@@ -79,6 +79,78 @@ export interface DeferredMessage {
   timestamp: string;
 }
 
+function getUserMessageText(message: Message): string | null {
+  const role =
+    (message.message as { role?: unknown } | undefined)?.role ?? message.role;
+  const isUserMessage = message.type === "user" || role === "user";
+  if (!isUserMessage) return null;
+
+  const content = message.message?.content ?? message.content;
+  if (typeof content === "string") {
+    const trimmed = content.trim();
+    return trimmed.length > 0 ? content : null;
+  }
+
+  if (!Array.isArray(content)) return null;
+
+  const text = content
+    .map((block) => {
+      if (!block || typeof block !== "object") return "";
+      return typeof block.text === "string" ? block.text : "";
+    })
+    .join("");
+  return text.trim().length > 0 ? text : null;
+}
+
+function isPendingMessageConfirmed(
+  pending: PendingMessage,
+  message: Message,
+): boolean {
+  const tempId = (message as { tempId?: unknown }).tempId;
+  if (typeof tempId === "string" && tempId === pending.tempId) {
+    return true;
+  }
+
+  const messageTimestampMs =
+    typeof message.timestamp === "string"
+      ? Date.parse(message.timestamp)
+      : Number.NaN;
+  const pendingTimestampMs = Date.parse(pending.timestamp);
+  if (
+    Number.isFinite(messageTimestampMs) &&
+    Number.isFinite(pendingTimestampMs) &&
+    messageTimestampMs < pendingTimestampMs - 5000
+  ) {
+    return false;
+  }
+
+  const pendingText = pending.content.trim();
+  if (!pendingText) return false;
+
+  const messageText = getUserMessageText(message)?.trim();
+  if (!messageText) return false;
+
+  return (
+    messageText === pendingText ||
+    messageText.startsWith(`${pendingText}\n\nUser uploaded files:`)
+  );
+}
+
+export function reconcilePendingMessagesWithConfirmedMessages(
+  pendingMessages: PendingMessage[],
+  messages: Message[],
+): PendingMessage[] {
+  if (pendingMessages.length === 0 || messages.length === 0) {
+    return pendingMessages;
+  }
+
+  const next = pendingMessages.filter(
+    (pending) =>
+      !messages.some((message) => isPendingMessageConfirmed(pending, message)),
+  );
+  return next.length === pendingMessages.length ? pendingMessages : next;
+}
+
 function extractUserMessageText(
   sdkMessage: Record<string, unknown>,
 ): string | null {
@@ -289,6 +361,12 @@ export function useSession(
     onLoadComplete: handleLoadComplete,
     onLoadError: handleLoadError,
   });
+
+  useEffect(() => {
+    setPendingMessages((prev) =>
+      reconcilePendingMessagesWithConfirmedMessages(prev, messages),
+    );
+  }, [messages]);
 
   // Update local mode (UI selection) and sync to server if process is active
   const setPermissionMode = useCallback(
