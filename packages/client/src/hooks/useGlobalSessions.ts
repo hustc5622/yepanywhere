@@ -426,6 +426,11 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
               originator: data.session.originator ?? existing.originator,
               source: data.session.source ?? existing.source,
               contextUsage: data.session.contextUsage ?? existing.contextUsage,
+              cumulativeUsage:
+                data.session.cumulativeUsage ?? existing.cumulativeUsage,
+              compactCount: data.session.compactCount ?? existing.compactCount,
+              compactEvents:
+                data.session.compactEvents ?? existing.compactEvents,
               model: data.session.model ?? existing.model,
               reasoningEffort:
                 data.session.reasoningEffort ?? existing.reasoningEffort,
@@ -619,6 +624,9 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
           originator: event.session.originator,
           source: event.session.source,
           contextUsage: event.session.contextUsage,
+          cumulativeUsage: event.session.cumulativeUsage,
+          compactCount: event.session.compactCount,
+          compactEvents: event.session.compactEvents,
           model: event.session.model,
           reasoningEffort: event.session.reasoningEffort,
           serviceTier: event.session.serviceTier,
@@ -748,6 +756,15 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
             }),
             ...(event.contextUsage !== undefined && {
               contextUsage: event.contextUsage,
+            }),
+            ...(event.cumulativeUsage !== undefined && {
+              cumulativeUsage: event.cumulativeUsage,
+            }),
+            ...(event.compactCount !== undefined && {
+              compactCount: event.compactCount,
+            }),
+            ...(event.compactEvents !== undefined && {
+              compactEvents: event.compactEvents,
             }),
             ...(event.model !== undefined && { model: event.model }),
             ...(event.reasoningEffort !== undefined && {

@@ -6,6 +6,8 @@
  */
 
 import {
+  type ContextCompactEvent,
+  type ContextCumulativeUsage,
   type ContextUsage,
   type ProviderName,
   type SessionCreatedBy,
@@ -104,6 +106,12 @@ export interface GlobalSessionItem {
    *  the All Sessions page can render the token count immediately on first
    *  paint, without waiting for a session-updated SSE event. */
   contextUsage?: ContextUsage;
+  /** Cumulative token spend across the whole session, when available. */
+  cumulativeUsage?: ContextCumulativeUsage;
+  /** Number of context compactions recorded in the active session history. */
+  compactCount?: number;
+  /** Best-effort details for each recorded context compaction. */
+  compactEvents?: ContextCompactEvent[];
   /** Model name from the session summary (matches contextUsage's scope). */
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
@@ -643,6 +651,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
             originator: session.originator,
             source: session.source,
             contextUsage: session.contextUsage,
+            cumulativeUsage: session.cumulativeUsage,
+            compactCount: session.compactCount,
+            compactEvents: session.compactEvents,
             model: session.model,
             reasoningEffort: session.reasoningEffort,
             serviceTier: session.serviceTier,
@@ -749,6 +760,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
           originator: session.originator,
           source: session.source,
           contextUsage: session.contextUsage,
+          cumulativeUsage: session.cumulativeUsage,
+          compactCount: session.compactCount,
+          compactEvents: session.compactEvents,
           model: session.model,
           reasoningEffort: session.reasoningEffort,
           serviceTier: session.serviceTier,

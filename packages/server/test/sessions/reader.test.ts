@@ -1641,6 +1641,17 @@ describe("SessionReader", () => {
       // percentage = round(57000 / 200000 * 100) = 28%
       expect(summary?.contextUsage?.inputTokens).toBe(57000);
       expect(summary?.contextUsage?.percentage).toBe(28);
+      expect(summary?.compactCount).toBe(1);
+      expect(summary?.compactEvents).toEqual([
+        expect.objectContaining({
+          beforeTokens: 167000,
+          afterTokens: 57000,
+          reclaimedTokens: 110000,
+          trigger: "auto",
+        }),
+      ]);
+      expect(summary?.cumulativeUsage?.totalTokens).toBe(210202);
+      expect(summary?.cumulativeUsage?.turnCount).toBe(2);
     });
 
     it("adjusts percentage after multiple compactions", async () => {
@@ -1674,6 +1685,21 @@ describe("SessionReader", () => {
       // percentage = round(129000 / 200000 * 100) = 65%
       expect(summary?.contextUsage?.inputTokens).toBe(129000);
       expect(summary?.contextUsage?.percentage).toBe(65);
+      expect(summary?.compactCount).toBe(2);
+      expect(summary?.compactEvents).toEqual([
+        expect.objectContaining({
+          beforeTokens: 167000,
+          afterTokens: 96000,
+          reclaimedTokens: 71000,
+          trigger: "auto",
+        }),
+        expect.objectContaining({
+          beforeTokens: 168000,
+          afterTokens: 129000,
+          reclaimedTokens: 39000,
+          trigger: "auto",
+        }),
+      ]);
     });
   });
 

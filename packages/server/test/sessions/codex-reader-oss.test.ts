@@ -563,6 +563,13 @@ describe("CodexSessionReader - OSS Support", () => {
       },
       {
         type: "event_msg",
+        timestamp: "2024-01-01T00:00:02.004Z",
+        payload: {
+          type: "context_compacted",
+        },
+      },
+      {
+        type: "event_msg",
         timestamp: "2024-01-01T00:00:02.010Z",
         payload: {
           type: "token_count",
@@ -599,6 +606,150 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(summary?.contextUsage?.inputTokens).toBe(7_945);
     expect(summary?.contextUsage?.percentage).toBe(3);
     expect(summary?.contextUsage?.contextWindow).toBe(258_000);
+    expect(summary?.compactCount).toBe(1);
+    expect(summary?.compactEvents).toEqual([
+      expect.objectContaining({
+        timestamp: "2024-01-01T00:00:02.000Z",
+        beforeTokens: 227_243,
+        afterTokens: 7_945,
+        reclaimedTokens: 219_298,
+        trigger: "compacted",
+      }),
+    ]);
+    expect(summary?.cumulativeUsage?.totalTokens).toBe(235_288);
+    expect(summary?.cumulativeUsage?.inputTokens).toBe(227_243);
+    expect(summary?.cumulativeUsage?.turnCount).toBe(2);
+  });
+
+  it("does not double-count monotonic Codex totals around compaction events", async () => {
+    const sessionId = "context-post-compact-monotonic-total";
+    const now = new Date().toISOString();
+    const lines: CodexSessionEntry[] = [
+      {
+        type: "session_meta",
+        timestamp: now,
+        payload: {
+          id: sessionId,
+          cwd: "/test/project",
+          timestamp: now,
+          model_provider: "openai",
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: now,
+        payload: {
+          type: "user_message",
+          message: "Hello world",
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2024-01-01T00:00:01.000Z",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 17_761_457,
+              cached_input_tokens: 17_338_240,
+              output_tokens: 38_570,
+              total_tokens: 17_800_027,
+            },
+            last_token_usage: {
+              input_tokens: 214_208,
+              cached_input_tokens: 210_304,
+              output_tokens: 403,
+              total_tokens: 214_611,
+            },
+          },
+          rate_limits: null,
+        },
+      },
+      {
+        type: "compacted",
+        timestamp: "2024-01-01T00:00:02.000Z",
+        payload: {
+          message: "",
+          replacement_history: [],
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2024-01-01T00:00:02.004Z",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 17_761_457,
+              cached_input_tokens: 17_338_240,
+              output_tokens: 38_570,
+              total_tokens: 17_800_027,
+            },
+            last_token_usage: {
+              input_tokens: 0,
+              cached_input_tokens: 0,
+              output_tokens: 0,
+              total_tokens: 7_375,
+            },
+          },
+          rate_limits: null,
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2024-01-01T00:00:02.006Z",
+        payload: {
+          type: "context_compacted",
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2024-01-01T00:00:03.000Z",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 17_804_129,
+              cached_input_tokens: 17_363_584,
+              output_tokens: 39_713,
+              total_tokens: 17_843_842,
+            },
+            last_token_usage: {
+              input_tokens: 26_227,
+              cached_input_tokens: 16_256,
+              output_tokens: 471,
+              total_tokens: 26_698,
+            },
+          },
+          rate_limits: null,
+        },
+      },
+    ];
+
+    await writeFile(
+      join(testDir, `${sessionId}.jsonl`),
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+    );
+
+    const summary = await reader.getSessionSummary(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+
+    expect(summary?.compactCount).toBe(1);
+    expect(summary?.compactEvents).toEqual([
+      expect.objectContaining({
+        timestamp: "2024-01-01T00:00:02.000Z",
+        beforeTokens: 214_208,
+        afterTokens: 7_375,
+        reclaimedTokens: 206_833,
+        trigger: "compacted",
+      }),
+    ]);
+    expect(summary?.cumulativeUsage?.totalTokens).toBe(17_843_842);
+    expect(summary?.cumulativeUsage?.inputTokens).toBe(440_545);
+    expect(summary?.cumulativeUsage?.cacheReadTokens).toBe(17_363_584);
+    expect(summary?.cumulativeUsage?.turnCount).toBe(3);
   });
 
   it("excludes developer messages from messageCount", async () => {

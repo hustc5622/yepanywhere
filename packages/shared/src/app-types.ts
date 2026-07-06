@@ -15,6 +15,10 @@ import type {
   SystemEntry,
   UserEntry,
 } from "./claude-sdk-schema/types.js";
+import type {
+  ContextCompactEvent,
+  ContextCumulativeUsage,
+} from "./context-status.js";
 import type { UrlProjectId } from "./projectId.js";
 import type { PermissionMode, ProviderName } from "./types.js";
 
@@ -440,6 +444,12 @@ export interface EnrichedRecentEntry {
   title: string | null;
   projectName: string;
   provider: ProviderName;
+  /** Cumulative token spend across the whole session, when available. */
+  cumulativeUsage?: ContextCumulativeUsage;
+  /** Number of context compactions recorded in the active session history. */
+  compactCount?: number;
+  /** Best-effort details for each recorded context compaction. */
+  compactEvents?: ContextCompactEvent[];
 }
 
 /**
@@ -476,6 +486,12 @@ export interface AppSessionSummary {
   isArchived?: boolean;
   isStarred?: boolean;
   contextUsage?: ContextUsage;
+  /** Cumulative token spend across the whole session. */
+  cumulativeUsage?: ContextCumulativeUsage;
+  /** Number of context compactions recorded in the active session history. */
+  compactCount?: number;
+  /** Best-effort details for each recorded context compaction. */
+  compactEvents?: ContextCompactEvent[];
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
   /** Launcher identifier from session metadata (e.g. "Codex Desktop", "yep-anywhere") */

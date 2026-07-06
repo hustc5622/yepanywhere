@@ -1,6 +1,8 @@
 import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import {
+  type ContextCompactEvent,
+  type ContextCumulativeUsage,
   type DirProjectId,
   type UrlProjectId,
   asDirProjectId,
@@ -103,6 +105,9 @@ export class ExternalSessionTracker {
       messageCount: number;
       projectId: UrlProjectId;
       contextUsage?: ContextUsage;
+      cumulativeUsage?: ContextCumulativeUsage;
+      compactCount?: number;
+      compactEvents?: ContextCompactEvent[];
       model?: string;
       reasoningEffort?: string;
       serviceTier?: string;
@@ -153,6 +158,9 @@ export class ExternalSessionTracker {
               messageCount: summary.messageCount,
               projectId,
               contextUsage: summary.contextUsage,
+              cumulativeUsage: summary.cumulativeUsage,
+              compactCount: summary.compactCount,
+              compactEvents: summary.compactEvents,
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,
@@ -175,6 +183,9 @@ export class ExternalSessionTracker {
                 messageCount: summary.messageCount,
                 updatedAt: summary.updatedAt,
                 contextUsage: summary.contextUsage,
+                cumulativeUsage: summary.cumulativeUsage,
+                compactCount: summary.compactCount,
+                compactEvents: summary.compactEvents,
                 model: summary.model,
                 reasoningEffort: summary.reasoningEffort,
                 serviceTier: summary.serviceTier,
@@ -204,6 +215,9 @@ export class ExternalSessionTracker {
               messageCount: summary.messageCount,
               projectId,
               contextUsage: summary.contextUsage,
+              cumulativeUsage: summary.cumulativeUsage,
+              compactCount: summary.compactCount,
+              compactEvents: summary.compactEvents,
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,
@@ -219,6 +233,22 @@ export class ExternalSessionTracker {
           const contextUsageChanged =
             cached?.contextUsage?.inputTokens !==
             summary.contextUsage?.inputTokens;
+          const cumulativeUsageChanged =
+            cached?.cumulativeUsage?.totalTokens !==
+              summary.cumulativeUsage?.totalTokens ||
+            cached?.cumulativeUsage?.inputTokens !==
+              summary.cumulativeUsage?.inputTokens ||
+            cached?.cumulativeUsage?.outputTokens !==
+              summary.cumulativeUsage?.outputTokens ||
+            cached?.cumulativeUsage?.cacheReadTokens !==
+              summary.cumulativeUsage?.cacheReadTokens ||
+            cached?.cumulativeUsage?.cacheCreationTokens !==
+              summary.cumulativeUsage?.cacheCreationTokens;
+          const compactCountChanged =
+            cached?.compactCount !== summary.compactCount;
+          const compactEventsChanged =
+            JSON.stringify(cached?.compactEvents ?? []) !==
+            JSON.stringify(summary.compactEvents ?? []);
           const modelChanged = cached?.model !== summary.model;
           const reasoningEffortChanged =
             cached?.reasoningEffort !== summary.reasoningEffort;
@@ -229,6 +259,9 @@ export class ExternalSessionTracker {
             titleChanged ||
             messageCountChanged ||
             contextUsageChanged ||
+            cumulativeUsageChanged ||
+            compactCountChanged ||
+            compactEventsChanged ||
             modelChanged ||
             reasoningEffortChanged ||
             serviceTierChanged
@@ -241,6 +274,9 @@ export class ExternalSessionTracker {
               messageCount: summary.messageCount,
               updatedAt: summary.updatedAt,
               contextUsage: summary.contextUsage,
+              cumulativeUsage: summary.cumulativeUsage,
+              compactCount: summary.compactCount,
+              compactEvents: summary.compactEvents,
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,
@@ -254,6 +290,9 @@ export class ExternalSessionTracker {
               messageCount: summary.messageCount,
               projectId,
               contextUsage: summary.contextUsage,
+              cumulativeUsage: summary.cumulativeUsage,
+              compactCount: summary.compactCount,
+              compactEvents: summary.compactEvents,
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,

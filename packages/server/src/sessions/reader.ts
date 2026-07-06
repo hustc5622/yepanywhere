@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type AgentStatus,
+  type ContextCompactEvent,
   type ContextCumulativeUsage,
   type ProviderName,
   SESSION_TITLE_MAX_LENGTH,
@@ -326,6 +327,8 @@ export class ClaudeSessionReader implements ISessionReader {
 
       const cumulativeUsage =
         this.extractCumulativeTokenUsage(activeBranchMessages);
+      const compactCount = this.countCompactions(activeBranchMessages);
+      const compactEvents = this.extractCompactEvents(activeBranchMessages);
 
       // A session is "interrupted" when its last turn was cut short (e.g. by a
       // server restart) and the session can be resumed. The reliable signal is
@@ -349,6 +352,8 @@ export class ClaudeSessionReader implements ISessionReader {
         ownership: { owner: "none" }, // Will be updated by Supervisor
         contextUsage,
         cumulativeUsage,
+        compactCount,
+        compactEvents,
         provider,
         model,
         serviceTier: runtimeConfig.serviceTier,
@@ -867,12 +872,113 @@ export class ClaudeSessionReader implements ISessionReader {
 
     if (turnCount === 0) return undefined;
     return {
+      totalTokens:
+        inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
       inputTokens,
       outputTokens,
       cacheReadTokens,
       cacheCreationTokens,
       turnCount,
     };
+  }
+
+  private countCompactions(messages: ClaudeSessionEntry[]): number {
+    return messages.reduce(
+      (count, msg) => count + (isCompactBoundary(msg) ? 1 : 0),
+      0,
+    );
+  }
+
+  private extractCompactEvents(
+    messages: ClaudeSessionEntry[],
+  ): ContextCompactEvent[] | undefined {
+    const events: ContextCompactEvent[] = [];
+
+    for (let index = 0; index < messages.length; index += 1) {
+      const msg = messages[index];
+      if (!msg || !isCompactBoundary(msg)) continue;
+
+      const metadata = (
+        msg as {
+          compactMetadata?: {
+            preTokens?: number;
+            trigger?: string;
+          };
+        }
+      ).compactMetadata;
+      const previousAssistantTokens = this.findAssistantInputTokens(
+        messages,
+        index - 1,
+        -1,
+      );
+      const preTokens =
+        typeof metadata?.preTokens === "number" && metadata.preTokens > 0
+          ? metadata.preTokens
+          : undefined;
+      const overhead =
+        preTokens !== undefined && previousAssistantTokens !== undefined
+          ? Math.max(0, preTokens - previousAssistantTokens)
+          : 0;
+      const beforeTokens =
+        preTokens !== undefined ? preTokens : previousAssistantTokens;
+      const afterAssistantTokens = this.findAssistantInputTokens(
+        messages,
+        index + 1,
+        1,
+      );
+      const afterTokens =
+        afterAssistantTokens !== undefined
+          ? afterAssistantTokens + overhead
+          : undefined;
+      const event: ContextCompactEvent = {};
+
+      if ("timestamp" in msg && typeof msg.timestamp === "string") {
+        event.timestamp = msg.timestamp;
+      }
+      if (typeof metadata?.trigger === "string" && metadata.trigger) {
+        event.trigger = metadata.trigger;
+      }
+      if (beforeTokens !== undefined) {
+        event.beforeTokens = beforeTokens;
+      }
+      if (afterTokens !== undefined) {
+        event.afterTokens = afterTokens;
+      }
+      if (beforeTokens !== undefined && afterTokens !== undefined) {
+        const reclaimedTokens = beforeTokens - afterTokens;
+        if (reclaimedTokens > 0) {
+          event.reclaimedTokens = reclaimedTokens;
+        }
+      }
+
+      events.push(event);
+    }
+
+    return events.length > 0 ? events : undefined;
+  }
+
+  private findAssistantInputTokens(
+    messages: ClaudeSessionEntry[],
+    startIndex: number,
+    direction: -1 | 1,
+  ): number | undefined {
+    for (
+      let index = startIndex;
+      index >= 0 && index < messages.length;
+      index += direction
+    ) {
+      const msg = messages[index];
+      if (!msg || msg.type !== "assistant") continue;
+
+      const usage = (msg as { message?: { usage?: UsageFields } }).message
+        ?.usage;
+      if (!usage) continue;
+
+      const inputTokens = getTotalInputTokens(usage);
+      if (inputTokens > 0) return inputTokens;
+    }
+
+    return undefined;
   }
 
   /**

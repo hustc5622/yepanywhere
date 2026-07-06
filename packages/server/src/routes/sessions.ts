@@ -3,6 +3,7 @@ import { join, relative } from "node:path";
 import {
   ALL_CODEX_MCP_MODES,
   type CodexMcpMode,
+  type ContextCompactEvent,
   type ContextCumulativeUsage,
   type ContextStatusResponse,
   type ContextUsage,
@@ -858,6 +859,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         approvalPolicy: sessionSummary?.approvalPolicy,
         sandboxPolicy: sessionSummary?.sandboxPolicy,
         contextUsage: sessionSummary?.contextUsage,
+        cumulativeUsage: sessionSummary?.cumulativeUsage,
+        compactCount: sessionSummary?.compactCount,
+        compactEvents: sessionSummary?.compactEvents,
         customTitle: metadata?.customTitle,
         aiTitle: metadata?.aiTitle ?? sessionSummary?.aiTitle,
         isArchived: metadata?.isArchived,
@@ -956,6 +960,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             // modal can show Claude Code's `/status`-style numbers even
             // while the agent is live.
             let cumulativeUsage: ContextCumulativeUsage | undefined;
+            let compactEvents: ContextCompactEvent[] | undefined;
             try {
               const summaryResult = await findSessionSummaryAcrossProviders(
                 project,
@@ -972,6 +977,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
                 process.provider,
               );
               cumulativeUsage = summaryResult?.summary?.cumulativeUsage;
+              compactEvents = summaryResult?.summary?.compactEvents;
             } catch {
               // Cumulative is best-effort; never block the SDK breakdown.
             }
@@ -979,6 +985,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             const payload: ContextStatusResponse = {
               ...usage,
               cumulativeUsage,
+              compactEvents,
             };
             return c.json(payload);
           }
@@ -1058,6 +1065,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         contextWindowFromCache: cachedWindow !== undefined,
         contextUsage,
         cumulativeUsage: sessionSummary?.cumulativeUsage,
+        compactEvents: sessionSummary?.compactEvents,
       };
       return c.json(payload);
     },

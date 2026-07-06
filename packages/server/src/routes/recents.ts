@@ -86,6 +86,9 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
         title: resolved.summary.title,
         projectName,
         provider: resolved.summary.provider as ProviderName,
+        cumulativeUsage: resolved.summary.cumulativeUsage,
+        compactCount: resolved.summary.compactCount,
+        compactEvents: resolved.summary.compactEvents,
       });
     }
 

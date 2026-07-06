@@ -94,4 +94,77 @@ describe("SessionListItem archive feedback", () => {
       ).toBeTruthy();
     });
   });
+
+  it("shows effective usage and compact count in compact mode", () => {
+    renderItem({
+      mode: "compact",
+      cumulativeUsage: {
+        totalTokens: 12_500,
+        inputTokens: 9_000,
+        outputTokens: 2_000,
+        cacheReadTokens: 1_500,
+        cacheCreationTokens: 0,
+        turnCount: 3,
+      },
+      compactCount: 2,
+      compactEvents: [
+        {
+          timestamp: "2026-01-01T00:02:00.000Z",
+          beforeTokens: 167_000,
+          afterTokens: 57_000,
+          reclaimedTokens: 110_000,
+          trigger: "auto",
+        },
+      ],
+    });
+
+    const usage = screen.getByText("11.0K");
+    expect(usage).toBeTruthy();
+    expect(usage.getAttribute("title")).toContain("Input: 9,000");
+    expect(usage.getAttribute("title")).toContain("Cache read: 1,500");
+    expect(usage.getAttribute("title")).toContain("Output: 2,000");
+    expect(usage.getAttribute("title")).toContain("Raw total: 12,500");
+    fireEvent.click(usage);
+    expect(screen.getByText("Effective")).toBeTruthy();
+    expect(screen.getByText("11,000 excl. cache")).toBeTruthy();
+    expect(screen.getByText("Cache read")).toBeTruthy();
+    const compact = screen.getByText("2 compacts");
+    fireEvent.click(compact);
+    expect(screen.getByText("#1 auto")).toBeTruthy();
+    expect(screen.getByText("167.0K -> 57.0K")).toBeTruthy();
+    expect(screen.getByText("110.0K")).toBeTruthy();
+  });
+
+  it("uses effective usage for card size metadata", () => {
+    renderItem({
+      showSizeMeta: true,
+      messageCount: 4,
+      contextUsage: {
+        inputTokens: 99_000,
+        percentage: 50,
+      },
+      cumulativeUsage: {
+        totalTokens: 12_500,
+        inputTokens: 9_000,
+        outputTokens: 2_000,
+        cacheReadTokens: 1_500,
+        cacheCreationTokens: 0,
+        turnCount: 3,
+      },
+      compactCount: 1,
+      compactEvents: [
+        {
+          beforeTokens: 167_000,
+          afterTokens: 57_000,
+          reclaimedTokens: 110_000,
+        },
+      ],
+    });
+
+    expect(screen.getByText("11.0K")).toBeTruthy();
+    const compact = screen.getByText("1 compact");
+    fireEvent.click(compact);
+    expect(screen.getByText("167.0K -> 57.0K")).toBeTruthy();
+    expect(screen.queryByText("99.0K")).toBeNull();
+  });
 });

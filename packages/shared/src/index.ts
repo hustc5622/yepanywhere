@@ -210,6 +210,7 @@ export type {
   ContextStatusEstimatePayload,
   ContextCategoryEntry,
   ContextCumulativeUsage,
+  ContextCompactEvent,
   ContextMcpToolEntry,
   ContextMemoryFileEntry,
   ContextSkillFrontmatterEntry,

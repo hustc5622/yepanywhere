@@ -22,6 +22,8 @@ import {
   type CodexSessionEntry,
   type CodexSessionMetaEntry,
   type CodexTurnContextEntry,
+  type ContextCompactEvent,
+  type ContextCumulativeUsage,
   SESSION_TITLE_MAX_LENGTH,
   type SessionQuestion,
   type UnifiedSession,
@@ -203,6 +205,9 @@ export class CodexSessionReader implements ISessionReader {
         model,
         provider,
       );
+      const cumulativeUsage = this.extractCumulativeTokenUsage(visibleEntries);
+      const compactCount = this.countCompactions(visibleEntries);
+      const compactEvents = this.extractCompactEvents(visibleEntries);
 
       // Skip sessions with no actual conversation messages
       if (messageCount === 0) return null;
@@ -220,6 +225,9 @@ export class CodexSessionReader implements ISessionReader {
         userQuestions,
         ownership: { owner: "none" },
         contextUsage,
+        cumulativeUsage,
+        compactCount,
+        compactEvents,
         provider,
         model,
         reasoningEffort: runtimeConfig.reasoningEffort,
@@ -669,6 +677,246 @@ export class CodexSessionReader implements ISessionReader {
     }
 
     return false;
+  }
+
+  private extractCumulativeTokenUsage(
+    entries: CodexSessionEntry[],
+  ): ContextCumulativeUsage | undefined {
+    type SegmentUsage = NonNullable<
+      NonNullable<
+        Extract<CodexEventMsgEntry["payload"], { type: "token_count" }>["info"]
+      >["total_token_usage"]
+    >;
+
+    const compactedTimestamps = this.getCompactedTimestamps(entries);
+    const segments: SegmentUsage[] = [];
+    let currentSegment: SegmentUsage | null = null;
+
+    for (const entry of entries) {
+      if (this.isLogicalCompactionBoundary(entry, compactedTimestamps)) {
+        if (currentSegment) {
+          segments.push(currentSegment);
+          currentSegment = null;
+        }
+        continue;
+      }
+
+      if (entry.type === "event_msg" && entry.payload.type === "token_count") {
+        currentSegment =
+          entry.payload.info?.total_token_usage ?? currentSegment;
+      }
+    }
+
+    if (currentSegment) {
+      segments.push(currentSegment);
+    }
+
+    if (segments.length === 0) return undefined;
+
+    const totals = this.sumCodexCumulativeSegments(segments);
+
+    if (
+      totals.totalTokens === 0 &&
+      totals.inputTokens === 0 &&
+      totals.outputTokens === 0 &&
+      totals.cacheReadTokens === 0
+    ) {
+      return undefined;
+    }
+
+    return {
+      ...totals,
+      cacheCreationTokens: 0,
+      turnCount: this.countTokenUsageTurns(entries),
+    };
+  }
+
+  private countTokenUsageTurns(entries: CodexSessionEntry[]): number {
+    return entries.reduce((count, entry) => {
+      if (entry.type !== "event_msg" || entry.payload.type !== "token_count") {
+        return count;
+      }
+      return entry.payload.info?.last_token_usage ? count + 1 : count;
+    }, 0);
+  }
+
+  private sumCodexCumulativeSegments(
+    segments: Array<{
+      total_tokens: number;
+      input_tokens: number;
+      output_tokens: number;
+      cached_input_tokens?: number;
+    }>,
+  ): {
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+  } {
+    const addUsage = (
+      acc: {
+        totalTokens: number;
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+      },
+      usage: {
+        total_tokens: number;
+        input_tokens: number;
+        output_tokens: number;
+        cached_input_tokens?: number;
+      },
+    ) => {
+      const cachedInputTokens = usage.cached_input_tokens ?? 0;
+      acc.totalTokens += usage.total_tokens;
+      acc.inputTokens += Math.max(0, usage.input_tokens - cachedInputTokens);
+      acc.outputTokens += usage.output_tokens;
+      acc.cacheReadTokens += cachedInputTokens;
+    };
+
+    const totals = {
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+    };
+    let current = segments[0];
+    if (!current) return totals;
+
+    for (const next of segments.slice(1)) {
+      if (next.total_tokens < current.total_tokens) {
+        addUsage(totals, current);
+      }
+      current = next;
+    }
+
+    addUsage(totals, current);
+    return totals;
+  }
+
+  private getCompactedTimestamps(entries: CodexSessionEntry[]): number[] {
+    return entries
+      .filter((entry) => entry.type === "compacted")
+      .map((entry) => timestampToMs(entry.timestamp))
+      .filter((timestamp): timestamp is number => timestamp !== null);
+  }
+
+  private countCompactions(entries: CodexSessionEntry[]): number {
+    const compactedTimestamps = this.getCompactedTimestamps(entries);
+    let count = compactedTimestamps.length;
+
+    for (const entry of entries) {
+      if (
+        entry.type === "event_msg" &&
+        entry.payload.type === "context_compacted" &&
+        !hasNearbyCodexCompactedEntry(compactedTimestamps, entry.timestamp)
+      ) {
+        count += 1;
+      }
+    }
+
+    return count;
+  }
+
+  private extractCompactEvents(
+    entries: CodexSessionEntry[],
+  ): ContextCompactEvent[] | undefined {
+    const compactedTimestamps = this.getCompactedTimestamps(entries);
+    const events: ContextCompactEvent[] = [];
+
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      if (
+        !entry ||
+        !this.isLogicalCompactionBoundary(entry, compactedTimestamps)
+      ) {
+        continue;
+      }
+
+      const beforeTokens = this.findCodexContextTokens(entries, index - 1, -1);
+      const afterTokens = this.findCodexContextTokens(entries, index + 1, 1);
+      const event: ContextCompactEvent = {};
+
+      if ("timestamp" in entry && typeof entry.timestamp === "string") {
+        event.timestamp = entry.timestamp;
+      }
+      event.trigger =
+        entry.type === "compacted" ? "compacted" : "context_compacted";
+      if (beforeTokens !== undefined) {
+        event.beforeTokens = beforeTokens;
+      }
+      if (afterTokens !== undefined) {
+        event.afterTokens = afterTokens;
+      }
+      if (beforeTokens !== undefined && afterTokens !== undefined) {
+        const reclaimedTokens = beforeTokens - afterTokens;
+        if (reclaimedTokens > 0) {
+          event.reclaimedTokens = reclaimedTokens;
+        }
+      }
+
+      events.push(event);
+    }
+
+    return events.length > 0 ? events : undefined;
+  }
+
+  private findCodexContextTokens(
+    entries: CodexSessionEntry[],
+    startIndex: number,
+    direction: -1 | 1,
+  ): number | undefined {
+    for (
+      let index = startIndex;
+      index >= 0 && index < entries.length;
+      index += direction
+    ) {
+      const tokens = this.getCodexContextTokensAt(entries, index);
+      if (tokens !== undefined) return tokens;
+    }
+
+    return undefined;
+  }
+
+  private getCodexContextTokensAt(
+    entries: CodexSessionEntry[],
+    index: number,
+  ): number | undefined {
+    const entry = entries[index];
+    if (
+      !entry ||
+      entry.type !== "event_msg" ||
+      entry.payload.type !== "token_count"
+    ) {
+      return undefined;
+    }
+
+    const info = entry.payload.info;
+    const usage = info?.last_token_usage ?? info?.total_token_usage;
+    if (!usage) return undefined;
+
+    let inputTokens = usage.input_tokens;
+    if (
+      inputTokens === 0 &&
+      usage.total_tokens > 0 &&
+      this.isTokenCountImmediatelyAfterCompaction(entries, index)
+    ) {
+      inputTokens = usage.total_tokens;
+    }
+
+    return inputTokens > 0 ? inputTokens : undefined;
+  }
+
+  private isLogicalCompactionBoundary(
+    entry: CodexSessionEntry,
+    compactedTimestamps: number[],
+  ): boolean {
+    if (entry.type === "compacted") return true;
+    return (
+      entry.type === "event_msg" &&
+      entry.payload.type === "context_compacted" &&
+      !hasNearbyCodexCompactedEntry(compactedTimestamps, entry.timestamp)
+    );
   }
 
   /**

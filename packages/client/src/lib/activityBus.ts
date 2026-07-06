@@ -1,5 +1,7 @@
 import type {
   AgentActivity,
+  ContextCompactEvent,
+  ContextCumulativeUsage,
   ContextUsage,
   PendingInputType,
   UrlProjectId,
@@ -94,6 +96,12 @@ export interface SessionUpdatedEvent {
   updatedAt?: string;
   /** Context window usage from the last assistant message */
   contextUsage?: ContextUsage;
+  /** Cumulative token spend across the whole session, when available. */
+  cumulativeUsage?: ContextCumulativeUsage;
+  /** Number of context compactions recorded in the active session history. */
+  compactCount?: number;
+  /** Best-effort details for each recorded context compaction. */
+  compactEvents?: ContextCompactEvent[];
   /** Resolved model name (e.g., "claude-sonnet-4-5-20250929") */
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */

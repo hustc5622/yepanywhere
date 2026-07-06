@@ -20,6 +20,10 @@ import type {
   PendingInputType,
   SessionOwnership,
 } from "../app-types.js";
+import type {
+  ContextCompactEvent,
+  ContextCumulativeUsage,
+} from "../context-status.js";
 import type { UrlProjectId } from "../projectId.js";
 import { DEFAULT_PROVIDER, type ProviderName } from "../types.js";
 
@@ -64,6 +68,12 @@ export class SessionView {
     readonly provider: ProviderName,
     /** AI-generated title (overrides autoTitle, but not customTitle) */
     readonly aiTitle: string | undefined = undefined,
+    /** Cumulative token spend across the whole session */
+    readonly cumulativeUsage: ContextCumulativeUsage | undefined = undefined,
+    /** Number of context compactions recorded in the active session history */
+    readonly compactCount: number | undefined = undefined,
+    /** Best-effort details for each recorded context compaction */
+    readonly compactEvents: ContextCompactEvent[] | undefined = undefined,
   ) {}
 
   // ===========================================================================
@@ -181,6 +191,9 @@ export class SessionView {
       summary.contextUsage,
       summary.provider,
       summary.aiTitle,
+      summary.cumulativeUsage,
+      summary.compactCount,
+      summary.compactEvents,
     );
   }
 
@@ -206,6 +219,9 @@ export class SessionView {
     lastSeenAt?: string;
     hasUnread?: boolean;
     contextUsage?: ContextUsage;
+    cumulativeUsage?: ContextCumulativeUsage;
+    compactCount?: number;
+    compactEvents?: ContextCompactEvent[];
     provider?: ProviderName;
   }): SessionView {
     const now = new Date().toISOString();
@@ -228,6 +244,9 @@ export class SessionView {
       data.contextUsage,
       data.provider ?? DEFAULT_PROVIDER,
       data.aiTitle,
+      data.cumulativeUsage,
+      data.compactCount,
+      data.compactEvents,
     );
   }
 }

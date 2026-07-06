@@ -28,13 +28,6 @@ const RECENT_SESSIONS_INCREMENT = 10; // How many more to show on each expand
 const getSessionListTitle = (session: GlobalSessionItem): string | null =>
   session.customTitle ?? session.aiTitle ?? session.title ?? null;
 
-const sortSessionsByUpdatedAtDesc = (
-  sessions: GlobalSessionItem[],
-): GlobalSessionItem[] =>
-  [...sessions].sort(
-    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-  );
-
 interface SessionProjectGroup {
   key: string;
   projectId: string;
@@ -327,33 +320,30 @@ export function Sidebar({
     return starredSessions.filter((s) => !s.isArchived);
   }, [starredSessions]);
 
-  // Sessions updated in the last 24 hours (non-starred, non-archived)
+  // Sessions updated in the last 24 hours (non-starred, non-archived).
+  // Keep the hook-provided order stable so high-frequency live updates don't
+  // move an active session back under the user's pointer while browsing.
   const recentDaySessions = useMemo(() => {
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
     const isWithinLastDay = (date: Date) => date.getTime() >= oneDayAgo;
 
-    return sortSessionsByUpdatedAtDesc(
-      globalSessions.filter(
-        (s) =>
-          !s.isStarred &&
-          !s.isArchived &&
-          isWithinLastDay(new Date(s.updatedAt)),
-      ),
+    return globalSessions.filter(
+      (s) =>
+        !s.isStarred && !s.isArchived && isWithinLastDay(new Date(s.updatedAt)),
     );
   }, [globalSessions]);
 
-  // Older sessions (non-starred, non-archived, NOT in last 24 hours)
+  // Older sessions (non-starred, non-archived, NOT in last 24 hours).
+  // Preserve stable ordering here for the same reason as recentDaySessions.
   const olderSessions = useMemo(() => {
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
     const isOlderThanOneDay = (date: Date) => date.getTime() < oneDayAgo;
 
-    return sortSessionsByUpdatedAtDesc(
-      globalSessions.filter(
-        (s) =>
-          !s.isStarred &&
-          !s.isArchived &&
-          isOlderThanOneDay(new Date(s.updatedAt)),
-      ),
+    return globalSessions.filter(
+      (s) =>
+        !s.isStarred &&
+        !s.isArchived &&
+        isOlderThanOneDay(new Date(s.updatedAt)),
     );
   }, [globalSessions]);
 
@@ -380,8 +370,13 @@ export function Sidebar({
     [allOlderProjectGroups, olderProjectGroupsLimit],
   );
 
+  const autoExpandedSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!currentSessionId) return;
+    if (!currentSessionId) {
+      autoExpandedSessionIdRef.current = null;
+      return;
+    }
+    if (autoExpandedSessionIdRef.current === currentSessionId) return;
 
     const currentGroupKeys = [
       ...allRecentProjectGroups,
@@ -394,6 +389,7 @@ export function Sidebar({
 
     if (currentGroupKeys.length === 0) return;
 
+    autoExpandedSessionIdRef.current = currentSessionId;
     setExpandedProjectGroups((current) => {
       let changed = false;
       const next = new Set(current);
@@ -454,6 +450,9 @@ export function Sidebar({
       projectName={session.projectName}
       basePath={basePath}
       messageCount={session.messageCount}
+      cumulativeUsage={session.cumulativeUsage}
+      compactCount={session.compactCount}
+      compactEvents={session.compactEvents}
       hasDraft={drafts.has(session.id)}
     />
   );

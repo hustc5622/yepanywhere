@@ -14,6 +14,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
+  type ContextCompactEvent,
+  type ContextCumulativeUsage,
   DEFAULT_PROVIDER,
   type ProviderName,
   type UrlProjectId,
@@ -39,6 +41,9 @@ export interface CachedSessionSummary {
   messageCount: number;
   userQuestions?: SessionSummary["userQuestions"];
   contextUsage?: { inputTokens: number; percentage: number };
+  cumulativeUsage?: ContextCumulativeUsage;
+  compactCount?: number;
+  compactEvents?: ContextCompactEvent[];
   /** File size in bytes at time of indexing */
   indexedBytes: number;
   /** File mtime in milliseconds since epoch at time of indexing */
@@ -68,12 +73,12 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
-  version: 6;
+  version: 8;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 6;
+const CURRENT_VERSION = 8;
 
 interface SessionFileStat {
   mtimeMs: number;
@@ -485,6 +490,9 @@ export class SessionIndexService implements ISessionIndexService {
         userQuestions: cached.userQuestions,
         ownership: { owner: "none" },
         contextUsage: cached.contextUsage,
+        cumulativeUsage: cached.cumulativeUsage,
+        compactCount: cached.compactCount,
+        compactEvents: cached.compactEvents,
         provider: cached.provider ?? DEFAULT_PROVIDER,
         model: cached.model,
         reasoningEffort: cached.reasoningEffort,
@@ -517,6 +525,9 @@ export class SessionIndexService implements ISessionIndexService {
       messageCount: summary.messageCount,
       userQuestions: summary.userQuestions,
       contextUsage: summary.contextUsage,
+      cumulativeUsage: summary.cumulativeUsage,
+      compactCount: summary.compactCount,
+      compactEvents: summary.compactEvents,
       indexedBytes: size,
       fileMtime: mtime,
       provider: summary.provider,
@@ -768,6 +779,9 @@ export class SessionIndexService implements ISessionIndexService {
             userQuestions: cached.userQuestions,
             ownership: { owner: "none" },
             contextUsage: cached.contextUsage,
+            cumulativeUsage: cached.cumulativeUsage,
+            compactCount: cached.compactCount,
+            compactEvents: cached.compactEvents,
             provider: cached.provider ?? DEFAULT_PROVIDER,
             model: cached.model,
             reasoningEffort: cached.reasoningEffort,

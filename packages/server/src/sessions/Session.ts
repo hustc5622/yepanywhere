@@ -61,6 +61,9 @@ export class Session extends SessionView {
       summary.contextUsage,
       summary.provider,
       summary.aiTitle,
+      summary.cumulativeUsage,
+      summary.compactCount,
+      summary.compactEvents,
     );
     this.deps = deps;
   }
@@ -176,6 +179,9 @@ export class Session extends SessionView {
       lastSeenAt: this.lastSeenAt,
       hasUnread: this.hasUnread,
       contextUsage: this.contextUsage,
+      cumulativeUsage: this.cumulativeUsage,
+      compactCount: this.compactCount,
+      compactEvents: this.compactEvents,
       provider: this.provider,
     };
   }

@@ -5,8 +5,10 @@ import { useToastContext } from "../contexts/ToastContext";
 import type { AgentActivity } from "../hooks/useFileActivity";
 import { useI18n } from "../i18n";
 import { formatSmartTime } from "../lib/datetime";
-import { formatTokenCount } from "../lib/tokens";
+import { formatTokenCount, getEffectiveTokenTotal } from "../lib/tokens";
 import type {
+  ContextCompactEvent,
+  ContextCumulativeUsage,
   ContextUsage,
   PendingInputType,
   ProviderName,
@@ -14,11 +16,13 @@ import type {
   SessionRuntime,
   SessionStatus,
 } from "../types";
+import { CompactCountBadge } from "./CompactCountBadge";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { ProviderBadge } from "./ProviderBadge";
 import { SessionMenu } from "./SessionMenu";
 import { SessionStatusBadge } from "./StatusBadge";
 import { ThinkingIndicator } from "./ThinkingIndicator";
+import { TokenUsageBadge } from "./TokenUsageBadge";
 
 interface SessionListItemProps {
   // Core (required)
@@ -35,6 +39,9 @@ interface SessionListItemProps {
   runtime?: SessionRuntime;
   pendingInputType?: PendingInputType;
   contextUsage?: ContextUsage;
+  cumulativeUsage?: ContextCumulativeUsage;
+  compactCount?: number;
+  compactEvents?: ContextCompactEvent[];
   status?: SessionStatus;
   provider?: ProviderName;
   /**
@@ -93,10 +100,10 @@ interface SessionListItemProps {
   /** Provider-specific service tier / speed label for provider badge display. */
   serviceTier?: string;
 
-  /** When true (and `mode === "card"`), the card shows a "12 条 · 12.3K
-   *  tokens" line below the timestamp. Used on the All Sessions page so users
-   *  can see at a glance how big each session is. Off by default so other
-   *  callers (Inbox, sidebar) aren't disturbed. */
+  /** When true (and `mode === "card"`), the card shows a "12 条 · 12.3K"
+   *  line below the timestamp. Used on the All Sessions page so users can see
+   *  at a glance how big each session is. Off by default so other callers
+   *  (Inbox, sidebar) aren't disturbed. */
   showSizeMeta?: boolean;
 }
 
@@ -187,6 +194,9 @@ export function SessionListItem({
   runtime,
   pendingInputType,
   contextUsage,
+  cumulativeUsage,
+  compactCount,
+  compactEvents,
   status,
   provider,
   interrupted,
@@ -259,6 +269,11 @@ export function SessionListItem({
     (messageCount === 0 || (messageCount == null && activity === "in-turn"));
   const displayTitle =
     localTitle ?? title ?? (isNewSession ? "New session" : "Untitled session");
+  const effectiveTokenTotal = getEffectiveTokenTotal(cumulativeUsage);
+  const fallbackContextTokenTotal =
+    effectiveTokenTotal === null && contextUsage && contextUsage.inputTokens > 0
+      ? contextUsage.inputTokens
+      : null;
 
   // Focus input when entering edit mode
   useEffect(() => {
@@ -543,16 +558,29 @@ export function SessionListItem({
                     {t("cardMessageCount", { count: messageCount })}
                   </span>
                 )}
+                {showSizeMeta && effectiveTokenTotal !== null && (
+                  <TokenUsageBadge
+                    usage={cumulativeUsage}
+                    className="session-list-item__size-meta"
+                  />
+                )}
                 {showSizeMeta &&
-                  contextUsage &&
-                  contextUsage.inputTokens > 0 && (
+                  effectiveTokenTotal === null &&
+                  fallbackContextTokenTotal !== null && (
                     <span
                       className="session-list-item__size-meta"
-                      title={`${contextUsage.inputTokens.toLocaleString()} tokens`}
+                      title={`${fallbackContextTokenTotal.toLocaleString()} context tokens`}
                     >
-                      {formatTokenCount(contextUsage.inputTokens)}
+                      {formatTokenCount(fallbackContextTokenTotal)}
                     </span>
                   )}
+                {showSizeMeta && (
+                  <CompactCountBadge
+                    count={compactCount}
+                    events={compactEvents}
+                    className="session-list-item__size-meta"
+                  />
+                )}
                 {executor && (
                   <span
                     className="session-badge session-badge-executor"
@@ -620,6 +648,15 @@ export function SessionListItem({
                       className="session-list-item__provider"
                     />
                   )}
+                  <TokenUsageBadge
+                    usage={cumulativeUsage}
+                    className="session-list-item__usage-meta"
+                  />
+                  <CompactCountBadge
+                    count={compactCount}
+                    events={compactEvents}
+                    className="session-list-item__usage-meta"
+                  />
                   {creationIndicatorEl}
                   {hasDraft && (
                     <span className="session-draft-badge">Draft</span>

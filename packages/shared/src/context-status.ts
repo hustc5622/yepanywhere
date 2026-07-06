@@ -69,16 +69,17 @@ export interface ContextDeferredBuiltinTool {
 }
 
 /**
- * Cumulative token spend across the entire session — sums the per-turn
- * `usage` blocks of every assistant message in the JSONL.
+ * Cumulative provider-reported token usage across the entire session.
  *
  * Distinct from `ContextUsage`, which represents the **last** turn's
  * snapshot of context-window fill (used for the "X / Y tokens" meter).
- * The cumulative figures answer "how many tokens has this session spent
- * total" (matches Claude Code's `/status` output) and are useful for
- * cost estimation.
+ * For Claude this is derived from per-assistant `usage` blocks; for Codex
+ * it comes from `token_count.info.total_token_usage`, with compaction
+ * boundaries handled by the session reader.
  */
 export interface ContextCumulativeUsage {
+  /** Provider-reported all-in total when available; otherwise callers can sum fields below. */
+  totalTokens?: number;
   /** Sum of usage.input_tokens across all assistant messages — fresh
    *  tokens billed at the input rate (excludes cached). */
   inputTokens: number;
@@ -92,6 +93,24 @@ export interface ContextCumulativeUsage {
   cacheCreationTokens: number;
   /** Total assistant turns counted (excludes synthetic / error entries). */
   turnCount: number;
+}
+
+/**
+ * Best-effort details for a context compaction observed in persisted session
+ * history. Token values describe context-window fill before/after compaction,
+ * not cumulative spend.
+ */
+export interface ContextCompactEvent {
+  /** When the compaction marker was written, if the provider recorded it. */
+  timestamp?: string;
+  /** Context tokens immediately before compaction, if known. */
+  beforeTokens?: number;
+  /** Context tokens immediately after compaction, if known. */
+  afterTokens?: number;
+  /** Positive difference between beforeTokens and afterTokens, if known. */
+  reclaimedTokens?: number;
+  /** Provider-reported trigger/source, e.g. "auto" or "manual". */
+  trigger?: string;
 }
 
 /**
@@ -122,6 +141,8 @@ export interface ContextStatusSdkPayload {
    *  the SDK's getContextUsage doesn't surface this). Optional because
    *  some providers' readers haven't implemented it yet. */
   cumulativeUsage?: ContextCumulativeUsage;
+  /** Best-effort compact details from persisted JSONL/session history. */
+  compactEvents?: ContextCompactEvent[];
 }
 
 /**
@@ -143,6 +164,8 @@ export interface ContextStatusEstimatePayload {
   contextUsage?: ContextUsage;
   /** Cumulative token spend across the whole session (see ContextCumulativeUsage). */
   cumulativeUsage?: ContextCumulativeUsage;
+  /** Best-effort compact details from persisted JSONL/session history. */
+  compactEvents?: ContextCompactEvent[];
 }
 
 export type ContextStatusResponse =

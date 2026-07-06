@@ -43,6 +43,8 @@ export type {
   PendingInputType,
   AgentActivity,
   ContextUsage,
+  ContextCompactEvent,
+  ContextCumulativeUsage,
   SessionCreatedBy,
   SessionBranchOption,
   SessionBranchState,

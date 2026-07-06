@@ -3,6 +3,8 @@ import type {
   BrowserProfilesResponse,
   CodexMcpMode,
   ConnectionsResponse,
+  ContextCompactEvent,
+  ContextCumulativeUsage,
   ContextStatusResponse,
   ContextUsage,
   DeviceInfo,
@@ -112,6 +114,12 @@ export interface GlobalSessionItem {
   source?: string;
   /** Cached context window usage if the server has it. */
   contextUsage?: ContextUsage;
+  /** Cumulative token spend across the whole session, when available. */
+  cumulativeUsage?: ContextCumulativeUsage;
+  /** Number of context compactions recorded in the active session history. */
+  compactCount?: number;
+  /** Best-effort details for each recorded context compaction. */
+  compactEvents?: ContextCompactEvent[];
   /** Model name from the session summary (e.g. "opus", "gpt-5.5"). */
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh"). */

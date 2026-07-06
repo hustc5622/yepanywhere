@@ -1,6 +1,7 @@
 import type {
   AgentActivity,
   CodexBranchState,
+  ContextCompactEvent,
   ContextCumulativeUsage,
   ContextUsage,
   EffortLevel,
@@ -106,6 +107,10 @@ export interface SessionSummary {
    *  "how much has this session cost in total" rather than "how full is
    *  the context window right now". */
   cumulativeUsage?: ContextCumulativeUsage;
+  /** Number of context compactions recorded in the active session history. */
+  compactCount?: number;
+  /** Best-effort details for each recorded context compaction. */
+  compactEvents?: ContextCompactEvent[];
   /** AI provider used for this session */
   provider: ProviderName;
   /** Model used for this session (extracted from JSONL, e.g. "claude-opus-4-5-20251101") */

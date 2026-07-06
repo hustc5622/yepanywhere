@@ -832,6 +832,9 @@ export function GlobalSessionsPage() {
                         showContextUsage={false}
                         showSizeMeta
                         contextUsage={session.contextUsage}
+                        cumulativeUsage={session.cumulativeUsage}
+                        compactCount={session.compactCount}
+                        compactEvents={session.compactEvents}
                         isSelected={selectedIds.has(session.id)}
                         isSelectionMode={isSelectionMode && !isWideScreen}
                         onNavigate={() => {
