@@ -392,7 +392,6 @@ function SessionPageContent({
 
   useEffect(() => {
     if (!pendingEditBranchRefresh) return;
-    if (processState !== "idle" && status.owner === "self") return;
 
     let cancelled = false;
     const refreshActiveBranch = async () => {
@@ -401,10 +400,7 @@ function SessionPageContent({
       if (cancelled) return;
 
       const attempt = editBranchRefreshAttemptsRef.current;
-      if (
-        (hasBranchChoices(refreshedSession) && attempt >= 1) ||
-        attempt >= 2
-      ) {
+      if (hasBranchChoices(refreshedSession) || attempt >= 2) {
         setPendingEditBranchRefresh(false);
         return;
       }
@@ -424,9 +420,7 @@ function SessionPageContent({
     clearEditBranchRefreshTimer,
     clearSelectedBranchAfterEdit,
     pendingEditBranchRefresh,
-    processState,
     refreshSessionMessages,
-    status.owner,
   ]);
 
   const handleCancelEdit = useCallback(() => {
