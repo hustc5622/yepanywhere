@@ -6,6 +6,7 @@ import type {
   CodexBranchOption,
   CodexBranchState,
   ContextUsage,
+  ProjectGitStatusSummary,
   SessionBranchOption,
   SessionBranchState,
 } from "@yep-anywhere/shared";
@@ -203,4 +204,5 @@ export interface Project {
   activeOwnedCount: number;
   activeExternalCount: number;
   lastActivity: string | null;
+  gitStatus?: ProjectGitStatusSummary | null;
 }

@@ -63,7 +63,11 @@ export {
   sessionMatchesKind,
 } from "./session-kind.js";
 
-export type { GitStatusInfo, GitFileChange } from "./git-status.js";
+export type {
+  GitStatusInfo,
+  GitFileChange,
+  ProjectGitStatusSummary,
+} from "./git-status.js";
 
 export {
   orderByParentChain,

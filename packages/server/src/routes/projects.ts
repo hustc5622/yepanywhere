@@ -1,6 +1,11 @@
 import { homedir } from "node:os";
-import { isUrlProjectId, toUrlProjectId } from "@yep-anywhere/shared";
+import {
+  type ProjectGitStatusSummary,
+  isUrlProjectId,
+  toUrlProjectId,
+} from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import { getProjectGitStatusSummary } from "../git-status-summary.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type {
   ProjectMetadataService,
@@ -35,6 +40,10 @@ export interface ProjectsDeps {
   /** ProjectMetadataService for persisting added projects */
   projectMetadataService?: ProjectMetadataService;
   sessionIndexService?: SessionIndexService;
+  /** Optional override for project-list git summaries (primarily for tests). */
+  gitStatusProvider?: (
+    project: Project,
+  ) => Promise<ProjectGitStatusSummary | null>;
   /** Codex scanner for checking if a project has Codex sessions */
   codexScanner?: CodexSessionScanner;
   /** Codex sessions directory (defaults to ~/.codex/sessions) */
@@ -53,6 +62,8 @@ interface ProjectActivityCounts {
   activeOwnedCount: number;
   activeExternalCount: number;
 }
+
+const PROJECT_GIT_STATUS_CONCURRENCY = 6;
 
 /**
  * Get activity counts for all projects.
@@ -93,6 +104,34 @@ async function getProjectActivityCounts(
   }
 
   return counts;
+}
+
+async function getProjectGitStatusSummaries(
+  projects: Project[],
+  provider: (project: Project) => Promise<ProjectGitStatusSummary | null>,
+): Promise<Map<string, ProjectGitStatusSummary | null>> {
+  const summaries = new Map<string, ProjectGitStatusSummary | null>();
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < projects.length) {
+      const index = nextIndex;
+      nextIndex++;
+      const project = projects[index];
+      if (!project) continue;
+
+      try {
+        summaries.set(project.id, await provider(project));
+      } catch {
+        summaries.set(project.id, null);
+      }
+    }
+  }
+
+  const workerCount = Math.min(PROJECT_GIT_STATUS_CONCURRENCY, projects.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return summaries;
 }
 
 export function createProjectsRoutes(deps: ProjectsDeps): Hono {
@@ -227,10 +266,13 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
   // GET /api/projects - List all projects
   routes.get("/", async (c) => {
     const rawProjects = await deps.scanner.listProjects();
-    const activityCounts = await getProjectActivityCounts(
-      deps.supervisor,
-      deps.externalTracker,
-    );
+    const gitStatusProvider =
+      deps.gitStatusProvider ??
+      ((project: Project) => getProjectGitStatusSummary(project.path));
+    const [activityCounts, gitStatusSummaries] = await Promise.all([
+      getProjectActivityCounts(deps.supervisor, deps.externalTracker),
+      getProjectGitStatusSummaries(rawProjects, gitStatusProvider),
+    ]);
 
     // Enrich projects with active counts (all keyed by UrlProjectId now)
     const projects = rawProjects.map((project) => {
@@ -239,6 +281,7 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
         ...project,
         activeOwnedCount: counts?.activeOwnedCount ?? 0,
         activeExternalCount: counts?.activeExternalCount ?? 0,
+        gitStatus: gitStatusSummaries.get(project.id) ?? null,
       };
     });
 

@@ -1,4 +1,7 @@
-import type { UrlProjectId } from "@yep-anywhere/shared";
+import type {
+  ProjectGitStatusSummary,
+  UrlProjectId,
+} from "@yep-anywhere/shared";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import { createProjectsRoutes } from "../../src/routes/projects.js";
@@ -35,6 +38,46 @@ function createSummary(): SessionSummary {
 }
 
 describe("Projects Routes", () => {
+  it("includes git status summaries in the project list", async () => {
+    const project = createProject();
+    const gitStatus: ProjectGitStatusSummary = {
+      isGitRepo: true,
+      branch: "main",
+      head: "abc1234",
+      upstream: "origin/main",
+      ahead: 1,
+      behind: 0,
+      isClean: false,
+      stagedCount: 1,
+      unstagedCount: 2,
+      deletedCount: 0,
+      untrackedCount: 3,
+      conflictedCount: 0,
+      stashCount: 1,
+    };
+    const gitStatusProvider = vi.fn(async () => gitStatus);
+
+    const routes = createProjectsRoutes({
+      scanner: {
+        listProjects: vi.fn(async () => [project]),
+      } as unknown as ProjectScanner,
+      readerFactory: vi.fn(() => ({}) as ISessionReader),
+      gitStatusProvider,
+    });
+
+    const response = await routes.request("/");
+    expect(response.status).toBe(200);
+
+    const json = await response.json();
+    expect(gitStatusProvider).toHaveBeenCalledWith(project);
+    expect(json.projects[0]).toMatchObject({
+      id: project.id,
+      activeOwnedCount: 0,
+      activeExternalCount: 0,
+      gitStatus,
+    });
+  });
+
   it("lists mixed-provider sessions through the shared provider resolver", async () => {
     const project = createProject();
     const summary = createSummary();

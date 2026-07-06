@@ -10,6 +10,7 @@ import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { activityBus } from "../lib/activityBus";
 import { formatSmartTime } from "../lib/datetime";
+import { ProjectGitStatusInline } from "./ProjectGitStatusInline";
 import { SessionListItem } from "./SessionListItem";
 import {
   SidebarIcons,
@@ -159,6 +160,10 @@ export function Sidebar({
   const newSessionProjectId = resolvePreferredProjectId(
     projects,
     recentProjects[0]?.id,
+  );
+  const projectsById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project])),
+    [projects],
   );
 
   const sidebarRef = useRef<HTMLElement>(null);
@@ -466,6 +471,7 @@ export function Sidebar({
         );
         const runningLabel = t("agentsRunning");
         const unreadLabel = t("globalSessionsStatusUnread");
+        const gitStatus = projectsById.get(group.projectId)?.gitStatus;
 
         return (
           <div
@@ -491,6 +497,11 @@ export function Sidebar({
                     <span className="sidebar-project-name">
                       {group.projectName}
                     </span>
+                    <ProjectGitStatusInline
+                      status={gitStatus}
+                      variant="sidebar"
+                      showIcon={false}
+                    />
                     {group.runningCount > 0 && (
                       <span
                         className="sidebar-project-status sidebar-project-status--running"
