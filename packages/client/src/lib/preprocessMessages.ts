@@ -595,7 +595,15 @@ function processMessage(
         if (existingIndex !== undefined) {
           const existingItem = items[existingIndex];
           if (existingItem?.type === "tool_call") {
-            items[existingIndex] = appendSourceMessage(existingItem, msg);
+            const replayStatus = getInitialToolStatus(
+              block,
+              orphanedToolIds.has(block.id),
+            );
+            const nextItem = appendSourceMessage(existingItem, msg);
+            items[existingIndex] =
+              existingItem.status === "pending" && replayStatus !== "pending"
+                ? { ...nextItem, status: replayStatus }
+                : nextItem;
             if (existingItem.status === "pending") {
               pendingToolCalls.set(block.id, existingIndex);
             }
@@ -611,7 +619,7 @@ function processMessage(
           toolName: block.name,
           toolInput: block.input,
           toolResult: undefined,
-          status: isOrphaned ? "aborted" : "pending",
+          status: getInitialToolStatus(block, isOrphaned),
           sourceMessages: [msg],
           isSubagent: msg.isSubagent,
         };
@@ -620,8 +628,51 @@ function processMessage(
         pendingToolCalls.set(block.id, itemIndex);
         items.push(toolCall);
       }
+    } else if (block.type === "tool_result" && block.tool_use_id) {
+      // OpenCode persists tool_use and tool_result blocks together in the
+      // assistant message. Pair those results here; Claude/Codex usually put
+      // tool_result blocks in a following user message handled above.
+      attachToolResult(block, msg, items, pendingToolCalls);
     }
   }
+}
+
+function getInitialToolStatus(
+  block: ContentBlock,
+  isOrphaned: boolean,
+): ToolCallItem["status"] {
+  if (isOrphaned) {
+    return "aborted";
+  }
+
+  const providerStatus =
+    getStringField(block, "opencodeStatus") ?? getStringField(block, "status");
+
+  switch (providerStatus?.toLowerCase()) {
+    case "complete":
+    case "completed":
+    case "success":
+      return "complete";
+    case "error":
+    case "failed":
+      return "error";
+    case "aborted":
+    case "cancelled":
+    case "canceled":
+      return "aborted";
+    default:
+      return "pending";
+  }
+}
+
+function getStringField(value: unknown, field: string): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const fieldValue = value[field];
+  return typeof fieldValue === "string" && fieldValue.trim()
+    ? fieldValue.trim()
+    : undefined;
 }
 
 function parseTaskNotificationMessage(msg: Message): TaskNotification | null {

@@ -188,10 +188,15 @@ export interface WebSearchInput {
 
 export interface WebSearchResult {
   query?: string;
-  results?: Array<{ content?: Array<{ title: string; url: string }> }>;
+  results?: Array<
+    string | { content?: Array<{ title?: string; url?: string }> }
+  >;
   durationSeconds?: number;
   codexActionLabel?: string;
   codexAction?: unknown;
+  content?: string;
+  output?: string;
+  text?: string;
 }
 
 /**

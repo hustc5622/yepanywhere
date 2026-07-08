@@ -44,6 +44,48 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("pairs OpenCode tool_result blocks from the same assistant message", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_1",
+            name: "websearch",
+            input: { query: "ST4000VN006 ST4000VN008" },
+            opencodeStatus: "completed",
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content:
+              "Found comparison notes at https://www.seagate.com/products/nas-drives/ironwolf-hard-drive/",
+            is_error: false,
+            opencodeStatus: "completed",
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "call_1",
+      toolName: "websearch",
+      status: "complete",
+      toolResult: {
+        content:
+          "Found comparison notes at https://www.seagate.com/products/nas-drives/ironwolf-hard-drive/",
+        isError: false,
+      },
+    });
+  });
+
   it("collapses repeated plan progress snapshots within one user turn", () => {
     const messages: Message[] = [
       {

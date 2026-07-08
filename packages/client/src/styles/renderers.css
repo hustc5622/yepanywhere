@@ -2468,6 +2468,12 @@ details[open] .collapsible__icon {
   word-break: break-all;
 }
 
+.websearch-content {
+  margin: 0;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
 .websearch-error {
   color: var(--error-color);
   padding: 0.5rem;

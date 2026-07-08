@@ -80,6 +80,15 @@ export function getToolSummary(
     return resultSummary;
   }
 
+  if (
+    (toolName.toLowerCase() === "websearch" ||
+      toolName.toLowerCase() === "webfetch") &&
+    inputSummary &&
+    inputSummary !== "..."
+  ) {
+    return `${inputSummary} → ${resultSummary}`;
+  }
+
   return resultSummary;
 }
 

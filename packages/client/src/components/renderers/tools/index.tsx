@@ -10,6 +10,8 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   apply_patch: "Edit",
   web_search_call: "WebSearch",
   search_query: "WebSearch",
+  websearch: "WebSearch",
+  webfetch: "WebFetch",
   Agent: "Task", // SDK 0.2.76+ renamed Task → Agent
   view_image: "ViewImage",
   imageView: "ViewImage",
