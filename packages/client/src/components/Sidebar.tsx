@@ -1,7 +1,9 @@
 import { SLASH_COMMAND_SESSION_KIND } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { api } from "../api/client";
 import type { GlobalSessionItem } from "../api/client";
+import { useToastContext } from "../contexts/ToastContext";
 import { useDrafts } from "../hooks/useDrafts";
 import { useGlobalSessions } from "../hooks/useGlobalSessions";
 import { resolvePreferredProjectId } from "../hooks/useRecentProject";
@@ -41,6 +43,10 @@ interface SessionProjectGroup {
 
 function isRunningSession(session: GlobalSessionItem): boolean {
   return session.activity === "in-turn";
+}
+
+function canArchiveSession(session: GlobalSessionItem): boolean {
+  return !session.isArchived && session.runtime?.canArchive !== false;
 }
 
 function groupSessionsByProject(
@@ -119,6 +125,7 @@ export function Sidebar({
   onResizeEnd,
 }: SidebarProps) {
   const { t, locale } = useI18n();
+  const { showToast } = useToastContext();
   // Base path for navigation links (empty — app is served at its own root).
   const basePath = useRemoteBasePath();
   const shouldLoadSessionLists = isDesktop ? !isCollapsed : isOpen;
@@ -191,6 +198,10 @@ export function Sidebar({
   const [expandedProjectGroups, setExpandedProjectGroups] = useState<
     Set<string>
   >(() => new Set());
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [isBulkArchivePending, setIsBulkArchivePending] = useState(false);
 
   const refetchSessionLists = useCallback(async () => {
     if (!shouldLoadSessionLists) return;
@@ -365,6 +376,116 @@ export function Sidebar({
     );
   }, [globalSessions]);
 
+  const sidebarSessions = useMemo(
+    () => [...filteredStarredSessions, ...recentDaySessions, ...olderSessions],
+    [filteredStarredSessions, olderSessions, recentDaySessions],
+  );
+
+  const sidebarSessionsById = useMemo(
+    () => new Map(sidebarSessions.map((session) => [session.id, session])),
+    [sidebarSessions],
+  );
+
+  const selectedSessions = useMemo(
+    () =>
+      Array.from(selectedSessionIds)
+        .map((id) => sidebarSessionsById.get(id))
+        .filter((session): session is GlobalSessionItem => Boolean(session)),
+    [selectedSessionIds, sidebarSessionsById],
+  );
+
+  const isSelectionMode = selectedSessionIds.size > 0;
+
+  useEffect(() => {
+    setSelectedSessionIds((current) => {
+      let changed = false;
+      const next = new Set<string>();
+
+      for (const id of current) {
+        if (sidebarSessionsById.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [sidebarSessionsById]);
+
+  const handleSelectSession = useCallback(
+    (sessionId: string, selected: boolean) => {
+      setSelectedSessionIds((current) => {
+        const next = new Set(current);
+        if (selected) {
+          next.add(sessionId);
+        } else {
+          next.delete(sessionId);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedSessionIds(new Set());
+  }, []);
+
+  const handleSelectAllSidebarSessions = useCallback(() => {
+    setSelectedSessionIds(
+      new Set(
+        sidebarSessions
+          .filter((session) => !session.isArchived)
+          .map((session) => session.id),
+      ),
+    );
+  }, [sidebarSessions]);
+
+  const handleBulkArchiveSelected = useCallback(async () => {
+    if (isBulkArchivePending || selectedSessions.length === 0) return;
+
+    const archivableSessions = selectedSessions.filter(canArchiveSession);
+    if (archivableSessions.length === 0) {
+      showToast(
+        selectedSessions[0]?.runtime?.archiveBlockReason ??
+          t("sessionArchiveFailed"),
+        "error",
+      );
+      return;
+    }
+
+    setIsBulkArchivePending(true);
+    try {
+      await Promise.all(
+        archivableSessions.map((session) =>
+          api.updateSessionMetadata(session.id, { archived: true }),
+        ),
+      );
+      showToast(
+        t("sidebarArchivedSelected", { count: archivableSessions.length }),
+        "success",
+      );
+      handleClearSelection();
+      await refetchSessionLists();
+    } catch (err) {
+      console.error("Failed to archive selected sidebar sessions:", err);
+      showToast(
+        err instanceof Error ? err.message : t("sessionArchiveFailed"),
+        "error",
+      );
+    } finally {
+      setIsBulkArchivePending(false);
+    }
+  }, [
+    handleClearSelection,
+    isBulkArchivePending,
+    refetchSessionLists,
+    selectedSessions,
+    showToast,
+    t,
+  ]);
+
   // Track which sessions have unsent drafts in localStorage
   const drafts = useDrafts();
 
@@ -463,7 +584,6 @@ export function Sidebar({
       mode="compact"
       isCurrent={session.id === currentSessionId}
       activity={session.activity}
-      onNavigate={onNavigate}
       showProjectName={showProjectName}
       projectName={session.projectName}
       basePath={basePath}
@@ -472,6 +592,16 @@ export function Sidebar({
       compactCount={session.compactCount}
       compactEvents={session.compactEvents}
       hasDraft={drafts.has(session.id)}
+      isSelected={selectedSessionIds.has(session.id)}
+      isSelectionMode={isSelectionMode && !isDesktop}
+      onSelect={handleSelectSession}
+      onNavigate={() => {
+        if (isSelectionMode && !isDesktop) {
+          handleSelectSession(session.id, !selectedSessionIds.has(session.id));
+          return;
+        }
+        onNavigate();
+      }}
     />
   );
 
@@ -744,6 +874,84 @@ export function Sidebar({
               basePath={basePath}
             />
           </SidebarNavSection>
+
+          {sidebarSessions.length > 0 && (
+            <div
+              className={`sidebar-bulk-toolbar${isSelectionMode ? " is-active" : ""}`}
+            >
+              {isSelectionMode ? (
+                <>
+                  <span className="sidebar-bulk-toolbar__count">
+                    {t("bulkSelectedCount", {
+                      count: selectedSessionIds.size,
+                    })}
+                  </span>
+                  <div className="sidebar-bulk-toolbar__actions">
+                    <button
+                      type="button"
+                      className="sidebar-bulk-toolbar__button sidebar-bulk-toolbar__button--primary"
+                      onClick={() => void handleBulkArchiveSelected()}
+                      disabled={
+                        isBulkArchivePending ||
+                        selectedSessions.every(
+                          (session) => !canArchiveSession(session),
+                        )
+                      }
+                      title={t("bulkArchiveSelected")}
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <polyline points="21 8 21 21 3 21 3 8" />
+                        <rect x="1" y="3" width="22" height="5" />
+                        <line x1="10" y1="12" x2="14" y2="12" />
+                      </svg>
+                      {t("bulkArchive")}
+                    </button>
+                    <button
+                      type="button"
+                      className="sidebar-bulk-toolbar__icon-button"
+                      onClick={handleClearSelection}
+                      disabled={isBulkArchivePending}
+                      aria-label={t("bulkClearSelection")}
+                      title={t("bulkClearSelection")}
+                    >
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="sidebar-bulk-toolbar__select-all"
+                  onClick={handleSelectAllSidebarSessions}
+                >
+                  {t("sidebarSelectAllSessions")}
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Global sessions list */}
           {filteredStarredSessions.length > 0 && (

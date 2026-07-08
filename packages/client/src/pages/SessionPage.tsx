@@ -1561,6 +1561,7 @@ function SessionPageContent({
                   <SessionMenu
                     sessionId={sessionId}
                     projectId={projectId}
+                    title={displayTitle}
                     isStarred={isStarred}
                     isArchived={isArchived}
                     hasUnread={hasUnread}

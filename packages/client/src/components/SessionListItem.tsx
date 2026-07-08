@@ -677,6 +677,7 @@ export function SessionListItem({
         <SessionMenu
           sessionId={sessionId}
           projectId={projectId}
+          title={displayTitle}
           isStarred={isStarred ?? false}
           isArchived={isArchived ?? false}
           hasUnread={hasUnread ?? false}

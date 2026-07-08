@@ -1962,6 +1962,102 @@ h2 {
   padding: 0.25rem 0 1rem;
 }
 
+.sidebar-bulk-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-height: 36px;
+  margin: 0 0.5rem 0.75rem;
+  padding: 0.25rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.sidebar-bulk-toolbar.is-active {
+  justify-content: space-between;
+  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-surface) 96%, transparent);
+}
+
+.sidebar-bulk-toolbar__count {
+  min-width: 0;
+  padding-left: var(--space-2);
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-bulk-toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.sidebar-bulk-toolbar__select-all,
+.sidebar-bulk-toolbar__button,
+.sidebar-bulk-toolbar__icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+  touch-action: manipulation;
+}
+
+.sidebar-bulk-toolbar__select-all,
+.sidebar-bulk-toolbar__button {
+  padding: 0 var(--space-2);
+  gap: var(--space-1);
+}
+
+.sidebar-bulk-toolbar__icon-button {
+  width: 28px;
+  padding: 0;
+}
+
+.sidebar-bulk-toolbar__select-all:hover:not(:disabled),
+.sidebar-bulk-toolbar__button:hover:not(:disabled),
+.sidebar-bulk-toolbar__icon-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
+
+.sidebar-bulk-toolbar__button--primary {
+  background: var(--app-yep-green);
+  border-color: var(--app-yep-green);
+  color: var(--bg-primary);
+  font-weight: 700;
+}
+
+.sidebar-bulk-toolbar__button--primary:hover:not(:disabled) {
+  background: var(--app-yep-green);
+  border-color: var(--app-yep-green);
+  opacity: 0.9;
+}
+
+.sidebar-bulk-toolbar__button:disabled,
+.sidebar-bulk-toolbar__icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 /* Unified sidebar navigation section and items */
 .sidebar-nav-section {
   display: flex;
@@ -6357,7 +6453,7 @@ a.sidebar-nav-item {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  min-width: 140px;
+  min-width: 190px;
   z-index: 10000; /* High z-index to appear above sidebar (z-index: 101) and modals */
   overflow: hidden;
 }
@@ -10378,6 +10474,10 @@ button.context-usage-indicator--button:focus-visible {
   font-weight: 500;
 }
 
+.session-list-item--compact.selected .session-list-item__link {
+  background: color-mix(in srgb, var(--app-yep-green) 14%, transparent);
+}
+
 /* Star icon */
 .session-star-icon {
   flex-shrink: 0;
@@ -10574,6 +10674,11 @@ button.context-usage-indicator--button:focus-visible {
   color: var(--text-primary);
 }
 
+.session-list-item--compact.selected .session-list-item__menu {
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* Checkbox for multi-select */
 .session-list-item__checkbox {
   width: 18px;
@@ -10581,6 +10686,45 @@ button.context-usage-indicator--button:focus-visible {
   flex-shrink: 0;
   cursor: pointer;
   accent-color: var(--app-yep-green);
+}
+
+.session-list-item--compact .session-list-item__checkbox {
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  margin-left: var(--space-1);
+}
+
+@media (max-width: 768px) {
+  .sidebar-bulk-toolbar {
+    min-height: 44px;
+    margin-bottom: var(--space-2);
+  }
+
+  .sidebar-bulk-toolbar__select-all,
+  .sidebar-bulk-toolbar__button,
+  .sidebar-bulk-toolbar__icon-button {
+    min-height: 36px;
+  }
+
+  .sidebar-bulk-toolbar__icon-button {
+    width: 36px;
+  }
+
+  .session-list-item--compact .session-list-item__checkbox {
+    width: 14px;
+    height: 14px;
+    margin-left: var(--space-2);
+  }
+
+  .session-list-item--compact .session-list-item__link {
+    min-height: 44px;
+    padding-right: var(--space-2);
+  }
+
+  .session-list-item--compact.selected .session-list-item__menu {
+    display: none;
+  }
 }
 
 /* Read state: slightly dimmer than unread */

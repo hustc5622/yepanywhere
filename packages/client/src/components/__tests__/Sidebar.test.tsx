@@ -1,19 +1,30 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GlobalSessionItem } from "../../api/client";
 import { ToastProvider } from "../../contexts/ToastContext";
 import { I18nProvider } from "../../i18n";
 import { Sidebar } from "../Sidebar";
 
-const { mockUseGlobalSessions, mockUseRecentProjects } = vi.hoisted(() => ({
+const {
+  mockUseGlobalSessions,
+  mockUseRecentProjects,
+  mockUpdateSessionMetadata,
+} = vi.hoisted(() => ({
   mockUseGlobalSessions: vi.fn(),
   mockUseRecentProjects: vi.fn(),
+  mockUpdateSessionMetadata: vi.fn(),
 }));
 
 vi.mock("../../hooks/useGlobalSessions", () => ({
   useGlobalSessions: mockUseGlobalSessions,
+}));
+
+vi.mock("../../api/client", () => ({
+  api: {
+    updateSessionMetadata: mockUpdateSessionMetadata,
+  },
 }));
 
 vi.mock("../../hooks/useRecentProjects", () => ({
@@ -52,6 +63,7 @@ function renderSidebar(
     recentProjects: [],
     projects: [],
     loading: false,
+    refetch: vi.fn(),
   });
 
   return render(
@@ -79,8 +91,39 @@ function projectNameOrder(container: HTMLElement): string[] {
 }
 
 describe("Sidebar recent session browsing", () => {
+  const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "localStorage",
+  );
+
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: vi.fn((key: string) => store.get(key) ?? null),
+        setItem: vi.fn((key: string, value: string) => {
+          store.set(key, value);
+        }),
+        removeItem: vi.fn((key: string) => {
+          store.delete(key);
+        }),
+        clear: vi.fn(() => {
+          store.clear();
+        }),
+      },
+    });
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
+    if (originalLocalStorageDescriptor) {
+      Object.defineProperty(
+        globalThis,
+        "localStorage",
+        originalLocalStorageDescriptor,
+      );
+    }
   });
 
   it("keeps project order stable when an active session receives a newer timestamp", () => {
@@ -189,5 +232,43 @@ describe("Sidebar recent session browsing", () => {
     );
 
     expect(screen.queryByText("Session A")).toBeNull();
+  });
+
+  it("archives checked sidebar sessions in one action", async () => {
+    mockUpdateSessionMetadata.mockResolvedValue({});
+
+    renderSidebar(
+      [
+        createSession({
+          id: "session-a",
+          title: "Session A",
+          projectId: "project-a",
+          projectName: "Project A",
+          updatedAt: new Date().toISOString(),
+        }),
+        createSession({
+          id: "session-b",
+          title: "Session B",
+          projectId: "project-a",
+          projectName: "Project A",
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
+      { currentSessionId: "session-a" },
+    );
+
+    fireEvent.click(screen.getByLabelText("Select Session A"));
+    fireEvent.click(screen.getByLabelText("Select Session B"));
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => {
+      expect(mockUpdateSessionMetadata).toHaveBeenCalledTimes(2);
+    });
+    expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-a", {
+      archived: true,
+    });
+    expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-b", {
+      archived: true,
+    });
   });
 });

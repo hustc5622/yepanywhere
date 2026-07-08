@@ -95,6 +95,31 @@ describe("SessionListItem archive feedback", () => {
     });
   });
 
+  it("copies session info from the menu", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    renderItem({
+      projectName: "Project Alpha",
+      model: "gpt-5-codex",
+      basePath: "/yep",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /options/i }));
+    fireEvent.click(screen.getByRole("button", { name: /copy session info/i }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalled();
+    });
+    const copiedText = writeText.mock.calls[0]?.[0] as string;
+    expect(copiedText).toBe(
+      ["Title: Session title", "Session ID: session-1"].join("\n"),
+    );
+  });
+
   it("shows effective usage and compact count in compact mode", () => {
     renderItem({
       mode: "compact",

@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api/client";
+import { useToastContext } from "../contexts/ToastContext";
 import { useI18n } from "../i18n";
+import { writeClipboardText } from "../lib/clipboard";
 import { getProvider } from "../providers/registry";
 
 export interface SessionMenuProps {
   sessionId: string;
   projectId: string;
+  title?: string | null;
   isStarred: boolean;
   isArchived: boolean;
   hasUnread?: boolean;
@@ -39,6 +42,7 @@ export interface SessionMenuProps {
 export function SessionMenu({
   sessionId,
   projectId,
+  title,
   isStarred,
   isArchived,
   hasUnread,
@@ -59,6 +63,7 @@ export function SessionMenu({
   useFixedPositioning = false,
 }: SessionMenuProps) {
   const { t } = useI18n();
+  const { showToast } = useToastContext();
   const [isOpen, setIsOpen] = useState(false);
   const [isCloning, setIsCloning] = useState(false);
   const [isTerminating, setIsTerminating] = useState(false);
@@ -117,8 +122,8 @@ export function SessionMenu({
       // Calculate position synchronously before opening to avoid flicker
       if (useFixedPositioning && triggerRef.current) {
         const rect = triggerRef.current.getBoundingClientRect();
-        const dropdownWidth = 140; // Approximate width of dropdown
-        const dropdownHeight = 180; // Approximate height of dropdown (varies by options)
+        const dropdownWidth = 190; // Approximate width of dropdown
+        const dropdownHeight = 224; // Approximate height of dropdown (varies by options)
         const rightPosition = window.innerWidth - rect.right;
         const margin = 8;
 
@@ -191,6 +196,31 @@ export function SessionMenu({
     }
   };
 
+  const buildSessionInfoText = () => {
+    const rows: Array<[string, string | undefined]> = [
+      ["Title", title || undefined],
+      ["Session ID", sessionId],
+    ];
+
+    return rows
+      .filter(([, value]) => value && value.trim().length > 0)
+      .map(([label, value]) => `${label}: ${value}`)
+      .join("\n");
+  };
+
+  const handleCopySessionInfo = async () => {
+    setIsOpen(false);
+    setDropdownPosition(null);
+    triggerRef.current?.blur();
+    try {
+      await writeClipboardText(buildSessionInfoText());
+      showToast(t("sessionMenuInfoCopied"), "success");
+    } catch (error) {
+      console.error("Failed to copy session info:", error);
+      showToast(t("sessionMenuInfoCopyFailed"), "error");
+    }
+  };
+
   const handleShare = async () => {
     if (isSharing || !onShare) return;
     setIsSharing(true);
@@ -245,6 +275,21 @@ export function SessionMenu({
           <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
         </svg>
         {isStarred ? t("sessionMenuUnstar") : t("sessionMenuStar")}
+      </button>
+      <button type="button" onClick={handleCopySessionInfo}>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          aria-hidden="true"
+        >
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+        {t("sessionMenuCopyInfo")}
       </button>
       <button type="button" onClick={() => handleAction(onRename)}>
         <svg
