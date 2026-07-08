@@ -347,6 +347,74 @@ describe("SessionTitleService", () => {
     expect(prompt).not.toContain("Stale full summary title");
   });
 
+  it("sends complete first user prompt and first final assistant response", async () => {
+    const longUserPrompt = [
+      "请分析这个会话标题生成问题。",
+      "用户输入中间内容 ".repeat(260),
+      "USER_PROMPT_TAIL_SENTINEL",
+    ].join("\n");
+    const longAssistantResponse = [
+      "最终回答总结如下。",
+      "助手回答中间内容 ".repeat(260),
+      "ASSISTANT_RESPONSE_TAIL_SENTINEL",
+    ].join("\n");
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"title":"完整上下文标题"}' } }],
+        }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          provider: "codex",
+          title: "请分析这个会话标题生成问题...",
+          fullTitle: longUserPrompt,
+          messages: [
+            {
+              type: "user",
+              message: {
+                role: "user",
+                content: longUserPrompt,
+              },
+            },
+            {
+              type: "assistant",
+              codexMessagePhase: "commentary",
+              message: {
+                role: "assistant",
+                content: "我先看一下代码。",
+              },
+            },
+            {
+              type: "assistant",
+              codexMessagePhase: "final_answer",
+              message: {
+                role: "assistant",
+                content: longAssistantResponse,
+              },
+            },
+          ],
+        }),
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const prompt = body.messages[1].content as string;
+    expect(prompt).toContain("USER_PROMPT_TAIL_SENTINEL");
+    expect(prompt).toContain("ASSISTANT_RESPONSE_TAIL_SENTINEL");
+    expect(prompt).not.toContain("请分析这个会话标题生成问题...");
+    expect(prompt).not.toContain("我先看一下代码。");
+  });
+
   it("skips Codex setup user messages when generating a title", async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(

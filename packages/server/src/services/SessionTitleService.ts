@@ -14,7 +14,6 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const DEFAULT_SCHEDULE_DELAY_MS = 1500;
 const DEFAULT_MIN_RETRY_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_MESSAGE_COUNT_FOR_TITLE = 2;
-const MAX_CONTEXT_CHARS = 2400;
 const MAX_LOG_SNIPPET_CHARS = 500;
 const TITLE_MODEL_MAX_TOKENS = 100000;
 
@@ -446,10 +445,10 @@ export class SessionTitleService {
               requiredLanguage,
               "",
               "First user message:",
-              truncateForPrompt(input.userMessage),
+              normalizeForPrompt(input.userMessage),
               "",
               "First assistant response:",
-              truncateForPrompt(input.assistantMessage),
+              normalizeForPrompt(input.assistantMessage),
             ].join("\n"),
           },
         ],
@@ -559,11 +558,8 @@ function getChatCompletionsUrl(apiBase: string): string {
     : `${base}/v1/chat/completions`;
 }
 
-function truncateForPrompt(value: string): string {
-  const trimmed = value.trim();
-  return trimmed.length <= MAX_CONTEXT_CHARS
-    ? trimmed
-    : trimmed.slice(0, MAX_CONTEXT_CHARS);
+function normalizeForPrompt(value: string): string {
+  return value.trim();
 }
 
 function truncateForLog(value: string): string {
