@@ -1,1 +1,1 @@
-Please read [CLAUDE.md](./CLAUDE.md) for full project context, architecture, and instructions.
+Please read [AGENTS.md](./AGENTS.md) for full project context, architecture, and instructions.

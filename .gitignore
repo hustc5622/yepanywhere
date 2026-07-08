@@ -65,6 +65,6 @@ packages/client/dist-stable
 packages/server/client-dist/
 packages/server/bundled/
 
-# Reference repos (cloned for source reading)
+# Reference repos cloned for source reading, e.g. references/opencode/ and references/codex/
 references/
 start.sh

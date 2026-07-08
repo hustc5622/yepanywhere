@@ -152,7 +152,7 @@ android-agent info                            # Screen size, API level, etc.
 
 ### 4. Skill definition
 
-Agent 可在 `CLAUDE.md` 中引用一个 markdown skill 文件：
+Agent 可在 `AGENTS.md` 中引用一个 markdown skill 文件：
 
 ```markdown
 # Android Agent Skill
@@ -188,7 +188,7 @@ android-agent tap 2
 | **Snapshot speed** | `adb shell uiautomator dump`，约 1-3s，动画 UI 易失败 | in-process `UiAutomation.getRootInActiveWindow()`，约 50-100ms |
 | **Input** | `adb shell input tap`，需要启动进程 | 通过 reflection 调 `InputManager.injectInputEvent()`，<10ms，已有能力 |
 | **Protocol** | MCP（JSON-RPC over stdio，需要 MCP client 配置） | 普通 CLI，任何 agent、任何 shell 都可用 |
-| **Integration** | 每个 agent 都要配置 MCP | 放一个 skill 文件，在 `CLAUDE.md` 中引用 |
+| **Integration** | 每个 agent 都要配置 MCP | 放一个 skill 文件，在 `AGENTS.md` 中引用 |
 
 ## 实现阶段
 
@@ -215,7 +215,7 @@ android-agent tap 2
 ### Phase 3：Skill + Agent integration
 
 1. 编写 skill definition markdown。
-2. 从项目 `CLAUDE.md` 引用它。
+2. 从项目 `AGENTS.md` 引用它。
 3. 用 Claude Code 测试：是否能只靠 CLI 导航 app？
 4. 根据 agent 遇到的问题迭代输出格式。
 

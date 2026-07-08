@@ -14,7 +14,7 @@
  *   YEP_ANYWHERE_PROFILE          # Profile name (creates ~/.yep-anywhere-{profile}/)
  *   AUTH_ENABLED                  # Enable cookie auth (default: false)
  *   LOG_LEVEL                     # Log level: fatal, error, warn, info, debug, trace
- *   ... (see CLAUDE.md for full list)
+ *   ... (see AGENTS.md for full list)
  */
 
 import { execSync } from "node:child_process";
