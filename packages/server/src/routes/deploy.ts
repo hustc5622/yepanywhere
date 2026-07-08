@@ -20,6 +20,7 @@ const MAX_JOBS = 20;
 export type DeploymentActionId =
   | "full"
   | "server"
+  | "server-dev"
   | "server-restart"
   | "services-restart"
   | "server-build"
@@ -106,6 +107,7 @@ export interface StartDeploymentRequest {
   install?: boolean;
   deviceId?: string;
   skipChecks?: boolean;
+  allowSessionInterrupt?: boolean;
   restartTargets?: DeploymentRestartTargets;
 }
 
@@ -131,6 +133,14 @@ const DEPLOYMENT_ACTIONS: DeploymentAction[] = [
     supportsInstall: false,
     supportsSkipChecks: true,
     supportsRestartTargets: true,
+  },
+  {
+    id: "server-dev",
+    args: ["--dev-server"],
+    requiresDevice: false,
+    supportsBuildType: false,
+    supportsInstall: false,
+    supportsSkipChecks: false,
   },
   {
     id: "server-restart",
@@ -353,6 +363,15 @@ export function buildDeployArgs(input: StartDeploymentRequest): {
 
   if (action.supportsSkipChecks && input.skipChecks) {
     args.push("--skip-checks");
+  }
+
+  if (input.allowSessionInterrupt) {
+    if (action.id !== "server-dev") {
+      throw new Error(
+        "allowSessionInterrupt is only supported for the server-dev action.",
+      );
+    }
+    args.push("--allow-yep-session-interrupt");
   }
 
   if (action.supportsBuildType || action.id === "apk-install-existing") {

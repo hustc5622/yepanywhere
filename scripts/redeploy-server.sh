@@ -146,6 +146,34 @@ server_process_pids() {
   pgrep -f "${REPO_ROOT}/dist/npm-package/dist/cli.js --port ${port}" 2>/dev/null | sort -u || true
 }
 
+parent_pid() {
+  local pid="$1"
+  ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]' || true
+}
+
+command_for_pid() {
+  local pid="$1"
+  ps -p "$pid" -o command= 2>/dev/null || true
+}
+
+dev_supervisor_pids_for_server_listeners() {
+  local listen_pids="$1"
+  local pid current parent cmd
+  for pid in $listen_pids; do
+    current="$pid"
+    for _ in $(seq 1 8); do
+      parent="$(parent_pid "$current")"
+      [[ -z "$parent" || "$parent" == "1" || "$parent" == "$current" ]] && break
+      cmd="$(command_for_pid "$parent")"
+      if [[ "$cmd" == *"$REPO_ROOT/scripts/dev.js"* ||
+        "$cmd" == *"$REPO_ROOT/scripts/dev-8022.js"* ]]; then
+        printf '%s\n' "$parent"
+      fi
+      current="$parent"
+    done
+  done | sort -u
+}
+
 wait_server_processes_stopped() {
   local port="$1"
   for _ in $(seq 1 20); do
@@ -279,6 +307,7 @@ if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
   OPENCODE_BRIDGE_HTTP_URL="${YEP_OPENCODE_BRIDGE_CONTROL_URL:-${OPENCODE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${OPENCODE_BRIDGE_PORT}}}"
   SERVER_LISTEN_PIDS="$(lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
   SERVER_PROCESS_PIDS="$(server_process_pids "$SERVER_PORT")"
+  DEV_SUPERVISOR_PIDS="$(dev_supervisor_pids_for_server_listeners "$SERVER_LISTEN_PIDS")"
   CODEX_BRIDGE_LISTEN_PIDS="$(lsof -iTCP:"${CODEX_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
   OPENCODE_BRIDGE_LISTEN_PIDS="$(lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
 else
@@ -288,6 +317,7 @@ else
   OPENCODE_BRIDGE_HTTP_URL=""
   SERVER_LISTEN_PIDS=""
   SERVER_PROCESS_PIDS=""
+  DEV_SUPERVISOR_PIDS=""
   CODEX_BRIDGE_LISTEN_PIDS=""
   OPENCODE_BRIDGE_LISTEN_PIDS=""
 fi
@@ -336,6 +366,12 @@ if $DO_RESTART; then
   fi
 
   log "Stopping running yepanywhere ..."
+  if [[ -n "$DEV_SUPERVISOR_PIDS" ]]; then
+    dim "stopping dev hot-reload supervisor(s): ${DEV_SUPERVISOR_PIDS//$'\n'/, }"
+    kill $DEV_SUPERVISOR_PIDS 2>/dev/null || true
+    wait_port_released "$SERVER_PORT" || true
+    SERVER_LISTEN_PIDS="$(lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
+  fi
   if [[ -n "$SERVER_LISTEN_PIDS" ]]; then
     kill $SERVER_LISTEN_PIDS 2>/dev/null || true
   fi

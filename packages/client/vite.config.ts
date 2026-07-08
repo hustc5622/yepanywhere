@@ -101,6 +101,7 @@ export default defineConfig({
   },
   server: {
     port: vitePort,
+    strictPort: true,
     host: viteHost,
     allowedHosts: ["localhost", ".yepanywhere.com"],
     // HMR configuration for reverse proxy setup

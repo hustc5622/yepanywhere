@@ -7,6 +7,7 @@
 # Usage:
 #   scripts/deploy.sh                         # interactive wizard
 #   scripts/deploy.sh --server-only           # non-interactive server deploy
+#   scripts/deploy.sh --dev-server            # replace 8022 with dev hot reload
 #   scripts/deploy.sh --codex-bridge-only     # non-interactive 4510 bridge deploy
 #   scripts/deploy.sh --opencode-bridge-only    # non-interactive 4520 bridge deploy
 #   scripts/deploy.sh --apk-only --debug
@@ -129,6 +130,9 @@ usage() {
 
 Options:
   --server-only       Deploy only the server bundle
+  --dev-server        Replace 8022 with dev hot reload (pnpm dev:8022 --replace)
+  --allow-yep-session-interrupt
+                      Allow --dev-server to interrupt active Yep-managed work
   --codex-bridge-only Deploy only the 4510 Codex bridge sidecar
   --opencode-bridge-only
                       Deploy only the 4520 OpenCode bridge sidecar
@@ -187,6 +191,8 @@ normalize_path_env_var "GOOGLE_APPLICATION_CREDENTIALS"
 discover_fcm_service_account_file
 
 DO_SERVER=true
+DO_DEV_SERVER=false
+ALLOW_YEP_SESSION_INTERRUPT=false
 DO_CODEX_BRIDGE=false
 DO_OPENCODE_BRIDGE=false
 DO_APK=true
@@ -660,6 +666,85 @@ sync_server_launchagent_env_if_needed() {
   scripts/install-launchagents.sh --server-only
 }
 
+start_dev_server() {
+  local server_port="${YEP_DEPLOY_PORT:-8022}"
+  local raw_base_path="${YEP_DEPLOY_BASE_PATH:-/yep}"
+  local server_base_path
+  local server_base_url
+  local dev_log="${YEP_DEV_8022_LOG:-/tmp/yep-dev-8022.log}"
+
+  if [[ "$raw_base_path" == "/" ]]; then
+    server_base_path=""
+  else
+    server_base_path="/${raw_base_path#/}"
+    server_base_path="${server_base_path%/}"
+  fi
+  server_base_url="http://127.0.0.1:${server_port}${server_base_path}"
+
+  log "Starting 8022 dev hot reload ..."
+  dim "server: ${server_base_url}"
+  dim "log:    ${dev_log}"
+  dim "mode:   pnpm dev:8022 --replace"
+
+  local dev_args=(dev:8022 --replace)
+  if $ALLOW_YEP_SESSION_INTERRUPT; then
+    dev_args+=(--allow-yep-session-interrupt)
+  fi
+
+  : >"$dev_log"
+  PORT="$server_port" \
+    BASE_PATH="${server_base_path:-/}" \
+    ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+    nohup pnpm "${dev_args[@]}" >"$dev_log" 2>&1 &
+  local dev_pid=$!
+  disown "$dev_pid" 2>/dev/null || true
+
+  log "Waiting for ${server_base_url}/api/version ..."
+  for _ in $(seq 1 120); do
+    if dev_server_ready "${server_base_url}/api/version" &&
+      dev_frontend_ready "${server_base_url}/" "${server_base_path:-/}"; then
+      log "8022 dev hot reload is running."
+      echo "Deploy complete."
+      return 0
+    fi
+    if ! kill -0 "$dev_pid" 2>/dev/null; then
+      err "Dev hot reload process exited before ${server_base_url}/api/version became ready."
+      tail -80 "$dev_log" >&2 || true
+      return 1
+    fi
+    sleep 0.25
+  done
+
+  err "Dev hot reload did not answer ${server_base_url}/api/version within 30s."
+  tail -80 "$dev_log" >&2 || true
+  return 1
+}
+
+dev_frontend_ready() {
+  local frontend_url="$1"
+  local expected_base_path="${2:-/yep}"
+  local body
+  local vite_client_path
+  body="$(curl -fsS "$frontend_url" 2>/dev/null)" || return 1
+  if [[ "$expected_base_path" == "/" || -z "$expected_base_path" ]]; then
+    vite_client_path="/@vite/client"
+  else
+    vite_client_path="${expected_base_path%/}/@vite/client"
+  fi
+  [[ "$body" == *"$vite_client_path"* ]]
+}
+
+dev_server_ready() {
+  local version_url="$1"
+  local body
+  body="$(curl -fsS "$version_url" 2>/dev/null)" || return 1
+  YEP_VERSION_JSON="$body" node -e '
+const info = JSON.parse(process.env.YEP_VERSION_JSON || "{}");
+const build = info && info.build;
+process.exit(build && build.source === "dev" && build.nodeEnv === "development" ? 0 : 1);
+' >/dev/null 2>&1
+}
+
 if [[ $# -eq 0 ]]; then
   if [[ -t 0 ]]; then
     configure_interactive
@@ -673,9 +758,23 @@ else
     case "$1" in
       --server-only)
         DO_SERVER=true
+        DO_DEV_SERVER=false
         DO_CODEX_BRIDGE=false
         DO_OPENCODE_BRIDGE=false
         DO_APK=false
+        shift
+        ;;
+      --dev-server)
+        DO_SERVER=true
+        DO_DEV_SERVER=true
+        DO_CODEX_BRIDGE=false
+        DO_OPENCODE_BRIDGE=false
+        DO_APK=false
+        RUN_CHECKS=false
+        shift
+        ;;
+      --allow-yep-session-interrupt)
+        ALLOW_YEP_SESSION_INTERRUPT=true
         shift
         ;;
       --codex-bridge-only)
@@ -773,6 +872,8 @@ fi
 
 log "Deploy plan"
 dim "8022 web/API:        $DO_SERVER"
+dim "8022 dev hot reload: $DO_DEV_SERVER"
+dim "allow session interrupt: $ALLOW_YEP_SESSION_INTERRUPT"
 dim "4510 Codex bridge:   $DO_CODEX_BRIDGE"
 dim "4520 OpenCode bridge:  $DO_OPENCODE_BRIDGE"
 dim "server args:         ${SERVER_ARGS[*]:-}"
@@ -790,13 +891,15 @@ elif [[ -n "${SESSION_TITLE_GENERATION+x}" ]] && is_falsey "$SESSION_TITLE_GENER
   dim "session titles:    disabled by deploy env"
 fi
 
-log "Checking native push deploy prerequisites ..."
-sync_android_google_services
-check_native_push_preflight
-log "Checking session title deploy prerequisites ..."
-check_session_title_preflight
-log "Checking local media deploy prerequisites ..."
-check_local_media_preflight
+if ! $DO_DEV_SERVER; then
+  log "Checking native push deploy prerequisites ..."
+  sync_android_google_services
+  check_native_push_preflight
+  log "Checking session title deploy prerequisites ..."
+  check_session_title_preflight
+  log "Checking local media deploy prerequisites ..."
+  check_local_media_preflight
+fi
 
 if $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; }; then
   log "Running preflight checks ..."
@@ -804,9 +907,13 @@ if $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; }; th
   pnpm typecheck
 fi
 
-sync_server_launchagent_env_if_needed
+if ! $DO_DEV_SERVER; then
+  sync_server_launchagent_env_if_needed
+fi
 
-if $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; then
+if $DO_DEV_SERVER; then
+  start_dev_server
+elif $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; then
   log "Deploying server services ..."
   if ! $DO_SERVER; then
     SERVER_ARGS+=(--no-restart)

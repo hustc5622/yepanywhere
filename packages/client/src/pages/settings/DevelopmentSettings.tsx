@@ -160,7 +160,10 @@ export function DevelopmentSettings() {
 
   const handleStartDeployment = async (
     action: DeploymentActionId,
-    options?: { restartTargets?: DeploymentRestartTargets },
+    options?: {
+      allowSessionInterrupt?: boolean;
+      restartTargets?: DeploymentRestartTargets;
+    },
   ) => {
     setStartingAction(action);
     setDeployError(null);
@@ -171,6 +174,7 @@ export function DevelopmentSettings() {
         install: apkInstall,
         deviceId: apkDeviceId || undefined,
         skipChecks,
+        allowSessionInterrupt: options?.allowSessionInterrupt,
         restartTargets: options?.restartTargets,
       });
       setDeployJob(job);
@@ -291,6 +295,17 @@ export function DevelopmentSettings() {
               <div className="settings-item-info">
                 <strong>{t("deploymentServerTitle")}</strong>
                 <p>{t("deploymentServerDescription")}</p>
+                <p className="settings-hint">
+                  {t("deploymentDevServerDescription")}
+                </p>
+                {unsafeToRestart && (
+                  <p className="settings-warning">
+                    {t("developmentInterruptedWarning", {
+                      count: workerActivity.activeWorkers,
+                      suffix: workerActivity.activeWorkers !== 1 ? "s " : " ",
+                    })}
+                  </p>
+                )}
                 <label className="settings-checkbox-row">
                   <input
                     type="checkbox"
@@ -310,6 +325,22 @@ export function DevelopmentSettings() {
                   {startingAction === "server"
                     ? t("deploymentStarting")
                     : t("deploymentRedeployServer")}
+                </button>
+                <button
+                  type="button"
+                  className={`settings-button settings-button-secondary ${unsafeToRestart ? "settings-button-danger" : ""}`}
+                  onClick={() =>
+                    void handleStartDeployment("server-dev", {
+                      allowSessionInterrupt: unsafeToRestart,
+                    })
+                  }
+                  disabled={!deployStatus?.available || deployRunning}
+                >
+                  {startingAction === "server-dev"
+                    ? t("deploymentStarting")
+                    : unsafeToRestart
+                      ? t("deploymentStartDevServerAnyway")
+                      : t("deploymentStartDevServer")}
                 </button>
               </div>
             </div>

@@ -474,6 +474,7 @@ export interface UpdateBindingResponse {
 export type DeploymentActionId =
   | "full"
   | "server"
+  | "server-dev"
   | "server-restart"
   | "services-restart"
   | "server-build"
@@ -556,6 +557,7 @@ export interface StartDeploymentRequest {
   install?: boolean;
   deviceId?: string;
   skipChecks?: boolean;
+  allowSessionInterrupt?: boolean;
   restartTargets?: DeploymentRestartTargets;
 }
 

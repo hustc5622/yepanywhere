@@ -103,6 +103,61 @@ function getCommand(pid) {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
+function getParentPid(pid) {
+  const result = spawnSync("ps", ["-p", pid, "-o", "ppid="], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
+function getDevSupervisorPidsForServerPids(serverPids) {
+  const supervisors = new Set();
+
+  for (const pid of serverPids) {
+    let current = pid;
+    for (let depth = 0; depth < 8; depth += 1) {
+      const parentPid = getParentPid(current);
+      if (!parentPid || parentPid === "1" || parentPid === current) break;
+
+      const command = getCommand(parentPid);
+      if (
+        command.includes(`${rootDir}/scripts/dev.js`) ||
+        command.includes(`${rootDir}/scripts/dev-8022.js`)
+      ) {
+        supervisors.add(parentPid);
+      }
+
+      current = parentPid;
+    }
+  }
+
+  return Array.from(supervisors);
+}
+
+function getRepoClientVitePids() {
+  const result = spawnSync("ps", ["-axo", "pid=,command="], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return [];
+
+  const pids = new Set();
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    if (!match) continue;
+
+    const [, pid, command] = match;
+    if (
+      command.includes(`${rootDir}/packages/client`) &&
+      command.includes("vite")
+    ) {
+      pids.add(pid);
+    }
+  }
+
+  return Array.from(pids);
+}
+
 function setsOverlap(left, right) {
   const rightSet = new Set(right);
   return left.some((pid) => rightSet.has(pid));
@@ -199,6 +254,52 @@ async function stopServerPids(port, pids) {
   );
 }
 
+async function stopDevSupervisorPids(port, vitePort, pids) {
+  console.log(
+    `Stopping existing 8022 dev hot-reload supervisor: ${pids.join(", ")}`,
+  );
+  for (const pid of pids) {
+    try {
+      process.kill(Number(pid), "SIGTERM");
+    } catch (error) {
+      console.warn(
+        `Failed to send SIGTERM to dev supervisor ${pid}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  if (await waitForPortRelease(port, 15000)) {
+    await waitForPortRelease(vitePort, 5000);
+    return;
+  }
+
+  const remaining = getListenPids(port);
+  throw new Error(
+    `Port ${port} is still in use by ${remaining.join(", ")} after stopping the existing dev supervisor.`,
+  );
+}
+
+async function stopRepoClientVitePids(vitePort, pids) {
+  if (pids.length === 0) return;
+
+  console.log(`Stopping stale Yep client Vite process(es): ${pids.join(", ")}`);
+  for (const pid of pids) {
+    try {
+      process.kill(Number(pid), "SIGTERM");
+    } catch (error) {
+      console.warn(
+        `Failed to send SIGTERM to Vite process ${pid}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  await waitForPortRelease(vitePort, 5000);
+}
+
 /**
  * Ask the running server to shut down gracefully via its maintenance endpoint
  * (POST /reload). This routes through gracefulShutdown, which aborts active
@@ -286,7 +387,7 @@ async function main() {
     `http://127.0.0.1:${bridgePort}`;
   const serverBaseUrl = `http://127.0.0.1:${port}${basePath}`;
 
-  const serverPids = getListenPids(port);
+  let serverPids = getListenPids(port);
   const bridgePids = getListenPids(bridgePort);
 
   console.log("Yep Anywhere 8022 hot-reload preflight");
@@ -343,7 +444,15 @@ async function main() {
       );
     }
 
-    await stopServerGracefully(maintenancePort, port, serverPids);
+    const devSupervisorPids = getDevSupervisorPidsForServerPids(serverPids);
+    if (devSupervisorPids.length > 0) {
+      await stopDevSupervisorPids(port, vitePort, devSupervisorPids);
+      serverPids = getListenPids(port);
+    }
+
+    if (serverPids.length > 0) {
+      await stopServerGracefully(maintenancePort, port, serverPids);
+    }
 
     const bridgePidsAfter = getListenPids(bridgePort);
     if (bridgePids.length > 0 && !setsOverlap(bridgePids, bridgePidsAfter)) {
@@ -354,6 +463,8 @@ async function main() {
       );
     }
   }
+
+  await stopRepoClientVitePids(vitePort, getRepoClientVitePids());
 
   const env = {
     ...process.env,

@@ -9,6 +9,32 @@ describe("deploy route argument mapping", () => {
     ]);
   });
 
+  it("can replace 8022 with dev hot reload", () => {
+    expect(buildDeployArgs({ action: "server-dev" }).args).toEqual([
+      "--dev-server",
+    ]);
+  });
+
+  it("can explicitly allow dev hot reload to interrupt active work", () => {
+    expect(
+      buildDeployArgs({
+        action: "server-dev",
+        allowSessionInterrupt: true,
+      }).args,
+    ).toEqual(["--dev-server", "--allow-yep-session-interrupt"]);
+  });
+
+  it("rejects session interrupt override for non-dev actions", () => {
+    expect(() =>
+      buildDeployArgs({
+        action: "server",
+        allowSessionInterrupt: true,
+      }),
+    ).toThrow(
+      "allowSessionInterrupt is only supported for the server-dev action.",
+    );
+  });
+
   it("can restart selected services with 8022 selected", () => {
     expect(
       buildDeployArgs({
