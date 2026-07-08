@@ -48,6 +48,7 @@ import { updateAllowedHosts } from "./middleware/allowed-hosts.js";
 import { NotificationService } from "./notifications/index.js";
 import { CodexSessionScanner } from "./projects/codex-scanner.js";
 import { GeminiSessionScanner } from "./projects/gemini-scanner.js";
+import { OpenCodeSessionScanner } from "./projects/opencode-scanner.js";
 import { ProjectScanner } from "./projects/scanner.js";
 import {
   NativePushService,
@@ -622,6 +623,7 @@ async function startServer() {
     geminiScanner: new GeminiSessionScanner({
       sessionsDir: config.geminiSessionsDir,
     }),
+    opencodeScanner: new OpenCodeSessionScanner(),
   });
 
   // Set service references for graceful shutdown

@@ -154,7 +154,11 @@ export function Sidebar({
 
   const sessionsLoading = globalLoading || starredLoading;
 
-  const { recentProjects, projects } = useRecentProjects({
+  const {
+    recentProjects,
+    projects,
+    refetch: refetchProjects,
+  } = useRecentProjects({
     enabled: shouldLoadSessionLists,
   });
   const newSessionProjectId = resolvePreferredProjectId(
@@ -191,8 +195,17 @@ export function Sidebar({
   const refetchSessionLists = useCallback(async () => {
     if (!shouldLoadSessionLists) return;
 
-    await Promise.all([refetchGlobalSessions(), refetchStarredSessions()]);
-  }, [refetchGlobalSessions, refetchStarredSessions, shouldLoadSessionLists]);
+    await Promise.all([
+      refetchGlobalSessions(),
+      refetchStarredSessions(),
+      refetchProjects(),
+    ]);
+  }, [
+    refetchGlobalSessions,
+    refetchProjects,
+    refetchStarredSessions,
+    shouldLoadSessionLists,
+  ]);
 
   const handleRefreshRecentSessions = useCallback(async () => {
     if (isRefreshingSessions) return;

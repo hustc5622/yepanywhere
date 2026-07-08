@@ -32,6 +32,7 @@ import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import {
   encodeProjectId,
   resolveResumeCwd,
@@ -47,6 +48,7 @@ import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import { normalizeSession } from "../sessions/normalization.js";
+import { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import {
   type PaginationInfo,
   sliceAfterMessage,
@@ -146,6 +148,12 @@ function isCodexProviderName(
   return provider === "codex" || provider === "codex-oss";
 }
 
+function supportsResumeSessionAt(
+  provider: ProviderName | string | undefined,
+): boolean {
+  return provider === "claude" || provider === "opencode";
+}
+
 function parseOptionalPositiveInteger(
   value: unknown,
   fieldName: string,
@@ -183,6 +191,10 @@ export interface SessionsDeps {
   geminiSessionsDir?: string;
   /** Optional shared Gemini reader factory for cross-provider session lookups */
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
+  opencodeScanner?: OpenCodeSessionScanner;
+  opencodeDbPath?: string;
+  /** Optional shared OpenCode reader factory for cross-provider session lookups */
+  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   /** ServerSettingsService for reading global instructions */
   serverSettingsService?: ServerSettingsService;
   /** ModelInfoService for context window lookups */
@@ -216,9 +228,9 @@ interface StartSessionBody {
   permissions?: PermissionRules;
   /**
    * Rewind/edit: resume the session only up to (and including) this message
-   * UUID, branching the conversation in place (same session id). Pass the
-   * edited message's parentUuid so that message and everything after it are
-   * dropped. Maps to the SDK `resumeSessionAt` option. Claude provider only.
+   * UUID. Claude rewinds in-place; OpenCode forks a native session at this
+   * boundary. Pass the edited message's parentUuid so the edited message and
+   * everything after it are dropped from the new branch.
    */
   resumeSessionAt?: string;
   /**
@@ -529,6 +541,8 @@ async function resolveArchiveTarget(
         geminiSessionsDir: deps.geminiSessionsDir,
         geminiReaderFactory: deps.geminiReaderFactory,
         geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+        opencodeDbPath: deps.opencodeDbPath,
+        opencodeReaderFactory: deps.opencodeReaderFactory,
       },
       preferredProvider,
     );
@@ -652,6 +666,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           projectPath,
         })
       : null);
+  const getOpenCodeReader = (projectPath: string): OpenCodeSessionReader =>
+    deps.opencodeReaderFactory?.(projectPath) ??
+    new OpenCodeSessionReader({
+      dbPath: deps.opencodeDbPath,
+      projectPath,
+    });
 
   // GET /api/archive/sessions - List physically archived sessions.
   routes.get("/archive/sessions", (c) => {
@@ -813,6 +833,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         geminiSessionsDir: deps.geminiSessionsDir,
         geminiReaderFactory: deps.geminiReaderFactory,
         geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+        opencodeDbPath: deps.opencodeDbPath,
+        opencodeReaderFactory: deps.opencodeReaderFactory,
       },
       metadataProvider ?? process?.provider,
     );
@@ -973,6 +995,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
                   geminiSessionsDir: deps.geminiSessionsDir,
                   geminiReaderFactory: deps.geminiReaderFactory,
                   geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+                  opencodeDbPath: deps.opencodeDbPath,
+                  opencodeReaderFactory: deps.opencodeReaderFactory,
                 },
                 process.provider,
               );
@@ -1009,6 +1033,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           geminiSessionsDir: deps.geminiSessionsDir,
           geminiReaderFactory: deps.geminiReaderFactory,
           geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+          opencodeDbPath: deps.opencodeDbPath,
+          opencodeReaderFactory: deps.opencodeReaderFactory,
         },
         metadataProvider ?? process?.provider,
       );
@@ -1200,6 +1226,22 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           { includeOrphans: wasEverOwned && !process, branchId },
         );
       }
+    }
+
+    // For mixed projects, also check OpenCode sessions if still not found.
+    if (
+      !loadedSession &&
+      (project.provider === "claude" ||
+        project.provider === "codex" ||
+        project.provider === "gemini")
+    ) {
+      const openCodeReader = getOpenCodeReader(project.path);
+      loadedSession = await openCodeReader.getSession(
+        sessionId,
+        project.id,
+        readerAfterMessageId,
+        { includeOrphans: wasEverOwned && !process, branchId },
+      );
     }
 
     let session = loadedSession ? normalizeSession(loadedSession) : null;
@@ -1869,6 +1911,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           geminiSessionsDir: deps.geminiSessionsDir,
           geminiReaderFactory: deps.geminiReaderFactory,
           geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+          opencodeDbPath: deps.opencodeDbPath,
+          opencodeReaderFactory: deps.opencodeReaderFactory,
         },
         metadataProvider ?? body.provider,
       );
@@ -1894,14 +1938,16 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           parsedCodexMcpMode.codexMcpMode ??
           deps.sessionMetadataService?.getCodexMcpMode?.(sessionId) ??
           null,
-        resumeSessionAt:
-          providerName === "claude" ? (body.resumeSessionAt ?? null) : null,
+        resumeSessionAt: supportsResumeSessionAt(providerName)
+          ? (body.resumeSessionAt ?? null)
+          : null,
         rollbackNumTurns:
           providerName === "codex"
             ? (parsedRollbackNumTurns.value ?? null)
             : null,
-        ignoredResumeSessionAt:
-          providerName !== "claude" ? (body.resumeSessionAt ?? null) : null,
+        ignoredResumeSessionAt: !supportsResumeSessionAt(providerName)
+          ? (body.resumeSessionAt ?? null)
+          : null,
         ignoredRollbackNumTurns:
           providerName !== "codex"
             ? (parsedRollbackNumTurns.value ?? null)
@@ -1930,13 +1976,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         executor,
         globalInstructions,
         permissions: body.permissions,
-        // Rewind/edit: resume the SAME session but only up to (and including)
-        // this message UUID, branching the conversation in place. The old tail
-        // becomes a dead branch the reader filters out by timestamp. Pass the
-        // edited message's parentUuid so that message and everything after it
-        // are dropped. Claude provider only (SDK feature).
-        resumeSessionAt:
-          providerName === "claude" ? body.resumeSessionAt : undefined,
+        // Rewind/edit: Claude rewinds the same session; OpenCode forks a native
+        // session from this boundary and reports the forked id through init.
+        resumeSessionAt: supportsResumeSessionAt(providerName)
+          ? body.resumeSessionAt
+          : undefined,
         // Codex app-server models Codex CLI Esc Esc backtrack as a
         // same-thread rollback count, not as a message UUID.
         rollbackNumTurns:
@@ -1979,10 +2023,31 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json(result, 202); // 202 Accepted - queued for processing
     }
 
+    const actualSessionId = result.sessionId ?? sessionId;
+
+    if (deps.sessionMetadataService && actualSessionId !== sessionId) {
+      if (providerName) {
+        await deps.sessionMetadataService.setProvider(
+          actualSessionId,
+          providerName as ProviderName,
+        );
+      }
+      if (executor) {
+        await deps.sessionMetadataService.setExecutor(
+          actualSessionId,
+          executor,
+        );
+      }
+    }
+    if (actualSessionId !== sessionId) {
+      await markSessionCreatedByYep(deps, actualSessionId, project.id);
+    }
+
     getLogger().info(
       {
         event: "session_resume_process_started",
         sessionId,
+        actualSessionId,
         projectId: resolvedProjectId,
         providerName,
         processId: result.id,
@@ -1993,6 +2058,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     );
 
     return c.json({
+      sessionId: actualSessionId,
       processId: result.id,
       permissionMode: result.permissionMode,
       modeVersion: result.modeVersion,

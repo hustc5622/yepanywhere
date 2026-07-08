@@ -174,4 +174,66 @@ describe("FocusedSessionWatchManager", () => {
     unsubscribe();
     manager.dispose();
   });
+
+  it("uses providerHint=opencode to resolve opencode database changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "focused-watch-opencode-"));
+    tempDirs.push(root);
+    const dbPath = join(root, "opencode.db");
+    await writeFile(dbPath, "initial");
+
+    const sessionId = "ses_opencode_1";
+    const projectId = "L3RtcC9kZW1vLW9wZW5jb2Rl" as UrlProjectId;
+    const project: Project = {
+      id: projectId,
+      path: "/tmp/demo-opencode",
+      name: "demo-opencode",
+      sessionCount: 1,
+      sessionDir: dbPath,
+      activeOwnedCount: 0,
+      activeExternalCount: 0,
+      lastActivity: null,
+      provider: "opencode",
+    };
+
+    const opencodeScanner = {
+      getSessionsForProject: vi
+        .fn<() => Promise<Array<{ id: string; filePath: string }>>>()
+        .mockResolvedValue([{ id: sessionId, filePath: dbPath }]),
+    };
+
+    const manager = new FocusedSessionWatchManager({
+      scanner: {
+        getProject: async () => project,
+        getOrCreateProject: async () => project,
+      },
+      codexScanner: {
+        getSessionsForProject: async () => [],
+      },
+      geminiScanner: {
+        getSessionsForProject: async () => [],
+      },
+      opencodeScanner,
+      pollMs: 100,
+      debounceMs: 30,
+    });
+
+    const events: FocusedSessionWatchEvent[] = [];
+    const unsubscribe = manager.subscribe(
+      { sessionId, projectId, providerHint: "opencode" },
+      (event) => events.push(event),
+    );
+
+    await delay(250);
+    await appendFile(dbPath, " updated");
+
+    const event = await waitForChange(events);
+    expect(event.provider).toBe("opencode");
+    expect(event.path).toBe(dbPath);
+    expect(opencodeScanner.getSessionsForProject).toHaveBeenCalledWith(
+      project.path,
+    );
+
+    unsubscribe();
+    manager.dispose();
+  });
 });

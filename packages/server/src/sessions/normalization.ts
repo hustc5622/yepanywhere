@@ -1746,6 +1746,7 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
       : undefined;
 
     const content = convertOpenCodeParts(parts);
+    const usage = createOpenCodeUsage(message.tokens, message.cost, parts);
 
     messages.push({
       uuid,
@@ -1754,24 +1755,48 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
         role: message.role,
         content,
         model: message.modelID,
-        usage: message.tokens
-          ? {
-              input_tokens: message.tokens.input,
-              output_tokens: message.tokens.output,
-              cache_read_input_tokens: message.tokens.cache?.read,
-            }
-          : undefined,
+        usage,
       },
       timestamp,
       // Include OpenCode-specific fields
       ...(message.parentID && { parentId: message.parentID }),
+      ...(message.providerID && { providerId: message.providerID }),
+      ...(message.cost !== undefined && { cost: message.cost }),
       ...(message.mode && { mode: message.mode }),
       ...(message.agent && { agent: message.agent }),
       ...(message.finish && { finish: message.finish }),
+      ...(message.path && { path: message.path }),
     });
   }
 
   return messages;
+}
+
+function createOpenCodeUsage(
+  messageTokens: OpenCodeStoredPart["tokens"],
+  messageCost: number | undefined,
+  parts: OpenCodeStoredPart[],
+): Record<string, unknown> | undefined {
+  const stepFinish = [...parts]
+    .reverse()
+    .find((part) => part.type === "step-finish" && (part.tokens || part.cost));
+  const tokens = messageTokens ?? stepFinish?.tokens;
+  const cost = messageCost ?? stepFinish?.cost;
+  if (!tokens && cost === undefined) return undefined;
+
+  const usage: Record<string, unknown> = {};
+  if (tokens?.input !== undefined) usage.input_tokens = tokens.input;
+  if (tokens?.output !== undefined) usage.output_tokens = tokens.output;
+  if (tokens?.reasoning !== undefined)
+    usage.reasoning_tokens = tokens.reasoning;
+  if (tokens?.cache?.read !== undefined) {
+    usage.cache_read_input_tokens = tokens.cache.read;
+  }
+  if (tokens?.cache?.write !== undefined) {
+    usage.cache_creation_input_tokens = tokens.cache.write;
+  }
+  if (cost !== undefined) usage.cost_usd = cost;
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
@@ -1796,10 +1821,17 @@ function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
             id: part.callID,
             name: part.tool,
             input: part.state?.input ?? {},
+            opencodeStatus: part.state?.status,
+            opencodeTitle: part.state?.title,
+            opencodeMetadata: part.state?.metadata,
+            opencodeTime: part.state?.time ?? part.time,
           });
 
           // If tool has completed, add tool result block
-          if (part.state?.status === "completed") {
+          if (
+            part.state?.status === "completed" ||
+            part.state?.status === "error"
+          ) {
             const resultContent = part.state.error
               ? part.state.error
               : typeof part.state.output === "string"
@@ -1810,13 +1842,17 @@ function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
               type: "tool_result",
               tool_use_id: part.callID,
               content: resultContent,
-              is_error: !!part.state.error,
+              is_error: part.state.status === "error" || !!part.state.error,
+              opencodeStatus: part.state.status,
+              opencodeTitle: part.state.title,
+              opencodeMetadata: part.state.metadata,
+              opencodeTime: part.state.time ?? part.time,
             });
           }
         }
         break;
 
-      // Skip step-start and step-finish (metadata, not content)
+      // Skip step-start (metadata, not content)
       case "step-start":
       case "step-finish":
         break;

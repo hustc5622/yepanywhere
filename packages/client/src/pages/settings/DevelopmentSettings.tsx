@@ -21,6 +21,7 @@ const LAST_DEPLOY_JOB_KEY = "yepanywhere:lastDeployJobId";
 const DEFAULT_RESTART_TARGETS: Required<DeploymentRestartTargets> = {
   server: true,
   codexBridge: false,
+  opencodeBridge: false,
   claudeBridge: false,
 };
 
@@ -205,6 +206,7 @@ export function DevelopmentSettings() {
   const hasSelectedRestartTarget =
     restartTargets.server ||
     restartTargets.codexBridge ||
+    restartTargets.opencodeBridge ||
     restartTargets.claudeBridge;
 
   const setRestartTarget = (
@@ -335,13 +337,13 @@ export function DevelopmentSettings() {
               <label className="settings-checkbox-row">
                 <input
                   type="checkbox"
-                  checked={restartTargets.claudeBridge}
+                  checked={restartTargets.opencodeBridge}
                   onChange={(e) =>
-                    setRestartTarget("claudeBridge", e.target.checked)
+                    setRestartTarget("opencodeBridge", e.target.checked)
                   }
                   disabled={deployRunning}
                 />
-                <span>{t("deploymentRestartTargetClaudeBridge")}</span>
+                <span>{t("deploymentRestartTargetOpenCodeBridge")}</span>
               </label>
               <button
                 type="button"

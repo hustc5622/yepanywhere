@@ -12,7 +12,7 @@
 #                                      # restart the 4510 Codex bridge sidecar too
 #   scripts/redeploy-server.sh --no-restart --restart-codex-bridge
 #                                      # rebuild + restart only the 4510 sidecar
-#   scripts/redeploy-server.sh --no-restart --restart-claude-bridge
+#   scripts/redeploy-server.sh --no-restart --restart-opencode-bridge
 #                                      # rebuild + restart only the 4520 sidecar
 #   scripts/redeploy-server.sh --embedded-codex-bridge
 #                                      # legacy: run 4510 inside 8022
@@ -29,8 +29,8 @@
 #   - 4510 Codex bridge sessions are preserved by default. If 4510 is still
 #     embedded in the 8022 process, preserving it while restarting 8022 is
 #     impossible; choose --restart-codex-bridge to migrate/restart it.
-#   - 4520 Claude bridge sessions are preserved by default. Choose
-#     --restart-claude-bridge to restart that sidecar too.
+#   - 4520 OpenCode bridge sessions are preserved by default. Choose
+#     --restart-opencode-bridge to restart that sidecar too.
 #   - Persisted session jsonl is unaffected.
 
 set -euo pipefail
@@ -57,7 +57,7 @@ DO_BUILD=true
 DO_RESTART=true
 USE_CODEX_BRIDGE_SIDECAR=true
 RESTART_CODEX_BRIDGE=false
-RESTART_CLAUDE_BRIDGE=false
+RESTART_OPENCODE_BRIDGE=false
 SERVER_PORT="${YEP_DEPLOY_PORT:-8022}"
 SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
 SERVER_ALLOWED_IMAGE_PATHS="${ALLOWED_IMAGE_PATHS:-/tmp,$HOME/Downloads}"
@@ -70,7 +70,7 @@ fi
 SERVER_BASE_URL="http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
 SERVER_LAUNCHD_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
 CODEX_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
-CLAUDE_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_CLAUDE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.claude-bridge}"
+OPENCODE_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
 for arg in "$@"; do
   case "$arg" in
     --restart)    DO_BUILD=false ;;
@@ -83,8 +83,8 @@ for arg in "$@"; do
       USE_CODEX_BRIDGE_SIDECAR=true
       RESTART_CODEX_BRIDGE=true
       ;;
-    --restart-claude-bridge)
-      RESTART_CLAUDE_BRIDGE=true
+    --restart-opencode-bridge)
+      RESTART_OPENCODE_BRIDGE=true
       ;;
     --embedded-codex-bridge|--no-preserve-codex-bridge)
       USE_CODEX_BRIDGE_SIDECAR=false
@@ -200,31 +200,31 @@ start_codex_bridge_sidecar() {
   return 1
 }
 
-start_claude_bridge_sidecar() {
+start_opencode_bridge_sidecar() {
   local bridge_port="$1"
   local bridge_url="$2"
   local server_url="$3"
 
-  if launchd_label_loaded "$CLAUDE_BRIDGE_LAUNCHD_LABEL"; then
-    log "Starting Claude bridge LaunchAgent ${CLAUDE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
-    kickstart_launchd_label "$CLAUDE_BRIDGE_LAUNCHD_LABEL"
+  if launchd_label_loaded "$OPENCODE_BRIDGE_LAUNCHD_LABEL"; then
+    log "Starting OpenCode bridge LaunchAgent ${OPENCODE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
+    kickstart_launchd_label "$OPENCODE_BRIDGE_LAUNCHD_LABEL"
   else
-    log "Starting Claude bridge sidecar on ${bridge_url} (logs: /tmp/yep-claude-bridge.log) ..."
-    YEP_CLAUDE_BRIDGE_PORT="$bridge_port" \
+    log "Starting OpenCode bridge sidecar on ${bridge_url} (logs: /tmp/yep-opencode-bridge.log) ..."
+    YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
       YEP_SERVER_URL="$server_url" \
-      nohup yepanywhere --claude-bridge-only >/tmp/yep-claude-bridge.log 2>&1 & disown
+      nohup yepanywhere --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
   fi
 
   for _ in $(seq 1 60); do
     if curl -fsS "${bridge_url}/status" >/dev/null 2>&1; then
-      log "Claude bridge sidecar is up."
+      log "OpenCode bridge sidecar is up."
       return 0
     fi
     sleep 0.25
   done
 
-  err "Claude bridge sidecar didn't answer ${bridge_url}/status within 15s."
-  tail -20 /tmp/yep-claude-bridge.log >&2 || true
+  err "OpenCode bridge sidecar didn't answer ${bridge_url}/status within 15s."
+  tail -20 /tmp/yep-opencode-bridge.log >&2 || true
   return 1
 }
 
@@ -272,29 +272,29 @@ if $DO_BUILD; then
 fi
 
 # ----- restart -----
-if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_CLAUDE_BRIDGE; then
+if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
   CODEX_BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
   CODEX_BRIDGE_HTTP_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${CODEX_BRIDGE_PORT}}}"
-  CLAUDE_BRIDGE_PORT="${YEP_CLAUDE_BRIDGE_PORT:-${CLAUDE_BRIDGE_PORT:-4520}}"
-  CLAUDE_BRIDGE_HTTP_URL="${YEP_CLAUDE_BRIDGE_CONTROL_URL:-${CLAUDE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${CLAUDE_BRIDGE_PORT}}}"
+  OPENCODE_BRIDGE_PORT="${YEP_OPENCODE_BRIDGE_PORT:-${OPENCODE_BRIDGE_PORT:-4520}}"
+  OPENCODE_BRIDGE_HTTP_URL="${YEP_OPENCODE_BRIDGE_CONTROL_URL:-${OPENCODE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${OPENCODE_BRIDGE_PORT}}}"
   SERVER_LISTEN_PIDS="$(lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
   SERVER_PROCESS_PIDS="$(server_process_pids "$SERVER_PORT")"
   CODEX_BRIDGE_LISTEN_PIDS="$(lsof -iTCP:"${CODEX_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
-  CLAUDE_BRIDGE_LISTEN_PIDS="$(lsof -iTCP:"${CLAUDE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
+  OPENCODE_BRIDGE_LISTEN_PIDS="$(lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
 else
   CODEX_BRIDGE_PORT=""
   CODEX_BRIDGE_HTTP_URL=""
-  CLAUDE_BRIDGE_PORT=""
-  CLAUDE_BRIDGE_HTTP_URL=""
+  OPENCODE_BRIDGE_PORT=""
+  OPENCODE_BRIDGE_HTTP_URL=""
   SERVER_LISTEN_PIDS=""
   SERVER_PROCESS_PIDS=""
   CODEX_BRIDGE_LISTEN_PIDS=""
-  CLAUDE_BRIDGE_LISTEN_PIDS=""
+  OPENCODE_BRIDGE_LISTEN_PIDS=""
 fi
 
 if $DO_RESTART; then
   START_CODEX_BRIDGE_AFTER_STOP=false
-  START_CLAUDE_BRIDGE_AFTER_STOP=false
+  START_OPENCODE_BRIDGE_AFTER_STOP=false
 
   if $USE_CODEX_BRIDGE_SIDECAR; then
     if $RESTART_CODEX_BRIDGE; then
@@ -320,18 +320,18 @@ if $DO_RESTART; then
     warn "Starting Codex bridge embedded in the web server; active cf / codex --remote sessions will disconnect."
   fi
 
-  if $RESTART_CLAUDE_BRIDGE; then
-    START_CLAUDE_BRIDGE_AFTER_STOP=true
-    if [[ -n "$CLAUDE_BRIDGE_LISTEN_PIDS" ]]; then
-      warn "Restarting Claude bridge on port ${CLAUDE_BRIDGE_PORT}; active yepanywhere claude wrapper sessions may disconnect."
+  if $RESTART_OPENCODE_BRIDGE; then
+    START_OPENCODE_BRIDGE_AFTER_STOP=true
+    if [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]]; then
+      warn "Restarting OpenCode bridge on port ${OPENCODE_BRIDGE_PORT}; active bridge clients may disconnect."
     else
-      dim "Claude bridge sidecar is not running; it will be started."
+      dim "OpenCode bridge sidecar is not running; it will be started."
     fi
-  elif [[ -n "$CLAUDE_BRIDGE_LISTEN_PIDS" ]] && ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$CLAUDE_BRIDGE_LISTEN_PIDS"; then
-    dim "preserving Claude bridge on port ${CLAUDE_BRIDGE_PORT} (PID ${CLAUDE_BRIDGE_LISTEN_PIDS//$'\n'/, })"
-  elif [[ -n "$CLAUDE_BRIDGE_LISTEN_PIDS" ]]; then
-    err "Cannot restart 8022 without affecting 4520: port ${CLAUDE_BRIDGE_PORT} is owned by the web server process."
-    err "Run again with --restart-claude-bridge to restart it too."
+  elif [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] && ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
+    dim "preserving OpenCode bridge on port ${OPENCODE_BRIDGE_PORT} (PID ${OPENCODE_BRIDGE_LISTEN_PIDS//$'\n'/, })"
+  elif [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]]; then
+    err "Cannot restart 8022 without affecting 4520: port ${OPENCODE_BRIDGE_PORT} is owned by the web server process."
+    err "Run again with --restart-opencode-bridge to restart it too."
     exit 1
   fi
 
@@ -347,10 +347,10 @@ if $DO_RESTART; then
     ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$CODEX_BRIDGE_LISTEN_PIDS"; then
     kill $CODEX_BRIDGE_LISTEN_PIDS 2>/dev/null || true
   fi
-  if $RESTART_CLAUDE_BRIDGE &&
-    [[ -n "$CLAUDE_BRIDGE_LISTEN_PIDS" ]] &&
-    ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$CLAUDE_BRIDGE_LISTEN_PIDS"; then
-    kill $CLAUDE_BRIDGE_LISTEN_PIDS 2>/dev/null || true
+  if $RESTART_OPENCODE_BRIDGE &&
+    [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] &&
+    ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
+    kill $OPENCODE_BRIDGE_LISTEN_PIDS 2>/dev/null || true
   fi
 
   # Wait briefly for the old process to release the port.
@@ -414,13 +414,13 @@ if $DO_RESTART; then
     start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL"
   fi
 
-  if $START_CLAUDE_BRIDGE_AFTER_STOP; then
-    wait_port_released "$CLAUDE_BRIDGE_PORT" || true
-    if lsof -iTCP:"${CLAUDE_BRIDGE_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
-      err "Claude bridge port ${CLAUDE_BRIDGE_PORT} is still in use; cannot start sidecar."
+  if $START_OPENCODE_BRIDGE_AFTER_STOP; then
+    wait_port_released "$OPENCODE_BRIDGE_PORT" || true
+    if lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
+      err "OpenCode bridge port ${OPENCODE_BRIDGE_PORT} is still in use; cannot start sidecar."
       exit 1
     fi
-    start_claude_bridge_sidecar "$CLAUDE_BRIDGE_PORT" "$CLAUDE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
+    start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
   fi
 
   log "Starting yepanywhere ..."
@@ -438,8 +438,8 @@ if $DO_RESTART; then
       YEP_CODEX_BRIDGE_MODE=external \
       YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
       YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
-      YEP_CLAUDE_BRIDGE_CONTROL_URL="$CLAUDE_BRIDGE_HTTP_URL" \
-      YEP_CLAUDE_BRIDGE_PORT="$CLAUDE_BRIDGE_PORT" \
+      YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
+      YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
       nohup yepanywhere --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
   else
     dim "LaunchAgent ${SERVER_LAUNCHD_LABEL} is not loaded; falling back to nohup (logs: /tmp/yep-server.log)"
@@ -519,34 +519,34 @@ if ! $DO_RESTART && $RESTART_CODEX_BRIDGE; then
   start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL"
 fi
 
-if ! $DO_RESTART && $RESTART_CLAUDE_BRIDGE; then
-  log "Restarting Claude bridge sidecar on port ${CLAUDE_BRIDGE_PORT} ..."
+if ! $DO_RESTART && $RESTART_OPENCODE_BRIDGE; then
+  log "Restarting OpenCode bridge sidecar on port ${OPENCODE_BRIDGE_PORT} ..."
   if [[ -n "$SERVER_LISTEN_PIDS" ]] &&
-    [[ -n "$CLAUDE_BRIDGE_LISTEN_PIDS" ]] &&
-    pid_sets_overlap "$SERVER_LISTEN_PIDS" "$CLAUDE_BRIDGE_LISTEN_PIDS"; then
-    err "Cannot restart only 4520: port ${CLAUDE_BRIDGE_PORT} is owned by the 8022 web/API process."
-    err "Redeploy 8022 with --restart-claude-bridge to restart both."
+    [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] &&
+    pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
+    err "Cannot restart only 4520: port ${OPENCODE_BRIDGE_PORT} is owned by the 8022 web/API process."
+    err "Redeploy 8022 with --restart-opencode-bridge to restart both."
     exit 1
   fi
 
-  if [[ -n "$CLAUDE_BRIDGE_LISTEN_PIDS" ]]; then
-    kill $CLAUDE_BRIDGE_LISTEN_PIDS 2>/dev/null || true
-    wait_port_released "$CLAUDE_BRIDGE_PORT" || true
+  if [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]]; then
+    kill $OPENCODE_BRIDGE_LISTEN_PIDS 2>/dev/null || true
+    wait_port_released "$OPENCODE_BRIDGE_PORT" || true
   fi
 
-  LISTEN_PIDS="$(lsof -iTCP:"${CLAUDE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
+  LISTEN_PIDS="$(lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
   if [[ -n "$LISTEN_PIDS" ]]; then
-    warn "Claude bridge port ${CLAUDE_BRIDGE_PORT} is still held by PID(s): ${LISTEN_PIDS//$'\n'/, }. Sending SIGKILL ..."
+    warn "OpenCode bridge port ${OPENCODE_BRIDGE_PORT} is still held by PID(s): ${LISTEN_PIDS//$'\n'/, }. Sending SIGKILL ..."
     kill -9 $LISTEN_PIDS 2>/dev/null || true
-    wait_port_released "$CLAUDE_BRIDGE_PORT" || true
+    wait_port_released "$OPENCODE_BRIDGE_PORT" || true
   fi
 
-  if lsof -iTCP:"${CLAUDE_BRIDGE_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
-    err "Claude bridge port ${CLAUDE_BRIDGE_PORT} is still in use after stopping the old sidecar."
+  if lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    err "OpenCode bridge port ${OPENCODE_BRIDGE_PORT} is still in use after stopping the old sidecar."
     exit 1
   fi
 
-  start_claude_bridge_sidecar "$CLAUDE_BRIDGE_PORT" "$CLAUDE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
+  start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
 fi
 
 log "Done."

@@ -25,7 +25,7 @@ describe("deploy route argument mapping", () => {
         restartTargets: {
           server: false,
           codexBridge: true,
-          claudeBridge: true,
+          opencodeBridge: true,
         },
       }).args,
     ).toEqual([
@@ -33,7 +33,7 @@ describe("deploy route argument mapping", () => {
       "--no-server",
       "--no-apk",
       "--restart-codex-bridge",
-      "--restart-claude-bridge",
+      "--restart-opencode-bridge",
     ]);
   });
 
@@ -43,14 +43,31 @@ describe("deploy route argument mapping", () => {
         action: "server-restart",
         restartTargets: {
           codexBridge: true,
-          claudeBridge: true,
+          opencodeBridge: true,
         },
       }).args,
     ).toEqual([
       "--server-only",
       "--restart-only",
       "--restart-codex-bridge",
-      "--restart-claude-bridge",
+      "--restart-opencode-bridge",
+    ]);
+  });
+
+  it("keeps legacy claudeBridge restart target as an OpenCode bridge alias", () => {
+    expect(
+      buildDeployArgs({
+        action: "services-restart",
+        restartTargets: {
+          server: false,
+          claudeBridge: true,
+        },
+      }).args,
+    ).toEqual([
+      "--restart-only",
+      "--no-server",
+      "--no-apk",
+      "--restart-opencode-bridge",
     ]);
   });
 

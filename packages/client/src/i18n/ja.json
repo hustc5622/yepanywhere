@@ -613,7 +613,7 @@
   "deploymentRestartSelected": "Restart Selected",
   "deploymentRestartTargetServer": "8022 web/API server",
   "deploymentRestartTargetCodexBridge": "4510 Codex bridge",
-  "deploymentRestartTargetClaudeBridge": "4520 Claude bridge",
+  "deploymentRestartTargetOpenCodeBridge": "4520 OpenCode bridge",
   "deploymentRestartSelectTarget": "Select at least one service to restart.",
   "deploymentStarting": "Starting...",
   "deploymentApkTitle": "Android APK",

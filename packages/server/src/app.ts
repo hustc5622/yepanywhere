@@ -41,6 +41,10 @@ import {
   GEMINI_TMP_DIR,
   GeminiSessionScanner,
 } from "./projects/gemini-scanner.js";
+import {
+  OPENCODE_DB_PATH,
+  OpenCodeSessionScanner,
+} from "./projects/opencode-scanner.js";
 import { CLAUDE_PROJECTS_DIR } from "./projects/paths.js";
 import { ProjectScanner } from "./projects/scanner.js";
 import {
@@ -347,10 +351,12 @@ export function createApp(options: AppOptions): AppResult {
   // Create dependencies
   const codexScanner = new CodexSessionScanner();
   const geminiScanner = new GeminiSessionScanner();
+  const opencodeScanner = new OpenCodeSessionScanner();
   const scanner = new ProjectScanner({
     projectsDir: options.projectsDir,
     codexScanner,
     geminiScanner,
+    opencodeScanner,
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
     cacheTtlMs: options.projectScanCacheTtlMs,
@@ -454,6 +460,15 @@ export function createApp(options: AppOptions): AppResult {
           hashToCwd: geminiScanner.getHashToCwd(),
         }),
     );
+  const opencodeReaderFactory = (projectPath: string): OpenCodeSessionReader =>
+    getOrCreateReader(
+      `opencode-extra::${OPENCODE_DB_PATH}::${projectPath}`,
+      () =>
+        new OpenCodeSessionReader({
+          dbPath: OPENCODE_DB_PATH,
+          projectPath,
+        }),
+    );
   const getSessionSummary = async (sessionId: string, projectId: string) => {
     const project = await scanner.getProject(projectId);
     if (!project) return null;
@@ -468,6 +483,8 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         geminiHashToCwd: geminiScanner.getHashToCwd(),
+        opencodeDbPath: OPENCODE_DB_PATH,
+        opencodeReaderFactory,
       },
       options.sessionMetadataService?.getProvider(sessionId),
     );
@@ -527,6 +544,8 @@ export function createApp(options: AppOptions): AppResult {
             geminiSessionsDir: GEMINI_TMP_DIR,
             geminiReaderFactory,
             geminiHashToCwd: geminiScanner.getHashToCwd(),
+            opencodeDbPath: OPENCODE_DB_PATH,
+            opencodeReaderFactory,
           },
           options.sessionMetadataService?.getProvider(sessionId),
         );
@@ -567,6 +586,7 @@ export function createApp(options: AppOptions): AppResult {
         projects,
         codexScanner,
         geminiScanner,
+        opencodeScanner,
       });
       const roots = {
         claudeProjectsDir: options.projectsDir ?? CLAUDE_PROJECTS_DIR,
@@ -579,6 +599,8 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         geminiHashToCwd: geminiScanner.getHashToCwd(),
+        opencodeDbPath: OPENCODE_DB_PATH,
+        opencodeReaderFactory,
       };
       const seenSessionIds = new Set<string>();
       let archivedCount = 0;
@@ -864,6 +886,9 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
+      opencodeScanner,
+      opencodeDbPath: OPENCODE_DB_PATH,
+      opencodeReaderFactory,
     }),
   );
   app.route(
@@ -882,6 +907,9 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
+      opencodeScanner,
+      opencodeDbPath: OPENCODE_DB_PATH,
+      opencodeReaderFactory,
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
       codexBridgeService: options.codexBridgeService,
@@ -914,6 +942,11 @@ export function createApp(options: AppOptions): AppResult {
               reader: geminiReaderFactory(project.path),
               sessionDir: GEMINI_TMP_DIR,
             };
+          case "opencode":
+            return {
+              reader: opencodeReaderFactory(project.path),
+              sessionDir: OPENCODE_DB_PATH,
+            };
           default:
             return {
               reader: readerFactory(project),
@@ -942,6 +975,9 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
+      opencodeScanner,
+      opencodeDbPath: OPENCODE_DB_PATH,
+      opencodeReaderFactory,
       codexBridgeService: options.codexBridgeService,
     }),
   );
@@ -963,6 +999,9 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
+      opencodeScanner,
+      opencodeDbPath: OPENCODE_DB_PATH,
+      opencodeReaderFactory,
       eventBus: options.eventBus,
       codexBridgeService: options.codexBridgeService,
     }),
@@ -983,6 +1022,9 @@ export function createApp(options: AppOptions): AppResult {
         geminiScanner,
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
+        opencodeScanner,
+        opencodeDbPath: OPENCODE_DB_PATH,
+        opencodeReaderFactory,
       }),
     );
   }
@@ -1008,6 +1050,9 @@ export function createApp(options: AppOptions): AppResult {
         geminiScanner,
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
+        opencodeScanner,
+        opencodeDbPath: OPENCODE_DB_PATH,
+        opencodeReaderFactory,
       }),
     );
   }

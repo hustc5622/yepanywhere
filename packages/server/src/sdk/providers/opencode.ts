@@ -20,14 +20,16 @@ import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   ModelInfo,
   OpenCodeMessagePartUpdatedEvent,
+  OpenCodeMessageUpdatedEvent,
   OpenCodePart,
   OpenCodeSSEEvent,
+  PermissionMode,
 } from "@yep-anywhere/shared";
 import { parseOpenCodeSSEEvent } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
 import { whichCommand } from "../cli-detection.js";
 import { MessageQueue } from "../messageQueue.js";
-import type { SDKMessage } from "../types.js";
+import type { SDKMessage, ToolApprovalResult } from "../types.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -49,6 +51,76 @@ export interface OpenCodeProviderConfig {
   basePort?: number;
 }
 
+type OpenCodePermissionAction = "allow" | "ask" | "deny";
+type OpenCodePermissionConfig = Record<string, OpenCodePermissionAction>;
+
+interface OpenCodePermissionAskedEvent {
+  type: "permission.asked";
+  properties: {
+    id: string;
+    sessionID: string;
+    permission: string;
+    patterns?: string[];
+    metadata?: unknown;
+    always?: string[];
+    tool?: {
+      messageID?: string;
+      callID?: string;
+    };
+  };
+}
+
+interface OpenCodePermissionRepliedEvent {
+  type: "permission.replied";
+  properties?: {
+    id?: string;
+    sessionID?: string;
+  };
+}
+
+interface OpenCodeMessageResponse {
+  info?: {
+    error?: {
+      name?: string;
+      data?: unknown;
+    };
+  };
+}
+
+interface OpenCodeSessionResponse {
+  id: string;
+}
+
+interface OpenCodeStreamBlockState {
+  index: number;
+  type: "text" | "thinking";
+  text: string;
+}
+
+interface OpenCodeAssistantStreamState {
+  messageId: string | null;
+  started: boolean;
+  stopped: boolean;
+  nextBlockIndex: number;
+  partBlocks: Map<string, OpenCodeStreamBlockState>;
+}
+
+interface OpenCodeEmissionState {
+  toolUseIds: Set<string>;
+  toolResultIds: Set<string>;
+  assistantStream?: OpenCodeAssistantStreamState;
+  latestUsage?: Record<string, unknown>;
+  latestCost?: number;
+  latestModel?: string;
+  latestFinish?: string;
+  emittedUsageResult?: boolean;
+}
+
+type OpenCodeRuntimeEvent =
+  | OpenCodeSSEEvent
+  | OpenCodePermissionAskedEvent
+  | OpenCodePermissionRepliedEvent;
+
 /** Port counter for unique port assignment */
 let nextPort = 14100;
 
@@ -67,7 +139,7 @@ function getNextPort(): number {
 export class OpenCodeProvider implements AgentProvider {
   readonly name = "opencode" as const;
   readonly displayName = "OpenCode";
-  readonly supportsPermissionMode = false; // OpenCode has its own permission model
+  readonly supportsPermissionMode = true;
   readonly supportsThinkingToggle = false;
   readonly supportsSlashCommands = false;
 
@@ -133,14 +205,20 @@ export class OpenCodeProvider implements AgentProvider {
         timeout: 10000,
       });
 
-      // Parse model list output (one model per line: provider/model)
+      // Parse model list output. Current OpenCode emits one model per line as
+      // provider/model; older/newer versions may include headings or table art.
       const models: ModelInfo[] = [];
       for (const line of result.split("\n")) {
         const trimmed = line.trim();
-        if (trimmed && !trimmed.startsWith("─")) {
+        if (
+          trimmed &&
+          !trimmed.startsWith("─") &&
+          !trimmed.startsWith("opencode models") &&
+          trimmed.includes("/")
+        ) {
           models.push({
             id: trimmed,
-            name: trimmed,
+            name: this.formatModelName(trimmed),
           });
         }
       }
@@ -162,6 +240,7 @@ export class OpenCodeProvider implements AgentProvider {
     const queue = new MessageQueue();
     const abortController = new AbortController();
     const pidRef: { value?: number } = {};
+    const runtimeRef: { baseUrl?: string; currentModel?: string | null } = {};
 
     // Push initial message if provided
     if (options.initialMessage) {
@@ -174,6 +253,7 @@ export class OpenCodeProvider implements AgentProvider {
       abortController.signal,
       options,
       pidRef,
+      runtimeRef,
     );
 
     return {
@@ -182,6 +262,15 @@ export class OpenCodeProvider implements AgentProvider {
       abort: () => abortController.abort(),
       get pid() {
         return pidRef.value;
+      },
+      supportedModels: () => this.getAvailableModels(),
+      setModel: async (model?: string) => {
+        if (!runtimeRef.baseUrl) return;
+        const normalizedModel = this.normalizeOpenCodeModelOption(model);
+        await this.patchServerConfig(runtimeRef.baseUrl, {
+          model: normalizedModel ?? undefined,
+        });
+        runtimeRef.currentModel = normalizedModel;
       },
     };
   }
@@ -196,6 +285,7 @@ export class OpenCodeProvider implements AgentProvider {
     signal: AbortSignal,
     options: StartSessionOptions,
     pidRef: { value?: number },
+    runtimeRef: { baseUrl?: string; currentModel?: string | null },
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
     const opencodePath = await this.findOpenCodePath();
@@ -211,19 +301,25 @@ export class OpenCodeProvider implements AgentProvider {
     // Allocate a unique port for this session
     const port = getNextPort();
     const baseUrl = `http://127.0.0.1:${port}`;
+    runtimeRef.baseUrl = baseUrl;
 
     // Start the OpenCode server
     let serverProcess: ChildProcess;
     try {
       serverProcess = spawn(
         opencodePath,
-        ["serve", "--port", String(port), "--print-logs"],
+        [
+          "serve",
+          "--hostname",
+          "127.0.0.1",
+          "--port",
+          String(port),
+          "--print-logs",
+        ],
         {
           cwd,
           stdio: ["pipe", "pipe", "pipe"],
-          env: {
-            ...process.env,
-          },
+          env: this.getOpenCodeEnv(),
           shell: process.platform === "win32",
         },
       );
@@ -257,24 +353,31 @@ export class OpenCodeProvider implements AgentProvider {
 
     log.info({ port, cwd }, "OpenCode server ready");
 
-    // Create a session on the server
+    const configApplied = await this.configureServer(baseUrl, options);
+    if (!configApplied.ok) {
+      serverProcess.kill("SIGTERM");
+      signal.removeEventListener("abort", abortHandler);
+      yield {
+        type: "error",
+        error: configApplied.error,
+      } as SDKMessage;
+      return;
+    }
+    runtimeRef.currentModel = configApplied.model;
+
+    // Create, resume, or fork a session on the server.
     let opencodeSessionId: string;
     try {
-      const sessionResponse = await fetch(`${baseUrl}/session`, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ title: "Yep Anywhere Session" }),
-      });
-
-      if (!sessionResponse.ok) {
-        throw new Error(`Failed to create session: ${sessionResponse.status}`);
-      }
-
-      const sessionData = (await sessionResponse.json()) as { id: string };
+      const sessionData = await this.prepareOpenCodeSession(baseUrl, options);
       opencodeSessionId = sessionData.id;
+      log.info(
+        {
+          opencodeSessionId,
+          resumeSessionId: options.resumeSessionId ?? null,
+          resumeSessionAt: options.resumeSessionAt ?? null,
+        },
+        "OpenCode session prepared",
+      );
     } catch (error) {
       serverProcess.kill("SIGTERM");
       signal.removeEventListener("abort", abortHandler);
@@ -285,10 +388,9 @@ export class OpenCodeProvider implements AgentProvider {
       return;
     }
 
-    // Generate our session ID (or use resume ID)
-    const sessionId =
-      options.resumeSessionId ??
-      `opencode-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    // Use OpenCode's persisted session ID so Yep process ownership lines up
+    // with the session stored in ~/.local/share/opencode/opencode.db.
+    const sessionId = opencodeSessionId;
 
     // Emit init message
     yield {
@@ -296,6 +398,7 @@ export class OpenCodeProvider implements AgentProvider {
       subtype: "init",
       session_id: sessionId,
       cwd,
+      model: runtimeRef.currentModel ?? undefined,
     } as SDKMessage;
 
     try {
@@ -332,6 +435,7 @@ export class OpenCodeProvider implements AgentProvider {
           sessionId,
           userPrompt,
           signal,
+          options.onToolApproval,
         );
       }
     } finally {
@@ -342,7 +446,94 @@ export class OpenCodeProvider implements AgentProvider {
       if (!serverProcess.killed) {
         serverProcess.kill("SIGTERM");
       }
+      runtimeRef.baseUrl = undefined;
     }
+  }
+
+  private async prepareOpenCodeSession(
+    baseUrl: string,
+    options: StartSessionOptions,
+  ): Promise<OpenCodeSessionResponse> {
+    if (!options.resumeSessionId) {
+      return this.createOpenCodeSession(baseUrl);
+    }
+
+    if (options.resumeSessionAt) {
+      return this.forkOpenCodeSession(
+        baseUrl,
+        options.resumeSessionId,
+        options.resumeSessionAt,
+      );
+    }
+
+    await this.getOpenCodeSession(baseUrl, options.resumeSessionId);
+    return { id: options.resumeSessionId };
+  }
+
+  private async createOpenCodeSession(
+    baseUrl: string,
+  ): Promise<OpenCodeSessionResponse> {
+    const response = await fetch(`${baseUrl}/session`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ title: "Yep Anywhere Session" }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to create session: ${response.status}`);
+    }
+
+    return (await response.json()) as OpenCodeSessionResponse;
+  }
+
+  private async getOpenCodeSession(
+    baseUrl: string,
+    sessionId: string,
+  ): Promise<OpenCodeSessionResponse> {
+    const response = await fetch(
+      `${baseUrl}/session/${encodeURIComponent(sessionId)}`,
+      {
+        headers: { Accept: "application/json" },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to load session ${sessionId}: ${response.status}`,
+      );
+    }
+
+    return (await response.json()) as OpenCodeSessionResponse;
+  }
+
+  private async forkOpenCodeSession(
+    baseUrl: string,
+    sessionId: string,
+    messageId: string,
+  ): Promise<OpenCodeSessionResponse> {
+    const response = await fetch(
+      `${baseUrl}/session/${encodeURIComponent(sessionId)}/fork`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ messageID: messageId }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(
+        `Failed to fork session ${sessionId} at ${messageId}: ${response.status}${errorText ? ` ${errorText}` : ""}`,
+      );
+    }
+
+    return (await response.json()) as OpenCodeSessionResponse;
   }
 
   /**
@@ -354,11 +545,16 @@ export class OpenCodeProvider implements AgentProvider {
     sessionId: string,
     text: string,
     signal: AbortSignal,
+    onToolApproval?: StartSessionOptions["onToolApproval"],
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
 
     const sseUrl = `${baseUrl}/event`;
     const sseController = new AbortController();
+    const emissionState: OpenCodeEmissionState = {
+      toolUseIds: new Set(),
+      toolResultIds: new Set(),
+    };
 
     // Event buffer and signaling for producer/consumer pattern
     // Using an object to avoid TypeScript control flow issues across async boundaries
@@ -366,6 +562,9 @@ export class OpenCodeProvider implements AgentProvider {
       eventBuffer: [] as SDKMessage[],
       sseError: null as Error | null,
       sseComplete: false,
+      postComplete: false,
+      postError: null as Error | null,
+      responseError: null as string | null,
       resolveWaiting: null as (() => void) | null,
     };
 
@@ -391,6 +590,7 @@ export class OpenCodeProvider implements AgentProvider {
         const decoder = new TextDecoder();
         let buffer = "";
         let currentAssistantMessageId: string | null = null;
+        const messageRoles = new Map<string, "user" | "assistant">();
 
         while (!sseController.signal.aborted) {
           const { done, value } = await reader.read();
@@ -420,14 +620,26 @@ export class OpenCodeProvider implements AgentProvider {
               if (event.properties.sessionID !== opencodeSessionId) continue;
             }
 
+            if (event.type === "message.updated") {
+              const info = (event as OpenCodeMessageUpdatedEvent).properties
+                .info;
+              messageRoles.set(info.id, info.role);
+            }
+
             // Convert to SDK message
-            const sdkMessage = this.convertSSEEventToSDKMessage(
+            const sdkMessages = await this.convertSSEEventToSDKMessages(
               event,
+              baseUrl,
               sessionId,
               currentAssistantMessageId,
+              signal,
+              messageRoles,
+              emissionState,
+              text,
+              onToolApproval,
             );
 
-            if (sdkMessage) {
+            for (const sdkMessage of sdkMessages) {
               // Track assistant message ID for consistent streaming
               if (
                 sdkMessage.type === "assistant" &&
@@ -437,9 +649,9 @@ export class OpenCodeProvider implements AgentProvider {
                 currentAssistantMessageId = sdkMessage.uuid as string;
               }
               state.eventBuffer.push(sdkMessage);
-              // Wake up consumer if waiting
-              state.resolveWaiting?.();
             }
+            // Wake up consumer if waiting
+            if (sdkMessages.length > 0) state.resolveWaiting?.();
 
             // Stop on session.idle
             if (event.type === "session.idle") {
@@ -463,8 +675,9 @@ export class OpenCodeProvider implements AgentProvider {
     // Wait briefly for SSE connection to establish
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // Send the message
-    try {
+    // Send the message without blocking SSE draining. The POST response is a
+    // final summary/error envelope; token/content streaming comes from SSE.
+    const messagePromise = (async () => {
       log.debug(
         { opencodeSessionId, textLength: text.length },
         "Sending message to OpenCode",
@@ -490,20 +703,28 @@ export class OpenCodeProvider implements AgentProvider {
           `Failed to send message: ${response.status} ${errorText}`,
         );
       }
-      log.debug({ opencodeSessionId }, "Message sent successfully");
-    } catch (error) {
-      sseController.abort();
-      if (signal.aborted) {
-        return;
+      const responseBody = (await response
+        .json()
+        .catch(() => null)) as OpenCodeMessageResponse | null;
+      const responseError = this.extractMessageResponseError(responseBody);
+      if (responseError) {
+        log.warn(
+          { opencodeSessionId, error: responseError },
+          "OpenCode message response contained an error",
+        );
+        state.responseError = responseError;
       }
-      log.error({ error }, "Failed to send message to OpenCode");
-      yield {
-        type: "error",
-        session_id: sessionId,
-        error: error instanceof Error ? error.message : String(error),
-      } as SDKMessage;
-      return;
-    }
+      log.debug({ opencodeSessionId }, "Message sent successfully");
+    })()
+      .catch((error) => {
+        if (signal.aborted) return;
+        state.postError =
+          error instanceof Error ? error : new Error(String(error));
+      })
+      .finally(() => {
+        state.postComplete = true;
+        state.resolveWaiting?.();
+      });
 
     // Yield events from buffer as they arrive
     try {
@@ -514,8 +735,28 @@ export class OpenCodeProvider implements AgentProvider {
           if (event) yield event;
         }
 
-        // Check if done
-        if (state.sseComplete) break;
+        if (state.postError) {
+          sseController.abort();
+          const error = state.postError;
+          log.error({ error }, "Failed to send message to OpenCode");
+          yield {
+            type: "error",
+            session_id: sessionId,
+            error: error.message,
+          } as SDKMessage;
+          break;
+        }
+
+        if (state.responseError) {
+          sseController.abort();
+          yield {
+            type: "error",
+            session_id: sessionId,
+            error: state.responseError,
+          } as SDKMessage;
+          break;
+        }
+
         if (state.sseError) {
           yield {
             type: "error",
@@ -524,6 +765,10 @@ export class OpenCodeProvider implements AgentProvider {
           } as SDKMessage;
           break;
         }
+
+        // session.idle closes our SSE reader; wait for the POST summary too so
+        // 200-with-error responses are not lost at turn end.
+        if (state.sseComplete && state.postComplete) break;
 
         // Wait for more events
         await new Promise<void>((resolve) => {
@@ -535,137 +780,759 @@ export class OpenCodeProvider implements AgentProvider {
       }
     } finally {
       sseController.abort();
-      await ssePromise; // Ensure SSE task completes
+      await Promise.allSettled([ssePromise, messagePromise]);
     }
 
     // Emit result message
-    yield {
-      type: "result",
-      session_id: sessionId,
-    } as SDKMessage;
+    yield this.createResultMessage(
+      sessionId,
+      emissionState.emittedUsageResult ? undefined : emissionState.latestUsage,
+    );
   }
 
   /**
-   * Convert an OpenCode SSE event to an SDK message.
+   * Convert an OpenCode SSE event to SDK messages.
    */
-  private convertSSEEventToSDKMessage(
-    event: OpenCodeSSEEvent,
+  private async convertSSEEventToSDKMessages(
+    event: OpenCodeRuntimeEvent,
+    baseUrl: string,
     sessionId: string,
     currentMessageId: string | null,
-  ): SDKMessage | null {
+    signal: AbortSignal,
+    messageRoles: ReadonlyMap<string, "user" | "assistant">,
+    emissionState: OpenCodeEmissionState,
+    submittedText: string,
+    onToolApproval?: StartSessionOptions["onToolApproval"],
+  ): Promise<SDKMessage[]> {
     switch (event.type) {
+      case "permission.asked": {
+        await this.handlePermissionAsked(
+          baseUrl,
+          event as OpenCodePermissionAskedEvent,
+          signal,
+          onToolApproval,
+        );
+        return [];
+      }
+
       case "message.part.updated": {
         const partEvent = event as OpenCodeMessagePartUpdatedEvent;
         const part = partEvent.properties.part;
         const delta = partEvent.properties.delta;
 
-        return this.convertPartToSDKMessage(
+        return this.convertPartToSDKMessages(
           part,
           sessionId,
           delta,
           currentMessageId,
+          messageRoles.get(part.messageID),
+          emissionState,
+          submittedText,
         );
       }
 
       case "session.idle":
+        return this.flushAssistantStreamMessages(emissionState, sessionId);
+
+      case "message.updated": {
+        const info = (event as OpenCodeMessageUpdatedEvent).properties.info;
+        if (info.role === "assistant") {
+          this.updateEmissionUsageFromMessageInfo(emissionState, info);
+        }
+        return [];
+      }
+
       case "session.status":
+      case "session.created":
       case "session.updated":
       case "session.diff":
-      case "message.updated":
       case "server.connected":
+      case "permission.replied":
         // These are status events, not content - skip
-        return null;
+        return [];
 
       default:
-        return null;
+        return [];
     }
   }
 
+  private updateEmissionUsageFromMessageInfo(
+    emissionState: OpenCodeEmissionState,
+    info: OpenCodeMessageUpdatedEvent["properties"]["info"],
+  ): void {
+    const usage = this.createUsageSummary(info.tokens, info.cost);
+    if (usage) {
+      emissionState.latestUsage = usage;
+    }
+    if (typeof info.cost === "number") {
+      emissionState.latestCost = info.cost;
+    }
+    const model =
+      info.modelID ??
+      info.model?.modelID ??
+      (info.providerID && info.model?.modelID
+        ? `${info.providerID}/${info.model.modelID}`
+        : undefined);
+    if (model) {
+      emissionState.latestModel = model;
+    }
+    if (info.finish) {
+      emissionState.latestFinish = info.finish;
+    }
+  }
+
+  private createUsageSummary(
+    tokens: OpenCodePart["tokens"] | undefined,
+    cost: number | undefined,
+  ): Record<string, unknown> | undefined {
+    if (!tokens && cost === undefined) return undefined;
+
+    const usage: Record<string, unknown> = {};
+    const inputTokens = tokens?.input;
+    const outputTokens = tokens?.output;
+    const reasoningTokens = tokens?.reasoning;
+    const cacheReadTokens = tokens?.cache?.read;
+    const cacheWriteTokens = tokens?.cache?.write;
+
+    if (inputTokens !== undefined) usage.input_tokens = inputTokens;
+    if (outputTokens !== undefined) usage.output_tokens = outputTokens;
+    if (reasoningTokens !== undefined) usage.reasoning_tokens = reasoningTokens;
+    if (cacheReadTokens !== undefined) {
+      usage.cache_read_input_tokens = cacheReadTokens;
+    }
+    if (cacheWriteTokens !== undefined) {
+      usage.cache_creation_input_tokens = cacheWriteTokens;
+    }
+    if (cost !== undefined) usage.cost_usd = cost;
+
+    return Object.keys(usage).length > 0 ? usage : undefined;
+  }
+
+  private createResultMessage(
+    sessionId: string,
+    usage?: Record<string, unknown>,
+  ): SDKMessage {
+    return {
+      type: "result",
+      session_id: sessionId,
+      ...(usage ? { usage } : {}),
+    } as SDKMessage;
+  }
+
   /**
-   * Convert an OpenCode part to an SDK message.
+   * Convert an OpenCode part to SDK messages.
    */
-  private convertPartToSDKMessage(
+  private convertPartToSDKMessages(
     part: OpenCodePart,
     sessionId: string,
     delta: string | undefined,
     currentMessageId: string | null,
-  ): SDKMessage | null {
+    role: "user" | "assistant" | undefined,
+    emissionState: OpenCodeEmissionState,
+    submittedText?: string,
+  ): SDKMessage[] {
     switch (part.type) {
       case "text": {
-        // Use delta if available (streaming), otherwise full text
-        const text = delta ?? part.text ?? "";
-        if (!text) return null;
+        if (role === "user") return [];
+        if (
+          !role &&
+          submittedText &&
+          (delta ?? part.text ?? "").trim() === submittedText.trim()
+        ) {
+          return [];
+        }
+        return this.convertStreamingTextPartToSDKMessages(
+          part,
+          sessionId,
+          delta,
+          currentMessageId,
+          emissionState,
+          "text",
+        );
+      }
 
-        return {
-          type: "assistant",
-          session_id: sessionId,
-          uuid: currentMessageId ?? part.messageID,
-          message: {
-            role: "assistant",
-            content: text,
-          },
-        } as SDKMessage;
+      case "reasoning": {
+        if (role === "user") return [];
+        return this.convertStreamingTextPartToSDKMessages(
+          part,
+          sessionId,
+          delta,
+          currentMessageId,
+          emissionState,
+          "thinking",
+        );
       }
 
       case "step-start":
         // Start of a processing step - no content to emit
-        return null;
+        return [];
 
       case "step-finish": {
+        const messages = this.flushAssistantStreamMessages(
+          emissionState,
+          sessionId,
+        );
+
         // End of processing step - emit usage info if available
-        if (part.tokens) {
-          return {
-            type: "result",
-            session_id: sessionId,
-            usage: {
-              input_tokens: part.tokens.input ?? 0,
-              output_tokens: part.tokens.output ?? 0,
-            },
-          } as SDKMessage;
+        const usage = this.createUsageSummary(part.tokens, part.cost);
+        if (usage) {
+          emissionState.latestUsage = usage;
+          emissionState.emittedUsageResult = true;
+          messages.push(this.createResultMessage(sessionId, usage));
         }
-        return null;
+        return messages;
+      }
+
+      case "tool": {
+        const toolUseId = part.callID ?? part.id;
+        const messages: SDKMessage[] = [];
+        const input = part.state?.input ?? part.input ?? {};
+        const status = part.state?.status;
+
+        if (!emissionState.toolUseIds.has(toolUseId)) {
+          emissionState.toolUseIds.add(toolUseId);
+          messages.push({
+            type: "assistant",
+            session_id: sessionId,
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: toolUseId,
+                  name: part.tool ?? "unknown",
+                  input,
+                  opencodeStatus: status,
+                  opencodeTitle: part.state?.title,
+                  opencodeMetadata: part.state?.metadata,
+                  opencodeTime: part.state?.time ?? part.time,
+                },
+              ],
+            },
+          } as unknown as SDKMessage);
+        }
+
+        if (
+          (status === "completed" || status === "error") &&
+          !emissionState.toolResultIds.has(toolUseId)
+        ) {
+          emissionState.toolResultIds.add(toolUseId);
+          messages.push({
+            type: "user",
+            session_id: sessionId,
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: toolUseId,
+                  content:
+                    part.state?.error ??
+                    part.error ??
+                    this.formatToolOutput(part.state?.output ?? part.output),
+                  is_error: status === "error" || !!part.state?.error,
+                  opencodeStatus: status,
+                  opencodeTitle: part.state?.title,
+                  opencodeMetadata: part.state?.metadata,
+                  opencodeTime: part.state?.time ?? part.time,
+                },
+              ],
+            },
+          } as unknown as SDKMessage);
+        }
+
+        return messages;
       }
 
       case "tool-use": {
         // Tool invocation
-        return {
-          type: "assistant",
-          session_id: sessionId,
-          message: {
-            role: "assistant",
-            content: [
-              {
-                type: "tool_use",
-                id: part.id,
-                name: part.tool ?? "unknown",
-                input: part.input ?? {},
-              },
-            ],
-          },
-        } as SDKMessage;
+        return [
+          {
+            type: "assistant",
+            session_id: sessionId,
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: part.id,
+                  name: part.tool ?? "unknown",
+                  input: part.input ?? {},
+                  opencodeTime: part.time,
+                },
+              ],
+            },
+          } as unknown as SDKMessage,
+        ];
       }
 
       case "tool-result": {
         // Tool result
-        return {
-          type: "user",
-          session_id: sessionId,
-          message: {
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: part.id,
-                content: part.error ?? String(part.output ?? ""),
-              },
-            ],
-          },
-        } as SDKMessage;
+        return [
+          {
+            type: "user",
+            session_id: sessionId,
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: part.id,
+                  content: part.error ?? this.formatToolOutput(part.output),
+                  is_error: !!part.error,
+                  opencodeTime: part.time,
+                },
+              ],
+            },
+          } as unknown as SDKMessage,
+        ];
       }
 
       default:
-        return null;
+        return [];
     }
+  }
+
+  private createAssistantStreamState(): OpenCodeAssistantStreamState {
+    return {
+      messageId: null,
+      started: false,
+      stopped: false,
+      nextBlockIndex: 0,
+      partBlocks: new Map(),
+    };
+  }
+
+  private getAssistantStreamState(
+    emissionState: OpenCodeEmissionState,
+  ): OpenCodeAssistantStreamState {
+    if (!emissionState.assistantStream?.stopped) {
+      emissionState.assistantStream ??= this.createAssistantStreamState();
+      return emissionState.assistantStream;
+    }
+
+    emissionState.assistantStream = this.createAssistantStreamState();
+    return emissionState.assistantStream;
+  }
+
+  private convertStreamingTextPartToSDKMessages(
+    part: OpenCodePart,
+    sessionId: string,
+    delta: string | undefined,
+    currentMessageId: string | null,
+    emissionState: OpenCodeEmissionState,
+    blockType: "text" | "thinking",
+  ): SDKMessage[] {
+    const streamState = this.getAssistantStreamState(emissionState);
+    const messageId =
+      streamState.messageId ?? currentMessageId ?? part.messageID;
+
+    if (
+      streamState.messageId &&
+      streamState.messageId !== messageId &&
+      !streamState.stopped
+    ) {
+      return [
+        ...this.flushAssistantStreamMessages(emissionState, sessionId),
+        ...this.convertStreamingTextPartToSDKMessages(
+          part,
+          sessionId,
+          delta,
+          currentMessageId,
+          emissionState,
+          blockType,
+        ),
+      ];
+    }
+
+    streamState.messageId = messageId;
+
+    let block = streamState.partBlocks.get(part.id);
+    let isNewBlock = false;
+    if (!block) {
+      block = {
+        index: streamState.nextBlockIndex,
+        type: blockType,
+        text: "",
+      };
+      streamState.nextBlockIndex += 1;
+      streamState.partBlocks.set(part.id, block);
+      isNewBlock = true;
+    }
+
+    let deltaText = "";
+    if (delta !== undefined) {
+      deltaText = delta;
+      block.text += delta;
+    } else {
+      const fullText = part.text ?? "";
+      if (fullText.startsWith(block.text)) {
+        deltaText = fullText.slice(block.text.length);
+      } else {
+        deltaText = fullText;
+      }
+      block.text = fullText;
+    }
+
+    if (!deltaText && !isNewBlock) return [];
+    if (!deltaText && isNewBlock && !block.text) {
+      streamState.partBlocks.delete(part.id);
+      streamState.nextBlockIndex -= 1;
+      return [];
+    }
+
+    const messages: SDKMessage[] = [];
+
+    if (!streamState.started) {
+      streamState.started = true;
+      messages.push(
+        this.createStreamEventMessage(sessionId, {
+          type: "message_start",
+          message: {
+            id: messageId,
+            role: "assistant",
+            content: [],
+          },
+        }),
+      );
+    }
+
+    if (isNewBlock) {
+      messages.push(
+        this.createStreamEventMessage(sessionId, {
+          type: "content_block_start",
+          index: block.index,
+          content_block:
+            block.type === "thinking"
+              ? { type: "thinking", thinking: "" }
+              : { type: "text", text: "" },
+        }),
+      );
+    }
+
+    if (deltaText) {
+      messages.push(
+        this.createStreamEventMessage(sessionId, {
+          type: "content_block_delta",
+          index: block.index,
+          delta:
+            block.type === "thinking"
+              ? { type: "thinking_delta", thinking: deltaText }
+              : { type: "text_delta", text: deltaText },
+        }),
+      );
+    }
+
+    return messages;
+  }
+
+  private flushAssistantStreamMessages(
+    emissionState: OpenCodeEmissionState,
+    sessionId: string,
+  ): SDKMessage[] {
+    const streamState = emissionState.assistantStream;
+    if (
+      !streamState?.started ||
+      streamState.stopped ||
+      !streamState.messageId
+    ) {
+      return [];
+    }
+
+    streamState.stopped = true;
+
+    const messages: SDKMessage[] = [
+      this.createStreamEventMessage(sessionId, {
+        type: "message_stop",
+      }),
+    ];
+
+    const contentBlocks = Array.from(streamState.partBlocks.values())
+      .sort((a, b) => a.index - b.index)
+      .filter((block) => block.text.length > 0)
+      .map((block) =>
+        block.type === "thinking"
+          ? { type: "thinking" as const, thinking: block.text }
+          : { type: "text" as const, text: block.text },
+      );
+
+    if (contentBlocks.length > 0) {
+      const content =
+        contentBlocks.length === 1 && contentBlocks[0]?.type === "text"
+          ? contentBlocks[0].text
+          : contentBlocks;
+
+      messages.push({
+        type: "assistant",
+        session_id: sessionId,
+        uuid: streamState.messageId,
+        message: {
+          role: "assistant",
+          content,
+        },
+      } as SDKMessage);
+    }
+
+    return messages;
+  }
+
+  private createStreamEventMessage(
+    sessionId: string,
+    event: Record<string, unknown>,
+  ): SDKMessage {
+    return {
+      type: "stream_event",
+      session_id: sessionId,
+      event,
+    } as SDKMessage;
+  }
+
+  /**
+   * Apply per-session OpenCode config to the dedicated server process.
+   */
+  private async configureServer(
+    baseUrl: string,
+    options: StartSessionOptions,
+  ): Promise<
+    { ok: true; model: string | null } | { ok: false; error: string }
+  > {
+    const config: Record<string, unknown> = {
+      permission: this.mapPermissionModeToOpenCode(options.permissionMode),
+    };
+    const model = this.normalizeOpenCodeModelOption(options.model);
+    if (model) {
+      config.model = model;
+    }
+
+    try {
+      await this.patchServerConfig(baseUrl, config);
+
+      getLogger().info(
+        {
+          permissionMode: options.permissionMode ?? "default",
+          model,
+        },
+        "Configured OpenCode server",
+      );
+      return { ok: true, model };
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Failed to configure OpenCode server: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  private async patchServerConfig(
+    baseUrl: string,
+    config: Record<string, unknown>,
+  ): Promise<void> {
+    const response = await fetch(`${baseUrl}/config`, {
+      method: "PATCH",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(config),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(
+        `Failed to configure OpenCode server: ${response.status}${errorText ? ` ${errorText}` : ""}`,
+      );
+    }
+  }
+
+  private mapPermissionModeToOpenCode(
+    mode: PermissionMode | undefined,
+  ): OpenCodePermissionConfig {
+    switch (mode) {
+      case "bypassPermissions":
+        return { "*": "allow" };
+
+      case "acceptEdits":
+        return {
+          read: "allow",
+          glob: "allow",
+          grep: "allow",
+          list: "allow",
+          edit: "allow",
+          write: "allow",
+          webfetch: "allow",
+          websearch: "allow",
+          bash: "ask",
+          "*": "ask",
+        };
+
+      case "plan":
+        return {
+          read: "allow",
+          glob: "allow",
+          grep: "allow",
+          list: "allow",
+          webfetch: "allow",
+          websearch: "allow",
+          edit: "ask",
+          write: "ask",
+          bash: "ask",
+          "*": "ask",
+        };
+
+      default:
+        return {
+          read: "allow",
+          glob: "allow",
+          grep: "allow",
+          list: "allow",
+          webfetch: "allow",
+          websearch: "allow",
+          edit: "ask",
+          write: "ask",
+          bash: "ask",
+          "*": "ask",
+        };
+    }
+  }
+
+  private normalizeOpenCodeModelOption(
+    model: string | undefined,
+  ): string | null {
+    const trimmed = model?.trim();
+    if (!trimmed || trimmed === "default" || trimmed === "auto") {
+      return null;
+    }
+    return trimmed;
+  }
+
+  private async handlePermissionAsked(
+    baseUrl: string,
+    event: OpenCodePermissionAskedEvent,
+    signal: AbortSignal,
+    onToolApproval?: StartSessionOptions["onToolApproval"],
+  ): Promise<void> {
+    const permission = event.properties.permission;
+    const toolName = this.mapOpenCodePermissionToToolName(permission);
+    const toolInput = {
+      permission,
+      patterns: event.properties.patterns ?? [],
+      metadata: event.properties.metadata ?? {},
+      always: event.properties.always ?? [],
+      messageID: event.properties.tool?.messageID,
+      callID: event.properties.tool?.callID,
+    };
+
+    let result: ToolApprovalResult = {
+      behavior: "deny",
+      message: "No approval handler available",
+      interrupt: true,
+    };
+
+    if (onToolApproval) {
+      try {
+        result = await onToolApproval(toolName, toolInput, { signal });
+      } catch (error) {
+        getLogger().warn(
+          { permissionId: event.properties.id, toolName, error },
+          "OpenCode approval callback failed; denying permission",
+        );
+      }
+    }
+
+    const reply = result.behavior === "allow" ? "once" : "reject";
+    const response = await fetch(
+      `${baseUrl}/permission/${event.properties.id}/reply`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ reply }),
+        signal,
+      },
+    );
+
+    if (!response.ok) {
+      getLogger().warn(
+        {
+          permissionId: event.properties.id,
+          status: response.status,
+          reply,
+        },
+        "Failed to reply to OpenCode permission request",
+      );
+    }
+  }
+
+  private mapOpenCodePermissionToToolName(permission: string): string {
+    switch (permission.toLowerCase()) {
+      case "bash":
+        return "Bash";
+      case "edit":
+      case "write":
+        return "Edit";
+      case "read":
+        return "Read";
+      case "glob":
+        return "Glob";
+      case "grep":
+        return "Grep";
+      case "webfetch":
+        return "WebFetch";
+      case "websearch":
+        return "WebSearch";
+      default:
+        return permission;
+    }
+  }
+
+  private formatModelName(model: string): string {
+    const [provider, modelId] = model.split("/", 2);
+    if (!provider || !modelId) return model;
+    return `${provider} / ${modelId}`;
+  }
+
+  private formatToolOutput(output: unknown): string {
+    if (typeof output === "string") return output;
+    if (output === undefined || output === null) return "";
+    try {
+      return JSON.stringify(output);
+    } catch {
+      return String(output);
+    }
+  }
+
+  private getOpenCodeEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    env.LLM_API_KEY ??=
+      process.env.SESSION_TITLE_LLM_API_KEY ?? process.env.OPENAI_API_KEY;
+    env.LLM_API_BASE ??=
+      process.env.SESSION_TITLE_LLM_API_BASE ?? process.env.LLM_API_BASE;
+    env.LLM_SUB_MODULE ??=
+      process.env.SESSION_TITLE_SUB_MODULE ?? process.env.LLM_SUB_MODULE;
+    return env;
+  }
+
+  private extractMessageResponseError(
+    response: OpenCodeMessageResponse | null,
+  ): string | null {
+    const error = response?.info?.error;
+    if (!error) return null;
+
+    const data = error.data;
+    if (data && typeof data === "object") {
+      const message = (data as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim()) {
+        return message;
+      }
+    }
+
+    if (typeof error.name === "string" && error.name.trim()) {
+      return error.name;
+    }
+    return "OpenCode message failed";
   }
 
   /**

@@ -68,8 +68,20 @@ export const OpenCodePartSchema = z.object({
   cost: z.number().optional(),
   tokens: OpenCodeTokensSchema.optional(),
   // tool-use specific fields
+  callID: z.string().optional(),
   tool: z.string().optional(),
   input: z.unknown().optional(),
+  state: z
+    .object({
+      status: z.string().optional(),
+      input: z.unknown().optional(),
+      output: z.unknown().optional(),
+      error: z.string().optional(),
+      title: z.string().optional(),
+      metadata: z.unknown().optional(),
+      time: OpenCodeTimeSchema.optional(),
+    })
+    .optional(),
   // tool-result specific fields
   output: z.unknown().optional(),
   error: z.string().optional(),
@@ -123,7 +135,24 @@ export const OpenCodeSessionInfoSchema = z.object({
   version: z.string().optional(),
   projectID: z.string().optional(),
   directory: z.string().optional(),
+  path: z
+    .object({
+      cwd: z.string().optional(),
+      root: z.string().optional(),
+    })
+    .optional(),
   title: z.string().optional(),
+  parentID: z.string().optional(),
+  cost: z.number().optional(),
+  tokens: OpenCodeTokensSchema.optional(),
+  agent: z.string().optional(),
+  model: z
+    .object({
+      providerID: z.string().optional(),
+      modelID: z.string().optional(),
+    })
+    .optional(),
+  revert: z.unknown().optional(),
   time: OpenCodeTimeSchema.optional(),
   summary: z
     .object({
@@ -148,6 +177,17 @@ export const OpenCodeServerConnectedEventSchema = z.object({
 
 export type OpenCodeServerConnectedEvent = z.infer<
   typeof OpenCodeServerConnectedEventSchema
+>;
+
+export const OpenCodeSessionCreatedEventSchema = z.object({
+  type: z.literal("session.created"),
+  properties: z.object({
+    info: OpenCodeSessionInfoSchema,
+  }),
+});
+
+export type OpenCodeSessionCreatedEvent = z.infer<
+  typeof OpenCodeSessionCreatedEventSchema
 >;
 
 /**
@@ -242,6 +282,7 @@ export type OpenCodeMessagePartUpdatedEvent = z.infer<
  */
 export const OpenCodeSSEEventSchema = z.discriminatedUnion("type", [
   OpenCodeServerConnectedEventSchema,
+  OpenCodeSessionCreatedEventSchema,
   OpenCodeSessionStatusEventSchema,
   OpenCodeSessionUpdatedEventSchema,
   OpenCodeSessionIdleEventSchema,

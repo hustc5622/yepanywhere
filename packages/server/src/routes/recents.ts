@@ -7,11 +7,13 @@ import { Hono } from "hono";
 import type { ISessionIndexService } from "../indexes/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { decodeProjectId, getProjectName } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { findSessionSummaryAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { Project } from "../supervisor/types.js";
@@ -27,6 +29,9 @@ export interface RecentsDeps {
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
+  opencodeScanner?: OpenCodeSessionScanner;
+  opencodeDbPath?: string;
+  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
 }
 
 export function createRecentsRoutes(deps: RecentsDeps): Hono {
@@ -73,6 +78,8 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
           geminiSessionsDir: deps.geminiSessionsDir,
           geminiReaderFactory: deps.geminiReaderFactory,
           geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+          opencodeDbPath: deps.opencodeDbPath,
+          opencodeReaderFactory: deps.opencodeReaderFactory,
         },
       );
       if (!resolved) {

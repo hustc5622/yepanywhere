@@ -72,14 +72,14 @@ export interface Config {
   codexBridgeClearUpstreamArgs: string[];
   /** Extra args passed to the managed full `codex app-server` upstream. */
   codexBridgeFullUpstreamArgs: string[];
-  /** Host/interface for the Claude terminal bridge. Defaults to localhost for safety. */
-  claudeBridgeHost: string;
-  /** Port for the Claude terminal bridge HTTP listener. */
-  claudeBridgePort: number;
-  /** HTTP control URL for the Claude terminal bridge sidecar. */
-  claudeBridgeControlUrl: string;
-  /** Yep server URL that the Claude bridge sidecar forwards requests to. */
-  claudeBridgeServerUrl: string;
+  /** Host/interface for the OpenCode bridge. Defaults to localhost for safety. */
+  opencodeBridgeHost: string;
+  /** Port for the OpenCode bridge HTTP listener. */
+  opencodeBridgePort: number;
+  /** HTTP control URL for the OpenCode bridge sidecar. */
+  opencodeBridgeControlUrl: string;
+  /** Yep server URL that the OpenCode bridge sidecar forwards requests to. */
+  opencodeBridgeServerUrl: string;
   /**
    * Periodic full-tree rescan interval for codex session watcher (ms).
    * Helps recover from missed fs.watch events on macOS. 0 disables it.
@@ -215,8 +215,11 @@ export function loadConfig(): Config {
     process.env.YEP_CODEX_BRIDGE_PORT ?? process.env.CODEX_BRIDGE_PORT,
     4510,
   );
-  const claudeBridgePort = parseIntOrDefault(
-    process.env.YEP_CLAUDE_BRIDGE_PORT ?? process.env.CLAUDE_BRIDGE_PORT,
+  const opencodeBridgePort = parseIntOrDefault(
+    process.env.YEP_OPENCODE_BRIDGE_PORT ??
+      process.env.OPENCODE_BRIDGE_PORT ??
+      process.env.YEP_CLAUDE_BRIDGE_PORT ??
+      process.env.CLAUDE_BRIDGE_PORT,
     4520,
   );
   const codexBridgeMode = parseCodexBridgeMode(
@@ -337,16 +340,20 @@ export function loadConfig(): Config {
       process.env.YEP_CODEX_BRIDGE_FULL_UPSTREAM_ARGS,
       [],
     ),
-    claudeBridgeHost:
+    opencodeBridgeHost:
+      process.env.YEP_OPENCODE_BRIDGE_HOST ??
+      process.env.OPENCODE_BRIDGE_HOST ??
       process.env.YEP_CLAUDE_BRIDGE_HOST ??
       process.env.CLAUDE_BRIDGE_HOST ??
       "127.0.0.1",
-    claudeBridgePort,
-    claudeBridgeControlUrl:
+    opencodeBridgePort,
+    opencodeBridgeControlUrl:
+      process.env.YEP_OPENCODE_BRIDGE_CONTROL_URL ??
+      process.env.OPENCODE_BRIDGE_CONTROL_URL ??
       process.env.YEP_CLAUDE_BRIDGE_CONTROL_URL ??
       process.env.CLAUDE_BRIDGE_CONTROL_URL ??
-      `http://127.0.0.1:${claudeBridgePort}`,
-    claudeBridgeServerUrl:
+      `http://127.0.0.1:${opencodeBridgePort}`,
+    opencodeBridgeServerUrl:
       process.env.YEP_SERVER_URL ??
       process.env.YEP_ANYWHERE_SERVER_URL ??
       `http://127.0.0.1:${parseIntOrDefault(process.env.PORT, 3400)}`,

@@ -40,10 +40,7 @@ import type {
   SessionSummary,
 } from "../supervisor/types.js";
 import { readJsonlLines } from "../utils/jsonl.js";
-import {
-  applyCodexRollbackMarkers,
-  buildCodexBranchView,
-} from "./codex-rollback.js";
+import { buildCodexBranchView } from "./codex-rollback.js";
 import {
   type CodexSessionManifest,
   type CodexSessionManifestEntry,
@@ -184,7 +181,8 @@ export class CodexSessionReader implements ISessionReader {
       }
 
       if (entries.length === 0) return null;
-      const visibleEntries = applyCodexRollbackMarkers(entries);
+      const branchView = buildCodexBranchView(entries, sessionId);
+      const visibleEntries = branchView.entries;
 
       // Extract session metadata from first entry
       const metaEntry = entries.find((e) => e.type === "session_meta") as
@@ -193,7 +191,11 @@ export class CodexSessionReader implements ISessionReader {
       if (!metaEntry) return null;
 
       const stats = await stat(sessionFile.filePath);
-      const { title, fullTitle } = this.extractTitle(visibleEntries);
+      const extractedTitle = this.extractTitle(visibleEntries);
+      const { title, fullTitle } =
+        extractedTitle.title === null
+          ? this.extractTitleFromBranchFallback(branchView.branchState.branches)
+          : extractedTitle;
       const userQuestions = this.extractUserQuestions(visibleEntries);
       const messageCount = this.countMessages(visibleEntries);
       const model = this.extractModel(visibleEntries);
@@ -447,11 +449,8 @@ export class CodexSessionReader implements ISessionReader {
         if (skipLeadingSystemPrompts && isSyntheticUserPromptText(fullTitle)) {
           continue;
         }
-        const title =
-          fullTitle.length <= SESSION_TITLE_MAX_LENGTH
-            ? fullTitle
-            : `${fullTitle.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
-        return { title, fullTitle };
+        const title = this.buildTitleFromText(fullTitle);
+        if (title) return title;
       }
 
       if (entry.type === "response_item") {
@@ -465,17 +464,42 @@ export class CodexSessionReader implements ISessionReader {
             text &&
             !(skipLeadingSystemPrompts && isSyntheticUserPromptText(text))
           ) {
-            const title =
-              text.length <= SESSION_TITLE_MAX_LENGTH
-                ? text
-                : `${text.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
-            return { title, fullTitle: text };
+            const title = this.buildTitleFromText(text);
+            if (title) return title;
           }
         }
       }
     }
 
     return { title: null, fullTitle: null };
+  }
+
+  private extractTitleFromBranchFallback(
+    branches: Array<{ prompt?: string | null }>,
+  ): { title: string | null; fullTitle: string | null } {
+    for (let index = branches.length - 1; index >= 0; index--) {
+      const prompt = branches[index]?.prompt;
+      if (typeof prompt !== "string") continue;
+      if (isSyntheticUserPromptText(prompt)) continue;
+
+      const title = this.buildTitleFromText(prompt);
+      if (title) return title;
+    }
+
+    return { title: null, fullTitle: null };
+  }
+
+  private buildTitleFromText(
+    text: string,
+  ): { title: string; fullTitle: string } | null {
+    const fullTitle = text.trim();
+    if (!fullTitle) return null;
+
+    const title =
+      fullTitle.length <= SESSION_TITLE_MAX_LENGTH
+        ? fullTitle
+        : `${fullTitle.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
+    return { title, fullTitle };
   }
 
   private extractUserQuestions(

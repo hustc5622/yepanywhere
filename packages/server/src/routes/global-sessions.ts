@@ -25,9 +25,11 @@ import type { SessionMetadataService } from "../metadata/SessionMetadataService.
 import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import {
   deriveSessionRuntime,
@@ -66,6 +68,12 @@ export interface GlobalSessionsDeps {
   geminiSessionsDir?: string;
   /** Optional shared Gemini reader factory for cross-provider session lookups */
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
+  /** OpenCode scanner for checking if a project has OpenCode sessions */
+  opencodeScanner?: OpenCodeSessionScanner;
+  /** OpenCode sqlite database path (defaults to ~/.local/share/opencode/opencode.db) */
+  opencodeDbPath?: string;
+  /** Optional shared OpenCode reader factory for cross-provider session lookups */
+  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   /** Event bus for cache invalidation */
   eventBus?: EventBus;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
@@ -340,6 +348,8 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         geminiSessionsDir: deps.geminiSessionsDir,
         geminiReaderFactory: deps.geminiReaderFactory,
         geminiHashToCwd: providerCatalog.geminiHashToCwd,
+        opencodeDbPath: deps.opencodeDbPath,
+        opencodeReaderFactory: deps.opencodeReaderFactory,
         allowStaleSessionCache: true,
       },
       providerCatalog,
@@ -353,6 +363,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       projects,
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
+      opencodeScanner: deps.opencodeScanner,
     });
     const seenSessionIds = new Set<string>();
 
@@ -506,6 +517,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       projects: allProjects,
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
+      opencodeScanner: deps.opencodeScanner,
     });
 
     const projectsForSessionScan = shouldCollectStats

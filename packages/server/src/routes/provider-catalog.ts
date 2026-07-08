@@ -1,17 +1,20 @@
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { Project } from "../supervisor/types.js";
 
 export interface ProviderCatalogDeps {
   codexScanner?: CodexSessionScanner;
   geminiScanner?: GeminiSessionScanner;
+  opencodeScanner?: OpenCodeSessionScanner;
   projects?: Project[];
 }
 
 export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
+  opencodePaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
 }
 
@@ -44,6 +47,15 @@ export async function buildProviderProjectCatalog(
         .map((project) => canonicalizeProjectPath(project.path))
         .filter((path) => !path.startsWith("gemini:")),
     );
+    const opencodePaths = new Set(
+      deps.projects
+        .filter(
+          (project) =>
+            project.hasOpenCodeSessions === true ||
+            project.provider === "opencode",
+        )
+        .map((project) => canonicalizeProjectPath(project.path)),
+    );
 
     const needsCodexScan = deps.projects.some(
       (project) =>
@@ -57,23 +69,34 @@ export async function buildProviderProjectCatalog(
         project.provider !== "gemini-acp" &&
         project.hasGeminiSessions === undefined,
     );
+    const needsOpenCodeScan = deps.projects.some(
+      (project) =>
+        project.provider !== "opencode" &&
+        project.hasOpenCodeSessions === undefined,
+    );
 
-    if (!needsCodexScan && !needsGeminiScan) {
+    if (!needsCodexScan && !needsGeminiScan && !needsOpenCodeScan) {
       return {
         codexPaths,
         geminiPaths,
+        opencodePaths,
         geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
       };
     }
 
-    const [codexProjects, geminiProjects] = await Promise.all([
-      needsCodexScan
-        ? (deps.codexScanner?.listProjects() ?? Promise.resolve([]))
-        : Promise.resolve([]),
-      needsGeminiScan
-        ? (deps.geminiScanner?.listProjects() ?? Promise.resolve([]))
-        : Promise.resolve([]),
-    ]);
+    const [codexProjects, geminiProjects, openCodeProjects] = await Promise.all(
+      [
+        needsCodexScan
+          ? (deps.codexScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+        needsGeminiScan
+          ? (deps.geminiScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+        needsOpenCodeScan
+          ? (deps.opencodeScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+      ],
+    );
 
     for (const project of codexProjects) {
       codexPaths.add(canonicalizeProjectPath(project.path));
@@ -84,17 +107,22 @@ export async function buildProviderProjectCatalog(
         geminiPaths.add(path);
       }
     }
+    for (const project of openCodeProjects) {
+      opencodePaths.add(canonicalizeProjectPath(project.path));
+    }
 
     return {
       codexPaths,
       geminiPaths,
+      opencodePaths,
       geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     };
   }
 
-  const [codexProjects, geminiProjects] = await Promise.all([
+  const [codexProjects, geminiProjects, openCodeProjects] = await Promise.all([
     deps.codexScanner?.listProjects() ?? Promise.resolve([]),
     deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
+    deps.opencodeScanner?.listProjects() ?? Promise.resolve([]),
   ]);
 
   return {
@@ -105,6 +133,9 @@ export async function buildProviderProjectCatalog(
       geminiProjects
         .map((project) => canonicalizeProjectPath(project.path))
         .filter((path) => !path.startsWith("gemini:")),
+    ),
+    opencodePaths: new Set(
+      openCodeProjects.map((project) => canonicalizeProjectPath(project.path)),
     ),
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
   };

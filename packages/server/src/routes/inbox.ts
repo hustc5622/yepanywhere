@@ -22,9 +22,11 @@ import type { SessionMetadataService } from "../metadata/SessionMetadataService.
 import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
@@ -49,6 +51,9 @@ export interface InboxDeps {
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
+  opencodeScanner?: OpenCodeSessionScanner;
+  opencodeDbPath?: string;
+  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   codexBridgeService?: CodexBridgeController;
 }
 
@@ -150,6 +155,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
     const providerCatalog = await buildProviderProjectCatalog({
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
+      opencodeScanner: deps.opencodeScanner,
     });
     const bridgeSessionViews =
       (await deps.codexBridgeService?.listSessionViews()) ?? [];
@@ -183,6 +189,8 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
               geminiSessionsDir: deps.geminiSessionsDir,
               geminiReaderFactory: deps.geminiReaderFactory,
               geminiHashToCwd: providerCatalog.geminiHashToCwd,
+              opencodeDbPath: deps.opencodeDbPath,
+              opencodeReaderFactory: deps.opencodeReaderFactory,
               allowStaleSessionCache: true,
             },
             providerCatalog,

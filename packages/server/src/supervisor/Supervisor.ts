@@ -771,12 +771,16 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message.text, messageUuid, message.tempId);
 
+    const isForkedResume =
+      activeProvider.name === "opencode" &&
+      Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
+
     // Wait for the real session ID from the provider before registering
-    if (!resumeSessionId) {
+    if (!resumeSessionId || isForkedResume) {
       await process.waitForSessionId();
     }
 
-    this.registerProcess(process, !resumeSessionId);
+    this.registerProcess(process, !resumeSessionId || isForkedResume);
 
     return process;
   }

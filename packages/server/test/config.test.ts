@@ -167,8 +167,11 @@ describe("loadConfig codex paths", () => {
     expect(config.codexBridgeFullUpstreamArgs).toEqual([]);
   });
 
-  it("uses safe Claude bridge defaults", async () => {
+  it("uses safe OpenCode bridge defaults", async () => {
     vi.stubEnv("PORT", undefined);
+    vi.stubEnv("YEP_OPENCODE_BRIDGE_HOST", undefined);
+    vi.stubEnv("YEP_OPENCODE_BRIDGE_PORT", undefined);
+    vi.stubEnv("YEP_OPENCODE_BRIDGE_CONTROL_URL", undefined);
     vi.stubEnv("YEP_CLAUDE_BRIDGE_HOST", undefined);
     vi.stubEnv("YEP_CLAUDE_BRIDGE_PORT", undefined);
     vi.stubEnv("YEP_CLAUDE_BRIDGE_CONTROL_URL", undefined);
@@ -178,25 +181,38 @@ describe("loadConfig codex paths", () => {
     const { loadConfig } = await import("../src/config.js");
     const config = loadConfig();
 
-    expect(config.claudeBridgeHost).toBe("127.0.0.1");
-    expect(config.claudeBridgePort).toBe(4520);
-    expect(config.claudeBridgeControlUrl).toBe("http://127.0.0.1:4520");
-    expect(config.claudeBridgeServerUrl).toBe("http://127.0.0.1:3400");
+    expect(config.opencodeBridgeHost).toBe("127.0.0.1");
+    expect(config.opencodeBridgePort).toBe(4520);
+    expect(config.opencodeBridgeControlUrl).toBe("http://127.0.0.1:4520");
+    expect(config.opencodeBridgeServerUrl).toBe("http://127.0.0.1:3400");
   });
 
-  it("parses Claude bridge env overrides", async () => {
-    vi.stubEnv("YEP_CLAUDE_BRIDGE_HOST", "localhost");
-    vi.stubEnv("YEP_CLAUDE_BRIDGE_PORT", "4620");
-    vi.stubEnv("YEP_CLAUDE_BRIDGE_CONTROL_URL", "http://localhost:4621");
+  it("parses OpenCode bridge env overrides", async () => {
+    vi.stubEnv("YEP_OPENCODE_BRIDGE_HOST", "localhost");
+    vi.stubEnv("YEP_OPENCODE_BRIDGE_PORT", "4620");
+    vi.stubEnv("YEP_OPENCODE_BRIDGE_CONTROL_URL", "http://localhost:4621");
     vi.stubEnv("YEP_SERVER_URL", "http://127.0.0.1:8022/yep");
 
     const { loadConfig } = await import("../src/config.js");
     const config = loadConfig();
 
-    expect(config.claudeBridgeHost).toBe("localhost");
-    expect(config.claudeBridgePort).toBe(4620);
-    expect(config.claudeBridgeControlUrl).toBe("http://localhost:4621");
-    expect(config.claudeBridgeServerUrl).toBe("http://127.0.0.1:8022/yep");
+    expect(config.opencodeBridgeHost).toBe("localhost");
+    expect(config.opencodeBridgePort).toBe(4620);
+    expect(config.opencodeBridgeControlUrl).toBe("http://localhost:4621");
+    expect(config.opencodeBridgeServerUrl).toBe("http://127.0.0.1:8022/yep");
+  });
+
+  it("maps legacy Claude bridge env overrides to OpenCode bridge config", async () => {
+    vi.stubEnv("YEP_CLAUDE_BRIDGE_HOST", "localhost");
+    vi.stubEnv("YEP_CLAUDE_BRIDGE_PORT", "4620");
+    vi.stubEnv("YEP_CLAUDE_BRIDGE_CONTROL_URL", "http://localhost:4621");
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.opencodeBridgeHost).toBe("localhost");
+    expect(config.opencodeBridgePort).toBe(4620);
+    expect(config.opencodeBridgeControlUrl).toBe("http://localhost:4621");
   });
 
   it("defaults session title submodule for ohmyrouter", async () => {

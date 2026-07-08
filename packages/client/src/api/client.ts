@@ -562,6 +562,8 @@ export interface StartDeploymentRequest {
 export interface DeploymentRestartTargets {
   server?: boolean;
   codexBridge?: boolean;
+  opencodeBridge?: boolean;
+  /** Deprecated alias accepted by older servers. */
   claudeBridge?: boolean;
 }
 
@@ -892,6 +894,7 @@ export const api = {
     rollbackNumTurns?: number,
   ) =>
     fetchJSON<{
+      sessionId: string;
       processId: string;
       permissionMode: PermissionMode;
       modeVersion: number;

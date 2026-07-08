@@ -297,6 +297,8 @@ export class FileWatcher {
         return this.parseGeminiFileType(relativePath);
       case "codex":
         return this.parseCodexFileType(relativePath);
+      case "opencode":
+        return this.parseOpenCodeFileType(relativePath);
     }
   }
 
@@ -333,6 +335,20 @@ export class FileWatcher {
   ): FileChangeEvent["fileType"] {
     // Watching ~/.codex/sessions - relativePath is {year}/{month}/{day}/rollout-*.jsonl
     if (relativePath.endsWith(".jsonl")) {
+      return "session";
+    }
+    return "other";
+  }
+
+  private parseOpenCodeFileType(
+    relativePath: string,
+  ): FileChangeEvent["fileType"] {
+    const baseName = path.basename(relativePath);
+    if (
+      baseName === "opencode.db" ||
+      baseName === "opencode.db-wal" ||
+      baseName === "opencode.db-shm"
+    ) {
       return "session";
     }
     return "other";

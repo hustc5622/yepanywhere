@@ -1,10 +1,7 @@
 import { loadConfig } from "../config.js";
-import { OpenCodeBridgeService } from "../opencode-bridge/OpenCodeBridgeService.js";
+import { OpenCodeBridgeService } from "./OpenCodeBridgeService.js";
 
-export async function runClaudeBridgeOnly(): Promise<void> {
-  console.warn(
-    "[OpenCodeBridge] --claude-bridge-only is deprecated; starting the OpenCode bridge instead.",
-  );
+export async function runOpenCodeBridgeOnly(): Promise<void> {
   const config = loadConfig();
   const bridge = new OpenCodeBridgeService({
     enabled: true,

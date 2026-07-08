@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
 import type { Project } from "../supervisor/types.js";
 
-type WatchProvider = "claude" | "codex" | "gemini";
+type WatchProvider = "claude" | "codex" | "gemini" | "opencode";
 type ChangeSource = "fs-watch" | "poll";
 
 interface CodexSessionInfo {
@@ -13,6 +13,11 @@ interface CodexSessionInfo {
 }
 
 interface GeminiSessionInfo {
+  id: string;
+  filePath: string;
+}
+
+interface OpenCodeSessionInfo {
   id: string;
   filePath: string;
 }
@@ -63,6 +68,9 @@ export interface FocusedSessionWatchManagerOptions {
   geminiScanner: {
     getSessionsForProject(projectPath: string): Promise<GeminiSessionInfo[]>;
   };
+  opencodeScanner?: {
+    getSessionsForProject(projectPath: string): Promise<OpenCodeSessionInfo[]>;
+  };
   pollMs?: number;
   debounceMs?: number;
 }
@@ -84,6 +92,7 @@ export class FocusedSessionWatchManager {
   private readonly scanner: FocusedSessionWatchManagerOptions["scanner"];
   private readonly codexScanner: FocusedSessionWatchManagerOptions["codexScanner"];
   private readonly geminiScanner: FocusedSessionWatchManagerOptions["geminiScanner"];
+  private readonly opencodeScanner: FocusedSessionWatchManagerOptions["opencodeScanner"];
   private readonly pollMs: number;
   private readonly debounceMs: number;
   private readonly targets = new Map<string, SessionWatchTarget>();
@@ -93,6 +102,7 @@ export class FocusedSessionWatchManager {
     this.scanner = options.scanner;
     this.codexScanner = options.codexScanner;
     this.geminiScanner = options.geminiScanner;
+    this.opencodeScanner = options.opencodeScanner;
     this.pollMs = Math.max(250, options.pollMs ?? 1500);
     this.debounceMs = Math.max(50, options.debounceMs ?? 200);
   }
@@ -386,6 +396,19 @@ export class FocusedSessionWatchManager {
         if (match) {
           return { filePath: match.filePath, provider };
         }
+        continue;
+      }
+
+      if (provider === "opencode") {
+        const sessions =
+          (await this.opencodeScanner?.getSessionsForProject(project.path)) ??
+          [];
+        const match = sessions.find(
+          (session) => session.id === target.sessionId,
+        );
+        if (match) {
+          return { filePath: match.filePath, provider };
+        }
       }
     }
 
@@ -407,6 +430,7 @@ export class FocusedSessionWatchManager {
     pushCandidate("claude");
     pushCandidate("codex");
     pushCandidate("gemini");
+    pushCandidate("opencode");
     return candidates;
   }
 
@@ -416,7 +440,8 @@ export class FocusedSessionWatchManager {
     if (!provider) return null;
     if (provider === "codex" || provider === "codex-oss") return "codex";
     if (provider === "gemini" || provider === "gemini-acp") return "gemini";
-    if (provider === "claude" || provider === "opencode") return "claude";
+    if (provider === "opencode") return "opencode";
+    if (provider === "claude") return "claude";
     return null;
   }
 

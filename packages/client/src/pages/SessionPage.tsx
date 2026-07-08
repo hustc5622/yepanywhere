@@ -662,7 +662,13 @@ function SessionPageContent({
           draftControlsRef.current?.clearDraft();
           setStatus({ owner: "self", processId: result.processId });
           queueEditBranchRefresh();
-          reconnectStream();
+          if (result.sessionId !== sessionId) {
+            navigate(
+              `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
+            );
+          } else {
+            reconnectStream();
+          }
         } else if (editRewind.parentUuid) {
           truncateMessagesBefore(editRewind.uuid);
           const result = await api.resumeSession(
@@ -677,7 +683,13 @@ function SessionPageContent({
           draftControlsRef.current?.clearDraft();
           setStatus({ owner: "self", processId: result.processId });
           queueEditBranchRefresh();
-          reconnectStream();
+          if (result.sessionId !== sessionId) {
+            navigate(
+              `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
+            );
+          } else {
+            reconnectStream();
+          }
         } else {
           // Edited the first message — no parent to rewind to; start fresh.
           const result = await api.startSession(
@@ -719,6 +731,11 @@ function SessionPageContent({
         );
         // Update status to trigger SSE connection
         setStatus({ owner: "self", processId: result.processId });
+        if (result.sessionId !== sessionId) {
+          navigate(
+            `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
+          );
+        }
       } else {
         // Queue to existing process with current permission mode and thinking setting
         const thinking = getThinkingSetting();
@@ -765,6 +782,11 @@ function SessionPageContent({
             tempId,
           );
           setStatus({ owner: "self", processId: result.processId });
+          if (result.sessionId !== sessionId) {
+            navigate(
+              `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
+            );
+          }
           draftControlsRef.current?.clearDraft();
           return;
         } catch (retryErr) {

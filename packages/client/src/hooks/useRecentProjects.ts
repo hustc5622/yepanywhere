@@ -10,7 +10,7 @@ const MAX_RECENT_PROJECTS = 12;
  * Returns up to 12 most recently active projects.
  */
 export function useRecentProjects(options: { enabled?: boolean } = {}) {
-  const { projects, loading } = useProjects(options);
+  const { projects, loading, refetch } = useProjects(options);
 
   const recentProjects = useMemo(() => {
     // Filter to projects with activity, sort by lastActivity descending
@@ -31,5 +31,7 @@ export function useRecentProjects(options: { enabled?: boolean } = {}) {
     projects,
     /** True while loading project data */
     loading,
+    /** Refetch all projects, including git status summaries. */
+    refetch,
   };
 }

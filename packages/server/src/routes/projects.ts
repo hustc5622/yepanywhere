@@ -14,10 +14,12 @@ import type {
 import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { canonicalizeProjectPath, isAbsolutePath } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
@@ -56,6 +58,12 @@ export interface ProjectsDeps {
   geminiSessionsDir?: string;
   /** Optional shared Gemini reader factory for cross-provider session lookups */
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
+  /** OpenCode scanner for checking if a project has OpenCode sessions */
+  opencodeScanner?: OpenCodeSessionScanner;
+  /** OpenCode sqlite database path (defaults to ~/.local/share/opencode/opencode.db) */
+  opencodeDbPath?: string;
+  /** Optional shared OpenCode reader factory for cross-provider session lookups */
+  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
 }
 
 interface ProjectActivityCounts {
@@ -385,6 +393,7 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       projects: [project],
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
+      opencodeScanner: deps.opencodeScanner,
     });
     let sessions = await listSessionsAcrossProviders(
       project,
@@ -396,6 +405,8 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
         geminiSessionsDir: deps.geminiSessionsDir,
         geminiReaderFactory: deps.geminiReaderFactory,
         geminiHashToCwd: providerCatalog.geminiHashToCwd,
+        opencodeDbPath: deps.opencodeDbPath,
+        opencodeReaderFactory: deps.opencodeReaderFactory,
       },
       providerCatalog,
     );

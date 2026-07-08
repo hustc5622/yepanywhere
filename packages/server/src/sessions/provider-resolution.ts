@@ -4,6 +4,8 @@ import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 import { CodexSessionReader } from "./codex-reader.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
+import { OPENCODE_DB_PATH } from "./opencode-db.js";
+import { OpenCodeSessionReader } from "./opencode-reader.js";
 import { ClaudeSessionReader } from "./reader.js";
 import type { ISessionReader } from "./types.js";
 
@@ -12,6 +14,7 @@ type ProviderGroup = "claude" | "codex" | "gemini" | "opencode";
 export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
+  opencodePaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
 }
 
@@ -23,6 +26,8 @@ export interface ProviderResolutionDeps {
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   geminiHashToCwd?: Promise<Map<string, string>>;
+  opencodeDbPath?: string;
+  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   allowStaleSessionCache?: boolean;
 }
 
@@ -30,7 +35,7 @@ export interface SessionSource {
   provider: ProviderName;
   reader: ISessionReader;
   sessionDir: string;
-  kind: "primary" | "codex" | "gemini";
+  kind: "primary" | "codex" | "gemini" | "opencode";
 }
 
 export interface ResolvedSessionSummary {
@@ -68,6 +73,17 @@ function mayHaveGeminiSessions(
   }
   const provider = normalizeProviderGroup(project.provider);
   return provider === "claude" || provider === "codex";
+}
+
+function mayHaveOpenCodeSessions(
+  project: Project,
+  catalog?: ProviderProjectCatalog,
+): boolean {
+  if (catalog) {
+    return catalog.opencodePaths.has(canonicalizeProjectPath(project.path));
+  }
+  const provider = normalizeProviderGroup(project.provider);
+  return provider === "claude" || provider === "codex" || provider === "gemini";
 }
 
 function createClaudeSource(
@@ -126,6 +142,25 @@ function createGeminiSource(
   };
 }
 
+function createOpenCodeSource(
+  project: Project,
+  deps: ProviderResolutionDeps,
+): SessionSource | null {
+  const dbPath = deps.opencodeDbPath ?? OPENCODE_DB_PATH;
+  const reader =
+    deps.opencodeReaderFactory?.(project.path) ??
+    new OpenCodeSessionReader({
+      dbPath,
+      projectPath: project.path,
+    });
+  return {
+    provider: "opencode",
+    reader,
+    sessionDir: dbPath,
+    kind: "opencode",
+  };
+}
+
 function buildCandidateGroups(
   project: Project,
   preferredProvider: ProviderName | string | undefined,
@@ -149,6 +184,9 @@ function buildCandidateGroups(
   if (mayHaveGeminiSessions(project, catalog)) {
     pushGroup("gemini");
   }
+  if (mayHaveOpenCodeSessions(project, catalog)) {
+    pushGroup("opencode");
+  }
 
   return groups;
 }
@@ -161,8 +199,9 @@ function getSourceForGroup(
 ): SessionSource | null {
   switch (group) {
     case "claude":
-    case "opencode":
       return createClaudeSource(project, deps);
+    case "opencode":
+      return createOpenCodeSource(project, deps);
     case "codex":
       return createCodexSource(project, deps);
     case "gemini":
@@ -250,6 +289,9 @@ export async function listSessionsAcrossProviders(
     }
   }
 
+  sessions.sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  );
   return sessions;
 }
 

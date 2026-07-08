@@ -73,12 +73,12 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
-  version: 8;
+  version: 9;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 8;
+const CURRENT_VERSION = 9;
 
 interface SessionFileStat {
   mtimeMs: number;
@@ -622,6 +622,12 @@ export class SessionIndexService implements ISessionIndexService {
     if (event.provider === "gemini") {
       // Gemini uses the same shared-tree + project-scoped index pattern.
       this.markMatchingScopesDirty("gemini::");
+      return;
+    }
+
+    if (event.provider === "opencode") {
+      // OpenCode sqlite indexes are also project-scoped over one shared DB.
+      this.markMatchingScopesDirty("opencode::");
     }
   }
 

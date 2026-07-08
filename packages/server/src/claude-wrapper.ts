@@ -119,9 +119,16 @@ export function parseClaudeWrapperArgs(args: string[]): ParsedArgs {
     DEFAULT_SERVER_URL;
   let desktopToken =
     process.env.YEP_DESKTOP_AUTH_TOKEN ?? process.env.DESKTOP_AUTH_TOKEN;
-  let bridgeUrl = process.env.YEP_CLAUDE_BRIDGE_URL ?? DEFAULT_BRIDGE_URL;
-  let bridgeRequired = process.env.YEP_CLAUDE_BRIDGE_URL !== undefined;
-  let useBridge = process.env.YEP_CLAUDE_BRIDGE !== "false";
+  let bridgeUrl =
+    process.env.YEP_OPENCODE_BRIDGE_URL ??
+    process.env.YEP_CLAUDE_BRIDGE_URL ??
+    DEFAULT_BRIDGE_URL;
+  let bridgeRequired =
+    process.env.YEP_OPENCODE_BRIDGE_URL !== undefined ||
+    process.env.YEP_CLAUDE_BRIDGE_URL !== undefined;
+  let useBridge =
+    (process.env.YEP_OPENCODE_BRIDGE ?? process.env.YEP_CLAUDE_BRIDGE) !==
+    "false";
   let cwd = process.cwd();
   let resumeSessionId: string | undefined;
   let mode: PermissionMode | undefined;
@@ -222,9 +229,9 @@ OPTIONS:
                        Can include a base path, e.g. http://host:8022/yep
   --token <token>      Desktop auth token for X-Desktop-Token
                        Env: YEP_DESKTOP_AUTH_TOKEN or DESKTOP_AUTH_TOKEN
-  --bridge <url>       Claude bridge URL (default probe: ${DEFAULT_BRIDGE_URL})
-                       Env: YEP_CLAUDE_BRIDGE_URL
-  --no-bridge          Skip Claude bridge probing and use Yep REST directly
+  --bridge <url>       OpenCode bridge URL (default probe: ${DEFAULT_BRIDGE_URL})
+                       Env: YEP_OPENCODE_BRIDGE_URL
+  --no-bridge          Skip OpenCode bridge probing and use Yep REST directly
   --cwd <path>         Project directory (default: current directory)
   --resume, -r <id>    Resume an existing Claude session
   --mode <mode>        Permission mode: default, acceptEdits,
@@ -252,7 +259,7 @@ export async function runClaudeWrapper(args: string[]): Promise<void> {
   try {
     console.log(`Yep server: ${options.serverUrl}`);
     if (client.kind === "bridge") {
-      console.log(`Claude bridge: ${client.url}`);
+      console.log(`OpenCode bridge: ${client.url}`);
     }
     console.log(`Project: ${options.cwd}`);
 
@@ -406,17 +413,17 @@ async function createSessionClient(
     return direct;
   }
 
-  const bridge = new ClaudeBridgeApiClient(options);
+  const bridge = new OpenCodeBridgeApiClient(options);
   if (await bridge.isAvailable()) {
     return bridge;
   }
   if (options.bridgeRequired) {
-    throw new Error(`Claude bridge is not available at ${options.bridgeUrl}`);
+    throw new Error(`OpenCode bridge is not available at ${options.bridgeUrl}`);
   }
   return direct;
 }
 
-class ClaudeBridgeApiClient implements ClaudeSessionClient {
+class OpenCodeBridgeApiClient implements ClaudeSessionClient {
   readonly kind = "bridge" as const;
   readonly url: string;
   private readonly serverUrl: string;
@@ -425,7 +432,7 @@ class ClaudeBridgeApiClient implements ClaudeSessionClient {
 
   constructor(options: ClaudeWrapperOptions) {
     if (!options.bridgeUrl) {
-      throw new Error("Claude bridge URL is required");
+      throw new Error("OpenCode bridge URL is required");
     }
     this.url = options.bridgeUrl;
     this.serverUrl = options.serverUrl;

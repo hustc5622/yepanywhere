@@ -677,7 +677,7 @@
   "deploymentRestartSelected": "重启所选服务",
   "deploymentRestartTargetServer": "8022 Web/API 服务",
   "deploymentRestartTargetCodexBridge": "4510 Codex bridge",
-  "deploymentRestartTargetClaudeBridge": "4520 Claude bridge",
+  "deploymentRestartTargetOpenCodeBridge": "4520 OpenCode bridge",
   "deploymentRestartSelectTarget": "请至少选择一个要重启的服务。",
   "deploymentStarting": "启动中...",
   "deploymentApkTitle": "Android APK",

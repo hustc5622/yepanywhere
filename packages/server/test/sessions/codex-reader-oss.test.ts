@@ -837,6 +837,100 @@ describe("CodexSessionReader - OSS Support", () => {
     ).toEqual(["q1", "a1", "q2", "a2", "q3", "a3"]);
   });
 
+  it("falls back to a rolled-back Codex branch prompt when visible title is setup-only", async () => {
+    const sessionId = "rollback-setup-only-title";
+    const now = new Date().toISOString();
+    const lines = [
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: now,
+        payload: {
+          id: sessionId,
+          cwd: "/test/project",
+          timestamp: now,
+          model_provider: "openai",
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "# AGENTS.md instructions for /test/project\n\n<INSTRUCTIONS />",
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:02Z",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "../eval-platform" }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:03Z",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "<turn_aborted>\nThe user interrupted.\n</turn_aborted>",
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2024-01-01T00:00:04Z",
+        payload: {
+          type: "turn_aborted",
+          turn_id: "turn-1",
+          reason: "interrupted",
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2024-01-01T00:00:05Z",
+        payload: {
+          type: "thread_rolled_back",
+          num_turns: 1,
+        },
+      }),
+    ];
+
+    await writeFile(
+      join(testDir, `${sessionId}.jsonl`),
+      `${lines.join("\n")}\n`,
+    );
+
+    const summary = await reader.getSessionSummary(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+    expect(summary?.title).toBe("../eval-platform");
+    expect(summary?.fullTitle).toBe("../eval-platform");
+
+    const session = await reader.getSession(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+    expect(session?.codexBranchState?.branches[0]?.prompt).toBe(
+      "../eval-platform",
+    );
+    expect(visibleMessageTexts(session?.data.session.entries ?? [])).toEqual([
+      "# AGENTS.md instructions for /test/project\n\n<INSTRUCTIONS />",
+    ]);
+  });
+
   it("preserves originator from session metadata", async () => {
     const sessionId = "originator-passthrough";
     await createSessionFile(sessionId, "openai", "gpt-4o", "yep-anywhere");

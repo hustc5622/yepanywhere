@@ -90,7 +90,8 @@ OPTIONS:
   --auth-disable        Disable authentication (bypass auth even if enabled in settings)
                         Emergency recovery mode; re-enable auth after fixing config
   --codex-bridge-only   Start only the Codex CLI bridge sidecar
-  --claude-bridge-only  Start only the Claude terminal bridge sidecar
+  --opencode-bridge-only
+                        Start only the OpenCode bridge sidecar
   claude                Start or attach to a Yep-managed Claude session
 
 SETUP OPTIONS (for headless installation):
@@ -147,8 +148,8 @@ EXAMPLES:
   # Start a Yep-managed Claude session from the terminal
   yepanywhere claude "fix the failing tests"
 
-  # Start only the local Claude terminal bridge sidecar
-  yepanywhere --claude-bridge-only
+  # Start only the local OpenCode bridge sidecar
+  yepanywhere --opencode-bridge-only
 
 DOCUMENTATION:
   For full documentation, see: https://github.com/kzahel/yepanywhere
@@ -264,7 +265,14 @@ if (claudeWrapperInvocation) {
     args.splice(codexBridgeOnlyIndex, 1);
   }
 
-  // Parse --claude-bridge-only flag
+  // Parse --opencode-bridge-only flag
+  const opencodeBridgeOnlyIndex = args.indexOf("--opencode-bridge-only");
+  const opencodeBridgeOnly = opencodeBridgeOnlyIndex !== -1;
+  if (opencodeBridgeOnlyIndex !== -1) {
+    args.splice(opencodeBridgeOnlyIndex, 1);
+  }
+
+  // Parse deprecated --claude-bridge-only flag as an OpenCode bridge alias.
   const claudeBridgeOnlyIndex = args.indexOf("--claude-bridge-only");
   const claudeBridgeOnly = claudeBridgeOnlyIndex !== -1;
   if (claudeBridgeOnlyIndex !== -1) {
@@ -305,8 +313,13 @@ if (claudeWrapperInvocation) {
     runSetup(setupAuthPassword);
   } else if (codexBridgeOnly) {
     runCodexBridgeOnly();
-  } else if (claudeBridgeOnly) {
-    runClaudeBridgeOnly();
+  } else if (opencodeBridgeOnly || claudeBridgeOnly) {
+    if (claudeBridgeOnly) {
+      console.warn(
+        "Warning: --claude-bridge-only is deprecated; starting the OpenCode bridge instead.",
+      );
+    }
+    runOpenCodeBridgeOnly();
   } else {
     // Only check for Claude CLI when starting the server (not for setup commands)
     checkClaudeCli();
@@ -352,11 +365,11 @@ function runCodexBridgeOnly(): void {
     });
 }
 
-function runClaudeBridgeOnly(): void {
-  import("./claude-bridge/standalone.js")
-    .then(({ runClaudeBridgeOnly }) => runClaudeBridgeOnly())
+function runOpenCodeBridgeOnly(): void {
+  import("./opencode-bridge/standalone.js")
+    .then(({ runOpenCodeBridgeOnly }) => runOpenCodeBridgeOnly())
     .catch((error) => {
-      console.error("Failed to start Claude bridge:", error);
+      console.error("Failed to start OpenCode bridge:", error);
       process.exit(1);
     });
 }

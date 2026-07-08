@@ -12,6 +12,7 @@ export type {
   OpenCodeMessageInfo,
   OpenCodeSessionInfo,
   OpenCodeServerConnectedEvent,
+  OpenCodeSessionCreatedEvent,
   OpenCodeSessionStatusEvent,
   OpenCodeSessionUpdatedEvent,
   OpenCodeSessionIdleEvent,

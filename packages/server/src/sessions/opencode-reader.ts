@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  type ContextCumulativeUsage,
   type OpenCodeMessage,
   type OpenCodeSessionEntry,
   type OpenCodeStoredPart,
@@ -10,15 +11,22 @@ import {
   type UrlProjectId,
   getModelContextWindow,
 } from "@yep-anywhere/shared";
+import { canonicalizeProjectPath } from "../projects/paths.js";
 import type {
   ContextUsage,
   Message,
   SessionSummary,
 } from "../supervisor/types.js";
+import {
+  OPENCODE_DB_PATH,
+  type OpenCodeDatabase,
+  withOpenCodeDb,
+} from "./opencode-db.js";
 import type {
   GetSessionOptions,
   ISessionReader,
   LoadedSession,
+  SessionFileEntry,
 } from "./types.js";
 import { createSessionQuestion } from "./user-questions.js";
 
@@ -43,6 +51,8 @@ export const OPENCODE_STORAGE_DIR = join(
 export interface OpenCodeSessionReaderOptions {
   /** Base storage directory (e.g., ~/.local/share/opencode/storage) */
   storageDir?: string;
+  /** Current sqlite database path (e.g., ~/.local/share/opencode/opencode.db) */
+  dbPath?: string;
   /** Project path (used to look up the OpenCode project ID) */
   projectPath: string;
 }
@@ -128,7 +138,7 @@ export async function findOpenCodeProjectId(
  * - Messages in message/{sessionId}/{messageId}.json
  * - Parts (content) in part/{messageId}/{partId}.json
  */
-export class OpenCodeSessionReader implements ISessionReader {
+class OpenCodeJsonSessionReader implements ISessionReader {
   private storageDir: string;
   private projectPath: string;
   private openCodeProjectIdCache: string | null | undefined = undefined;
@@ -513,7 +523,9 @@ export class OpenCodeSessionReader implements ISessionReader {
 
           if (msg.role === "assistant" && msg.tokens) {
             const inputTokens =
-              (msg.tokens.input ?? 0) + (msg.tokens.cache?.read ?? 0);
+              (msg.tokens.input ?? 0) +
+              (msg.tokens.cache?.read ?? 0) +
+              (msg.tokens.cache?.write ?? 0);
 
             if (inputTokens === 0) continue;
 
@@ -535,6 +547,12 @@ export class OpenCodeSessionReader implements ISessionReader {
               msg.tokens.cache.read > 0
             ) {
               result.cacheReadTokens = msg.tokens.cache.read;
+            }
+            if (
+              msg.tokens.cache?.write !== undefined &&
+              msg.tokens.cache.write > 0
+            ) {
+              result.cacheCreationTokens = msg.tokens.cache.write;
             }
 
             return result;
@@ -558,5 +576,692 @@ export class OpenCodeSessionReader implements ISessionReader {
     const trimmed = title.trim();
     if (trimmed.length <= SESSION_TITLE_MAX_LENGTH) return trimmed;
     return `${trimmed.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
+  }
+}
+
+interface OpenCodeSqliteSessionRow {
+  id: string;
+  projectId: string;
+  directory: string;
+  title: string | null;
+  model: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  tokensInput: number;
+  tokensOutput: number;
+  tokensCacheRead: number;
+  tokensCacheWrite: number;
+  tokensReasoning: number;
+}
+
+interface OpenCodeSqliteSessionStats {
+  sessionId: string;
+  mtime: number;
+  size: number;
+  messageCount: number;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string" || value.length === 0) return {};
+  try {
+    return asRecord(JSON.parse(value)) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function parseOpenCodeModel(
+  model: string | null | undefined,
+): string | undefined {
+  if (!model) return undefined;
+  const trimmed = model.trim();
+  if (!trimmed) return undefined;
+
+  const parsed = parseJsonRecord(trimmed);
+  const modelId = asString(parsed.id) ?? asString(parsed.modelID);
+  const providerId = asString(parsed.providerID);
+  if (modelId && providerId) return `${providerId}/${modelId}`;
+  if (modelId) return modelId;
+
+  return trimmed;
+}
+
+function getNestedRecord(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null {
+  return asRecord(record[key]);
+}
+
+function getNestedNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  return asNumber(record[key]);
+}
+
+function truncateOpenCodeTitle(title: string | null): string | null {
+  if (!title) return null;
+  const trimmed = title.trim();
+  if (trimmed.length <= SESSION_TITLE_MAX_LENGTH) return trimmed;
+  return `${trimmed.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
+}
+
+function isGenericOpenCodeTitle(title: string | null | undefined): boolean {
+  if (!title) return false;
+  const normalized = title.trim().toLowerCase();
+  return normalized === "yep anywhere session" || normalized === "new session";
+}
+
+function mapSqliteSessionRow(
+  row: Record<string, unknown> | undefined,
+): OpenCodeSqliteSessionRow | null {
+  if (!row) return null;
+  const id = asString(row.id);
+  const projectId = asString(row.project_id) ?? "global";
+  const directory = asString(row.directory);
+  const createdAtMs = asNumber(row.time_created);
+  const updatedAtMs = asNumber(row.time_updated);
+  if (
+    !id ||
+    !directory ||
+    createdAtMs === undefined ||
+    updatedAtMs === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    projectId,
+    directory,
+    title: asString(row.title) ?? null,
+    model: asString(row.model) ?? null,
+    createdAtMs,
+    updatedAtMs,
+    tokensInput: asNumber(row.tokens_input) ?? 0,
+    tokensOutput: asNumber(row.tokens_output) ?? 0,
+    tokensCacheRead: asNumber(row.tokens_cache_read) ?? 0,
+    tokensCacheWrite: asNumber(row.tokens_cache_write) ?? 0,
+    tokensReasoning: asNumber(row.tokens_reasoning) ?? 0,
+  };
+}
+
+function messageFromSqliteRow(
+  row: Record<string, unknown>,
+): OpenCodeMessage | null {
+  const id = asString(row.id);
+  const sessionID = asString(row.session_id);
+  const createdAtMs = asNumber(row.time_created);
+  const updatedAtMs = asNumber(row.time_updated);
+  if (!id || !sessionID) return null;
+
+  const data = parseJsonRecord(row.data);
+  const role =
+    data.role === "user" || data.role === "assistant" ? data.role : null;
+  if (!role) return null;
+
+  const time = getNestedRecord(data, "time") ?? {};
+  const model = getNestedRecord(data, "model") ?? {};
+  const modelID =
+    asString(data.modelID) ?? asString(model.modelID) ?? asString(model.id);
+  const providerID = asString(data.providerID) ?? asString(model.providerID);
+
+  return {
+    ...data,
+    id,
+    sessionID,
+    role,
+    time: {
+      ...time,
+      created: getNestedNumber(time, "created") ?? createdAtMs,
+      completed: getNestedNumber(time, "completed") ?? updatedAtMs,
+    },
+    ...(modelID ? { modelID } : {}),
+    ...(providerID ? { providerID } : {}),
+  } as OpenCodeMessage;
+}
+
+function partFromSqliteRow(
+  row: Record<string, unknown>,
+): OpenCodeStoredPart | null {
+  const id = asString(row.id);
+  const messageID = asString(row.message_id);
+  const sessionID = asString(row.session_id);
+  if (!id || !messageID || !sessionID) return null;
+
+  const data = parseJsonRecord(row.data);
+  const type = asString(data.type);
+  if (!type) return null;
+
+  return {
+    ...data,
+    id,
+    messageID,
+    sessionID,
+    type,
+  } as OpenCodeStoredPart;
+}
+
+function extractMessageText(parts: OpenCodeStoredPart[]): string | null {
+  const text = parts
+    .filter((part) => part.type === "text" && part.text)
+    .map((part) => part.text)
+    .join("");
+  return text.trim() ? text : null;
+}
+
+function computeCumulativeUsage(
+  row: OpenCodeSqliteSessionRow,
+  assistantTurnCount: number,
+): ContextCumulativeUsage | undefined {
+  const totalTokens =
+    row.tokensInput +
+    row.tokensOutput +
+    row.tokensReasoning +
+    row.tokensCacheRead +
+    row.tokensCacheWrite;
+  if (totalTokens <= 0 && assistantTurnCount <= 0) return undefined;
+
+  return {
+    totalTokens,
+    inputTokens: row.tokensInput,
+    outputTokens: row.tokensOutput,
+    cacheReadTokens: row.tokensCacheRead,
+    cacheCreationTokens: row.tokensCacheWrite,
+    turnCount: assistantTurnCount,
+  };
+}
+
+function getMessageModel(message: OpenCodeMessage): string | undefined {
+  if (message.providerID && message.modelID) {
+    return `${message.providerID}/${message.modelID}`;
+  }
+  return message.modelID;
+}
+
+const SESSION_STATS_SQL = `
+  WITH message_stats AS (
+    SELECT
+      session_id,
+      COUNT(*) AS message_count,
+      MAX(time_updated) AS message_updated,
+      SUM(LENGTH(data)) AS message_bytes
+    FROM message
+    GROUP BY session_id
+  ),
+  part_stats AS (
+    SELECT
+      session_id,
+      COUNT(*) AS part_count,
+      MAX(time_updated) AS part_updated,
+      SUM(LENGTH(data)) AS part_bytes
+    FROM part
+    GROUP BY session_id
+  )
+  SELECT
+    s.id,
+    MAX(
+      s.time_updated,
+      COALESCE(message_stats.message_updated, 0),
+      COALESCE(part_stats.part_updated, 0)
+    ) AS mtime,
+    COALESCE(message_stats.message_count, 0) AS message_count,
+    COALESCE(part_stats.part_count, 0) AS part_count,
+    LENGTH(COALESCE(s.title, '')) +
+      LENGTH(COALESCE(s.model, '')) +
+      COALESCE(message_stats.message_bytes, 0) +
+      COALESCE(part_stats.part_bytes, 0) AS indexed_size
+  FROM session s
+  LEFT JOIN message_stats ON message_stats.session_id = s.id
+  LEFT JOIN part_stats ON part_stats.session_id = s.id
+`;
+
+export class OpenCodeSessionReader implements ISessionReader {
+  private readonly dbPath: string;
+  private readonly projectPath: string;
+  private readonly legacyReader: ISessionReader;
+
+  constructor(options: OpenCodeSessionReaderOptions) {
+    this.dbPath = options.dbPath ?? OPENCODE_DB_PATH;
+    this.projectPath = canonicalizeProjectPath(options.projectPath);
+    this.legacyReader = new OpenCodeJsonSessionReader(options);
+  }
+
+  async listSessions(projectId: UrlProjectId): Promise<SessionSummary[]> {
+    const sqliteSessions = await this.listSqliteSessions(projectId);
+    if (sqliteSessions !== undefined) return sqliteSessions;
+    return this.legacyReader.listSessions(projectId);
+  }
+
+  async getSessionSummary(
+    sessionId: string,
+    projectId: UrlProjectId,
+  ): Promise<SessionSummary | null> {
+    const sqliteSummary = await this.getSqliteSessionSummary(
+      sessionId,
+      projectId,
+    );
+    if (sqliteSummary) return sqliteSummary;
+    return this.legacyReader.getSessionSummary(sessionId, projectId);
+  }
+
+  async getSession(
+    sessionId: string,
+    projectId: UrlProjectId,
+    afterMessageId?: string,
+    options?: GetSessionOptions,
+  ): Promise<LoadedSession | null> {
+    const summary = await this.getSqliteSessionSummary(sessionId, projectId);
+    if (summary) {
+      return {
+        summary,
+        data: {
+          provider: "opencode",
+          session: {
+            messages: await this.loadSqliteSessionMessages(
+              sessionId,
+              afterMessageId,
+            ),
+          },
+        },
+      };
+    }
+
+    return this.legacyReader.getSession(
+      sessionId,
+      projectId,
+      afterMessageId,
+      options,
+    );
+  }
+
+  async getSessionSummaryIfChanged(
+    sessionId: string,
+    projectId: UrlProjectId,
+    cachedMtime: number,
+    cachedSize: number,
+  ): Promise<{ summary: SessionSummary; mtime: number; size: number } | null> {
+    const sqliteStats = await this.getSqliteSessionStats(sessionId);
+    if (sqliteStats) {
+      if (
+        sqliteStats.mtime === cachedMtime &&
+        sqliteStats.size === cachedSize
+      ) {
+        return null;
+      }
+      const summary = await this.getSqliteSessionSummary(sessionId, projectId);
+      return summary
+        ? { summary, mtime: sqliteStats.mtime, size: sqliteStats.size }
+        : null;
+    }
+
+    return this.legacyReader.getSessionSummaryIfChanged(
+      sessionId,
+      projectId,
+      cachedMtime,
+      cachedSize,
+    );
+  }
+
+  getAgentMappings(): Promise<{ toolUseId: string; agentId: string }[]> {
+    return Promise.resolve([]);
+  }
+
+  getAgentSession(
+    _agentId: string,
+  ): Promise<{ messages: Message[]; status: string } | null> {
+    return Promise.resolve(null);
+  }
+
+  async getSessionFilePath(sessionId: string): Promise<string | null> {
+    const stats = await this.getSqliteSessionStats(sessionId);
+    if (stats) return this.dbPath;
+    return this.legacyReader.getSessionFilePath?.(sessionId) ?? null;
+  }
+
+  async listSessionFiles(_sessionDir: string): Promise<SessionFileEntry[]> {
+    const stats = await this.listSqliteSessionStats();
+    return (
+      stats?.map((entry) => ({
+        sessionId: entry.sessionId,
+        filePath: this.dbPath,
+        mtime: entry.mtime,
+        size: entry.size,
+      })) ?? []
+    );
+  }
+
+  getIndexScopeKey(_sessionDir: string): string {
+    return `opencode::${this.dbPath}::${this.projectPath}`;
+  }
+
+  private async listSqliteSessions(
+    projectId: UrlProjectId,
+  ): Promise<SessionSummary[] | undefined> {
+    return withOpenCodeDb<SessionSummary[] | undefined>(
+      this.dbPath,
+      undefined,
+      (db) => {
+        const rows = db
+          .prepare(
+            `
+              SELECT id
+              FROM session
+              WHERE directory = ? AND time_archived IS NULL
+              ORDER BY time_updated DESC
+            `,
+          )
+          .all(this.projectPath);
+
+        const summaries: SessionSummary[] = [];
+        for (const row of rows) {
+          const sessionId = asString(row.id);
+          if (!sessionId) continue;
+          const summary = this.getSqliteSessionSummaryFromDb(
+            db,
+            sessionId,
+            projectId,
+          );
+          if (summary) summaries.push(summary);
+        }
+
+        summaries.sort(
+          (a, b) =>
+            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+        );
+        return summaries;
+      },
+    );
+  }
+
+  private async getSqliteSessionSummary(
+    sessionId: string,
+    projectId: UrlProjectId,
+  ): Promise<SessionSummary | null | undefined> {
+    return withOpenCodeDb<SessionSummary | null | undefined>(
+      this.dbPath,
+      undefined,
+      (db) => this.getSqliteSessionSummaryFromDb(db, sessionId, projectId),
+    );
+  }
+
+  private getSqliteSessionSummaryFromDb(
+    db: OpenCodeDatabase,
+    sessionId: string,
+    projectId: UrlProjectId,
+  ): SessionSummary | null {
+    const row = mapSqliteSessionRow(
+      db
+        .prepare(
+          `
+            SELECT
+              id,
+              project_id,
+              directory,
+              title,
+              model,
+              time_created,
+              time_updated,
+              tokens_input,
+              tokens_output,
+              tokens_reasoning,
+              tokens_cache_read,
+              tokens_cache_write
+            FROM session
+            WHERE id = ? AND directory = ? AND time_archived IS NULL
+          `,
+        )
+        .get(sessionId, this.projectPath),
+    );
+    if (!row) return null;
+
+    const messages = this.loadSqliteMessagesFromDb(db, sessionId);
+    if (messages.length === 0) return null;
+
+    let firstUserMessageText: string | null = null;
+    const userQuestions: SessionQuestion[] = [];
+    let model = parseOpenCodeModel(row.model);
+    let assistantTurnCount = 0;
+
+    for (const message of messages) {
+      if (message.role === "assistant") {
+        assistantTurnCount++;
+        model ??= getMessageModel(message);
+        continue;
+      }
+
+      if (message.role !== "user") continue;
+      const text = this.getSqliteMessageTextFromDb(db, message.id);
+      if (!text) continue;
+
+      firstUserMessageText ??= text;
+      const question = createSessionQuestion(
+        {
+          id: message.id,
+          text,
+          timestamp: message.time?.created
+            ? new Date(message.time.created).toISOString()
+            : undefined,
+        },
+        `opencode-user-${userQuestions.length}`,
+      );
+      if (question) userQuestions.push(question);
+    }
+
+    const nonGenericTitle = isGenericOpenCodeTitle(row.title)
+      ? null
+      : row.title?.trim() || null;
+    const fullTitle = firstUserMessageText?.trim() || nonGenericTitle;
+    const contextUsage = this.extractSqliteContextUsageFromMessages(
+      messages,
+      model,
+    );
+
+    return {
+      id: sessionId,
+      projectId,
+      title: truncateOpenCodeTitle(fullTitle),
+      fullTitle,
+      createdAt: new Date(row.createdAtMs).toISOString(),
+      updatedAt: new Date(row.updatedAtMs).toISOString(),
+      messageCount: messages.length,
+      userQuestions,
+      ownership: { owner: "none" },
+      contextUsage,
+      cumulativeUsage: computeCumulativeUsage(row, assistantTurnCount),
+      provider: "opencode",
+      model,
+    };
+  }
+
+  private async loadSqliteSessionMessages(
+    sessionId: string,
+    afterMessageId?: string,
+  ): Promise<OpenCodeSessionEntry[]> {
+    return withOpenCodeDb(this.dbPath, [], (db) => {
+      const messages = this.loadSqliteMessagesFromDb(db, sessionId);
+      const entries: OpenCodeSessionEntry[] = [];
+      let foundAfterMessage = !afterMessageId;
+
+      for (const message of messages) {
+        if (!foundAfterMessage) {
+          if (message.id === afterMessageId) {
+            foundAfterMessage = true;
+          }
+          continue;
+        }
+
+        entries.push({
+          message,
+          parts: this.loadSqliteMessagePartsFromDb(db, message.id),
+        });
+      }
+
+      return entries;
+    });
+  }
+
+  private loadSqliteMessagesFromDb(
+    db: OpenCodeDatabase,
+    sessionId: string,
+  ): OpenCodeMessage[] {
+    return db
+      .prepare(
+        `
+          SELECT id, session_id, time_created, time_updated, data
+          FROM message
+          WHERE session_id = ?
+          ORDER BY time_created ASC, id ASC
+        `,
+      )
+      .all(sessionId)
+      .map(messageFromSqliteRow)
+      .filter((message): message is OpenCodeMessage => message !== null);
+  }
+
+  private loadSqliteMessagePartsFromDb(
+    db: OpenCodeDatabase,
+    messageId: string,
+  ): OpenCodeStoredPart[] {
+    return db
+      .prepare(
+        `
+          SELECT id, message_id, session_id, time_created, time_updated, data
+          FROM part
+          WHERE message_id = ?
+          ORDER BY time_created ASC, id ASC
+        `,
+      )
+      .all(messageId)
+      .map(partFromSqliteRow)
+      .filter((part): part is OpenCodeStoredPart => part !== null);
+  }
+
+  private getSqliteMessageTextFromDb(
+    db: OpenCodeDatabase,
+    messageId: string,
+  ): string | null {
+    return extractMessageText(this.loadSqliteMessagePartsFromDb(db, messageId));
+  }
+
+  private extractSqliteContextUsageFromMessages(
+    messages: OpenCodeMessage[],
+    model: string | undefined,
+  ): ContextUsage | undefined {
+    const contextWindowSize = getModelContextWindow(model);
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (!message || message.role !== "assistant" || !message.tokens) continue;
+
+      const inputTokens =
+        (message.tokens.input ?? 0) +
+        (message.tokens.cache?.read ?? 0) +
+        (message.tokens.cache?.write ?? 0);
+      if (inputTokens === 0) continue;
+
+      const usage: ContextUsage = {
+        inputTokens,
+        percentage: Math.round((inputTokens / contextWindowSize) * 100),
+        contextWindow: contextWindowSize,
+      };
+      if (message.tokens.output !== undefined && message.tokens.output > 0) {
+        usage.outputTokens = message.tokens.output;
+      }
+      if (
+        message.tokens.cache?.read !== undefined &&
+        message.tokens.cache.read > 0
+      ) {
+        usage.cacheReadTokens = message.tokens.cache.read;
+      }
+      if (
+        message.tokens.cache?.write !== undefined &&
+        message.tokens.cache.write > 0
+      ) {
+        usage.cacheCreationTokens = message.tokens.cache.write;
+      }
+      return usage;
+    }
+
+    return undefined;
+  }
+
+  private async listSqliteSessionStats(): Promise<
+    OpenCodeSqliteSessionStats[] | undefined
+  > {
+    return withOpenCodeDb<OpenCodeSqliteSessionStats[] | undefined>(
+      this.dbPath,
+      undefined,
+      (db) => {
+        const rows = db
+          .prepare(
+            `
+              ${SESSION_STATS_SQL}
+              WHERE s.directory = ? AND s.time_archived IS NULL
+              ORDER BY mtime DESC
+            `,
+          )
+          .all(this.projectPath);
+
+        return rows
+          .map((row) => this.mapStatsRow(row))
+          .filter(
+            (stats): stats is OpenCodeSqliteSessionStats => stats !== null,
+          );
+      },
+    );
+  }
+
+  private async getSqliteSessionStats(
+    sessionId: string,
+  ): Promise<OpenCodeSqliteSessionStats | null | undefined> {
+    return withOpenCodeDb<OpenCodeSqliteSessionStats | null | undefined>(
+      this.dbPath,
+      undefined,
+      (db) =>
+        this.mapStatsRow(
+          db
+            .prepare(
+              `
+                ${SESSION_STATS_SQL}
+                WHERE s.id = ? AND s.directory = ? AND s.time_archived IS NULL
+              `,
+            )
+            .get(sessionId, this.projectPath),
+        ),
+    );
+  }
+
+  private mapStatsRow(
+    row: Record<string, unknown> | undefined,
+  ): OpenCodeSqliteSessionStats | null {
+    if (!row) return null;
+    const sessionId = asString(row.id);
+    const mtime = asNumber(row.mtime);
+    const size = asNumber(row.indexed_size);
+    const messageCount = asNumber(row.message_count) ?? 0;
+    if (!sessionId || mtime === undefined || size === undefined) return null;
+    return {
+      sessionId,
+      mtime,
+      size,
+      messageCount,
+    };
   }
 }

@@ -13,7 +13,7 @@ type PermissionMode =
 
 type InputResponse = "approve" | "approve_accept_edits" | "deny";
 
-interface ClaudeBridgeServiceOptions {
+interface OpenCodeBridgeServiceOptions {
   enabled: boolean;
   host: string;
   port: number;
@@ -21,7 +21,7 @@ interface ClaudeBridgeServiceOptions {
   desktopToken?: string;
 }
 
-interface ClaudeBridgeStatus {
+interface OpenCodeBridgeStatus {
   enabled: boolean;
   listening: boolean;
   host: string;
@@ -82,7 +82,7 @@ interface ClientConfig {
   desktopToken?: string;
 }
 
-export class ClaudeBridgeService {
+export class OpenCodeBridgeService {
   private readonly enabled: boolean;
   private readonly host: string;
   private readonly port: number;
@@ -94,7 +94,7 @@ export class ClaudeBridgeService {
   private lastError: string | null = null;
   private sessions = new Map<string, SessionRecord>();
 
-  constructor(options: ClaudeBridgeServiceOptions) {
+  constructor(options: OpenCodeBridgeServiceOptions) {
     this.enabled = options.enabled;
     this.host = options.host;
     this.port = options.port;
@@ -120,7 +120,7 @@ export class ClaudeBridgeService {
         this.listening = false;
         this.server = null;
         console.warn(
-          `[ClaudeBridge] Failed to listen on http://${this.host}:${this.port}: ${error.message}`,
+          `[OpenCodeBridge] Failed to listen on http://${this.host}:${this.port}: ${error.message}`,
         );
         cleanup();
         resolve();
@@ -129,7 +129,7 @@ export class ClaudeBridgeService {
         this.listening = true;
         this.lastError = null;
         console.log(
-          `[ClaudeBridge] Listening on http://${this.host}:${this.port}`,
+          `[OpenCodeBridge] Listening on http://${this.host}:${this.port}`,
         );
         cleanup();
         resolve();
@@ -146,7 +146,7 @@ export class ClaudeBridgeService {
 
     server.on("error", (error) => {
       this.lastError = error.message;
-      console.warn(`[ClaudeBridge] Server error: ${error.message}`);
+      console.warn(`[OpenCodeBridge] Server error: ${error.message}`);
     });
   }
 
@@ -158,7 +158,7 @@ export class ClaudeBridgeService {
     this.listening = false;
   }
 
-  getStatus(): ClaudeBridgeStatus {
+  getStatus(): OpenCodeBridgeStatus {
     return {
       enabled: this.enabled,
       listening: this.listening,
@@ -186,7 +186,7 @@ export class ClaudeBridgeService {
   ): Promise<void> {
     if (!this.isLocalAddress(req.socket.remoteAddress ?? "")) {
       this.writeJson(res, 403, {
-        error: "Claude bridge only accepts local connections",
+        error: "OpenCode bridge only accepts local connections",
       });
       return;
     }
@@ -295,10 +295,12 @@ export class ClaudeBridgeService {
           {
             mode: request.mode,
             model: request.model,
+            resumeSessionAt: request.resumeSessionAt,
           },
         );
+        const responseSessionId = response.sessionId ?? sessionId;
         this.recordSession(
-          sessionId,
+          responseSessionId,
           projectId,
           request.cwd,
           this.getClientConfig(req, body),
@@ -476,7 +478,7 @@ class YepApiClient {
         message,
         mode: options.mode,
         model: options.model,
-        provider: "claude",
+        provider: "opencode",
       },
     });
   }
@@ -485,7 +487,11 @@ class YepApiClient {
     projectId: string,
     sessionId: string,
     message: string,
-    options: { mode?: PermissionMode; model?: string },
+    options: {
+      mode?: PermissionMode;
+      model?: string;
+      resumeSessionAt?: string;
+    },
   ): Promise<StartSessionResponse> {
     const response = await this.request<StartSessionResponse>(
       `/api/projects/${projectId}/sessions/${sessionId}/resume`,
@@ -495,11 +501,12 @@ class YepApiClient {
           message,
           mode: options.mode,
           model: options.model,
-          provider: "claude",
+          resumeSessionAt: options.resumeSessionAt,
+          provider: "opencode",
         },
       },
     );
-    return { ...response, sessionId };
+    return { sessionId, ...response };
   }
 
   getSession(
@@ -524,7 +531,7 @@ class YepApiClient {
         message,
         mode: options.mode,
         model: options.model,
-        provider: "claude",
+        provider: "opencode",
       },
     });
   }
@@ -575,6 +582,7 @@ function parseSessionRequest(raw: unknown): {
   message?: string;
   mode?: PermissionMode;
   model?: string;
+  resumeSessionAt?: string;
 } {
   const body = asRecord(raw);
   const cwd =
@@ -585,7 +593,11 @@ function parseSessionRequest(raw: unknown): {
       ? body.mode
       : undefined;
   const model = typeof body?.model === "string" ? body.model : undefined;
-  return { cwd, message, mode, model };
+  const resumeSessionAt =
+    typeof body?.resumeSessionAt === "string"
+      ? body.resumeSessionAt
+      : undefined;
+  return { cwd, message, mode, model, resumeSessionAt };
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
