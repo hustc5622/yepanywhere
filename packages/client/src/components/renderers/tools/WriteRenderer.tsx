@@ -32,6 +32,31 @@ function getFileName(filePath: string): string {
   return filePath.split("/").pop() || filePath;
 }
 
+function normalizeWriteResult(
+  result: WriteResult | string | undefined,
+  input?: WriteInputWithAugment,
+): WriteResult | undefined {
+  if (result && typeof result !== "string") {
+    return result;
+  }
+
+  if (!input?.file_path || typeof input.content !== "string") {
+    return undefined;
+  }
+
+  const lineCount = input.content.split("\n").length;
+  return {
+    type: "text",
+    file: {
+      filePath: input.file_path,
+      content: input.content,
+      numLines: lineCount,
+      startLine: 1,
+      totalLines: lineCount,
+    },
+  };
+}
+
 /**
  * Truncate highlighted HTML to a specified number of lines.
  * Shiki output wraps each line in <span class="line">.
@@ -160,10 +185,11 @@ function WriteToolResult({
   isError,
   input,
 }: {
-  result: WriteResult;
+  result: WriteResult | string | undefined;
   isError: boolean;
   input?: WriteInputWithAugment;
 }) {
+  const normalizedResult = normalizeWriteResult(result, input);
   const [isExpanded, setIsExpanded] = useState(false);
   const { enabled, reportValidationError, isToolIgnored } =
     useSchemaValidationContext();
@@ -172,8 +198,8 @@ function WriteToolResult({
   );
 
   useEffect(() => {
-    if (enabled && result) {
-      const validation = validateToolResult("Write", result);
+    if (enabled && normalizedResult) {
+      const validation = validateToolResult("Write", normalizedResult);
       if (!validation.valid && validation.errors) {
         setValidationErrors(validation.errors);
         reportValidationError("Write", validation.errors);
@@ -181,12 +207,12 @@ function WriteToolResult({
         setValidationErrors(null);
       }
     }
-  }, [enabled, result, reportValidationError]);
+  }, [enabled, normalizedResult, reportValidationError]);
 
   const showValidationWarning =
     enabled && validationErrors && !isToolIgnored("Write");
 
-  if (isError || !result?.file) {
+  if (isError || !normalizedResult?.file) {
     // Extract error message - can be a string or object with content
     let errorMessage = "Failed to write file";
     if (typeof result === "string") {
@@ -207,7 +233,7 @@ function WriteToolResult({
     );
   }
 
-  const { file } = result;
+  const { file } = normalizedResult;
   const lines = file.content.split("\n");
   const needsCollapse = lines.length > MAX_LINES_COLLAPSED;
   const fileName = getFileName(file.filePath);
@@ -427,7 +453,7 @@ export const writeRenderer: ToolRenderer<WriteInput, WriteResult> = {
   renderToolResult(result, isError, _context, input) {
     return (
       <WriteToolResult
-        result={result as WriteResult}
+        result={result as WriteResult | string | undefined}
         isError={isError}
         input={input as WriteInputWithAugment | undefined}
       />
@@ -440,7 +466,10 @@ export const writeRenderer: ToolRenderer<WriteInput, WriteResult> = {
 
   getResultSummary(result, isError, input?) {
     if (isError) return "Error";
-    const r = result as WriteResult;
+    const r = normalizeWriteResult(
+      result as WriteResult | string | undefined,
+      input as WriteInputWithAugment | undefined,
+    );
     if (r?.file) {
       return getFileName(r.file.filePath);
     }

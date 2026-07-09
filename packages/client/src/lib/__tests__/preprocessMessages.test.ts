@@ -86,6 +86,128 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("normalizes OpenCode tool input and string output for expandable rows", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_read",
+            name: "read",
+            input: {
+              filePath:
+                "/repo/packages/client/src/components/blocks/ToolCallRow.tsx",
+            },
+            opencodeStatus: "completed",
+            opencodeTitle:
+              "packages/client/src/components/blocks/ToolCallRow.tsx",
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "call_read",
+            content:
+              '<path>/repo/packages/client/src/components/blocks/ToolCallRow.tsx</path>\n<type>file</type>\n<content>\n10: import { ToolCallRow } from "./blocks/ToolCallRow";\n11: \n(End of file - total 11 lines)\n</content>',
+            is_error: false,
+            opencodeStatus: "completed",
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "call_read",
+      toolName: "read",
+      status: "complete",
+      toolInput: {
+        filePath: "/repo/packages/client/src/components/blocks/ToolCallRow.tsx",
+        file_path:
+          "/repo/packages/client/src/components/blocks/ToolCallRow.tsx",
+        opencodeTitle: "packages/client/src/components/blocks/ToolCallRow.tsx",
+      },
+      toolResult: {
+        isError: false,
+        structured: {
+          type: "text",
+          file: {
+            filePath:
+              "/repo/packages/client/src/components/blocks/ToolCallRow.tsx",
+            content: 'import { ToolCallRow } from "./blocks/ToolCallRow";',
+            numLines: 1,
+            startLine: 10,
+            totalLines: 11,
+          },
+        },
+      },
+    });
+  });
+
+  it("normalizes OpenCode write output from input content", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_write",
+            name: "write",
+            input: {
+              filePath: "/repo/migrations/0011_benchmark_metrics.sql",
+              content:
+                "CREATE TABLE benchmark_metric (\n  id BIGINT PRIMARY KEY\n);",
+            },
+            opencodeStatus: "completed",
+            opencodeTitle: "migrations/0011_benchmark_metrics.sql",
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "call_write",
+            content: "Wrote file successfully.",
+            is_error: false,
+            opencodeStatus: "completed",
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "call_write",
+      toolName: "write",
+      status: "complete",
+      toolInput: {
+        filePath: "/repo/migrations/0011_benchmark_metrics.sql",
+        file_path: "/repo/migrations/0011_benchmark_metrics.sql",
+        content: "CREATE TABLE benchmark_metric (\n  id BIGINT PRIMARY KEY\n);",
+      },
+      toolResult: {
+        isError: false,
+        structured: {
+          type: "text",
+          file: {
+            filePath: "/repo/migrations/0011_benchmark_metrics.sql",
+            content:
+              "CREATE TABLE benchmark_metric (\n  id BIGINT PRIMARY KEY\n);",
+            numLines: 3,
+            startLine: 1,
+            totalLines: 3,
+          },
+        },
+      },
+    });
+  });
+
   it("collapses repeated plan progress snapshots within one user turn", () => {
     const messages: Message[] = [
       {

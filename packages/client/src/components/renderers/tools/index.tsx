@@ -3,8 +3,17 @@ import type { RenderContext } from "../types";
 import type { ToolRenderer } from "./types";
 
 const TOOL_NAME_ALIASES: Record<string, string> = {
+  bash: "Bash",
+  shell: "Bash",
   shell_command: "Bash",
   exec_command: "Bash",
+  read: "Read",
+  write: "Write",
+  edit: "Edit",
+  glob: "Glob",
+  grep: "Grep",
+  todowrite: "TodoWrite",
+  todo: "TodoWrite",
   write_stdin: "WriteStdin",
   update_plan: "UpdatePlan",
   apply_patch: "Edit",

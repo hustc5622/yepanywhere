@@ -240,10 +240,12 @@
 
 .local-file-modal-content {
   display: flex;
-  min-height: 12rem;
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: 72vh;
   flex-direction: column;
   gap: 0.75rem;
+  overflow: hidden;
 }
 
 .local-file-loading,
@@ -266,6 +268,8 @@
 }
 
 .local-file-text {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   margin: 0;
   padding: 0.75rem 0;
@@ -1197,7 +1201,10 @@ details[open] .collapsible__icon {
 
 .file-content-with-lines {
   display: grid;
+  flex: 1 1 auto;
   grid-template-columns: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: auto;
   font-family: "SF Mono", Monaco, monospace;
   font-size: var(--font-size-base);
   background: var(--bg-code);
@@ -1983,6 +1990,10 @@ details[open] .collapsible__icon {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--bg-success, rgba(35, 134, 54, 0.12));
+  border: 1px solid rgba(35, 134, 54, 0.28);
+  border-radius: 4px;
 }
 
 .write-error {
@@ -3481,11 +3492,30 @@ details[open] .collapsible__icon {
 }
 
 /* Modal code content containers */
-.file-content-modal,
+.file-content-modal {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-code);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
 .diff-modal-content {
   background: var(--bg-code);
   border-radius: 4px;
   overflow: auto;
+}
+
+.file-content-range-notice {
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
 
 /* Diff context expansion controls */
@@ -3855,6 +3885,7 @@ pre.code-highlighter-plain code {
 .markdown-preview {
   flex: 1 1 auto;
   min-height: 0;
+  width: 100%;
   overflow: auto;
 }
 

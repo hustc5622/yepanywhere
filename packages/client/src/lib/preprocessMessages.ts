@@ -613,11 +613,12 @@ function processMessage(
 
         // Check if this tool call is orphaned (process killed before result)
         const isOrphaned = orphanedToolIds.has(block.id);
+        const toolInput = normalizeOpenCodeToolInput(block);
         const toolCall: ToolCallItem = {
           type: "tool_call",
           id: block.id,
           toolName: block.name,
-          toolInput: block.input,
+          toolInput,
           toolResult: undefined,
           status: getInitialToolStatus(block, isOrphaned),
           sourceMessages: [msg],
@@ -663,6 +664,62 @@ function getInitialToolStatus(
     default:
       return "pending";
   }
+}
+
+function normalizeOpenCodeToolInput(block: ContentBlock): unknown {
+  const input = isRecord(block.input) ? { ...block.input } : block.input;
+  if (!isRecord(input)) {
+    return input;
+  }
+
+  const title = getStringField(block, "opencodeTitle");
+  if (title) {
+    input.opencodeTitle = title;
+  }
+  if (isRecord(block) && block.opencodeMetadata !== undefined) {
+    input.opencodeMetadata = block.opencodeMetadata;
+  }
+
+  const name = typeof block.name === "string" ? block.name.toLowerCase() : "";
+  if (
+    (name === "read" || name === "write" || name === "edit") &&
+    typeof input.filePath === "string" &&
+    typeof input.file_path !== "string"
+  ) {
+    input.file_path = input.filePath;
+  }
+
+  if (
+    name === "edit" &&
+    typeof input.oldString === "string" &&
+    typeof input.old_string !== "string"
+  ) {
+    input.old_string = input.oldString;
+  }
+  if (
+    name === "edit" &&
+    typeof input.newString === "string" &&
+    typeof input.new_string !== "string"
+  ) {
+    input.new_string = input.newString;
+  }
+  if (
+    name === "edit" &&
+    typeof input.replaceAll === "boolean" &&
+    typeof input.replace_all !== "boolean"
+  ) {
+    input.replace_all = input.replaceAll;
+  }
+
+  if (
+    name === "grep" &&
+    typeof input.include === "string" &&
+    typeof input.glob !== "string"
+  ) {
+    input.glob = input.include;
+  }
+
+  return input;
 }
 
 function getStringField(value: unknown, field: string): string | undefined {
@@ -997,9 +1054,19 @@ function attachToolResult(
 
   // Attach result to existing tool call
   // Handle both camelCase (toolUseResult) and snake_case (tool_use_result) from SDK
+  const content = typeof block.content === "string" ? block.content : "";
   let structured =
     resultMessage.toolUseResult ??
     (resultMessage as Record<string, unknown>).tool_use_result;
+
+  if (!structured) {
+    structured = normalizeOpenCodeToolResult(
+      item.toolName,
+      content,
+      block.is_error || false,
+      item.toolInput,
+    );
+  }
 
   // SDK 0.2.76+: Agent tool has no structured tool_use_result.
   // Parse agentId and usage stats from the text content blocks instead.
@@ -1008,7 +1075,7 @@ function attachToolResult(
   }
 
   const resultData: ToolResultData = {
-    content: typeof block.content === "string" ? block.content : "",
+    content,
     isError: block.is_error || false,
     structured,
   };
@@ -1027,6 +1094,181 @@ function attachToolResult(
 
   items[index] = updatedItem;
   pendingToolCalls.delete(toolUseId);
+}
+
+function normalizeOpenCodeToolResult(
+  toolName: string,
+  content: string,
+  isError: boolean,
+  input: unknown,
+): unknown {
+  const normalized = toolName.toLowerCase();
+
+  if (normalized === "bash" || normalized === "shell") {
+    return {
+      stdout: isError ? "" : content,
+      stderr: isError ? content : "",
+      interrupted: false,
+      isImage: false,
+    };
+  }
+
+  if (normalized === "read") {
+    return normalizeOpenCodeReadResult(content, input);
+  }
+
+  if (normalized === "write") {
+    return normalizeOpenCodeWriteResult(input);
+  }
+
+  if (normalized === "glob") {
+    const filenames = content
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("("));
+    return {
+      filenames,
+      numFiles: filenames.length,
+      durationMs: 0,
+      truncated: content.includes("Results are truncated"),
+    };
+  }
+
+  if (normalized === "grep") {
+    const filenames = new Set<string>();
+    for (const line of content.split("\n")) {
+      if (!line.trim() || line.startsWith("  Line ")) continue;
+      if (line.endsWith(":")) {
+        filenames.add(line.slice(0, -1));
+      }
+    }
+    return {
+      mode: "content",
+      filenames: Array.from(filenames),
+      numFiles: filenames.size,
+      content,
+      numLines: content.split("\n").filter(Boolean).length,
+    };
+  }
+
+  if (normalized === "todowrite" || normalized === "todo") {
+    try {
+      const todos = JSON.parse(content);
+      if (Array.isArray(todos)) {
+        return { oldTodos: [], newTodos: todos };
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeOpenCodeWriteResult(input: unknown): unknown {
+  if (!isRecord(input)) {
+    return undefined;
+  }
+
+  const filePath =
+    typeof input.file_path === "string"
+      ? input.file_path
+      : typeof input.filePath === "string"
+        ? input.filePath
+        : undefined;
+  const content = typeof input.content === "string" ? input.content : undefined;
+  if (!filePath || content === undefined) {
+    return undefined;
+  }
+
+  const lineCount = content.split("\n").length;
+  return {
+    type: "text",
+    file: {
+      filePath,
+      content,
+      numLines: lineCount,
+      startLine: 1,
+      totalLines: lineCount,
+    },
+  };
+}
+
+function normalizeOpenCodeReadResult(content: string, input: unknown): unknown {
+  const filePath =
+    getXmlTag(content, "path") ??
+    (isRecord(input) &&
+    (typeof input.file_path === "string" || typeof input.filePath === "string")
+      ? String(input.file_path ?? input.filePath)
+      : "");
+  if (!filePath) {
+    return undefined;
+  }
+
+  const type = getXmlTag(content, "type");
+  const rawContent =
+    getXmlTag(content, "content") ?? getXmlTag(content, "entries");
+  if (!rawContent) {
+    return {
+      type: "text",
+      file: {
+        filePath,
+        content,
+        numLines: content.split("\n").length,
+        startLine: 1,
+        totalLines: content.split("\n").length,
+      },
+    };
+  }
+
+  const startLine = parseOpenCodeReadStartLine(rawContent);
+  const text =
+    type === "directory"
+      ? rawContent.trim()
+      : stripOpenCodeReadLineNumbers(rawContent);
+  const numLines = text ? text.split("\n").length : 0;
+  const totalLines =
+    parseOpenCodeReadTotalLines(content) ??
+    Math.max(startLine + Math.max(numLines - 1, 0), numLines);
+
+  return {
+    type: "text",
+    file: {
+      filePath,
+      content: text,
+      numLines,
+      startLine,
+      totalLines,
+    },
+  };
+}
+
+function getXmlTag(text: string, tag: string): string | undefined {
+  const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
+  return match?.[1]?.trim();
+}
+
+function stripOpenCodeReadLineNumbers(text: string): string {
+  return text
+    .split("\n")
+    .filter(
+      (line) =>
+        !line.startsWith("(End of file") && !line.startsWith("(Showing lines"),
+    )
+    .map((line) => line.replace(/^\d+:\s?/, ""))
+    .join("\n")
+    .trimEnd();
+}
+
+function parseOpenCodeReadStartLine(text: string): number {
+  const firstNumberedLine = text.match(/^(\d+):/m);
+  return firstNumberedLine?.[1] ? Number.parseInt(firstNumberedLine[1], 10) : 1;
+}
+
+function parseOpenCodeReadTotalLines(text: string): number | undefined {
+  const totalMatch =
+    text.match(/total\s+(\d+)\s+lines/i) ?? text.match(/of\s+(\d+)\./i);
+  return totalMatch?.[1] ? Number.parseInt(totalMatch[1], 10) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

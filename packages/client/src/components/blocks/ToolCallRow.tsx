@@ -40,7 +40,9 @@ export const ToolCallRow = memo(function ToolCallRow({
   const structuredResult = toolResult?.structured ?? toolResult?.content;
 
   // Check if this tool renders inline (bypasses entire tool-row structure)
-  const hasInlineRenderer = toolRegistry.hasInlineRenderer(toolName);
+  const preferExpandableRow = sessionProvider === "opencode";
+  const hasInlineRenderer =
+    !preferExpandableRow && toolRegistry.hasInlineRenderer(toolName);
   const suppressCollapsedPreview = shouldSuppressBashCollapsedPreview(
     toolName,
     toolInput,
@@ -49,6 +51,9 @@ export const ToolCallRow = memo(function ToolCallRow({
   );
 
   const interactiveSummaryContent = useMemo(() => {
+    if (preferExpandableRow) {
+      return null;
+    }
     if (status !== "complete") {
       return null;
     }
@@ -66,6 +71,7 @@ export const ToolCallRow = memo(function ToolCallRow({
     structuredResult,
     toolResult,
     renderContext,
+    preferExpandableRow,
   ]);
 
   const hasInteractiveSummary =
@@ -74,6 +80,9 @@ export const ToolCallRow = memo(function ToolCallRow({
     interactiveSummaryContent !== false;
 
   const collapsedPreviewContent = useMemo(() => {
+    if (preferExpandableRow) {
+      return null;
+    }
     if (suppressCollapsedPreview) {
       return null;
     }
@@ -91,6 +100,7 @@ export const ToolCallRow = memo(function ToolCallRow({
     structuredResult,
     toolResult,
     renderContext,
+    preferExpandableRow,
   ]);
 
   const hasCollapsedPreview =
@@ -98,7 +108,7 @@ export const ToolCallRow = memo(function ToolCallRow({
     collapsedPreviewContent !== undefined &&
     collapsedPreviewContent !== false;
   const hideSummaryWhenPreviewVisible =
-    toolName === "Bash" &&
+    isBashToolName(toolName) &&
     status === "pending" &&
     hasCollapsedPreview &&
     isCodexLikeBashInput(toolInput, sessionProvider);
@@ -111,8 +121,10 @@ export const ToolCallRow = memo(function ToolCallRow({
   );
 
   const summary = useMemo(() => {
-    return getToolSummary(toolName, toolInput, toolResult, status);
-  }, [toolName, toolInput, toolResult, status]);
+    return getToolSummary(toolName, toolInput, toolResult, status, {
+      provider: sessionProvider,
+    });
+  }, [toolName, toolInput, toolResult, status, sessionProvider]);
 
   const handleToggle = () => {
     if (!isNonExpandable) {
@@ -221,8 +233,12 @@ function shouldSuppressBashCollapsedPreview(
   sessionProvider?: string,
   status?: "pending" | "complete" | "error" | "aborted",
 ): boolean {
-  if (toolName !== "Bash") {
+  if (!isBashToolName(toolName)) {
     return false;
+  }
+
+  if (sessionProvider === "opencode") {
+    return true;
   }
 
   if (!isCodexLikeBashInput(toolInput, sessionProvider)) {
@@ -246,6 +262,11 @@ function shouldSuppressBashCollapsedPreview(
   }
 
   return /^(rg|grep|sed|nl|cat)\b/.test(command.trimStart());
+}
+
+function isBashToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === "bash" || normalized === "shell";
 }
 
 function ToolUseExpanded({
