@@ -73,6 +73,7 @@ import { health } from "./routes/health.js";
 import { createInboxRoutes } from "./routes/inbox.js";
 import { createNetworkBindingRoutes } from "./routes/network-binding.js";
 import { createOnboardingRoutes } from "./routes/onboarding.js";
+import { createOpenCodeBridgeRoutes } from "./routes/opencode-bridge.js";
 import { createProcessesRoutes } from "./routes/processes.js";
 import { createProjectsRoutes } from "./routes/projects.js";
 import { buildProviderProjectCatalog } from "./routes/provider-catalog.js";
@@ -87,6 +88,7 @@ import { createSettingsRoutes } from "./routes/settings.js";
 import { createSharingRoutes } from "./routes/sharing.js";
 import { ClaudeOllamaProvider } from "./sdk/providers/claude-ollama.js";
 
+import type { OpenCodeBridgeController } from "./opencode-bridge/types.js";
 import { createLocalFileRoutes } from "./routes/local-file.js";
 import { createLocalImageRoutes } from "./routes/local-image.js";
 import { type UploadDeps, createUploadRoutes } from "./routes/upload.js";
@@ -203,6 +205,8 @@ export interface AppOptions {
   deviceBridgeService?: DeviceBridgeService;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
   codexBridgeService?: CodexBridgeController;
+  /** OpenCode bridge for OpenCode CLI sessions. */
+  opencodeBridgeService?: OpenCodeBridgeController;
   /** AI title generation settings. */
   sessionTitleGeneration?: SessionTitleGenerationConfig;
   /** If non-empty, only these provider names are exposed via the API. */
@@ -868,6 +872,15 @@ export function createApp(options: AppOptions): AppResult {
     );
   }
 
+  if (options.opencodeBridgeService) {
+    app.route(
+      "/api/opencode-bridge",
+      createOpenCodeBridgeRoutes({
+        opencodeBridgeService: options.opencodeBridgeService,
+      }),
+    );
+  }
+
   // Mount API routes
   app.route(
     "/api/projects",
@@ -913,6 +926,7 @@ export function createApp(options: AppOptions): AppResult {
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
       codexBridgeService: options.codexBridgeService,
+      opencodeBridgeService: options.opencodeBridgeService,
       sessionArchiveService: options.sessionArchiveService,
       claudeProjectsDir: options.projectsDir ?? CLAUDE_PROJECTS_DIR,
     }),
@@ -979,6 +993,7 @@ export function createApp(options: AppOptions): AppResult {
       opencodeDbPath: OPENCODE_DB_PATH,
       opencodeReaderFactory,
       codexBridgeService: options.codexBridgeService,
+      opencodeBridgeService: options.opencodeBridgeService,
     }),
   );
 
@@ -1004,6 +1019,7 @@ export function createApp(options: AppOptions): AppResult {
       opencodeReaderFactory,
       eventBus: options.eventBus,
       codexBridgeService: options.codexBridgeService,
+      opencodeBridgeService: options.opencodeBridgeService,
     }),
   );
 

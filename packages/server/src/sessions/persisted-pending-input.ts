@@ -17,7 +17,7 @@ function getContentBlocks(message: Message): ContentBlockLike[] {
     .map((block) => block as ContentBlockLike);
 }
 
-function isAskUserQuestionInput(input: unknown): input is {
+function isQuestionInput(input: unknown): input is {
   questions: Array<{ question?: unknown }>;
 } {
   if (!input || typeof input !== "object") return false;
@@ -25,12 +25,27 @@ function isAskUserQuestionInput(input: unknown): input is {
   return Array.isArray(questions) && questions.length > 0;
 }
 
+function normalizeQuestionInput(input: unknown): unknown {
+  if (!isQuestionInput(input)) return input;
+  return {
+    ...(input as Record<string, unknown>),
+    questions: input.questions.map((question) => {
+      if (!question || typeof question !== "object") return question;
+      const record = question as Record<string, unknown>;
+      return {
+        ...record,
+        multiSelect: Boolean(record.multiSelect ?? record.multiple),
+      };
+    }),
+  };
+}
+
 /**
- * Claude CLI sessions owned by an external terminal can stop at an
- * AskUserQuestion tool_use. Yep does not own that process, so the live Process
- * pending-input queue is empty, but the pending question is still visible in the
- * JSONL. Reconstruct a read-only InputRequest from the persisted tool_use so the
- * UI can show the choice prompt instead of appearing idle.
+ * Provider sessions owned by an external terminal can stop at a question
+ * tool_use. Yep does not own that process, so the live Process pending-input
+ * queue is empty, but the pending question is still visible in persisted data.
+ * Reconstruct a read-only InputRequest from the persisted tool_use so the UI can
+ * show the choice prompt instead of appearing idle.
  */
 export function getPersistedAskUserQuestionInputRequest(
   messages: Message[],
@@ -60,16 +75,20 @@ export function getPersistedAskUserQuestionInputRequest(
     const blocks = getContentBlocks(message);
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex--) {
       const block = blocks[blockIndex];
+      if (!block) continue;
+      const isClaudeQuestion = block.name === "AskUserQuestion";
+      const isOpenCodeQuestion = block.name === "question";
       if (
         block?.type !== "tool_use" ||
-        block.name !== "AskUserQuestion" ||
+        (!isClaudeQuestion && !isOpenCodeQuestion) ||
         typeof block.id !== "string" ||
         answeredToolUseIds.has(block.id) ||
-        !isAskUserQuestionInput(block.input)
+        !isQuestionInput(block.input)
       ) {
         continue;
       }
 
+      const toolInput = normalizeQuestionInput(block.input);
       const firstQuestion = block.input.questions[0]?.question;
       return {
         id: block.id,
@@ -77,7 +96,7 @@ export function getPersistedAskUserQuestionInputRequest(
         type: "question",
         prompt: typeof firstQuestion === "string" ? firstQuestion : "Question",
         toolName: "AskUserQuestion",
-        toolInput: block.input,
+        toolInput,
         timestamp: message.timestamp ?? new Date().toISOString(),
         source: "persisted",
       };

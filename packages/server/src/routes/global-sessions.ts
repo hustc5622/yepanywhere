@@ -23,6 +23,11 @@ import type { CodexBridgeController } from "../codex-bridge/types.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/index.js";
+import { isLiveOpenCodeBridgeSessionView } from "../opencode-bridge/session-state.js";
+import type {
+  OpenCodeBridgeController,
+  OpenCodeBridgeSessionView,
+} from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -78,6 +83,58 @@ export interface GlobalSessionsDeps {
   eventBus?: EventBus;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
   codexBridgeService?: CodexBridgeController;
+  /** OpenCode bridge for OpenCode CLI sessions. */
+  opencodeBridgeService?: OpenCodeBridgeController;
+}
+
+type AnyBridgeSessionView =
+  | Awaited<ReturnType<CodexBridgeController["getSessionView"]>>
+  | OpenCodeBridgeSessionView;
+
+async function listBridgeSessionViews(
+  deps: Pick<
+    GlobalSessionsDeps,
+    "codexBridgeService" | "opencodeBridgeService"
+  >,
+): Promise<OpenCodeBridgeSessionView[]> {
+  const [codexViews, opencodeViews] = await Promise.all([
+    deps.codexBridgeService?.listSessionViews() ?? [],
+    deps.opencodeBridgeService?.listSessionViews() ?? [],
+  ]);
+  return [...codexViews, ...opencodeViews] as OpenCodeBridgeSessionView[];
+}
+
+async function getBridgeSessionView(
+  deps: Pick<
+    GlobalSessionsDeps,
+    "codexBridgeService" | "opencodeBridgeService"
+  >,
+  sessionId: string,
+): Promise<NonNullable<AnyBridgeSessionView> | null> {
+  return (
+    (await deps.codexBridgeService?.getSessionView(sessionId)) ??
+    (await deps.opencodeBridgeService?.getSessionView(sessionId)) ??
+    null
+  );
+}
+
+async function isBridgeSessionActive(
+  deps: Pick<
+    GlobalSessionsDeps,
+    "codexBridgeService" | "opencodeBridgeService"
+  >,
+  sessionId: string,
+): Promise<boolean> {
+  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
+    return true;
+  }
+  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+}
+
+function isLiveAnyBridgeSessionView(
+  view: NonNullable<AnyBridgeSessionView>,
+): boolean {
+  return isLiveBridgeSessionView(view) || isLiveOpenCodeBridgeSessionView(view);
 }
 
 export interface GlobalSessionItem {
@@ -389,8 +446,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       }
     }
 
-    const statsBridgeSessionViews =
-      (await deps.codexBridgeService?.listSessionViews()) ?? [];
+    const statsBridgeSessionViews = await listBridgeSessionViews(deps);
     for (const item of statsBridgeSessionViews) {
       if (seenSessionIds.has(item.session.id)) continue;
       const metadata = deps.sessionMetadataService?.getMetadata(
@@ -490,8 +546,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
     const projectOptions: ProjectOption[] = allProjects
       .map((p) => ({ id: p.id, name: p.name }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    const bridgeSessionViews =
-      (await deps.codexBridgeService?.listSessionViews()) ?? [];
+    const bridgeSessionViews = await listBridgeSessionViews(deps);
     for (const item of bridgeSessionViews) {
       if (
         !projectOptions.some((project) => project.id === item.session.projectId)
@@ -613,17 +668,15 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         const process = deps.supervisor?.getProcessForSession(session.id);
         const bridgedSession =
           bridgedSessionById.get(session.id) ??
-          (await deps.codexBridgeService?.getSessionView(session.id)) ??
-          null;
-        const isBridgeSessionActive = bridgedSession
-          ? ((await deps.codexBridgeService?.isSessionActive(session.id)) ??
-            false)
+          (await getBridgeSessionView(deps, session.id));
+        const bridgeSessionActive = bridgedSession
+          ? await isBridgeSessionActive(deps, session.id)
           : false;
         const isBridgeSessionLive =
-          bridgedSession !== null && isLiveBridgeSessionView(bridgedSession);
+          bridgedSession !== null && isLiveAnyBridgeSessionView(bridgedSession);
         const isExternal =
           (deps.externalTracker?.isExternal(session.id) ?? false) ||
-          (isBridgeSessionLive && isBridgeSessionActive);
+          (isBridgeSessionLive && bridgeSessionActive);
 
         const runtime = deriveSessionRuntime({
           process,
@@ -741,7 +794,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       }
 
       const runtime = deriveSessionRuntime({
-        externalActive: isLiveBridgeSessionView(item),
+        externalActive: isLiveAnyBridgeSessionView(item),
         externalActivity: item.activity,
         fallbackOwnership: session.ownership,
       });

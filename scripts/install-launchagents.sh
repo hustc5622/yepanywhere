@@ -19,6 +19,9 @@ BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
 BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${BRIDGE_PORT}}}"
 OPENCODE_BRIDGE_PORT="${YEP_OPENCODE_BRIDGE_PORT:-${OPENCODE_BRIDGE_PORT:-4520}}"
 OPENCODE_BRIDGE_URL="${YEP_OPENCODE_BRIDGE_CONTROL_URL:-${OPENCODE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${OPENCODE_BRIDGE_PORT}}}"
+OPENCODE_SERVER_HOST="${YEP_OPENCODE_HOST:-127.0.0.1}"
+OPENCODE_SERVER_START_PORT="${YEP_OPENCODE_SERVER_START_PORT:-${YEP_OPENCODE_PORT:-${OPENCODE_SERVER_START_PORT:-${OPENCODE_PORT:-$((OPENCODE_BRIDGE_PORT + 1))}}}}"
+OPENCODE_BRIDGE_UPSTREAM_URL="${YEP_OPENCODE_BRIDGE_UPSTREAM_URL:-${OPENCODE_BRIDGE_UPSTREAM_URL:-}}"
 SERVER_URL="http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
 NODE_BIN="${YEP_LAUNCHD_NODE:-$(command -v node 2>/dev/null || true)}"
 CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
@@ -63,6 +66,9 @@ Environment overrides:
                                (default: /tmp,$HOME/Downloads)
   YEP_CODEX_BRIDGE_PORT        Codex bridge port (default: 4510)
   YEP_OPENCODE_BRIDGE_PORT       OpenCode bridge port (default: 4520)
+  YEP_OPENCODE_SERVER_START_PORT OpenCode managed server start port (default: 4521)
+  YEP_OPENCODE_BRIDGE_UPSTREAM_URL
+                               Optional external OpenCode server URL observed by the bridge
   YEP_LAUNCHD_NODE             Absolute node binary path
   YEP_LAUNCHD_PATH             PATH stored in the LaunchAgent environment
   YEP_LAUNCHD_LOG_DIR          LaunchAgent stdout/stderr log directory
@@ -255,13 +261,20 @@ write_bridge_plist() {
 
 write_opencode_bridge_plist() {
   local plist="$LAUNCH_AGENTS_DIR/$OPENCODE_BRIDGE_LABEL.plist"
-  write_header "$plist" "$OPENCODE_BRIDGE_LABEL" "$LOG_DIR/opencode-bridge-launchd.out.log" "$LOG_DIR/opencode-bridge-launchd.err.log"
-  append_env "$plist" \
-    "NODE_ENV" "production" \
-    "PATH" "$LAUNCHD_PATH" \
-    "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT" \
-    "YEP_OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_PORT" \
+  local env_args=(
+    "NODE_ENV" "production"
+    "PATH" "$LAUNCHD_PATH"
+    "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT"
+    "YEP_OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_PORT"
+    "YEP_OPENCODE_SERVER_START_PORT" "$OPENCODE_SERVER_START_PORT"
     "YEP_SERVER_URL" "$SERVER_URL"
+  )
+  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
+    env_args+=("YEP_OPENCODE_BRIDGE_UPSTREAM_URL" "$OPENCODE_BRIDGE_UPSTREAM_URL")
+  fi
+
+  write_header "$plist" "$OPENCODE_BRIDGE_LABEL" "$LOG_DIR/opencode-bridge-launchd.out.log" "$LOG_DIR/opencode-bridge-launchd.err.log"
+  append_env "$plist" "${env_args[@]}"
   append_program_arguments "$plist" "$NODE_BIN" "$CLI_JS" "--opencode-bridge-only"
   echo "$plist"
 }
@@ -279,7 +292,11 @@ write_server_plist() {
     "YEP_CODEX_BRIDGE_PORT" "$BRIDGE_PORT"
     "YEP_OPENCODE_BRIDGE_CONTROL_URL" "$OPENCODE_BRIDGE_URL"
     "YEP_OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_PORT"
+    "YEP_OPENCODE_SERVER_START_PORT" "$OPENCODE_SERVER_START_PORT"
   )
+  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
+    env_args+=("YEP_OPENCODE_BRIDGE_UPSTREAM_URL" "$OPENCODE_BRIDGE_UPSTREAM_URL")
+  fi
 
   if [[ -n "$FCM_SERVICE_ACCOUNT_FILE" ]]; then
     env_args+=("YEP_FCM_SERVICE_ACCOUNT_FILE" "$FCM_SERVICE_ACCOUNT_FILE")
@@ -357,7 +374,12 @@ else
 fi
 if $INSTALL_OPENCODE_BRIDGE; then
   dim "opencode bridge: $OPENCODE_BRIDGE_LABEL -> $OPENCODE_BRIDGE_URL"
-  dim "opencode bridge server: $SERVER_URL"
+  dim "opencode bridge yep server: $SERVER_URL"
+  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
+    dim "opencode server: external $OPENCODE_BRIDGE_UPSTREAM_URL"
+  else
+    dim "opencode server: managed from port $OPENCODE_SERVER_START_PORT"
+  fi
 else
   dim "opencode bridge: skipped"
 fi

@@ -115,8 +115,6 @@ export interface DeploymentRestartTargets {
   server?: boolean;
   codexBridge?: boolean;
   opencodeBridge?: boolean;
-  /** Deprecated alias for opencodeBridge. */
-  claudeBridge?: boolean;
 }
 
 export interface DeployRoutesOptions {
@@ -283,10 +281,6 @@ function parseRestartTargets(value: unknown): DeploymentRestartTargets {
   if ("opencodeBridge" in input) {
     targets.opencodeBridge = input.opencodeBridge === true;
   }
-  if ("claudeBridge" in input) {
-    targets.opencodeBridge = input.claudeBridge === true;
-    targets.claudeBridge = input.claudeBridge === true;
-  }
   return targets;
 }
 
@@ -294,8 +288,7 @@ function hasRestartTargets(targets: DeploymentRestartTargets): boolean {
   return (
     targets.server === true ||
     targets.codexBridge === true ||
-    targets.opencodeBridge === true ||
-    targets.claudeBridge === true
+    targets.opencodeBridge === true
   );
 }
 
@@ -313,7 +306,7 @@ function buildServicesRestartArgs(targets: DeploymentRestartTargets): string[] {
   if (targets.codexBridge) {
     args.push("--restart-codex-bridge");
   }
-  if (targets.opencodeBridge || targets.claudeBridge) {
+  if (targets.opencodeBridge) {
     args.push("--restart-opencode-bridge");
   }
   return args;
@@ -339,7 +332,7 @@ function appendOptionalRestartTargetArgs(
   if (targets.codexBridge) {
     args.push("--restart-codex-bridge");
   }
-  if (targets.opencodeBridge || targets.claudeBridge) {
+  if (targets.opencodeBridge) {
     args.push("--restart-opencode-bridge");
   }
 }

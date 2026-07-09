@@ -135,7 +135,7 @@ Options:
                       Allow --dev-server to interrupt active Yep-managed work
   --codex-bridge-only Deploy only the 4510 Codex bridge sidecar
   --opencode-bridge-only
-                      Deploy only the 4520 OpenCode bridge sidecar
+                      Deploy only the 4520 OpenCode CLI bridge sidecar
   --apk-only          Build/install only the APK
   --no-server         Skip server deploy
   --no-apk            Skip APK build/install
@@ -146,7 +146,7 @@ Options:
   --restart-codex-bridge
                       Restart the Codex bridge sidecar too; disconnects active cf sessions
   --restart-opencode-bridge
-                      Restart the OpenCode bridge sidecar too
+                      Restart the OpenCode CLI bridge sidecar too; the bridge manages its paired 4521 OpenCode server
   --embedded-codex-bridge
                       Legacy mode: run the Codex bridge inside the web server
   --skip-checks       Skip pnpm lint/typecheck preflight
@@ -352,7 +352,8 @@ configure_interactive() {
 
   echo
   log "4520 OpenCode bridge"
-  dim "4520 is the local HTTP bridge used by OpenCode bridge clients."
+  dim "4520 is the local HTTP bridge used by OpenCode CLI clients."
+  dim "The bridge manages its paired OpenCode server starting at 4521."
   dim "Choosing no leaves the existing 4520 process untouched."
   dim "Choosing yes restarts 4520; active terminal wrapper sessions may disconnect."
   if ask_yes_no "Redeploy 4520 OpenCode bridge service?" "no"; then

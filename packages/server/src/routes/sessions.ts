@@ -27,10 +27,18 @@ import {
 } from "../archive/index.js";
 import { augmentTextBlocks } from "../augments/markdown-augments.js";
 import { isLiveBridgeSessionView } from "../codex-bridge/session-state.js";
-import type { CodexBridgeController } from "../codex-bridge/types.js";
+import type {
+  CodexBridgeController,
+  CodexBridgeInputResponse,
+} from "../codex-bridge/types.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
+import { isLiveOpenCodeBridgeSessionView } from "../opencode-bridge/session-state.js";
+import type {
+  OpenCodeBridgeController,
+  OpenCodeBridgeInputResponse,
+} from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -260,10 +268,81 @@ export interface SessionsDeps {
   recentsService?: RecentsService;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
   codexBridgeService?: CodexBridgeController;
+  /** OpenCode bridge for OpenCode CLI sessions. */
+  opencodeBridgeService?: OpenCodeBridgeController;
   /** Physical cold-archive service for moving old provider JSONL files away from hot scan paths. */
   sessionArchiveService?: SessionArchiveService;
   /** Claude projects directory, used to synthesize file-change invalidation events after moves. */
   claudeProjectsDir?: string;
+}
+
+type BridgeSessionView =
+  | Awaited<ReturnType<CodexBridgeController["getSessionView"]>>
+  | Awaited<ReturnType<OpenCodeBridgeController["getSessionView"]>>;
+
+async function getBridgeSessionView(
+  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  sessionId: string,
+): Promise<NonNullable<BridgeSessionView> | null> {
+  return (
+    (await deps.codexBridgeService?.getSessionView(sessionId)) ??
+    (await deps.opencodeBridgeService?.getSessionView(sessionId)) ??
+    null
+  );
+}
+
+async function isBridgeSessionActive(
+  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  sessionId: string,
+): Promise<boolean> {
+  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
+    return true;
+  }
+  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+}
+
+async function getBridgePendingInputRequest(
+  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  sessionId: string,
+) {
+  return (
+    (await deps.codexBridgeService?.getPendingInputRequest(sessionId)) ??
+    (await deps.opencodeBridgeService?.getPendingInputRequest(sessionId)) ??
+    null
+  );
+}
+
+async function respondToBridgeInput(
+  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  sessionId: string,
+  requestId: string,
+  response: CodexBridgeInputResponse | OpenCodeBridgeInputResponse,
+  answers?: Record<string, string>,
+): Promise<boolean> {
+  if (
+    await deps.codexBridgeService?.respondToInput(
+      sessionId,
+      requestId,
+      response as CodexBridgeInputResponse,
+      answers,
+    )
+  ) {
+    return true;
+  }
+  return Boolean(
+    await deps.opencodeBridgeService?.respondToInput(
+      sessionId,
+      requestId,
+      response as OpenCodeBridgeInputResponse,
+      answers,
+    ),
+  );
+}
+
+function isLiveAnyBridgeSessionView(
+  view: NonNullable<BridgeSessionView>,
+): boolean {
+  return isLiveBridgeSessionView(view) || isLiveOpenCodeBridgeSessionView(view);
 }
 
 interface StartSessionBody {
@@ -830,20 +909,19 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Check if session is actively owned by a process
     const process = deps.supervisor.getProcessForSession(sessionId);
-    const bridgeView =
-      (await deps.codexBridgeService?.getSessionView(sessionId)) ?? null;
+    const bridgeView = await getBridgeSessionView(deps, sessionId);
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;
-    const isBridgeSessionActive = bridgedSession
-      ? ((await deps.codexBridgeService?.isSessionActive(sessionId)) ?? false)
+    const bridgeSessionActive = bridgedSession
+      ? await isBridgeSessionActive(deps, sessionId)
       : false;
     const isBridgeSessionLive =
-      bridgedSession !== null && isLiveBridgeSessionView(bridgedSession);
+      bridgedSession !== null && isLiveAnyBridgeSessionView(bridgedSession);
 
     // Check if session is being controlled by an external program
     const isExternal =
       (deps.externalTracker?.isExternal(sessionId) ?? false) ||
-      (isBridgeSessionLive && isBridgeSessionActive);
+      (isBridgeSessionLive && bridgeSessionActive);
 
     const runtime = deriveSessionRuntime({
       process,
@@ -863,8 +941,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const activePendingInputRequest =
       process?.state.type === "waiting-input"
         ? process.state.request
-        : ((await deps.codexBridgeService?.getPendingInputRequest(sessionId)) ??
-          null);
+        : await getBridgePendingInputRequest(deps, sessionId);
     const pendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -1198,20 +1275,19 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Check if session is actively owned by a process
     const process = deps.supervisor.getProcessForSession(sessionId);
-    const bridgeView =
-      (await deps.codexBridgeService?.getSessionView(sessionId)) ?? null;
+    const bridgeView = await getBridgeSessionView(deps, sessionId);
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;
-    const isBridgeSessionActive = bridgedSession
-      ? ((await deps.codexBridgeService?.isSessionActive(sessionId)) ?? false)
+    const bridgeSessionActive = bridgedSession
+      ? await isBridgeSessionActive(deps, sessionId)
       : false;
     const isBridgeSessionLive =
-      bridgedSession !== null && isLiveBridgeSessionView(bridgedSession);
+      bridgedSession !== null && isLiveAnyBridgeSessionView(bridgedSession);
 
     // Check if session is being controlled by an external program
     const isExternal =
       (deps.externalTracker?.isExternal(sessionId) ?? false) ||
-      (isBridgeSessionLive && isBridgeSessionActive);
+      (isBridgeSessionLive && bridgeSessionActive);
 
     // Check if we've ever owned this session (for orphan detection)
     // Only mark tools as "aborted" if we owned the session and know it terminated
@@ -1320,8 +1396,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const activePendingInputRequest =
       process?.state.type === "waiting-input"
         ? process.state.request
-        : ((await deps.codexBridgeService?.getPendingInputRequest(sessionId)) ??
-          null);
+        : await getBridgePendingInputRequest(deps, sessionId);
     const livePendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -1508,7 +1583,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     const persistedPendingInputRequest =
       activePendingInputRequest === null &&
-      (session.provider === "claude" || session.provider === "claude-ollama")
+      (session.provider === "claude" ||
+        session.provider === "claude-ollama" ||
+        session.provider === "opencode")
         ? getPersistedAskUserQuestionInputRequest(session.messages, sessionId)
         : null;
     const pendingInputRequest =
@@ -2349,9 +2426,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const process = deps.supervisor.getProcessForSession(sessionId);
     if (!process) {
       return c.json({
-        request:
-          (await deps.codexBridgeService?.getPendingInputRequest(sessionId)) ??
-          null,
+        request: await getBridgePendingInputRequest(deps, sessionId),
       });
     }
 
@@ -2396,13 +2471,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           ? bridgeBody.response
           : "deny";
 
-      const accepted =
-        (await deps.codexBridgeService?.respondToInput(
-          sessionId,
-          bridgeBody.requestId,
-          bridgeResponse,
-          bridgeBody.answers,
-        )) ?? false;
+      const accepted = await respondToBridgeInput(
+        deps,
+        sessionId,
+        bridgeBody.requestId,
+        bridgeResponse,
+        bridgeBody.answers,
+      );
       if (!accepted) {
         return c.json({ error: "No active process for session" }, 404);
       }
@@ -2575,18 +2650,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     if (body.archived === true && deps.sessionArchiveService) {
       const activeProcess = deps.supervisor.getProcessForSession(sessionId);
-      const bridgeView =
-        (await deps.codexBridgeService?.getSessionView(sessionId)) ?? null;
-      const isBridgeSessionActive = bridgeView
-        ? ((await deps.codexBridgeService?.isSessionActive(sessionId)) ?? false)
+      const bridgeView = await getBridgeSessionView(deps, sessionId);
+      const bridgeSessionActive = bridgeView
+        ? await isBridgeSessionActive(deps, sessionId)
         : false;
       const isBridgeSessionLive =
-        bridgeView !== null && isLiveBridgeSessionView(bridgeView);
+        bridgeView !== null && isLiveAnyBridgeSessionView(bridgeView);
       const runtime = deriveSessionRuntime({
         process: activeProcess,
         externalActive:
           (deps.externalTracker?.isExternal(sessionId) ?? false) ||
-          (isBridgeSessionLive && isBridgeSessionActive),
+          (isBridgeSessionLive && bridgeSessionActive),
         externalActivity: bridgeView?.activity,
       });
 

@@ -1,8 +1,28 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
 import * as path from "node:path";
-import type { UrlProjectId } from "@yep-anywhere/shared";
+import type {
+  AgentActivity,
+  InputRequest,
+  PendingInputType,
+  UrlProjectId,
+} from "@yep-anywhere/shared";
 import { encodeProjectId } from "../projects/paths.js";
+import type { SessionSummary } from "../supervisor/types.js";
+import {
+  isLiveOpenCodeBridgeSession,
+  isLiveOpenCodeBridgeSessionView,
+  opencodeBridgeOwnership,
+} from "./session-state.js";
+import type {
+  OpenCodeBridgeController,
+  OpenCodeBridgeInputResponse,
+  OpenCodeBridgePendingInput,
+  OpenCodeBridgeSession,
+  OpenCodeBridgeSessionView,
+  OpenCodeBridgeStatus,
+} from "./types.js";
 
 type PermissionMode =
   | "default"
@@ -11,25 +31,18 @@ type PermissionMode =
   | "plan"
   | "auto";
 
-type InputResponse = "approve" | "approve_accept_edits" | "deny";
+type InputResponse = OpenCodeBridgeInputResponse;
 
 interface OpenCodeBridgeServiceOptions {
   enabled: boolean;
   host: string;
   port: number;
   serverUrl: string;
+  opencodeServerUrl?: string;
+  opencodeStartPort?: number;
+  opencodePath?: string;
+  startupTimeoutMs?: number;
   desktopToken?: string;
-}
-
-interface OpenCodeBridgeStatus {
-  enabled: boolean;
-  listening: boolean;
-  host: string;
-  port: number;
-  url: string;
-  serverUrl: string;
-  sessionCount: number;
-  lastError: string | null;
 }
 
 interface SessionRecord {
@@ -43,9 +56,12 @@ interface SessionRecord {
   processId?: string;
   model?: string;
   mode?: PermissionMode;
+  title?: string | null;
+  messageCount?: number;
+  activity?: AgentActivity;
+  pendingInputType?: PendingInputType;
+  active?: boolean;
 }
-
-type PublicSessionRecord = Omit<SessionRecord, "desktopToken">;
 
 interface StartSessionResponse {
   sessionId?: string;
@@ -82,23 +98,55 @@ interface ClientConfig {
   desktopToken?: string;
 }
 
-export class OpenCodeBridgeService {
+type OpenCodeQuestion = {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+};
+
+interface OpenCodeEvent {
+  type?: unknown;
+  properties?: unknown;
+}
+
+const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+
+export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private readonly enabled: boolean;
   private readonly host: string;
   private readonly port: number;
   private readonly defaultServerUrl: string;
+  private readonly opencodeServerUrlOverride?: string;
+  private readonly opencodeStartPort: number;
+  private readonly opencodePath: string;
+  private readonly startupTimeoutMs: number;
   private readonly defaultDesktopToken?: string;
 
   private server: Server | null = null;
   private listening = false;
+  private opencodeConnected = false;
+  private opencodeProcess: ChildProcess | null = null;
+  private opencodeServerUrl: string | null = null;
+  private opencodeStartPromise: Promise<string> | null = null;
   private lastError: string | null = null;
   private sessions = new Map<string, SessionRecord>();
+  private pendingInputs = new Map<string, OpenCodeBridgePendingInput>();
+  private eventAbortController: AbortController | null = null;
+  private eventReconnectTimer: NodeJS.Timeout | null = null;
 
   constructor(options: OpenCodeBridgeServiceOptions) {
     this.enabled = options.enabled;
     this.host = options.host;
     this.port = options.port;
     this.defaultServerUrl = normalizeUrl(options.serverUrl);
+    this.opencodeServerUrlOverride = options.opencodeServerUrl
+      ? normalizeUrl(options.opencodeServerUrl)
+      : undefined;
+    this.opencodeStartPort = options.opencodeStartPort ?? options.port + 1;
+    this.opencodePath = options.opencodePath ?? "opencode";
+    this.startupTimeoutMs =
+      options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.defaultDesktopToken = options.desktopToken;
   }
 
@@ -148,14 +196,20 @@ export class OpenCodeBridgeService {
       this.lastError = error.message;
       console.warn(`[OpenCodeBridge] Server error: ${error.message}`);
     });
+
+    if (this.listening) {
+      this.startOpenCodeEventStream();
+    }
   }
 
   async shutdown(): Promise<void> {
+    this.stopOpenCodeEventStream();
     if (this.server) {
       await new Promise<void>((resolve) => this.server?.close(() => resolve()));
       this.server = null;
     }
     this.listening = false;
+    await this.stopManagedOpenCodeServer("shutdown");
   }
 
   getStatus(): OpenCodeBridgeStatus {
@@ -166,18 +220,84 @@ export class OpenCodeBridgeService {
       port: this.port,
       url: `http://${this.host}:${this.port}`,
       serverUrl: this.defaultServerUrl,
+      opencodeServerUrl: this.getOpenCodeServerStatusUrl(),
+      opencodeServerMode: this.opencodeServerUrlOverride
+        ? "external"
+        : "managed",
+      opencodeServerRunning: this.isManagedOpenCodeServerRunning(),
+      opencodeServerPid: this.opencodeServerUrlOverride
+        ? null
+        : (this.opencodeProcess?.pid ?? null),
+      opencodeConnected: this.opencodeConnected,
       sessionCount: this.sessions.size,
+      pendingInputCount: this.pendingInputs.size,
       lastError: this.lastError,
     };
   }
 
-  listSessions(): PublicSessionRecord[] {
+  listSessions(): OpenCodeBridgeSession[] {
     return Array.from(this.sessions.values())
       .sort(
         (a, b) =>
           new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
       )
-      .map(({ desktopToken: _desktopToken, ...session }) => session);
+      .map((session) => this.toBridgeSession(session));
+  }
+
+  listSessionViews(): OpenCodeBridgeSessionView[] {
+    return this.listSessions().map((session) => this.toSessionView(session));
+  }
+
+  getSessionView(sessionId: string): OpenCodeBridgeSessionView | null {
+    const record = this.sessions.get(sessionId);
+    return record ? this.toSessionView(this.toBridgeSession(record)) : null;
+  }
+
+  isSessionActive(sessionId: string): boolean {
+    const record = this.sessions.get(sessionId);
+    return record
+      ? isLiveOpenCodeBridgeSession(this.toBridgeSession(record))
+      : false;
+  }
+
+  getPendingInputRequest(sessionId: string): InputRequest | null {
+    return this.pendingInputs.get(sessionId)?.request ?? null;
+  }
+
+  async respondToInput(
+    sessionId: string,
+    requestId: string,
+    response: OpenCodeBridgeInputResponse,
+    answers?: Record<string, string>,
+  ): Promise<boolean> {
+    const pending = this.pendingInputs.get(sessionId);
+    if (!pending || pending.request.id !== requestId) return false;
+
+    if (pending.kind === "permission") {
+      const reply =
+        response === "deny"
+          ? "reject"
+          : response === "approve_always"
+            ? "always"
+            : "once";
+      await this.postOpenCodeJson(`/permission/${requestId}/reply`, { reply });
+    } else {
+      if (response === "deny") {
+        await this.postOpenCodeJson(`/question/${requestId}/reject`, {});
+      } else {
+        await this.postOpenCodeJson(`/question/${requestId}/reply`, {
+          answers: buildOpenCodeQuestionAnswers(pending.request, answers),
+        });
+      }
+    }
+
+    this.pendingInputs.delete(sessionId);
+    this.updateSessionState(sessionId, {
+      activity: "in-turn",
+      pendingInputType: undefined,
+      active: true,
+    });
+    return true;
   }
 
   private async handleHttpRequest(
@@ -198,15 +318,23 @@ export class OpenCodeBridgeService {
       .map((part) => decodeURIComponent(part));
 
     if (req.method === "GET" && url.pathname === "/readyz") {
+      await this.syncOpenCodeRuntimeState();
       this.writeJson(res, 200, this.getStatus());
       return;
     }
     if (req.method === "GET" && url.pathname === "/status") {
+      await this.syncOpenCodeRuntimeState();
       this.writeJson(res, 200, this.getStatus());
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
+      await this.syncOpenCodeRuntimeState();
       this.writeJson(res, 200, { sessions: this.listSessions() });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/session-views") {
+      await this.syncOpenCodeRuntimeState();
+      this.writeJson(res, 200, { sessions: this.listSessionViews() });
       return;
     }
 
@@ -242,6 +370,22 @@ export class OpenCodeBridgeService {
 
     if (parts[0] === "sessions" && parts[1]) {
       const sessionId = parts[1];
+      if (req.method === "GET" && parts[2] === "view") {
+        await this.syncOpenCodeRuntimeState();
+        this.writeJson(res, 200, {
+          sessionView: this.getSessionView(sessionId),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && parts[2] === "active") {
+        await this.syncOpenCodeRuntimeState();
+        this.writeJson(res, 200, {
+          active: this.isSessionActive(sessionId),
+        });
+        return;
+      }
+
       if (req.method === "GET" && parts.length === 2) {
         const { client, projectId, cwd } = this.resolveSessionTarget(
           sessionId,
@@ -267,14 +411,9 @@ export class OpenCodeBridgeService {
       }
 
       if (req.method === "GET" && parts[2] === "pending-input") {
-        const { client, projectId } = this.resolveSessionTarget(
-          sessionId,
-          url,
-          req,
-        );
-        const detail = await client.getSession(projectId, sessionId);
+        await this.syncOpenCodeRuntimeState();
         this.writeJson(res, 200, {
-          request: detail.pendingInputRequest ?? null,
+          request: this.getPendingInputRequest(sessionId),
         });
         return;
       }
@@ -336,6 +475,18 @@ export class OpenCodeBridgeService {
         if (!body?.requestId || !body.response) {
           this.writeJson(res, 400, {
             error: "requestId and response are required",
+          });
+          return;
+        }
+        await this.syncOpenCodeRuntimeState();
+        if (this.pendingInputs.get(sessionId)?.request.id === body.requestId) {
+          this.writeJson(res, 200, {
+            accepted: await this.respondToInput(
+              sessionId,
+              body.requestId,
+              body.response,
+              body.answers,
+            ),
           });
           return;
         }
@@ -433,6 +584,11 @@ export class OpenCodeBridgeService {
       processId: metadata.processId ?? existing?.processId,
       model: metadata.model ?? existing?.model,
       mode: metadata.mode ?? existing?.mode,
+      title: existing?.title,
+      messageCount: existing?.messageCount,
+      activity: existing?.activity,
+      pendingInputType: existing?.pendingInputType,
+      active: existing?.active,
     });
   }
 
@@ -444,6 +600,607 @@ export class OpenCodeBridgeService {
     if (!existing) return;
     existing.updatedAt = new Date().toISOString();
     existing.processId = metadata.processId ?? existing.processId;
+  }
+
+  private updateSessionState(
+    sessionId: string,
+    state: Partial<
+      Pick<
+        SessionRecord,
+        | "title"
+        | "messageCount"
+        | "activity"
+        | "pendingInputType"
+        | "active"
+        | "updatedAt"
+      >
+    >,
+  ): void {
+    const existing = this.sessions.get(sessionId);
+    const now = new Date().toISOString();
+    if (existing) {
+      Object.assign(existing, {
+        ...state,
+        updatedAt: state.updatedAt ?? now,
+      });
+      return;
+    }
+
+    const cwd = process.cwd();
+    this.sessions.set(sessionId, {
+      id: sessionId,
+      projectId: encodeProjectId(cwd),
+      cwd,
+      serverUrl: this.defaultServerUrl,
+      desktopToken: this.defaultDesktopToken,
+      createdAt: now,
+      updatedAt: state.updatedAt ?? now,
+      title: state.title,
+      messageCount: state.messageCount,
+      activity: state.activity,
+      pendingInputType: state.pendingInputType,
+      active: state.active,
+    });
+  }
+
+  private toBridgeSession(record: SessionRecord): OpenCodeBridgeSession {
+    const projectName = path.basename(record.cwd) || record.cwd;
+    return {
+      id: record.id,
+      projectId: record.projectId,
+      projectPath: record.cwd,
+      projectName,
+      title: record.title ?? null,
+      fullTitle: record.title ?? null,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      messageCount: record.messageCount ?? 1,
+      provider: "opencode",
+      model: record.model,
+      activity: record.activity,
+      pendingInputType: record.pendingInputType,
+      active:
+        record.active ??
+        (record.activity === "in-turn" || record.activity === "waiting-input"),
+    };
+  }
+
+  private toSessionView(
+    session: OpenCodeBridgeSession,
+  ): OpenCodeBridgeSessionView {
+    const view: OpenCodeBridgeSessionView = {
+      session: {
+        id: session.id,
+        projectId: session.projectId,
+        title: session.title,
+        fullTitle: session.fullTitle,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messageCount: session.messageCount,
+        ownership: opencodeBridgeOwnership(
+          isLiveOpenCodeBridgeSession(session),
+        ),
+        pendingInputType: session.pendingInputType,
+        activity: session.activity,
+        provider: "opencode",
+        model: session.model,
+        source: "opencode-bridge",
+      } satisfies SessionSummary,
+      projectName: session.projectName,
+      activity: session.activity,
+      pendingInputType: session.pendingInputType,
+    };
+    return {
+      ...view,
+      session: {
+        ...view.session,
+        ownership: opencodeBridgeOwnership(
+          isLiveOpenCodeBridgeSessionView(view),
+        ),
+      },
+    };
+  }
+
+  private startOpenCodeEventStream(): void {
+    if (!this.enabled || this.eventAbortController) return;
+    this.eventAbortController = new AbortController();
+    void this.consumeOpenCodeEvents(this.eventAbortController.signal);
+  }
+
+  private stopOpenCodeEventStream(): void {
+    if (this.eventReconnectTimer) {
+      clearTimeout(this.eventReconnectTimer);
+      this.eventReconnectTimer = null;
+    }
+    this.eventAbortController?.abort();
+    this.eventAbortController = null;
+    this.opencodeConnected = false;
+  }
+
+  private scheduleOpenCodeEventReconnect(): void {
+    if (!this.enabled || this.eventAbortController?.signal.aborted) return;
+    if (this.eventReconnectTimer) return;
+    this.eventReconnectTimer = setTimeout(() => {
+      this.eventReconnectTimer = null;
+      const controller = this.eventAbortController;
+      if (!controller || controller.signal.aborted) return;
+      void this.consumeOpenCodeEvents(controller.signal);
+    }, 1_000);
+  }
+
+  private async consumeOpenCodeEvents(signal: AbortSignal): Promise<void> {
+    try {
+      const opencodeServerUrl = await this.ensureOpenCodeServerUrl();
+      if (signal.aborted) return;
+      const response = await fetch(`${opencodeServerUrl}/global/event`, {
+        headers: { accept: "text/event-stream" },
+        signal,
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`OpenCode event stream returned ${response.status}`);
+      }
+
+      this.opencodeConnected = true;
+      this.lastError = null;
+      await this.syncOpenCodeRuntimeState(opencodeServerUrl);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          this.handleSseLine(line);
+        }
+      }
+    } catch (error) {
+      if (!signal.aborted) {
+        this.lastError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      this.opencodeConnected = false;
+      if (!signal.aborted) this.scheduleOpenCodeEventReconnect();
+    }
+  }
+
+  private handleSseLine(line: string): void {
+    if (!line.startsWith("data:")) return;
+    const data = line.slice("data:".length).trim();
+    if (!data || data === "[DONE]") return;
+    try {
+      const event = unwrapOpenCodeEvent(JSON.parse(data));
+      if (event) this.handleOpenCodeEvent(event);
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private handleOpenCodeEvent(event: OpenCodeEvent): void {
+    const type = typeof event.type === "string" ? event.type : "";
+    const properties = asRecord(event.properties);
+    const sessionId =
+      readString(properties, "sessionID") ??
+      readString(properties, "sessionId");
+    if (!sessionId) return;
+
+    if (type === "session.idle") {
+      this.updateSessionState(sessionId, {
+        activity: "idle",
+        pendingInputType: undefined,
+        active: false,
+      });
+      return;
+    }
+
+    if (type === "session.status") {
+      const status = readOpenCodeStatusType(properties?.status);
+      this.updateSessionState(sessionId, {
+        activity: status === "idle" ? "idle" : "in-turn",
+        active: status !== "idle",
+      });
+      return;
+    }
+
+    if (
+      type === "session.created" ||
+      type === "session.updated" ||
+      type === "message.updated" ||
+      type === "message.part.updated" ||
+      type === "message.part.delta"
+    ) {
+      this.recordOpenCodeSessionEvent(sessionId, properties);
+      return;
+    }
+
+    if (type === "permission.asked" || type === "permission.v2.asked") {
+      this.recordOpenCodePermissionRequest(sessionId, properties);
+      return;
+    }
+
+    if (type === "permission.replied" || type === "permission.v2.replied") {
+      this.clearOpenCodePendingInput(sessionId, properties);
+      return;
+    }
+
+    if (type === "question.asked" || type === "question.v2.asked") {
+      this.recordOpenCodeQuestionRequest(sessionId, properties);
+      return;
+    }
+
+    if (
+      type === "question.replied" ||
+      type === "question.rejected" ||
+      type === "question.v2.replied" ||
+      type === "question.v2.rejected"
+    ) {
+      this.clearOpenCodePendingInput(sessionId, properties);
+    }
+  }
+
+  private recordOpenCodeSessionEvent(
+    sessionId: string,
+    properties: Record<string, unknown> | null,
+  ): void {
+    const info = asRecord(properties?.info);
+    const title = readString(info, "title");
+    const updatedAt =
+      readString(info, "updatedAt") ?? readString(properties, "updatedAt");
+    const messageCount = readNumber(info, "messageCount");
+    this.updateSessionState(sessionId, {
+      title,
+      messageCount,
+      updatedAt: updatedAt ?? undefined,
+      activity: "in-turn",
+      active: true,
+    });
+  }
+
+  private recordOpenCodePermissionRequest(
+    sessionId: string,
+    properties: Record<string, unknown> | null,
+  ): void {
+    const requestId =
+      readString(properties, "id") ?? readString(properties, "requestID");
+    if (!requestId) return;
+    const permission = readString(properties, "permission") ?? "permission";
+    const patterns = readStringArray(properties?.patterns);
+    const prompt = `Allow ${permission}${patterns.length ? ` ${patterns.join(", ")}` : ""}?`;
+    const timestamp = new Date().toISOString();
+    this.pendingInputs.set(sessionId, {
+      requestId,
+      kind: "permission",
+      raw: properties,
+      createdAt: timestamp,
+      request: {
+        id: requestId,
+        sessionId,
+        type: "tool-approval",
+        prompt,
+        options: ["Approve", "Deny"],
+        toolName: "OpenCode",
+        toolInput: {
+          approvalKind: "opencode_permission",
+          permission,
+          patterns,
+          metadata: properties?.metadata,
+          raw: properties,
+        },
+        timestamp,
+        source: "opencode-bridge",
+      },
+    });
+    this.updateSessionState(sessionId, {
+      activity: "waiting-input",
+      pendingInputType: "tool-approval",
+      active: true,
+    });
+  }
+
+  private recordOpenCodeQuestionRequest(
+    sessionId: string,
+    properties: Record<string, unknown> | null,
+  ): void {
+    const requestId =
+      readString(properties, "id") ?? readString(properties, "requestID");
+    const questions = normalizeOpenCodeQuestions(properties?.questions);
+    if (!requestId || questions.length === 0) return;
+    const timestamp = new Date().toISOString();
+    this.pendingInputs.set(sessionId, {
+      requestId,
+      kind: "question",
+      raw: properties,
+      createdAt: timestamp,
+      request: {
+        id: requestId,
+        sessionId,
+        type: "question",
+        prompt: questions[0]?.question ?? "Question",
+        toolName: "AskUserQuestion",
+        toolInput: {
+          questions,
+          opencodeQuestions: properties?.questions,
+          raw: properties,
+        },
+        timestamp,
+        source: "opencode-bridge",
+      },
+    });
+    this.updateSessionState(sessionId, {
+      activity: "waiting-input",
+      pendingInputType: "user-question",
+      active: true,
+    });
+  }
+
+  private clearOpenCodePendingInput(
+    sessionId: string,
+    properties: Record<string, unknown> | null,
+  ): void {
+    const requestId = readString(properties, "requestID");
+    const pending = this.pendingInputs.get(sessionId);
+    if (!requestId || pending?.requestId === requestId) {
+      this.pendingInputs.delete(sessionId);
+    }
+    this.updateSessionState(sessionId, {
+      activity: "in-turn",
+      pendingInputType: undefined,
+      active: true,
+    });
+  }
+
+  private async postOpenCodeJson(
+    pathname: string,
+    body: unknown,
+  ): Promise<void> {
+    const opencodeServerUrl = await this.ensureOpenCodeServerUrl();
+    const response = await fetch(`${opencodeServerUrl}${pathname}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const body = await readResponseBody(response);
+      const message = formatApiError(response.status, body);
+      throw new Error(message);
+    }
+  }
+
+  private async syncOpenCodeRuntimeState(baseUrl?: string): Promise<void> {
+    try {
+      const opencodeServerUrl =
+        baseUrl ?? (await this.ensureOpenCodeServerUrl());
+      await Promise.all([
+        this.syncOpenCodeSessionStatus(opencodeServerUrl),
+        this.syncOpenCodePendingQuestions(opencodeServerUrl),
+      ]);
+      this.lastError = null;
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private async syncOpenCodeSessionStatus(baseUrl?: string): Promise<void> {
+    const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
+    const response = await fetch(`${opencodeServerUrl}/session/status`, {
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) {
+      const body = await readResponseBody(response);
+      throw new Error(formatApiError(response.status, body));
+    }
+
+    const body = await response.json();
+    const activeStatus = asRecord(body) ?? {};
+    const activeSessionIds = new Set(Object.keys(activeStatus));
+    for (const sessionId of activeSessionIds) {
+      const statusType = readOpenCodeStatusType(activeStatus[sessionId]);
+      this.updateSessionState(sessionId, {
+        activity: statusType === "idle" ? "idle" : "in-turn",
+        active: statusType !== "idle",
+      });
+    }
+
+    for (const [sessionId, record] of this.sessions) {
+      if (record.activity === "waiting-input") continue;
+      if (activeSessionIds.has(sessionId)) continue;
+      this.updateSessionState(sessionId, {
+        activity: "idle",
+        pendingInputType: undefined,
+        active: false,
+      });
+    }
+  }
+
+  private async syncOpenCodePendingQuestions(baseUrl?: string): Promise<void> {
+    const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
+    const response = await fetch(`${opencodeServerUrl}/question`, {
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) {
+      const body = await readResponseBody(response);
+      throw new Error(formatApiError(response.status, body));
+    }
+
+    const body = await response.json();
+    const bodyRecord = asRecord(body);
+    const requests: unknown[] = Array.isArray(body)
+      ? body
+      : Array.isArray(bodyRecord?.data)
+        ? bodyRecord.data
+        : [];
+    const seen = new Set<string>();
+    for (const item of requests) {
+      const record = asRecord(item);
+      const sessionId =
+        readString(record, "sessionID") ?? readString(record, "sessionId");
+      const requestId =
+        readString(record, "id") ?? readString(record, "requestID");
+      if (!sessionId || !requestId) continue;
+      this.recordOpenCodeQuestionRequest(sessionId, {
+        ...record,
+        id: requestId,
+      });
+      seen.add(`${sessionId}:${requestId}`);
+    }
+
+    for (const [sessionId, pending] of this.pendingInputs) {
+      if (
+        pending.kind === "question" &&
+        !seen.has(`${sessionId}:${pending.requestId}`)
+      ) {
+        this.pendingInputs.delete(sessionId);
+        this.updateSessionState(sessionId, {
+          activity: "in-turn",
+          pendingInputType: undefined,
+          active: true,
+        });
+      }
+    }
+  }
+
+  private async ensureOpenCodeServerUrl(): Promise<string> {
+    if (this.opencodeServerUrlOverride) return this.opencodeServerUrlOverride;
+    if (this.opencodeServerUrl && this.isManagedOpenCodeServerRunning()) {
+      return this.opencodeServerUrl;
+    }
+    if (this.opencodeStartPromise) {
+      return this.opencodeStartPromise;
+    }
+
+    this.opencodeStartPromise = this.startManagedOpenCodeServer().finally(
+      () => {
+        this.opencodeStartPromise = null;
+      },
+    );
+    return this.opencodeStartPromise;
+  }
+
+  private async startManagedOpenCodeServer(): Promise<string> {
+    const port = await findAvailablePort(this.opencodeStartPort);
+    const url = `http://127.0.0.1:${port}`;
+    const spawnArgs = [
+      "serve",
+      "--hostname",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--print-logs",
+    ];
+    console.log(
+      `[OpenCodeBridge] Starting managed OpenCode server path=${this.opencodePath} args=${JSON.stringify(spawnArgs)}`,
+    );
+    const child = spawn(this.opencodePath, spawnArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      env: process.env,
+    });
+    this.opencodeProcess = child;
+    this.opencodeServerUrl = url;
+    const spawnErrorPromise = new Promise<never>((_, reject) => {
+      child.once("error", (error) => {
+        reject(
+          new Error(
+            `Failed to start OpenCode server with ${this.opencodePath}: ${error.message}`,
+          ),
+        );
+      });
+    });
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8").trim();
+      if (text) console.debug(`[OpenCodeBridge upstream] ${text}`);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8").trim();
+      if (text) console.debug(`[OpenCodeBridge upstream] ${text}`);
+    });
+    child.once("exit", (code, signal) => {
+      if (this.opencodeProcess === child) {
+        this.opencodeProcess = null;
+        this.opencodeServerUrl = null;
+      }
+      console.log(
+        `[OpenCodeBridge] Managed OpenCode server exited code=${String(code)} signal=${String(signal)}`,
+      );
+    });
+
+    try {
+      await Promise.race([
+        waitForOpenCodeHealth(url, this.startupTimeoutMs),
+        spawnErrorPromise,
+      ]);
+    } catch (error) {
+      if (this.opencodeProcess === child) {
+        this.opencodeProcess = null;
+        this.opencodeServerUrl = null;
+      }
+      if (child.pid && child.exitCode === null && !child.killed) {
+        try {
+          console.warn(
+            `[OpenCodeBridge] Stopping managed OpenCode server reason=startup-failed pid=${child.pid}`,
+          );
+          process.kill(process.platform !== "win32" ? -child.pid : child.pid);
+        } catch {}
+      }
+      throw error;
+    }
+
+    this.lastError = null;
+    console.log(`[OpenCodeBridge] Managed OpenCode server ready at ${url}`);
+    return url;
+  }
+
+  private async stopManagedOpenCodeServer(reason: string): Promise<void> {
+    this.opencodeStartPromise = null;
+    if (this.opencodeServerUrlOverride) return;
+
+    const child = this.opencodeProcess;
+    this.opencodeProcess = null;
+    this.opencodeServerUrl = null;
+    if (!child?.pid || child.exitCode !== null || child.killed) {
+      return;
+    }
+
+    const pid = process.platform !== "win32" ? -child.pid : child.pid;
+    try {
+      console.log(
+        `[OpenCodeBridge] Stopping managed OpenCode server reason=${reason} pid=${child.pid}`,
+      );
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+        resolve();
+      }, 1500);
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  private isManagedOpenCodeServerRunning(): boolean {
+    if (this.opencodeServerUrlOverride) return false;
+    const child = this.opencodeProcess;
+    return !!child && !child.killed && child.exitCode === null;
+  }
+
+  private getOpenCodeServerStatusUrl(): string {
+    return (
+      this.opencodeServerUrlOverride ??
+      this.opencodeServerUrl ??
+      `http://127.0.0.1:${this.opencodeStartPort}`
+    );
   }
 
   private writeJson(res: ServerResponse, status: number, body: unknown): void {
@@ -621,6 +1378,52 @@ async function readResponseBody(response: Response): Promise<unknown> {
   }
 }
 
+async function findAvailablePort(startPort: number): Promise<number> {
+  for (let port = Math.max(1, startPort); port < startPort + 100; port++) {
+    if (await isPortAvailable("127.0.0.1", port)) {
+      return port;
+    }
+  }
+  throw new Error(`No available port found near ${startPort}`);
+}
+
+async function isPortAvailable(host: string, port: number): Promise<boolean> {
+  const { createServer } = await import("node:net");
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once("error", () => {
+      resolve(false);
+    });
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, host);
+  });
+}
+
+async function waitForOpenCodeHealth(
+  baseUrl: string,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${baseUrl}/global/health`);
+      if (response.ok) return;
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Timed out waiting for OpenCode server at ${baseUrl}: ${
+      lastError instanceof Error ? lastError.message : "unknown error"
+    }`,
+  );
+}
+
 function formatApiError(status: number, body: unknown): string {
   const record = asRecord(body);
   const message = record?.error;
@@ -657,4 +1460,89 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object"
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function unwrapOpenCodeEvent(value: unknown): OpenCodeEvent | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const payload = asRecord(record.payload);
+  const event = payload ?? record;
+  return typeof event.type === "string" ? (event as OpenCodeEvent) : null;
+}
+
+function readString(
+  record: Record<string, unknown> | null | undefined,
+  key: string,
+): string | null {
+  const value = record?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+function readNumber(
+  record: Record<string, unknown> | null | undefined,
+  key: string,
+): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function readOpenCodeStatusType(value: unknown): string {
+  if (typeof value === "string") return value;
+  const record = asRecord(value);
+  return readString(record, "type") ?? "running";
+}
+
+function normalizeOpenCodeQuestions(raw: unknown): OpenCodeQuestion[] {
+  if (!Array.isArray(raw)) return [];
+  const questions: OpenCodeQuestion[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    const question = readString(record, "question");
+    if (!question) continue;
+
+    const options = Array.isArray(record?.options)
+      ? record.options
+          .map((option) => {
+            const optionRecord = asRecord(option);
+            const label = readString(optionRecord, "label");
+            if (!label) return null;
+            return {
+              label,
+              description: readString(optionRecord, "description") ?? "",
+            };
+          })
+          .filter(
+            (option): option is { label: string; description: string } =>
+              option !== null,
+          )
+      : [];
+
+    questions.push({
+      question,
+      header: readString(record, "header") ?? "Question",
+      options,
+      multiSelect: Boolean(record?.multiSelect ?? record?.multiple),
+    });
+  }
+  return questions;
+}
+
+function buildOpenCodeQuestionAnswers(
+  request: InputRequest,
+  answers: Record<string, string> | undefined,
+): string[][] {
+  const input = asRecord(request.toolInput);
+  const questions = normalizeOpenCodeQuestions(input?.questions);
+  return questions.map((question) => {
+    const answer = answers?.[question.question];
+    return answer ? [answer] : [];
+  });
 }

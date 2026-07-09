@@ -9,8 +9,6 @@ describe("parseClaudeWrapperArgs", () => {
     vi.stubEnv("DESKTOP_AUTH_TOKEN", undefined);
     vi.stubEnv("YEP_OPENCODE_BRIDGE", undefined);
     vi.stubEnv("YEP_OPENCODE_BRIDGE_URL", undefined);
-    vi.stubEnv("YEP_CLAUDE_BRIDGE", undefined);
-    vi.stubEnv("YEP_CLAUDE_BRIDGE_URL", undefined);
   });
 
   afterEach(() => {

@@ -55,6 +55,15 @@ function processStateFromActivity(
   return undefined;
 }
 
+function keepPersistedPendingInputForSession(
+  request: InputRequest | null,
+  sessionId: string,
+): InputRequest | null {
+  return request?.source === "persisted" && request.sessionId === sessionId
+    ? request
+    : null;
+}
+
 // Re-export types from useSessionMessages
 export type { AgentContent, AgentContentMap } from "./useSessionMessages";
 
@@ -674,7 +683,9 @@ export function useSession(
             // Non-critical. A later activity event or reconnect will refresh it.
           });
       } else if (event.activity !== "waiting-input") {
-        setPendingInputRequest(null);
+        setPendingInputRequest((prev) =>
+          keepPersistedPendingInputForSession(prev, sessionId),
+        );
       }
     },
     [projectId, sessionId],
@@ -983,7 +994,9 @@ export function useSession(
           }
         } else {
           // Clear pending request when state changes away from waiting-input
-          setPendingInputRequest(null);
+          setPendingInputRequest((prev) =>
+            keepPersistedPendingInputForSession(prev, sessionId),
+          );
         }
       } else if (data.eventType === "deferred-queue") {
         const deferredData = data as {
@@ -1039,7 +1052,9 @@ export function useSession(
         if (connectedData.state === "waiting-input" && connectedData.request) {
           setPendingInputRequest(connectedData.request);
         } else {
-          setPendingInputRequest(null);
+          setPendingInputRequest((prev) =>
+            keepPersistedPendingInputForSession(prev, sessionId),
+          );
         }
         if (
           connectedData.permissionMode &&

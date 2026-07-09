@@ -8,6 +8,8 @@ export async function runOpenCodeBridgeOnly(): Promise<void> {
     host: config.opencodeBridgeHost,
     port: config.opencodeBridgePort,
     serverUrl: config.opencodeBridgeServerUrl,
+    opencodeServerUrl: config.opencodeServerUrl,
+    opencodeStartPort: config.opencodeServerStartPort,
     desktopToken: config.desktopAuthToken,
   });
 
@@ -37,6 +39,6 @@ export async function runOpenCodeBridgeOnly(): Promise<void> {
   }
 
   console.log(
-    `[OpenCodeBridge] Standalone bridge running at ${status.url}, server=${status.serverUrl}`,
+    `[OpenCodeBridge] Standalone bridge running at ${status.url}, server=${status.serverUrl}, opencode=${status.opencodeServerUrl} mode=${status.opencodeServerMode}`,
   );
 }

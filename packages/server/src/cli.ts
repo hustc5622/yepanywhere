@@ -59,7 +59,7 @@ function checkClaudeCli(): void {
   } catch {
     console.warn("Warning: Claude CLI not found.");
     console.warn(
-      "Claude Code is the primary supported agent. Install it to use Claude sessions:",
+      "Claude provider sessions require the Claude CLI. Install it only if you plan to use Claude sessions:",
     );
     console.warn(
       os.platform() === "win32"
@@ -72,7 +72,7 @@ function checkClaudeCli(): void {
 
 function showHelp(): void {
   console.log(`
-yepanywhere - A mobile-first supervisor for Claude Code agents
+yepanywhere - A mobile-first supervisor for local coding agents
 
 USAGE:
   yepanywhere [OPTIONS]
@@ -91,8 +91,8 @@ OPTIONS:
                         Emergency recovery mode; re-enable auth after fixing config
   --codex-bridge-only   Start only the Codex CLI bridge sidecar
   --opencode-bridge-only
-                        Start only the OpenCode bridge sidecar
-  claude                Start or attach to a Yep-managed Claude session
+                        Start only the OpenCode CLI bridge sidecar
+  claude                Start or attach to a Yep-managed Claude provider session
 
 SETUP OPTIONS (for headless installation):
   --setup-auth <password>
@@ -145,10 +145,10 @@ EXAMPLES:
   # Emergency auth bypass (temporary)
   yepanywhere --auth-disable
 
-  # Start a Yep-managed Claude session from the terminal
+  # Start a Yep-managed Claude provider session from the terminal
   yepanywhere claude "fix the failing tests"
 
-  # Start only the local OpenCode bridge sidecar
+  # Start only the local OpenCode CLI bridge sidecar
   yepanywhere --opencode-bridge-only
 
 DOCUMENTATION:
@@ -160,7 +160,7 @@ DATA DIRECTORY:
 
 REQUIREMENTS:
   - Node.js >= 20
-  - Claude CLI installed (curl -fsSL https://claude.ai/install.sh | bash)
+  - Provider CLI installed for the agent you want to supervise
 `);
 }
 
@@ -272,13 +272,6 @@ if (claudeWrapperInvocation) {
     args.splice(opencodeBridgeOnlyIndex, 1);
   }
 
-  // Parse deprecated --claude-bridge-only flag as an OpenCode bridge alias.
-  const claudeBridgeOnlyIndex = args.indexOf("--claude-bridge-only");
-  const claudeBridgeOnly = claudeBridgeOnlyIndex !== -1;
-  if (claudeBridgeOnlyIndex !== -1) {
-    args.splice(claudeBridgeOnlyIndex, 1);
-  }
-
   // Parse --setup-auth flag
   const setupAuthIndex = args.indexOf("--setup-auth");
   let setupAuthPassword: string | undefined;
@@ -313,12 +306,7 @@ if (claudeWrapperInvocation) {
     runSetup(setupAuthPassword);
   } else if (codexBridgeOnly) {
     runCodexBridgeOnly();
-  } else if (opencodeBridgeOnly || claudeBridgeOnly) {
-    if (claudeBridgeOnly) {
-      console.warn(
-        "Warning: --claude-bridge-only is deprecated; starting the OpenCode bridge instead.",
-      );
-    }
+  } else if (opencodeBridgeOnly) {
     runOpenCodeBridgeOnly();
   } else {
     // Only check for Claude CLI when starting the server (not for setup commands)

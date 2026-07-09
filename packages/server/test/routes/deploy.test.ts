@@ -80,23 +80,6 @@ describe("deploy route argument mapping", () => {
     ]);
   });
 
-  it("keeps legacy claudeBridge restart target as an OpenCode bridge alias", () => {
-    expect(
-      buildDeployArgs({
-        action: "services-restart",
-        restartTargets: {
-          server: false,
-          claudeBridge: true,
-        },
-      }).args,
-    ).toEqual([
-      "--restart-only",
-      "--no-server",
-      "--no-apk",
-      "--restart-opencode-bridge",
-    ]);
-  });
-
   it("rejects selected-services restart without any selected service", () => {
     expect(() =>
       buildDeployArgs({

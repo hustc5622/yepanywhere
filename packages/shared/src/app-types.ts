@@ -562,7 +562,7 @@ export interface InputRequest {
    * Where the request came from. Persisted requests are reconstructed from a
    * provider JSONL owned by another process, so they are display-only.
    */
-  source?: "process" | "codex-bridge" | "persisted";
+  source?: "process" | "codex-bridge" | "opencode-bridge" | "persisted";
 }
 
 // =============================================================================

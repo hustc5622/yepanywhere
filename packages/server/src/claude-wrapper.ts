@@ -119,16 +119,9 @@ export function parseClaudeWrapperArgs(args: string[]): ParsedArgs {
     DEFAULT_SERVER_URL;
   let desktopToken =
     process.env.YEP_DESKTOP_AUTH_TOKEN ?? process.env.DESKTOP_AUTH_TOKEN;
-  let bridgeUrl =
-    process.env.YEP_OPENCODE_BRIDGE_URL ??
-    process.env.YEP_CLAUDE_BRIDGE_URL ??
-    DEFAULT_BRIDGE_URL;
-  let bridgeRequired =
-    process.env.YEP_OPENCODE_BRIDGE_URL !== undefined ||
-    process.env.YEP_CLAUDE_BRIDGE_URL !== undefined;
-  let useBridge =
-    (process.env.YEP_OPENCODE_BRIDGE ?? process.env.YEP_CLAUDE_BRIDGE) !==
-    "false";
+  let bridgeUrl = process.env.YEP_OPENCODE_BRIDGE_URL ?? DEFAULT_BRIDGE_URL;
+  let bridgeRequired = process.env.YEP_OPENCODE_BRIDGE_URL !== undefined;
+  let useBridge = process.env.YEP_OPENCODE_BRIDGE !== "false";
   let cwd = process.cwd();
   let resumeSessionId: string | undefined;
   let mode: PermissionMode | undefined;
@@ -219,7 +212,7 @@ export function parseClaudeWrapperArgs(args: string[]): ParsedArgs {
 
 export function showClaudeWrapperHelp(): void {
   console.log(`
-yepanywhere claude - Start or attach to a Yep-managed Claude session
+yepanywhere claude - Start or attach to a Yep-managed Claude provider session
 
 USAGE:
   yepanywhere claude [OPTIONS] [prompt]
@@ -229,9 +222,9 @@ OPTIONS:
                        Can include a base path, e.g. http://host:8022/yep
   --token <token>      Desktop auth token for X-Desktop-Token
                        Env: YEP_DESKTOP_AUTH_TOKEN or DESKTOP_AUTH_TOKEN
-  --bridge <url>       OpenCode bridge URL (default probe: ${DEFAULT_BRIDGE_URL})
+  --bridge <url>       OpenCode CLI bridge URL (default probe: ${DEFAULT_BRIDGE_URL})
                        Env: YEP_OPENCODE_BRIDGE_URL
-  --no-bridge          Skip OpenCode bridge probing and use Yep REST directly
+  --no-bridge          Skip OpenCode CLI bridge probing and use Yep REST directly
   --cwd <path>         Project directory (default: current directory)
   --resume, -r <id>    Resume an existing Claude session
   --mode <mode>        Permission mode: default, acceptEdits,

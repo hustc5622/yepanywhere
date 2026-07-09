@@ -20,6 +20,11 @@ import type { SessionIndexService } from "../indexes/index.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/index.js";
+import { isLiveOpenCodeBridgeSessionView } from "../opencode-bridge/session-state.js";
+import type {
+  OpenCodeBridgeController,
+  OpenCodeBridgeSessionView,
+} from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -55,6 +60,31 @@ export interface InboxDeps {
   opencodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   codexBridgeService?: CodexBridgeController;
+  opencodeBridgeService?: OpenCodeBridgeController;
+}
+
+async function listBridgeSessionViews(
+  deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
+): Promise<OpenCodeBridgeSessionView[]> {
+  const [codexViews, opencodeViews] = await Promise.all([
+    deps.codexBridgeService?.listSessionViews() ?? [],
+    deps.opencodeBridgeService?.listSessionViews() ?? [],
+  ]);
+  return [...codexViews, ...opencodeViews] as OpenCodeBridgeSessionView[];
+}
+
+async function isBridgeSessionActive(
+  deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
+  sessionId: string,
+): Promise<boolean> {
+  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
+    return true;
+  }
+  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+}
+
+function isLiveAnyBridgeSessionView(view: OpenCodeBridgeSessionView): boolean {
+  return isLiveBridgeSessionView(view) || isLiveOpenCodeBridgeSessionView(view);
 }
 
 export interface InboxItem {
@@ -157,18 +187,15 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       geminiScanner: deps.geminiScanner,
       opencodeScanner: deps.opencodeScanner,
     });
-    const bridgeSessionViews =
-      (await deps.codexBridgeService?.listSessionViews()) ?? [];
+    const bridgeSessionViews = await listBridgeSessionViews(deps);
     const bridgedSessionById = new Map(
       bridgeSessionViews.map((item) => [item.session.id, item]),
     );
     const activeBridgeSessionIds = new Set<string>();
     await Promise.all(
       bridgeSessionViews.map(async (item) => {
-        if (!isLiveBridgeSessionView(item)) return;
-        const isActive =
-          (await deps.codexBridgeService?.isSessionActive(item.session.id)) ??
-          false;
+        if (!isLiveAnyBridgeSessionView(item)) return;
+        const isActive = await isBridgeSessionActive(deps, item.session.id);
         if (isActive) {
           activeBridgeSessionIds.add(item.session.id);
         }

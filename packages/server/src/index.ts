@@ -46,6 +46,8 @@ import {
 } from "./metadata/index.js";
 import { updateAllowedHosts } from "./middleware/allowed-hosts.js";
 import { NotificationService } from "./notifications/index.js";
+import { OpenCodeBridgeHttpClient } from "./opencode-bridge/OpenCodeBridgeHttpClient.js";
+import type { OpenCodeBridgeController } from "./opencode-bridge/types.js";
 import { CodexSessionScanner } from "./projects/codex-scanner.js";
 import { GeminiSessionScanner } from "./projects/gemini-scanner.js";
 import { OpenCodeSessionScanner } from "./projects/opencode-scanner.js";
@@ -121,6 +123,7 @@ let supervisorForShutdown:
   | null = null;
 let deviceBridgeForShutdown: DeviceBridgeService | null = null;
 let codexBridgeForShutdown: CodexBridgeController | null = null;
+let opencodeBridgeForShutdown: OpenCodeBridgeController | null = null;
 let terminalServiceForShutdown: TerminalService | null = null;
 let sessionArchiveServiceForShutdown: SessionArchiveService | null = null;
 let isShuttingDown = false;
@@ -176,6 +179,15 @@ async function gracefulShutdown(signal: string): Promise<void> {
       console.log("[Shutdown] Codex bridge shut down");
     } catch (error) {
       console.error("[Shutdown] Error shutting down Codex bridge:", error);
+    }
+  }
+
+  if (opencodeBridgeForShutdown) {
+    try {
+      await opencodeBridgeForShutdown.shutdown?.();
+      console.log("[Shutdown] OpenCode bridge client shut down");
+    } catch (error) {
+      console.error("[Shutdown] Error shutting down OpenCode bridge:", error);
     }
   }
 
@@ -347,6 +359,17 @@ console.log(
       : ""
   }`,
 );
+const opencodeBridgeService: OpenCodeBridgeController =
+  new OpenCodeBridgeHttpClient({
+    baseUrl: config.opencodeBridgeControlUrl,
+    eventBus,
+  });
+console.log(
+  `[OpenCodeBridge] control=${config.opencodeBridgeControlUrl} opencode=${
+    config.opencodeServerUrl ??
+    `managed-from-port:${config.opencodeServerStartPort}`
+  }`,
+);
 
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
@@ -478,6 +501,7 @@ async function startServer() {
   await modelInfoService.initialize();
   await networkBindingService.initialize();
   await codexBridgeService?.start?.();
+  await opencodeBridgeService.start?.();
 
   // Seed allowed hosts middleware from persisted settings
   updateAllowedHosts(serverSettingsService.getSetting("allowedHosts"));
@@ -605,6 +629,7 @@ async function startServer() {
     sharingService,
     deviceBridgeService,
     codexBridgeService,
+    opencodeBridgeService,
     sessionTitleGeneration: config.sessionTitleGeneration,
     modelInfoService,
     enabledProviders: config.enabledProviders,
@@ -630,6 +655,7 @@ async function startServer() {
   supervisorForShutdown = supervisor;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
   codexBridgeForShutdown = codexBridgeService ?? null;
+  opencodeBridgeForShutdown = opencodeBridgeService;
   sessionArchiveServiceForShutdown = sessionArchiveService;
 
   // Set up debug context for maintenance server

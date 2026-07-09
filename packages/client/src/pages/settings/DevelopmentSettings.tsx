@@ -22,7 +22,6 @@ const DEFAULT_RESTART_TARGETS: Required<DeploymentRestartTargets> = {
   server: true,
   codexBridge: false,
   opencodeBridge: false,
-  claudeBridge: false,
 };
 
 function getErrorMessage(err: unknown): string {
@@ -210,8 +209,7 @@ export function DevelopmentSettings() {
   const hasSelectedRestartTarget =
     restartTargets.server ||
     restartTargets.codexBridge ||
-    restartTargets.opencodeBridge ||
-    restartTargets.claudeBridge;
+    restartTargets.opencodeBridge;
 
   const setRestartTarget = (
     target: keyof Required<DeploymentRestartTargets>,

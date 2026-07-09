@@ -31,6 +31,7 @@
 #     impossible; choose --restart-codex-bridge to migrate/restart it.
 #   - 4520 OpenCode bridge sessions are preserved by default. Choose
 #     --restart-opencode-bridge to restart that sidecar too.
+#   - The 4520 bridge manages its paired OpenCode server starting at 4521.
 #   - Persisted session jsonl is unaffected.
 
 set -euo pipefail
@@ -232,26 +233,39 @@ start_opencode_bridge_sidecar() {
   local bridge_port="$1"
   local bridge_url="$2"
   local server_url="$3"
+  local opencode_start_port="$4"
+  local opencode_bridge_upstream_url="${5:-}"
 
   if launchd_label_loaded "$OPENCODE_BRIDGE_LAUNCHD_LABEL"; then
     log "Starting OpenCode bridge LaunchAgent ${OPENCODE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
     kickstart_launchd_label "$OPENCODE_BRIDGE_LAUNCHD_LABEL"
   else
-    log "Starting OpenCode bridge sidecar on ${bridge_url} (logs: /tmp/yep-opencode-bridge.log) ..."
-    YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
-      YEP_SERVER_URL="$server_url" \
-      nohup yepanywhere --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
+    log "Starting OpenCode CLI bridge sidecar on ${bridge_url} (logs: /tmp/yep-opencode-bridge.log) ..."
+    if [[ -n "$opencode_bridge_upstream_url" ]]; then
+      YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
+        YEP_SERVER_URL="$server_url" \
+        YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
+        YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$opencode_bridge_upstream_url" \
+        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+        nohup yepanywhere --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
+    else
+      YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
+        YEP_SERVER_URL="$server_url" \
+        YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
+        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+        nohup yepanywhere --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
+    fi
   fi
 
   for _ in $(seq 1 60); do
     if curl -fsS "${bridge_url}/status" >/dev/null 2>&1; then
-      log "OpenCode bridge sidecar is up."
+      log "OpenCode CLI bridge sidecar is up."
       return 0
     fi
     sleep 0.25
   done
 
-  err "OpenCode bridge sidecar didn't answer ${bridge_url}/status within 15s."
+  err "OpenCode CLI bridge sidecar didn't answer ${bridge_url}/status within 15s."
   tail -20 /tmp/yep-opencode-bridge.log >&2 || true
   return 1
 }
@@ -305,6 +319,8 @@ if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
   CODEX_BRIDGE_HTTP_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${CODEX_BRIDGE_PORT}}}"
   OPENCODE_BRIDGE_PORT="${YEP_OPENCODE_BRIDGE_PORT:-${OPENCODE_BRIDGE_PORT:-4520}}"
   OPENCODE_BRIDGE_HTTP_URL="${YEP_OPENCODE_BRIDGE_CONTROL_URL:-${OPENCODE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${OPENCODE_BRIDGE_PORT}}}"
+  OPENCODE_SERVER_START_PORT="${YEP_OPENCODE_SERVER_START_PORT:-${YEP_OPENCODE_PORT:-${OPENCODE_SERVER_START_PORT:-${OPENCODE_PORT:-$((OPENCODE_BRIDGE_PORT + 1))}}}}"
+  OPENCODE_BRIDGE_UPSTREAM_URL="${YEP_OPENCODE_BRIDGE_UPSTREAM_URL:-${OPENCODE_BRIDGE_UPSTREAM_URL:-}}"
   SERVER_LISTEN_PIDS="$(lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
   SERVER_PROCESS_PIDS="$(server_process_pids "$SERVER_PORT")"
   DEV_SUPERVISOR_PIDS="$(dev_supervisor_pids_for_server_listeners "$SERVER_LISTEN_PIDS")"
@@ -315,6 +331,8 @@ else
   CODEX_BRIDGE_HTTP_URL=""
   OPENCODE_BRIDGE_PORT=""
   OPENCODE_BRIDGE_HTTP_URL=""
+  OPENCODE_SERVER_START_PORT=""
+  OPENCODE_BRIDGE_UPSTREAM_URL=""
   SERVER_LISTEN_PIDS=""
   SERVER_PROCESS_PIDS=""
   DEV_SUPERVISOR_PIDS=""
@@ -355,7 +373,7 @@ if $DO_RESTART; then
     if [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]]; then
       warn "Restarting OpenCode bridge on port ${OPENCODE_BRIDGE_PORT}; active bridge clients may disconnect."
     else
-      dim "OpenCode bridge sidecar is not running; it will be started."
+      dim "OpenCode CLI bridge sidecar is not running; it will be started."
     fi
   elif [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] && ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
     dim "preserving OpenCode bridge on port ${OPENCODE_BRIDGE_PORT} (PID ${OPENCODE_BRIDGE_LISTEN_PIDS//$'\n'/, })"
@@ -456,7 +474,7 @@ if $DO_RESTART; then
       err "OpenCode bridge port ${OPENCODE_BRIDGE_PORT} is still in use; cannot start sidecar."
       exit 1
     fi
-    start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
+    start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL" "$OPENCODE_SERVER_START_PORT" "$OPENCODE_BRIDGE_UPSTREAM_URL"
   fi
 
   log "Starting yepanywhere ..."
@@ -469,14 +487,30 @@ if $DO_RESTART; then
     kickstart_launchd_label "$SERVER_LAUNCHD_LABEL"
   elif $USE_CODEX_BRIDGE_SIDECAR; then
     dim "LaunchAgent ${SERVER_LAUNCHD_LABEL} is not loaded; falling back to nohup (logs: /tmp/yep-server.log)"
-    BASE_PATH="${SERVER_BASE_PATH:-/}" \
-      ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
-      YEP_CODEX_BRIDGE_MODE=external \
-      YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
-      YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
-      YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
-      YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
-      nohup yepanywhere --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
+    if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
+      BASE_PATH="${SERVER_BASE_PATH:-/}" \
+        ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+        YEP_CODEX_BRIDGE_MODE=external \
+        YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
+        YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
+        YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
+        YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
+        YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
+        YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$OPENCODE_BRIDGE_UPSTREAM_URL" \
+        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+        nohup yepanywhere --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
+    else
+      BASE_PATH="${SERVER_BASE_PATH:-/}" \
+        ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+        YEP_CODEX_BRIDGE_MODE=external \
+        YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
+        YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
+        YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
+        YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
+        YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
+        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+        nohup yepanywhere --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
+    fi
   else
     dim "LaunchAgent ${SERVER_LAUNCHD_LABEL} is not loaded; falling back to nohup (logs: /tmp/yep-server.log)"
     BASE_PATH="${SERVER_BASE_PATH:-/}" \
@@ -556,7 +590,7 @@ if ! $DO_RESTART && $RESTART_CODEX_BRIDGE; then
 fi
 
 if ! $DO_RESTART && $RESTART_OPENCODE_BRIDGE; then
-  log "Restarting OpenCode bridge sidecar on port ${OPENCODE_BRIDGE_PORT} ..."
+  log "Restarting OpenCode CLI bridge sidecar on port ${OPENCODE_BRIDGE_PORT} ..."
   if [[ -n "$SERVER_LISTEN_PIDS" ]] &&
     [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] &&
     pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
@@ -582,7 +616,7 @@ if ! $DO_RESTART && $RESTART_OPENCODE_BRIDGE; then
     exit 1
   fi
 
-  start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
+  start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL" "$OPENCODE_SERVER_START_PORT" "$OPENCODE_BRIDGE_UPSTREAM_URL"
 fi
 
 log "Done."

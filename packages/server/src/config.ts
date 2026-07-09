@@ -76,10 +76,14 @@ export interface Config {
   opencodeBridgeHost: string;
   /** Port for the OpenCode bridge HTTP listener. */
   opencodeBridgePort: number;
-  /** HTTP control URL for the OpenCode bridge sidecar. */
+  /** HTTP control URL for the OpenCode CLI bridge sidecar. */
   opencodeBridgeControlUrl: string;
-  /** Yep server URL that the OpenCode bridge sidecar forwards requests to. */
+  /** Yep server URL that the OpenCode CLI bridge sidecar forwards requests to. */
   opencodeBridgeServerUrl: string;
+  /** Optional fixed OpenCode CLI upstream URL. Defaults to a managed local server. */
+  opencodeServerUrl?: string;
+  /** First port to try for the managed OpenCode server. */
+  opencodeServerStartPort: number;
   /**
    * Periodic full-tree rescan interval for codex session watcher (ms).
    * Helps recover from missed fs.watch events on macOS. 0 disables it.
@@ -216,10 +220,7 @@ export function loadConfig(): Config {
     4510,
   );
   const opencodeBridgePort = parseIntOrDefault(
-    process.env.YEP_OPENCODE_BRIDGE_PORT ??
-      process.env.OPENCODE_BRIDGE_PORT ??
-      process.env.YEP_CLAUDE_BRIDGE_PORT ??
-      process.env.CLAUDE_BRIDGE_PORT,
+    process.env.YEP_OPENCODE_BRIDGE_PORT ?? process.env.OPENCODE_BRIDGE_PORT,
     4520,
   );
   const codexBridgeMode = parseCodexBridgeMode(
@@ -343,20 +344,26 @@ export function loadConfig(): Config {
     opencodeBridgeHost:
       process.env.YEP_OPENCODE_BRIDGE_HOST ??
       process.env.OPENCODE_BRIDGE_HOST ??
-      process.env.YEP_CLAUDE_BRIDGE_HOST ??
-      process.env.CLAUDE_BRIDGE_HOST ??
       "127.0.0.1",
     opencodeBridgePort,
     opencodeBridgeControlUrl:
       process.env.YEP_OPENCODE_BRIDGE_CONTROL_URL ??
       process.env.OPENCODE_BRIDGE_CONTROL_URL ??
-      process.env.YEP_CLAUDE_BRIDGE_CONTROL_URL ??
-      process.env.CLAUDE_BRIDGE_CONTROL_URL ??
       `http://127.0.0.1:${opencodeBridgePort}`,
     opencodeBridgeServerUrl:
       process.env.YEP_SERVER_URL ??
       process.env.YEP_ANYWHERE_SERVER_URL ??
       `http://127.0.0.1:${parseIntOrDefault(process.env.PORT, 3400)}`,
+    opencodeServerUrl:
+      process.env.YEP_OPENCODE_BRIDGE_UPSTREAM_URL ??
+      process.env.OPENCODE_BRIDGE_UPSTREAM_URL,
+    opencodeServerStartPort: parseIntOrDefault(
+      process.env.YEP_OPENCODE_SERVER_START_PORT ??
+        process.env.YEP_OPENCODE_PORT ??
+        process.env.OPENCODE_SERVER_START_PORT ??
+        process.env.OPENCODE_PORT,
+      opencodeBridgePort + 1,
+    ),
     codexWatchPeriodicRescanMs,
     sessionIndexFullValidationMs,
     sessionIndexWriteLockTimeoutMs,

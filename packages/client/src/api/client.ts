@@ -568,8 +568,6 @@ export interface DeploymentRestartTargets {
   server?: boolean;
   codexBridge?: boolean;
   opencodeBridge?: boolean;
-  /** Deprecated alias accepted by older servers. */
-  claudeBridge?: boolean;
 }
 
 export interface GetVersionOptions {
