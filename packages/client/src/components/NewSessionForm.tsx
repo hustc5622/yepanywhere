@@ -2,6 +2,7 @@ import {
   type CodexMcpMode,
   DEFAULT_PERMISSION_MODE,
   type ModelInfo,
+  type OpenCodeModelLimits,
   type ProviderInfo,
   type ProviderName,
   resolveModel,
@@ -85,6 +86,7 @@ function getThinkingOption(
 }
 
 type ThinkingPreset = "off" | "auto" | `on:${EffortLevel}`;
+type OpenCodeEndpoint = "openai" | "anthropic";
 
 const THINKING_PRESET_ORDER: readonly ThinkingPreset[] = [
   "off",
@@ -94,6 +96,11 @@ const THINKING_PRESET_ORDER: readonly ThinkingPreset[] = [
   "on:high",
   "on:max",
 ];
+const OPENCODE_ENDPOINT_PROVIDERS = new Set([
+  "anthropic",
+  "ohmyrouter",
+  "openai",
+]);
 
 function isEffortLevel(value: string): value is EffortLevel {
   return EFFORT_LEVEL_OPTIONS.some((option) => option.value === value);
@@ -144,6 +151,136 @@ function getPreferredModelId(
   return models[0]?.id ?? null;
 }
 
+function splitProviderModelId(modelId: string | null | undefined): {
+  provider: string;
+  model: string;
+} | null {
+  const trimmed = modelId?.trim();
+  if (!trimmed) return null;
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return null;
+  return {
+    provider: trimmed.slice(0, slash),
+    model: trimmed.slice(slash + 1),
+  };
+}
+
+function getOpenCodeEndpointFromModel(
+  modelId: string | null | undefined,
+): OpenCodeEndpoint {
+  return splitProviderModelId(modelId)?.provider === "anthropic"
+    ? "anthropic"
+    : "openai";
+}
+
+function getOpenCodeModelKey(
+  modelId: string | null | undefined,
+): string | null {
+  const parsed = splitProviderModelId(modelId);
+  if (!parsed) return modelId?.trim() || null;
+  return OPENCODE_ENDPOINT_PROVIDERS.has(parsed.provider)
+    ? parsed.model
+    : (modelId ?? null);
+}
+
+function isOpenCodeEndpointModel(modelId: string | null | undefined): boolean {
+  const parsed = splitProviderModelId(modelId);
+  return parsed ? OPENCODE_ENDPOINT_PROVIDERS.has(parsed.provider) : true;
+}
+
+function getOpenCodeOpenAIProvider(
+  modelId: string,
+  models: ModelInfo[],
+): "ohmyrouter" | "openai" {
+  const matchingProviders = models
+    .map((model) => splitProviderModelId(model.id))
+    .filter((parsed): parsed is { provider: string; model: string } =>
+      Boolean(parsed && parsed.model === modelId),
+    )
+    .map((parsed) => parsed.provider);
+
+  if (matchingProviders.includes("ohmyrouter")) return "ohmyrouter";
+  if (matchingProviders.includes("openai")) return "openai";
+  return "ohmyrouter";
+}
+
+function buildOpenCodeModelForEndpoint(
+  modelId: string,
+  endpoint: OpenCodeEndpoint,
+  models: ModelInfo[],
+): string {
+  const parsed = splitProviderModelId(modelId);
+  if (parsed && !OPENCODE_ENDPOINT_PROVIDERS.has(parsed.provider)) {
+    return modelId;
+  }
+
+  const bareModelId = parsed?.model ?? modelId;
+  if (endpoint === "anthropic") return `anthropic/${bareModelId}`;
+  return `${getOpenCodeOpenAIProvider(bareModelId, models)}/${bareModelId}`;
+}
+
+function getPreferredOpenCodeModelId(
+  models: ModelInfo[],
+  preferredModelId?: string | null,
+): string | null {
+  const configuredModelId = preferredModelId ?? resolveModel(getModelSetting());
+
+  if (configuredModelId) {
+    const matchingPreferredModel = models.find(
+      (model) => model.id === configuredModelId,
+    );
+    if (matchingPreferredModel) return matchingPreferredModel.id;
+
+    const configuredKey =
+      splitProviderModelId(configuredModelId)?.model ?? configuredModelId;
+    const matchingModel = models.find(
+      (model) => splitProviderModelId(model.id)?.model === configuredKey,
+    );
+    if (matchingModel) return configuredModelId;
+  }
+
+  return models[0]?.id ?? null;
+}
+
+function parseTokenLimitInput(value: string): number | undefined | null {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const normalized = trimmed.replace(/[,_\s]/g, "").toLowerCase();
+  const match = normalized.match(/^(\d+(?:\.\d+)?)([km])?$/);
+  if (!match) return null;
+
+  const amount = Number(match[1]);
+  const suffix = match[2];
+  const multiplier = suffix === "m" ? 1_000_000 : suffix === "k" ? 1_000 : 1;
+  const tokens = Math.round(amount * multiplier);
+
+  if (!Number.isSafeInteger(tokens) || tokens <= 0) return null;
+  return tokens;
+}
+
+function getOpenCodeModelLimits(
+  contextInput: string,
+  outputInput: string,
+): { limits?: OpenCodeModelLimits; error?: "invalid" | "incomplete" } {
+  const context = parseTokenLimitInput(contextInput);
+  const output = parseTokenLimitInput(outputInput);
+
+  if (context === null || output === null) return { error: "invalid" };
+  if (context === undefined && output === undefined) return {};
+  if (context === undefined || output === undefined) {
+    return { error: "incomplete" };
+  }
+  return { limits: { context, output } };
+}
+
+function sameOpenCodeModelLimits(
+  a: OpenCodeModelLimits | undefined,
+  b: OpenCodeModelLimits | undefined,
+): boolean {
+  return a?.context === b?.context && a?.output === b?.output;
+}
+
 export interface NewSessionFormProps {
   projectId: string;
   /** Whether to focus the textarea on mount (default: true) */
@@ -174,8 +311,12 @@ export function NewSessionForm({
     null,
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [selectedOpenCodeEndpoint, setSelectedOpenCodeEndpoint] =
+    useState<OpenCodeEndpoint>("openai");
   const [selectedCodexMcpMode, setSelectedCodexMcpMode] =
     useState<CodexMcpMode>("standard");
+  const [opencodeContextLimit, setOpencodeContextLimit] = useState("");
+  const [opencodeOutputLimit, setOpencodeOutputLimit] = useState("");
   // null = local, string = remote host
   const [selectedExecutor, setSelectedExecutor] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
@@ -344,13 +485,42 @@ export function NewSessionForm({
     if (!initialProvider) return;
 
     setSelectedProvider(initialProvider.name);
-    setSelectedModel(
-      getPreferredModelId(
-        initialProvider.models ?? [],
-        savedDefaults?.model ?? initialProvider.currentModel,
-      ),
-    );
+    const preferredModel =
+      initialProvider.name === "opencode"
+        ? getPreferredOpenCodeModelId(
+            initialProvider.models ?? [],
+            savedDefaults?.model ?? initialProvider.currentModel,
+          )
+        : getPreferredModelId(
+            initialProvider.models ?? [],
+            savedDefaults?.model ?? initialProvider.currentModel,
+          );
+    if (initialProvider.name === "opencode") {
+      const endpoint = getOpenCodeEndpointFromModel(preferredModel);
+      setSelectedOpenCodeEndpoint(endpoint);
+      setSelectedModel(
+        preferredModel
+          ? buildOpenCodeModelForEndpoint(
+              preferredModel,
+              endpoint,
+              initialProvider.models ?? [],
+            )
+          : null,
+      );
+    } else {
+      setSelectedModel(preferredModel);
+    }
     setSelectedCodexMcpMode(savedDefaults?.codexMcpMode ?? "standard");
+    setOpencodeContextLimit(
+      savedDefaults?.opencodeModelLimits?.context
+        ? String(savedDefaults.opencodeModelLimits.context)
+        : "",
+    );
+    setOpencodeOutputLimit(
+      savedDefaults?.opencodeModelLimits?.output
+        ? String(savedDefaults.opencodeModelLimits.output)
+        : "",
+    );
     setMode(savedDefaults?.permissionMode ?? DEFAULT_PERMISSION_MODE);
     const savedThinkingPreset = normalizeThinkingOption(
       savedDefaults?.thinking,
@@ -375,9 +545,25 @@ export function NewSessionForm({
     setSelectedProvider(providerName);
     const provider = providers.find((p) => p.name === providerName);
     if (provider?.models && provider.models.length > 0) {
-      setSelectedModel(
-        getPreferredModelId(provider.models, provider.currentModel),
-      );
+      const preferredModel =
+        providerName === "opencode"
+          ? getPreferredOpenCodeModelId(provider.models, provider.currentModel)
+          : getPreferredModelId(provider.models, provider.currentModel);
+      if (providerName === "opencode") {
+        const endpoint = getOpenCodeEndpointFromModel(preferredModel);
+        setSelectedOpenCodeEndpoint(endpoint);
+        setSelectedModel(
+          preferredModel
+            ? buildOpenCodeModelForEndpoint(
+                preferredModel,
+                endpoint,
+                provider.models,
+              )
+            : null,
+        );
+      } else {
+        setSelectedModel(preferredModel);
+      }
     } else {
       setSelectedModel(null);
     }
@@ -388,10 +574,27 @@ export function NewSessionForm({
 
   // Build model options for FilterDropdown
   const modelOptions = useMemo((): FilterOption<string>[] => {
-    return availableModels.map((model) => {
+    const seenOpenCodeModels = new Set<string>();
+    const options: FilterOption<string>[] = [];
+
+    for (const model of availableModels) {
+      const parsed = splitProviderModelId(model.id);
+      const isOpenCodeEndpointOption =
+        selectedProvider === "opencode" &&
+        parsed &&
+        OPENCODE_ENDPOINT_PROVIDERS.has(parsed.provider);
+      const value = isOpenCodeEndpointOption ? parsed.model : model.id;
+
+      if (isOpenCodeEndpointOption) {
+        if (seenOpenCodeModels.has(value)) continue;
+        seenOpenCodeModels.add(value);
+      }
+
       const label = model.size
         ? `${model.name} (${(model.size / (1024 * 1024 * 1024)).toFixed(1)} GB)`
-        : model.name;
+        : isOpenCodeEndpointOption
+          ? model.name.replace(/^(anthropic|ohmyrouter|openai)\s+\/\s+/i, "")
+          : model.name;
 
       let description = model.description;
       if (!description) {
@@ -405,14 +608,59 @@ export function NewSessionForm({
         if (parts.length > 0) description = parts.join(" · ");
       }
 
-      return { value: model.id, label, description };
-    });
-  }, [availableModels]);
+      options.push({ value, label, description });
+    }
+
+    return options;
+  }, [availableModels, selectedProvider]);
+
+  const selectedModelForDropdown =
+    selectedProvider === "opencode"
+      ? getOpenCodeModelKey(selectedModel)
+      : selectedModel;
+  const showOpenCodeEndpointSelector =
+    selectedProvider === "opencode" &&
+    selectedModelForDropdown !== null &&
+    isOpenCodeEndpointModel(selectedModel);
 
   // Handle model selection from FilterDropdown
-  const handleModelSelect = useCallback((selected: string[]) => {
-    setSelectedModel(selected[0] ?? null);
-  }, []);
+  const handleModelSelect = useCallback(
+    (selected: string[]) => {
+      const nextModel = selected[0] ?? null;
+      if (selectedProvider === "opencode") {
+        setSelectedModel(
+          nextModel
+            ? buildOpenCodeModelForEndpoint(
+                nextModel,
+                selectedOpenCodeEndpoint,
+                availableModels,
+              )
+            : null,
+        );
+        return;
+      }
+      setSelectedModel(nextModel);
+    },
+    [availableModels, selectedOpenCodeEndpoint, selectedProvider],
+  );
+
+  const handleOpenCodeEndpointSelect = useCallback(
+    (endpoint: OpenCodeEndpoint) => {
+      setSelectedOpenCodeEndpoint(endpoint);
+      setSelectedModel((currentModel) => {
+        const modelKey = getOpenCodeModelKey(currentModel);
+        if (!modelKey || !isOpenCodeEndpointModel(currentModel)) {
+          return currentModel;
+        }
+        return buildOpenCodeModelForEndpoint(
+          modelKey,
+          endpoint,
+          availableModels,
+        );
+      });
+    },
+    [availableModels],
+  );
 
   // Combined display text: committed text + interim transcript
   const displayText = interimTranscript
@@ -493,6 +741,23 @@ export function NewSessionForm({
     [setEffortLevel, setThinkingMode],
   );
 
+  const opencodeModelLimitResult = useMemo(
+    () => getOpenCodeModelLimits(opencodeContextLimit, opencodeOutputLimit),
+    [opencodeContextLimit, opencodeOutputLimit],
+  );
+  const hasOpenCodeModelLimitError =
+    selectedProvider === "opencode" && !!opencodeModelLimitResult.error;
+  const opencodeModelLimitErrorMessage =
+    opencodeModelLimitResult.error === "incomplete"
+      ? t("newSessionOpenCodeLimitsIncomplete")
+      : opencodeModelLimitResult.error === "invalid"
+        ? t("newSessionOpenCodeLimitsInvalid")
+        : "";
+  const opencodeModelLimitsForRequest =
+    selectedProvider === "opencode" && !opencodeModelLimitResult.error
+      ? opencodeModelLimitResult.limits
+      : undefined;
+
   const handleSaveDefaults = useCallback(async () => {
     setIsSavingDefaults(true);
     try {
@@ -505,6 +770,7 @@ export function NewSessionForm({
         permissionMode: mode,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
+        opencodeModelLimits: opencodeModelLimitsForRequest,
       });
       showToast(t("newSessionDefaultsSaved"), "success");
     } catch (err) {
@@ -518,6 +784,7 @@ export function NewSessionForm({
     }
   }, [
     mode,
+    opencodeModelLimitsForRequest,
     selectedCodexMcpMode,
     selectedModel,
     selectedProvider,
@@ -542,7 +809,9 @@ export function NewSessionForm({
     }
 
     const hasContent = finalMessage.trim() || pendingFiles.length > 0;
-    if (!projectId || !hasContent || isStarting) return;
+    if (!projectId || !hasContent || isStarting || hasOpenCodeModelLimitError) {
+      return;
+    }
 
     const trimmedMessage = finalMessage.trim();
 
@@ -563,6 +832,7 @@ export function NewSessionForm({
         provider: selectedProvider ?? undefined,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
+        opencodeModelLimits: opencodeModelLimitsForRequest,
         executor: selectedExecutor ?? undefined,
       };
 
@@ -806,13 +1076,21 @@ export function NewSessionForm({
     ? (savedDefaults?.thinking ?? undefined) ===
       getThinkingOption(thinkingMode, thinkingLevel)
     : true;
+  const opencodeDefaultsMatch =
+    selectedProvider === "opencode"
+      ? sameOpenCodeModelLimits(
+          savedDefaults?.opencodeModelLimits,
+          opencodeModelLimitsForRequest,
+        )
+      : true;
   const defaultsMatchCurrent =
     (savedDefaults?.provider ?? undefined) ===
       (selectedProvider ?? undefined) &&
     (savedDefaults?.model ?? undefined) === (selectedModel ?? undefined) &&
     (savedDefaults?.permissionMode ?? DEFAULT_PERMISSION_MODE) === mode &&
     thinkingDefaultsMatch &&
-    codexMcpDefaultsMatch;
+    codexMcpDefaultsMatch &&
+    opencodeDefaultsMatch;
 
   // Split providers into available vs unavailable so the unavailable ones can
   // be tucked behind a toggle (keeps the grid from looking ragged).
@@ -985,7 +1263,7 @@ export function NewSessionForm({
         <button
           type="button"
           onClick={handleStartSession}
-          disabled={isStarting || !hasContent}
+          disabled={isStarting || !hasContent || hasOpenCodeModelLimitError}
           className="send-button"
           aria-label={t("newSessionStartAction")}
         >
@@ -1137,11 +1415,38 @@ export function NewSessionForm({
                   <FilterDropdown
                     label={t("newSessionModelTitle")}
                     options={modelOptions}
-                    selected={selectedModel ? [selectedModel] : []}
+                    selected={
+                      selectedModelForDropdown ? [selectedModelForDropdown] : []
+                    }
                     onChange={handleModelSelect}
                     multiSelect={false}
                     placeholder={t("newSessionModelPlaceholder")}
                   />
+                </div>
+              )}
+              {showOpenCodeEndpointSelector && (
+                <div className="new-session-config-field">
+                  <h3>{t("newSessionOpenCodeEndpointTitle")}</h3>
+                  <div className="new-session-endpoint-options">
+                    <button
+                      type="button"
+                      className={`new-session-endpoint-option ${selectedOpenCodeEndpoint === "openai" ? "selected" : ""}`}
+                      onClick={() => handleOpenCodeEndpointSelect("openai")}
+                      disabled={isStarting}
+                      aria-pressed={selectedOpenCodeEndpoint === "openai"}
+                    >
+                      {t("newSessionOpenCodeEndpointOpenAI")}
+                    </button>
+                    <button
+                      type="button"
+                      className={`new-session-endpoint-option ${selectedOpenCodeEndpoint === "anthropic" ? "selected" : ""}`}
+                      onClick={() => handleOpenCodeEndpointSelect("anthropic")}
+                      disabled={isStarting}
+                      aria-pressed={selectedOpenCodeEndpoint === "anthropic"}
+                    >
+                      {t("newSessionOpenCodeEndpointAnthropic")}
+                    </button>
+                  </div>
                 </div>
               )}
               {supportsThinkingToggle && (
@@ -1161,6 +1466,45 @@ export function NewSessionForm({
             </div>
           </div>
         )}
+
+      {selectedProvider === "opencode" && (
+        <div className="new-session-opencode-limits-section">
+          <h3>{t("newSessionOpenCodeLimitsTitle")}</h3>
+          <div className="new-session-opencode-limits-grid">
+            <label className="new-session-limit-field">
+              <span>{t("newSessionOpenCodeContextLimit")}</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                className="new-session-limit-input"
+                value={opencodeContextLimit}
+                onChange={(event) =>
+                  setOpencodeContextLimit(event.target.value)
+                }
+                placeholder={t("newSessionOpenCodeContextPlaceholder")}
+                disabled={isStarting}
+              />
+            </label>
+            <label className="new-session-limit-field">
+              <span>{t("newSessionOpenCodeOutputLimit")}</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                className="new-session-limit-input"
+                value={opencodeOutputLimit}
+                onChange={(event) => setOpencodeOutputLimit(event.target.value)}
+                placeholder={t("newSessionOpenCodeOutputPlaceholder")}
+                disabled={isStarting}
+              />
+            </label>
+          </div>
+          {opencodeModelLimitErrorMessage && (
+            <p className="new-session-limit-error">
+              {opencodeModelLimitErrorMessage}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Codex MCP Profile - matches cf / cf -mcp launch modes */}
       {selectedProvider === "codex" && (
@@ -1274,6 +1618,7 @@ export function NewSessionForm({
                 isSavingDefaults ||
                 settingsLoading ||
                 !selectedProvider ||
+                hasOpenCodeModelLimitError ||
                 defaultsMatchCurrent
               }
             >

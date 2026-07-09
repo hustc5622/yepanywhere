@@ -8,6 +8,7 @@ import {
   type ContextStatusResponse,
   type ContextUsage,
   type ModelOption,
+  type OpenCodeModelLimits,
   type PermissionRules,
   type ProviderName,
   type ThinkingOption,
@@ -175,6 +176,62 @@ function parseOptionalPositiveInteger(
   return { value };
 }
 
+function parseOptionalOpenCodeModelLimits(rawLimits: unknown): {
+  opencodeModelLimits: OpenCodeModelLimits | undefined;
+  error?: string;
+} {
+  if (rawLimits === undefined || rawLimits === null || rawLimits === "") {
+    return { opencodeModelLimits: undefined };
+  }
+  if (typeof rawLimits !== "object") {
+    return {
+      opencodeModelLimits: undefined,
+      error: "opencodeModelLimits must be an object",
+    };
+  }
+
+  const input = rawLimits as Record<string, unknown>;
+  const hasContext = input.context !== undefined && input.context !== null;
+  const hasOutput = input.output !== undefined && input.output !== null;
+  if (!hasContext && !hasOutput) {
+    return { opencodeModelLimits: undefined };
+  }
+  if (!hasContext || !hasOutput) {
+    return {
+      opencodeModelLimits: undefined,
+      error: "opencodeModelLimits requires both context and output",
+    };
+  }
+
+  const context = parseOptionalPositiveInteger(
+    input.context,
+    "opencodeModelLimits.context",
+  );
+  if (context.error) {
+    return { opencodeModelLimits: undefined, error: context.error };
+  }
+  const output = parseOptionalPositiveInteger(
+    input.output,
+    "opencodeModelLimits.output",
+  );
+  if (output.error) {
+    return { opencodeModelLimits: undefined, error: output.error };
+  }
+  if (context.value === undefined || output.value === undefined) {
+    return {
+      opencodeModelLimits: undefined,
+      error: "opencodeModelLimits requires both context and output",
+    };
+  }
+
+  return {
+    opencodeModelLimits: {
+      context: context.value,
+      output: output.value,
+    },
+  };
+}
+
 export interface SessionsDeps {
   supervisor: Supervisor;
   scanner: ProjectScanner;
@@ -220,6 +277,8 @@ interface StartSessionBody {
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
+  /** OpenCode-only per-session model limits. */
+  opencodeModelLimits?: OpenCodeModelLimits;
   /** Client-generated temp ID for optimistic UI tracking */
   tempId?: string;
   /** SSH host alias for remote execution (undefined = local) */
@@ -247,6 +306,8 @@ interface CreateSessionBody {
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
+  /** OpenCode-only per-session model limits. */
+  opencodeModelLimits?: OpenCodeModelLimits;
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
   /** Permission rules for tool filtering (deny/allow patterns) */
@@ -1568,6 +1629,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
+    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
+      body.opencodeModelLimits,
+    );
+    if (parsedOpenCodeModelLimits.error) {
+      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    }
 
     const userMessage: UserMessage = {
       text: body.message,
@@ -1592,6 +1659,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       provider: body.provider,
       executor,
       model: body.model,
+      opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
     });
 
     const globalInstructions =
@@ -1607,6 +1675,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         effort,
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
+        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
         executor,
         globalInstructions,
         permissions: body.permissions,
@@ -1690,6 +1759,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
+    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
+      body.opencodeModelLimits,
+    );
+    if (parsedOpenCodeModelLimits.error) {
+      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    }
 
     // Convert thinking option to SDK config
     const { thinking, effort } = body.thinking
@@ -1712,6 +1787,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         effort,
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
+        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
         executor,
         globalInstructions,
         permissions: body.permissions,
@@ -1835,6 +1911,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
+    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
+      body.opencodeModelLimits,
+    );
+    if (parsedOpenCodeModelLimits.error) {
+      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    }
 
     const userMessage: UserMessage = {
       text: body.message,
@@ -1954,6 +2036,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             : null,
         tempId: body.tempId ?? null,
         messageLength: body.message.length,
+        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
       },
       "Session resume requested",
     );
@@ -1973,6 +2056,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             ? (parsedCodexMcpMode.codexMcpMode ??
               deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
+        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
         executor,
         globalInstructions,
         permissions: body.permissions,
@@ -2088,6 +2172,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
+    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
+      body.opencodeModelLimits,
+    );
+    if (parsedOpenCodeModelLimits.error) {
+      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    }
 
     const userMessage: UserMessage = {
       text: body.message,
@@ -2161,6 +2251,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             ? (parsedCodexMcpMode.codexMcpMode ??
               deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
+        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
         executor:
           executor ??
           metadataExecutor.executor ??

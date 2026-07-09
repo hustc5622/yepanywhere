@@ -3,6 +3,7 @@ import {
   type CodexMcpMode,
   DEFAULT_PERMISSION_MODE,
   type EffortLevel,
+  type OpenCodeModelLimits,
   type PermissionRules,
   type ProviderName,
   SESSION_TITLE_MAX_LENGTH,
@@ -80,6 +81,8 @@ export interface ModelSettings {
   effort?: EffortLevel;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
+  /** OpenCode model limit override. Only consumed by the OpenCode provider. */
+  opencodeModelLimits?: OpenCodeModelLimits;
   /** Provider to use for this session. undefined = use default (Claude) */
   providerName?: ProviderName;
   /** SSH host for remote execution (undefined = local) */
@@ -585,6 +588,7 @@ export class Supervisor {
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
       codexMcpMode: modelSettings?.codexMcpMode,
+      opencodeModelLimits: modelSettings?.opencodeModelLimits,
       executor: modelSettings?.executor,
       remoteEnv: modelSettings?.remoteEnv,
       globalInstructions: modelSettings?.globalInstructions,
@@ -708,6 +712,7 @@ export class Supervisor {
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
       codexMcpMode: modelSettings?.codexMcpMode,
+      opencodeModelLimits: modelSettings?.opencodeModelLimits,
       executor: modelSettings?.executor,
       remoteEnv: modelSettings?.remoteEnv,
       globalInstructions: modelSettings?.globalInstructions,

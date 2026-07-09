@@ -21,6 +21,7 @@ import type {
   ModelInfo,
   OpenCodeMessagePartUpdatedEvent,
   OpenCodeMessageUpdatedEvent,
+  OpenCodeModelLimits,
   OpenCodePart,
   OpenCodeSSEEvent,
   PermissionMode,
@@ -54,6 +55,18 @@ export interface OpenCodeProviderConfig {
 type OpenCodePermissionAction = "allow" | "ask" | "deny";
 type OpenCodePermissionConfig = Record<string, OpenCodePermissionAction>;
 
+type OpenCodeProviderModelLimitConfig = Record<
+  string,
+  {
+    models: Record<
+      string,
+      {
+        limit: OpenCodeModelLimits;
+      }
+    >;
+  }
+>;
+
 interface OpenCodePermissionAskedEvent {
   type: "permission.asked";
   properties: {
@@ -85,6 +98,33 @@ interface OpenCodeMessageResponse {
       data?: unknown;
     };
   };
+}
+
+interface OpenCodeModelRef {
+  providerID: string;
+  modelID: string;
+}
+
+interface OpenCodeRuntimeRef {
+  baseUrl?: string;
+  currentModel?: string | null;
+  cwd?: string;
+}
+
+interface OpenCodeSessionCreatePayload {
+  title: string;
+  location?: {
+    directory: string;
+  };
+  model?: {
+    providerID: string;
+    id: string;
+  };
+}
+
+interface OpenCodeMessagePayload {
+  parts: Array<{ type: "text"; text: string }>;
+  model?: OpenCodeModelRef;
 }
 
 interface OpenCodeSessionResponse {
@@ -240,7 +280,7 @@ export class OpenCodeProvider implements AgentProvider {
     const queue = new MessageQueue();
     const abortController = new AbortController();
     const pidRef: { value?: number } = {};
-    const runtimeRef: { baseUrl?: string; currentModel?: string | null } = {};
+    const runtimeRef: OpenCodeRuntimeRef = {};
 
     // Push initial message if provided
     if (options.initialMessage) {
@@ -266,10 +306,14 @@ export class OpenCodeProvider implements AgentProvider {
       supportedModels: () => this.getAvailableModels(),
       setModel: async (model?: string) => {
         if (!runtimeRef.baseUrl) return;
-        const normalizedModel = this.normalizeOpenCodeModelOption(model);
-        await this.patchServerConfig(runtimeRef.baseUrl, {
-          model: normalizedModel ?? undefined,
-        });
+        const normalizedModel = await this.resolveOpenCodeModelOption(model);
+        await this.patchServerConfig(
+          runtimeRef.baseUrl,
+          {
+            model: normalizedModel ?? undefined,
+          },
+          runtimeRef.cwd,
+        );
         runtimeRef.currentModel = normalizedModel;
       },
     };
@@ -285,7 +329,7 @@ export class OpenCodeProvider implements AgentProvider {
     signal: AbortSignal,
     options: StartSessionOptions,
     pidRef: { value?: number },
-    runtimeRef: { baseUrl?: string; currentModel?: string | null },
+    runtimeRef: OpenCodeRuntimeRef,
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
     const opencodePath = await this.findOpenCodePath();
@@ -302,6 +346,7 @@ export class OpenCodeProvider implements AgentProvider {
     const port = getNextPort();
     const baseUrl = `http://127.0.0.1:${port}`;
     runtimeRef.baseUrl = baseUrl;
+    runtimeRef.cwd = cwd;
 
     // Start the OpenCode server
     let serverProcess: ChildProcess;
@@ -340,7 +385,7 @@ export class OpenCodeProvider implements AgentProvider {
     signal.addEventListener("abort", abortHandler);
 
     // Wait for server to be ready
-    const serverReady = await this.waitForServer(baseUrl, 10000);
+    const serverReady = await this.waitForServer(baseUrl, 10000, cwd);
     if (!serverReady) {
       serverProcess.kill("SIGTERM");
       signal.removeEventListener("abort", abortHandler);
@@ -353,7 +398,7 @@ export class OpenCodeProvider implements AgentProvider {
 
     log.info({ port, cwd }, "OpenCode server ready");
 
-    const configApplied = await this.configureServer(baseUrl, options);
+    const configApplied = await this.configureServer(baseUrl, options, cwd);
     if (!configApplied.ok) {
       serverProcess.kill("SIGTERM");
       signal.removeEventListener("abort", abortHandler);
@@ -368,7 +413,12 @@ export class OpenCodeProvider implements AgentProvider {
     // Create, resume, or fork a session on the server.
     let opencodeSessionId: string;
     try {
-      const sessionData = await this.prepareOpenCodeSession(baseUrl, options);
+      const sessionData = await this.prepareOpenCodeSession(
+        baseUrl,
+        options,
+        cwd,
+        configApplied.model,
+      );
       opencodeSessionId = sessionData.id;
       log.info(
         {
@@ -436,6 +486,8 @@ export class OpenCodeProvider implements AgentProvider {
           userPrompt,
           signal,
           options.onToolApproval,
+          runtimeRef.currentModel,
+          cwd,
         );
       }
     } finally {
@@ -447,15 +499,18 @@ export class OpenCodeProvider implements AgentProvider {
         serverProcess.kill("SIGTERM");
       }
       runtimeRef.baseUrl = undefined;
+      runtimeRef.cwd = undefined;
     }
   }
 
   private async prepareOpenCodeSession(
     baseUrl: string,
     options: StartSessionOptions,
+    cwd: string,
+    model: string | null,
   ): Promise<OpenCodeSessionResponse> {
     if (!options.resumeSessionId) {
-      return this.createOpenCodeSession(baseUrl);
+      return this.createOpenCodeSession(baseUrl, cwd, model);
     }
 
     if (options.resumeSessionAt) {
@@ -463,23 +518,27 @@ export class OpenCodeProvider implements AgentProvider {
         baseUrl,
         options.resumeSessionId,
         options.resumeSessionAt,
+        cwd,
       );
     }
 
-    await this.getOpenCodeSession(baseUrl, options.resumeSessionId);
+    await this.getOpenCodeSession(baseUrl, options.resumeSessionId, cwd);
     return { id: options.resumeSessionId };
   }
 
   private async createOpenCodeSession(
     baseUrl: string,
+    cwd: string,
+    model: string | null,
   ): Promise<OpenCodeSessionResponse> {
-    const response = await fetch(`${baseUrl}/session`, {
+    const response = await fetch(this.openCodeUrl(baseUrl, "/session", cwd), {
       method: "POST",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
+        ...this.openCodeDirectoryHeaders(cwd),
       },
-      body: JSON.stringify({ title: "Yep Anywhere Session" }),
+      body: JSON.stringify(this.buildOpenCodeSessionCreatePayload(cwd, model)),
     });
 
     if (!response.ok) {
@@ -492,11 +551,19 @@ export class OpenCodeProvider implements AgentProvider {
   private async getOpenCodeSession(
     baseUrl: string,
     sessionId: string,
+    cwd?: string,
   ): Promise<OpenCodeSessionResponse> {
     const response = await fetch(
-      `${baseUrl}/session/${encodeURIComponent(sessionId)}`,
+      this.openCodeUrl(
+        baseUrl,
+        `/session/${encodeURIComponent(sessionId)}`,
+        cwd,
+      ),
       {
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          ...this.openCodeDirectoryHeaders(cwd),
+        },
       },
     );
 
@@ -513,14 +580,20 @@ export class OpenCodeProvider implements AgentProvider {
     baseUrl: string,
     sessionId: string,
     messageId: string,
+    cwd?: string,
   ): Promise<OpenCodeSessionResponse> {
     const response = await fetch(
-      `${baseUrl}/session/${encodeURIComponent(sessionId)}/fork`,
+      this.openCodeUrl(
+        baseUrl,
+        `/session/${encodeURIComponent(sessionId)}/fork`,
+        cwd,
+      ),
       {
         method: "POST",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
+          ...this.openCodeDirectoryHeaders(cwd),
         },
         body: JSON.stringify({ messageID: messageId }),
       },
@@ -546,10 +619,12 @@ export class OpenCodeProvider implements AgentProvider {
     text: string,
     signal: AbortSignal,
     onToolApproval?: StartSessionOptions["onToolApproval"],
+    model?: string | null,
+    cwd?: string,
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
 
-    const sseUrl = `${baseUrl}/event`;
+    const sseUrl = this.openCodeUrl(baseUrl, "/event", cwd);
     const sseController = new AbortController();
     const emissionState: OpenCodeEmissionState = {
       toolUseIds: new Set(),
@@ -572,7 +647,10 @@ export class OpenCodeProvider implements AgentProvider {
     const ssePromise = (async () => {
       try {
         const response = await fetch(sseUrl, {
-          headers: { Accept: "text/event-stream" },
+          headers: {
+            Accept: "text/event-stream",
+            ...this.openCodeDirectoryHeaders(cwd),
+          },
           signal: sseController.signal,
         });
 
@@ -637,6 +715,7 @@ export class OpenCodeProvider implements AgentProvider {
               emissionState,
               text,
               onToolApproval,
+              cwd,
             );
 
             for (const sdkMessage of sdkMessages) {
@@ -683,16 +762,19 @@ export class OpenCodeProvider implements AgentProvider {
         "Sending message to OpenCode",
       );
       const response = await fetch(
-        `${baseUrl}/session/${opencodeSessionId}/message`,
+        this.openCodeUrl(
+          baseUrl,
+          `/session/${encodeURIComponent(opencodeSessionId)}/message`,
+          cwd,
+        ),
         {
           method: "POST",
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
+            ...this.openCodeDirectoryHeaders(cwd),
           },
-          body: JSON.stringify({
-            parts: [{ type: "text", text }],
-          }),
+          body: JSON.stringify(this.buildOpenCodeMessagePayload(text, model)),
           signal,
         },
       );
@@ -803,6 +885,7 @@ export class OpenCodeProvider implements AgentProvider {
     emissionState: OpenCodeEmissionState,
     submittedText: string,
     onToolApproval?: StartSessionOptions["onToolApproval"],
+    cwd?: string,
   ): Promise<SDKMessage[]> {
     switch (event.type) {
       case "permission.asked": {
@@ -811,6 +894,7 @@ export class OpenCodeProvider implements AgentProvider {
           event as OpenCodePermissionAskedEvent,
           signal,
           onToolApproval,
+          cwd,
         );
         return [];
       }
@@ -1293,24 +1377,40 @@ export class OpenCodeProvider implements AgentProvider {
   private async configureServer(
     baseUrl: string,
     options: StartSessionOptions,
+    cwd?: string,
   ): Promise<
     { ok: true; model: string | null } | { ok: false; error: string }
   > {
     const config: Record<string, unknown> = {
       permission: this.mapPermissionModeToOpenCode(options.permissionMode),
     };
-    const model = this.normalizeOpenCodeModelOption(options.model);
+    const model = await this.resolveOpenCodeModelOption(options.model);
     if (model) {
       config.model = model;
     }
+    if (options.opencodeModelLimits) {
+      const providerLimitConfig = this.buildOpenCodeModelLimitConfig(
+        model,
+        options.opencodeModelLimits,
+      );
+      if (!providerLimitConfig) {
+        return {
+          ok: false,
+          error:
+            "OpenCode model limits require an explicit model in provider/model format",
+        };
+      }
+      config.provider = providerLimitConfig;
+    }
 
     try {
-      await this.patchServerConfig(baseUrl, config);
+      await this.patchServerConfig(baseUrl, config, cwd);
 
       getLogger().info(
         {
           permissionMode: options.permissionMode ?? "default",
           model,
+          opencodeModelLimits: options.opencodeModelLimits,
         },
         "Configured OpenCode server",
       );
@@ -1326,12 +1426,14 @@ export class OpenCodeProvider implements AgentProvider {
   private async patchServerConfig(
     baseUrl: string,
     config: Record<string, unknown>,
+    cwd?: string,
   ): Promise<void> {
-    const response = await fetch(`${baseUrl}/config`, {
+    const response = await fetch(this.openCodeUrl(baseUrl, "/config", cwd), {
       method: "PATCH",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
+        ...this.openCodeDirectoryHeaders(cwd),
       },
       body: JSON.stringify(config),
       signal: AbortSignal.timeout(5000),
@@ -1406,11 +1508,108 @@ export class OpenCodeProvider implements AgentProvider {
     return trimmed;
   }
 
+  private async resolveOpenCodeModelOption(
+    model: string | undefined,
+  ): Promise<string | null> {
+    const normalized = this.normalizeOpenCodeModelOption(model);
+    if (!normalized || normalized.includes("/")) return normalized;
+
+    const models = await this.getAvailableModels();
+    const suffixMatches = models
+      .map((item) => item.id)
+      .filter((id) => id.split("/").at(-1) === normalized);
+    if (suffixMatches.length === 1) {
+      return suffixMatches[0] ?? normalized;
+    }
+
+    const anthropicMatch = suffixMatches.find((id) =>
+      id.startsWith("anthropic/"),
+    );
+    if (anthropicMatch) return anthropicMatch;
+
+    const openaiMatch = suffixMatches.find((id) => id.startsWith("openai/"));
+    if (openaiMatch) return openaiMatch;
+
+    return normalized;
+  }
+
+  private parseOpenCodeModelOption(
+    model: string | null | undefined,
+  ): OpenCodeModelRef | null {
+    if (!model) return null;
+    const slash = model.indexOf("/");
+    if (slash <= 0 || slash === model.length - 1) return null;
+    return {
+      providerID: model.slice(0, slash),
+      modelID: model.slice(slash + 1),
+    };
+  }
+
+  private buildOpenCodeModelLimitConfig(
+    model: string | null | undefined,
+    limits: OpenCodeModelLimits | undefined,
+  ): OpenCodeProviderModelLimitConfig | null {
+    if (!limits) return null;
+    const parsed = this.parseOpenCodeModelOption(model);
+    if (!parsed) return null;
+
+    return {
+      [parsed.providerID]: {
+        models: {
+          [parsed.modelID]: {
+            limit: limits,
+          },
+        },
+      },
+    };
+  }
+
+  private buildOpenCodeSessionCreatePayload(
+    cwd: string,
+    model: string | null | undefined,
+  ): OpenCodeSessionCreatePayload {
+    const payload: OpenCodeSessionCreatePayload = {
+      title: "Yep Anywhere Session",
+      location: { directory: cwd },
+    };
+    const parsed = this.parseOpenCodeModelOption(model);
+    if (parsed) {
+      payload.model = {
+        providerID: parsed.providerID,
+        id: parsed.modelID,
+      };
+    }
+    return payload;
+  }
+
+  private openCodeUrl(baseUrl: string, path: string, cwd?: string): string {
+    const url = new URL(path, baseUrl);
+    if (cwd) url.searchParams.set("directory", cwd);
+    return url.toString();
+  }
+
+  private openCodeDirectoryHeaders(cwd?: string): Record<string, string> {
+    return cwd ? { "x-opencode-directory": cwd } : {};
+  }
+
+  private buildOpenCodeMessagePayload(
+    text: string,
+    model: string | null | undefined,
+  ): OpenCodeMessagePayload {
+    const payload: OpenCodeMessagePayload = {
+      parts: [{ type: "text", text }],
+    };
+    const parsed = this.parseOpenCodeModelOption(model);
+    if (parsed) payload.model = parsed;
+    return payload;
+  }
+
   private async handlePermissionAsked(
     baseUrl: string,
     event: OpenCodePermissionAskedEvent,
     signal: AbortSignal,
     onToolApproval?: StartSessionOptions["onToolApproval"],
+    cwd?: string,
   ): Promise<void> {
     const permission = event.properties.permission;
     const toolName = this.mapOpenCodePermissionToToolName(permission);
@@ -1442,12 +1641,17 @@ export class OpenCodeProvider implements AgentProvider {
 
     const reply = result.behavior === "allow" ? "once" : "reject";
     const response = await fetch(
-      `${baseUrl}/permission/${event.properties.id}/reply`,
+      this.openCodeUrl(
+        baseUrl,
+        `/permission/${encodeURIComponent(event.properties.id)}/reply`,
+        cwd,
+      ),
       {
         method: "POST",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
+          ...this.openCodeDirectoryHeaders(cwd),
         },
         body: JSON.stringify({ reply }),
         signal,
@@ -1541,15 +1745,22 @@ export class OpenCodeProvider implements AgentProvider {
   private async waitForServer(
     baseUrl: string,
     timeoutMs: number,
+    cwd?: string,
   ): Promise<boolean> {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeoutMs) {
       try {
-        const response = await fetch(`${baseUrl}/session`, {
-          headers: { Accept: "application/json" },
-          signal: AbortSignal.timeout(1000),
-        });
+        const response = await fetch(
+          this.openCodeUrl(baseUrl, "/session", cwd),
+          {
+            headers: {
+              Accept: "application/json",
+              ...this.openCodeDirectoryHeaders(cwd),
+            },
+            signal: AbortSignal.timeout(1000),
+          },
+        );
         if (response.ok) {
           return true;
         }

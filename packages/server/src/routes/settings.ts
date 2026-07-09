@@ -9,6 +9,7 @@ import {
   type CodexMcpMode,
   type EffortLevel,
   type NewSessionDefaults,
+  type OpenCodeModelLimits,
   type PermissionMode,
   type ProviderName,
   type ThinkingOption,
@@ -81,6 +82,38 @@ function getEffortFromThinkingOption(
     return isEffortLevel(effort) ? effort : undefined;
   }
   return isEffortLevel(option) ? option : undefined;
+}
+
+function parsePositiveTokenLimit(value: unknown): number | null {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value <= 0 ||
+    value > Number.MAX_SAFE_INTEGER
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function parseOpenCodeModelLimits(
+  raw: unknown,
+): OpenCodeModelLimits | undefined | null {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "object") return null;
+
+  const input = raw as Record<string, unknown>;
+  const hasContext = input.context !== undefined && input.context !== null;
+  const hasOutput = input.output !== undefined && input.output !== null;
+  if (!hasContext && !hasOutput) return undefined;
+  if (!hasContext || !hasOutput) return null;
+
+  const context = parsePositiveTokenLimit(input.context);
+  const output = parsePositiveTokenLimit(input.output);
+
+  if (context === null || output === null) return null;
+  return { context, output };
 }
 
 /**
@@ -173,6 +206,12 @@ function parseNewSessionDefaults(
     ) {
       parsed.codexMcpMode = input.codexMcpMode as CodexMcpMode;
     }
+  }
+
+  if ("opencodeModelLimits" in input) {
+    const limits = parseOpenCodeModelLimits(input.opencodeModelLimits);
+    if (limits === null) return null;
+    if (limits) parsed.opencodeModelLimits = limits;
   }
 
   return Object.keys(parsed).length > 0 ? parsed : undefined;

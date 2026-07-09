@@ -59,6 +59,19 @@ export interface ModelInfo {
 }
 
 /**
+ * Per-session OpenCode model limit override.
+ *
+ * OpenCode's current config API expects both values when overriding a model
+ * limit, so the UI only sends this object when the pair is complete.
+ */
+export interface OpenCodeModelLimits {
+  /** Maximum context window in tokens */
+  context: number;
+  /** Maximum output tokens */
+  output: number;
+}
+
+/**
  * Slash command (skill) available in a session.
  */
 export interface SlashCommand {
@@ -151,6 +164,8 @@ export interface NewSessionDefaults {
   thinking?: ThinkingOption;
   permissionMode?: PermissionMode;
   codexMcpMode?: CodexMcpMode;
+  /** OpenCode-only per-session model limits */
+  opencodeModelLimits?: OpenCodeModelLimits;
 }
 
 /**

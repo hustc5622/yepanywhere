@@ -21,6 +21,7 @@ export type {
   ProviderName,
   ProviderInfo,
   ModelInfo,
+  OpenCodeModelLimits,
   SlashCommand,
   PermissionMode,
   CodexMcpMode,

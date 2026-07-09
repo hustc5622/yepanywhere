@@ -3,6 +3,7 @@ import type {
   CodexMcpMode,
   ContextStatusSdkPayload,
   ModelInfo,
+  OpenCodeModelLimits,
   PermissionMode,
   SlashCommand,
 } from "@yep-anywhere/shared";
@@ -70,6 +71,8 @@ export interface StartSessionOptions {
   effort?: import("@yep-anywhere/shared").EffortLevel;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
+  /** OpenCode model limit override. Only consumed by the OpenCode provider. */
+  opencodeModelLimits?: OpenCodeModelLimits;
   /** Tool approval callback */
   onToolApproval?: CanUseTool;
   /** SSH host for remote execution (undefined = local) */

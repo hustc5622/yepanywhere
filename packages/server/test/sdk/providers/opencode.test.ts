@@ -166,13 +166,104 @@ describe("OpenCodeProvider", () => {
     );
   });
 
+  it("builds OpenCode session and message payloads with the selected model", () => {
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      buildOpenCodeSessionCreatePayload: (
+        cwd: string,
+        model?: string | null,
+      ) => unknown;
+      buildOpenCodeMessagePayload: (
+        text: string,
+        model?: string | null,
+      ) => unknown;
+    };
+
+    expect(
+      methods.buildOpenCodeSessionCreatePayload(
+        "/repo",
+        "anthropic/claude-fable-5",
+      ),
+    ).toEqual({
+      title: "Yep Anywhere Session",
+      location: { directory: "/repo" },
+      model: {
+        providerID: "anthropic",
+        id: "claude-fable-5",
+      },
+    });
+
+    expect(
+      methods.buildOpenCodeMessagePayload("hello", "anthropic/claude-fable-5"),
+    ).toEqual({
+      parts: [{ type: "text", text: "hello" }],
+      model: {
+        providerID: "anthropic",
+        modelID: "claude-fable-5",
+      },
+    });
+  });
+
+  it("routes OpenCode session creation to the requested project directory", async () => {
+    const provider = new OpenCodeProvider();
+    const prepareOpenCodeSession = (
+      provider as unknown as {
+        prepareOpenCodeSession: (
+          baseUrl: string,
+          options: { resumeSessionId?: string; resumeSessionAt?: string },
+          cwd: string,
+          model: string | null,
+        ) => Promise<{ id: string }>;
+      }
+    ).prepareOpenCodeSession.bind(provider);
+
+    const requests: Array<{
+      url?: string;
+      directoryHeader?: string | string[];
+      body: unknown;
+    }> = [];
+    const cwd = "/repo with spaces";
+
+    const result = await withTestServer(
+      async (req, res) => {
+        requests.push({
+          url: req.url,
+          directoryHeader: req.headers["x-opencode-directory"],
+          body: await readJsonBody(req),
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ id: "ses_created" }));
+      },
+      (baseUrl) =>
+        prepareOpenCodeSession(baseUrl, {}, cwd, "anthropic/claude-fable-5"),
+    );
+
+    const url = new URL(requests[0]?.url ?? "", "http://127.0.0.1");
+    expect(result).toEqual({ id: "ses_created" });
+    expect(url.pathname).toBe("/session");
+    expect(url.searchParams.get("directory")).toBe(cwd);
+    expect(requests[0]?.directoryHeader).toBe(cwd);
+    expect(requests[0]?.body).toEqual({
+      title: "Yep Anywhere Session",
+      location: { directory: cwd },
+      model: {
+        providerID: "anthropic",
+        id: "claude-fable-5",
+      },
+    });
+  });
+
   it("patches OpenCode config with permission mode and selected model", async () => {
     const provider = new OpenCodeProvider();
     const configureServer = (
       provider as unknown as {
         configureServer: (
           baseUrl: string,
-          options: { permissionMode?: string; model?: string },
+          options: {
+            permissionMode?: string;
+            model?: string;
+            opencodeModelLimits?: { context: number; output: number };
+          },
         ) => Promise<{ ok: true; model: string | null } | { ok: false }>;
       }
     ).configureServer.bind(provider);
@@ -194,6 +285,7 @@ describe("OpenCodeProvider", () => {
         configureServer(baseUrl, {
           permissionMode: "acceptEdits",
           model: "anthropic/claude-sonnet-4",
+          opencodeModelLimits: { context: 1_000_000, output: 32_000 },
         }),
     );
 
@@ -210,9 +302,48 @@ describe("OpenCodeProvider", () => {
             "*": "ask",
           }),
           model: "anthropic/claude-sonnet-4",
+          provider: {
+            anthropic: {
+              models: {
+                "claude-sonnet-4": {
+                  limit: { context: 1_000_000, output: 32_000 },
+                },
+              },
+            },
+          },
         },
       },
     ]);
+  });
+
+  it("rejects OpenCode model limits without an explicit provider/model", async () => {
+    const provider = new OpenCodeProvider();
+    const configureServer = (
+      provider as unknown as {
+        configureServer: (
+          baseUrl: string,
+          options: {
+            permissionMode?: string;
+            model?: string;
+            opencodeModelLimits?: { context: number; output: number };
+          },
+        ) => Promise<
+          { ok: true; model: string | null } | { ok: false; error: string }
+        >;
+      }
+    ).configureServer.bind(provider);
+
+    const result = await configureServer("http://127.0.0.1:9", {
+      permissionMode: "default",
+      model: "auto",
+      opencodeModelLimits: { context: 1_000_000, output: 32_000 },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "OpenCode model limits require an explicit model in provider/model format",
+    });
   });
 
   it("forks an OpenCode session when resuming at a message boundary", async () => {
@@ -222,6 +353,8 @@ describe("OpenCodeProvider", () => {
         prepareOpenCodeSession: (
           baseUrl: string,
           options: { resumeSessionId?: string; resumeSessionAt?: string },
+          cwd: string,
+          model: string | null,
         ) => Promise<{ id: string }>;
       }
     ).prepareOpenCodeSession.bind(provider);
@@ -240,20 +373,25 @@ describe("OpenCodeProvider", () => {
         res.end(JSON.stringify({ id: "ses_fork" }));
       },
       (baseUrl) =>
-        prepareOpenCodeSession(baseUrl, {
-          resumeSessionId: "ses_parent",
-          resumeSessionAt: "msg_boundary",
-        }),
+        prepareOpenCodeSession(
+          baseUrl,
+          {
+            resumeSessionId: "ses_parent",
+            resumeSessionAt: "msg_boundary",
+          },
+          "/repo",
+          null,
+        ),
     );
 
     expect(result).toEqual({ id: "ses_fork" });
-    expect(requests).toEqual([
-      {
-        url: "/session/ses_parent/fork",
-        method: "POST",
-        body: { messageID: "msg_boundary" },
-      },
-    ]);
+    const url = new URL(requests[0]?.url ?? "", "http://127.0.0.1");
+    expect(url.pathname).toBe("/session/ses_parent/fork");
+    expect(url.searchParams.get("directory")).toBe("/repo");
+    expect(requests[0]).toMatchObject({
+      method: "POST",
+      body: { messageID: "msg_boundary" },
+    });
   });
 
   it("bridges OpenCode permission requests through Yep tool approval", async () => {
