@@ -8,6 +8,11 @@ import {
 import { validateToolResult } from "../../../lib/validateToolResult";
 import { SchemaWarning } from "../../SchemaWarning";
 import { Modal } from "../../ui/Modal";
+import {
+  BenchmarkReviewPreview,
+  BenchmarkReviewResult,
+  parseBenchmarkReviewBlock,
+} from "./BenchmarkReviewRenderer";
 import type { BashInput, BashResult, ToolRenderer } from "./types";
 
 const MAX_LINES_COLLAPSED = 20;
@@ -107,6 +112,7 @@ function BashModalContent({
   const command = getBashCommand(input);
   const stdout = result?.stdout || "";
   const stderr = result?.stderr || "";
+  const benchmarkReview = parseBenchmarkReviewBlock(stdout);
 
   return (
     <div className="bash-modal-sections">
@@ -121,11 +127,15 @@ function BashModalContent({
       {stdout && (
         <div className="bash-modal-section">
           <div className="bash-modal-label">Output</div>
-          <div className="bash-modal-code">
-            <pre className="code-block">
-              <code>{stdout}</code>
-            </pre>
-          </div>
+          {benchmarkReview ? (
+            <BenchmarkReviewResult block={benchmarkReview} />
+          ) : (
+            <div className="bash-modal-code">
+              <pre className="code-block">
+                <code>{stdout}</code>
+              </pre>
+            </div>
+          )}
         </div>
       )}
       {stderr && (
@@ -230,6 +240,7 @@ function BashToolResult({
 
   const stdout = result.stdout || "";
   const stderr = result.stderr || "";
+  const benchmarkReview = parseBenchmarkReviewBlock(stdout);
   const stdoutLines = stdout.split("\n");
   const needsCollapse = stdoutLines.length > MAX_LINES_COLLAPSED;
   const displayStdout =
@@ -252,19 +263,25 @@ function BashToolResult({
       )}
       {stdout && (
         <div className="bash-stdout">
-          <pre className="code-block">
-            <code>{displayStdout}</code>
-          </pre>
-          {needsCollapse && (
-            <button
-              type="button"
-              className="expand-button"
-              onClick={() => setIsExpanded(!isExpanded)}
-            >
-              {isExpanded
-                ? "Show less"
-                : `Show all ${stdoutLines.length} lines`}
-            </button>
+          {benchmarkReview ? (
+            <BenchmarkReviewResult block={benchmarkReview} />
+          ) : (
+            <>
+              <pre className="code-block">
+                <code>{displayStdout}</code>
+              </pre>
+              {needsCollapse && (
+                <button
+                  type="button"
+                  className="expand-button"
+                  onClick={() => setIsExpanded(!isExpanded)}
+                >
+                  {isExpanded
+                    ? "Show less"
+                    : `Show all ${stdoutLines.length} lines`}
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
@@ -357,6 +374,7 @@ function BashCollapsedPreview({
     result?.stdout || result?.stderr || "",
     provider,
   );
+  const benchmarkReview = parseBenchmarkReviewBlock(result?.stdout || "");
   const command = getBashCommand(input);
   const { text: previewText, truncated } = truncateOutput(
     output,
@@ -386,20 +404,27 @@ function BashCollapsedPreview({
             <SchemaWarning toolName="Bash" errors={validationErrors} />
           )}
         </div>
-        {hasOutput && (
+        {benchmarkReview ? (
           <div className="bash-preview-row bash-preview-output-row">
             <span className="bash-preview-label">OUT</span>
-            <div
-              className={`bash-preview-output ${truncated ? "bash-preview-truncated" : ""} ${isError || result?.stderr ? "bash-preview-error" : ""}`}
-            >
-              <pre>
-                <code>{previewText}</code>
-              </pre>
-              {truncated && <div className="bash-preview-fade" />}
-            </div>
+            <BenchmarkReviewPreview block={benchmarkReview} />
           </div>
+        ) : (
+          hasOutput && (
+            <div className="bash-preview-row bash-preview-output-row">
+              <span className="bash-preview-label">OUT</span>
+              <div
+                className={`bash-preview-output ${truncated ? "bash-preview-truncated" : ""} ${isError || result?.stderr ? "bash-preview-error" : ""}`}
+              >
+                <pre>
+                  <code>{previewText}</code>
+                </pre>
+                {truncated && <div className="bash-preview-fade" />}
+              </div>
+            </div>
+          )
         )}
-        {!hasOutput && result && !result.interrupted && (
+        {!benchmarkReview && !hasOutput && result && !result.interrupted && (
           <div className="bash-preview-row">
             <span className="bash-preview-label">OUT</span>
             <span className="bash-preview-empty">No output</span>
