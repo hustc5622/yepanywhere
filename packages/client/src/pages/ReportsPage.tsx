@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
@@ -98,29 +99,82 @@ function ReportsDocumentMenu({ report }: { report: ReportDocument }) {
   const { t } = useI18n();
   const { showToast } = useToastContext();
   const [isOpen, setIsOpen] = useState(false);
+  const [dropdownPosition, setDropdownPosition] = useState<{
+    top: number;
+    left?: number;
+    right?: number;
+  } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
 
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (!wrapperRef.current?.contains(target)) {
+      const clickedInWrapper = wrapperRef.current?.contains(target);
+      const clickedInDropdown = dropdownRef.current?.contains(target);
+      if (!clickedInWrapper && !clickedInDropdown) {
         setIsOpen(false);
+        setDropdownPosition(null);
         triggerRef.current?.blur();
       }
     };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setIsOpen(false);
+      setDropdownPosition(null);
+      triggerRef.current?.blur();
+    };
+    const handleScroll = () => {
+      setIsOpen(false);
+      setDropdownPosition(null);
+      triggerRef.current?.blur();
+    };
 
     document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("scroll", handleScroll, true);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("scroll", handleScroll, true);
     };
   }, [isOpen]);
 
   const closeMenu = () => {
     setIsOpen(false);
+    setDropdownPosition(null);
     triggerRef.current?.blur();
+  };
+
+  const toggleMenu = () => {
+    if (isOpen) {
+      closeMenu();
+      return;
+    }
+
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) {
+      const dropdownWidth = 176;
+      const dropdownHeight = 42;
+      const margin = 8;
+      const top =
+        rect.bottom + margin + dropdownHeight > window.innerHeight
+          ? Math.max(margin, rect.top - dropdownHeight - margin)
+          : rect.bottom + margin;
+
+      if (rect.right - dropdownWidth < margin) {
+        setDropdownPosition({ top, left: Math.max(margin, rect.left) });
+      } else {
+        setDropdownPosition({
+          top,
+          right: Math.max(margin, window.innerWidth - rect.right),
+        });
+      }
+    }
+    setIsOpen(true);
   };
 
   const handleCopyPath = async () => {
@@ -148,7 +202,7 @@ function ReportsDocumentMenu({ report }: { report: ReportDocument }) {
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          setIsOpen((open) => !open);
+          toggleMenu();
         }}
         title={t("reportsDocumentOptions")}
         aria-label={t("reportsDocumentOptions")}
@@ -167,25 +221,37 @@ function ReportsDocumentMenu({ report }: { report: ReportDocument }) {
           <circle cx="19" cy="12" r="2" />
         </svg>
       </button>
-      {isOpen && (
-        <div className="session-menu-dropdown">
-          <button type="button" onClick={handleCopyPath}>
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden="true"
-            >
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-            {t("reportsCopyPath")}
-          </button>
-        </div>
-      )}
+      {isOpen &&
+        createPortal(
+          <div
+            ref={dropdownRef}
+            className="session-menu-dropdown reports-document-menu-dropdown"
+            style={{
+              position: "fixed",
+              top: dropdownPosition?.top ?? 100,
+              ...(dropdownPosition?.left !== undefined
+                ? { left: dropdownPosition.left }
+                : { right: dropdownPosition?.right ?? 20 }),
+            }}
+          >
+            <button type="button" onClick={handleCopyPath}>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden="true"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+              {t("reportsCopyPath")}
+            </button>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
