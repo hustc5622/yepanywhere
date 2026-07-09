@@ -8,7 +8,14 @@
  */
 
 export interface CompletedBlock {
-  type: "paragraph" | "heading" | "code" | "list" | "blockquote" | "hr";
+  type:
+    | "paragraph"
+    | "heading"
+    | "code"
+    | "list"
+    | "blockquote"
+    | "hr"
+    | "details";
   content: string;
   lang?: string; // for code blocks
   startOffset: number;
@@ -33,7 +40,8 @@ type BlockState =
   | { kind: "heading"; startOffset: number }
   | { kind: "code"; startOffset: number; lang: string; fence: string }
   | { kind: "list"; startOffset: number; listType: "bullet" | "numbered" }
-  | { kind: "blockquote"; startOffset: number };
+  | { kind: "blockquote"; startOffset: number }
+  | { kind: "details"; startOffset: number };
 
 export class BlockDetector {
   private buffer = "";
@@ -157,6 +165,10 @@ export class BlockDetector {
       return this.tryCompleteCodeBlock();
     }
 
+    if (this.state.kind === "details") {
+      return this.tryCompleteDetailsBlock();
+    }
+
     // If we're in a block state, check for completion
     if (this.state.kind !== "none") {
       return this.tryCompleteCurrentBlock();
@@ -202,6 +214,11 @@ export class BlockDetector {
         // Try to complete in this same call
         return this.tryCompleteCodeBlock();
       }
+    }
+
+    if (/^\s*<details(?:\s[^>]*)?>/i.test(firstLine)) {
+      this.state = { kind: "details", startOffset: this.offset };
+      return this.tryCompleteDetailsBlock();
     }
 
     // Check for heading
@@ -276,6 +293,9 @@ export class BlockDetector {
     // Could become HR
     if (/^[-*_]+$/.test(line)) return true;
 
+    // Could become a details disclosure block
+    if (/^<details/i.test(line)) return true;
+
     return false;
   }
 
@@ -289,6 +309,8 @@ export class BlockDetector {
         return this.tryCompleteList();
       case "blockquote":
         return this.tryCompleteBlockquote();
+      case "details":
+        return this.tryCompleteDetailsBlock();
       default:
         return null;
     }
@@ -605,6 +627,31 @@ export class BlockDetector {
     return null;
   }
 
+  private tryCompleteDetailsBlock(): CompletedBlock | null {
+    if (this.state.kind !== "details") return null;
+
+    const closeMatch = /<\/details\s*>/i.exec(this.buffer);
+    if (!closeMatch) {
+      return null;
+    }
+
+    const endIdx = closeMatch.index + closeMatch[0].length;
+    const newlineAfter =
+      this.buffer.length > endIdx && this.buffer[endIdx] === "\n" ? 1 : 0;
+    const content = this.buffer.slice(0, endIdx).trim();
+
+    const block: CompletedBlock = {
+      type: "details",
+      content,
+      startOffset: this.state.startOffset,
+      endOffset: this.offset + endIdx,
+    };
+
+    this.consumeChars(endIdx + newlineAfter);
+    this.state = { kind: "none" };
+    return block;
+  }
+
   private isClosingFence(line: string, openingFence: string): boolean {
     const trimmed = line.trim();
     const fenceChar = openingFence.charAt(0);
@@ -655,6 +702,9 @@ export class BlockDetector {
     // Blockquote
     if (line.startsWith("> ") || line === ">") return true;
 
+    // Details disclosure
+    if (/^\s*<details(?:\s[^>]*)?>/i.test(line)) return true;
+
     // Bullet list
     if (/^[-*]\s/.test(line)) return true;
 
@@ -688,6 +738,7 @@ export class BlockDetector {
     if (/^(`{3,}|~{3,})/.test(line)) return "code";
     if (/^[-*]\s/.test(line) || /^\d+\.\s/.test(line)) return "list";
     if (line.startsWith("> ") || line === ">") return "blockquote";
+    if (/^\s*<details(?:\s[^>]*)?>/i.test(line)) return "details";
     if (this.isHorizontalRule(line)) return "hr";
     return "paragraph";
   }
@@ -734,6 +785,13 @@ export class BlockDetector {
       case "blockquote":
         return {
           type: "blockquote",
+          content,
+          startOffset: this.state.startOffset,
+          endOffset: this.offset + this.buffer.length,
+        };
+      case "details":
+        return {
+          type: "details",
           content,
           startOffset: this.state.startOffset,
           endOffset: this.offset + this.buffer.length,

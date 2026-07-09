@@ -140,6 +140,8 @@ const MARKDOWN_SANITIZE_OPTIONS = {
     "br",
     "code",
     "del",
+    "details",
+    "div",
     "em",
     "h1",
     "h2",
@@ -156,6 +158,7 @@ const MARKDOWN_SANITIZE_OPTIONS = {
     "pre",
     "span",
     "strong",
+    "summary",
     "table",
     "tbody",
     "td",
@@ -175,10 +178,13 @@ const MARKDOWN_SANITIZE_OPTIONS = {
       "data-column",
     ],
     code: ["class"],
+    details: ["class", "open"],
+    div: ["class"],
     img: ["src", "alt", "title"],
     input: ["type", "checked", "disabled"],
     ol: ["start"],
     span: ["class"],
+    summary: ["class"],
     td: ["align"],
     th: ["align"],
   },
@@ -191,6 +197,9 @@ const MARKDOWN_SANITIZE_OPTIONS = {
   allowProtocolRelative: false,
   disallowedTagsMode: "escape" as const,
 };
+
+const DETAILS_PLACEHOLDER_PREFIX = "YEP_MARKDOWN_DETAILS_BLOCK_";
+const MAX_DETAILS_DEPTH = 8;
 
 const renderer: RendererObject<string, string> = {
   html({ text }) {
@@ -291,10 +300,180 @@ export function sanitizeUrl(
  * Render markdown to sanitized HTML with raw HTML disabled.
  */
 export function renderSafeMarkdown(markdown: string): string {
-  const rendered = markdownRenderer.parse(markdown, { async: false });
+  const { markdown: markdownWithPlaceholders, replacements } =
+    extractDetailsBlocks(markdown);
+  const rendered = markdownRenderer.parse(markdownWithPlaceholders, {
+    async: false,
+  });
   const html = typeof rendered === "string" ? rendered : "";
   const sanitized = sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS);
-  return sanitized.trim();
+  return restoreDetailsBlocks(sanitized, replacements).trim();
+}
+
+function renderSafeMarkdownNested(markdown: string, depth: number): string {
+  if (depth > MAX_DETAILS_DEPTH) {
+    return renderSafeMarkdownWithoutDetails(markdown);
+  }
+
+  const { markdown: markdownWithPlaceholders, replacements } =
+    extractDetailsBlocks(markdown, depth);
+  const rendered = markdownRenderer.parse(markdownWithPlaceholders, {
+    async: false,
+  });
+  const html = typeof rendered === "string" ? rendered : "";
+  const sanitized = sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS);
+  return restoreDetailsBlocks(sanitized, replacements).trim();
+}
+
+function renderSafeMarkdownWithoutDetails(markdown: string): string {
+  const rendered = markdownRenderer.parse(markdown, { async: false });
+  const html = typeof rendered === "string" ? rendered : "";
+  return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS).trim();
+}
+
+function renderSafeInlineMarkdown(markdown: string): string {
+  const rendered = markdownRenderer.parseInline(markdown, { async: false });
+  const html = typeof rendered === "string" ? rendered : "";
+  return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS).trim();
+}
+
+function extractDetailsBlocks(
+  markdown: string,
+  depth = 0,
+): {
+  markdown: string;
+  replacements: Map<string, string>;
+} {
+  if (!/<details[\s>]/i.test(markdown)) {
+    return { markdown, replacements: new Map() };
+  }
+
+  const replacements = new Map<string, string>();
+  let result = "";
+  let lastIndex = 0;
+  let pos = 0;
+  let fence: { char: "`" | "~"; length: number } | null = null;
+
+  while (pos < markdown.length) {
+    const lineStart = pos;
+    const newlineIdx = markdown.indexOf("\n", pos);
+    const lineEnd = newlineIdx === -1 ? markdown.length : newlineIdx + 1;
+    const line = markdown.slice(lineStart, lineEnd);
+    const lineWithoutNewline = line.replace(/\n$/, "");
+
+    if (fence) {
+      if (isClosingFenceLine(lineWithoutNewline, fence)) {
+        fence = null;
+      }
+      pos = lineEnd;
+      continue;
+    }
+
+    const openingFence = getOpeningFence(lineWithoutNewline);
+    if (openingFence) {
+      fence = openingFence;
+      pos = lineEnd;
+      continue;
+    }
+
+    if (/^\s*<details(?:\s[^>]*)?>/i.test(lineWithoutNewline)) {
+      const rest = markdown.slice(lineStart);
+      const closeMatch = /<\/details\s*>/i.exec(rest);
+      if (closeMatch) {
+        const blockStart = lineStart;
+        const blockEnd = lineStart + closeMatch.index + closeMatch[0].length;
+        const block = markdown.slice(blockStart, blockEnd);
+        const renderedDetails = renderDetailsBlock(block, depth);
+        if (renderedDetails) {
+          const placeholder = `${DETAILS_PLACEHOLDER_PREFIX}${replacements.size}__`;
+          result += markdown.slice(lastIndex, blockStart);
+          result += `\n\n${placeholder}\n\n`;
+          replacements.set(placeholder, renderedDetails);
+          lastIndex = blockEnd;
+          pos = blockEnd;
+          continue;
+        }
+      }
+    }
+
+    pos = lineEnd;
+  }
+
+  if (replacements.size === 0) {
+    return { markdown, replacements };
+  }
+
+  result += markdown.slice(lastIndex);
+  return { markdown: result, replacements };
+}
+
+function renderDetailsBlock(block: string, depth: number): string | null {
+  const match = /^\s*<details([^>]*)>([\s\S]*?)<\/details\s*>\s*$/i.exec(block);
+  if (!match) return null;
+
+  const attrs = match[1] ?? "";
+  const inner = match[2] ?? "";
+  const summaryMatch =
+    /^\s*<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary\s*>/i.exec(inner);
+
+  const summaryMarkdown = summaryMatch?.[1]?.trim() || "Details";
+  const bodyMarkdown = summaryMatch
+    ? inner.slice(summaryMatch[0].length).trim()
+    : inner.trim();
+  const summaryHtml = renderSafeInlineMarkdown(summaryMarkdown);
+  const bodyHtml = bodyMarkdown
+    ? renderSafeMarkdownNested(bodyMarkdown, depth + 1)
+    : "";
+  const openAttr = /\sopen(?:\s*=\s*(?:"open"|'open'|open))?(?=\s|$)/i.test(
+    attrs,
+  )
+    ? " open"
+    : "";
+
+  return `<details class="markdown-details"${openAttr}><summary class="markdown-details__summary">${summaryHtml}</summary><div class="markdown-details__content">${bodyHtml}</div></details>`;
+}
+
+function restoreDetailsBlocks(
+  html: string,
+  replacements: ReadonlyMap<string, string>,
+): string {
+  let restored = html;
+  for (const [placeholder, detailsHtml] of replacements) {
+    const escaped = escapeRegExp(placeholder);
+    restored = restored.replace(
+      new RegExp(`<p>\\s*${escaped}\\s*</p>`, "g"),
+      detailsHtml,
+    );
+    restored = restored.replace(new RegExp(escaped, "g"), detailsHtml);
+  }
+  return restored;
+}
+
+function getOpeningFence(
+  line: string,
+): { char: "`" | "~"; length: number } | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  if (!match?.[1]) return null;
+  return {
+    char: match[1][0] as "`" | "~",
+    length: match[1].length,
+  };
+}
+
+function isClosingFenceLine(
+  line: string,
+  fence: { char: "`" | "~"; length: number },
+): boolean {
+  const trimmed = line.trim();
+  const pattern =
+    fence.char === "`"
+      ? new RegExp(`^\`{${fence.length},}$`)
+      : new RegExp(`^~{${fence.length},}$`);
+  return pattern.test(trimmed);
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function escapeHtml(text: string): string {

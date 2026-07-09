@@ -348,6 +348,81 @@
   color: var(--text-muted);
 }
 
+.text-block .markdown-details,
+.streaming-blocks .markdown-details,
+.streaming-block .markdown-details {
+  margin: var(--space-3) 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--accent-color, #3b82f6);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+}
+
+.text-block .markdown-details__summary,
+.streaming-blocks .markdown-details__summary,
+.streaming-block .markdown-details__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.text-block .markdown-details__summary::-webkit-details-marker,
+.streaming-blocks .markdown-details__summary::-webkit-details-marker,
+.streaming-block .markdown-details__summary::-webkit-details-marker {
+  display: none;
+}
+
+.text-block .markdown-details__summary::before,
+.streaming-blocks .markdown-details__summary::before,
+.streaming-block .markdown-details__summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  opacity: 0.72;
+  transition: transform 0.15s ease;
+}
+
+.text-block .markdown-details[open] > .markdown-details__summary::before,
+.streaming-blocks .markdown-details[open] > .markdown-details__summary::before,
+.streaming-block .markdown-details[open] > .markdown-details__summary::before {
+  transform: rotate(90deg);
+}
+
+.text-block .markdown-details[open] > .markdown-details__summary,
+.streaming-blocks .markdown-details[open] > .markdown-details__summary,
+.streaming-block .markdown-details[open] > .markdown-details__summary {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.text-block .markdown-details__content,
+.streaming-blocks .markdown-details__content,
+.streaming-block .markdown-details__content {
+  padding: var(--space-3);
+  padding-left: calc(var(--space-3) + 10px);
+}
+
+.text-block .markdown-details__content > :first-child,
+.streaming-blocks .markdown-details__content > :first-child,
+.streaming-block .markdown-details__content > :first-child {
+  margin-top: 0;
+}
+
+.text-block .markdown-details__content > :last-child,
+.streaming-blocks .markdown-details__content > :last-child,
+.streaming-block .markdown-details__content > :last-child {
+  margin-bottom: 0;
+}
+
 /* Headers in streaming blocks */
 .streaming-blocks h1,
 .streaming-blocks h2,

@@ -908,6 +908,26 @@ code
       // Just "-" is not a list item, it's paragraph
       expect(blocks[0]).toMatchObject({ type: "paragraph" });
     });
+
+    it("keeps details disclosure blocks intact across inner blank lines", () => {
+      const detector = new BlockDetector();
+      const blocks = detector.feed(
+        "<details><summary>点击查看答案</summary>\n" +
+          "1. **Provider 路径的 rollback 成功了。**\n\n" +
+          "2. **JSONL 没有 marker 的原因：**\n\n" +
+          "</details>\n\nAfter\n\n",
+      );
+
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]).toMatchObject({ type: "details" });
+      expect(blocks[0]?.content).toContain("<summary>点击查看答案</summary>");
+      expect(blocks[0]?.content).toContain("2. **JSONL");
+      expect(blocks[0]?.content).toContain("</details>");
+      expect(blocks[1]).toMatchObject({
+        type: "paragraph",
+        content: "After",
+      });
+    });
   });
 
   describe("streaming code blocks", () => {

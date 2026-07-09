@@ -242,6 +242,58 @@ describe("AugmentGenerator", () => {
       expect(augment.html).toContain("&lt;script&gt;");
     });
 
+    it("renders details disclosure blocks with markdown content", async () => {
+      const block: CompletedBlock = {
+        type: "details",
+        content:
+          "<details><summary>点击查看答案</summary>\n" +
+          "1. **Provider 路径的 rollback 成功了。**\n\n" +
+          "2. **JSONL 没有 `thread_rolled_back` marker 的原因：**\n" +
+          "- TUI backtrack 写 marker\n" +
+          "- app-server `thread/rollback` 创建新 thread\n\n" +
+          "</details>",
+        startOffset: 0,
+        endOffset: 158,
+      };
+
+      const augment = await generator.processBlock(block, 0);
+
+      expect(augment.type).toBe("details");
+      expect(augment.html).toContain('<details class="markdown-details">');
+      expect(augment.html).toContain(
+        '<summary class="markdown-details__summary">点击查看答案</summary>',
+      );
+      expect(augment.html).toContain(
+        "<strong>Provider 路径的 rollback 成功了。</strong>",
+      );
+      expect(augment.html).toContain("<code>thread_rolled_back</code>");
+      expect(augment.html).toContain("<ul>");
+      expect(augment.html).not.toContain("&lt;details");
+      expect(augment.html).not.toContain("&lt;summary");
+    });
+
+    it("sanitizes details attributes and escapes unsafe nested HTML", async () => {
+      const block: CompletedBlock = {
+        type: "details",
+        content:
+          '<details onclick="alert(1)" open><summary><script>bad()</script>Answer</summary>\n' +
+          "Body <img src=x onerror=alert(1)> **ok**\n" +
+          "</details>",
+        startOffset: 0,
+        endOffset: 126,
+      };
+
+      const augment = await generator.processBlock(block, 0);
+
+      expect(augment.html).toContain('<details class="markdown-details" open>');
+      expect(augment.html).not.toContain("onclick");
+      expect(augment.html).not.toContain("<script>");
+      expect(augment.html).not.toContain("<img");
+      expect(augment.html).toContain("&lt;script&gt;");
+      expect(augment.html).toContain("&lt;img");
+      expect(augment.html).toContain("<strong>ok</strong>");
+    });
+
     it("removes markdown links with unsafe protocols", async () => {
       const block: CompletedBlock = {
         type: "paragraph",
