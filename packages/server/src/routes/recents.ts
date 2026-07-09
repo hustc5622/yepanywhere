@@ -5,6 +5,7 @@ import type {
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import type { ISessionIndexService } from "../indexes/types.js";
+import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -20,6 +21,7 @@ import type { Project } from "../supervisor/types.js";
 
 export interface RecentsDeps {
   recentsService: RecentsService;
+  notificationService?: NotificationService;
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
   sessionIndexService?: ISessionIndexService;
@@ -123,6 +125,7 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
     }
 
     await deps.recentsService.recordVisit(body.sessionId, body.projectId);
+    await deps.notificationService?.markSeen(body.sessionId);
     return c.json({ recorded: true });
   });
 

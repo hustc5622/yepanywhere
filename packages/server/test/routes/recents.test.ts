@@ -1,5 +1,6 @@
 import type { UrlProjectId } from "@yep-anywhere/shared";
 import { describe, expect, it, vi } from "vitest";
+import type { NotificationService } from "../../src/notifications/index.js";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import type { RecentsService } from "../../src/recents/index.js";
 import { createRecentsRoutes } from "../../src/routes/recents.js";
@@ -84,5 +85,33 @@ describe("Recents Routes", () => {
       "sess-1",
       "proj-1",
     );
+  });
+
+  it("marks sessions seen when recording a visit", async () => {
+    const markSeen = vi.fn(async () => undefined);
+    const recordVisit = vi.fn(async () => undefined);
+
+    const routes = createRecentsRoutes({
+      recentsService: {
+        recordVisit,
+      } as unknown as RecentsService,
+      notificationService: {
+        markSeen,
+      } as unknown as NotificationService,
+      scanner: {
+        listProjects: vi.fn(async () => []),
+      } as unknown as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/visit", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: "sess-1", projectId: "proj-1" }),
+      headers: { "Content-Type": "application/json" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(recordVisit).toHaveBeenCalledWith("sess-1", "proj-1");
+    expect(markSeen).toHaveBeenCalledWith("sess-1");
   });
 });

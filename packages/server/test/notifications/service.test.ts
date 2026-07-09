@@ -321,6 +321,58 @@ describe("NotificationService", () => {
     });
   });
 
+  describe("importLastSeenFromRecents", () => {
+    it("imports visit timestamps without flooring to server now", async () => {
+      await service.initialize();
+
+      const imported = await service.importLastSeenFromRecents([
+        {
+          sessionId: "session-1",
+          projectId: "project-1",
+          visitedAt: "2023-12-31T23:00:00.000Z",
+        },
+      ]);
+
+      expect(imported).toBe(1);
+      expect(service.getLastSeen("session-1")).toEqual({
+        timestamp: "2023-12-31T23:00:00.000Z",
+      });
+    });
+
+    it("keeps newer explicit read markers", async () => {
+      await service.initialize();
+
+      await service.markSeen("session-1", "2024-06-15T12:00:00Z");
+      const imported = await service.importLastSeenFromRecents([
+        {
+          sessionId: "session-1",
+          projectId: "project-1",
+          visitedAt: "2024-06-15T11:00:00Z",
+        },
+      ]);
+
+      expect(imported).toBe(0);
+      expect(service.getLastSeen("session-1")).toEqual({
+        timestamp: "2024-06-15T12:00:00Z",
+      });
+    });
+
+    it("does not clear newer needs-review state from an older visit", async () => {
+      await service.initialize();
+
+      await service.markSessionNeedsReview("session-1", "2024-06-15T12:00:00Z");
+      await service.importLastSeenFromRecents([
+        {
+          sessionId: "session-1",
+          projectId: "project-1",
+          visitedAt: "2024-06-15T11:00:00Z",
+        },
+      ]);
+
+      expect(service.getSessionsNeedingReview()).toEqual(["session-1"]);
+    });
+  });
+
   describe("event emission", () => {
     it("emits session-seen event when marking seen", async () => {
       const eventBus = new EventBus();

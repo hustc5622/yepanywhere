@@ -495,6 +495,15 @@ async function startServer() {
   await nativePushService.initialize();
   await browserProfileService.initialize();
   await recentsService.initialize();
+  const importedRecentReadMarkers =
+    await notificationService.importLastSeenFromRecents(
+      recentsService.getRecents(),
+    );
+  if (importedRecentReadMarkers > 0) {
+    console.log(
+      `[NotificationService] Imported ${importedRecentReadMarkers} read marker(s) from recents`,
+    );
+  }
   await authService.initialize();
   await serverSettingsService.initialize();
   await sharingService.initialize();

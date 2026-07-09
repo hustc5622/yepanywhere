@@ -7,6 +7,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { RecentEntry } from "../recents/index.js";
 import type { EventBus, SessionSeenEvent } from "../watcher/EventBus.js";
 
 export type { SessionSeenEvent };
@@ -132,36 +133,44 @@ export class NotificationService {
     const provided = timestamp ?? now;
     const ts = provided > now ? provided : now;
 
-    // Only update if this is newer than existing entry.
-    const existing = this.state.lastSeen[sessionId];
-    const shouldUpdateLastSeen = !existing || existing.timestamp < ts;
-    const hadNeedsReview = !!this.state.needsReview[sessionId];
-    if (!shouldUpdateLastSeen && !hadNeedsReview) {
-      return;
-    }
+    await this.recordSeen(sessionId, ts, messageId, {
+      clearNeedsReview: true,
+      emitEvent: true,
+    });
+  }
 
-    if (shouldUpdateLastSeen) {
-      this.state.lastSeen[sessionId] = {
-        timestamp: ts,
-        messageId,
-      };
-    }
+  /**
+   * Backfill read markers from the persisted recents list.
+   *
+   * A session visit means the user navigated to the session, so it is a valid
+   * lower-bound read marker. Unlike markSeen(), this must preserve visitedAt
+   * exactly instead of flooring to server "now"; otherwise every restart would
+   * hide genuinely new content that arrived after the visit.
+   */
+  async importLastSeenFromRecents(visits: RecentEntry[]): Promise<number> {
+    let changed = false;
+    let imported = 0;
 
-    if (hadNeedsReview) {
-      delete this.state.needsReview[sessionId];
-    }
+    for (const visit of visits) {
+      const timestamp = visit.visitedAt;
+      if (!timestamp || Number.isNaN(Date.parse(timestamp))) {
+        continue;
+      }
 
-    // Emit event for other tabs/clients
-    if (shouldUpdateLastSeen && this.eventBus) {
-      this.eventBus.emit({
-        type: "session-seen",
-        sessionId,
-        timestamp: ts,
-        messageId,
+      const updated = this.recordSeenInMemory(visit.sessionId, timestamp, {
+        clearNeedsReview: false,
       });
+      if (updated) {
+        changed = true;
+        imported += 1;
+      }
     }
 
-    await this.save();
+    if (changed) {
+      await this.save();
+    }
+
+    return imported;
   }
 
   /**
@@ -244,6 +253,62 @@ export class NotificationService {
       delete this.state.needsReview[sessionId];
       await this.save();
     }
+  }
+
+  private async recordSeen(
+    sessionId: string,
+    timestamp: string,
+    messageId: string | undefined,
+    options: { clearNeedsReview: boolean; emitEvent: boolean },
+  ): Promise<void> {
+    const changed = this.recordSeenInMemory(sessionId, timestamp, {
+      messageId,
+      clearNeedsReview: options.clearNeedsReview,
+    });
+    if (!changed) {
+      return;
+    }
+
+    if (options.emitEvent && this.eventBus) {
+      this.eventBus.emit({
+        type: "session-seen",
+        sessionId,
+        timestamp,
+        messageId,
+      });
+    }
+
+    await this.save();
+  }
+
+  private recordSeenInMemory(
+    sessionId: string,
+    timestamp: string,
+    options: { messageId?: string; clearNeedsReview: boolean },
+  ): boolean {
+    const existing = this.state.lastSeen[sessionId];
+    const shouldUpdateLastSeen = !existing || existing.timestamp < timestamp;
+    const needsReview = this.state.needsReview[sessionId];
+    const shouldClearNeedsReview =
+      options.clearNeedsReview ||
+      (needsReview ? timestamp >= needsReview.timestamp : false);
+
+    if (!shouldUpdateLastSeen && (!needsReview || !shouldClearNeedsReview)) {
+      return false;
+    }
+
+    if (shouldUpdateLastSeen) {
+      this.state.lastSeen[sessionId] = {
+        timestamp,
+        messageId: options.messageId,
+      };
+    }
+
+    if (needsReview && shouldClearNeedsReview) {
+      delete this.state.needsReview[sessionId];
+    }
+
+    return true;
   }
 
   /**

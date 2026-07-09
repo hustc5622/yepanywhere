@@ -1057,6 +1057,7 @@ export function createApp(options: AppOptions): AppResult {
       "/api/recents",
       createRecentsRoutes({
         recentsService: options.recentsService,
+        notificationService: options.notificationService,
         scanner,
         readerFactory,
         sessionIndexService: options.sessionIndexService,
