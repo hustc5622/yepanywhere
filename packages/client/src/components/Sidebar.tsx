@@ -194,6 +194,8 @@ export function Sidebar({
   const [starredSessionsLimit, setStarredSessionsLimit] = useState(
     RECENT_SESSIONS_INITIAL,
   );
+  const [isStarredSectionExpanded, setIsStarredSectionExpanded] =
+    useState(false);
   const [isRefreshingSessions, setIsRefreshingSessions] = useState(false);
   const [expandedProjectGroups, setExpandedProjectGroups] = useState<
     Set<string>
@@ -431,16 +433,6 @@ export function Sidebar({
   const handleClearSelection = useCallback(() => {
     setSelectedSessionIds(new Set());
   }, []);
-
-  const handleSelectAllSidebarSessions = useCallback(() => {
-    setSelectedSessionIds(
-      new Set(
-        sidebarSessions
-          .filter((session) => !session.isArchived)
-          .map((session) => session.id),
-      ),
-    );
-  }, [sidebarSessions]);
 
   const handleBulkArchiveSelected = useCallback(async () => {
     if (isBulkArchivePending || selectedSessions.length === 0) return;
@@ -875,112 +867,122 @@ export function Sidebar({
             />
           </SidebarNavSection>
 
-          {sidebarSessions.length > 0 && (
-            <div
-              className={`sidebar-bulk-toolbar${isSelectionMode ? " is-active" : ""}`}
-            >
-              {isSelectionMode ? (
-                <>
-                  <span className="sidebar-bulk-toolbar__count">
-                    {t("bulkSelectedCount", {
-                      count: selectedSessionIds.size,
-                    })}
-                  </span>
-                  <div className="sidebar-bulk-toolbar__actions">
-                    <button
-                      type="button"
-                      className="sidebar-bulk-toolbar__button sidebar-bulk-toolbar__button--primary"
-                      onClick={() => void handleBulkArchiveSelected()}
-                      disabled={
-                        isBulkArchivePending ||
-                        selectedSessions.every(
-                          (session) => !canArchiveSession(session),
-                        )
-                      }
-                      title={t("bulkArchiveSelected")}
-                    >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <polyline points="21 8 21 21 3 21 3 8" />
-                        <rect x="1" y="3" width="22" height="5" />
-                        <line x1="10" y1="12" x2="14" y2="12" />
-                      </svg>
-                      {t("bulkArchive")}
-                    </button>
-                    <button
-                      type="button"
-                      className="sidebar-bulk-toolbar__icon-button"
-                      onClick={handleClearSelection}
-                      disabled={isBulkArchivePending}
-                      aria-label={t("bulkClearSelection")}
-                      title={t("bulkClearSelection")}
-                    >
-                      <svg
-                        width="16"
-                        height="16"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                        <line x1="6" y1="6" x2="18" y2="18" />
-                      </svg>
-                    </button>
-                  </div>
-                </>
-              ) : (
+          {isSelectionMode && (
+            <div className="sidebar-bulk-toolbar is-active">
+              <span className="sidebar-bulk-toolbar__count">
+                {t("bulkSelectedCount", {
+                  count: selectedSessionIds.size,
+                })}
+              </span>
+              <div className="sidebar-bulk-toolbar__actions">
                 <button
                   type="button"
-                  className="sidebar-bulk-toolbar__select-all"
-                  onClick={handleSelectAllSidebarSessions}
+                  className="sidebar-bulk-toolbar__button sidebar-bulk-toolbar__button--primary"
+                  onClick={() => void handleBulkArchiveSelected()}
+                  disabled={
+                    isBulkArchivePending ||
+                    selectedSessions.every(
+                      (session) => !canArchiveSession(session),
+                    )
+                  }
+                  title={t("bulkArchiveSelected")}
                 >
-                  {t("sidebarSelectAllSessions")}
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <polyline points="21 8 21 21 3 21 3 8" />
+                    <rect x="1" y="3" width="22" height="5" />
+                    <line x1="10" y1="12" x2="14" y2="12" />
+                  </svg>
+                  {t("bulkArchive")}
                 </button>
-              )}
+                <button
+                  type="button"
+                  className="sidebar-bulk-toolbar__icon-button"
+                  onClick={handleClearSelection}
+                  disabled={isBulkArchivePending}
+                  aria-label={t("bulkClearSelection")}
+                  title={t("bulkClearSelection")}
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
             </div>
           )}
 
           {/* Global sessions list */}
           {filteredStarredSessions.length > 0 && (
             <div className="sidebar-section">
-              <h3 className="sidebar-section-title">
-                {t("sidebarSectionStarred")}
-              </h3>
-              <ul className="sidebar-session-list">
-                {filteredStarredSessions
-                  .slice(0, starredSessionsLimit)
-                  .map((session) => renderSessionListItem(session, true))}
-              </ul>
-              {filteredStarredSessions.length > starredSessionsLimit && (
+              <h3 className="sidebar-section-title sidebar-collapsible-title">
                 <button
                   type="button"
-                  className="sidebar-show-more"
+                  className="sidebar-section-toggle"
                   onClick={() =>
-                    setStarredSessionsLimit(
-                      (prev) => prev + RECENT_SESSIONS_INCREMENT,
-                    )
+                    setIsStarredSectionExpanded((expanded) => !expanded)
                   }
+                  aria-expanded={isStarredSectionExpanded}
                 >
-                  {t("actionShowMore", {
-                    count: Math.min(
-                      RECENT_SESSIONS_INCREMENT,
-                      filteredStarredSessions.length - starredSessionsLimit,
-                    ),
-                  })}
+                  <span
+                    className={`sidebar-section-chevron${
+                      isStarredSectionExpanded ? " expanded" : ""
+                    }`}
+                    aria-hidden="true"
+                  >
+                    ›
+                  </span>
+                  <span>{t("sidebarSectionStarred")}</span>
+                  <span className="sidebar-section-count">
+                    {filteredStarredSessions.length}
+                  </span>
                 </button>
+              </h3>
+              {isStarredSectionExpanded && (
+                <>
+                  <ul className="sidebar-session-list">
+                    {filteredStarredSessions
+                      .slice(0, starredSessionsLimit)
+                      .map((session) => renderSessionListItem(session, true))}
+                  </ul>
+                  {filteredStarredSessions.length > starredSessionsLimit && (
+                    <button
+                      type="button"
+                      className="sidebar-show-more"
+                      onClick={() =>
+                        setStarredSessionsLimit(
+                          (prev) => prev + RECENT_SESSIONS_INCREMENT,
+                        )
+                      }
+                    >
+                      {t("actionShowMore", {
+                        count: Math.min(
+                          RECENT_SESSIONS_INCREMENT,
+                          filteredStarredSessions.length - starredSessionsLimit,
+                        ),
+                      })}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}

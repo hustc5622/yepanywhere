@@ -53,9 +53,10 @@ function createSession(
 function renderSidebar(
   sessions: GlobalSessionItem[],
   props: Partial<ComponentProps<typeof Sidebar>> = {},
+  starredSessions: GlobalSessionItem[] = [],
 ) {
   mockUseGlobalSessions.mockImplementation((options) => ({
-    sessions: options?.starred ? [] : sessions,
+    sessions: options?.starred ? starredSessions : sessions,
     loading: false,
     refetch: vi.fn(),
   }));
@@ -124,6 +125,22 @@ describe("Sidebar recent session browsing", () => {
         originalLocalStorageDescriptor,
       );
     }
+  });
+
+  it("keeps starred sessions collapsed until the section header is clicked", () => {
+    const starredSession = createSession({
+      id: "starred-session",
+      title: "Important Session",
+      isStarred: true,
+    });
+
+    renderSidebar([], {}, [starredSession]);
+
+    expect(screen.queryByText("Important Session")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Starred/i }));
+
+    expect(screen.getByText("Important Session")).toBeTruthy();
   });
 
   it("keeps project order stable when an active session receives a newer timestamp", () => {

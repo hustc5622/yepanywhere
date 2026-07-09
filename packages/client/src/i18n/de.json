@@ -434,7 +434,6 @@
   "cardMessageCount": "{count} Nachr.",
   "globalSessionsExecutorLocal": "Lokal",
   "globalSessionsSelectAll": "Alle auswählen",
-  "sidebarSelectAllSessions": "Alle Seitenleisten-Sitzungen auswählen",
   "sidebarArchivedSelected": "{count} Sitzungen archiviert",
   "globalSessionsNoResultsTitle": "Keine Sitzungen gefunden",
   "globalSessionsNoResultsFiltered": "Versuche, Filter oder Suche anzupassen.",

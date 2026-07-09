@@ -434,7 +434,6 @@
   "cardMessageCount": "{count} 件",
   "globalSessionsExecutorLocal": "ローカル",
   "globalSessionsSelectAll": "すべて選択",
-  "sidebarSelectAllSessions": "サイドバーのセッションをすべて選択",
   "sidebarArchivedSelected": "{count} 件のセッションをアーカイブしました",
   "globalSessionsNoResultsTitle": "セッションが見つかりません",
   "globalSessionsNoResultsFiltered": "フィルターや検索条件を調整してください。",

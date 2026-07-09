@@ -434,7 +434,6 @@
   "cardMessageCount": "{count} msgs",
   "globalSessionsExecutorLocal": "Local",
   "globalSessionsSelectAll": "Seleccionar todo",
-  "sidebarSelectAllSessions": "Seleccionar todas las sesiones de la barra lateral",
   "sidebarArchivedSelected": "{count} sesiones archivadas",
   "globalSessionsNoResultsTitle": "No se encontraron sesiones",
   "globalSessionsNoResultsFiltered": "Prueba ajustando tus filtros o búsqueda.",

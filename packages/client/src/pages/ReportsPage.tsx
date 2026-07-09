@@ -17,6 +17,7 @@ import { useToastContext } from "../contexts/ToastContext";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
+import { writeClipboardText } from "../lib/clipboard";
 import { formatSmartTime } from "../lib/datetime";
 
 interface HeadingItem {
@@ -91,6 +92,102 @@ function countMarkdownLines(markdown: string): number {
 
 function getDisplayPath(document: ReportDocument): string {
   return document.absolutePath || document.path;
+}
+
+function ReportsDocumentMenu({ report }: { report: ReportDocument }) {
+  const { t } = useI18n();
+  const { showToast } = useToastContext();
+  const [isOpen, setIsOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!wrapperRef.current?.contains(target)) {
+        setIsOpen(false);
+        triggerRef.current?.blur();
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isOpen]);
+
+  const closeMenu = () => {
+    setIsOpen(false);
+    triggerRef.current?.blur();
+  };
+
+  const handleCopyPath = async () => {
+    closeMenu();
+    try {
+      await writeClipboardText(getDisplayPath(report));
+      showToast(t("reportsPathCopied"), "success");
+    } catch (error) {
+      console.error("Failed to copy report path:", error);
+      showToast(t("reportsPathCopyFailed"), "error");
+    }
+  };
+
+  return (
+    <div
+      className={`session-menu-wrapper reports-document-menu ${
+        isOpen ? "is-open" : ""
+      }`}
+      ref={wrapperRef}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="session-menu-trigger"
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setIsOpen((open) => !open);
+        }}
+        title={t("reportsDocumentOptions")}
+        aria-label={t("reportsDocumentOptions")}
+        aria-expanded={isOpen}
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="currentColor"
+          stroke="none"
+          aria-hidden="true"
+        >
+          <circle cx="5" cy="12" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <circle cx="19" cy="12" r="2" />
+        </svg>
+      </button>
+      {isOpen && (
+        <div className="session-menu-dropdown">
+          <button type="button" onClick={handleCopyPath}>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+            {t("reportsCopyPath")}
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ReportsPage() {
@@ -375,23 +472,26 @@ export function ReportsPage() {
           <div className="reports-state-inline">{t("reportsNoMatches")}</div>
         )}
         {filteredDocuments.map((doc) => (
-          <button
+          <div
             key={doc.path}
-            type="button"
             className={`reports-document-item ${
               doc.path === selectedPath ? "active" : ""
             }`}
-            onClick={() => handleSelectDocument(doc.path)}
           >
-            <span className="reports-document-title">{doc.title}</span>
-            <span className="reports-document-path" title={getDisplayPath(doc)}>
-              {doc.path}
-            </span>
-            <span className="reports-document-meta">
-              {formatSmartTime(doc.modifiedAt, locale)} ·{" "}
-              {formatBytes(doc.size)}
-            </span>
-          </button>
+            <button
+              type="button"
+              className="reports-document-item-main"
+              onClick={() => handleSelectDocument(doc.path)}
+              title={getDisplayPath(doc)}
+            >
+              <span className="reports-document-title">{doc.title}</span>
+              <span className="reports-document-meta">
+                {formatSmartTime(doc.modifiedAt, locale)} ·{" "}
+                {formatBytes(doc.size)}
+              </span>
+            </button>
+            <ReportsDocumentMenu report={doc} />
+          </div>
         ))}
       </div>
     </aside>
@@ -502,15 +602,9 @@ export function ReportsPage() {
               {selectedDocument && (
                 <header className="reports-reader-header">
                   <div>
-                    <p
-                      className="reports-reader-eyebrow"
-                      title={getDisplayPath(selectedDocument)}
-                    >
-                      {getDisplayPath(selectedDocument)}
-                    </p>
-                    <h1>{selectedDocument.title}</h1>
-                    <p>{metaText}</p>
+                    <p className="reports-reader-meta">{metaText}</p>
                   </div>
+                  <ReportsDocumentMenu report={selectedDocument} />
                 </header>
               )}
 
