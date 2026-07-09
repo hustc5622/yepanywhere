@@ -114,6 +114,163 @@ describe("normalizeSession", () => {
     expect(toolResultIds).toContain("task-3");
   });
 
+  it("normalizes OpenCode reasoning and tool inputs for shared renderers", () => {
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "opencode-test-session",
+        projectId: "test-project" as UrlProjectId,
+        title: "OpenCode Test",
+        fullTitle: "OpenCode Test",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 1,
+        status: { state: "idle" },
+        provider: "opencode",
+      },
+      data: {
+        provider: "opencode",
+        session: {
+          messages: [
+            {
+              message: {
+                id: "msg-1",
+                sessionID: "session-1",
+                role: "assistant",
+                time: { created: Date.now() },
+              },
+              parts: [
+                {
+                  id: "part-reasoning",
+                  sessionID: "session-1",
+                  messageID: "msg-1",
+                  type: "reasoning",
+                  text: "Need to inspect the file.",
+                },
+                {
+                  id: "part-tool",
+                  sessionID: "session-1",
+                  messageID: "msg-1",
+                  type: "tool",
+                  callID: "call-edit",
+                  tool: "edit",
+                  state: {
+                    status: "completed",
+                    input: {
+                      filePath: "/repo/src/app.ts",
+                      oldString: "const value = 1;",
+                      newString: "const value = 2;",
+                    },
+                    output: "Edited successfully.",
+                    title: "src/app.ts",
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    const content = normalized.messages[0]?.message?.content;
+
+    expect(content).toMatchObject([
+      { type: "thinking", thinking: "Need to inspect the file." },
+      {
+        type: "tool_use",
+        id: "call-edit",
+        name: "Edit",
+        input: {
+          filePath: "/repo/src/app.ts",
+          file_path: "/repo/src/app.ts",
+          oldString: "const value = 1;",
+          old_string: "const value = 1;",
+          newString: "const value = 2;",
+          new_string: "const value = 2;",
+        },
+      },
+      {
+        type: "tool_result",
+        tool_use_id: "call-edit",
+        content: "Edited successfully.",
+      },
+    ]);
+  });
+
+  it("preserves OpenCode edit metadata diff as a raw patch augment", () => {
+    const rawDiff = [
+      "===================================================================",
+      "--- /repo/src/app.ts",
+      "+++ /repo/src/app.ts",
+      "@@ -1,1 +1,1 @@",
+      "-const value = 1;",
+      "+const value = 2;",
+    ].join("\n");
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "opencode-diff-session",
+        projectId: "test-project" as UrlProjectId,
+        title: "OpenCode Diff",
+        fullTitle: "OpenCode Diff",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 1,
+        status: { state: "idle" },
+        provider: "opencode",
+      },
+      data: {
+        provider: "opencode",
+        session: {
+          messages: [
+            {
+              message: {
+                id: "msg-1",
+                sessionID: "session-1",
+                role: "assistant",
+                time: { created: Date.now() },
+              },
+              parts: [
+                {
+                  id: "part-tool",
+                  sessionID: "session-1",
+                  messageID: "msg-1",
+                  type: "tool",
+                  callID: "call-edit",
+                  tool: "edit",
+                  state: {
+                    status: "completed",
+                    input: {
+                      filePath: "/repo/src/app.ts",
+                    },
+                    output: "Edited successfully.",
+                    title: "src/app.ts",
+                    metadata: {
+                      diff: rawDiff,
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    const content = normalized.messages[0]?.message?.content;
+
+    expect(content?.[0]).toMatchObject({
+      type: "tool_use",
+      id: "call-edit",
+      name: "Edit",
+      input: {
+        filePath: "/repo/src/app.ts",
+        file_path: "/repo/src/app.ts",
+        _rawPatch: rawDiff,
+      },
+    });
+  });
+
   it("normalizes codex-oss sessions correctly", () => {
     const mockSession: LoadedSession = {
       summary: {

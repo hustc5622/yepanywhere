@@ -7517,6 +7517,7 @@ a.sidebar-nav-item {
   gap: var(--space-1);
   margin-left: var(--space-2);
   cursor: default;
+  min-width: 0;
 }
 
 .context-usage-pie {
@@ -7527,6 +7528,7 @@ a.sidebar-nav-item {
   font-size: var(--font-size-xs);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* Interactive variant - rendered as <button>; visually identical to the
@@ -7534,10 +7536,26 @@ a.sidebar-nav-item {
 button.context-usage-indicator--button {
   background: transparent;
   border: none;
-  padding: 0;
+  padding: 2px 4px;
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: background 0.15s ease;
+}
+
+.message-input-actions .context-usage-indicator {
+  margin-left: 0;
+}
+
+.message-input-actions .context-usage-label {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 420px) {
+  .message-input-actions .context-usage-label {
+    display: none;
+  }
 }
 
 button.context-usage-indicator--button:hover {
@@ -8401,16 +8419,33 @@ button.context-usage-indicator--button:focus-visible {
   color: var(--text-muted);
 }
 
+.new-session-limit-input-wrap {
+  position: relative;
+  min-width: 0;
+}
+
 .new-session-limit-input {
   width: 100%;
   min-height: 40px;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-2) calc(var(--space-3) + 1.5rem) var(--space-2)
+    var(--space-3);
   color: var(--text-primary);
   background: var(--bg-input);
   border: 1px solid var(--border-input);
   border-radius: var(--radius-md);
   font: inherit;
   font-size: var(--font-size-sm);
+}
+
+.new-session-limit-unit {
+  position: absolute;
+  right: var(--space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  pointer-events: none;
 }
 
 .new-session-limit-input:focus {

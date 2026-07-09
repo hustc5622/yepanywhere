@@ -208,6 +208,68 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("normalizes OpenCode edit output into an expandable diff result", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_edit",
+            name: "edit",
+            input: {
+              filePath: "/repo/src/app.ts",
+              oldString: "const value = 1;",
+              newString: "const value = 2;",
+            },
+            opencodeStatus: "completed",
+            opencodeTitle: "src/app.ts",
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "call_edit",
+            content: "Edited successfully.",
+            is_error: false,
+            opencodeStatus: "completed",
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "call_edit",
+      toolName: "edit",
+      status: "complete",
+      toolInput: {
+        filePath: "/repo/src/app.ts",
+        file_path: "/repo/src/app.ts",
+        oldString: "const value = 1;",
+        old_string: "const value = 1;",
+        newString: "const value = 2;",
+        new_string: "const value = 2;",
+      },
+      toolResult: {
+        isError: false,
+        structured: {
+          filePath: "/repo/src/app.ts",
+          oldString: "const value = 1;",
+          newString: "const value = 2;",
+          structuredPatch: [
+            {
+              lines: ["-const value = 1;", "+const value = 2;"],
+            },
+          ],
+        },
+      },
+    });
+  });
+
   it("collapses repeated plan progress snapshots within one user turn", () => {
     const messages: Message[] = [
       {

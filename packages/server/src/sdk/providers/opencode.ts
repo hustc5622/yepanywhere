@@ -1130,7 +1130,14 @@ export class OpenCodeProvider implements AgentProvider {
       case "tool": {
         const toolUseId = part.callID ?? part.id;
         const messages: SDKMessage[] = [];
-        const input = part.state?.input ?? part.input ?? {};
+        const toolName = this.canonicalizeOpenCodeToolName(
+          part.tool ?? "unknown",
+        );
+        const input = this.normalizeOpenCodeToolInput(
+          toolName,
+          part.state?.input ?? part.input ?? {},
+          part.state?.metadata,
+        );
         const status = part.state?.status;
 
         if (!emissionState.toolUseIds.has(toolUseId)) {
@@ -1144,7 +1151,7 @@ export class OpenCodeProvider implements AgentProvider {
                 {
                   type: "tool_use",
                   id: toolUseId,
-                  name: part.tool ?? "unknown",
+                  name: toolName,
                   input,
                   opencodeStatus: status,
                   opencodeTitle: part.state?.title,
@@ -1189,6 +1196,9 @@ export class OpenCodeProvider implements AgentProvider {
       }
 
       case "tool-use": {
+        const toolName = this.canonicalizeOpenCodeToolName(
+          part.tool ?? "unknown",
+        );
         // Tool invocation
         return [
           {
@@ -1200,8 +1210,12 @@ export class OpenCodeProvider implements AgentProvider {
                 {
                   type: "tool_use",
                   id: part.id,
-                  name: part.tool ?? "unknown",
-                  input: part.input ?? {},
+                  name: toolName,
+                  input: this.normalizeOpenCodeToolInput(
+                    toolName,
+                    part.input ?? {},
+                    part.state?.metadata,
+                  ),
                   opencodeTime: part.time,
                 },
               ],
@@ -1235,6 +1249,98 @@ export class OpenCodeProvider implements AgentProvider {
       default:
         return [];
     }
+  }
+
+  private canonicalizeOpenCodeToolName(toolName: string): string {
+    switch (toolName.toLowerCase()) {
+      case "bash":
+      case "shell":
+        return "Bash";
+      case "read":
+        return "Read";
+      case "write":
+        return "Write";
+      case "edit":
+      case "apply_patch":
+        return "Edit";
+      case "glob":
+        return "Glob";
+      case "grep":
+        return "Grep";
+      case "todowrite":
+      case "todo":
+        return "TodoWrite";
+      default:
+        return toolName;
+    }
+  }
+
+  private normalizeOpenCodeToolInput(
+    toolName: string,
+    input: unknown,
+    metadata?: unknown,
+  ): unknown {
+    const baseInput =
+      input && typeof input === "object" && !Array.isArray(input) ? input : {};
+    const normalized = { ...(baseInput as Record<string, unknown>) };
+    const lowerToolName = toolName.toLowerCase();
+    const metadataRecord =
+      metadata && typeof metadata === "object" && !Array.isArray(metadata)
+        ? (metadata as Record<string, unknown>)
+        : undefined;
+
+    if (
+      (lowerToolName === "read" ||
+        lowerToolName === "write" ||
+        lowerToolName === "edit") &&
+      typeof normalized.filePath === "string" &&
+      typeof normalized.file_path !== "string"
+    ) {
+      normalized.file_path = normalized.filePath;
+    }
+
+    if (
+      lowerToolName === "edit" &&
+      typeof normalized.oldString === "string" &&
+      typeof normalized.old_string !== "string"
+    ) {
+      normalized.old_string = normalized.oldString;
+    }
+
+    if (
+      lowerToolName === "edit" &&
+      typeof normalized.newString === "string" &&
+      typeof normalized.new_string !== "string"
+    ) {
+      normalized.new_string = normalized.newString;
+    }
+
+    if (
+      lowerToolName === "edit" &&
+      typeof normalized.replaceAll === "boolean" &&
+      typeof normalized.replace_all !== "boolean"
+    ) {
+      normalized.replace_all = normalized.replaceAll;
+    }
+
+    if (
+      lowerToolName === "edit" &&
+      typeof metadataRecord?.diff === "string" &&
+      metadataRecord.diff.trim() &&
+      typeof normalized._rawPatch !== "string"
+    ) {
+      normalized._rawPatch = metadataRecord.diff;
+    }
+
+    if (
+      lowerToolName === "grep" &&
+      typeof normalized.include === "string" &&
+      typeof normalized.glob !== "string"
+    ) {
+      normalized.glob = normalized.include;
+    }
+
+    return normalized;
   }
 
   private createAssistantStreamState(): OpenCodeAssistantStreamState {

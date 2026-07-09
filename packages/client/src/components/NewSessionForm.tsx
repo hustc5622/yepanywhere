@@ -242,7 +242,7 @@ function getPreferredOpenCodeModelId(
   return models[0]?.id ?? null;
 }
 
-function parseTokenLimitInput(value: string): number | undefined | null {
+function parseOpenCodeLimitInput(value: string): number | undefined | null {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
 
@@ -252,19 +252,27 @@ function parseTokenLimitInput(value: string): number | undefined | null {
 
   const amount = Number(match[1]);
   const suffix = match[2];
-  const multiplier = suffix === "m" ? 1_000_000 : suffix === "k" ? 1_000 : 1;
+  const multiplier = suffix === "m" ? 1_000_000 : 1_000;
   const tokens = Math.round(amount * multiplier);
 
   if (!Number.isSafeInteger(tokens) || tokens <= 0) return null;
   return tokens;
 }
 
+function formatOpenCodeLimitInput(tokens: number | undefined): string {
+  if (!tokens || tokens <= 0) return "";
+  const valueInK = tokens / 1_000;
+  return Number.isInteger(valueInK)
+    ? String(valueInK)
+    : String(Number(valueInK.toFixed(3)));
+}
+
 function getOpenCodeModelLimits(
   contextInput: string,
   outputInput: string,
 ): { limits?: OpenCodeModelLimits; error?: "invalid" | "incomplete" } {
-  const context = parseTokenLimitInput(contextInput);
-  const output = parseTokenLimitInput(outputInput);
+  const context = parseOpenCodeLimitInput(contextInput);
+  const output = parseOpenCodeLimitInput(outputInput);
 
   if (context === null || output === null) return { error: "invalid" };
   if (context === undefined && output === undefined) return {};
@@ -512,14 +520,10 @@ export function NewSessionForm({
     }
     setSelectedCodexMcpMode(savedDefaults?.codexMcpMode ?? "standard");
     setOpencodeContextLimit(
-      savedDefaults?.opencodeModelLimits?.context
-        ? String(savedDefaults.opencodeModelLimits.context)
-        : "",
+      formatOpenCodeLimitInput(savedDefaults?.opencodeModelLimits?.context),
     );
     setOpencodeOutputLimit(
-      savedDefaults?.opencodeModelLimits?.output
-        ? String(savedDefaults.opencodeModelLimits.output)
-        : "",
+      formatOpenCodeLimitInput(savedDefaults?.opencodeModelLimits?.output),
     );
     setMode(savedDefaults?.permissionMode ?? DEFAULT_PERMISSION_MODE);
     const savedThinkingPreset = normalizeThinkingOption(
@@ -1473,29 +1477,37 @@ export function NewSessionForm({
           <div className="new-session-opencode-limits-grid">
             <label className="new-session-limit-field">
               <span>{t("newSessionOpenCodeContextLimit")}</span>
-              <input
-                type="text"
-                inputMode="decimal"
-                className="new-session-limit-input"
-                value={opencodeContextLimit}
-                onChange={(event) =>
-                  setOpencodeContextLimit(event.target.value)
-                }
-                placeholder={t("newSessionOpenCodeContextPlaceholder")}
-                disabled={isStarting}
-              />
+              <div className="new-session-limit-input-wrap">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  className="new-session-limit-input"
+                  value={opencodeContextLimit}
+                  onChange={(event) =>
+                    setOpencodeContextLimit(event.target.value)
+                  }
+                  placeholder={t("newSessionOpenCodeContextPlaceholder")}
+                  disabled={isStarting}
+                />
+                <span className="new-session-limit-unit">K</span>
+              </div>
             </label>
             <label className="new-session-limit-field">
               <span>{t("newSessionOpenCodeOutputLimit")}</span>
-              <input
-                type="text"
-                inputMode="decimal"
-                className="new-session-limit-input"
-                value={opencodeOutputLimit}
-                onChange={(event) => setOpencodeOutputLimit(event.target.value)}
-                placeholder={t("newSessionOpenCodeOutputPlaceholder")}
-                disabled={isStarting}
-              />
+              <div className="new-session-limit-input-wrap">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  className="new-session-limit-input"
+                  value={opencodeOutputLimit}
+                  onChange={(event) =>
+                    setOpencodeOutputLimit(event.target.value)
+                  }
+                  placeholder={t("newSessionOpenCodeOutputPlaceholder")}
+                  disabled={isStarting}
+                />
+                <span className="new-session-limit-unit">K</span>
+              </div>
             </label>
           </div>
           {opencodeModelLimitErrorMessage && (

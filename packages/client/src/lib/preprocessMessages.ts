@@ -1121,6 +1121,10 @@ function normalizeOpenCodeToolResult(
     return normalizeOpenCodeWriteResult(input);
   }
 
+  if (normalized === "edit" || normalized === "apply_patch") {
+    return normalizeOpenCodeEditResult(input);
+  }
+
   if (normalized === "glob") {
     const filenames = content
       .split("\n")
@@ -1165,17 +1169,61 @@ function normalizeOpenCodeToolResult(
   return undefined;
 }
 
+function normalizeOpenCodeEditResult(input: unknown): unknown {
+  if (!isRecord(input)) {
+    return undefined;
+  }
+
+  const filePath = getOpenCodeFilePath(input);
+  const oldString = getStringInputField(input, "old_string", "oldString");
+  const newString = getStringInputField(input, "new_string", "newString");
+  const replaceAll =
+    typeof input.replace_all === "boolean"
+      ? input.replace_all
+      : typeof input.replaceAll === "boolean"
+        ? input.replaceAll
+        : false;
+
+  if (!filePath || oldString === undefined || newString === undefined) {
+    return undefined;
+  }
+
+  return {
+    filePath,
+    oldString,
+    newString,
+    originalFile: oldString,
+    replaceAll,
+    userModified: false,
+    structuredPatch: createReplacementPatch(oldString, newString),
+  };
+}
+
+function createReplacementPatch(oldString: string, newString: string) {
+  const oldLines = oldString.length > 0 ? oldString.split("\n") : [];
+  const newLines = newString.length > 0 ? newString.split("\n") : [];
+  const lines = [
+    ...oldLines.map((line) => `-${line}`),
+    ...newLines.map((line) => `+${line}`),
+  ];
+
+  return [
+    {
+      oldStart: 1,
+      oldLines: Math.max(oldLines.length, 1),
+      newStart: 1,
+      newLines: Math.max(newLines.length, 1),
+      lines,
+    },
+  ];
+}
+
 function normalizeOpenCodeWriteResult(input: unknown): unknown {
   if (!isRecord(input)) {
     return undefined;
   }
 
-  const filePath =
-    typeof input.file_path === "string"
-      ? input.file_path
-      : typeof input.filePath === "string"
-        ? input.filePath
-        : undefined;
+  const filePath = getOpenCodeFilePath(input);
   const content = typeof input.content === "string" ? input.content : undefined;
   if (!filePath || content === undefined) {
     return undefined;
@@ -1192,6 +1240,25 @@ function normalizeOpenCodeWriteResult(input: unknown): unknown {
       totalLines: lineCount,
     },
   };
+}
+
+function getOpenCodeFilePath(
+  input: Record<string, unknown>,
+): string | undefined {
+  return getStringInputField(input, "file_path", "filePath", "path");
+}
+
+function getStringInputField(
+  input: Record<string, unknown>,
+  ...fields: string[]
+): string | undefined {
+  for (const field of fields) {
+    const value = input[field];
+    if (typeof value === "string") {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function normalizeOpenCodeReadResult(content: string, input: unknown): unknown {

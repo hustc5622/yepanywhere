@@ -357,8 +357,9 @@ export function getModelContextWindow(
  * more tokens than it can hold). Claude only has one larger tier today
  * (1M), so escalating to that recovers the right denominator.
  *
- * No-op for provider/model combos that don't have a larger tier (Codex,
- * Gemini); the >100% display there indicates a real problem.
+ * No-op for provider/model combos that don't have a known larger tier (Codex,
+ * Gemini, OpenCode); the >100% display there indicates a real limit/config
+ * mismatch that the UI should surface instead of hiding.
  */
 export function escalateContextWindow(
   contextWindow: number,
@@ -368,6 +369,7 @@ export function escalateContextWindow(
   if (inputTokens <= contextWindow) return contextWindow;
   if (provider === "codex" || provider === "codex-oss") return contextWindow;
   if (provider === "gemini" || provider === "gemini-acp") return contextWindow;
+  if (provider === "opencode") return contextWindow;
   // Default to Claude's 1M tier for Claude and unknown providers.
   return Math.max(contextWindow, CLAUDE_EXTENDED_CONTEXT_WINDOW);
 }

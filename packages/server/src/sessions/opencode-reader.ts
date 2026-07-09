@@ -1,11 +1,13 @@
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, parse as parsePath } from "node:path";
 import {
   type ContextCumulativeUsage,
   type OpenCodeMessage,
   type OpenCodeSessionEntry,
   type OpenCodeStoredPart,
+  type ProviderName,
   SESSION_TITLE_MAX_LENGTH,
   type SessionCreatedBy,
   type SessionQuestion,
@@ -39,6 +41,13 @@ export const OPENCODE_STORAGE_DIR = join(
   "opencode",
   "storage",
 );
+const OPENCODE_CONFIG_DIR =
+  process.env.OPENCODE_CONFIG_DIR ?? join(homedir(), ".config", "opencode");
+const OPENCODE_CONFIG_PATH = process.env.OPENCODE_CONFIG;
+const OPENCODE_CONFIG_CONTENT = process.env.OPENCODE_CONFIG_CONTENT;
+const OPENCODE_DISABLE_PROJECT_CONFIG =
+  process.env.OPENCODE_DISABLE_PROJECT_CONFIG === "1" ||
+  process.env.OPENCODE_DISABLE_PROJECT_CONFIG === "true";
 
 /**
  * OpenCode storage directory structure:
@@ -56,6 +65,12 @@ export interface OpenCodeSessionReaderOptions {
   dbPath?: string;
   /** Project path (used to look up the OpenCode project ID) */
   projectPath: string;
+  /** Optional context window resolver (from ModelInfoService) */
+  getContextWindow?: (
+    model: string | undefined,
+    provider?: ProviderName,
+    sessionId?: string,
+  ) => number | undefined;
 }
 
 /**
@@ -89,6 +104,183 @@ interface OpenCodeSessionJson {
 }
 
 // Use OpenCodeMessage and OpenCodeStoredPart types from shared
+
+interface OpenCodeConfigContextWindowCache {
+  byProviderModel: Map<string, number>;
+  byModel: Map<string, number>;
+  ambiguousModels: Set<string>;
+}
+
+function stripJsonComments(input: string): string {
+  let output = "";
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const current = input[i] ?? "";
+    const next = input[i + 1] ?? "";
+
+    if (inLineComment) {
+      if (current === "\n" || current === "\r") {
+        inLineComment = false;
+        output += current;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (current === "*" && next === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+
+    if (inString) {
+      output += current;
+      if (escaped) {
+        escaped = false;
+      } else if (current === "\\") {
+        escaped = true;
+      } else if (current === quote) {
+        inString = false;
+        quote = "";
+      }
+      continue;
+    }
+
+    if (current === '"' || current === "'") {
+      inString = true;
+      quote = current;
+      output += current;
+      continue;
+    }
+
+    if (current === "/" && next === "/") {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+
+    if (current === "/" && next === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+
+    output += current;
+  }
+
+  return output.replace(/,\s*([}\]])/g, "$1");
+}
+
+function parseJsonLikeRecord(input: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(stripJsonComments(input));
+    return asRecord(parsed) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function readOpenCodeConfigFile(filePath: string): Record<string, unknown> {
+  try {
+    if (!existsSync(filePath)) return {};
+    return parseJsonLikeRecord(readFileSync(filePath, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function listOpenCodeProjectConfigFiles(projectPath: string): string[] {
+  if (OPENCODE_DISABLE_PROJECT_CONFIG) return [];
+  const dirs: string[] = [];
+  let current = projectPath;
+  const root = parsePath(current).root;
+
+  while (current && current !== root) {
+    dirs.push(current);
+    current = dirname(current);
+  }
+  if (root) dirs.push(root);
+
+  return dirs
+    .reverse()
+    .flatMap((dir) => [
+      join(dir, "opencode.jsonc"),
+      join(dir, "opencode.json"),
+    ]);
+}
+
+function loadOpenCodeConfigContextWindows(
+  projectPath: string,
+): OpenCodeConfigContextWindowCache {
+  const byProviderModel = new Map<string, number>();
+  const byModelValues = new Map<string, Set<number>>();
+
+  const ingest = (config: Record<string, unknown>) => {
+    const providers = asRecord(config.providers) ?? asRecord(config.provider);
+    if (!providers) return;
+
+    for (const [providerId, providerValue] of Object.entries(providers)) {
+      const models = asRecord(asRecord(providerValue)?.models);
+      if (!models) continue;
+
+      for (const [modelId, modelValue] of Object.entries(models)) {
+        const context = asNumber(
+          asRecord(asRecord(modelValue)?.limit)?.context,
+        );
+        if (!context || context <= 0) continue;
+
+        byProviderModel.set(`${providerId}/${modelId}`, context);
+        const values = byModelValues.get(modelId) ?? new Set<number>();
+        values.add(context);
+        byModelValues.set(modelId, values);
+      }
+    }
+  };
+
+  if (OPENCODE_CONFIG_CONTENT) {
+    ingest(parseJsonLikeRecord(OPENCODE_CONFIG_CONTENT));
+  }
+  for (const filePath of [
+    join(OPENCODE_CONFIG_DIR, "config.json"),
+    join(OPENCODE_CONFIG_DIR, "opencode.json"),
+    join(OPENCODE_CONFIG_DIR, "opencode.jsonc"),
+    ...(OPENCODE_CONFIG_PATH ? [OPENCODE_CONFIG_PATH] : []),
+    ...listOpenCodeProjectConfigFiles(projectPath),
+  ]) {
+    ingest(readOpenCodeConfigFile(filePath));
+  }
+
+  const byModel = new Map<string, number>();
+  const ambiguousModels = new Set<string>();
+  for (const [modelId, values] of byModelValues.entries()) {
+    if (values.size === 1) {
+      byModel.set(modelId, Array.from(values)[0] ?? 0);
+    } else {
+      ambiguousModels.add(modelId);
+    }
+  }
+
+  return { byProviderModel, byModel, ambiguousModels };
+}
+
+function getOpenCodeConfigContextWindow(
+  cache: OpenCodeConfigContextWindowCache,
+  model: string | undefined,
+): number | undefined {
+  if (!model) return undefined;
+  const slash = model.indexOf("/");
+  if (slash > 0 && slash < model.length - 1) {
+    return cache.byProviderModel.get(model);
+  }
+  if (cache.ambiguousModels.has(model)) return undefined;
+  return cache.byModel.get(model);
+}
 
 /**
  * Find the OpenCode project ID for a given project path by scanning project files.
@@ -142,11 +334,14 @@ export async function findOpenCodeProjectId(
 class OpenCodeJsonSessionReader implements ISessionReader {
   private storageDir: string;
   private projectPath: string;
+  private readonly getContextWindow?: OpenCodeSessionReaderOptions["getContextWindow"];
+  private configContextWindows: OpenCodeConfigContextWindowCache | null = null;
   private openCodeProjectIdCache: string | null | undefined = undefined;
 
   constructor(options: OpenCodeSessionReaderOptions) {
     this.storageDir = options.storageDir ?? OPENCODE_STORAGE_DIR;
     this.projectPath = options.projectPath;
+    this.getContextWindow = options.getContextWindow;
   }
 
   /**
@@ -241,8 +436,8 @@ class OpenCodeJsonSessionReader implements ISessionReader {
             const msg = JSON.parse(msgContent) as OpenCodeMessage;
 
             // Get model from first assistant message
-            if (!model && msg.role === "assistant" && msg.modelID) {
-              model = msg.modelID;
+            if (!model && msg.role === "assistant") {
+              model = getMessageModel(msg);
             }
 
             // Get first user message text
@@ -506,7 +701,6 @@ class OpenCodeJsonSessionReader implements ISessionReader {
     sessionId: string,
     model: string | undefined,
   ): Promise<ContextUsage | undefined> {
-    const contextWindowSize = getModelContextWindow(model);
     const messageDir = join(this.storageDir, "message", sessionId);
 
     try {
@@ -523,6 +717,7 @@ class OpenCodeJsonSessionReader implements ISessionReader {
           const msg = JSON.parse(content) as OpenCodeMessage;
 
           if (msg.role === "assistant" && msg.tokens) {
+            const effectiveModel = getMessageModel(msg) ?? model;
             const inputTokens =
               (msg.tokens.input ?? 0) +
               (msg.tokens.cache?.read ?? 0) +
@@ -530,6 +725,10 @@ class OpenCodeJsonSessionReader implements ISessionReader {
 
             if (inputTokens === 0) continue;
 
+            const contextWindowSize = this.resolveContextWindow(
+              effectiveModel,
+              sessionId,
+            );
             const percentage = Math.round(
               (inputTokens / contextWindowSize) * 100,
             );
@@ -567,6 +766,24 @@ class OpenCodeJsonSessionReader implements ISessionReader {
     }
 
     return undefined;
+  }
+
+  private resolveContextWindow(
+    model: string | undefined,
+    sessionId: string,
+  ): number {
+    return (
+      this.getContextWindow?.(model, "opencode", sessionId) ??
+      getOpenCodeConfigContextWindow(this.getConfigContextWindows(), model) ??
+      getModelContextWindow(model, "opencode")
+    );
+  }
+
+  private getConfigContextWindows(): OpenCodeConfigContextWindowCache {
+    this.configContextWindows ??= loadOpenCodeConfigContextWindows(
+      this.projectPath,
+    );
+    return this.configContextWindows;
   }
 
   /**
@@ -867,11 +1084,14 @@ const SESSION_STATS_SQL = `
 export class OpenCodeSessionReader implements ISessionReader {
   private readonly dbPath: string;
   private readonly projectPath: string;
+  private readonly getContextWindow?: OpenCodeSessionReaderOptions["getContextWindow"];
+  private configContextWindows: OpenCodeConfigContextWindowCache | null = null;
   private readonly legacyReader: ISessionReader;
 
   constructor(options: OpenCodeSessionReaderOptions) {
     this.dbPath = options.dbPath ?? OPENCODE_DB_PATH;
     this.projectPath = canonicalizeProjectPath(options.projectPath);
+    this.getContextWindow = options.getContextWindow;
     this.legacyReader = new OpenCodeJsonSessionReader(options);
   }
 
@@ -1105,6 +1325,7 @@ export class OpenCodeSessionReader implements ISessionReader {
     const contextUsage = this.extractSqliteContextUsageFromMessages(
       messages,
       model,
+      sessionId,
     );
     const createdBy =
       deriveOpenCodeCreatedByFromMetadata(row.metadata) ??
@@ -1235,8 +1456,8 @@ export class OpenCodeSessionReader implements ISessionReader {
   private extractSqliteContextUsageFromMessages(
     messages: OpenCodeMessage[],
     model: string | undefined,
+    sessionId?: string,
   ): ContextUsage | undefined {
-    const contextWindowSize = getModelContextWindow(model);
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (!message || message.role !== "assistant" || !message.tokens) continue;
@@ -1247,6 +1468,11 @@ export class OpenCodeSessionReader implements ISessionReader {
         (message.tokens.cache?.write ?? 0);
       if (inputTokens === 0) continue;
 
+      const effectiveModel = getMessageModel(message) ?? model;
+      const contextWindowSize = this.resolveContextWindow(
+        effectiveModel,
+        sessionId ?? message.sessionID,
+      );
       const usage: ContextUsage = {
         inputTokens,
         percentage: Math.round((inputTokens / contextWindowSize) * 100),
@@ -1271,6 +1497,24 @@ export class OpenCodeSessionReader implements ISessionReader {
     }
 
     return undefined;
+  }
+
+  private resolveContextWindow(
+    model: string | undefined,
+    sessionId: string | undefined,
+  ): number {
+    return (
+      this.getContextWindow?.(model, "opencode", sessionId) ??
+      getOpenCodeConfigContextWindow(this.getConfigContextWindows(), model) ??
+      getModelContextWindow(model, "opencode")
+    );
+  }
+
+  private getConfigContextWindows(): OpenCodeConfigContextWindowCache {
+    this.configContextWindows ??= loadOpenCodeConfigContextWindows(
+      this.projectPath,
+    );
+    return this.configContextWindows;
   }
 
   private async listSqliteSessionStats(): Promise<

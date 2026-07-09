@@ -415,6 +415,46 @@ describe("mergeStreamMessage", () => {
       expect(result.index).toBe(0);
     });
 
+    it("preserves existing thinking blocks when a later SDK snapshot adds a tool call", () => {
+      const existing: Message[] = [
+        {
+          id: "assistant-1",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "I should inspect files." },
+            ],
+          },
+          _source: "sdk",
+        },
+      ];
+      const incoming: Message = {
+        id: "assistant-1",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-1",
+              name: "Read",
+              input: { file_path: "src/app.ts" },
+            },
+          ],
+        },
+      };
+
+      const result = mergeStreamMessage(existing, incoming);
+      const content = result.messages[0]?.message?.content;
+
+      expect(Array.isArray(content)).toBe(true);
+      expect(content).toMatchObject([
+        { type: "thinking", thinking: "I should inspect files." },
+        { type: "tool_use", id: "tool-1", name: "Read" },
+      ]);
+    });
+
     it("returns same array if no change", () => {
       const existing: Message[] = [
         { id: "msg-1", content: "same", _source: "jsonl" },

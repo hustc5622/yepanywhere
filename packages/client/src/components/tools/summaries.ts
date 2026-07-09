@@ -164,10 +164,6 @@ function getOpenCodeInputSummary(toolName: string, input: unknown): string {
   }
 
   const i = input as Record<string, unknown>;
-  if (typeof i.opencodeTitle === "string" && i.opencodeTitle.trim()) {
-    return truncate(i.opencodeTitle.trim(), 160);
-  }
-
   const lowerToolName = toolName.toLowerCase();
   const stringField = (...fields: string[]) => {
     for (const field of fields) {
@@ -207,6 +203,10 @@ function getOpenCodeInputSummary(toolName: string, input: unknown): string {
         return `${i.todos.length} todos`;
       }
       break;
+  }
+
+  if (typeof i.opencodeTitle === "string" && i.opencodeTitle.trim()) {
+    return truncate(i.opencodeTitle.trim(), 160);
   }
 
   return getFirstStringValue(i);

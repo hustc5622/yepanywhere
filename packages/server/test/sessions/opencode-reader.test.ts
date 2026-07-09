@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -274,5 +274,41 @@ describe("OpenCode sqlite session support", () => {
     const sessions = await reader.listSessions(encodeProjectId(projectPath));
 
     expect(sessions[0]?.createdBy).toBe("yep");
+  });
+
+  it("uses project OpenCode provider config for context usage", async () => {
+    const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
+    tempDirs.push(dir);
+    await mkdir(dir, { recursive: true });
+
+    const dbPath = join(dir, "opencode.db");
+    const projectPath = join(dir, "research_tasks");
+    await mkdir(projectPath, { recursive: true });
+    await writeFile(
+      join(projectPath, "opencode.json"),
+      JSON.stringify({
+        providers: {
+          anthropic: {
+            models: {
+              "glm-5.2": {
+                limit: { context: 2000, output: 1000 },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const sqliteAvailable = await createOpenCodeDb(dbPath, projectPath);
+    if (!sqliteAvailable) return;
+
+    const reader = new OpenCodeSessionReader({ dbPath, projectPath });
+    const sessions = await reader.listSessions(encodeProjectId(projectPath));
+
+    expect(sessions[0]?.contextUsage).toMatchObject({
+      inputTokens: 1000,
+      contextWindow: 2000,
+      percentage: 50,
+    });
   });
 });

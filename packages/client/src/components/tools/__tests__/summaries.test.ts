@@ -88,6 +88,24 @@ describe("getToolSummary", () => {
     expect(summary).toBe('rg -n "opencode" packages/client/src');
   });
 
+  it("prefers OpenCode bash command over generic title", () => {
+    const summary = getToolSummary(
+      "Bash",
+      {
+        command: "pnpm test -- --runInBand",
+        opencodeTitle: "bash",
+      },
+      {
+        content: "ok",
+        isError: false,
+      },
+      "complete",
+      { provider: "opencode" },
+    );
+
+    expect(summary).toBe("pnpm test -- --runInBand");
+  });
+
   it("shows OpenCode read target instead of generic done", () => {
     const summary = getToolSummary(
       "read",

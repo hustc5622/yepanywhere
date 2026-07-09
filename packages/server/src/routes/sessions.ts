@@ -796,6 +796,39 @@ async function markSessionCreatedByYep(
   });
 }
 
+function recordOpenCodeContextWindowOverride(
+  deps: SessionsDeps,
+  input: {
+    provider?: ProviderName;
+    model?: string;
+    sessionId?: string;
+    limits?: OpenCodeModelLimits;
+  },
+): void {
+  if (
+    input.provider !== "opencode" ||
+    !input.limits ||
+    input.limits.context <= 0
+  ) {
+    return;
+  }
+
+  if (input.model) {
+    deps.modelInfoService?.recordContextWindow(
+      input.model,
+      input.limits.context,
+      "opencode",
+    );
+  }
+  if (input.sessionId) {
+    deps.modelInfoService?.recordSessionContextWindow(
+      input.sessionId,
+      input.limits.context,
+      "opencode",
+    );
+  }
+}
+
 export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const routes = new Hono();
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
@@ -806,12 +839,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           projectPath,
         })
       : null);
-  const getOpenCodeReader = (projectPath: string): OpenCodeSessionReader =>
-    deps.opencodeReaderFactory?.(projectPath) ??
-    new OpenCodeSessionReader({
-      dbPath: deps.opencodeDbPath,
-      projectPath,
-    });
+  const getOpenCodeReader = (projectPath: string): OpenCodeSessionReader => {
+    const mis = deps.modelInfoService;
+    return (
+      deps.opencodeReaderFactory?.(projectPath) ??
+      new OpenCodeSessionReader({
+        dbPath: deps.opencodeDbPath,
+        projectPath,
+        getContextWindow: mis
+          ? (model, provider, sessionId) =>
+              mis.getCachedContextWindow(model, provider, sessionId)
+          : undefined,
+      })
+    );
+  };
 
   // GET /api/archive/sessions - List physically archived sessions.
   routes.get("/archive/sessions", (c) => {
@@ -1772,6 +1813,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json(result, 202); // 202 Accepted - queued for processing
     }
 
+    recordOpenCodeContextWindowOverride(deps, {
+      provider: result.provider,
+      model,
+      sessionId: result.sessionId,
+      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+    });
+
     // Save provider and executor to session metadata for resume
     if (deps.sessionMetadataService) {
       if (body.provider) {
@@ -1883,6 +1931,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (isQueuedResponse(result)) {
       return c.json(result, 202); // 202 Accepted - queued for processing
     }
+
+    recordOpenCodeContextWindowOverride(deps, {
+      provider: result.provider,
+      model,
+      sessionId: result.sessionId,
+      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+    });
 
     // Save provider and executor to session metadata for resume
     if (deps.sessionMetadataService) {
@@ -2204,6 +2259,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       await markSessionCreatedByYep(deps, actualSessionId, project.id);
     }
 
+    recordOpenCodeContextWindowOverride(deps, {
+      provider: providerName as ProviderName | undefined,
+      model,
+      sessionId: actualSessionId,
+      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+    });
+
     getLogger().info(
       {
         event: "session_resume_process_started",
@@ -2348,6 +2410,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         410,
       ); // 410 Gone - process is no longer available
     }
+
+    recordOpenCodeContextWindowOverride(deps, {
+      provider: providerName,
+      model,
+      sessionId,
+      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+    });
 
     return c.json({
       queued: true,

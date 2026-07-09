@@ -1,5 +1,5 @@
 import { orderByParentChain } from "@yep-anywhere/shared";
-import type { Message } from "../types";
+import type { ContentBlock, Message } from "../types";
 
 /**
  * Get the message ID, preferring uuid over id.
@@ -47,6 +47,170 @@ function getMessageRole(m: Message): string | undefined {
     return m.role;
   }
   return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+type MergeableContentBlock = ContentBlock & Record<string, unknown>;
+
+function isContentBlock(value: unknown): value is MergeableContentBlock {
+  return isRecord(value) && typeof value.type === "string";
+}
+
+function getContentBlocks(message: Message): MergeableContentBlock[] | null {
+  const content = getMessageContent(message);
+  if (!Array.isArray(content)) {
+    return null;
+  }
+  return content.filter(isContentBlock);
+}
+
+function getBlockText(block: MergeableContentBlock): string | undefined {
+  if (block.type === "thinking") {
+    return typeof block.thinking === "string" ? block.thinking : undefined;
+  }
+  if (block.type === "text") {
+    return typeof block.text === "string" ? block.text : undefined;
+  }
+  return undefined;
+}
+
+function getBlockKey(block: MergeableContentBlock): string | null {
+  if (typeof block.id === "string" && block.id) {
+    return `${String(block.type)}:${block.id}`;
+  }
+  if (typeof block.tool_use_id === "string" && block.tool_use_id) {
+    return `${String(block.type)}:${block.tool_use_id}`;
+  }
+  return null;
+}
+
+function blocksAreSameStream(
+  existing: MergeableContentBlock | undefined,
+  incoming: MergeableContentBlock,
+): boolean {
+  if (!existing || existing.type !== incoming.type) {
+    return false;
+  }
+
+  const existingKey = getBlockKey(existing);
+  const incomingKey = getBlockKey(incoming);
+  if (existingKey || incomingKey) {
+    return existingKey === incomingKey;
+  }
+
+  const existingText = getBlockText(existing);
+  const incomingText = getBlockText(incoming);
+  if (existingText === undefined || incomingText === undefined) {
+    return false;
+  }
+
+  return (
+    incomingText.startsWith(existingText) ||
+    existingText.startsWith(incomingText)
+  );
+}
+
+function mergeBlocks(
+  existing: MergeableContentBlock,
+  incoming: MergeableContentBlock,
+): MergeableContentBlock {
+  const existingText = getBlockText(existing);
+  const incomingText = getBlockText(incoming);
+
+  if (incoming.type === "thinking" && incomingText !== undefined) {
+    return {
+      ...existing,
+      ...incoming,
+      thinking:
+        existingText && existingText.length > incomingText.length
+          ? existingText
+          : incomingText,
+    };
+  }
+
+  if (incoming.type === "text" && incomingText !== undefined) {
+    return {
+      ...existing,
+      ...incoming,
+      text:
+        existingText && existingText.length > incomingText.length
+          ? existingText
+          : incomingText,
+    };
+  }
+
+  return { ...existing, ...incoming };
+}
+
+function hasEquivalentBlock(
+  blocks: MergeableContentBlock[],
+  incoming: MergeableContentBlock,
+): boolean {
+  const incomingKey = getBlockKey(incoming);
+  const incomingText = getBlockText(incoming);
+
+  return blocks.some((block) => {
+    const blockKey = getBlockKey(block);
+    if (incomingKey || blockKey) {
+      return incomingKey === blockKey;
+    }
+
+    return (
+      block.type === incoming.type &&
+      incomingText !== undefined &&
+      getBlockText(block) === incomingText
+    );
+  });
+}
+
+function cloneBlock(block: MergeableContentBlock): MergeableContentBlock {
+  return { ...block, type: block.type };
+}
+
+function mergeSdkContentBlocks(existing: Message, incoming: Message): Message {
+  const existingBlocks = getContentBlocks(existing);
+  const incomingBlocks = getContentBlocks(incoming);
+  if (!existingBlocks || !incomingBlocks) {
+    return incoming;
+  }
+
+  const mergedBlocks: MergeableContentBlock[] = existingBlocks.map(cloneBlock);
+
+  for (let index = 0; index < incomingBlocks.length; index += 1) {
+    const incomingBlock = incomingBlocks[index];
+    if (!incomingBlock) continue;
+    const existingAtIndex = mergedBlocks[index];
+
+    if (
+      existingAtIndex &&
+      blocksAreSameStream(existingAtIndex, incomingBlock)
+    ) {
+      mergedBlocks[index] = mergeBlocks(existingAtIndex, incomingBlock);
+      continue;
+    }
+
+    const lastIndex = mergedBlocks.length - 1;
+    const lastBlock = mergedBlocks[lastIndex];
+    if (lastBlock && blocksAreSameStream(lastBlock, incomingBlock)) {
+      mergedBlocks[lastIndex] = mergeBlocks(lastBlock, incomingBlock);
+      continue;
+    }
+
+    if (!hasEquivalentBlock(mergedBlocks, incomingBlock)) {
+      mergedBlocks.push(cloneBlock(incomingBlock));
+    }
+  }
+
+  return {
+    ...incoming,
+    message: {
+      ...(incoming.message ?? {}),
+      content: mergedBlocks,
+    },
+  };
 }
 
 function getConversationSiblingKey(m: Message): string | null {
@@ -157,7 +321,7 @@ export function mergeMessage(
   }
 
   // Both are SDK - use the newer one (incoming)
-  return { ...incoming, _source: "sdk" };
+  return { ...mergeSdkContentBlocks(existing, incoming), _source: "sdk" };
 }
 
 export interface MergeJSONLResult {

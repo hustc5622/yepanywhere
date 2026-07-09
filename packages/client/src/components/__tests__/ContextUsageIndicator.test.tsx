@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { I18nProvider } from "../../i18n";
 import { ContextUsageIndicator } from "../ContextUsageIndicator";
@@ -40,5 +40,22 @@ describe("ContextUsageIndicator", () => {
     expect(indicator?.getAttribute("title")).toBe(
       "Context: 25% (50.0K tokens)",
     );
+  });
+
+  it("can show used/window tokens as the label", () => {
+    render(
+      <I18nProvider>
+        <ContextUsageIndicator
+          usage={{
+            inputTokens: 281_200,
+            percentage: 28.12,
+            contextWindow: 1_000_000,
+          }}
+          labelMode="tokens"
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByText("281.2K/1.0M")).toBeTruthy();
   });
 });

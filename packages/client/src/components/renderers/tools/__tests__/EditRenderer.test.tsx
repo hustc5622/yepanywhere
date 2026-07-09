@@ -206,4 +206,57 @@ describe("EditRenderer collapsed preview fallback", () => {
 
     expect(screen.getByRole("button", { name: /Foo\.tsx/i })).toBeDefined();
   });
+
+  it("renders completed result diffs from input augment data", () => {
+    render(
+      <div>
+        {editRenderer.renderToolResult(
+          { content: "Edited successfully." } as never,
+          false,
+          renderContext,
+          {
+            file_path: "src/example.ts",
+            _structuredPatch: [
+              {
+                oldStart: 1,
+                oldLines: 1,
+                newStart: 1,
+                newLines: 1,
+                lines: ["-const x = 1;", "+const x = 2;"],
+              },
+            ],
+          } as never,
+        )}
+      </div>,
+    );
+
+    expect(screen.queryByText("(empty)")).toBeNull();
+    expect(screen.getByText("-const x = 1;")).toBeDefined();
+    expect(screen.getByText("+const x = 2;")).toBeDefined();
+  });
+
+  it("renders completed result raw patch from input when structured data is unavailable", () => {
+    render(
+      <div>
+        {editRenderer.renderToolResult(
+          { content: "Edited successfully." } as never,
+          false,
+          renderContext,
+          {
+            file_path: "src/example.ts",
+            _rawPatch: [
+              "--- src/example.ts",
+              "+++ src/example.ts",
+              "@@ -1,1 +1,1 @@",
+              "-const x = 1;",
+              "+const x = 2;",
+            ].join("\n"),
+          } as never,
+        )}
+      </div>,
+    );
+
+    expect(screen.queryByText("(empty)")).toBeNull();
+    expect(screen.getByText(/--- src\/example\.ts/)).toBeDefined();
+  });
 });

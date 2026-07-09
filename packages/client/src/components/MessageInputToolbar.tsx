@@ -248,6 +248,7 @@ export function MessageInputToolbar({
         <ContextUsageIndicator
           usage={contextUsage}
           size={16}
+          labelMode="tokens"
           onClick={
             projectId && sessionId
               ? () => setIsContextModalOpen(true)

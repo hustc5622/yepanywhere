@@ -435,14 +435,20 @@ export function createApp(options: AppOptions): AppResult {
             }),
         );
       }
-      case "opencode":
+      case "opencode": {
+        const mis = options.modelInfoService;
         return getOrCreateReader(
           `opencode::${project.path}`,
           () =>
             new OpenCodeSessionReader({
               projectPath: project.path,
+              getContextWindow: mis
+                ? (model, provider, sessionId) =>
+                    mis.getCachedContextWindow(model, provider, sessionId)
+                : undefined,
             }),
         );
+      }
     }
   };
   const codexReaderFactory = (projectPath: string): CodexSessionReader =>
@@ -467,11 +473,17 @@ export function createApp(options: AppOptions): AppResult {
   const opencodeReaderFactory = (projectPath: string): OpenCodeSessionReader =>
     getOrCreateReader(
       `opencode-extra::${OPENCODE_DB_PATH}::${projectPath}`,
-      () =>
-        new OpenCodeSessionReader({
+      () => {
+        const mis = options.modelInfoService;
+        return new OpenCodeSessionReader({
           dbPath: OPENCODE_DB_PATH,
           projectPath,
-        }),
+          getContextWindow: mis
+            ? (model, provider, sessionId) =>
+                mis.getCachedContextWindow(model, provider, sessionId)
+            : undefined,
+        });
+      },
     );
   const getSessionSummary = async (sessionId: string, projectId: string) => {
     const project = await scanner.getProject(projectId);
@@ -902,6 +914,8 @@ export function createApp(options: AppOptions): AppResult {
       opencodeScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
       opencodeReaderFactory,
+      codexBridgeService: options.codexBridgeService,
+      opencodeBridgeService: options.opencodeBridgeService,
     }),
   );
   app.route(

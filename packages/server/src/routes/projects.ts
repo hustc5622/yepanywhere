@@ -5,6 +5,10 @@ import {
   toUrlProjectId,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import type {
+  CodexBridgeController,
+  CodexBridgeSessionView,
+} from "../codex-bridge/types.js";
 import { getProjectGitStatusSummary } from "../git-status-summary.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type {
@@ -12,6 +16,10 @@ import type {
   SessionMetadataService,
 } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
+import type {
+  OpenCodeBridgeController,
+  OpenCodeBridgeSessionView,
+} from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -64,6 +72,10 @@ export interface ProjectsDeps {
   opencodeDbPath?: string;
   /** Optional shared OpenCode reader factory for cross-provider session lookups */
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  /** Codex bridge for externally launched `codex --remote` sessions. */
+  codexBridgeService?: CodexBridgeController;
+  /** OpenCode bridge for OpenCode CLI sessions. */
+  opencodeBridgeService?: OpenCodeBridgeController;
 }
 
 interface ProjectActivityCounts {
@@ -72,6 +84,87 @@ interface ProjectActivityCounts {
 }
 
 const PROJECT_GIT_STATUS_CONCURRENCY = 6;
+
+type BridgeSessionView = CodexBridgeSessionView | OpenCodeBridgeSessionView;
+
+async function listBridgeSessionViews(
+  deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
+): Promise<BridgeSessionView[]> {
+  const [codexViews, opencodeViews] = await Promise.all([
+    deps.codexBridgeService?.listSessionViews() ?? [],
+    deps.opencodeBridgeService?.listSessionViews() ?? [],
+  ]);
+  return [...codexViews, ...opencodeViews] as BridgeSessionView[];
+}
+
+async function isBridgeSessionActive(
+  deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  sessionId: string,
+): Promise<boolean> {
+  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
+    return true;
+  }
+  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+}
+
+async function getActiveBridgeSessionViews(
+  deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
+): Promise<BridgeSessionView[]> {
+  const views = await listBridgeSessionViews(deps);
+  const active = await Promise.all(
+    views.map(async (view) =>
+      (await isBridgeSessionActive(deps, view.session.id)) ? view : null,
+    ),
+  );
+  return active.filter((view): view is BridgeSessionView => view !== null);
+}
+
+function mergeBridgeSessions(
+  sessions: SessionSummary[],
+  bridgeViews: BridgeSessionView[],
+): SessionSummary[] {
+  if (bridgeViews.length === 0) return sessions;
+
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const existingIds = new Set(sessions.map((session) => session.id));
+  for (const view of bridgeViews) {
+    const existing = byId.get(view.session.id);
+    byId.set(
+      view.session.id,
+      existing
+        ? {
+            ...view.session,
+            ...existing,
+            ownership: view.session.ownership,
+            pendingInputType:
+              view.session.pendingInputType ??
+              view.pendingInputType ??
+              existing.pendingInputType,
+            activity:
+              view.session.activity ?? view.activity ?? existing.activity,
+            provider: view.session.provider,
+            model: view.session.model ?? existing.model,
+            source: view.session.source ?? existing.source,
+          }
+        : view.session,
+    );
+  }
+
+  const bridgeOnly = bridgeViews
+    .filter((view) => !existingIds.has(view.session.id))
+    .map((view) => byId.get(view.session.id))
+    .filter((session): session is SessionSummary => Boolean(session));
+  const mergedExisting = sessions.map(
+    (session) => byId.get(session.id) ?? session,
+  );
+  return [
+    ...bridgeOnly.sort(
+      (a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    ),
+    ...mergedExisting,
+  ];
+}
 
 /**
  * Get activity counts for all projects.
@@ -240,6 +333,9 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
         if (state === "in-turn" || state === "waiting-input") {
           activity = state;
         }
+      } else {
+        pendingInputType = session.pendingInputType;
+        activity = session.activity;
       }
 
       // Get last seen and unread status
@@ -277,10 +373,20 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
     const gitStatusProvider =
       deps.gitStatusProvider ??
       ((project: Project) => getProjectGitStatusSummary(project.path));
-    const [activityCounts, gitStatusSummaries] = await Promise.all([
-      getProjectActivityCounts(deps.supervisor, deps.externalTracker),
-      getProjectGitStatusSummaries(rawProjects, gitStatusProvider),
-    ]);
+    const [activityCounts, gitStatusSummaries, activeBridgeViews] =
+      await Promise.all([
+        getProjectActivityCounts(deps.supervisor, deps.externalTracker),
+        getProjectGitStatusSummaries(rawProjects, gitStatusProvider),
+        getActiveBridgeSessionViews(deps),
+      ]);
+    for (const view of activeBridgeViews) {
+      const existing = activityCounts.get(view.session.projectId) || {
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+      };
+      existing.activeExternalCount++;
+      activityCounts.set(view.session.projectId, existing);
+    }
 
     // Enrich projects with active counts (all keyed by UrlProjectId now)
     const projects = rawProjects.map((project) => {
@@ -410,6 +516,11 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       },
       providerCatalog,
     );
+
+    const activeBridgeViews = (await getActiveBridgeSessionViews(deps)).filter(
+      (view) => view.session.projectId === projectId,
+    );
+    sessions = mergeBridgeSessions(sessions, activeBridgeViews);
 
     // Add missing owned sessions (new sessions that don't have user/assistant messages yet)
     sessions = addMissingOwnedSessions(sessions, projectId);

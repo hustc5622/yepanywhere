@@ -9,6 +9,8 @@ interface ContextUsageIndicatorProps {
   size?: number;
   /** Whether to show the percentage label (default: true) */
   showLabel?: boolean;
+  /** Label style for compact surfaces. Default keeps existing percentage UI. */
+  labelMode?: "percent" | "tokens";
   /**
    * When provided, the indicator becomes interactive (button) and invokes
    * this callback on click — used by SessionPage to open the
@@ -28,6 +30,7 @@ export function ContextUsageIndicator({
   usage,
   size = 16,
   showLabel = true,
+  labelMode = "percent",
   onClick,
   ariaLabel,
 }: ContextUsageIndicatorProps) {
@@ -35,7 +38,8 @@ export function ContextUsageIndicator({
   if (!usage) return null;
 
   const { percentage } = usage;
-  // Clamp percentage to 0-100
+  const displayPercentage = Math.max(0, percentage);
+  // Clamp only the visual fill to 0-100.
   const clampedPercentage = Math.min(100, Math.max(0, percentage));
 
   // Calculate the stroke-dasharray for the pie chart
@@ -53,14 +57,20 @@ export function ContextUsageIndicator({
 
   const tooltip = usage.contextWindow
     ? t("contextTooltipWithWindow", {
-        percentage: clampedPercentage,
+        percentage: displayPercentage,
         used: formatTokens(usage.inputTokens),
         total: formatTokens(usage.contextWindow),
       })
     : t("contextTooltipNoWindow", {
-        percentage: clampedPercentage,
+        percentage: displayPercentage,
         used: formatTokens(usage.inputTokens),
       });
+  const label =
+    labelMode === "tokens"
+      ? usage.contextWindow
+        ? `${formatTokens(usage.inputTokens)}/${formatTokens(usage.contextWindow)}`
+        : formatTokens(usage.inputTokens)
+      : `${displayPercentage}%`;
 
   return (
     <ContextUsageWrapper
@@ -97,9 +107,7 @@ export function ContextUsageIndicator({
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
         />
       </svg>
-      {showLabel && (
-        <span className="context-usage-label">{clampedPercentage}%</span>
-      )}
+      {showLabel && <span className="context-usage-label">{label}</span>}
     </ContextUsageWrapper>
   );
 }

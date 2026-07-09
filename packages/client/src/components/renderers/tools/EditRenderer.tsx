@@ -850,24 +850,47 @@ function EditToolResult({
   const showValidationWarning =
     enabled && validationErrors && !isToolIgnored("Edit");
 
+  const inputWithAugment = input as EditInputWithAugment | undefined;
+  const filePath = getEditFilePath(inputWithAugment, result);
+  const fileName = getFileName(filePath);
+  const structuredPatch =
+    result?.structuredPatch ?? inputWithAugment?._structuredPatch ?? [];
+  const diffHtml = inputWithAugment?._diffHtml;
+  const rawPatch = inputWithAugment?._rawPatch;
+  const inputRecord = inputWithAugment as
+    | (EditInputWithAugment & Record<string, unknown>)
+    | undefined;
+  const oldString =
+    result?.oldString ??
+    inputWithAugment?.old_string ??
+    (typeof inputRecord?.oldString === "string"
+      ? inputRecord.oldString
+      : undefined);
+  const newString =
+    result?.newString ??
+    inputWithAugment?.new_string ??
+    (typeof inputRecord?.newString === "string"
+      ? inputRecord.newString
+      : undefined);
+  const originalFile = result?.originalFile;
+
   // Count total lines in all hunks
   const totalLines = useMemo(() => {
-    if (!result?.structuredPatch) return 0;
-    return result.structuredPatch.reduce(
+    return structuredPatch.reduce(
       (sum, hunk) => sum + hunk.lines.length + 1, // +1 for hunk header
       0,
     );
-  }, [result?.structuredPatch]);
+  }, [structuredPatch]);
 
   const isTruncated = totalLines > MAX_VISIBLE_LINES;
 
   // Compute change summary
   const changeSummary = useMemo(() => {
-    if (!result?.structuredPatch) return null;
-    const additions = result.structuredPatch
+    if (structuredPatch.length === 0) return null;
+    const additions = structuredPatch
       .flatMap((h) => h.lines)
       .filter((l) => l.startsWith("+")).length;
-    const deletions = result.structuredPatch
+    const deletions = structuredPatch
       .flatMap((h) => h.lines)
       .filter((l) => l.startsWith("-")).length;
 
@@ -881,7 +904,7 @@ function EditToolResult({
       return `Removed ${deletions} line${deletions !== 1 ? "s" : ""}`;
     }
     return null;
-  }, [result?.structuredPatch]);
+  }, [structuredPatch]);
 
   if (isError) {
     // Extract error message - can be a string or object with content
@@ -907,7 +930,6 @@ function EditToolResult({
     const isRejection = isUserRejection(classification.classification);
 
     // For user rejections, show the proposed diff alongside the declined badge
-    const inputWithAugment = input as EditInputWithAugment | undefined;
     const hasProposedDiff =
       isRejection &&
       inputWithAugment?._structuredPatch &&
@@ -916,9 +938,6 @@ function EditToolResult({
       ? (inputWithAugment._structuredPatch?.flatMap((hunk) => hunk.lines) ?? [])
       : [];
     const proposedDiffTruncated = proposedDiffLines.length > MAX_VISIBLE_LINES;
-
-    const filePath = getEditFilePath(inputWithAugment);
-    const fileName = getFileName(filePath);
 
     return (
       <>
@@ -978,10 +997,10 @@ function EditToolResult({
           >
             <DiffModalContent
               diffHtml={inputWithAugment._diffHtml}
-              structuredPatch={inputWithAugment._structuredPatch ?? []}
+              structuredPatch={structuredPatch}
               filePath={filePath}
-              oldString={inputWithAugment.old_string}
-              newString={inputWithAugment.new_string}
+              oldString={oldString}
+              newString={newString}
             />
           </Modal>
         )}
@@ -991,10 +1010,46 @@ function EditToolResult({
 
   // Handle case where result doesn't have structuredPatch
   // Use input data as fallback when result data is missing
-  if (!result?.structuredPatch || result.structuredPatch.length === 0) {
-    const filePath = getEditFilePath(input, result);
-    const oldString = result?.oldString || input?.old_string || "";
-    const newString = result?.newString || input?.new_string || "";
+  if (structuredPatch.length === 0) {
+    if (rawPatch) {
+      const rawPatchPreview = truncateByLines(rawPatch, MAX_VISIBLE_LINES);
+      return (
+        <>
+          <div className="edit-result">
+            <div className="edit-header">
+              <span className="file-path">
+                {filePath ? getFileName(filePath) : "Patch"}
+              </span>
+              {showValidationWarning && validationErrors && (
+                <SchemaWarning toolName="Edit" errors={validationErrors} />
+              )}
+            </div>
+            <RawPatchPreview
+              rawPatch={rawPatch}
+              truncateLines={MAX_VISIBLE_LINES}
+            />
+            {rawPatchPreview.truncated && (
+              <DiffExpandButton
+                label="Show full patch"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowModal(true);
+                }}
+              />
+            )}
+          </div>
+          {showModal && (
+            <Modal
+              title={<span className="file-path">{fileName}</span>}
+              onClose={() => setShowModal(false)}
+            >
+              <RawPatchModalContent rawPatch={rawPatch} />
+            </Modal>
+          )}
+        </>
+      );
+    }
+
     const isPlan = filePath ? isPlanFile(filePath) : false;
 
     return (
@@ -1045,7 +1100,7 @@ function EditToolResult({
           className={`diff-view-container ${isTruncated ? "truncated" : ""}`}
         >
           <div className="diff-view">
-            {result.structuredPatch.map((hunk, i) => (
+            {structuredPatch.map((hunk, i) => (
               <DiffHunk key={`hunk-${hunk.oldStart}-${i}`} hunk={hunk} />
             ))}
           </div>
@@ -1065,17 +1120,15 @@ function EditToolResult({
       </div>
       {showModal && (
         <Modal
-          title={
-            <span className="file-path">{getFileName(result.filePath)}</span>
-          }
+          title={<span className="file-path">{fileName}</span>}
           onClose={() => setShowModal(false)}
         >
           <DiffModalContent
-            structuredPatch={result.structuredPatch}
-            filePath={result.filePath}
-            oldString={result.oldString ?? input?.old_string ?? ""}
-            newString={result.newString ?? input?.new_string ?? ""}
-            originalFile={result.originalFile}
+            structuredPatch={structuredPatch}
+            filePath={filePath}
+            oldString={oldString ?? ""}
+            newString={newString ?? ""}
+            originalFile={originalFile}
           />
         </Modal>
       )}

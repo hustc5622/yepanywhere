@@ -1813,14 +1813,28 @@ function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
         }
         break;
 
+      case "reasoning":
+        if (part.text?.trim()) {
+          blocks.push({
+            type: "thinking",
+            thinking: part.text,
+          });
+        }
+        break;
+
       case "tool":
         if (part.tool && part.callID) {
+          const toolName = canonicalizeOpenCodeToolName(part.tool);
           // Tool use block
           blocks.push({
             type: "tool_use",
             id: part.callID,
-            name: part.tool,
-            input: part.state?.input ?? {},
+            name: toolName,
+            input: normalizeOpenCodeToolInput(
+              toolName,
+              part.state?.input,
+              part.state?.metadata,
+            ),
             opencodeStatus: part.state?.status,
             opencodeTitle: part.state?.title,
             opencodeMetadata: part.state?.metadata,
@@ -1864,4 +1878,96 @@ function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
   }
 
   return blocks;
+}
+
+function canonicalizeOpenCodeToolName(toolName: string): string {
+  switch (toolName.toLowerCase()) {
+    case "bash":
+    case "shell":
+      return "Bash";
+    case "read":
+      return "Read";
+    case "write":
+      return "Write";
+    case "edit":
+    case "apply_patch":
+      return "Edit";
+    case "glob":
+      return "Glob";
+    case "grep":
+      return "Grep";
+    case "todowrite":
+    case "todo":
+      return "TodoWrite";
+    default:
+      return toolName;
+  }
+}
+
+function normalizeOpenCodeToolInput(
+  toolName: string,
+  input: unknown,
+  metadata?: unknown,
+): unknown {
+  const baseInput =
+    input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const normalized = { ...(baseInput as Record<string, unknown>) };
+  const lowerToolName = toolName.toLowerCase();
+  const metadataRecord =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>)
+      : undefined;
+
+  if (
+    (lowerToolName === "read" ||
+      lowerToolName === "write" ||
+      lowerToolName === "edit") &&
+    typeof normalized.filePath === "string" &&
+    typeof normalized.file_path !== "string"
+  ) {
+    normalized.file_path = normalized.filePath;
+  }
+
+  if (
+    lowerToolName === "edit" &&
+    typeof normalized.oldString === "string" &&
+    typeof normalized.old_string !== "string"
+  ) {
+    normalized.old_string = normalized.oldString;
+  }
+
+  if (
+    lowerToolName === "edit" &&
+    typeof normalized.newString === "string" &&
+    typeof normalized.new_string !== "string"
+  ) {
+    normalized.new_string = normalized.newString;
+  }
+
+  if (
+    lowerToolName === "edit" &&
+    typeof normalized.replaceAll === "boolean" &&
+    typeof normalized.replace_all !== "boolean"
+  ) {
+    normalized.replace_all = normalized.replaceAll;
+  }
+
+  if (
+    lowerToolName === "edit" &&
+    typeof metadataRecord?.diff === "string" &&
+    metadataRecord.diff.trim() &&
+    typeof normalized._rawPatch !== "string"
+  ) {
+    normalized._rawPatch = metadataRecord.diff;
+  }
+
+  if (
+    lowerToolName === "grep" &&
+    typeof normalized.include === "string" &&
+    typeof normalized.glob !== "string"
+  ) {
+    normalized.glob = normalized.include;
+  }
+
+  return normalized;
 }
