@@ -10,9 +10,10 @@ import {
 import { basename, dirname, join } from "node:path";
 import type { ProviderName, UrlProjectId } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
+import { withWritableOpenCodeDb } from "../sessions/opencode-db.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 
-export type ArchiveProvider = "claude" | "codex";
+export type ArchiveProvider = "claude" | "codex" | "opencode";
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {
@@ -33,6 +34,7 @@ export interface ArchivedSessionRecord {
   createdAt?: string;
   updatedAt?: string;
   messageCount?: number;
+  storagePath?: string;
   archivedAt: string;
   reason: ArchiveReason;
   files: ArchivedFileRecord[];
@@ -148,7 +150,9 @@ export class SessionArchiveService {
 
     const existing = this.manifest.sessions[params.sessionId];
     if (existing) {
-      const primaryExists = await fileExists(existing.files[0]?.archivePath);
+      const primaryExists =
+        existing.provider === "opencode" ||
+        (await fileExists(existing.files[0]?.archivePath));
       if (primaryExists) {
         throw new ArchiveError(
           "already_archived",
@@ -181,12 +185,22 @@ export class SessionArchiveService {
       createdAt: params.summary?.createdAt,
       updatedAt: params.summary?.updatedAt,
       messageCount: params.summary?.messageCount,
+      storagePath: provider === "opencode" ? params.sessionFilePath : undefined,
       archivedAt: new Date().toISOString(),
       reason: params.reason,
       files,
     };
 
-    await moveFiles(files, "to-archive");
+    if (provider === "opencode") {
+      await setOpenCodeSessionArchived({
+        dbPath: params.sessionFilePath,
+        sessionId: params.sessionId,
+        projectPath: params.project.path,
+        archivedAtMs: Date.now(),
+      });
+    } else {
+      await moveFiles(files, "to-archive");
+    }
     this.manifest.sessions[params.sessionId] = record;
     await this.save();
     return record;
@@ -201,16 +215,31 @@ export class SessionArchiveService {
       );
     }
 
-    for (const file of record.files) {
-      if (await fileExists(file.originalPath)) {
+    if (record.provider === "opencode") {
+      if (!record.storagePath) {
         throw new ArchiveError(
-          "restore_conflict",
-          `Cannot restore ${sessionId}; original path already exists: ${file.originalPath}`,
+          "restore_failed",
+          `Cannot restore ${sessionId}; missing OpenCode database path`,
         );
       }
+      await setOpenCodeSessionUnarchived({
+        dbPath: record.storagePath,
+        sessionId,
+        projectPath: record.projectPath,
+      });
+    } else {
+      for (const file of record.files) {
+        if (await fileExists(file.originalPath)) {
+          throw new ArchiveError(
+            "restore_conflict",
+            `Cannot restore ${sessionId}; original path already exists: ${file.originalPath}`,
+          );
+        }
+      }
+
+      await moveFiles(record.files, "to-original");
     }
 
-    await moveFiles(record.files, "to-original");
     delete this.manifest.sessions[sessionId];
     await this.save();
     return { record };
@@ -274,6 +303,10 @@ export class SessionArchiveService {
       sessionFilePath,
       join(archiveSessionDir, basename(sessionFilePath)),
     );
+
+    if (provider === "opencode") {
+      return [];
+    }
 
     if (provider !== "claude") {
       return [primary];
@@ -374,7 +407,91 @@ function normalizeArchiveProvider(
 ): ArchiveProvider | null {
   if (provider === "claude" || provider === "claude-ollama") return "claude";
   if (provider === "codex" || provider === "codex-oss") return "codex";
+  if (provider === "opencode") return "opencode";
   return null;
+}
+
+async function setOpenCodeSessionArchived(params: {
+  dbPath: string;
+  sessionId: string;
+  projectPath: string;
+  archivedAtMs: number;
+}): Promise<void> {
+  const result = await withWritableOpenCodeDb<
+    "archived" | "already_archived" | "not_found" | "unavailable"
+  >(params.dbPath, "unavailable", (db) => {
+    const row =
+      db
+        .prepare(
+          "SELECT time_archived FROM session WHERE id = ? AND directory = ?",
+        )
+        .get(params.sessionId, params.projectPath) ??
+      db
+        .prepare("SELECT time_archived FROM session WHERE id = ?")
+        .get(params.sessionId);
+
+    if (!row) return "not_found";
+    if (typeof row.time_archived === "number") return "already_archived";
+
+    db.prepare("UPDATE session SET time_archived = ? WHERE id = ?").run(
+      params.archivedAtMs,
+      params.sessionId,
+    );
+    return "archived";
+  });
+
+  if (result === "archived") return;
+  if (result === "already_archived") {
+    throw new ArchiveError(
+      "already_archived",
+      `Session ${params.sessionId} is already archived`,
+    );
+  }
+  if (result === "not_found") {
+    throw new ArchiveError(
+      "session_not_found",
+      `OpenCode session not found for ${params.sessionId}`,
+    );
+  }
+  throw new ArchiveError(
+    "archive_failed",
+    "OpenCode database is not available for archive",
+  );
+}
+
+async function setOpenCodeSessionUnarchived(params: {
+  dbPath: string;
+  sessionId: string;
+  projectPath: string;
+}): Promise<void> {
+  const result = await withWritableOpenCodeDb<
+    "restored" | "not_found" | "unavailable"
+  >(params.dbPath, "unavailable", (db) => {
+    const row =
+      db
+        .prepare("SELECT id FROM session WHERE id = ? AND directory = ?")
+        .get(params.sessionId, params.projectPath) ??
+      db.prepare("SELECT id FROM session WHERE id = ?").get(params.sessionId);
+
+    if (!row) return "not_found";
+
+    db.prepare("UPDATE session SET time_archived = NULL WHERE id = ?").run(
+      params.sessionId,
+    );
+    return "restored";
+  });
+
+  if (result === "restored") return;
+  if (result === "not_found") {
+    throw new ArchiveError(
+      "restore_failed",
+      `OpenCode session not found for ${params.sessionId}`,
+    );
+  }
+  throw new ArchiveError(
+    "restore_failed",
+    "OpenCode database is not available for restore",
+  );
 }
 
 async function createArchivedFileRecord(

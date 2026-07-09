@@ -12,6 +12,7 @@ export const OPENCODE_DB_PATH =
 interface OpenCodeStatement {
   all(...params: unknown[]): Record<string, unknown>[];
   get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): unknown;
 }
 
 export interface OpenCodeDatabase {
@@ -63,6 +64,31 @@ export async function withOpenCodeDb<T>(
   let db: OpenCodeDatabase | null = null;
   try {
     db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+    return callback(db);
+  } catch {
+    return fallback;
+  } finally {
+    db?.close();
+  }
+}
+
+export async function withWritableOpenCodeDb<T>(
+  dbPath: string,
+  fallback: T,
+  callback: (db: OpenCodeDatabase) => T,
+): Promise<T> {
+  try {
+    await access(dbPath);
+  } catch {
+    return fallback;
+  }
+
+  const sqlite = await loadSqliteModule();
+  if (!sqlite) return fallback;
+
+  let db: OpenCodeDatabase | null = null;
+  try {
+    db = new sqlite.DatabaseSync(dbPath);
     return callback(db);
   } catch {
     return fallback;

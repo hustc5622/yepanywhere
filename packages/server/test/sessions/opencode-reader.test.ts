@@ -41,6 +41,7 @@ async function loadSqliteModule(): Promise<TestSqliteModule | null> {
 async function createOpenCodeDb(
   dbPath: string,
   projectPath: string,
+  options: { sessionMetadata?: Record<string, unknown> | null } = {},
 ): Promise<boolean> {
   const sqlite = await loadSqliteModule();
   if (!sqlite) return false;
@@ -112,9 +113,10 @@ async function createOpenCodeDb(
           model,
           tokens_input,
           tokens_output,
-          tokens_cache_read
+          tokens_cache_read,
+          metadata
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     ).run(
       "ses_test",
@@ -133,6 +135,9 @@ async function createOpenCodeDb(
       1000,
       50,
       200,
+      options.sessionMetadata === undefined
+        ? null
+        : JSON.stringify(options.sessionMetadata),
     );
 
     db.prepare(
@@ -237,6 +242,7 @@ describe("OpenCode sqlite session support", () => {
       model: "anthropic/glm-5.2",
       messageCount: 2,
     });
+    expect(sessions[0]?.createdBy).toBeUndefined();
     expect(sessions[0]?.userQuestions?.[0]?.text).toBe(
       "搜一下腾讯新发布的 hy3系列模型",
     );
@@ -250,5 +256,23 @@ describe("OpenCode sqlite session support", () => {
     expect(loaded?.data.session.messages[0]?.parts[0]?.text).toBe(
       "搜一下腾讯新发布的 hy3系列模型",
     );
+  });
+
+  it("reads Yep creation source from OpenCode session metadata", async () => {
+    const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
+    tempDirs.push(dir);
+    await mkdir(dir, { recursive: true });
+
+    const dbPath = join(dir, "opencode.db");
+    const projectPath = join(dir, "research_tasks");
+    const sqliteAvailable = await createOpenCodeDb(dbPath, projectPath, {
+      sessionMetadata: { createdBy: "yep", source: "yep-anywhere" },
+    });
+    if (!sqliteAvailable) return;
+
+    const reader = new OpenCodeSessionReader({ dbPath, projectPath });
+    const sessions = await reader.listSessions(encodeProjectId(projectPath));
+
+    expect(sessions[0]?.createdBy).toBe("yep");
   });
 });

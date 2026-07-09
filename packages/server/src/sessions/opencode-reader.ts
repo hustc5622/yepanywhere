@@ -7,6 +7,7 @@ import {
   type OpenCodeSessionEntry,
   type OpenCodeStoredPart,
   SESSION_TITLE_MAX_LENGTH,
+  type SessionCreatedBy,
   type SessionQuestion,
   type UrlProjectId,
   getModelContextWindow,
@@ -582,9 +583,11 @@ class OpenCodeJsonSessionReader implements ISessionReader {
 interface OpenCodeSqliteSessionRow {
   id: string;
   projectId: string;
+  parentId: string | null;
   directory: string;
   title: string | null;
   model: string | null;
+  metadata: Record<string, unknown>;
   createdAtMs: number;
   updatedAtMs: number;
   tokensInput: number;
@@ -675,6 +678,7 @@ function mapSqliteSessionRow(
   if (!row) return null;
   const id = asString(row.id);
   const projectId = asString(row.project_id) ?? "global";
+  const parentId = asString(row.parent_id) ?? null;
   const directory = asString(row.directory);
   const createdAtMs = asNumber(row.time_created);
   const updatedAtMs = asNumber(row.time_updated);
@@ -690,9 +694,11 @@ function mapSqliteSessionRow(
   return {
     id,
     projectId,
+    parentId,
     directory,
     title: asString(row.title) ?? null,
     model: asString(row.model) ?? null,
+    metadata: asRecord(row.metadata) ?? parseJsonRecord(row.metadata),
     createdAtMs,
     updatedAtMs,
     tokensInput: asNumber(row.tokens_input) ?? 0,
@@ -794,6 +800,31 @@ function getMessageModel(message: OpenCodeMessage): string | undefined {
     return `${message.providerID}/${message.modelID}`;
   }
   return message.modelID;
+}
+
+function normalizeMetadataString(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function deriveOpenCodeCreatedByFromMetadata(
+  metadata: Record<string, unknown>,
+): SessionCreatedBy | undefined {
+  const createdBy = normalizeMetadataString(metadata.createdBy);
+  if (createdBy === "yep") return "yep";
+  if (createdBy === "external") return "external";
+
+  const source = normalizeMetadataString(metadata.source);
+  const client = normalizeMetadataString(metadata.client);
+  const originator = normalizeMetadataString(metadata.originator);
+  if (
+    source === "yep-anywhere" ||
+    client === "yep-anywhere" ||
+    originator === "yep-anywhere"
+  ) {
+    return "yep";
+  }
+
+  return undefined;
 }
 
 const SESSION_STATS_SQL = `
@@ -1014,9 +1045,11 @@ export class OpenCodeSessionReader implements ISessionReader {
             SELECT
               id,
               project_id,
+              parent_id,
               directory,
               title,
               model,
+              metadata,
               time_created,
               time_updated,
               tokens_input,
@@ -1073,6 +1106,9 @@ export class OpenCodeSessionReader implements ISessionReader {
       messages,
       model,
     );
+    const createdBy =
+      deriveOpenCodeCreatedByFromMetadata(row.metadata) ??
+      this.getParentSqliteCreatedByFromDb(db, row.parentId);
 
     return {
       id: sessionId,
@@ -1088,7 +1124,42 @@ export class OpenCodeSessionReader implements ISessionReader {
       cumulativeUsage: computeCumulativeUsage(row, assistantTurnCount),
       provider: "opencode",
       model,
+      createdBy,
     };
+  }
+
+  private getParentSqliteCreatedByFromDb(
+    db: OpenCodeDatabase,
+    parentId: string | null,
+  ): SessionCreatedBy | undefined {
+    if (!parentId) return undefined;
+    const parent = mapSqliteSessionRow(
+      db
+        .prepare(
+          `
+            SELECT
+              id,
+              project_id,
+              parent_id,
+              directory,
+              title,
+              model,
+              metadata,
+              time_created,
+              time_updated,
+              tokens_input,
+              tokens_output,
+              tokens_reasoning,
+              tokens_cache_read,
+              tokens_cache_write
+            FROM session
+            WHERE id = ?
+          `,
+        )
+        .get(parentId),
+    );
+    if (!parent) return undefined;
+    return deriveOpenCodeCreatedByFromMetadata(parent.metadata);
   }
 
   private async loadSqliteSessionMessages(

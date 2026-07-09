@@ -2697,6 +2697,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         });
         deps.scanner.invalidateCache();
         deps.codexScanner?.invalidateCache();
+        deps.opencodeScanner?.invalidateCache();
         emitArchiveFileEvents(deps, record, "delete");
         archiveResult = { physical: true, action: "archive", record };
       } catch (error) {
@@ -2726,6 +2727,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           await deps.sessionArchiveService.restoreSession(sessionId);
         deps.scanner.invalidateCache();
         deps.codexScanner?.invalidateCache();
+        deps.opencodeScanner?.invalidateCache();
         emitArchiveFileEvents(deps, record, "create");
         archiveResult = { physical: true, action: "restore", record };
       } catch (error) {

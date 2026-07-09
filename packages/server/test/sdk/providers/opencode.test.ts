@@ -187,6 +187,10 @@ describe("OpenCodeProvider", () => {
     ).toEqual({
       title: "Yep Anywhere Session",
       location: { directory: "/repo" },
+      metadata: {
+        createdBy: "yep",
+        source: "yep-anywhere",
+      },
       model: {
         providerID: "anthropic",
         id: "claude-fable-5",
@@ -202,6 +206,47 @@ describe("OpenCodeProvider", () => {
         modelID: "claude-fable-5",
       },
     });
+  });
+
+  it("marks newly created OpenCode sessions with Yep metadata", async () => {
+    const provider = new OpenCodeProvider();
+    const markOpenCodeSessionCreatedByYep = (
+      provider as unknown as {
+        markOpenCodeSessionCreatedByYep: (
+          baseUrl: string,
+          sessionId: string,
+          cwd: string,
+        ) => Promise<void>;
+      }
+    ).markOpenCodeSessionCreatedByYep.bind(provider);
+    const requests: Array<{ url?: string; method?: string; body: unknown }> =
+      [];
+
+    await withTestServer(
+      async (req, res) => {
+        requests.push({
+          url: req.url,
+          method: req.method,
+          body: await readJsonBody(req),
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ id: "ses_1" }));
+      },
+      (baseUrl) => markOpenCodeSessionCreatedByYep(baseUrl, "ses_1", "/repo"),
+    );
+
+    expect(requests).toEqual([
+      {
+        url: "/session/ses_1?directory=%2Frepo",
+        method: "PATCH",
+        body: {
+          metadata: {
+            createdBy: "yep",
+            source: "yep-anywhere",
+          },
+        },
+      },
+    ]);
   });
 
   it("routes OpenCode session creation to the requested project directory", async () => {
@@ -246,6 +291,10 @@ describe("OpenCodeProvider", () => {
     expect(requests[0]?.body).toEqual({
       title: "Yep Anywhere Session",
       location: { directory: cwd },
+      metadata: {
+        createdBy: "yep",
+        source: "yep-anywhere",
+      },
       model: {
         providerID: "anthropic",
         id: "claude-fable-5",

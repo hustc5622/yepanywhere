@@ -5,13 +5,157 @@ import { join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
 import { describe, expect, it, vi } from "vitest";
 import { SessionArchiveService } from "../../src/archive/index.js";
+import { encodeProjectId } from "../../src/projects/paths.js";
 import {
   type SessionsDeps,
   createSessionsRoutes,
 } from "../../src/routes/sessions.js";
 import type { CodexSessionReader } from "../../src/sessions/codex-reader.js";
+import { OpenCodeSessionReader } from "../../src/sessions/opencode-reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
 import type { Project, SessionSummary } from "../../src/supervisor/types.js";
+
+interface TestSqliteStatement {
+  run(...params: unknown[]): void;
+}
+
+interface TestSqliteDatabase {
+  exec(sql: string): void;
+  prepare(sql: string): TestSqliteStatement;
+  close(): void;
+}
+
+interface TestSqliteModule {
+  DatabaseSync: new (
+    path: string,
+    options?: { readOnly?: boolean },
+  ) => TestSqliteDatabase;
+}
+
+async function loadSqliteModule(): Promise<TestSqliteModule | null> {
+  const specifier: string = "node:sqlite";
+  return import(specifier)
+    .then((mod) => {
+      const maybeModule = mod as {
+        DatabaseSync?: TestSqliteModule["DatabaseSync"];
+      };
+      return maybeModule.DatabaseSync
+        ? { DatabaseSync: maybeModule.DatabaseSync }
+        : null;
+    })
+    .catch(() => null);
+}
+
+async function createOpenCodeDb(
+  dbPath: string,
+  projectPath: string,
+  sessionId: string,
+): Promise<boolean> {
+  const sqlite = await loadSqliteModule();
+  if (!sqlite) return false;
+
+  const db = new sqlite.DatabaseSync(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE session (
+        id text PRIMARY KEY,
+        project_id text NOT NULL,
+        parent_id text,
+        slug text NOT NULL,
+        directory text NOT NULL,
+        title text NOT NULL,
+        version text NOT NULL,
+        share_url text,
+        summary_additions integer,
+        summary_deletions integer,
+        summary_files integer,
+        summary_diffs text,
+        revert text,
+        permission text,
+        time_created integer NOT NULL,
+        time_updated integer NOT NULL,
+        time_compacting integer,
+        time_archived integer,
+        workspace_id text,
+        path text,
+        agent text,
+        model text,
+        cost real DEFAULT 0 NOT NULL,
+        tokens_input integer DEFAULT 0 NOT NULL,
+        tokens_output integer DEFAULT 0 NOT NULL,
+        tokens_reasoning integer DEFAULT 0 NOT NULL,
+        tokens_cache_read integer DEFAULT 0 NOT NULL,
+        tokens_cache_write integer DEFAULT 0 NOT NULL,
+        metadata text
+      );
+      CREATE TABLE message (
+        id text PRIMARY KEY,
+        session_id text NOT NULL,
+        time_created integer NOT NULL,
+        time_updated integer NOT NULL,
+        data text NOT NULL
+      );
+      CREATE TABLE part (
+        id text PRIMARY KEY,
+        message_id text NOT NULL,
+        session_id text NOT NULL,
+        time_created integer NOT NULL,
+        time_updated integer NOT NULL,
+        data text NOT NULL
+      );
+    `);
+
+    const createdAt = Date.UTC(2026, 6, 7, 1, 34, 46);
+    const updatedAt = Date.UTC(2026, 6, 7, 1, 35, 23);
+    db.prepare(
+      `
+        INSERT INTO session (
+          id,
+          project_id,
+          slug,
+          directory,
+          title,
+          version,
+          time_created,
+          time_updated
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+    ).run(
+      sessionId,
+      "global",
+      "test",
+      projectPath,
+      "Yep Anywhere Session",
+      "1",
+      createdAt,
+      updatedAt,
+    );
+    db.prepare(
+      "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+    ).run(
+      "msg_user",
+      sessionId,
+      createdAt + 10,
+      createdAt + 10,
+      JSON.stringify({ role: "user", time: { created: createdAt + 10 } }),
+    );
+    db.prepare(
+      "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(
+      "prt_user",
+      "msg_user",
+      sessionId,
+      createdAt + 20,
+      createdAt + 20,
+      JSON.stringify({ type: "text", text: "OpenCode archive target" }),
+    );
+  } finally {
+    db.close();
+  }
+
+  return true;
+}
 
 function createProject(): Project {
   return {
@@ -350,6 +494,128 @@ describe("Sessions metadata route", () => {
         starred: undefined,
       });
       expect(invalidateCache).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("archives and restores OpenCode sqlite sessions through metadata updates", async () => {
+    const testDir = join(
+      tmpdir(),
+      `yep-route-opencode-archive-${randomUUID()}`,
+    );
+    const dataDir = join(testDir, "data");
+    const projectPath = join(testDir, "project");
+    const dbPath = join(testDir, "opencode.db");
+    const sessionId = "ses_opencode_archive";
+
+    try {
+      await mkdir(projectPath, { recursive: true });
+      const sqliteAvailable = await createOpenCodeDb(
+        dbPath,
+        projectPath,
+        sessionId,
+      );
+      if (!sqliteAvailable) return;
+
+      const project: Project = {
+        ...createProject(),
+        id: encodeProjectId(projectPath),
+        path: projectPath,
+        name: "project",
+        sessionDir: dbPath,
+        provider: "opencode",
+      };
+      const archiveService = new SessionArchiveService({ dataDir });
+      await archiveService.initialize();
+      const updateMetadata = vi.fn(async () => undefined);
+      const invalidateCache = vi.fn();
+      const invalidateOpenCodeCache = vi.fn();
+      const makeReader = () =>
+        new OpenCodeSessionReader({ dbPath, projectPath });
+
+      const routes = createSessionsRoutes({
+        supervisor: {
+          getProcessForSession: vi.fn(() => null),
+        } as unknown as SessionsDeps["supervisor"],
+        scanner: {
+          listProjects: vi.fn(async () => [project]),
+          invalidateCache,
+        } as unknown as SessionsDeps["scanner"],
+        readerFactory: vi.fn(() => makeReader()),
+        opencodeDbPath: dbPath,
+        opencodeReaderFactory: vi.fn(() => makeReader()),
+        opencodeScanner: {
+          invalidateCache: invalidateOpenCodeCache,
+        } as unknown as SessionsDeps["opencodeScanner"],
+        sessionMetadataService: {
+          getProvider: vi.fn(() => "opencode"),
+          updateMetadata,
+        } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
+        sessionArchiveService: archiveService,
+      });
+
+      expect(
+        await makeReader().getSessionSummary(sessionId, project.id),
+      ).not.toBeNull();
+
+      const archiveResponse = await routes.request(
+        `/sessions/${sessionId}/metadata`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ archived: true }),
+        },
+      );
+
+      expect(archiveResponse.status).toBe(200);
+      const archiveJson = await archiveResponse.json();
+      expect(archiveJson.archive).toMatchObject({
+        physical: true,
+        action: "archive",
+        record: {
+          sessionId,
+          provider: "opencode",
+          storagePath: dbPath,
+        },
+      });
+      expect(archiveService.getArchivedSession(sessionId)).toMatchObject({
+        sessionId,
+        provider: "opencode",
+        storagePath: dbPath,
+        files: [],
+      });
+      expect(await makeReader().getSessionSummary(sessionId, project.id)).toBe(
+        null,
+      );
+      expect(invalidateCache).toHaveBeenCalledTimes(1);
+      expect(invalidateOpenCodeCache).toHaveBeenCalledTimes(1);
+
+      const restoreResponse = await routes.request(
+        `/sessions/${sessionId}/metadata`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ archived: false }),
+        },
+      );
+
+      expect(restoreResponse.status).toBe(200);
+      expect(
+        await makeReader().getSessionSummary(sessionId, project.id),
+      ).toMatchObject({
+        id: sessionId,
+        provider: "opencode",
+        title: "OpenCode archive target",
+      });
+      expect(archiveService.getArchivedSession(sessionId)).toBeUndefined();
+      expect(invalidateCache).toHaveBeenCalledTimes(2);
+      expect(invalidateOpenCodeCache).toHaveBeenCalledTimes(2);
+      expect(updateMetadata).toHaveBeenLastCalledWith(sessionId, {
+        title: undefined,
+        archived: false,
+        starred: undefined,
+      });
     } finally {
       await rm(testDir, { recursive: true, force: true });
     }

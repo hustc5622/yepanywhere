@@ -120,6 +120,7 @@ interface OpenCodeSessionCreatePayload {
     providerID: string;
     id: string;
   };
+  metadata?: Record<string, unknown>;
 }
 
 interface OpenCodeMessagePayload {
@@ -412,6 +413,7 @@ export class OpenCodeProvider implements AgentProvider {
 
     // Create, resume, or fork a session on the server.
     let opencodeSessionId: string;
+    let shouldTagSessionCreatedByYep = false;
     try {
       const sessionData = await this.prepareOpenCodeSession(
         baseUrl,
@@ -420,6 +422,8 @@ export class OpenCodeProvider implements AgentProvider {
         configApplied.model,
       );
       opencodeSessionId = sessionData.id;
+      shouldTagSessionCreatedByYep =
+        !options.resumeSessionId || Boolean(options.resumeSessionAt);
       log.info(
         {
           opencodeSessionId,
@@ -436,6 +440,14 @@ export class OpenCodeProvider implements AgentProvider {
         error: `Failed to create OpenCode session: ${error instanceof Error ? error.message : String(error)}`,
       } as SDKMessage;
       return;
+    }
+
+    if (shouldTagSessionCreatedByYep) {
+      await this.markOpenCodeSessionCreatedByYep(
+        baseUrl,
+        opencodeSessionId,
+        cwd,
+      );
     }
 
     // Use OpenCode's persisted session ID so Yep process ownership lines up
@@ -546,6 +558,54 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     return (await response.json()) as OpenCodeSessionResponse;
+  }
+
+  private async markOpenCodeSessionCreatedByYep(
+    baseUrl: string,
+    sessionId: string,
+    cwd: string,
+  ): Promise<void> {
+    try {
+      const response = await fetch(
+        this.openCodeUrl(
+          baseUrl,
+          `/session/${encodeURIComponent(sessionId)}`,
+          cwd,
+        ),
+        {
+          method: "PATCH",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            ...this.openCodeDirectoryHeaders(cwd),
+          },
+          body: JSON.stringify({
+            metadata: this.buildYepOpenCodeSessionMetadata(),
+          }),
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        getLogger().warn(
+          {
+            sessionId,
+            status: response.status,
+            error: errorText || undefined,
+          },
+          "Failed to mark OpenCode session creation source",
+        );
+      }
+    } catch (error) {
+      getLogger().warn(
+        {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to mark OpenCode session creation source",
+      );
+    }
   }
 
   private async getOpenCodeSession(
@@ -1571,6 +1631,7 @@ export class OpenCodeProvider implements AgentProvider {
     const payload: OpenCodeSessionCreatePayload = {
       title: "Yep Anywhere Session",
       location: { directory: cwd },
+      metadata: this.buildYepOpenCodeSessionMetadata(),
     };
     const parsed = this.parseOpenCodeModelOption(model);
     if (parsed) {
@@ -1580,6 +1641,13 @@ export class OpenCodeProvider implements AgentProvider {
       };
     }
     return payload;
+  }
+
+  private buildYepOpenCodeSessionMetadata(): Record<string, unknown> {
+    return {
+      createdBy: "yep",
+      source: "yep-anywhere",
+    };
   }
 
   private openCodeUrl(baseUrl: string, path: string, cwd?: string): string {
