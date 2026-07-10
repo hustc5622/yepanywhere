@@ -60,6 +60,9 @@ packages/server/generated/codex-app-server/
 # Text files in repo root
 /*.txt
 
+# Local tool config
+/config.json
+
 packages/client/dist-remote
 packages/client/dist-stable
 packages/server/client-dist/
