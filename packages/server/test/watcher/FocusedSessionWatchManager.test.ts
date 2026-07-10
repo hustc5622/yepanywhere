@@ -175,13 +175,14 @@ describe("FocusedSessionWatchManager", () => {
     manager.dispose();
   });
 
-  it("uses providerHint=opencode to resolve opencode database changes", async () => {
+  it("emits OpenCode changes only when the selected session row changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "focused-watch-opencode-"));
     tempDirs.push(root);
     const dbPath = join(root, "opencode.db");
     await writeFile(dbPath, "initial");
 
     const sessionId = "ses_opencode_1";
+    let selectedSessionMtime = 100;
     const projectId = "L3RtcC9kZW1vLW9wZW5jb2Rl" as UrlProjectId;
     const project: Project = {
       id: projectId,
@@ -197,8 +198,12 @@ describe("FocusedSessionWatchManager", () => {
 
     const opencodeScanner = {
       getSessionsForProject: vi
-        .fn<() => Promise<Array<{ id: string; filePath: string }>>>()
-        .mockResolvedValue([{ id: sessionId, filePath: dbPath }]),
+        .fn<
+          () => Promise<Array<{ id: string; filePath: string; mtime: number }>>
+        >()
+        .mockImplementation(async () => [
+          { id: sessionId, filePath: dbPath, mtime: selectedSessionMtime },
+        ]),
     };
 
     const manager = new FocusedSessionWatchManager({
@@ -224,8 +229,15 @@ describe("FocusedSessionWatchManager", () => {
     );
 
     await delay(250);
-    await appendFile(dbPath, " updated");
 
+    // A write from another OpenCode session changes the shared database file,
+    // but not this session's time_updated row. It must not refresh this view.
+    await appendFile(dbPath, " updated");
+    await delay(300);
+    expect(events).toEqual([]);
+
+    selectedSessionMtime = 101;
+    await appendFile(dbPath, " selected session updated");
     const event = await waitForChange(events);
     expect(event.provider).toBe("opencode");
     expect(event.path).toBe(dbPath);

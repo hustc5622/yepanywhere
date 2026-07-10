@@ -5,7 +5,7 @@ import {
   type ProviderName,
   getModelContextWindow,
 } from "@yep-anywhere/shared";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { getMessageId } from "../lib/mergeMessages";
 import { findPendingTasks } from "../lib/pendingTasks";
@@ -731,14 +731,20 @@ export function useSession(
     throttledFetch();
   }, [status.owner, throttledFetch]);
 
+  const sessionWatchTarget = useMemo(
+    () =>
+      status.owner === "self"
+        ? null
+        : {
+            sessionId,
+            projectId,
+            provider: session?.provider,
+          },
+    [projectId, session?.provider, sessionId, status.owner],
+  );
+
   const { connected: sessionWatchConnected } = useSessionWatchStream(
-    status.owner !== "self"
-      ? {
-          sessionId,
-          projectId,
-          provider: session?.provider,
-        }
-      : null,
+    sessionWatchTarget,
     {
       onChange: handleSessionWatchChange,
     },

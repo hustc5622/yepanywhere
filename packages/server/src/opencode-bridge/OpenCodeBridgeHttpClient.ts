@@ -2,7 +2,6 @@ import type { AgentActivity, PendingInputType } from "@yep-anywhere/shared";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
 import {
-  isLiveOpenCodeBridgeSession,
   isLiveOpenCodeBridgeSessionView,
   opencodeBridgeOwnership,
 } from "./session-state.js";
@@ -182,18 +181,15 @@ export class OpenCodeBridgeHttpClient implements OpenCodeBridgeController {
     if (!this.eventBus || this.polling) return;
     this.polling = true;
     try {
-      const [sessions, views] = await Promise.all([
-        this.listSessions(),
-        this.listSessionViews(),
-      ]);
-      const viewsById = new Map(views.map((view) => [view.session.id, view]));
+      // session-views already contains the full bridge session snapshot. Calling
+      // both endpoints makes the sidecar synchronize its OpenCode status twice
+      // per poll, which used to manufacture a new updatedAt every second.
+      const views = await this.listSessionViews();
       const nextIds = new Set<string>();
 
-      for (const session of sessions) {
-        const view = viewsById.get(session.id);
-        if (!view) continue;
-        nextIds.add(session.id);
-        this.emitChanges(session, view);
+      for (const view of views) {
+        nextIds.add(view.session.id);
+        this.emitChanges(view);
       }
 
       for (const [sessionId, previous] of this.knownSessions) {
@@ -213,13 +209,11 @@ export class OpenCodeBridgeHttpClient implements OpenCodeBridgeController {
     }
   }
 
-  private emitChanges(
-    session: OpenCodeBridgeSession,
-    view: OpenCodeBridgeSessionView,
-  ): void {
+  private emitChanges(view: OpenCodeBridgeSessionView): void {
     if (!this.eventBus) return;
 
-    const active = isLiveOpenCodeBridgeSession(session);
+    const session = view.session;
+    const active = isLiveOpenCodeBridgeSessionView(view);
     const previous = this.knownSessions.get(session.id);
     const next: SessionPollState = {
       projectId: session.projectId,

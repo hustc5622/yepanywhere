@@ -619,10 +619,15 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const existing = this.sessions.get(sessionId);
     const now = new Date().toISOString();
     if (existing) {
-      Object.assign(existing, {
-        ...state,
-        updatedAt: state.updatedAt ?? now,
-      });
+      const stateChanged = Object.entries(state).some(
+        ([key, value]) => existing[key as keyof SessionRecord] !== value,
+      );
+      if (!stateChanged) return;
+
+      // Runtime status polling is not session content. Preserve the timestamp
+      // supplied by OpenCode and do not manufacture a fresh updatedAt merely
+      // because a repeated busy/idle poll arrived.
+      Object.assign(existing, state);
       return;
     }
 
@@ -848,14 +853,16 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const info = asRecord(properties?.info);
     const title = normalizeOpenCodeSessionTitle(readString(info, "title"));
     const updatedAt =
-      readString(info, "updatedAt") ?? readString(properties, "updatedAt");
+      readOpenCodeUpdatedAt(info) ??
+      readString(info, "updatedAt") ??
+      readString(properties, "updatedAt");
     const messageCount = readNumber(info, "messageCount");
     this.updateSessionState(sessionId, {
       // Message events do not include a session title. Avoid replacing the
       // title recorded from session.created with undefined in that case.
       ...(title ? { title } : {}),
-      messageCount,
-      updatedAt: updatedAt ?? undefined,
+      ...(messageCount !== undefined ? { messageCount } : {}),
+      ...(updatedAt ? { updatedAt } : {}),
       activity: "in-turn",
       active: true,
     });
@@ -1478,6 +1485,21 @@ function readString(
 ): string | null {
   const value = record?.[key];
   return typeof value === "string" ? value : null;
+}
+
+/**
+ * OpenCode session events carry their authoritative timestamp in
+ * properties.info.time.updated (milliseconds since epoch). Older bridge
+ * versions looked for info.updatedAt instead and replaced it with the local
+ * clock, causing every runtime status poll to look like new session content.
+ */
+function readOpenCodeUpdatedAt(
+  info: Record<string, unknown> | null,
+): string | null {
+  const time = asRecord(info?.time);
+  const updated = readNumber(time, "updated");
+  if (updated === undefined) return null;
+  return new Date(updated).toISOString();
 }
 
 /**

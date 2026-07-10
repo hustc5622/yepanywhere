@@ -20,6 +20,10 @@ interface GeminiSessionInfo {
 interface OpenCodeSessionInfo {
   id: string;
   filePath: string;
+  /** OpenCode stores every session in one SQLite file; use this row version
+   * to distinguish an update to the selected session from another session's
+   * database write. */
+  mtime?: number;
 }
 
 interface SessionWatchTarget {
@@ -33,6 +37,8 @@ interface SessionWatchTarget {
   provider: WatchProvider | null;
   knownMtimeMs: number | null;
   knownSize: number | null;
+  /** Provider-specific session version. Only set for OpenCode SQLite rows. */
+  knownSessionMtime: number | null;
   watcher: fs.FSWatcher | null;
   pollTimer: NodeJS.Timeout | null;
   debounceTimer: NodeJS.Timeout | null;
@@ -78,6 +84,11 @@ export interface FocusedSessionWatchManagerOptions {
 interface ResolvedSessionFile {
   filePath: string;
   provider: WatchProvider;
+  /**
+   * OpenCode sessions share one SQLite file. The per-row time_updated value
+   * lets us avoid emitting a change for every other session's write.
+   */
+  sessionMtime?: number;
 }
 
 /**
@@ -161,6 +172,7 @@ export class FocusedSessionWatchManager {
       provider: null,
       knownMtimeMs: null,
       knownSize: null,
+      knownSessionMtime: null,
       watcher: null,
       pollTimer: null,
       debounceTimer: null,
@@ -219,6 +231,7 @@ export class FocusedSessionWatchManager {
     target.filePath = resolved.filePath;
     target.fileName = basename(resolved.filePath);
     target.provider = resolved.provider;
+    target.knownSessionMtime = resolved.sessionMtime ?? null;
 
     try {
       const stats = await stat(resolved.filePath);
@@ -314,6 +327,25 @@ export class FocusedSessionWatchManager {
         return;
       }
 
+      // OpenCode uses one database file for every session. A database mtime
+      // alone therefore tells us only that *some* OpenCode session changed.
+      // Re-resolve the selected row and emit only when its time_updated value
+      // changed too. Without this guard, one active `of` session repeatedly
+      // refreshes every other OpenCode session currently open in Yep.
+      if (target.provider === "opencode") {
+        const resolved = await this.resolveSessionFile(target);
+        if (!resolved || resolved.provider !== "opencode") {
+          await this.ensureWatching(target);
+          return;
+        }
+
+        const nextSessionMtime = resolved.sessionMtime ?? null;
+        if (nextSessionMtime === target.knownSessionMtime) {
+          return;
+        }
+        target.knownSessionMtime = nextSessionMtime;
+      }
+
       const event: FocusedSessionWatchEvent = {
         type: "session-watch-change",
         sessionId: target.sessionId,
@@ -407,7 +439,11 @@ export class FocusedSessionWatchManager {
           (session) => session.id === target.sessionId,
         );
         if (match) {
-          return { filePath: match.filePath, provider };
+          return {
+            filePath: match.filePath,
+            provider,
+            sessionMtime: match.mtime,
+          };
         }
       }
     }

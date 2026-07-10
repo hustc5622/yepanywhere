@@ -30,24 +30,32 @@ export function useSessionWatchStream(
 ) {
   const [connected, setConnected] = useState(false);
   const wsSubscriptionRef = useRef<Subscription | null>(null);
+  const targetRef = useRef<SessionWatchTarget | null>(target);
+  targetRef.current = target;
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const mountedKeyRef = useRef<string | null>(null);
   const cleaningUpRef = useRef(false);
+  // The session object is often refreshed with a new identity. Keep the
+  // transport keyed by stable values so those routine renders do not close and
+  // reopen the focused WebSocket subscription.
+  const targetKey = target
+    ? `${target.projectId}\u0000${target.sessionId}\u0000${target.provider ?? ""}`
+    : null;
 
   const connect = useCallback(() => {
-    if (!target) {
+    const sessionTarget = targetRef.current;
+    if (!sessionTarget || !targetKey) {
       mountedKeyRef.current = null;
       return;
     }
 
-    const targetKey = `${target.projectId}:${target.sessionId}`;
     if (wsSubscriptionRef.current) return;
     if (mountedKeyRef.current === targetKey) return;
     mountedKeyRef.current = targetKey;
 
-    connectWithConnection(target, getWebSocketConnection());
-  }, [target]);
+    connectWithConnection(sessionTarget, getWebSocketConnection());
+  }, [targetKey]);
 
   const connectWithConnection = useCallback(
     (
@@ -147,11 +155,11 @@ export function useSessionWatchStream(
         setConnected(false);
         mountedKeyRef.current = null;
       }
-      if (state === "connected" && target && !wsSubscriptionRef.current) {
+      if (state === "connected" && targetKey && !wsSubscriptionRef.current) {
         connect();
       }
     });
-  }, [target, connect]);
+  }, [targetKey, connect]);
 
   useEffect(() => {
     connect();

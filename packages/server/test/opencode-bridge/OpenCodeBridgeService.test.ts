@@ -295,6 +295,63 @@ describe("OpenCodeBridgeService", () => {
     expect(bridge.isSessionActive("ses_status")).toBe(false);
   });
 
+  it("preserves upstream timestamps across repeated runtime status updates", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.created",
+      properties: {
+        sessionID: "ses_timestamp",
+        info: {
+          title: "Timestamped session",
+          time: { updated: 1_783_673_406_957 },
+        },
+      },
+    });
+    const createdAt = bridge.listSessions()[0]?.updatedAt;
+    expect(createdAt).toBe("2026-07-10T08:50:06.957Z");
+
+    handleEvent({
+      type: "session.status",
+      properties: {
+        sessionID: "ses_timestamp",
+        status: { type: "running" },
+      },
+    });
+    handleEvent({
+      type: "session.status",
+      properties: {
+        sessionID: "ses_timestamp",
+        status: { type: "running" },
+      },
+    });
+
+    expect(bridge.listSessions()[0]?.updatedAt).toBe(createdAt);
+
+    handleEvent({
+      type: "session.updated",
+      properties: {
+        sessionID: "ses_timestamp",
+        info: { time: { updated: 1_783_673_500_000 } },
+      },
+    });
+
+    expect(bridge.listSessions()[0]?.updatedAt).toBe(
+      "2026-07-10T08:51:40.000Z",
+    );
+  });
+
   it("preserves the prior title for titleless and boilerplate title events", () => {
     const bridge = new OpenCodeBridgeService({
       enabled: false,
