@@ -82,6 +82,7 @@ Environment overrides:
   LLM_API_BASE                 Fallback API base for AI session titles
   SESSION_TITLE_SUB_MODULE     X-Sub-Module header for AI session titles
   LLM_SUB_MODULE               Fallback X-Sub-Module header for AI session titles
+  OPENCODE_LLM_SUB_MODULE      X-Sub-Module header only for OpenCode model requests
   SESSION_TITLE_MODEL          Model for AI session titles (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION     Set false to disable AI session titles
   SESSION_TITLE_TIMEOUT_MS     Request timeout for AI session title generation
@@ -168,6 +169,7 @@ fi
 SESSION_TITLE_API_KEY="${SESSION_TITLE_LLM_API_KEY:-${LLM_API_KEY:-}}"
 SESSION_TITLE_API_BASE="${SESSION_TITLE_LLM_API_BASE:-${LLM_API_BASE:-}}"
 SESSION_TITLE_SUB_MODULE_VALUE="${SESSION_TITLE_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
+OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-}"
 
 chmod +x "$CLI_JS" 2>/dev/null || true
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
@@ -312,6 +314,9 @@ write_server_plist() {
   fi
   if [[ -n "$SESSION_TITLE_SUB_MODULE_VALUE" ]]; then
     env_args+=("SESSION_TITLE_SUB_MODULE" "$SESSION_TITLE_SUB_MODULE_VALUE")
+  fi
+  if [[ -n "$OPENCODE_LLM_SUB_MODULE_VALUE" ]]; then
+    env_args+=("OPENCODE_LLM_SUB_MODULE" "$OPENCODE_LLM_SUB_MODULE_VALUE")
   fi
   if [[ -n "${SESSION_TITLE_MODEL:-}" ]]; then
     env_args+=("SESSION_TITLE_MODEL" "$SESSION_TITLE_MODEL")

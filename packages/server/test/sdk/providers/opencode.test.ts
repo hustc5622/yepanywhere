@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { type IncomingMessage, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
@@ -102,10 +103,12 @@ describe("OpenCodeProvider", () => {
     LLM_API_KEY: process.env.LLM_API_KEY,
     LLM_API_BASE: process.env.LLM_API_BASE,
     LLM_SUB_MODULE: process.env.LLM_SUB_MODULE,
+    OPENCODE_LLM_SUB_MODULE: process.env.OPENCODE_LLM_SUB_MODULE,
     SESSION_TITLE_LLM_API_KEY: process.env.SESSION_TITLE_LLM_API_KEY,
     SESSION_TITLE_LLM_API_BASE: process.env.SESSION_TITLE_LLM_API_BASE,
     SESSION_TITLE_SUB_MODULE: process.env.SESSION_TITLE_SUB_MODULE,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
   };
 
   afterEach(() => {
@@ -164,6 +167,76 @@ describe("OpenCodeProvider", () => {
     expect(normalizeOpenCodeModelOption(" anthropic/claude-sonnet-4 ")).toBe(
       "anthropic/claude-sonnet-4",
     );
+  });
+
+  it("preserves an explicit OpenCode provider/model selection", async () => {
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      resolveOpenCodeModelOption: (model?: string) => Promise<string | null>;
+    };
+    await expect(
+      methods.resolveOpenCodeModelOption("anthropic/deepseek-v4-pro"),
+    ).resolves.toBe("anthropic/deepseek-v4-pro");
+    await expect(
+      methods.resolveOpenCodeModelOption("anthropic/claude-sonnet-4"),
+    ).resolves.toBe("anthropic/claude-sonnet-4");
+  });
+
+  it("allocates an OpenCode port that is not already listening", async () => {
+    const provider = new OpenCodeProvider();
+    const getAvailablePort = (
+      provider as unknown as {
+        getAvailablePort: () => Promise<number>;
+      }
+    ).getAvailablePort.bind(provider);
+
+    const [allocatedPort, occupiedPort] = await withTestServer(
+      (_req, res) => res.end(),
+      async (baseUrl) => [
+        await getAvailablePort(),
+        Number(new URL(baseUrl).port),
+      ],
+    );
+
+    expect(allocatedPort).not.toBe(occupiedPort);
+  });
+
+  it("does not accept a stale OpenCode listener after its child exits", async () => {
+    const provider = new OpenCodeProvider();
+    const waitForServer = (
+      provider as unknown as {
+        waitForServer: (
+          baseUrl: string,
+          timeoutMs: number,
+          cwd?: string,
+          process?: {
+            exitCode: number | null;
+            signalCode: NodeJS.Signals | null;
+            once: EventEmitter["once"];
+            off: EventEmitter["off"];
+          },
+        ) => Promise<boolean>;
+      }
+    ).waitForServer.bind(provider);
+    const child = new EventEmitter() as EventEmitter & {
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+    };
+    child.exitCode = null;
+    child.signalCode = null;
+
+    const ready = await withTestServer(
+      (_req, res) => res.end("[]"),
+      async (baseUrl) => {
+        setTimeout(() => {
+          child.exitCode = 1;
+          child.emit("exit", 1, null);
+        }, 20);
+        return await waitForServer(baseUrl, 1_000, undefined, child);
+      },
+    );
+
+    expect(ready).toBe(false);
   });
 
   it("builds OpenCode session and message payloads with the selected model", () => {
@@ -361,6 +434,59 @@ describe("OpenCodeProvider", () => {
             },
           },
         },
+      },
+    ]);
+  });
+
+  it("configures DeepSeek with the selected Anthropic endpoint", async () => {
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      configureServer: (
+        baseUrl: string,
+        options: {
+          permissionMode?: string;
+          model?: string;
+          opencodeModelLimits?: { context: number; output: number };
+        },
+      ) => Promise<{ ok: true; model: string | null } | { ok: false }>;
+    };
+    const requests: Array<{ url?: string; method?: string; body: unknown }> =
+      [];
+
+    const result = await withTestServer(
+      async (req, res) => {
+        requests.push({
+          url: req.url,
+          method: req.method,
+          body: await readJsonBody(req),
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({}));
+      },
+      (baseUrl) =>
+        methods.configureServer(baseUrl, {
+          model: "anthropic/deepseek-v4-pro",
+          opencodeModelLimits: { context: 1_000_000, output: 32_000 },
+        }),
+    );
+
+    expect(result).toEqual({ ok: true, model: "anthropic/deepseek-v4-pro" });
+    expect(requests).toEqual([
+      {
+        url: "/config",
+        method: "PATCH",
+        body: expect.objectContaining({
+          model: "anthropic/deepseek-v4-pro",
+          provider: {
+            anthropic: {
+              models: {
+                "deepseek-v4-pro": {
+                  limit: { context: 1_000_000, output: 32_000 },
+                },
+              },
+            },
+          },
+        }),
       },
     ]);
   });
@@ -780,10 +906,11 @@ describe("OpenCodeProvider", () => {
     );
   });
 
-  it("passes fallback LLM env vars to OpenCode child processes", () => {
+  it("does not inherit the session-title submodule into OpenCode child processes", () => {
     Reflect.deleteProperty(process.env, "LLM_API_KEY");
     Reflect.deleteProperty(process.env, "LLM_API_BASE");
     Reflect.deleteProperty(process.env, "LLM_SUB_MODULE");
+    Reflect.deleteProperty(process.env, "OPENCODE_LLM_SUB_MODULE");
     process.env.SESSION_TITLE_LLM_API_KEY = "test-key";
     process.env.SESSION_TITLE_LLM_API_BASE = "https://example.test/v1";
     process.env.SESSION_TITLE_SUB_MODULE = "test-module";
@@ -798,7 +925,72 @@ describe("OpenCodeProvider", () => {
     expect(getOpenCodeEnv()).toMatchObject({
       LLM_API_KEY: "test-key",
       LLM_API_BASE: "https://example.test/v1",
-      LLM_SUB_MODULE: "test-module",
+    });
+    expect(getOpenCodeEnv()).not.toHaveProperty("LLM_SUB_MODULE");
+  });
+
+  it("uses an explicit OpenCode submodule without changing title configuration", () => {
+    Reflect.deleteProperty(process.env, "LLM_SUB_MODULE");
+    process.env.SESSION_TITLE_SUB_MODULE = "title-module";
+    process.env.OPENCODE_LLM_SUB_MODULE = "opencode-module";
+
+    const provider = new OpenCodeProvider();
+    const getOpenCodeEnv = (
+      provider as unknown as {
+        getOpenCodeEnv: () => NodeJS.ProcessEnv;
+      }
+    ).getOpenCodeEnv.bind(provider);
+
+    expect(getOpenCodeEnv()).toMatchObject({
+      LLM_SUB_MODULE: "opencode-module",
+    });
+  });
+
+  it("preserves an explicitly configured generic OpenCode submodule", () => {
+    process.env.LLM_SUB_MODULE = "generic-module";
+    process.env.OPENCODE_LLM_SUB_MODULE = "opencode-module";
+
+    const provider = new OpenCodeProvider();
+    const getOpenCodeEnv = (
+      provider as unknown as {
+        getOpenCodeEnv: () => NodeJS.ProcessEnv;
+      }
+    ).getOpenCodeEnv.bind(provider);
+
+    expect(getOpenCodeEnv()).toMatchObject({
+      LLM_SUB_MODULE: "generic-module",
+    });
+  });
+
+  it("registers the selected model for its OpenCode protocol provider", () => {
+    const provider = new OpenCodeProvider();
+    const getOpenCodeEnv = (
+      provider as unknown as {
+        getOpenCodeEnv: (
+          model?: string | null,
+          limits?: { context: number; output: number },
+        ) => NodeJS.ProcessEnv;
+      }
+    ).getOpenCodeEnv.bind(provider);
+
+    const env = getOpenCodeEnv("anthropic/deepseek-v4-pro", {
+      context: 1_000_000,
+      output: 32_000,
+    });
+    const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      provider?: Record<
+        string,
+        {
+          models?: Record<
+            string,
+            { limit?: { context: number; output: number } }
+          >;
+        }
+      >;
+    };
+
+    expect(config.provider?.anthropic?.models?.["deepseek-v4-pro"]).toEqual({
+      limit: { context: 1_000_000, output: 32_000 },
     });
   });
 

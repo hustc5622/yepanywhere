@@ -22,10 +22,6 @@ interface OpenCodeBridgeHttpClientOptions {
 
 interface SessionPollState {
   projectId: OpenCodeBridgeSession["projectId"];
-  updatedAt: string;
-  title: string | null;
-  messageCount: number;
-  model?: string;
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
   active: boolean;
@@ -217,10 +213,6 @@ export class OpenCodeBridgeHttpClient implements OpenCodeBridgeController {
     const previous = this.knownSessions.get(session.id);
     const next: SessionPollState = {
       projectId: session.projectId,
-      updatedAt: session.updatedAt,
-      title: session.title,
-      messageCount: session.messageCount,
-      model: session.model,
       activity: session.activity,
       pendingInputType: session.pendingInputType,
       active,
@@ -263,24 +255,14 @@ export class OpenCodeBridgeHttpClient implements OpenCodeBridgeController {
       });
     }
 
-    if (
-      !previous ||
-      previous.updatedAt !== session.updatedAt ||
-      previous.title !== session.title ||
-      previous.messageCount !== session.messageCount ||
-      previous.model !== session.model
-    ) {
-      this.eventBus.emit({
-        type: "session-updated",
-        sessionId: session.id,
-        projectId: session.projectId,
-        title: session.title,
-        messageCount: session.messageCount,
-        updatedAt: session.updatedAt,
-        model: session.model,
-        timestamp,
-      });
-    }
+    // The sidecar only has a best-effort runtime view of an OpenCode session.
+    // In particular, its message count is initialized from the first observed
+    // message and is not the persisted session count. Emitting that view as a
+    // session-updated event made it race the SQLite reader: the client would
+    // first receive the bridge title/count, then replace them with the
+    // authoritative database summary on the focused watch refresh. Keep the
+    // bridge responsible for lifecycle state; persisted content is refreshed
+    // by FocusedSessionWatchManager from the selected SQLite session row.
   }
 
   private isDisplayableBridgeSession(

@@ -41,7 +41,10 @@ async function loadSqliteModule(): Promise<TestSqliteModule | null> {
 async function createOpenCodeDb(
   dbPath: string,
   projectPath: string,
-  options: { sessionMetadata?: Record<string, unknown> | null } = {},
+  options: {
+    sessionMetadata?: Record<string, unknown> | null;
+    sessionTitle?: string;
+  } = {},
 ): Promise<boolean> {
   const sqlite = await loadSqliteModule();
   if (!sqlite) return false;
@@ -123,7 +126,7 @@ async function createOpenCodeDb(
       "global",
       "test",
       projectPath,
-      "Yep Anywhere Session",
+      options.sessionTitle ?? "Yep Anywhere Session",
       "1",
       createdAt,
       updatedAt,
@@ -274,6 +277,27 @@ describe("OpenCode sqlite session support", () => {
     const sessions = await reader.listSessions(encodeProjectId(projectPath));
 
     expect(sessions[0]?.createdBy).toBe("yep");
+  });
+
+  it("prefers OpenCode's persisted generated title over the first user prompt", async () => {
+    const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
+    tempDirs.push(dir);
+    await mkdir(dir, { recursive: true });
+
+    const dbPath = join(dir, "opencode.db");
+    const projectPath = join(dir, "research_tasks");
+    const sqliteAvailable = await createOpenCodeDb(dbPath, projectPath, {
+      sessionTitle: "Generated OpenCode workflow title",
+    });
+    if (!sqliteAvailable) return;
+
+    const reader = new OpenCodeSessionReader({ dbPath, projectPath });
+    const sessions = await reader.listSessions(encodeProjectId(projectPath));
+
+    expect(sessions[0]).toMatchObject({
+      title: "Generated OpenCode workflow title",
+      fullTitle: "Generated OpenCode workflow title",
+    });
   });
 
   it("uses project OpenCode provider config for context usage", async () => {

@@ -1321,7 +1321,10 @@ export class OpenCodeSessionReader implements ISessionReader {
     const nonGenericTitle = isGenericOpenCodeTitle(row.title)
       ? null
       : row.title?.trim() || null;
-    const fullTitle = firstUserMessageText?.trim() || nonGenericTitle;
+    // OpenCode replaces its generic initial title with a generated session
+    // title. Prefer that persisted title so the SQLite reader agrees with the
+    // bridge and does not flip back to the first user prompt on each refresh.
+    const fullTitle = nonGenericTitle || firstUserMessageText?.trim() || null;
     const contextUsage = this.extractSqliteContextUsageFromMessages(
       messages,
       model,

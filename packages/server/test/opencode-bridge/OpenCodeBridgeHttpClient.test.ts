@@ -91,4 +91,74 @@ describe("OpenCodeBridgeHttpClient", () => {
       }),
     );
   });
+
+  it("emits runtime state changes without overwriting persisted session content", () => {
+    const eventBus = { emit: vi.fn() };
+    const client = new OpenCodeBridgeHttpClient({
+      baseUrl: "http://127.0.0.1:1",
+      eventBus: eventBus as never,
+    });
+    const emitChanges = (
+      client as unknown as {
+        emitChanges: (view: {
+          session: {
+            id: string;
+            projectId: string;
+            title: string;
+            updatedAt: string;
+            messageCount: number;
+            ownership: { owner: "external" };
+            provider: "opencode";
+            activity: "in-turn" | "waiting-input";
+          };
+          projectName: string;
+          activity: "in-turn" | "waiting-input";
+        }) => void;
+      }
+    ).emitChanges.bind(client);
+
+    const view = {
+      session: {
+        id: "ses_live",
+        projectId: "project_1",
+        title: "Generated OpenCode title",
+        updatedAt: "2026-07-10T09:00:00.000Z",
+        messageCount: 1,
+        ownership: { owner: "external" as const },
+        provider: "opencode" as const,
+        activity: "in-turn" as const,
+      },
+      projectName: "demo",
+      activity: "in-turn" as const,
+    };
+
+    emitChanges(view);
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "session-updated" }),
+    );
+
+    eventBus.emit.mockClear();
+    emitChanges({
+      ...view,
+      session: {
+        ...view.session,
+        title: "A later generated title",
+        updatedAt: "2026-07-10T09:00:01.000Z",
+        messageCount: 2,
+      },
+    });
+    expect(eventBus.emit).not.toHaveBeenCalled();
+
+    emitChanges({
+      ...view,
+      session: { ...view.session, activity: "waiting-input" },
+      activity: "waiting-input",
+    });
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "process-state-changed",
+        activity: "waiting-input",
+      }),
+    );
+  });
 });

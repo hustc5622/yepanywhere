@@ -173,6 +173,7 @@ AI session title deploy config:
   LLM_API_BASE                     Fallback API base for title generation
   SESSION_TITLE_SUB_MODULE         X-Sub-Module header for title generation
   LLM_SUB_MODULE                   Fallback X-Sub-Module header for title generation
+  OPENCODE_LLM_SUB_MODULE          X-Sub-Module header only for OpenCode model requests
   SESSION_TITLE_MODEL              Title model (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION=false   Disable title generation
   SESSION_TITLE_TIMEOUT_MS         Title request timeout in milliseconds

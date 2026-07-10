@@ -13,6 +13,7 @@
 
 import { type ChildProcess, exec, execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -55,13 +56,13 @@ export interface OpenCodeProviderConfig {
 type OpenCodePermissionAction = "allow" | "ask" | "deny";
 type OpenCodePermissionConfig = Record<string, OpenCodePermissionAction>;
 
-type OpenCodeProviderModelLimitConfig = Record<
+type OpenCodeProviderModelConfig = Record<
   string,
   {
     models: Record<
       string,
       {
-        limit: OpenCodeModelLimits;
+        limit?: OpenCodeModelLimits;
       }
     >;
   }
@@ -109,6 +110,25 @@ interface OpenCodeRuntimeRef {
   baseUrl?: string;
   currentModel?: string | null;
   cwd?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mergeOpenCodeConfig(
+  base: Record<string, unknown>,
+  overlay: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(overlay)) {
+    const current = merged[key];
+    merged[key] =
+      isRecord(current) && isRecord(value)
+        ? mergeOpenCodeConfig(current, value)
+        : value;
+  }
+  return merged;
 }
 
 interface OpenCodeSessionCreatePayload {
@@ -161,16 +181,6 @@ type OpenCodeRuntimeEvent =
   | OpenCodeSSEEvent
   | OpenCodePermissionAskedEvent
   | OpenCodePermissionRepliedEvent;
-
-/** Port counter for unique port assignment */
-let nextPort = 14100;
-
-/**
- * Get next available port for OpenCode server.
- */
-function getNextPort(): number {
-  return nextPort++;
-}
 
 /**
  * OpenCode Provider implementation.
@@ -343,8 +353,21 @@ export class OpenCodeProvider implements AgentProvider {
       return;
     }
 
-    // Allocate a unique port for this session
-    const port = getNextPort();
+    const selectedModel = await this.resolveOpenCodeModelOption(options.model);
+
+    // Ask the OS for a free port instead of reusing a counter that resets when
+    // Yep restarts. A stale OpenCode server can otherwise impersonate the
+    // freshly spawned child on the old counter port.
+    let port: number;
+    try {
+      port = await this.getAvailablePort();
+    } catch (error) {
+      yield {
+        type: "error",
+        error: `Failed to allocate an OpenCode server port: ${error instanceof Error ? error.message : String(error)}`,
+      } as SDKMessage;
+      return;
+    }
     const baseUrl = `http://127.0.0.1:${port}`;
     runtimeRef.baseUrl = baseUrl;
     runtimeRef.cwd = cwd;
@@ -365,7 +388,7 @@ export class OpenCodeProvider implements AgentProvider {
         {
           cwd,
           stdio: ["pipe", "pipe", "pipe"],
-          env: this.getOpenCodeEnv(),
+          env: this.getOpenCodeEnv(selectedModel, options.opencodeModelLimits),
           shell: process.platform === "win32",
         },
       );
@@ -386,20 +409,30 @@ export class OpenCodeProvider implements AgentProvider {
     signal.addEventListener("abort", abortHandler);
 
     // Wait for server to be ready
-    const serverReady = await this.waitForServer(baseUrl, 10000, cwd);
+    const serverReady = await this.waitForServer(
+      baseUrl,
+      10000,
+      cwd,
+      serverProcess,
+    );
     if (!serverReady) {
       serverProcess.kill("SIGTERM");
       signal.removeEventListener("abort", abortHandler);
       yield {
         type: "error",
-        error: "OpenCode server failed to start",
+        error: `OpenCode server failed to start${serverProcess.exitCode !== null ? ` (exit code ${serverProcess.exitCode})` : ""}`,
       } as SDKMessage;
       return;
     }
 
     log.info({ port, cwd }, "OpenCode server ready");
 
-    const configApplied = await this.configureServer(baseUrl, options, cwd);
+    const configApplied = await this.configureServer(
+      baseUrl,
+      options,
+      cwd,
+      selectedModel,
+    );
     if (!configApplied.ok) {
       serverProcess.kill("SIGTERM");
       signal.removeEventListener("abort", abortHandler);
@@ -1544,18 +1577,20 @@ export class OpenCodeProvider implements AgentProvider {
     baseUrl: string,
     options: StartSessionOptions,
     cwd?: string,
+    resolvedModel?: string | null,
   ): Promise<
     { ok: true; model: string | null } | { ok: false; error: string }
   > {
     const config: Record<string, unknown> = {
       permission: this.mapPermissionModeToOpenCode(options.permissionMode),
     };
-    const model = await this.resolveOpenCodeModelOption(options.model);
+    const model =
+      resolvedModel ?? (await this.resolveOpenCodeModelOption(options.model));
     if (model) {
       config.model = model;
     }
     if (options.opencodeModelLimits) {
-      const providerLimitConfig = this.buildOpenCodeModelLimitConfig(
+      const providerLimitConfig = this.buildOpenCodeModelConfig(
         model,
         options.opencodeModelLimits,
       );
@@ -1711,11 +1746,10 @@ export class OpenCodeProvider implements AgentProvider {
     };
   }
 
-  private buildOpenCodeModelLimitConfig(
+  private buildOpenCodeModelConfig(
     model: string | null | undefined,
     limits: OpenCodeModelLimits | undefined,
-  ): OpenCodeProviderModelLimitConfig | null {
-    if (!limits) return null;
+  ): OpenCodeProviderModelConfig | null {
     const parsed = this.parseOpenCodeModelOption(model);
     if (!parsed) return null;
 
@@ -1723,11 +1757,19 @@ export class OpenCodeProvider implements AgentProvider {
       [parsed.providerID]: {
         models: {
           [parsed.modelID]: {
-            limit: limits,
+            ...(limits ? { limit: limits } : {}),
           },
         },
       },
     };
+  }
+
+  private buildOpenCodeConfigOverlay(
+    model: string | null | undefined,
+    limits: OpenCodeModelLimits | undefined,
+  ): Record<string, unknown> | null {
+    const provider = this.buildOpenCodeModelConfig(model, limits);
+    return provider ? { provider } : null;
   }
 
   private buildOpenCodeSessionCreatePayload(
@@ -1882,14 +1924,46 @@ export class OpenCodeProvider implements AgentProvider {
     }
   }
 
-  private getOpenCodeEnv(): NodeJS.ProcessEnv {
+  private getOpenCodeEnv(
+    model?: string | null,
+    limits?: OpenCodeModelLimits,
+  ): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...process.env };
     env.LLM_API_KEY ??=
       process.env.SESSION_TITLE_LLM_API_KEY ?? process.env.OPENAI_API_KEY;
     env.LLM_API_BASE ??=
       process.env.SESSION_TITLE_LLM_API_BASE ?? process.env.LLM_API_BASE;
-    env.LLM_SUB_MODULE ??=
-      process.env.SESSION_TITLE_SUB_MODULE ?? process.env.LLM_SUB_MODULE;
+    const opencodeSubModule = process.env.OPENCODE_LLM_SUB_MODULE?.trim();
+    if (env.LLM_SUB_MODULE === undefined && opencodeSubModule) {
+      env.LLM_SUB_MODULE = opencodeSubModule;
+    }
+
+    // OpenCode constructs its provider catalog while the server starts.
+    // Register a protocol-specific model before startup; a later /config PATCH
+    // does not make a newly added provider/model pair selectable by that server.
+    const overlay = this.buildOpenCodeConfigOverlay(model, limits);
+    if (!overlay) return env;
+
+    if (env.OPENCODE_CONFIG_CONTENT) {
+      try {
+        const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT) as unknown;
+        if (!isRecord(parsed)) {
+          throw new Error("OPENCODE_CONFIG_CONTENT must be a JSON object");
+        }
+        env.OPENCODE_CONFIG_CONTENT = JSON.stringify(
+          mergeOpenCodeConfig(parsed, overlay),
+        );
+      } catch (error) {
+        getLogger().warn(
+          {
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Ignoring invalid OPENCODE_CONFIG_CONTENT while preparing OpenCode model config",
+        );
+      }
+    } else {
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(overlay);
+    }
     return env;
   }
 
@@ -1913,17 +1987,88 @@ export class OpenCodeProvider implements AgentProvider {
     return "OpenCode message failed";
   }
 
-  /**
-   * Wait for server to be ready.
-   */
+  /** Get an ephemeral localhost port that is currently available. */
+  private async getAvailablePort(): Promise<number> {
+    return await new Promise<number>((resolve, reject) => {
+      const server = createServer();
+      const cleanup = () => {
+        server.off("error", onError);
+        server.off("listening", onListening);
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      const onListening = () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          cleanup();
+          server.close();
+          reject(new Error("Could not determine the OpenCode server port"));
+          return;
+        }
+
+        const { port } = address;
+        server.close((error) => {
+          cleanup();
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(port);
+        });
+      };
+
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(0, "127.0.0.1");
+    });
+  }
+
+  private async didChildProcessRemainRunning(
+    process: ChildProcess,
+    durationMs: number,
+  ): Promise<boolean> {
+    if (process.exitCode !== null || process.signalCode !== null) return false;
+
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (running: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        process.off("exit", onExit);
+        process.off("error", onError);
+        resolve(running);
+      };
+      const onExit = () => settle(false);
+      const onError = () => settle(false);
+      const timer = setTimeout(
+        () => settle(process.exitCode === null && process.signalCode === null),
+        durationMs,
+      );
+
+      process.once("exit", onExit);
+      process.once("error", onError);
+    });
+  }
+
+  /** Wait for the spawned OpenCode server to be ready. */
   private async waitForServer(
     baseUrl: string,
     timeoutMs: number,
     cwd?: string,
+    process?: ChildProcess,
   ): Promise<boolean> {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeoutMs) {
+      if (
+        process &&
+        (process.exitCode !== null || process.signalCode !== null)
+      ) {
+        return false;
+      }
       try {
         const response = await fetch(
           this.openCodeUrl(baseUrl, "/session", cwd),
@@ -1936,7 +2081,9 @@ export class OpenCodeProvider implements AgentProvider {
           },
         );
         if (response.ok) {
-          return true;
+          return process
+            ? await this.didChildProcessRemainRunning(process, 150)
+            : true;
         }
       } catch {
         // Server not ready yet
