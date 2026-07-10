@@ -23,16 +23,27 @@ import { z } from "zod";
 /**
  * Session metadata payload - first entry in session file.
  */
-export const CodexSessionMetaPayloadSchema = z.object({
-  id: z.string(),
-  timestamp: z.string(),
-  cwd: z.string(),
-  originator: z.string().optional(), // e.g. "codex_exec"
-  cli_version: z.string().optional(),
-  instructions: z.string().optional(),
-  source: z.string().optional(), // e.g. "exec"
-  model_provider: z.string().optional(), // e.g. "openai"
-});
+export const CodexSessionMetaPayloadSchema = z
+  .object({
+    session_id: z.string().optional(),
+    id: z.string(),
+    forked_from_id: z.string().nullable().optional(),
+    parent_thread_id: z.string().nullable().optional(),
+    timestamp: z.string(),
+    cwd: z.string(),
+    originator: z.string().optional(), // e.g. "codex_exec"
+    cli_version: z.string().optional(),
+    instructions: z.string().optional(),
+    // Root sessions use scalar values such as "exec"/"vscode". Subagents use
+    // a structured `source.subagent.thread_spawn` payload.
+    source: z.unknown().optional(),
+    thread_source: z.string().optional(),
+    agent_nickname: z.string().nullable().optional(),
+    agent_role: z.string().nullable().optional(),
+    agent_path: z.string().nullable().optional(),
+    model_provider: z.string().optional(), // e.g. "openai"
+  })
+  .passthrough();
 
 export type CodexSessionMetaPayload = z.infer<
   typeof CodexSessionMetaPayloadSchema
@@ -172,6 +183,7 @@ export const CodexCustomToolCallPayloadSchema = z
     call_id: z.string().optional(),
     id: z.string().optional(),
     name: z.string().optional(),
+    namespace: z.string().optional(),
     arguments: z.string().optional(),
     input: z.unknown().optional(),
   })

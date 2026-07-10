@@ -93,6 +93,8 @@ import { createLocalFileRoutes } from "./routes/local-file.js";
 import { createLocalImageRoutes } from "./routes/local-image.js";
 import { type UploadDeps, createUploadRoutes } from "./routes/upload.js";
 import { createVersionRoutes } from "./routes/version.js";
+import { EmbeddedRuntimeController } from "./runtime/EmbeddedRuntimeController.js";
+import type { RuntimeController } from "./runtime/types.js";
 import type {
   ClaudeSDK,
   PermissionMode,
@@ -224,12 +226,16 @@ export interface AppOptions {
    * https://host/yep/...). Empty string / omitted = serve at root.
    */
   basePath?: string;
+  /** Runtime facade for live agent operations. Defaults to embedded Supervisor mode. */
+  runtimeController?: RuntimeController;
 }
 
 export interface AppResult {
   app: Hono<{ Bindings: HttpBindings }>;
   /** Supervisor instance for debug API access */
   supervisor: Supervisor;
+  /** Runtime facade used by live session routes */
+  runtimeController: RuntimeController;
   /** Project scanner for debug API access */
   scanner: ProjectScanner;
   /** Session reader factory for debug API access */
@@ -521,8 +527,25 @@ export function createApp(options: AppOptions): AppResult {
           options.sessionMetadataService?.setExecutor(sessionId, executor) ??
           Promise.resolve()
       : undefined,
+    onSessionIdChanged: options.sessionMetadataService
+      ? async (oldSessionId, newSessionId, projectId) => {
+          await options.sessionMetadataService?.remapSessionId(
+            oldSessionId,
+            newSessionId,
+          );
+          options.eventBus?.emit({
+            type: "session-metadata-changed",
+            sessionId: newSessionId,
+            projectId,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      : undefined,
     onSessionSummary: getSessionSummary,
   });
+  const runtimeController =
+    options.runtimeController ??
+    new EmbeddedRuntimeController(supervisor, options.eventBus);
 
   // Create external session tracker if eventBus is available
   const externalTracker = options.eventBus
@@ -534,6 +557,8 @@ export function createApp(options: AppOptions): AppResult {
         // Callback to get session summary for new external sessions
         // projectId is now UrlProjectId (base64url) - ExternalSessionTracker converts it
         getSessionSummary,
+        getRuntimeProcess: (sessionId) =>
+          runtimeController.getProcessForSession(sessionId),
       })
     : undefined;
 
@@ -678,7 +703,7 @@ export function createApp(options: AppOptions): AppResult {
               continue;
             }
             if (
-              supervisor.getProcessForSession(session.id) ||
+              (await runtimeController.getProcessForSession(session.id)) ||
               externalTracker?.isExternal(session.id)
             ) {
               skippedCount++;
@@ -755,6 +780,7 @@ export function createApp(options: AppOptions): AppResult {
       pushService: options.pushService,
       nativePushService: options.nativePushService,
       notificationService: options.notificationService,
+      runtimeController,
       supervisor,
       connectedBrowsers: options.connectedBrowsers,
     });
@@ -763,6 +789,7 @@ export function createApp(options: AppOptions): AppResult {
   if (options.eventBus && options.serverSettingsService) {
     new LifecycleWebhookService({
       eventBus: options.eventBus,
+      runtimeController,
       supervisor,
       serverSettingsService: options.serverSettingsService,
     });
@@ -816,6 +843,7 @@ export function createApp(options: AppOptions): AppResult {
     "/api/server",
     createServerAdminRoutes({
       supervisor,
+      runtimeController,
       notificationService: options.notificationService,
       dataDir: options.dataDir,
     }),
@@ -900,6 +928,7 @@ export function createApp(options: AppOptions): AppResult {
       scanner,
       readerFactory,
       supervisor,
+      runtimeController,
       externalTracker,
       notificationService: options.notificationService,
       sessionMetadataService: options.sessionMetadataService,
@@ -921,6 +950,7 @@ export function createApp(options: AppOptions): AppResult {
   app.route(
     "/api",
     createSessionsRoutes({
+      runtimeController,
       supervisor,
       scanner,
       readerFactory,
@@ -948,6 +978,7 @@ export function createApp(options: AppOptions): AppResult {
   app.route(
     "/api/processes",
     createProcessesRoutes({
+      runtimeController,
       supervisor,
       scanner,
       readerFactory,
@@ -994,6 +1025,7 @@ export function createApp(options: AppOptions): AppResult {
       scanner,
       readerFactory,
       supervisor,
+      runtimeController,
       notificationService: options.notificationService,
       sessionIndexService: options.sessionIndexService,
       sessionMetadataService: options.sessionMetadataService,
@@ -1018,6 +1050,7 @@ export function createApp(options: AppOptions): AppResult {
       scanner,
       readerFactory,
       supervisor,
+      runtimeController,
       externalTracker,
       notificationService: options.notificationService,
       sessionIndexService: options.sessionIndexService,
@@ -1113,14 +1146,23 @@ export function createApp(options: AppOptions): AppResult {
       createSettingsRoutes({
         serverSettingsService: options.serverSettingsService,
         onAllowedHostsChanged: updateAllowedHosts,
-        onOllamaUrlChanged: (url) => {
+        onOllamaUrlChanged: async (url) => {
           ClaudeOllamaProvider.setOllamaUrl(url);
+          await runtimeController.updateProviderSettings({
+            claudeOllama: { url },
+          });
         },
-        onOllamaSystemPromptChanged: (prompt) => {
+        onOllamaSystemPromptChanged: async (prompt) => {
           ClaudeOllamaProvider.setSystemPrompt(prompt);
+          await runtimeController.updateProviderSettings({
+            claudeOllama: { systemPrompt: prompt },
+          });
         },
-        onOllamaUseFullSystemPromptChanged: (enabled) => {
+        onOllamaUseFullSystemPromptChanged: async (enabled) => {
           ClaudeOllamaProvider.setUseFullSystemPrompt(enabled);
+          await runtimeController.updateProviderSettings({
+            claudeOllama: { useFullSystemPrompt: enabled },
+          });
         },
       }),
     );
@@ -1227,10 +1269,19 @@ export function createApp(options: AppOptions): AppResult {
     // Dev routes (manual reload workflow) - mounted when manual reload is enabled
     const isDevMode =
       process.env.NO_BACKEND_RELOAD === "true" ||
-      process.env.NO_FRONTEND_RELOAD === "true";
+      process.env.NO_FRONTEND_RELOAD === "true" ||
+      (process.env.NODE_ENV !== "production" &&
+        runtimeController.mode === "external");
     if (isDevMode) {
       console.log("[Dev] Mounting dev routes at /api/dev");
-      app.route("/api/dev", createDevRoutes({ eventBus: options.eventBus }));
+      app.route(
+        "/api/dev",
+        createDevRoutes({
+          eventBus: options.eventBus,
+          dataDir: options.dataDir,
+          runtimeMode: runtimeController.mode,
+        }),
+      );
     }
   }
 
@@ -1250,7 +1301,7 @@ export function createApp(options: AppOptions): AppResult {
     });
   }
 
-  return { app, supervisor, scanner, readerFactory };
+  return { app, supervisor, runtimeController, scanner, readerFactory };
 }
 
 // Default app for backwards compatibility (health check only)

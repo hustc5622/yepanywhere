@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import {
+  type PermissionMode,
   type ProjectGitStatusSummary,
+  type UrlProjectId,
   isUrlProjectId,
   toUrlProjectId,
 } from "@yep-anywhere/shared";
@@ -25,6 +27,7 @@ import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { canonicalizeProjectPath, isAbsolutePath } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
@@ -44,6 +47,7 @@ export interface ProjectsDeps {
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
   supervisor?: Supervisor;
+  runtimeController?: RuntimeController;
   externalTracker?: ExternalSessionTracker;
   notificationService?: NotificationService;
   sessionMetadataService?: SessionMetadataService;
@@ -81,6 +85,63 @@ export interface ProjectsDeps {
 interface ProjectActivityCounts {
   activeOwnedCount: number;
   activeExternalCount: number;
+}
+
+interface OwnedProcessView {
+  id: string;
+  sessionId: string;
+  projectId: UrlProjectId;
+  startedAt: string;
+  permissionMode?: PermissionMode;
+  modeVersion?: number;
+  provider: SessionSummary["provider"];
+  state: AgentActivity;
+  pendingInputType?: PendingInputType;
+}
+
+async function loadOwnedProcessViews(
+  deps: Pick<ProjectsDeps, "runtimeController" | "supervisor">,
+): Promise<OwnedProcessView[]> {
+  if (deps.runtimeController) {
+    const processes = await deps.runtimeController.listProcessSnapshots();
+    return processes.map((process) => {
+      const pendingRequest = process.pendingInputRequest;
+      return {
+        id: process.id,
+        sessionId: process.sessionId,
+        projectId: process.projectId,
+        startedAt: process.startedAt,
+        permissionMode: process.permissionMode,
+        modeVersion: process.modeVersion,
+        provider: process.provider,
+        state: process.state,
+        pendingInputType: pendingRequest
+          ? pendingRequest.type === "tool-approval"
+            ? "tool-approval"
+            : "user-question"
+          : undefined,
+      };
+    });
+  }
+
+  return (deps.supervisor?.getAllProcesses() ?? []).map((process) => {
+    const pendingRequest = process.getPendingInputRequest();
+    return {
+      id: process.id,
+      sessionId: process.sessionId,
+      projectId: process.projectId,
+      startedAt: process.startedAt.toISOString(),
+      permissionMode: process.permissionMode,
+      modeVersion: process.modeVersion,
+      provider: process.provider,
+      state: process.state.type,
+      pendingInputType: pendingRequest
+        ? pendingRequest.type === "tool-approval"
+          ? "tool-approval"
+          : "user-question"
+        : undefined,
+    };
+  });
 }
 
 const PROJECT_GIT_STATUS_CONCURRENCY = 6;
@@ -171,26 +232,27 @@ function mergeBridgeSessions(
  * All counts are keyed by UrlProjectId (base64url format).
  */
 async function getProjectActivityCounts(
-  supervisor: Supervisor | undefined,
+  ownedProcesses: OwnedProcessView[],
   externalTracker: ExternalSessionTracker | undefined,
 ): Promise<Map<string, ProjectActivityCounts>> {
   const counts = new Map<string, ProjectActivityCounts>();
 
-  // Count owned sessions from Supervisor (uses base64url projectId)
-  if (supervisor) {
-    for (const process of supervisor.getAllProcesses()) {
-      const existing = counts.get(process.projectId) || {
-        activeOwnedCount: 0,
-        activeExternalCount: 0,
-      };
-      existing.activeOwnedCount++;
-      counts.set(process.projectId, existing);
-    }
+  for (const process of ownedProcesses) {
+    const existing = counts.get(process.projectId) || {
+      activeOwnedCount: 0,
+      activeExternalCount: 0,
+    };
+    existing.activeOwnedCount++;
+    counts.set(process.projectId, existing);
   }
 
   // Count external sessions - convert to UrlProjectId for consistent keys
   if (externalTracker) {
+    const ownedSessionIds = new Set(
+      ownedProcesses.map((process) => process.sessionId),
+    );
     for (const sessionId of externalTracker.getExternalSessions()) {
+      if (ownedSessionIds.has(sessionId)) continue;
       const info =
         await externalTracker.getExternalSessionInfoWithUrlId(sessionId);
       if (info) {
@@ -244,11 +306,11 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
    */
   function getOwnedSessionsForProject(
     projectId: string,
+    ownedProcesses: OwnedProcessView[],
   ): Map<string, SessionSummary> {
     const ownedSessions = new Map<string, SessionSummary>();
-    if (!deps.supervisor) return ownedSessions;
 
-    for (const process of deps.supervisor.getAllProcesses()) {
+    for (const process of ownedProcesses) {
       if (process.projectId === projectId) {
         const now = new Date().toISOString();
         ownedSessions.set(process.sessionId, {
@@ -256,7 +318,7 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
           projectId: process.projectId,
           title: null, // Title will be populated once file has content
           fullTitle: null,
-          createdAt: process.startedAt.toISOString(),
+          createdAt: process.startedAt,
           updatedAt: now,
           messageCount: 0,
           ownership: {
@@ -281,8 +343,9 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
   function addMissingOwnedSessions(
     sessions: SessionSummary[],
     projectId: string,
+    ownedProcesses: OwnedProcessView[],
   ): SessionSummary[] {
-    const ownedSessions = getOwnedSessionsForProject(projectId);
+    const ownedSessions = getOwnedSessionsForProject(projectId, ownedProcesses);
     if (ownedSessions.size === 0) return sessions;
 
     // Check which owned sessions are already in the list
@@ -300,9 +363,15 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
   }
 
   // Helper to enrich sessions with real status, notification state, and metadata
-  function enrichSessions(sessions: SessionSummary[]): SessionSummary[] {
+  function enrichSessions(
+    sessions: SessionSummary[],
+    ownedProcesses: OwnedProcessView[],
+  ): SessionSummary[] {
+    const processBySessionId = new Map(
+      ownedProcesses.map((process) => [process.sessionId, process]),
+    );
     return sessions.map((session) => {
-      const process = deps.supervisor?.getProcessForSession(session.id);
+      const process = processBySessionId.get(session.id);
       const isExternal = deps.externalTracker?.isExternal(session.id) ?? false;
 
       // Enrich with ownership
@@ -321,15 +390,9 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       let pendingInputType: PendingInputType | undefined;
       let activity: AgentActivity | undefined;
       if (process) {
-        const pendingRequest = process.getPendingInputRequest();
-        if (pendingRequest) {
-          pendingInputType =
-            pendingRequest.type === "tool-approval"
-              ? "tool-approval"
-              : "user-question";
-        }
+        pendingInputType = process.pendingInputType;
         // Get the current agent activity (in-turn/waiting-input/idle)
-        const state = process.state.type;
+        const state = process.state;
         if (state === "in-turn" || state === "waiting-input") {
           activity = state;
         }
@@ -373,12 +436,16 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
     const gitStatusProvider =
       deps.gitStatusProvider ??
       ((project: Project) => getProjectGitStatusSummary(project.path));
-    const [activityCounts, gitStatusSummaries, activeBridgeViews] =
+    const [ownedProcesses, gitStatusSummaries, activeBridgeViews] =
       await Promise.all([
-        getProjectActivityCounts(deps.supervisor, deps.externalTracker),
+        loadOwnedProcessViews(deps),
         getProjectGitStatusSummaries(rawProjects, gitStatusProvider),
         getActiveBridgeSessionViews(deps),
       ]);
+    const activityCounts = await getProjectActivityCounts(
+      ownedProcesses,
+      deps.externalTracker,
+    );
     for (const view of activeBridgeViews) {
       const existing = activityCounts.get(view.session.projectId) || {
         activeOwnedCount: 0,
@@ -523,9 +590,10 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
     sessions = mergeBridgeSessions(sessions, activeBridgeViews);
 
     // Add missing owned sessions (new sessions that don't have user/assistant messages yet)
-    sessions = addMissingOwnedSessions(sessions, projectId);
+    const ownedProcesses = await loadOwnedProcessViews(deps);
+    sessions = addMissingOwnedSessions(sessions, projectId, ownedProcesses);
 
-    return c.json({ sessions: enrichSessions(sessions) });
+    return c.json({ sessions: enrichSessions(sessions, ownedProcesses) });
   });
 
   return routes;

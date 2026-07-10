@@ -1,5 +1,5 @@
 interface Props {
-  target: "backend" | "frontend";
+  target: "backend" | "frontend" | "runtime";
   onReload: () => void;
   onDismiss: () => void;
   unsafeToRestart?: boolean;
@@ -13,8 +13,13 @@ export function ReloadBanner({
   unsafeToRestart,
   activeWorkers,
 }: Props) {
-  const label = target === "backend" ? "Server" : "Frontend";
-  const showWarning = unsafeToRestart && target === "backend";
+  const label =
+    target === "backend"
+      ? "Web/API"
+      : target === "runtime"
+        ? "Agent Runtime"
+        : "Frontend";
+  const showWarning = unsafeToRestart && target !== "frontend";
 
   return (
     <div

@@ -223,6 +223,39 @@ describe("loadConfig codex paths", () => {
     expect(config.opencodeServerStartPort).toBe(4521);
   });
 
+  it("keeps the agent runtime embedded by default", async () => {
+    vi.stubEnv("PORT", "8022");
+    vi.stubEnv("YEP_RUNTIME_MODE", undefined);
+    vi.stubEnv("YEP_RUNTIME_PORT", undefined);
+    vi.stubEnv("YEP_RUNTIME_CONTROL_URL", undefined);
+    vi.stubEnv("YEP_ANYWHERE_DATA_DIR", "/tmp/yep-runtime-config");
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.runtimeMode).toBe("embedded");
+    expect(config.runtimePort).toBe(8025);
+    expect(config.runtimeControlUrl).toBe("http://127.0.0.1:8025");
+    expect(config.runtimeTokenFile).toBe(
+      "/tmp/yep-runtime-config/runtime/token",
+    );
+  });
+
+  it("parses external agent runtime overrides", async () => {
+    vi.stubEnv("YEP_RUNTIME_MODE", "external");
+    vi.stubEnv("YEP_RUNTIME_PORT", "9025");
+    vi.stubEnv("YEP_RUNTIME_CONTROL_URL", "http://localhost:9026");
+    vi.stubEnv("YEP_RUNTIME_TOKEN_FILE", "/tmp/runtime-token");
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.runtimeMode).toBe("external");
+    expect(config.runtimePort).toBe(9025);
+    expect(config.runtimeControlUrl).toBe("http://localhost:9026");
+    expect(config.runtimeTokenFile).toBe("/tmp/runtime-token");
+  });
+
   it("defaults session title submodule for ohmyrouter", async () => {
     vi.stubEnv("SESSION_TITLE_LLM_API_KEY", "test-key");
     vi.stubEnv("SESSION_TITLE_LLM_API_BASE", "https://api.ohmyrouter.com");

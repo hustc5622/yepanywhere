@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { ProviderName, UrlProjectId } from "@yep-anywhere/shared";
+import type { RuntimeController } from "../runtime/types.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import { decodeProjectId } from "../supervisor/types.js";
@@ -37,8 +38,28 @@ interface SessionInactiveWebhookPayload {
 
 export interface LifecycleWebhookServiceOptions {
   eventBus: EventBus;
-  supervisor: Supervisor;
+  runtimeController?: Pick<RuntimeController, "getProcessSnapshotForSession">;
+  supervisor?: Supervisor;
   serverSettingsService: ServerSettingsService;
+}
+
+interface WebhookProcessView {
+  id: string;
+  state: string | { type: string };
+  projectPath: string;
+  provider: ProviderName;
+  model?: string;
+  resolvedModel?: string;
+  executor?: string;
+  permissionMode?: string;
+  messageHistory?: Array<{
+    type?: string;
+    message?: { role?: string; content?: unknown };
+  }>;
+  getMessageHistory?: () => Array<{
+    type?: string;
+    message?: { role?: string; content?: unknown };
+  }>;
 }
 
 export class LifecycleWebhookService {
@@ -72,10 +93,8 @@ export class LifecycleWebhookService {
       return;
     }
 
-    const process = this.options.supervisor.getProcessForSession(
-      event.sessionId,
-    );
-    if (!process || process.state.type !== "idle") {
+    const process = await this.getProcess(event.sessionId);
+    if (!process || this.getProcessActivity(process) !== "idle") {
       // Ignore the synthetic idle emitted during unregister; we only want
       // the live transition when the process is still resumable in-memory.
       return;
@@ -89,12 +108,12 @@ export class LifecycleWebhookService {
       process: {
         id: process.id,
         provider: process.provider,
-        model: process.resolvedModel,
+        model: process.resolvedModel ?? process.model,
         executor: process.executor,
         permissionMode: process.permissionMode,
       },
       projectPath: process.projectPath,
-      history: process.getMessageHistory(),
+      history: this.getMessageHistory(process),
     });
 
     await this.send(payload);
@@ -103,9 +122,7 @@ export class LifecycleWebhookService {
   private async handleProcessTerminated(
     event: ProcessTerminatedEvent,
   ): Promise<void> {
-    const process = this.options.supervisor.getProcessForSession(
-      event.sessionId,
-    );
+    const process = await this.getProcess(event.sessionId);
     const projectPath =
       process?.projectPath ?? this.decodeProjectPath(event.projectId);
     if (!projectPath) {
@@ -121,12 +138,12 @@ export class LifecycleWebhookService {
       process: {
         id: event.processId,
         provider: event.provider as ProviderName,
-        model: process?.resolvedModel,
+        model: process?.resolvedModel ?? process?.model,
         executor: process?.executor,
         permissionMode: process?.permissionMode,
       },
       projectPath,
-      history: process?.getMessageHistory() ?? [],
+      history: process ? this.getMessageHistory(process) : [],
     });
 
     await this.send(payload);
@@ -167,6 +184,31 @@ export class LifecycleWebhookService {
       lastMessageText: this.extractLastMessageText(input.history),
       dryRun,
     };
+  }
+
+  private async getProcess(
+    sessionId: string,
+  ): Promise<WebhookProcessView | null> {
+    if (this.options.runtimeController) {
+      return this.options.runtimeController.getProcessSnapshotForSession(
+        sessionId,
+      );
+    }
+    return (
+      (this.options.supervisor?.getProcessForSession(sessionId) as
+        | WebhookProcessView
+        | undefined) ?? null
+    );
+  }
+
+  private getProcessActivity(process: WebhookProcessView): string {
+    return typeof process.state === "string"
+      ? process.state
+      : process.state.type;
+  }
+
+  private getMessageHistory(process: WebhookProcessView) {
+    return process.messageHistory ?? process.getMessageHistory?.() ?? [];
   }
 
   private async send(payload: SessionInactiveWebhookPayload): Promise<void> {

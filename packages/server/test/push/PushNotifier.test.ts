@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NotificationService } from "../../src/notifications/NotificationService.js";
 import { PushNotifier } from "../../src/push/PushNotifier.js";
 import type { PushService } from "../../src/push/PushService.js";
+import type { RuntimeController } from "../../src/runtime/types.js";
 import type { Supervisor } from "../../src/supervisor/Supervisor.js";
 import type { InputRequest, ProcessState } from "../../src/supervisor/types.js";
 import type {
@@ -89,6 +90,52 @@ describe("PushNotifier", () => {
   });
 
   describe("handling process state changes", () => {
+    it("reads pending input from an external runtime snapshot", async () => {
+      const request: InputRequest = {
+        id: "req-external",
+        sessionId: "session-external",
+        type: "tool-approval",
+        prompt: "Allow Edit?",
+        toolName: "Edit",
+        toolInput: { file_path: "/home/user/test-project/src/index.ts" },
+        timestamp: new Date().toISOString(),
+      };
+      const runtimeController = {
+        getProcessSnapshotForSession: vi.fn(async () => ({
+          id: "proc-external",
+          state: "waiting-input",
+          pendingInputRequest: request,
+          messageHistory: [],
+        })),
+      } as unknown as Pick<RuntimeController, "getProcessSnapshotForSession">;
+
+      new PushNotifier({
+        eventBus: mockEventBus,
+        pushService: mockPushService,
+        notificationService: mockNotificationService,
+        runtimeController,
+      });
+
+      eventHandler?.({
+        type: "process-state-changed",
+        sessionId: "session-external",
+        projectId: testProjectId,
+        activity: "waiting-input",
+        timestamp: new Date().toISOString(),
+      });
+
+      await vi.waitFor(() => {
+        expect(mockPushService.sendToAll).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "pending-input",
+            sessionId: "session-external",
+            requestId: "req-external",
+          }),
+          expect.any(Object),
+        );
+      });
+    });
+
     it("should send push notification when entering waiting-input state", async () => {
       const mockProcess = {
         state: {

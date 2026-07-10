@@ -6,11 +6,14 @@ import { Hono } from "hono";
 import type { SessionIndexService } from "../indexes/index.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import { EmbeddedRuntimeController } from "../runtime/EmbeddedRuntimeController.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type { ProcessInfo, Project } from "../supervisor/types.js";
 
 export interface ProcessesDeps {
+  runtimeController?: RuntimeController;
   supervisor: Supervisor;
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
@@ -106,13 +109,15 @@ async function enrichProcessInfo(
 
 export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   const routes = new Hono();
+  const runtimeController =
+    deps.runtimeController ?? new EmbeddedRuntimeController(deps.supervisor);
 
   // GET /api/processes - List all active processes
   // Query params:
   //   - includeTerminated: if "true", also includes recently terminated processes
   routes.get("/", async (c) => {
     const includeTerminated = c.req.query("includeTerminated") === "true";
-    const processes = deps.supervisor.getProcessInfoList();
+    const processes = await runtimeController.listProcesses();
 
     // Enrich all processes with session titles and model info
     const enrichedProcesses = await Promise.all(
@@ -121,7 +126,7 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
 
     if (includeTerminated) {
       const terminatedProcesses =
-        deps.supervisor.getRecentlyTerminatedProcesses();
+        await runtimeController.listRecentlyTerminatedProcesses();
       // Also enrich terminated processes
       const enrichedTerminated = await Promise.all(
         terminatedProcesses.map((p) => enrichProcessInfo(p, deps)),
@@ -139,7 +144,7 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   routes.post("/:processId/abort", async (c) => {
     const processId = c.req.param("processId");
 
-    const aborted = await deps.supervisor.abortProcess(processId);
+    const { aborted } = await runtimeController.abortProcess(processId);
     if (!aborted) {
       return c.json({ error: "Process not found" }, 404);
     }
@@ -152,11 +157,13 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   routes.post("/:processId/interrupt", async (c) => {
     const processId = c.req.param("processId");
 
-    const result = await deps.supervisor.interruptProcess(processId);
+    const result = await runtimeController.interruptProcess(processId);
     if (!result.success && !result.supported) {
       // Process not found or doesn't support interrupt
       if (
-        !deps.supervisor.getProcessInfoList().some((p) => p.id === processId)
+        !(await runtimeController.listProcesses()).some(
+          (p) => p.id === processId,
+        )
       ) {
         return c.json({ error: "Process not found" }, 404);
       }
@@ -172,12 +179,12 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   routes.get("/:processId/models", async (c) => {
     const processId = c.req.param("processId");
 
-    const process = deps.supervisor.getProcess(processId);
+    const process = await runtimeController.getProcess(processId);
     if (!process) {
       return c.json({ error: "Process not found" }, 404);
     }
 
-    const models = await process.supportedModels();
+    const models = await runtimeController.getSupportedModels(processId);
     if (models === null) {
       // Process doesn't support dynamic model listing
       return c.json(
@@ -194,12 +201,12 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   routes.get("/:processId/commands", async (c) => {
     const processId = c.req.param("processId");
 
-    const process = deps.supervisor.getProcess(processId);
+    const process = await runtimeController.getProcess(processId);
     if (!process) {
       return c.json({ error: "Process not found" }, 404);
     }
 
-    const commands = await process.supportedCommands();
+    const commands = await runtimeController.getSupportedCommands(processId);
     if (commands === null) {
       // Process doesn't support dynamic command listing
       return c.json(
@@ -216,13 +223,13 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   routes.post("/:processId/model", async (c) => {
     const processId = c.req.param("processId");
 
-    const process = deps.supervisor.getProcess(processId);
+    const process = await runtimeController.getProcess(processId);
     if (!process) {
       return c.json({ error: "Process not found" }, 404);
     }
 
     const body = await c.req.json<{ model?: string }>();
-    const success = await process.setModel(body.model);
+    const { success } = await runtimeController.setModel(processId, body.model);
 
     if (!success) {
       return c.json(

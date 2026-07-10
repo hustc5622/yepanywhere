@@ -4,6 +4,7 @@ import type { IncomingMessage } from "node:http";
 import { basename } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
+import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
 import type { SessionSummary } from "../supervisor/types.js";
@@ -83,6 +84,12 @@ interface PendingServerRequest {
 
 interface SessionRecord {
   id: string;
+  isSubagent: boolean;
+  threadMetadataKnown: boolean;
+  parentThreadId?: string;
+  agentPath?: string;
+  agentNickname?: string;
+  agentRole?: string;
   projectId: UrlProjectId;
   projectPath: string;
   projectName: string;
@@ -250,7 +257,9 @@ export class CodexBridgeService implements CodexBridgeController {
         full: this.getUpstreamStatus("full"),
       },
       connectionCount: this.connections.size,
-      sessionCount: this.sessions.size,
+      sessionCount: Array.from(this.sessions.values()).filter((record) =>
+        this.isTopLevelSessionRecord(record),
+      ).length,
       pendingInputCount: this.pendingByInputId.size,
       recentMcpStartupEvents: this.recentMcpStartupEvents.map((event) => ({
         ...event,
@@ -272,6 +281,7 @@ export class CodexBridgeService implements CodexBridgeController {
 
   listSessions(): CodexBridgeSession[] {
     return Array.from(this.sessions.values())
+      .filter((record) => this.isTopLevelSessionRecord(record))
       .map((record) => this.toBridgeSession(record))
       .sort(
         (a, b) =>
@@ -281,7 +291,7 @@ export class CodexBridgeService implements CodexBridgeController {
 
   getSessionView(sessionId: string): CodexBridgeSessionView | null {
     const record = this.sessions.get(sessionId);
-    if (!record) return null;
+    if (!record || !this.isTopLevelSessionRecord(record)) return null;
     const session = this.toBridgeSession(record);
     if (!this.isDisplayableBridgeSession(session)) return null;
     return {
@@ -294,17 +304,22 @@ export class CodexBridgeService implements CodexBridgeController {
 
   isSessionActive(sessionId: string): boolean {
     const record = this.sessions.get(sessionId);
-    return !!record && isLiveBridgeSession(this.toBridgeSession(record));
+    return (
+      !!record &&
+      this.isTopLevelSessionRecord(record) &&
+      isLiveBridgeSession(this.toBridgeSession(record))
+    );
   }
 
   getPendingInputRequest(
     sessionId: string,
   ): CodexBridgePendingInput["request"] | null {
-    const ids = this.pendingIdsByThread.get(sessionId);
-    if (!ids) return null;
-    const firstId = ids.values().next().value;
-    if (!firstId) return null;
-    return this.pendingByInputId.get(firstId)?.inputRequest ?? null;
+    const pending = this.findPendingForVisibleSession(sessionId);
+    if (!pending) return null;
+    return {
+      ...pending.inputRequest,
+      sessionId: this.getTopLevelSessionId(pending.threadId),
+    };
   }
 
   respondToInput(
@@ -314,7 +329,11 @@ export class CodexBridgeService implements CodexBridgeController {
     answers?: Record<string, string>,
   ): boolean {
     const pending = this.pendingByInputId.get(requestId);
-    if (!pending || pending.threadId !== sessionId) {
+    if (
+      !pending ||
+      (pending.threadId !== sessionId &&
+        this.getTopLevelSessionId(pending.threadId) !== sessionId)
+    ) {
       return false;
     }
     if (
@@ -334,6 +353,36 @@ export class CodexBridgeService implements CodexBridgeController {
     pending.connection.resolvedServerRequestIds.add(pending.rpcKey);
     this.resolvePendingRequest(pending, "yep");
     return true;
+  }
+
+  private getTopLevelSessionId(threadId: string): string {
+    let currentId = threadId;
+    const visited = new Set<string>();
+
+    while (!visited.has(currentId)) {
+      visited.add(currentId);
+      const record = this.sessions.get(currentId);
+      if (!record?.isSubagent || !record.parentThreadId) {
+        return currentId;
+      }
+      currentId = record.parentThreadId;
+    }
+
+    return threadId;
+  }
+
+  private findPendingForVisibleSession(
+    sessionId: string,
+  ): PendingServerRequest | null {
+    for (const pending of this.pendingByInputId.values()) {
+      if (
+        pending.threadId === sessionId ||
+        this.getTopLevelSessionId(pending.threadId) === sessionId
+      ) {
+        return pending;
+      }
+    }
+    return null;
   }
 
   private async handleHttpRequest(
@@ -689,6 +738,11 @@ export class CodexBridgeService implements CodexBridgeController {
   ): void {
     const p = asRecord(params);
     switch (method) {
+      case "item/started":
+      case "item/completed": {
+        this.recordCollaborationThreadMetadata(p);
+        break;
+      }
       case "thread/started": {
         const thread = asRecord(p?.thread);
         if (thread) {
@@ -777,6 +831,66 @@ export class CodexBridgeService implements CodexBridgeController {
         break;
       }
     }
+  }
+
+  private recordCollaborationThreadMetadata(
+    params: Record<string, unknown> | null,
+  ): void {
+    const item = asRecord(params?.item);
+    if (!item) return;
+
+    const itemType = getString(item.type);
+    if (itemType === "subAgentActivity") {
+      const parentThreadId = getString(params?.threadId);
+      const agentThreadId = getString(item.agentThreadId);
+      if (!parentThreadId || !agentThreadId) return;
+      this.registerSubagentThread(parentThreadId, agentThreadId, {
+        agentPath: getString(item.agentPath),
+        activityKind: getString(item.kind),
+      });
+      return;
+    }
+
+    if (
+      itemType !== "collabAgentToolCall" ||
+      getString(item.tool) !== "spawnAgent"
+    ) {
+      return;
+    }
+
+    const parentThreadId =
+      getString(item.senderThreadId) ?? getString(params?.threadId);
+    if (!parentThreadId || !Array.isArray(item.receiverThreadIds)) return;
+
+    for (const receiverThreadId of item.receiverThreadIds) {
+      if (typeof receiverThreadId !== "string") continue;
+      this.registerSubagentThread(parentThreadId, receiverThreadId);
+    }
+  }
+
+  private registerSubagentThread(
+    parentThreadId: string,
+    threadId: string,
+    metadata: { agentPath?: string; activityKind?: string } = {},
+  ): void {
+    const parent = this.sessions.get(parentThreadId);
+    const record = this.ensureSessionRecord(threadId, {
+      cwd: parent?.projectPath,
+      isSubagent: true,
+      threadMetadataKnown: true,
+      parentThreadId,
+      agentPath: metadata.agentPath,
+    });
+
+    if (
+      metadata.activityKind === "started" ||
+      metadata.activityKind === "interacted"
+    ) {
+      record.activity = "in-turn";
+    } else if (metadata.activityKind === "interrupted") {
+      record.activity = "idle";
+    }
+    record.updatedAt = new Date().toISOString();
   }
 
   private recordMcpStartupStatus(
@@ -875,9 +989,17 @@ export class CodexBridgeService implements CodexBridgeController {
     record.activity = "waiting-input";
     record.pendingInputType = pendingInputType;
     record.updatedAt = createdAt;
-    this.emitSessionCreated(record);
-    this.emitSessionStatus(record, { owner: "external" });
-    this.emitProcessState(record, "waiting-input", pendingInputType);
+
+    const visibleRecord =
+      this.sessions.get(this.getTopLevelSessionId(threadId)) ?? record;
+    if (visibleRecord !== record) {
+      visibleRecord.activity = "waiting-input";
+      visibleRecord.pendingInputType = pendingInputType;
+      visibleRecord.updatedAt = createdAt;
+    }
+    this.emitSessionCreated(visibleRecord);
+    this.emitSessionStatus(visibleRecord, { owner: "external" });
+    this.emitProcessState(visibleRecord, "waiting-input", pendingInputType);
   }
 
   private toInputRequest(
@@ -1111,20 +1233,48 @@ export class CodexBridgeService implements CodexBridgeController {
     const record = this.sessions.get(pending.threadId);
     if (!record) return;
 
-    const nextPending = this.getPendingInputRequest(pending.threadId);
-    if (nextPending) {
+    this.updatePendingState(
+      record,
+      this.findPendingForThread(pending.threadId),
+    );
+
+    const visibleRecord = this.sessions.get(
+      this.getTopLevelSessionId(pending.threadId),
+    );
+    if (visibleRecord && visibleRecord !== record) {
+      this.updatePendingState(
+        visibleRecord,
+        this.findPendingForVisibleSession(visibleRecord.id),
+      );
+    }
+  }
+
+  private findPendingForThread(threadId: string): PendingServerRequest | null {
+    const ids = this.pendingIdsByThread.get(threadId);
+    if (!ids) return null;
+    for (const id of ids) {
+      const pending = this.pendingByInputId.get(id);
+      if (pending) return pending;
+    }
+    return null;
+  }
+
+  private updatePendingState(
+    record: SessionRecord,
+    pending: PendingServerRequest | null,
+  ): void {
+    record.updatedAt = new Date().toISOString();
+    if (pending) {
       record.activity = "waiting-input";
-      record.pendingInputType =
-        nextPending.type === "tool-approval"
-          ? "tool-approval"
-          : "user-question";
+      record.pendingInputType = pending.pendingInputType;
       this.emitProcessState(record, "waiting-input", record.pendingInputType);
-    } else {
-      record.pendingInputType = undefined;
-      if (record.activity === "waiting-input") {
-        record.activity = "in-turn";
-        this.emitProcessState(record, "in-turn");
-      }
+      return;
+    }
+
+    record.pendingInputType = undefined;
+    if (record.activity === "waiting-input") {
+      record.activity = "in-turn";
+      this.emitProcessState(record, "in-turn");
     }
   }
 
@@ -1227,8 +1377,14 @@ export class CodexBridgeService implements CodexBridgeController {
     if (!id) return;
 
     const cwd = extra.cwd ?? getString(thread.cwd);
+    const subagent = getCodexSubagentMetadata(thread);
     const record = this.ensureSessionRecord(id, {
       cwd,
+      isSubagent: subagent.isSubagent,
+      parentThreadId: subagent.parentThreadId,
+      agentPath: subagent.agentPath,
+      agentNickname: subagent.agentNickname,
+      agentRole: subagent.agentRole,
       model: extra.model ?? getString(thread.model),
       reasoningEffort: extra.reasoningEffort,
       serviceTier: extra.serviceTier,
@@ -1260,6 +1416,12 @@ export class CodexBridgeService implements CodexBridgeController {
     threadId: string,
     values: {
       cwd?: string;
+      isSubagent?: boolean;
+      threadMetadataKnown?: boolean;
+      parentThreadId?: string;
+      agentPath?: string;
+      agentNickname?: string;
+      agentRole?: string;
       model?: string;
       reasoningEffort?: string;
       serviceTier?: string;
@@ -1274,6 +1436,13 @@ export class CodexBridgeService implements CodexBridgeController {
     const projectPath = values.cwd ?? existing?.projectPath ?? process.cwd();
     const record: SessionRecord = existing ?? {
       id: threadId,
+      isSubagent: values.isSubagent ?? false,
+      threadMetadataKnown:
+        values.threadMetadataKnown ?? values.isSubagent !== undefined,
+      parentThreadId: values.parentThreadId,
+      agentPath: values.agentPath,
+      agentNickname: values.agentNickname,
+      agentRole: values.agentRole,
       projectId: encodeProjectId(projectPath),
       projectPath,
       projectName: basename(projectPath),
@@ -1291,6 +1460,20 @@ export class CodexBridgeService implements CodexBridgeController {
       record.projectId = encodeProjectId(values.cwd);
       record.projectName = basename(values.cwd);
     }
+    // Classification is monotonic: once Codex identifies a child thread, a
+    // later partial notification must not promote it back to a root session.
+    if (values.isSubagent === true) {
+      record.isSubagent = true;
+    } else if (values.isSubagent === false && !record.threadMetadataKnown) {
+      record.isSubagent = false;
+    }
+    if (values.threadMetadataKnown || values.isSubagent !== undefined) {
+      record.threadMetadataKnown = true;
+    }
+    if (values.parentThreadId) record.parentThreadId = values.parentThreadId;
+    if (values.agentPath) record.agentPath = values.agentPath;
+    if (values.agentNickname) record.agentNickname = values.agentNickname;
+    if (values.agentRole) record.agentRole = values.agentRole;
     if (values.model) record.model = values.model;
     if (values.reasoningEffort) {
       record.reasoningEffort = values.reasoningEffort;
@@ -1338,7 +1521,12 @@ export class CodexBridgeService implements CodexBridgeController {
     return "in-turn";
   }
 
+  private isTopLevelSessionRecord(record: SessionRecord): boolean {
+    return record.threadMetadataKnown && !record.isSubagent;
+  }
+
   private emitSessionCreated(record: SessionRecord): void {
+    if (!this.isTopLevelSessionRecord(record)) return;
     const session = this.toBridgeSession(record);
     if (!this.isDisplayableBridgeSession(session)) {
       return;
@@ -1358,6 +1546,7 @@ export class CodexBridgeService implements CodexBridgeController {
     record: SessionRecord,
     ownership: SessionSummary["ownership"],
   ): void {
+    if (!this.isTopLevelSessionRecord(record)) return;
     this.eventBus?.emit({
       type: "session-status-changed",
       sessionId: record.id,
@@ -1372,6 +1561,7 @@ export class CodexBridgeService implements CodexBridgeController {
     activity: "in-turn" | "idle" | "waiting-input",
     pendingInputType?: "tool-approval" | "user-question",
   ): void {
+    if (!this.isTopLevelSessionRecord(record)) return;
     this.eventBus?.emit({
       type: "process-state-changed",
       sessionId: record.id,
@@ -1383,6 +1573,7 @@ export class CodexBridgeService implements CodexBridgeController {
   }
 
   private emitSessionUpdated(record: SessionRecord): void {
+    if (!this.isTopLevelSessionRecord(record)) return;
     this.eventBus?.emit({
       type: "session-updated",
       sessionId: record.id,

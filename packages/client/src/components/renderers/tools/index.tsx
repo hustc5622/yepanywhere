@@ -166,6 +166,8 @@ export const toolRegistry = new ToolRendererRegistry(fallbackToolRenderer);
 import { askUserQuestionRenderer } from "./AskUserQuestionRenderer";
 import { bashOutputRenderer } from "./BashOutputRenderer";
 import { bashRenderer } from "./BashRenderer";
+import { codexCollaborationRenderers } from "./CodexCollaborationRenderer";
+import { codexExecRenderer } from "./CodexExecRenderer";
 import { editRenderer } from "./EditRenderer";
 import { exitPlanModeRenderer } from "./ExitPlanModeRenderer";
 import { globRenderer } from "./GlobRenderer";
@@ -184,6 +186,7 @@ import { writeStdinRenderer } from "./WriteStdinRenderer";
 
 // Tier 1 & 2: Core tools
 toolRegistry.register(bashRenderer);
+toolRegistry.register(codexExecRenderer);
 toolRegistry.register(readRenderer);
 toolRegistry.register(editRenderer);
 toolRegistry.register(writeRenderer);
@@ -202,6 +205,9 @@ toolRegistry.register(writeStdinRenderer);
 
 // Codex-specific tools
 toolRegistry.register(viewImageRenderer);
+for (const renderer of codexCollaborationRenderers) {
+  toolRegistry.register(renderer);
+}
 
 // Tier 4: Background/async tools
 toolRegistry.register(bashOutputRenderer);

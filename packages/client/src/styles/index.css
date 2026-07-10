@@ -4204,6 +4204,17 @@ a.sidebar-nav-item {
    Remote terminal
    ========================================================================== */
 
+.terminal-page-wrapper {
+  --terminal-available-height: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0b0b;
+}
+
 .terminal-page {
   display: flex;
   flex-direction: column;
@@ -4388,6 +4399,11 @@ a.sidebar-nav-item {
 }
 
 @media (max-width: 760px), (pointer: coarse) {
+  .terminal-page-wrapper {
+    height: var(--terminal-available-height, 100%);
+    max-height: var(--terminal-available-height, 100%);
+  }
+
   .terminal-mobile-controls {
     display: flex;
   }
@@ -6003,6 +6019,57 @@ a.sidebar-nav-item {
 
 .deployment-restart-targets .settings-checkbox-row {
   margin-top: 0;
+}
+
+@media (max-width: 600px) {
+  .settings-item-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .settings-item-row > .settings-button {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .settings-item-actions {
+    align-items: stretch;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    width: 100%;
+  }
+
+  .settings-item-actions .settings-button,
+  .deployment-controls > .settings-button {
+    width: 100%;
+    min-height: 44px;
+    line-height: 1.4;
+    white-space: normal;
+  }
+
+  .deployment-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .deployment-control {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .deployment-control .settings-select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .deployment-controls > .settings-checkbox-row {
+    width: 100%;
+    min-height: 44px;
+    margin-top: 0;
+  }
 }
 
 .deployment-log {

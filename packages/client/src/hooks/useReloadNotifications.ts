@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJSON } from "../api/client";
 import {
   type SourceChangeEvent,
@@ -15,12 +15,17 @@ export type {
 export interface PendingReloads {
   backend: boolean;
   frontend: boolean;
+  runtime: boolean;
 }
 
 interface DevStatus {
   noBackendReload: boolean;
   noFrontendReload: boolean;
   backendDirty?: boolean;
+  runtimeMode?: "embedded" | "external";
+  runtimeDirty?: boolean;
+  runtimeDirtyFiles?: string[];
+  runtimeDirtyGeneration?: string;
 }
 
 /**
@@ -31,6 +36,7 @@ export function useReloadNotifications() {
   const [pendingReloads, setPendingReloads] = useState<PendingReloads>({
     backend: false,
     frontend: false,
+    runtime: false,
   });
   const [devStatus, setDevStatus] = useState<DevStatus | null>(null);
   const [connected, setConnected] = useState(activityBus.connected);
@@ -41,6 +47,24 @@ export function useReloadNotifications() {
     hasActiveWork: false,
     timestamp: "",
   });
+  const runtimeDirtyGenerationRef = useRef<string | null>(null);
+  const dismissedRuntimeGenerationRef = useRef<string | null>(null);
+
+  const applyRuntimeDirtyStatus = useCallback((data: DevStatus) => {
+    const generation =
+      data.runtimeDirtyGeneration ??
+      (data.runtimeDirty ? JSON.stringify(data.runtimeDirtyFiles ?? []) : null);
+    runtimeDirtyGenerationRef.current = generation;
+    if (!data.runtimeDirty) {
+      dismissedRuntimeGenerationRef.current = null;
+    }
+    setPendingReloads((prev) => ({
+      ...prev,
+      runtime:
+        data.runtimeDirty === true &&
+        generation !== dismissedRuntimeGenerationRef.current,
+    }));
+  }, []);
 
   // Sync dev status and worker activity from server
   const syncFromServer = useCallback(() => {
@@ -51,9 +75,11 @@ export function useReloadNotifications() {
     // Sync dev status
     fetchJSON<DevStatus>("/dev/status")
       .then((data) => {
+        setDevStatus(data);
         if (data && !data.backendDirty) {
           setPendingReloads((prev) => ({ ...prev, backend: false }));
         }
+        applyRuntimeDirtyStatus(data);
       })
       .catch(() => {
         // Ignore errors
@@ -67,7 +93,7 @@ export function useReloadNotifications() {
       .catch(() => {
         // Ignore errors
       });
-  }, []);
+  }, [applyRuntimeDirtyStatus]);
 
   // Check if server is in dev mode and get persisted dirty state
   useEffect(() => {
@@ -81,11 +107,12 @@ export function useReloadNotifications() {
         if (data.backendDirty) {
           setPendingReloads((prev) => ({ ...prev, backend: true }));
         }
+        applyRuntimeDirtyStatus(data);
       })
       .catch(() => {
         setDevStatus(null);
       });
-  }, []);
+  }, [applyRuntimeDirtyStatus]);
 
   // Subscribe to events from the bus
   useEffect(() => {
@@ -150,6 +177,12 @@ export function useReloadNotifications() {
     }
   }, [devStatus, syncFromServer]);
 
+  useEffect(() => {
+    if (devStatus?.runtimeMode !== "external") return;
+    const interval = setInterval(syncFromServer, 2_000);
+    return () => clearInterval(interval);
+  }, [devStatus?.runtimeMode, syncFromServer]);
+
   // Reload the backend (triggers server restart)
   const reloadBackend = useCallback(async () => {
     console.log("[ReloadNotifications] Requesting backend reload...");
@@ -167,17 +200,40 @@ export function useReloadNotifications() {
     window.location.reload();
   }, []);
 
+  const reloadRuntime = useCallback(async (force = false) => {
+    console.log("[ReloadNotifications] Requesting agent runtime reload...");
+    try {
+      await fetchJSON<{ ok: boolean }>("/server/runtime/restart", {
+        method: "POST",
+        body: JSON.stringify({ force }),
+      });
+      setPendingReloads((prev) => ({ ...prev, runtime: false }));
+    } catch (error) {
+      console.error(
+        "[ReloadNotifications] Agent runtime reload failed:",
+        error,
+      );
+    }
+  }, []);
+
   // Reload whichever needs it (backend first if both)
   const reload = useCallback(() => {
     if (pendingReloads.backend) {
       reloadBackend();
+    } else if (pendingReloads.runtime) {
+      // The keyboard shortcut must never imply permission to interrupt work.
+      // The warning banner's explicit "Reload Anyway" action supplies force.
+      void reloadRuntime(false);
     } else if (pendingReloads.frontend) {
       reloadFrontend();
     }
-  }, [pendingReloads, reloadBackend, reloadFrontend]);
+  }, [pendingReloads, reloadBackend, reloadFrontend, reloadRuntime]);
 
   // Dismiss a pending reload notification
-  const dismiss = useCallback((target: "backend" | "frontend") => {
+  const dismiss = useCallback((target: "backend" | "frontend" | "runtime") => {
+    if (target === "runtime") {
+      dismissedRuntimeGenerationRef.current = runtimeDirtyGenerationRef.current;
+    }
     setPendingReloads((prev) => ({
       ...prev,
       [target]: false,
@@ -186,7 +242,8 @@ export function useReloadNotifications() {
 
   // Dismiss all
   const dismissAll = useCallback(() => {
-    setPendingReloads({ backend: false, frontend: false });
+    dismissedRuntimeGenerationRef.current = runtimeDirtyGenerationRef.current;
+    setPendingReloads({ backend: false, frontend: false, runtime: false });
   }, []);
 
   // Keyboard shortcut: Ctrl+Shift+R
@@ -204,7 +261,9 @@ export function useReloadNotifications() {
 
   // Check if manual reload mode is active at all
   const isManualReloadMode =
-    devStatus?.noBackendReload || devStatus?.noFrontendReload;
+    devStatus?.noBackendReload ||
+    devStatus?.noFrontendReload ||
+    devStatus?.runtimeMode === "external";
 
   return {
     isManualReloadMode,
@@ -212,10 +271,13 @@ export function useReloadNotifications() {
     connected,
     reloadBackend,
     reloadFrontend,
+    reloadRuntime,
     reload,
     dismiss,
     dismissAll,
     workerActivity,
-    unsafeToRestart: workerActivity.hasActiveWork,
+    unsafeToRestart:
+      workerActivity.hasActiveWork && workerActivity.runtimeMode !== "external",
+    unsafeToReloadRuntime: workerActivity.hasActiveWork,
   };
 }

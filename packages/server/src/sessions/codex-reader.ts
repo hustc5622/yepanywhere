@@ -236,7 +236,10 @@ export class CodexSessionReader implements ISessionReader {
         serviceTier: runtimeConfig.serviceTier,
         originator: metaEntry.payload.originator,
         cliVersion: metaEntry.payload.cli_version,
-        source: metaEntry.payload.source,
+        source:
+          typeof metaEntry.payload.source === "string"
+            ? metaEntry.payload.source
+            : undefined,
         approvalPolicy: turnContext?.payload.approval_policy,
         sandboxPolicy: turnContext?.payload.sandbox_policy
           ? {

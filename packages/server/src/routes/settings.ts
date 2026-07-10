@@ -33,11 +33,15 @@ export interface SettingsRoutesDeps {
   /** Callback to apply allowedHosts changes at runtime */
   onAllowedHostsChanged?: (value: string | undefined) => void;
   /** Callback to apply Ollama URL changes at runtime */
-  onOllamaUrlChanged?: (url: string | undefined) => void;
+  onOllamaUrlChanged?: (url: string | undefined) => void | Promise<void>;
   /** Callback to apply Ollama system prompt changes at runtime */
-  onOllamaSystemPromptChanged?: (prompt: string | undefined) => void;
+  onOllamaSystemPromptChanged?: (
+    prompt: string | undefined,
+  ) => void | Promise<void>;
   /** Callback to apply Ollama full system prompt toggle at runtime */
-  onOllamaUseFullSystemPromptChanged?: (enabled: boolean) => void;
+  onOllamaUseFullSystemPromptChanged?: (
+    enabled: boolean,
+  ) => void | Promise<void>;
 }
 
 function parseHostAliasList(rawHosts: unknown[]): {
@@ -71,6 +75,15 @@ function isThinkingOption(value: unknown): value is ThinkingOption {
   if (isEffortLevel(value)) return true;
   if (!value.startsWith("on:")) return false;
   return isEffortLevel(value.slice(3));
+}
+
+function isReasoningEffort(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 64 &&
+    /^[a-z0-9_-]+$/i.test(value)
+  );
 }
 
 function getEffortFromThinkingOption(
@@ -171,6 +184,20 @@ function parseNewSessionDefaults(
     }
     if (isThinkingOption(input.thinking)) {
       parsed.thinking = input.thinking;
+    }
+  }
+
+  if ("reasoningEffort" in input) {
+    if (
+      input.reasoningEffort !== undefined &&
+      input.reasoningEffort !== null &&
+      input.reasoningEffort !== "" &&
+      !isReasoningEffort(input.reasoningEffort)
+    ) {
+      return null;
+    }
+    if (isReasoningEffort(input.reasoningEffort)) {
+      parsed.reasoningEffort = input.reasoningEffort;
     }
   }
 
@@ -414,16 +441,16 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
       onAllowedHostsChanged(settings.allowedHosts);
     }
     if ("ollamaUrl" in updates && onOllamaUrlChanged) {
-      onOllamaUrlChanged(settings.ollamaUrl);
+      await onOllamaUrlChanged(settings.ollamaUrl);
     }
     if ("ollamaSystemPrompt" in updates && onOllamaSystemPromptChanged) {
-      onOllamaSystemPromptChanged(settings.ollamaSystemPrompt);
+      await onOllamaSystemPromptChanged(settings.ollamaSystemPrompt);
     }
     if (
       "ollamaUseFullSystemPrompt" in updates &&
       onOllamaUseFullSystemPromptChanged
     ) {
-      onOllamaUseFullSystemPromptChanged(
+      await onOllamaUseFullSystemPromptChanged(
         settings.ollamaUseFullSystemPrompt ?? false,
       );
     }

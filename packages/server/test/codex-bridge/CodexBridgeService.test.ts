@@ -355,6 +355,231 @@ describe("CodexBridgeService", () => {
     }
   });
 
+  it("keeps collaboration child threads under their parent session", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const parentThreadId = "parent-thread";
+      const childThreadId = "child-review-runtime";
+
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "thread/started",
+          params: {
+            thread: {
+              id: parentThreadId,
+              preview: "Review current changes",
+              createdAt: 1_780_000_000,
+              updatedAt: 1_780_000_001,
+              cwd: "/tmp/project-collaboration",
+              source: "vscode",
+              threadSource: "user",
+              status: { type: "active", activeFlags: [] },
+              turns: [],
+            },
+          },
+        }),
+      );
+      await waitFor(() => bridge.listSessionViews().length === 1);
+
+      // Child turn notifications may race ahead of the parent's collaboration
+      // item. Unknown records must remain private until metadata arrives.
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: { threadId: childThreadId },
+        }),
+      );
+      await delay(20);
+      expect(bridge.listSessions().map((session) => session.id)).toEqual([
+        parentThreadId,
+      ]);
+
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: {
+            threadId: parentThreadId,
+            turnId: "turn-parent",
+            item: {
+              type: "collabAgentToolCall",
+              id: "spawn-review-runtime",
+              tool: "spawnAgent",
+              status: "completed",
+              senderThreadId: parentThreadId,
+              receiverThreadIds: [childThreadId],
+              agentsStates: {},
+            },
+          },
+        }),
+      );
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: {
+            threadId: parentThreadId,
+            turnId: "turn-parent",
+            item: {
+              type: "subAgentActivity",
+              id: "activity-review-runtime",
+              kind: "started",
+              agentThreadId: childThreadId,
+              agentPath: "/root/review_runtime",
+            },
+          },
+        }),
+      );
+      await delay(20);
+
+      expect(bridge.listSessions().map((session) => session.id)).toEqual([
+        parentThreadId,
+      ]);
+      expect(bridge.listSessionViews()).toHaveLength(1);
+      expect(bridge.getSessionView(childThreadId)).toBeNull();
+      expect(bridge.isSessionActive(childThreadId)).toBe(false);
+      expect(bridge.getStatus().sessionCount).toBe(1);
+      expect(
+        emittedEvents.some(
+          (event) =>
+            [
+              "session-created",
+              "session-status-changed",
+              "process-state-changed",
+              "session-updated",
+            ].includes((event as { type?: string }).type ?? "") &&
+            ((event as { session?: { id?: string } }).session?.id ===
+              childThreadId ||
+              (event as { sessionId?: string }).sessionId === childThreadId),
+        ),
+      ).toBe(false);
+
+      const forwardedApproval = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: "child-approval",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: childThreadId,
+            turnId: "turn-child",
+            itemId: "item-child",
+            command: "pnpm test",
+            cwd: "/tmp/project-collaboration",
+            reason: "Run focused tests",
+          },
+        }),
+      );
+      expect(await forwardedApproval).toMatchObject({
+        id: "child-approval",
+        method: "item/commandExecution/requestApproval",
+      });
+
+      const pending = bridge.getPendingInputRequest(parentThreadId);
+      expect(pending).toMatchObject({
+        sessionId: parentThreadId,
+        type: "tool-approval",
+      });
+      expect(bridge.getSessionView(parentThreadId)).toMatchObject({
+        pendingInputType: "tool-approval",
+        session: { pendingInputType: "tool-approval" },
+      });
+
+      const upstreamMessageCount = upstreamMessages.length;
+      expect(
+        bridge.respondToInput(parentThreadId, pending?.id ?? "", "approve"),
+      ).toBe(true);
+      await waitFor(() => upstreamMessages.length === upstreamMessageCount + 1);
+      expect(upstreamMessages.at(-1)).toMatchObject({
+        id: "child-approval",
+        result: { decision: "accept" },
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("distinguishes app-server subagents from ordinary user forks", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "thread/started",
+          params: {
+            thread: {
+              id: "user-fork",
+              forkedFromId: "original-thread",
+              parentThreadId: null,
+              preview: "User-created fork",
+              createdAt: 1_780_000_000,
+              updatedAt: 1_780_000_001,
+              cwd: "/tmp/project-fork",
+              source: "vscode",
+              threadSource: "user",
+              status: { type: "active", activeFlags: [] },
+              turns: [],
+            },
+          },
+        }),
+      );
+      await waitFor(() => bridge.listSessionViews().length === 1);
+
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "thread/started",
+          params: {
+            thread: {
+              id: "direct-child",
+              parentThreadId: "user-fork",
+              preview: "Internal review worker",
+              createdAt: 1_780_000_002,
+              updatedAt: 1_780_000_003,
+              cwd: "/tmp/project-fork",
+              source: {
+                subAgent: {
+                  thread_spawn: {
+                    parent_thread_id: "user-fork",
+                    depth: 1,
+                    agent_path: "/root/review",
+                    agent_nickname: "Noether",
+                    agent_role: "reviewer",
+                  },
+                },
+              },
+              threadSource: "subagent",
+              status: { type: "active", activeFlags: [] },
+              turns: [],
+            },
+          },
+        }),
+      );
+      await delay(20);
+
+      expect(bridge.listSessions().map((session) => session.id)).toEqual([
+        "user-fork",
+      ]);
+      expect(bridge.getSessionView("direct-child")).toBeNull();
+      expect(bridge.isSessionActive("direct-child")).toBe(false);
+      expect(
+        emittedEvents.some(
+          (event) =>
+            (event as { session?: { id?: string } }).session?.id ===
+              "direct-child" ||
+            (event as { sessionId?: string }).sessionId === "direct-child",
+        ),
+      ).toBe(false);
+    } finally {
+      client.close();
+    }
+  });
+
   it("reports idle bridge sessions with open connections as external", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {

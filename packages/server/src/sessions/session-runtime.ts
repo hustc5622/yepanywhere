@@ -4,17 +4,29 @@ import type {
   SessionRuntime,
 } from "@yep-anywhere/shared";
 import type { PermissionMode } from "../sdk/types.js";
-import type { Process } from "../supervisor/Process.js";
 import type { SessionOwnership } from "../supervisor/types.js";
 
-export function getProcessActivity(process: Process): AgentActivity {
-  switch (process.state.type) {
+export interface SessionRuntimeProcess {
+  id: string;
+  state: AgentActivity | { type: AgentActivity };
+  permissionMode?: PermissionMode;
+  modeVersion?: number;
+  pendingInputRequest?: { type: string } | null;
+  getPendingInputRequest?: () => { type: string } | null;
+}
+
+export function getProcessActivity(
+  process: SessionRuntimeProcess,
+): AgentActivity {
+  const activity =
+    typeof process.state === "string" ? process.state : process.state.type;
+  switch (activity) {
     case "in-turn":
     case "idle":
     case "waiting-input":
     case "hold":
     case "terminated":
-      return process.state.type;
+      return activity;
   }
 }
 
@@ -26,7 +38,7 @@ export function isBusyActivity(activity: AgentActivity | undefined): boolean {
   );
 }
 
-function buildSelfOwnership(process: Process): SessionOwnership {
+function buildSelfOwnership(process: SessionRuntimeProcess): SessionOwnership {
   return {
     owner: "self",
     processId: process.id,
@@ -78,7 +90,7 @@ function getArchiveBlock(
 }
 
 export interface DeriveSessionRuntimeOptions {
-  process?: Process | null;
+  process?: SessionRuntimeProcess | null;
   externalActive?: boolean;
   externalActivity?: AgentActivity;
   fallbackOwnership?: SessionOwnership;
@@ -119,16 +131,10 @@ export function deriveSessionRuntime({
 }
 
 export function pendingInputTypeFromProcess(
-  process: Process | undefined | null,
+  process: SessionRuntimeProcess | undefined | null,
 ): "tool-approval" | "user-question" | undefined {
-  const getPendingInputRequest = (
-    process as
-      | { getPendingInputRequest?: () => { type: string } | null }
-      | undefined
-      | null
-  )?.getPendingInputRequest;
-  if (!getPendingInputRequest) return undefined;
-  const request = getPendingInputRequest.call(process);
+  const request =
+    process?.pendingInputRequest ?? process?.getPendingInputRequest?.() ?? null;
   if (!request) return undefined;
   return request.type === "tool-approval" ? "tool-approval" : "user-question";
 }

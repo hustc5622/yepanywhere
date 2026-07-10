@@ -124,6 +124,8 @@ export interface WorkerActivityEvent {
   activeWorkers: number;
   queueLength: number;
   hasActiveWork: boolean;
+  /** External work survives a web/API shell reload. */
+  runtimeMode?: "embedded" | "external";
   timestamp: string;
 }
 

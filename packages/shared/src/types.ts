@@ -46,6 +46,13 @@ export interface ModelInfo {
   name: string;
   /** Description of the model's capabilities (optional) */
   description?: string;
+  /** Reasoning efforts advertised by the provider, in picker display order. */
+  supportedReasoningEfforts?: Array<{
+    reasoningEffort: string;
+    description?: string;
+  }>;
+  /** Provider-recommended reasoning effort for this model. */
+  defaultReasoningEffort?: string;
   /** Model size in bytes (for local models) */
   size?: number;
   /** Context window size in tokens (for local models) */
@@ -162,6 +169,8 @@ export interface NewSessionDefaults {
   provider?: ProviderName;
   model?: string;
   thinking?: ThinkingOption;
+  /** Exact provider reasoning effort (currently used by Codex). */
+  reasoningEffort?: string;
   permissionMode?: PermissionMode;
   codexMcpMode?: CodexMcpMode;
   /** OpenCode-only per-session model limits */

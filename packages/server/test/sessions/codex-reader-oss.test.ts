@@ -168,6 +168,55 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(sessions[0]?.sessionId).toBe(matchingSessionId);
   });
 
+  it("keeps Codex collaboration children out of top-level session files", async () => {
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    await createSessionFile(parentId, "openai", "gpt-5");
+
+    const now = new Date().toISOString();
+    await writeFile(
+      join(testDir, `${childId}.jsonl`),
+      `${[
+        JSON.stringify({
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            session_id: parentId,
+            id: childId,
+            // fork_turns="none" children do not need forked_from_id.
+            parent_thread_id: parentId,
+            cwd: "/test/project",
+            timestamp: now,
+            thread_source: "subagent",
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: parentId,
+                  depth: 1,
+                  agent_path: "/root/review",
+                },
+              },
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: now,
+          payload: {
+            type: "user_message",
+            message: "Review the parent changes",
+          },
+        }),
+      ].join("\n")}\n`,
+    );
+
+    const sessions = await reader.listSessionFiles(testDir);
+    expect(sessions.map((session) => session.sessionId)).toEqual([parentId]);
+    expect(
+      await reader.getSessionSummary(childId, "test-project" as UrlProjectId),
+    ).toBeNull();
+  });
+
   const createRollbackSessionFile = async (sessionId: string) => {
     const now = new Date().toISOString();
     const responseMessage = (

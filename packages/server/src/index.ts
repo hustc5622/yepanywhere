@@ -60,6 +60,8 @@ import {
 import { RecentsService } from "./recents/index.js";
 import { createUploadRoutes } from "./routes/upload.js";
 import { createWsRoutes } from "./routes/ws.js";
+import { HttpRuntimeController } from "./runtime/HttpRuntimeController.js";
+import type { RuntimeController } from "./runtime/types.js";
 import { detectClaudeCli, detectCodexCli } from "./sdk/cli-detection.js";
 import { initMessageLogger } from "./sdk/messageLogger.js";
 import { ClaudeOllamaProvider } from "./sdk/providers/claude-ollama.js";
@@ -77,6 +79,7 @@ import { ClaudeSessionReader } from "./sessions/reader.js";
 import { TerminalService } from "./terminal/TerminalService.js";
 import { UploadManager } from "./uploads/manager.js";
 import {
+  type BusEvent,
   EventBus,
   FileWatcher,
   FocusedSessionWatchManager,
@@ -118,9 +121,7 @@ process.on("unhandledRejection", (reason) => {
 const config = loadConfig();
 
 // Track services for graceful shutdown (set after createApp)
-let supervisorForShutdown:
-  | Awaited<ReturnType<typeof createApp>>["supervisor"]
-  | null = null;
+let runtimeControllerForShutdown: RuntimeController | null = null;
 let deviceBridgeForShutdown: DeviceBridgeService | null = null;
 let codexBridgeForShutdown: CodexBridgeController | null = null;
 let opencodeBridgeForShutdown: OpenCodeBridgeController | null = null;
@@ -130,7 +131,8 @@ let isShuttingDown = false;
 
 /**
  * Graceful shutdown handler.
- * Aborts all running Claude processes before exiting to prevent orphaned child processes.
+ * Embedded mode owns and aborts agent children. External mode only detaches
+ * the shell subscriptions so a web/API replacement cannot interrupt work.
  */
 async function gracefulShutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
@@ -141,25 +143,17 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   console.log(`[Shutdown] Received ${signal}, cleaning up...`);
 
-  if (supervisorForShutdown) {
-    const processes = supervisorForShutdown.getAllProcesses();
-    if (processes.length > 0) {
+  if (runtimeControllerForShutdown) {
+    const abortActive = runtimeControllerForShutdown.mode === "embedded";
+    try {
+      await runtimeControllerForShutdown.shutdown({ abortActive });
       console.log(
-        `[Shutdown] Aborting ${processes.length} active session(s)...`,
+        abortActive
+          ? "[Shutdown] Embedded agent runtime shut down"
+          : "[Shutdown] Detached from external agent runtime",
       );
-      await Promise.all(
-        processes.map(async (p) => {
-          try {
-            await p.abort();
-            console.log(`[Shutdown] Aborted session ${p.sessionId}`);
-          } catch (error) {
-            console.error(
-              `[Shutdown] Error aborting session ${p.sessionId}:`,
-              error,
-            );
-          }
-        }),
-      );
+    } catch (error) {
+      console.error("[Shutdown] Error shutting down runtime facade:", error);
     }
   }
 
@@ -603,7 +597,110 @@ async function startServer() {
 
   // Create the app first (without WebSocket support initially)
   // We'll add WebSocket routes after setting up WebSocket support
-  const { app, supervisor, scanner } = createApp({
+  const configuredRuntimeController =
+    config.runtimeMode === "external"
+      ? new HttpRuntimeController({
+          baseUrl: config.runtimeControlUrl,
+          tokenFile: config.runtimeTokenFile,
+        })
+      : undefined;
+  if (configuredRuntimeController) {
+    const applyRuntimeEvent = async (event: BusEvent): Promise<void> => {
+      if (event.type === "session-id-changed") {
+        await sessionMetadataService.remapSessionId(
+          event.oldSessionId,
+          event.newSessionId,
+        );
+        if (event.executor) {
+          await sessionMetadataService.setExecutor(
+            event.newSessionId,
+            event.executor,
+          );
+        }
+        eventBus.emit(event);
+        eventBus.emit({
+          type: "session-metadata-changed",
+          sessionId: event.newSessionId,
+          projectId: event.projectId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      eventBus.emit(
+        event.type === "worker-activity-changed"
+          ? { ...event, runtimeMode: "external" }
+          : event,
+      );
+    };
+    let runtimeEventChain = Promise.resolve();
+    const enqueueRuntimeEvent = (event: BusEvent): Promise<void> => {
+      const work = runtimeEventChain
+        .catch(() => {})
+        .then(() => applyRuntimeEvent(event));
+      runtimeEventChain = work;
+      return work;
+    };
+
+    await configuredRuntimeController.start();
+    await configuredRuntimeController.updateProviderSettings({
+      claudeOllama: {
+        url: serverSettingsService.getSetting("ollamaUrl"),
+        systemPrompt: serverSettingsService.getSetting("ollamaSystemPrompt"),
+        useFullSystemPrompt:
+          serverSettingsService.getSetting("ollamaUseFullSystemPrompt") ??
+          false,
+      },
+    });
+    const activitySubscription =
+      await configuredRuntimeController.subscribeActivity((event) => {
+        void enqueueRuntimeEvent(event).catch((error) => {
+          console.error("[AgentRuntime] Failed to apply runtime event:", error);
+        });
+      });
+    if (!activitySubscription) {
+      throw new Error("External agent runtime activity stream is unavailable");
+    }
+
+    // Delayed provider IDs can arrive while the web shell is being replaced.
+    // Replay those idempotent remaps before serving requests so metadata has a
+    // single durable owner in this process.
+    const replay = await configuredRuntimeController.replay({});
+    for (const record of replay) {
+      if (record.type !== "session-id-changed") continue;
+      const data = record.data as {
+        oldSessionId?: unknown;
+        newSessionId?: unknown;
+        projectId?: unknown;
+        executor?: unknown;
+      };
+      if (
+        typeof data.oldSessionId !== "string" ||
+        typeof data.newSessionId !== "string" ||
+        typeof data.projectId !== "string"
+      ) {
+        continue;
+      }
+      await enqueueRuntimeEvent({
+        type: "session-id-changed",
+        oldSessionId: data.oldSessionId,
+        newSessionId: data.newSessionId,
+        projectId: data.projectId as Extract<
+          BusEvent,
+          { type: "session-id-changed" }
+        >["projectId"],
+        executor: typeof data.executor === "string" ? data.executor : undefined,
+        timestamp: record.timestamp,
+      });
+    }
+    console.log(
+      `[AgentRuntime] mode=external control=${config.runtimeControlUrl}`,
+    );
+  } else {
+    console.log("[AgentRuntime] mode=embedded");
+  }
+
+  const { app, supervisor, runtimeController, scanner } = createApp({
     realSdk,
     projectsDir: config.claudeProjectsDir,
     idleTimeoutMs: config.idleTimeoutMs,
@@ -647,7 +744,46 @@ async function startServer() {
     allowedImagePaths: config.allowedImagePaths,
     allowedLocalFilePaths: config.allowedLocalFilePaths,
     basePath: config.basePath,
+    runtimeController: configuredRuntimeController,
   });
+  if (configuredRuntimeController) {
+    const [activity, processes] = await Promise.all([
+      runtimeController.getWorkerActivity(),
+      runtimeController.listProcessSnapshots(),
+    ]);
+    eventBus.emit({
+      type: "worker-activity-changed",
+      ...activity,
+      runtimeMode: "external",
+      timestamp: new Date().toISOString(),
+    });
+    for (const process of processes) {
+      eventBus.emit({
+        type: "session-status-changed",
+        sessionId: process.sessionId,
+        projectId: process.projectId,
+        ownership: {
+          owner: "self",
+          processId: process.id,
+          permissionMode: process.permissionMode,
+          modeVersion: process.modeVersion,
+        },
+        timestamp: new Date().toISOString(),
+      });
+      eventBus.emit({
+        type: "process-state-changed",
+        sessionId: process.sessionId,
+        projectId: process.projectId,
+        activity: process.state,
+        pendingInputType: process.pendingInputRequest
+          ? process.pendingInputRequest.type === "tool-approval"
+            ? "tool-approval"
+            : "user-question"
+          : undefined,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
 
   const focusedSessionWatchManager = new FocusedSessionWatchManager({
     scanner,
@@ -661,7 +797,7 @@ async function startServer() {
   });
 
   // Set service references for graceful shutdown
-  supervisorForShutdown = supervisor;
+  runtimeControllerForShutdown = runtimeController;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
   codexBridgeForShutdown = codexBridgeService ?? null;
   opencodeBridgeForShutdown = opencodeBridgeService;
@@ -710,7 +846,7 @@ async function startServer() {
     app,
     baseUrl,
     basePath: config.basePath,
-    supervisor,
+    runtimeController,
     eventBus,
     uploadManager: wsUploadManager,
     connectedBrowsers: connectedBrowsersService,

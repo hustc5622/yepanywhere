@@ -350,6 +350,8 @@ describe("Sessions metadata route", () => {
           provider: "claude",
           model: "gpt-5.4",
           resolvedModel: "gpt-5.4",
+          requestedReasoningEffort: "ultra",
+          reasoningEffort: "ultra",
           executor: undefined,
         })),
         queueMessageToSession,
@@ -387,6 +389,7 @@ describe("Sessions metadata route", () => {
       expect.objectContaining({
         model: "gpt-5.4",
         providerName: "codex",
+        reasoningEffort: "ultra",
       }),
     );
   });

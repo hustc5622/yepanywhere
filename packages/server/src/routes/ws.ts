@@ -4,11 +4,11 @@ import type { WSEvents } from "hono/ws";
 import type { WebSocket as RawWebSocket } from "ws";
 import type { DeviceBridgeService } from "../device/DeviceBridgeService.js";
 import { isAllowedOrigin } from "../middleware/allowed-hosts.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type {
   BrowserProfileService,
   ConnectedBrowsersService,
 } from "../services/index.js";
-import type { Supervisor } from "../supervisor/Supervisor.js";
 import type { TerminalService } from "../terminal/TerminalService.js";
 import type { UploadManager } from "../uploads/manager.js";
 import type { EventBus, FocusedSessionWatchManager } from "../watcher/index.js";
@@ -41,8 +41,8 @@ export interface WsRoutesDeps {
    * before they reach the Hono router. See WsHandlerDeps.basePath.
    */
   basePath?: string;
-  /** Supervisor for subscribing to session events */
-  supervisor: Supervisor;
+  /** Runtime facade for subscribing to session events */
+  runtimeController: RuntimeController;
   /** Event bus for subscribing to activity events */
   eventBus: EventBus;
   /** Upload manager for handling file uploads */
@@ -77,7 +77,7 @@ export function createWsRoutes(
     upgradeWebSocket,
     app,
     baseUrl,
-    supervisor,
+    runtimeController,
     eventBus,
     uploadManager,
     connectedBrowsers,
@@ -92,7 +92,7 @@ export function createWsRoutes(
     app,
     baseUrl,
     basePath: deps.basePath,
-    supervisor,
+    runtimeController,
     eventBus,
     uploadManager,
     connectedBrowsers,

@@ -52,6 +52,13 @@ export class SessionMetadataService {
   private state: SessionMetadataState;
   private dataDir: string;
   private filePath: string;
+  /**
+   * Providers may initially expose a temporary session ID and replace it with
+   * the durable ID after their init event arrives. Keep that relationship in
+   * memory so metadata writes racing with the init event land on the durable
+   * session instead of recreating an orphaned temporary entry.
+   */
+  private sessionIdAliases = new Map<string, string>();
   private savePromise: Promise<void> | null = null;
   private pendingSave = false;
 
@@ -110,7 +117,7 @@ export class SessionMetadataService {
    * Get metadata for a session.
    */
   getMetadata(sessionId: string): SessionMetadata | undefined {
-    return this.state.sessions[sessionId];
+    return this.state.sessions[this.resolveSessionId(sessionId)];
   }
 
   /**
@@ -222,7 +229,7 @@ export class SessionMetadataService {
    * Returns undefined if the provider was never explicitly saved.
    */
   getProvider(sessionId: string): string | undefined {
-    return this.state.sessions[sessionId]?.provider;
+    return this.getMetadata(sessionId)?.provider;
   }
 
   /**
@@ -230,7 +237,7 @@ export class SessionMetadataService {
    * Returns undefined if the session ran locally or executor is unknown.
    */
   getExecutor(sessionId: string): string | undefined {
-    return this.state.sessions[sessionId]?.executor;
+    return this.getMetadata(sessionId)?.executor;
   }
 
   /**
@@ -238,7 +245,50 @@ export class SessionMetadataService {
    * Returns undefined when the session should use provider defaults.
    */
   getCodexMcpMode(sessionId: string): CodexMcpMode | undefined {
-    return this.state.sessions[sessionId]?.codexMcpMode;
+    return this.getMetadata(sessionId)?.codexMcpMode;
+  }
+
+  /**
+   * Move metadata from a provider's temporary session ID to its durable ID.
+   *
+   * The alias is registered before reading state so a later write that still
+   * uses the temporary ID is redirected even when this method wins the race
+   * against the HTTP creation route.
+   */
+  async remapSessionId(
+    oldSessionId: string,
+    newSessionId: string,
+  ): Promise<void> {
+    if (!oldSessionId || !newSessionId || oldSessionId === newSessionId) {
+      return;
+    }
+
+    const resolvedOldSessionId = this.resolveSessionId(oldSessionId);
+    const resolvedNewSessionId = this.resolveSessionId(newSessionId);
+
+    this.sessionIdAliases.set(oldSessionId, resolvedNewSessionId);
+    if (resolvedOldSessionId !== oldSessionId) {
+      this.sessionIdAliases.set(resolvedOldSessionId, resolvedNewSessionId);
+    }
+    for (const [alias, target] of this.sessionIdAliases) {
+      if (target === resolvedOldSessionId) {
+        this.sessionIdAliases.set(alias, resolvedNewSessionId);
+      }
+    }
+
+    const oldMetadata = this.state.sessions[resolvedOldSessionId];
+    const newMetadata = this.state.sessions[resolvedNewSessionId];
+    if (!oldMetadata && !newMetadata) {
+      return;
+    }
+
+    // Durable-ID metadata wins when both entries already exist; the temporary
+    // entry only fills fields that have not yet been persisted on the target.
+    const mergedMetadata = { ...oldMetadata, ...newMetadata };
+    delete this.state.sessions[oldSessionId];
+    delete this.state.sessions[resolvedOldSessionId];
+    this.state.sessions[resolvedNewSessionId] = mergedMetadata;
+    await this.save();
   }
 
   /**
@@ -293,7 +343,8 @@ export class SessionMetadataService {
     sessionId: string,
     updater: (current: SessionMetadata) => SessionMetadata,
   ): void {
-    const existing = this.state.sessions[sessionId] ?? {};
+    const resolvedSessionId = this.resolveSessionId(sessionId);
+    const existing = this.state.sessions[resolvedSessionId] ?? {};
     const updated = updater(existing);
 
     // Remove undefined values and check if entry should be deleted
@@ -310,11 +361,23 @@ export class SessionMetadataService {
 
     if (Object.keys(cleaned).length === 0) {
       // Remove the entry entirely if empty
-      const { [sessionId]: _, ...rest } = this.state.sessions;
+      const { [resolvedSessionId]: _, ...rest } = this.state.sessions;
       this.state.sessions = rest;
     } else {
-      this.state.sessions[sessionId] = cleaned;
+      this.state.sessions[resolvedSessionId] = cleaned;
     }
+  }
+
+  private resolveSessionId(sessionId: string): string {
+    let resolved = sessionId;
+    const visited = new Set<string>();
+    while (!visited.has(resolved)) {
+      visited.add(resolved);
+      const next = this.sessionIdAliases.get(resolved);
+      if (!next) break;
+      resolved = next;
+    }
+    return resolved;
   }
 
   /**
@@ -322,8 +385,9 @@ export class SessionMetadataService {
    * Useful when a session is deleted.
    */
   async clearSession(sessionId: string): Promise<void> {
-    if (this.state.sessions[sessionId]) {
-      const { [sessionId]: _, ...rest } = this.state.sessions;
+    const resolvedSessionId = this.resolveSessionId(sessionId);
+    if (this.state.sessions[resolvedSessionId]) {
+      const { [resolvedSessionId]: _, ...rest } = this.state.sessions;
       this.state.sessions = rest;
       await this.save();
     }

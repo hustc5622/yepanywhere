@@ -104,6 +104,8 @@ export class Process {
   readonly startedAt: Date;
   readonly provider: ProviderName;
   readonly model: string | undefined;
+  /** Exact provider reasoning effort requested when the process started. */
+  readonly requestedReasoningEffort: string | undefined;
   /** SSH host for remote execution (undefined = local) */
   readonly executor: string | undefined;
 
@@ -241,6 +243,7 @@ export class Process {
     this._permissions = options.permissions;
     this.provider = options.provider;
     this.model = options.model;
+    this.requestedReasoningEffort = options.reasoningEffort;
     this.executor = options.executor;
     this._thinking = options.thinking;
     this._effort = options.effort;
@@ -302,7 +305,11 @@ export class Process {
   }
 
   get resolvedReasoningEffort(): string | undefined {
-    return this._resolvedReasoningEffort ?? this._effort;
+    return (
+      this._resolvedReasoningEffort ??
+      this.requestedReasoningEffort ??
+      this._effort
+    );
   }
 
   get serviceTier(): string | undefined {
@@ -785,6 +792,7 @@ export class Process {
       provider: this.provider,
       model: this._resolvedModel ?? this.model,
       reasoningEffort: this.resolvedReasoningEffort,
+      requestedReasoningEffort: this.requestedReasoningEffort,
       serviceTier: this._serviceTier,
       thinking: this._thinking,
       effort: this._effort,

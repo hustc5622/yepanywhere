@@ -104,6 +104,14 @@ export interface Config {
   idleTimeoutMs: number;
   /** Default permission mode for new sessions */
   defaultPermissionMode: PermissionMode;
+  /** Whether live agent processes are embedded in this server or external. */
+  runtimeMode: "embedded" | "external";
+  /** Loopback control URL for the external agent runtime. */
+  runtimeControlUrl: string;
+  /** External agent runtime control port. */
+  runtimePort: number;
+  /** Bearer token file shared with the external agent runtime. */
+  runtimeTokenFile: string;
   /** Server port */
   port: number;
   /** File to write the actual port to after binding (for test harnesses) */
@@ -202,6 +210,15 @@ export function loadConfig(): Config {
 
   // Get data directory (supports profiles for multiple instances)
   const dataDir = getDataDir();
+  const serverPort = parseIntOrDefault(process.env.PORT, 3400);
+  const runtimeMode =
+    process.env.YEP_RUNTIME_MODE?.trim().toLowerCase() === "external"
+      ? "external"
+      : "embedded";
+  const runtimePort = parseIntOrDefault(
+    process.env.YEP_RUNTIME_PORT,
+    serverPort + 3,
+  );
 
   // Session directories can be overridden via env vars for test isolation
   const claudeSessionsDir =
@@ -371,7 +388,14 @@ export function loadConfig(): Config {
     projectScanCacheTtlMs,
     idleTimeoutMs: parseIntOrDefault(process.env.IDLE_TIMEOUT, 5 * 60) * 1000,
     defaultPermissionMode: parsePermissionMode(process.env.PERMISSION_MODE),
-    port: parseIntOrDefault(process.env.PORT, 3400),
+    runtimeMode,
+    runtimeControlUrl:
+      process.env.YEP_RUNTIME_CONTROL_URL ?? `http://127.0.0.1:${runtimePort}`,
+    runtimePort,
+    runtimeTokenFile:
+      process.env.YEP_RUNTIME_TOKEN_FILE ??
+      path.join(dataDir, "runtime", "token"),
+    port: serverPort,
     portFile: process.env.PORT_FILE ?? null,
     // Host defaults to 127.0.0.1 for security and consistency (avoids IPv6 ambiguity with "localhost")
     host: process.env.HOST ?? "127.0.0.1",

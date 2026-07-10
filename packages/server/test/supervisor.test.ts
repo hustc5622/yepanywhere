@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageQueue } from "../src/sdk/messageQueue.js";
 import { MockClaudeSDK, createMockScenario } from "../src/sdk/mock.js";
-import type { AgentProvider } from "../src/sdk/providers/types.js";
+import type {
+  AgentProvider,
+  StartSessionOptions,
+} from "../src/sdk/providers/types.js";
 import type { RealClaudeSDKInterface } from "../src/sdk/types.js";
 import { Supervisor } from "../src/supervisor/Supervisor.js";
 import type { SessionSummary } from "../src/supervisor/types.js";
@@ -479,6 +482,93 @@ describe("Supervisor", () => {
         effort: "high",
         initialMessage: { text: "second" },
       });
+    });
+
+    it("preserves an exact Codex reasoning effort and restarts when it changes", async () => {
+      const aborters: Array<() => void> = [];
+      const startSession = vi.fn(async (options: StartSessionOptions) => {
+        let aborted = false;
+        aborters.push(() => {
+          aborted = true;
+        });
+        const sessionId = options.resumeSessionId ?? "reasoning-session";
+        async function* iterator() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: sessionId,
+          };
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: aborters.at(-1) ?? (() => {}),
+        };
+      });
+      const provider: AgentProvider = {
+        name: "codex",
+        displayName: "Codex",
+        supportsPermissionMode: true,
+        supportsThinkingToggle: true,
+        supportsSlashCommands: false,
+        isInstalled: async () => true,
+        isAuthenticated: async () => true,
+        getAuthStatus: async () => ({
+          installed: true,
+          authenticated: true,
+          enabled: true,
+        }),
+        getAvailableModels: async () => [],
+        startSession,
+      };
+      const reasoningSupervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+      });
+
+      const started = await reasoningSupervisor.startSession(
+        "/tmp/reasoning-session",
+        { text: "start" },
+        undefined,
+        { reasoningEffort: "ultra" },
+      );
+      expect("id" in started).toBe(true);
+      expect(
+        "requestedReasoningEffort" in started
+          ? started.requestedReasoningEffort
+          : undefined,
+      ).toBe("ultra");
+
+      await expect(
+        reasoningSupervisor.queueMessageToSession(
+          "reasoning-session",
+          "/tmp/reasoning-session",
+          { text: "same effort" },
+          undefined,
+          { reasoningEffort: "ultra" },
+        ),
+      ).resolves.toMatchObject({ success: true, restarted: false });
+      expect(startSession).toHaveBeenCalledTimes(1);
+
+      await expect(
+        reasoningSupervisor.queueMessageToSession(
+          "reasoning-session",
+          "/tmp/reasoning-session",
+          { text: "lower effort" },
+          undefined,
+          { reasoningEffort: "xhigh" },
+        ),
+      ).resolves.toMatchObject({ success: true, restarted: true });
+      expect(startSession).toHaveBeenCalledTimes(2);
+      expect(startSession.mock.calls[1]?.[0]).toMatchObject({
+        resumeSessionId: "reasoning-session",
+        reasoningEffort: "xhigh",
+      });
+
+      await reasoningSupervisor.shutdown();
     });
   });
 

@@ -251,6 +251,57 @@ describe("SessionMetadataService", () => {
     });
   });
 
+  describe("remapSessionId", () => {
+    it("moves temporary session metadata to the durable provider ID", async () => {
+      await service.initialize();
+      await service.setProvider("temporary-id", "codex");
+      await service.setCodexMcpMode("temporary-id", "standard");
+      await service.setCreatedBy("temporary-id", "yep");
+
+      await service.remapSessionId("temporary-id", "durable-id");
+
+      expect(service.getMetadata("durable-id")).toEqual({
+        provider: "codex",
+        codexMcpMode: "standard",
+        createdBy: "yep",
+      });
+      expect(service.getMetadata("temporary-id")).toEqual(
+        service.getMetadata("durable-id"),
+      );
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+      expect(reloaded.getMetadata("temporary-id")).toBeUndefined();
+      expect(reloaded.getMetadata("durable-id")?.createdBy).toBe("yep");
+    });
+
+    it("redirects metadata writes that race after the ID change", async () => {
+      await service.initialize();
+
+      await service.remapSessionId("temporary-id", "durable-id");
+      await service.setCreatedBy("temporary-id", "yep");
+
+      expect(service.getMetadata("durable-id")?.createdBy).toBe("yep");
+      const allMetadata = service.getAllMetadata();
+      expect(allMetadata["temporary-id"]).toBeUndefined();
+      expect(allMetadata["durable-id"]?.createdBy).toBe("yep");
+    });
+
+    it("preserves metadata already written under the durable ID", async () => {
+      await service.initialize();
+      await service.setProvider("temporary-id", "codex");
+      await service.setTitle("temporary-id", "Temporary title");
+      await service.setTitle("durable-id", "Durable title");
+
+      await service.remapSessionId("temporary-id", "durable-id");
+
+      expect(service.getMetadata("durable-id")).toEqual({
+        provider: "codex",
+        customTitle: "Durable title",
+      });
+    });
+  });
+
   describe("setStarred", () => {
     it("sets starred status for a session", async () => {
       await service.initialize();

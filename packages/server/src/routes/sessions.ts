@@ -49,6 +49,11 @@ import {
 } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
+import { EmbeddedRuntimeController } from "../runtime/EmbeddedRuntimeController.js";
+import type {
+  RuntimeController,
+  RuntimeStartResponse,
+} from "../runtime/types.js";
 import { getProjectDirFromCwd, syncSessions } from "../sdk/session-sync.js";
 import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
@@ -74,7 +79,6 @@ import {
 import type { ISessionReader } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
-import type { Process } from "../supervisor/Process.js";
 import type {
   QueueFullResponse,
   Supervisor,
@@ -96,7 +100,7 @@ import type { EventBus } from "../watcher/index.js";
  * Type guard to check if a result is a QueuedResponse
  */
 function isQueuedResponse(
-  result: Process | QueuedResponse | QueueFullResponse,
+  result: RuntimeStartResponse,
 ): result is QueuedResponse {
   return "queued" in result && result.queued === true;
 }
@@ -105,7 +109,7 @@ function isQueuedResponse(
  * Type guard to check if a result is a QueueFullResponse
  */
 function isQueueFullResponse(
-  result: Process | QueuedResponse | QueueFullResponse,
+  result: RuntimeStartResponse,
 ): result is QueueFullResponse {
   return "error" in result && result.error === "queue_full";
 }
@@ -240,7 +244,31 @@ function parseOptionalOpenCodeModelLimits(rawLimits: unknown): {
   };
 }
 
+function parseOptionalReasoningEffort(rawEffort: unknown): {
+  reasoningEffort?: string;
+  error?: string;
+} {
+  if (rawEffort === undefined || rawEffort === null || rawEffort === "") {
+    return {};
+  }
+  if (typeof rawEffort !== "string") {
+    return { error: "reasoningEffort must be a string" };
+  }
+
+  const reasoningEffort = rawEffort.trim();
+  if (
+    reasoningEffort.length === 0 ||
+    reasoningEffort.length > 64 ||
+    !/^[a-z0-9_-]+$/i.test(reasoningEffort)
+  ) {
+    return { error: "Invalid reasoningEffort" };
+  }
+
+  return { reasoningEffort };
+}
+
 export interface SessionsDeps {
+  runtimeController?: RuntimeController;
   supervisor: Supervisor;
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
@@ -353,6 +381,8 @@ interface StartSessionBody {
   mode?: PermissionMode;
   model?: ModelOption;
   thinking?: ThinkingOption;
+  /** Exact provider reasoning effort. Only used when provider resolves to Codex. */
+  reasoningEffort?: string;
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
@@ -382,6 +412,8 @@ interface CreateSessionBody {
   mode?: PermissionMode;
   model?: ModelOption;
   thinking?: ThinkingOption;
+  /** Exact provider reasoning effort. Only used when provider resolves to Codex. */
+  reasoningEffort?: string;
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
@@ -831,6 +863,8 @@ function recordOpenCodeContextWindowOverride(
 
 export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const routes = new Hono();
+  const runtimeController =
+    deps.runtimeController ?? new EmbeddedRuntimeController(deps.supervisor);
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
     deps.codexReaderFactory?.(projectPath) ??
     (deps.codexSessionsDir
@@ -949,7 +983,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     // Check if session is actively owned by a process
-    const process = deps.supervisor.getProcessForSession(sessionId);
+    const process =
+      await runtimeController.getProcessSnapshotForSession(sessionId);
     const bridgeView = await getBridgeSessionView(deps, sessionId);
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;
@@ -980,9 +1015,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Get pending input request from active process
     const activePendingInputRequest =
-      process?.state.type === "waiting-input"
-        ? process.state.request
-        : await getBridgePendingInputRequest(deps, sessionId);
+      process?.pendingInputRequest ??
+      (await getBridgePendingInputRequest(deps, sessionId));
     const pendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -994,7 +1028,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Get available slash commands from active process
     const slashCommands = process?.supportsDynamicCommands
-      ? await process.supportedCommands()
+      ? await runtimeController.getSupportedCommands(process.id)
       : null;
 
     // Read minimal session info from disk (just for title/timestamps, no messages)
@@ -1051,7 +1085,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           project.provider,
         model: sessionSummary?.model,
         reasoningEffort:
-          sessionSummary?.reasoningEffort ?? process?.resolvedReasoningEffort,
+          sessionSummary?.reasoningEffort ?? process?.reasoningEffort,
         serviceTier: sessionSummary?.serviceTier ?? process?.serviceTier,
         originator: sessionSummary?.originator,
         createdBy: metadata?.createdBy ?? sessionSummary?.createdBy,
@@ -1099,18 +1133,19 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         return c.json({ error: "Project not found" }, 404);
       }
 
-      const process = deps.supervisor.getProcessForSession(sessionId);
+      const process =
+        await runtimeController.getProcessSnapshotForSession(sessionId);
 
       // Live path — SDK-backed breakdown.
       if (process) {
         // Opportunistically probe initializationResult() once per process so
         // ModelInfoService learns the real context window (and persists it),
         // even if the user never opens this modal again.
-        if (!process.initializationResultProbed && deps.modelInfoService) {
-          // Fire and forget; failures are already swallowed inside Process.
-          process.markInitializationResultProbed();
-          void process
-            .initializationResult()
+        if (deps.modelInfoService) {
+          // Fire and forget; the runtime guarantees this probe only runs once
+          // for each live process.
+          void runtimeController
+            .probeInitializationResult(sessionId)
             .then((init) => {
               if (!init || !init.models) return;
               for (const m of init.models) {
@@ -1129,7 +1164,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         }
 
         try {
-          const usage = await process.getContextUsage();
+          const usage = await runtimeController.getContextUsage(sessionId);
           // Validate shape: an empty {} from a not-yet-initialized SDK is
           // truthy but would crash the client when it iterates over
           // `categories`. Only accept fully-formed SDK payloads; otherwise
@@ -1137,8 +1172,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           if (usage && Array.isArray(usage.categories)) {
             // Persist the live max-tokens against the resolved model so the
             // fallback path stays accurate after this process exits.
-            const modelForCache =
-              process.resolvedModel ?? process.model ?? usage.model;
+            const modelForCache = process.model ?? usage.model;
             if (modelForCache && usage.rawMaxTokens > 0) {
               deps.modelInfoService?.recordContextWindow(
                 modelForCache,
@@ -1225,12 +1259,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         project.provider;
       const model = sessionSummary?.model;
 
+      const summaryWindow = sessionSummary?.contextUsage?.contextWindow;
       const cachedWindow = deps.modelInfoService?.getCachedContextWindow(
         model,
         providerName,
         sessionId,
       );
       const baseContextWindow =
+        summaryWindow ??
         cachedWindow ??
         deps.modelInfoService?.getContextWindow(
           model,
@@ -1267,7 +1303,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         source: "jsonl",
         model,
         contextWindow: escalatedWindow,
-        contextWindowFromCache: cachedWindow !== undefined,
+        contextWindowFromCache:
+          summaryWindow !== undefined || cachedWindow !== undefined,
         contextUsage,
         cumulativeUsage: sessionSummary?.cumulativeUsage,
         compactEvents: sessionSummary?.compactEvents,
@@ -1315,7 +1352,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     // Check if session is actively owned by a process
-    const process = deps.supervisor.getProcessForSession(sessionId);
+    const process =
+      await runtimeController.getProcessSnapshotForSession(sessionId);
     const bridgeView = await getBridgeSessionView(deps, sessionId);
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;
@@ -1332,7 +1370,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Check if we've ever owned this session (for orphan detection)
     // Only mark tools as "aborted" if we owned the session and know it terminated
-    const wasEverOwned = deps.supervisor.wasEverOwned(sessionId);
+    const wasEverOwned = await runtimeController.wasEverOwned(sessionId);
 
     // Always try to read from disk first (even for owned sessions)
     const reader = deps.readerFactory(project);
@@ -1435,9 +1473,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // Get pending input request from active process (for tool approval prompts)
     // This ensures clients get pending requests immediately without waiting for SSE
     const activePendingInputRequest =
-      process?.state.type === "waiting-input"
-        ? process.state.request
-        : await getBridgePendingInputRequest(deps, sessionId);
+      process?.pendingInputRequest ??
+      (await getBridgePendingInputRequest(deps, sessionId));
     const livePendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -1451,17 +1488,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // The init message that normally carries these gets discarded from the SSE buffer
     // after ~30s, so we attach them to the REST response for reliable delivery.
     const slashCommands = process?.supportsDynamicCommands
-      ? await process.supportedCommands()
+      ? await runtimeController.getSupportedCommands(process.id)
       : null;
 
     if (!session) {
       // Session file doesn't exist yet - only valid if we own the process
       if (process) {
         // Get raw messages from process memory
-        const sdkMessages = process.getMessageHistory();
+        const sdkMessages = process.messageHistory;
         // Convert to client format
         const processMessages = sdkMessagesToClientMessages(sdkMessages, {
-          model: process.resolvedModel,
+          model: process.model,
           provider: process.provider,
         });
         // Extract context usage from raw SDK messages (has usage field)
@@ -1470,7 +1507,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         const sdkContextWindow = process.contextWindow;
         const contextUsage = extractContextUsageFromSDKMessages(
           sdkMessages,
-          process.resolvedModel,
+          process.model,
           process.provider,
           sdkContextWindow
             ? () => sdkContextWindow
@@ -1479,9 +1516,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               : undefined,
         );
         // Cache SDK-reported context window for future JSONL reads
-        if (mis && sdkContextWindow && process.resolvedModel) {
+        if (mis && sdkContextWindow && process.model) {
           mis.recordContextWindow(
-            process.resolvedModel,
+            process.model,
             sdkContextWindow,
             process.provider,
           );
@@ -1522,8 +1559,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             lastSeenAt: lastSeenEntry?.timestamp,
             hasUnread,
             provider: process.provider,
-            model: process.resolvedModel,
-            reasoningEffort: process.resolvedReasoningEffort,
+            model: process.model,
+            reasoningEffort: process.reasoningEffort,
             serviceTier: process.serviceTier,
             contextUsage,
           },
@@ -1649,7 +1686,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       };
       // Cache for future reads without a live process
       deps.modelInfoService?.recordContextWindow(
-        process.resolvedModel ?? session.model ?? "",
+        process.model ?? session.model ?? "",
         cw,
         process.provider,
       );
@@ -1753,6 +1790,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedOpenCodeModelLimits.error) {
       return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
     }
+    const parsedReasoningEffort = parseOptionalReasoningEffort(
+      body.reasoningEffort,
+    );
+    if (parsedReasoningEffort.error) {
+      return c.json({ error: parsedReasoningEffort.error }, 400);
+    }
 
     const userMessage: UserMessage = {
       text: body.message,
@@ -1783,14 +1826,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const globalInstructions =
       deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
 
-    const result = await deps.supervisor.startSession(
-      project.path,
-      userMessage,
-      body.mode,
-      {
+    const result = await runtimeController.startSession({
+      projectPath: project.path,
+      message: userMessage,
+      permissionMode: body.mode,
+      modelSettings: {
         model,
         thinking,
         effort,
+        reasoningEffort: parsedReasoningEffort.reasoningEffort,
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
         opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
@@ -1798,7 +1842,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         globalInstructions,
         permissions: body.permissions,
       },
-    );
+    });
 
     // Check if queue is full
     if (isQueueFullResponse(result)) {
@@ -1890,6 +1934,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedOpenCodeModelLimits.error) {
       return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
     }
+    const parsedReasoningEffort = parseOptionalReasoningEffort(
+      body.reasoningEffort,
+    );
+    if (parsedReasoningEffort.error) {
+      return c.json({ error: parsedReasoningEffort.error }, 400);
+    }
 
     // Convert thinking option to SDK config
     const { thinking, effort } = body.thinking
@@ -1903,13 +1953,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const globalInstructions =
       deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
 
-    const result = await deps.supervisor.createSession(
-      project.path,
-      body.mode,
-      {
+    const result = await runtimeController.createSession({
+      projectPath: project.path,
+      permissionMode: body.mode,
+      modelSettings: {
         model,
         thinking,
         effort,
+        reasoningEffort: parsedReasoningEffort.reasoningEffort,
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
         opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
@@ -1917,7 +1968,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         globalInstructions,
         permissions: body.permissions,
       },
-    );
+    });
 
     // Check if queue is full
     if (isQueueFullResponse(result)) {
@@ -2049,6 +2100,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedOpenCodeModelLimits.error) {
       return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
     }
+    const parsedReasoningEffort = parseOptionalReasoningEffort(
+      body.reasoningEffort,
+    );
+    if (parsedReasoningEffort.error) {
+      return c.json({ error: parsedReasoningEffort.error }, 400);
+    }
 
     const userMessage: UserMessage = {
       text: body.message,
@@ -2112,8 +2169,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       sessionId,
     ) as ProviderName | undefined;
 
+    let sessionSummary: SessionSummary | null = null;
     let providerName = metadataProvider ?? body.provider;
-    if (!providerName) {
+    if (!providerName || !parsedReasoningEffort.reasoningEffort) {
       const sessionSummaryResult = await findSessionSummaryAcrossProviders(
         project,
         sessionId,
@@ -2130,8 +2188,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         },
         metadataProvider ?? body.provider,
       );
-      const sessionSummary = sessionSummaryResult?.summary ?? null;
+      sessionSummary = sessionSummaryResult?.summary ?? null;
       providerName =
+        providerName ??
         sessionSummary?.provider ??
         metadataProvider ??
         body.provider ??
@@ -2173,15 +2232,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       "Session resume requested",
     );
 
-    const result = await deps.supervisor.resumeSession(
+    const result = await runtimeController.resumeSession({
       sessionId,
-      project.path,
-      userMessage,
-      body.mode,
-      {
+      projectPath: project.path,
+      message: userMessage,
+      permissionMode: body.mode,
+      modelSettings: {
         model,
         thinking,
         effort,
+        reasoningEffort:
+          parsedReasoningEffort.reasoningEffort ??
+          (providerName === "codex"
+            ? sessionSummary?.reasoningEffort
+            : undefined),
         providerName,
         codexMcpMode:
           providerName === "codex"
@@ -2202,7 +2266,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         rollbackNumTurns:
           providerName === "codex" ? parsedRollbackNumTurns.value : undefined,
       },
-    );
+    });
 
     if (
       deps.sessionMetadataService &&
@@ -2292,7 +2356,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   routes.post("/sessions/:sessionId/messages", async (c) => {
     const sessionId = c.req.param("sessionId");
 
-    const process = deps.supervisor.getProcessForSession(sessionId);
+    const process =
+      await runtimeController.getProcessSnapshotForSession(sessionId);
     if (!process) {
       return c.json({ error: "No active process for session" }, 404);
     }
@@ -2317,6 +2382,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedOpenCodeModelLimits.error) {
       return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
     }
+    const parsedReasoningEffort = parseOptionalReasoningEffort(
+      body.reasoningEffort,
+    );
+    if (parsedReasoningEffort.error) {
+      return c.json({ error: parsedReasoningEffort.error }, 400);
+    }
 
     const userMessage: UserMessage = {
       text: body.message,
@@ -2328,7 +2399,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     };
 
     // Check if process is terminated
-    if (process.isTerminated) {
+    if (process.state === "terminated") {
       return c.json(
         {
           error: "Process terminated",
@@ -2340,7 +2411,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Deferred messages are held server-side and auto-sent when the agent finishes
     if (body.deferred) {
-      process.deferMessage(userMessage);
+      const deferred = await runtimeController.deferMessage(
+        sessionId,
+        userMessage,
+      );
+      if (!deferred.queued) {
+        return c.json({ error: "No active process for session" }, 410);
+      }
       return c.json({ queued: true, deferred: true });
     }
 
@@ -2366,24 +2443,26 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     const model =
-      body.model && body.model !== "default"
-        ? body.model
-        : (process.resolvedModel ?? process.model);
+      body.model && body.model !== "default" ? body.model : process.model;
     const providerName = metadataProvider ?? body.provider ?? process.provider;
 
     // Use queueMessageToSession which handles thinking mode changes
     // If thinking mode changed, it will restart the process automatically
     const queueGlobalInstructions =
       deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
-    const result = await deps.supervisor.queueMessageToSession(
+    const result = await runtimeController.queueMessage({
       sessionId,
-      process.projectPath,
-      userMessage,
-      body.mode,
-      {
+      projectPath: process.projectPath,
+      message: userMessage,
+      permissionMode: body.mode,
+      modelSettings: {
         model,
         thinking,
         effort,
+        reasoningEffort:
+          parsedReasoningEffort.reasoningEffort ??
+          process.requestedReasoningEffort ??
+          process.reasoningEffort,
         providerName,
         codexMcpMode:
           providerName === "codex"
@@ -2399,7 +2478,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         globalInstructions: queueGlobalInstructions,
         permissions: body.permissions,
       },
-    );
+    });
 
     if (!result.success) {
       return c.json(
@@ -2426,16 +2505,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   });
 
   // DELETE /api/sessions/:sessionId/deferred/:tempId - Cancel a deferred message
-  routes.delete("/sessions/:sessionId/deferred/:tempId", (c) => {
+  routes.delete("/sessions/:sessionId/deferred/:tempId", async (c) => {
     const sessionId = c.req.param("sessionId");
     const tempId = c.req.param("tempId");
 
-    const process = deps.supervisor.getProcessForSession(sessionId);
+    const process =
+      await runtimeController.getProcessSnapshotForSession(sessionId);
     if (!process) {
       return c.json({ error: "No active process for session" }, 404);
     }
 
-    const cancelled = process.cancelDeferredMessage(tempId);
+    const { cancelled } = await runtimeController.cancelDeferredMessage(
+      sessionId,
+      tempId,
+    );
     if (!cancelled) {
       return c.json({ error: "Deferred message not found" }, 404);
     }
@@ -2452,16 +2535,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "mode is required" }, 400);
     }
 
-    const process = deps.supervisor.getProcessForSession(sessionId);
-    if (!process) {
+    const modeResult = await runtimeController.setPermissionMode({
+      sessionId,
+      mode: body.mode,
+    });
+    if (!modeResult.ok) {
       return c.json({ error: "No active process for session" }, 404);
     }
 
-    process.setPermissionMode(body.mode);
-
     return c.json({
-      permissionMode: process.permissionMode,
-      modeVersion: process.modeVersion,
+      permissionMode: modeResult.permissionMode,
+      modeVersion: modeResult.modeVersion,
     });
   });
 
@@ -2474,17 +2558,18 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "hold is required (boolean)" }, 400);
     }
 
-    const process = deps.supervisor.getProcessForSession(sessionId);
-    if (!process) {
+    const holdResult = await runtimeController.setHold({
+      sessionId,
+      hold: body.hold,
+    });
+    if (!holdResult.ok) {
       return c.json({ error: "No active process for session" }, 404);
     }
 
-    process.setHold(body.hold);
-
     return c.json({
-      isHeld: process.isHeld,
-      holdSince: process.holdSince?.toISOString() ?? null,
-      state: process.state.type,
+      isHeld: holdResult.isHeld,
+      holdSince: holdResult.holdSince,
+      state: holdResult.state,
     });
   });
 
@@ -2492,7 +2577,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   routes.get("/sessions/:sessionId/pending-input", async (c) => {
     const sessionId = c.req.param("sessionId");
 
-    const process = deps.supervisor.getProcessForSession(sessionId);
+    const process =
+      await runtimeController.getProcessSnapshotForSession(sessionId);
     if (!process) {
       return c.json({
         request: await getBridgePendingInputRequest(deps, sessionId),
@@ -2500,7 +2586,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     // Use getPendingInputRequest which works for both mock and real SDK
-    const request = process.getPendingInputRequest();
+    const request = await runtimeController.getPendingInputRequest(sessionId);
     return c.json({ request });
   });
 
@@ -2508,19 +2594,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   routes.get("/sessions/:sessionId/process", async (c) => {
     const sessionId = c.req.param("sessionId");
 
-    const process = deps.supervisor.getProcessForSession(sessionId);
+    const process = await runtimeController.getProcessForSession(sessionId);
     if (!process) {
       return c.json({ process: null });
     }
 
-    return c.json({ process: process.getInfo() });
+    return c.json({ process });
   });
 
   // POST /api/sessions/:sessionId/input - Respond to input request
   routes.post("/sessions/:sessionId/input", async (c) => {
     const sessionId = c.req.param("sessionId");
 
-    const process = deps.supervisor.getProcessForSession(sessionId);
+    const process =
+      await runtimeController.getProcessSnapshotForSession(sessionId);
     if (!process) {
       let bridgeBody: InputResponseBody;
       try {
@@ -2553,7 +2640,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ accepted: true });
     }
 
-    if (process.state.type !== "waiting-input") {
+    if (!process.pendingInputRequest) {
       return c.json({ error: "No pending input request" }, 400);
     }
 
@@ -2580,12 +2667,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         : "deny";
 
     // Call respondToInput which resolves the SDK's canUseTool promise
-    const accepted = process.respondToInput(
-      body.requestId,
-      normalizedResponse,
-      body.answers,
-      body.feedback,
-    );
+    const { accepted } = await runtimeController.respondToInput({
+      sessionId,
+      requestId: body.requestId,
+      response: normalizedResponse,
+      answers: body.answers,
+      feedback: body.feedback,
+    });
 
     if (!accepted) {
       return c.json({ error: "Invalid request ID or no pending request" }, 400);
@@ -2593,7 +2681,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // If approve_accept_edits, switch the permission mode
     if (isApproveAcceptEdits) {
-      process.setPermissionMode("acceptEdits");
+      await runtimeController.setPermissionMode({
+        sessionId,
+        mode: "acceptEdits",
+      });
     }
 
     return c.json({ accepted: true });
@@ -2718,7 +2809,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       | undefined;
 
     if (body.archived === true && deps.sessionArchiveService) {
-      const activeProcess = deps.supervisor.getProcessForSession(sessionId);
+      const activeProcess =
+        await runtimeController.getProcessSnapshotForSession(sessionId);
       const bridgeView = await getBridgeSessionView(deps, sessionId);
       const bridgeSessionActive = bridgeView
         ? await isBridgeSessionActive(deps, sessionId)
@@ -2747,7 +2839,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       }
 
       if (activeProcess) {
-        await deps.supervisor.abortProcess(activeProcess.id);
+        await runtimeController.abortProcess(activeProcess.id);
       }
 
       const target = await resolveArchiveTarget(deps, sessionId);
@@ -2951,22 +3043,21 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   // ============ Worker Queue Endpoints ============
 
   // GET /api/status/workers - Get worker activity for safe restart indicator
-  routes.get("/status/workers", (c) => {
-    const activity = deps.supervisor.getWorkerActivity();
-    return c.json(activity);
+  routes.get("/status/workers", async (c) => {
+    const activity = await runtimeController.getWorkerActivity();
+    return c.json({ ...activity, runtimeMode: runtimeController.mode });
   });
 
   // GET /api/queue - Get all queued requests
-  routes.get("/queue", (c) => {
-    const queue = deps.supervisor.getQueueInfo();
-    const poolStatus = deps.supervisor.getWorkerPoolStatus();
-    return c.json({ queue, ...poolStatus });
+  routes.get("/queue", async (c) => {
+    const queueStatus = await runtimeController.getQueueStatus();
+    return c.json(queueStatus);
   });
 
   // GET /api/queue/:queueId - Get specific queue entry position
-  routes.get("/queue/:queueId", (c) => {
+  routes.get("/queue/:queueId", async (c) => {
     const queueId = c.req.param("queueId");
-    const position = deps.supervisor.getQueuePosition(queueId);
+    const position = await runtimeController.getQueuePosition(queueId);
 
     if (position === undefined) {
       return c.json({ error: "Queue entry not found" }, 404);
@@ -2976,10 +3067,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   });
 
   // DELETE /api/queue/:queueId - Cancel a queued request
-  routes.delete("/queue/:queueId", (c) => {
+  routes.delete("/queue/:queueId", async (c) => {
     const queueId = c.req.param("queueId");
 
-    const cancelled = deps.supervisor.cancelQueuedRequest(queueId);
+    const { cancelled } = await runtimeController.cancelQueuedRequest(queueId);
     if (!cancelled) {
       return c.json(
         { error: "Queue entry not found or already processed" },

@@ -41,6 +41,10 @@ import { useRemoteExecutors } from "../hooks/useRemoteExecutors";
 import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
 import { getStaticAgentCommandConfigs } from "../lib/agentCommands";
+import {
+  getModelReasoningEfforts,
+  resolveModelReasoningEffort,
+} from "../lib/codexReasoning";
 import { hasCoarsePointer } from "../lib/deviceDetection";
 import type { PermissionMode } from "../types";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
@@ -62,6 +66,7 @@ const MODE_ORDER: PermissionMode[] = [
   "bypassPermissions",
 ];
 const CODEX_MCP_MODE_ORDER: CodexMcpMode[] = ["clear", "standard", "full"];
+const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 
 const EFFORT_LABEL_KEYS: Record<
   EffortLevel,
@@ -85,7 +90,7 @@ function getThinkingOption(
   return `on:${effort}`;
 }
 
-type ThinkingPreset = "off" | "auto" | `on:${EffortLevel}`;
+type ThinkingPreset = "off" | "auto" | `on:${string}`;
 type OpenCodeEndpoint = "openai" | "anthropic";
 
 const THINKING_PRESET_ORDER: readonly ThinkingPreset[] = [
@@ -134,11 +139,17 @@ function formatSize(bytes: number): string {
 function getPreferredModelId(
   models: ModelInfo[],
   preferredModelId?: string | null,
+  fallbackModelId?: string,
 ) {
   const configuredModelId = preferredModelId ?? resolveModel(getModelSetting());
 
   if (!configuredModelId) {
-    return models.find((m) => m.id === "default")?.id ?? null;
+    return (
+      models.find((m) => m.id === "default")?.id ??
+      models[0]?.id ??
+      models.find((m) => m.id === fallbackModelId)?.id ??
+      null
+    );
   }
 
   if (configuredModelId) {
@@ -148,7 +159,9 @@ function getPreferredModelId(
     if (matchingPreferredModel) return matchingPreferredModel.id;
   }
 
-  return models[0]?.id ?? null;
+  return (
+    models.find((m) => m.id === fallbackModelId)?.id ?? models[0]?.id ?? null
+  );
 }
 
 function splitProviderModelId(modelId: string | null | undefined): {
@@ -319,6 +332,9 @@ export function NewSessionForm({
     null,
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [codexReasoningEffort, setCodexReasoningEffort] = useState<
+    string | null
+  >(null);
   const [selectedOpenCodeEndpoint, setSelectedOpenCodeEndpoint] =
     useState<OpenCodeEndpoint>("openai");
   const [selectedCodexMcpMode, setSelectedCodexMcpMode] =
@@ -395,21 +411,58 @@ export function NewSessionForm({
     standard: t("newSessionCodexMcpStandardDescription"),
     full: t("newSessionCodexMcpFullDescription"),
   };
-  const getEffortLabel = useCallback(
-    (effort: EffortLevel): string => {
-      if (
-        (selectedProvider === "codex" || selectedProvider === "codex-oss") &&
-        effort === "max"
-      ) {
-        return "xhigh";
-      }
-      return t(EFFORT_LABEL_KEYS[effort]);
-    },
-    [selectedProvider, t],
+  // Get models and capabilities for the currently selected provider.
+  const selectedProviderInfo = providers.find(
+    (p) => p.name === selectedProvider,
   );
-  const selectedThinkingPreset = getThinkingPreset(thinkingMode, thinkingLevel);
+  const availableModels: ModelInfo[] = selectedProviderInfo?.models ?? [];
+  const selectedModelInfo = availableModels.find(
+    (model) => model.id === selectedModel,
+  );
+  const codexReasoningEfforts = useMemo(
+    () => getModelReasoningEfforts(selectedModelInfo),
+    [selectedModelInfo],
+  );
+  const effectiveCodexReasoningEffort =
+    selectedProvider === "codex"
+      ? resolveModelReasoningEffort(
+          selectedModelInfo,
+          codexReasoningEffort ??
+            (codexReasoningEfforts.length === 0
+              ? thinkingLevel === "max"
+                ? "xhigh"
+                : thinkingLevel
+              : undefined),
+        )
+      : undefined;
+  const getEffortLabel = useCallback(
+    (effort: string): string => {
+      return isEffortLevel(effort) ? t(EFFORT_LABEL_KEYS[effort]) : effort;
+    },
+    [t],
+  );
+  const selectedThinkingPreset: ThinkingPreset =
+    selectedProvider === "codex" &&
+    thinkingMode === "on" &&
+    effectiveCodexReasoningEffort
+      ? `on:${effectiveCodexReasoningEffort}`
+      : getThinkingPreset(thinkingMode, thinkingLevel);
   const thinkingOptions = useMemo((): FilterOption<ThinkingPreset>[] => {
-    return THINKING_PRESET_ORDER.map((preset) => {
+    const presets: Array<{
+      value: ThinkingPreset;
+      description?: string;
+    }> = [
+      { value: "off" },
+      { value: "auto" },
+      ...(selectedProvider === "codex" && codexReasoningEfforts.length > 0
+        ? codexReasoningEfforts.map((option) => ({
+            value: `on:${option.reasoningEffort}` as ThinkingPreset,
+            description: option.description,
+          }))
+        : THINKING_PRESET_ORDER.slice(2).map((value) => ({ value }))),
+    ];
+
+    return presets.map(({ value: preset, description }) => {
       if (preset === "off") {
         return {
           value: preset,
@@ -422,15 +475,16 @@ export function NewSessionForm({
           label: t("newSessionThinkingAuto"),
         };
       }
-      const effort = preset.slice(3) as EffortLevel;
+      const effort = preset.slice(3);
       return {
         value: preset,
         label: t("newSessionThinkingOn", {
           level: getEffortLabel(effort),
         }),
+        description,
       };
     });
-  }, [getEffortLabel, t]);
+  }, [codexReasoningEfforts, getEffortLabel, selectedProvider, t]);
   const applyThinkingPreset = useCallback(
     (preset: ThinkingPreset) => {
       if (preset === "off" || preset === "auto") {
@@ -438,11 +492,21 @@ export function NewSessionForm({
         return;
       }
       const effort = preset.slice(3);
+      if (
+        selectedProvider === "codex" &&
+        codexReasoningEfforts.some(
+          (option) => option.reasoningEffort === effort,
+        )
+      ) {
+        setCodexReasoningEffort(effort);
+        setThinkingMode("on");
+        return;
+      }
       if (!isEffortLevel(effort)) return;
       setEffortLevel(effort);
       setThinkingMode("on");
     },
-    [setEffortLevel, setThinkingMode],
+    [codexReasoningEfforts, selectedProvider, setEffortLevel, setThinkingMode],
   );
   const handleThinkingSelect = useCallback(
     (selected: ThinkingPreset[]) => {
@@ -451,11 +515,6 @@ export function NewSessionForm({
     [applyThinkingPreset],
   );
 
-  // Get models and capabilities for the currently selected provider
-  const selectedProviderInfo = providers.find(
-    (p) => p.name === selectedProvider,
-  );
-  const availableModels: ModelInfo[] = selectedProviderInfo?.models ?? [];
   // Default to true for backwards compatibility with providers that don't set these flags
   const supportsPermissionMode =
     selectedProviderInfo?.supportsPermissionMode ?? true;
@@ -502,6 +561,7 @@ export function NewSessionForm({
         : getPreferredModelId(
             initialProvider.models ?? [],
             savedDefaults?.model ?? initialProvider.currentModel,
+            initialProvider.name === "codex" ? DEFAULT_CODEX_MODEL : undefined,
           );
     if (initialProvider.name === "opencode") {
       const endpoint = getOpenCodeEndpointFromModel(preferredModel);
@@ -529,7 +589,23 @@ export function NewSessionForm({
     const savedThinkingPreset = normalizeThinkingOption(
       savedDefaults?.thinking,
     );
-    if (savedThinkingPreset) {
+    if (initialProvider.name === "codex" && savedDefaults?.reasoningEffort) {
+      setCodexReasoningEffort(savedDefaults.reasoningEffort);
+      if (savedThinkingPreset) {
+        applyThinkingPreset(savedThinkingPreset);
+      } else {
+        setThinkingMode("on");
+      }
+    } else if (savedThinkingPreset) {
+      if (
+        initialProvider.name === "codex" &&
+        savedThinkingPreset.startsWith("on:")
+      ) {
+        const legacyEffort = savedThinkingPreset.slice(3);
+        setCodexReasoningEffort(
+          legacyEffort === "max" ? "xhigh" : legacyEffort,
+        );
+      }
       applyThinkingPreset(savedThinkingPreset);
     } else if (initialProvider.currentEffortLevel) {
       setEffortLevel(initialProvider.currentEffortLevel);
@@ -540,6 +616,7 @@ export function NewSessionForm({
     providers,
     providersLoading,
     setEffortLevel,
+    setThinkingMode,
     settings,
     settingsLoading,
   ]);
@@ -553,6 +630,14 @@ export function NewSessionForm({
         providerName === "opencode"
           ? getPreferredOpenCodeModelId(provider.models, provider.currentModel)
           : getPreferredModelId(provider.models, provider.currentModel);
+      const resolvedPreferredModel =
+        providerName === "codex"
+          ? getPreferredModelId(
+              provider.models,
+              provider.currentModel,
+              DEFAULT_CODEX_MODEL,
+            )
+          : preferredModel;
       if (providerName === "opencode") {
         const endpoint = getOpenCodeEndpointFromModel(preferredModel);
         setSelectedOpenCodeEndpoint(endpoint);
@@ -566,7 +651,7 @@ export function NewSessionForm({
             : null,
         );
       } else {
-        setSelectedModel(preferredModel);
+        setSelectedModel(resolvedPreferredModel);
       }
     } else {
       setSelectedModel(null);
@@ -771,6 +856,10 @@ export function NewSessionForm({
         thinking: supportsThinkingToggle
           ? getThinkingOption(thinkingMode, thinkingLevel)
           : undefined,
+        reasoningEffort:
+          selectedProvider === "codex" && thinkingMode === "on"
+            ? effectiveCodexReasoningEffort
+            : undefined,
         permissionMode: mode,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
@@ -790,6 +879,7 @@ export function NewSessionForm({
     mode,
     opencodeModelLimitsForRequest,
     selectedCodexMcpMode,
+    effectiveCodexReasoningEffort,
     selectedModel,
     selectedProvider,
     showToast,
@@ -833,6 +923,10 @@ export function NewSessionForm({
         mode,
         model: selectedModel ?? undefined,
         thinking,
+        reasoningEffort:
+          selectedProvider === "codex" && thinkingMode === "on"
+            ? effectiveCodexReasoningEffort
+            : undefined,
         provider: selectedProvider ?? undefined,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
@@ -887,6 +981,7 @@ export function NewSessionForm({
           uploadedFiles.length > 0 ? uploadedFiles : undefined,
           undefined, // tempId
           thinking, // Pass the captured thinking setting to avoid process restart
+          sessionOptions.reasoningEffort,
         );
       } else {
         // No files - use single-step flow for efficiency
@@ -1080,6 +1175,11 @@ export function NewSessionForm({
     ? (savedDefaults?.thinking ?? undefined) ===
       getThinkingOption(thinkingMode, thinkingLevel)
     : true;
+  const reasoningEffortDefaultsMatch =
+    selectedProvider === "codex"
+      ? (savedDefaults?.reasoningEffort ?? undefined) ===
+        (thinkingMode === "on" ? effectiveCodexReasoningEffort : undefined)
+      : true;
   const opencodeDefaultsMatch =
     selectedProvider === "opencode"
       ? sameOpenCodeModelLimits(
@@ -1093,6 +1193,7 @@ export function NewSessionForm({
     (savedDefaults?.model ?? undefined) === (selectedModel ?? undefined) &&
     (savedDefaults?.permissionMode ?? DEFAULT_PERMISSION_MODE) === mode &&
     thinkingDefaultsMatch &&
+    reasoningEffortDefaultsMatch &&
     codexMcpDefaultsMatch &&
     opencodeDefaultsMatch;
 
@@ -1218,7 +1319,9 @@ export function NewSessionForm({
                   : thinkingMode === "auto"
                     ? t("newSessionThinkingAuto")
                     : t("newSessionThinkingOn", {
-                        level: getEffortLabel(thinkingLevel),
+                        level: getEffortLabel(
+                          effectiveCodexReasoningEffort ?? thinkingLevel,
+                        ),
                       })
               }
               aria-label={t("newSessionThinkingMode", { mode: thinkingMode })}

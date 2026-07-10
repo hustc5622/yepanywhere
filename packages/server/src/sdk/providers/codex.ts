@@ -21,8 +21,11 @@ import {
 import { getCodexMcpAppServerArgs } from "../../codex/mcp-profile.js";
 import {
   type CodexToolCallContext,
+  canonicalizeCodexToolName,
   normalizeCodexCommandExecutionOutput,
   normalizeCodexToolInvocation,
+  normalizeCodexToolOutputWithContext,
+  parseCodexToolArguments,
 } from "../../codex/normalization.js";
 import { getLogger } from "../../logging/logger.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
@@ -127,6 +130,7 @@ const APP_SERVER_MODEL_LIST_REQUEST_ID = 2;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
 const CODEX_CLOUD_MODEL_PROVIDER = "openai";
 const CODEX_MODEL_PROVIDER_NAMES = new Set(["openai", "azure"]);
+const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 
 /**
  * Local debug knobs for Codex app-server policy behavior.
@@ -156,6 +160,9 @@ const DECLARED_CODEX_ORIGINATOR = "Codex Desktop";
 // ("model is not supported when using Codex with a ChatGPT account"), so they
 // must never be the default the picker preselects.
 const PREFERRED_MODEL_ORDER = [
+  DEFAULT_CODEX_MODEL,
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
@@ -166,7 +173,62 @@ const PREFERRED_MODEL_ORDER = [
   "gpt-5.1-codex-mini",
 ] as const;
 
+const CODEX_REASONING_EFFORTS = [
+  {
+    reasoningEffort: "low",
+    description: "Fast responses with lighter reasoning",
+  },
+  {
+    reasoningEffort: "medium",
+    description: "Balances speed and reasoning depth for everyday tasks",
+  },
+  {
+    reasoningEffort: "high",
+    description: "Greater reasoning depth for complex problems",
+  },
+  {
+    reasoningEffort: "xhigh",
+    description: "Extra high reasoning depth for complex problems",
+  },
+  {
+    reasoningEffort: "max",
+    description: "Maximum reasoning depth for the hardest problems",
+  },
+] as const;
+
+const CODEX_ULTRA_REASONING_EFFORT = {
+  reasoningEffort: "ultra",
+  description: "Maximum reasoning with automatic task delegation",
+} as const;
+
 const FALLBACK_CODEX_MODELS: ModelInfo[] = [
+  {
+    id: "gpt-5.6-sol",
+    name: "GPT-5.6-Sol",
+    description: "Latest frontier agentic coding model.",
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: [
+      ...CODEX_REASONING_EFFORTS,
+      CODEX_ULTRA_REASONING_EFFORT,
+    ],
+  },
+  {
+    id: "gpt-5.6-terra",
+    name: "GPT-5.6-Terra",
+    description: "Balanced agentic coding model for everyday work.",
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: [
+      ...CODEX_REASONING_EFFORTS,
+      CODEX_ULTRA_REASONING_EFFORT,
+    ],
+  },
+  {
+    id: "gpt-5.6-luna",
+    name: "GPT-5.6-Luna",
+    description: "Fast and affordable agentic coding model.",
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: [...CODEX_REASONING_EFFORTS],
+  },
   { id: "gpt-5.5", name: "GPT-5.5" },
   { id: "gpt-5.4", name: "GPT-5.4" },
   { id: "gpt-5.4-mini", name: "GPT-5.4-Mini" },
@@ -205,6 +267,11 @@ interface AppServerModel {
   hidden?: boolean;
   /** The model Codex itself selects by default for this account. */
   isDefault?: boolean;
+  supportedReasoningEfforts?: Array<{
+    reasoningEffort?: string;
+    description?: string;
+  }>;
+  defaultReasoningEffort?: string;
 }
 
 interface TokenUsageSnapshot {
@@ -979,6 +1046,20 @@ export class CodexProvider implements AgentProvider {
         id: modelId,
         name: this.formatModelName(model.displayName || modelId),
         description: model.description,
+        supportedReasoningEfforts: model.supportedReasoningEfforts
+          ?.filter(
+            (
+              option,
+            ): option is { reasoningEffort: string; description?: string } =>
+              typeof option.reasoningEffort === "string" &&
+              option.reasoningEffort.trim().length > 0,
+          )
+          .map((option) => ({
+            reasoningEffort: option.reasoningEffort.trim(),
+            description: option.description,
+          })),
+        defaultReasoningEffort:
+          model.defaultReasoningEffort?.trim() || undefined,
       });
 
       const upgradeId = model.upgrade?.trim();
@@ -995,8 +1076,11 @@ export class CodexProvider implements AgentProvider {
         model,
         index,
         rank: defaultIds.has(model.id)
-          ? -1
-          : (orderLookup.get(model.id) ?? PREFERRED_MODEL_ORDER.length + index),
+          ? -2
+          : model.id === DEFAULT_CODEX_MODEL
+            ? -1
+            : (orderLookup.get(model.id) ??
+              PREFERRED_MODEL_ORDER.length + index),
       }))
       .sort((a, b) => a.rank - b.rank)
       .map((entry) => entry.model);
@@ -1019,9 +1103,14 @@ export class CodexProvider implements AgentProvider {
   }
 
   private mapEffortToReasoningEffort(
+    reasoningEffort?: string,
     effort?: import("@yep-anywhere/shared").EffortLevel,
     thinking?: import("@yep-anywhere/shared").ThinkingConfig,
-  ): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+  ): string | undefined {
+    const exactReasoningEffort = reasoningEffort?.trim();
+    if (exactReasoningEffort) {
+      return exactReasoningEffort;
+    }
     if (thinking?.type === "disabled") {
       return "low";
     }
@@ -1169,6 +1258,7 @@ export class CodexProvider implements AgentProvider {
 
     let sessionId = options.resumeSessionId ?? "";
     const usageByTurnId = new Map<string, TokenUsageSnapshot>();
+    const customToolContexts = new Map<string, CodexToolCallContext>();
     const logMessage = (message: SDKMessage): SDKMessage => {
       const messageSessionId =
         typeof (message as { session_id?: unknown }).session_id === "string"
@@ -1344,6 +1434,7 @@ export class CodexProvider implements AgentProvider {
           threadId: sessionId,
           input: [{ type: "text", text: userPrompt, text_elements: [] }],
           effort: this.mapEffortToReasoningEffort(
+            options.reasoningEffort,
             options.effort,
             options.thinking,
           ),
@@ -1380,6 +1471,7 @@ export class CodexProvider implements AgentProvider {
             notification,
             sessionId,
             usageByTurnId,
+            customToolContexts,
           );
           for (const msg of messages) {
             yield logMessage(msg);
@@ -1745,6 +1837,7 @@ export class CodexProvider implements AgentProvider {
     notification: JsonRpcNotification,
     sessionId: string,
     usageByTurnId: Map<string, TokenUsageSnapshot>,
+    customToolContexts: Map<string, CodexToolCallContext> = new Map(),
   ): SDKMessage[] {
     switch (notification.method) {
       case "turn/completed": {
@@ -1819,6 +1912,13 @@ export class CodexProvider implements AgentProvider {
         );
       }
 
+      case "rawResponseItem/completed":
+        return this.convertRawResponseItemToSDKMessages(
+          notification.params,
+          sessionId,
+          customToolContexts,
+        );
+
       case "account/rateLimits/updated": {
         // account/rateLimits/updated is telemetry, not a terminal turn error.
         // Real usage-limit/quota failures arrive via the `error` notification.
@@ -1828,6 +1928,118 @@ export class CodexProvider implements AgentProvider {
       default:
         return [];
     }
+  }
+
+  private convertRawResponseItemToSDKMessages(
+    params: unknown,
+    sessionId: string,
+    customToolContexts: Map<string, CodexToolCallContext>,
+  ): SDKMessage[] {
+    if (!params || typeof params !== "object") return [];
+    const record = params as Record<string, unknown>;
+    const turnId = this.getOptionalString(record.turnId);
+    if (!turnId || !record.item || typeof record.item !== "object") return [];
+
+    const item = record.item as Record<string, unknown>;
+    const type = this.getOptionalString(item.type);
+    const callId = this.getOptionalString(item.call_id);
+    if (!callId) return [];
+
+    const contextKey = `${sessionId}:${callId}`;
+    const observedAt = new Date().toISOString();
+    const itemId = this.getOptionalString(item.id) ?? callId;
+
+    if (type === "custom_tool_call") {
+      const rawToolName = this.getOptionalString(item.name);
+      if (!rawToolName) return [];
+      const namespace = this.getOptionalString(item.namespace) ?? undefined;
+      const toolName = canonicalizeCodexToolName(rawToolName, namespace);
+      const rawInput =
+        item.input !== undefined
+          ? item.input
+          : parseCodexToolArguments(
+              this.getOptionalString(item.arguments) ?? undefined,
+            );
+      const normalized = normalizeCodexToolInvocation(toolName, rawInput);
+      customToolContexts.set(contextKey, {
+        toolName: normalized.toolName,
+        input: normalized.input,
+        readShellInfo: normalized.readShellInfo,
+        writeShellInfo: normalized.writeShellInfo,
+      });
+
+      const message = withCodexTimestamp(
+        {
+          type: "assistant",
+          session_id: sessionId,
+          uuid: `${itemId}-${turnId}-custom-call`,
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: callId,
+                name: normalized.toolName,
+                input: normalized.input,
+              },
+            ],
+          },
+          codexToolName: rawToolName,
+          ...(namespace ? { codexToolNamespace: namespace } : {}),
+        } as SDKMessage,
+        observedAt,
+      );
+      logSdkCorrelationDebug(sessionId, message, {
+        eventKind: "custom_tool_call",
+        turnId,
+        itemId,
+        callId,
+        phase: "completed",
+        sourceEvent: "rawResponseItem/completed",
+      });
+      return [message];
+    }
+
+    if (type === "custom_tool_call_output") {
+      const context = customToolContexts.get(contextKey);
+      const normalized = normalizeCodexToolOutputWithContext(
+        item.output,
+        context,
+      );
+      customToolContexts.delete(contextKey);
+      const toolResult = {
+        type: "tool_result",
+        tool_use_id: callId,
+        content: normalized.content,
+        ...(normalized.isError ? { is_error: true } : {}),
+      };
+      const message = withCodexTimestamp(
+        {
+          type: "user",
+          session_id: sessionId,
+          uuid: `${itemId}-${turnId}-custom-result`,
+          message: {
+            role: "user",
+            content: [toolResult],
+          },
+          ...(normalized.structured !== undefined
+            ? { toolUseResult: normalized.structured }
+            : {}),
+        } as SDKMessage,
+        observedAt,
+      );
+      logSdkCorrelationDebug(sessionId, message, {
+        eventKind: "custom_tool_result",
+        turnId,
+        itemId,
+        callId,
+        phase: "completed",
+        sourceEvent: "rawResponseItem/completed",
+      });
+      return [message];
+    }
+
+    return [];
   }
 
   private normalizeThreadItem(

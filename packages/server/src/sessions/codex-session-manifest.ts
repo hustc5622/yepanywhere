@@ -4,6 +4,7 @@ import {
   type CodexSessionMetaEntry,
   parseCodexSessionEntry,
 } from "@yep-anywhere/shared";
+import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { getLogger } from "../logging/logger.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import { readFirstLine } from "../utils/jsonl.js";
@@ -221,7 +222,7 @@ async function readSessionManifestEntry(
       timestamp: meta.timestamp,
       mtime: stats.mtimeMs,
       size: stats.size,
-      isSubagent: isSubagentSessionMeta(meta),
+      isSubagent: getCodexSubagentMetadata(meta).isSubagent,
     };
   } catch (error) {
     getLogger().debug(
@@ -229,23 +230,4 @@ async function readSessionManifestEntry(
     );
     return null;
   }
-}
-
-function isSubagentSessionMeta(
-  meta: CodexSessionMetaEntry["payload"],
-): boolean {
-  if (!("forked_from_id" in meta) || typeof meta.forked_from_id !== "string") {
-    return false;
-  }
-
-  const source = meta.source;
-  if (!source || typeof source !== "object") return false;
-
-  const subagentSource = source as {
-    subagent?: { thread_spawn?: { parent_thread_id?: string } };
-  };
-
-  return (
-    typeof subagentSource.subagent?.thread_spawn?.parent_thread_id === "string"
-  );
 }

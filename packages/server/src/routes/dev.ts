@@ -1,8 +1,13 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { Hono } from "hono";
+import type { RuntimeMode } from "../runtime/types.js";
 import type { EventBus, SourceChangeEvent } from "../watcher/index.js";
 
 export interface DevDeps {
   eventBus: EventBus;
+  dataDir?: string;
+  runtimeMode?: RuntimeMode;
 }
 
 // Track backend dirty state - persists across page refreshes until server restarts
@@ -46,10 +51,33 @@ export function createDevRoutes(deps: DevDeps): Hono {
 
   // GET /api/dev/status - Get dev mode status including dirty flag
   routes.get("/status", (c) => {
+    let runtimeDirty = false;
+    let runtimeDirtyFiles: string[] = [];
+    let runtimeDirtyGeneration: string | undefined;
+    if (deps.dataDir) {
+      try {
+        const dirty = JSON.parse(
+          readFileSync(
+            path.join(deps.dataDir, "runtime", "dirty.json"),
+            "utf8",
+          ),
+        ) as { files?: string[]; timestamp?: string };
+        runtimeDirty = true;
+        runtimeDirtyFiles = dirty.files ?? [];
+        runtimeDirtyGeneration =
+          dirty.timestamp ?? JSON.stringify(runtimeDirtyFiles);
+      } catch {
+        // Missing or incomplete marker means the runtime is clean.
+      }
+    }
     return c.json({
       noBackendReload: process.env.NO_BACKEND_RELOAD === "true",
       noFrontendReload: process.env.NO_FRONTEND_RELOAD === "true",
       backendDirty,
+      runtimeMode: deps.runtimeMode ?? "embedded",
+      runtimeDirty,
+      runtimeDirtyFiles,
+      runtimeDirtyGeneration,
       timestamp: new Date().toISOString(),
     });
   });

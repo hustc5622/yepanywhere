@@ -49,9 +49,11 @@ function AppContent({ children }: Props) {
     pendingReloads,
     reloadBackend,
     reloadFrontend,
+    reloadRuntime,
     dismiss,
     unsafeToRestart,
     workerActivity,
+    unsafeToReloadRuntime,
   } = useReloadNotifications();
 
   return (
@@ -71,6 +73,15 @@ function AppContent({ children }: Props) {
           target="frontend"
           onReload={reloadFrontend}
           onDismiss={() => dismiss("frontend")}
+        />
+      )}
+      {isManualReloadMode && pendingReloads.runtime && (
+        <ReloadBanner
+          target="runtime"
+          onReload={() => void reloadRuntime(workerActivity.hasActiveWork)}
+          onDismiss={() => dismiss("runtime")}
+          unsafeToRestart={unsafeToReloadRuntime}
+          activeWorkers={workerActivity.activeWorkers}
         />
       )}
       {children}

@@ -9,11 +9,13 @@
 
 import { basename } from "node:path";
 import {
+  type ProviderName,
   type UrlProjectId,
   getSessionDisplayTitle,
 } from "@yep-anywhere/shared";
 import type { NotificationService } from "../notifications/NotificationService.js";
 import { decodeProjectId } from "../projects/paths.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type { ConnectedBrowsersService } from "../services/ConnectedBrowsersService.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type { InputRequest } from "../supervisor/types.js";
@@ -39,9 +41,32 @@ export interface PushNotifierOptions {
   nativePushService?: NativePushService;
   /** Tracks notification-backed badge state. */
   notificationService?: NotificationService;
-  supervisor: Supervisor;
+  /** Live process source. RuntimeController is required for external mode. */
+  runtimeController?: Pick<RuntimeController, "getProcessSnapshotForSession">;
+  /** Backwards-compatible embedded/test process source. */
+  supervisor?: Supervisor;
   /** Optional: skip push for connected browser profiles */
   connectedBrowsers?: ConnectedBrowsersService;
+}
+
+interface NotificationProcessView {
+  id: string;
+  state: string | { type: string; request?: InputRequest };
+  pendingInputRequest?: InputRequest | null;
+  messageHistory?: Array<{
+    type?: string;
+    message?: { role?: string; content?: unknown };
+  }>;
+  getMessageHistory?: () => Array<{
+    type?: string;
+    message?: { role?: string; content?: unknown };
+  }>;
+  startedAt?: string | Date;
+  provider?: ProviderName;
+  model?: string;
+  resolvedModel?: string;
+  executor?: string;
+  permissionMode?: string;
 }
 
 export class PushNotifier {
@@ -49,7 +74,8 @@ export class PushNotifier {
   private pushService: PushService;
   private nativePushService?: NativePushService;
   private notificationService?: NotificationService;
-  private supervisor: Supervisor;
+  private runtimeController?: PushNotifierOptions["runtimeController"];
+  private supervisor?: Supervisor;
   private connectedBrowsers?: ConnectedBrowsersService;
   private unsubscribe: (() => void) | null = null;
   /**
@@ -66,6 +92,7 @@ export class PushNotifier {
     this.pushService = options.pushService;
     this.nativePushService = options.nativePushService;
     this.notificationService = options.notificationService;
+    this.runtimeController = options.runtimeController;
     this.supervisor = options.supervisor;
     this.connectedBrowsers = options.connectedBrowsers;
 
@@ -102,7 +129,7 @@ export class PushNotifier {
   private async handleProcessStateChange(
     event: ProcessStateEvent,
   ): Promise<void> {
-    const process = this.supervisor.getProcessForSession(event.sessionId);
+    const process = await this.getProcess(event.sessionId);
     this.cacheProcessSessionTitle(event.sessionId, process);
 
     // Send dismiss when leaving waiting-input (if we sent a notification for it)
@@ -145,11 +172,12 @@ export class PushNotifier {
     }
 
     // Get the process to access the InputRequest details
-    if (!process || process.state.type !== "waiting-input") {
+    if (!process || this.getProcessActivity(process) !== "waiting-input") {
       return;
     }
 
-    const request = process.state.request;
+    const request = this.getPendingInputRequest(process);
+    if (!request) return;
     const inputType =
       request.type === "tool-approval" ? "tool-approval" : "user-question";
 
@@ -285,7 +313,7 @@ export class PushNotifier {
       return;
     }
 
-    const process = this.supervisor.getProcessForSession(event.sessionId);
+    const process = await this.getProcess(event.sessionId);
     this.cacheProcessSessionTitle(event.sessionId, process);
     const sessionTitle =
       (process ? this.getSessionTitle(process) : undefined) ??
@@ -299,7 +327,7 @@ export class PushNotifier {
       sessionTitle,
       reason,
       duration: process?.startedAt
-        ? Date.now() - process.startedAt.getTime()
+        ? Date.now() - new Date(process.startedAt).getTime()
         : 0,
       timestamp: event.timestamp,
     };
@@ -350,9 +378,7 @@ export class PushNotifier {
 
   private cacheProcessSessionTitle(
     sessionId: string,
-    process:
-      | NonNullable<ReturnType<Supervisor["getProcessForSession"]>>
-      | undefined,
+    process: NotificationProcessView | null | undefined,
   ): void {
     if (!process) return;
     this.cacheSessionTitle(sessionId, this.getSessionTitle(process));
@@ -412,19 +438,9 @@ export class PushNotifier {
   }
 
   private getSessionTitle(
-    process: NonNullable<ReturnType<Supervisor["getProcessForSession"]>>,
+    process: NotificationProcessView,
   ): string | undefined {
-    const historyReader = (
-      process as {
-        getMessageHistory?: () => Array<{
-          type?: string;
-          message?: { content?: unknown };
-        }>;
-      }
-    ).getMessageHistory;
-    if (typeof historyReader !== "function") return undefined;
-
-    const firstUser = historyReader.call(process).find((message) => {
+    const firstUser = this.getMessageHistory(process).find((message) => {
       return (
         message.type === "user" && typeof message.message?.content === "string"
       );
@@ -436,6 +452,39 @@ export class PushNotifier {
     return normalized.length <= 120
       ? normalized
       : `${normalized.slice(0, 117)}...`;
+  }
+
+  private async getProcess(
+    sessionId: string,
+  ): Promise<NotificationProcessView | null> {
+    if (this.runtimeController) {
+      return this.runtimeController.getProcessSnapshotForSession(sessionId);
+    }
+    return (
+      (this.supervisor?.getProcessForSession(sessionId) as
+        | NotificationProcessView
+        | undefined) ?? null
+    );
+  }
+
+  private getProcessActivity(process: NotificationProcessView): string {
+    return typeof process.state === "string"
+      ? process.state
+      : process.state.type;
+  }
+
+  private getPendingInputRequest(
+    process: NotificationProcessView,
+  ): InputRequest | null {
+    if (process.pendingInputRequest) return process.pendingInputRequest;
+    return typeof process.state === "object" &&
+      process.state.type === "waiting-input"
+      ? (process.state.request ?? null)
+      : null;
+  }
+
+  private getMessageHistory(process: NotificationProcessView) {
+    return process.messageHistory ?? process.getMessageHistory?.() ?? [];
   }
 
   /**

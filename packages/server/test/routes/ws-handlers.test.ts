@@ -9,7 +9,10 @@ import {
   type WSAdapter,
   createConnectionState,
   createSendFn,
+  handleSessionSubscribe,
+  handleUnsubscribe,
 } from "../../src/routes/ws-handlers.js";
+import type { RuntimeController } from "../../src/runtime/types.js";
 
 type SentFrame = string | ArrayBuffer | Uint8Array<ArrayBuffer>;
 
@@ -81,5 +84,51 @@ describe("WebSocket handlers", () => {
       eventType: "status",
     });
     expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it("cleans up a session subscription that resolves after unsubscribe", async () => {
+    let resolveSubscription: ((value: { cleanup(): void }) => void) | undefined;
+    let observedSignal: AbortSignal | undefined;
+    const cleanup = vi.fn();
+    const runtimeController = {
+      subscribeSession: vi.fn(
+        (
+          _sessionId: string,
+          _emit: (eventType: string, data: unknown) => void,
+          options?: { signal?: AbortSignal },
+        ) => {
+          observedSignal = options?.signal;
+          return new Promise<{ cleanup(): void }>((resolve) => {
+            resolveSubscription = resolve;
+          });
+        },
+      ),
+    } as unknown as RuntimeController;
+    const subscriptions = new Map<string, () => void>();
+    const send = vi.fn();
+
+    const pending = handleSessionSubscribe(
+      subscriptions,
+      {
+        type: "subscribe",
+        subscriptionId: "sub-race",
+        channel: "session",
+        sessionId: "session-race",
+      },
+      send,
+      runtimeController,
+    );
+    handleUnsubscribe(subscriptions, {
+      type: "unsubscribe",
+      subscriptionId: "sub-race",
+    });
+
+    expect(observedSignal?.aborted).toBe(true);
+    resolveSubscription?.({ cleanup });
+    await pending;
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(subscriptions.has("sub-race")).toBe(false);
+    expect(send).not.toHaveBeenCalled();
   });
 });

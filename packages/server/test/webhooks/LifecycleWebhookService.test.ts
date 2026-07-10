@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeController } from "../../src/runtime/types.js";
 import type { ServerSettingsService } from "../../src/services/ServerSettingsService.js";
 import type { Supervisor } from "../../src/supervisor/Supervisor.js";
 import { EventBus } from "../../src/watcher/EventBus.js";
@@ -96,6 +97,64 @@ describe("LifecycleWebhookService", () => {
       },
       lastUserMessageText: "fix the tests",
       lastMessageText: "Done with the first pass.",
+    });
+  });
+
+  it("reads idle process details from an external runtime snapshot", async () => {
+    const eventBus = new EventBus();
+    const runtimeController = {
+      getProcessSnapshotForSession: vi.fn(async () => ({
+        id: "proc-external",
+        sessionId: "sess-external",
+        projectPath: "/tmp/external-repo",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "default",
+        state: "idle",
+        messageHistory: [
+          {
+            type: "assistant",
+            message: { role: "assistant", content: "External runtime done." },
+          },
+        ],
+      })),
+    } as unknown as Pick<RuntimeController, "getProcessSnapshotForSession">;
+    const serverSettingsService = {
+      getSettings: vi.fn(() => ({
+        lifecycleWebhooksEnabled: true,
+        lifecycleWebhookUrl: "https://example.com/hook",
+        lifecycleWebhookDryRun: true,
+      })),
+      getSetting: vi.fn(() => true),
+    } as unknown as ServerSettingsService;
+
+    new LifecycleWebhookService({
+      eventBus,
+      runtimeController,
+      serverSettingsService,
+    });
+
+    eventBus.emit({
+      type: "process-state-changed",
+      sessionId: "sess-external",
+      projectId: Buffer.from("/tmp/external-repo").toString("base64url"),
+      activity: "idle",
+      timestamp: "2026-04-02T12:00:00.000Z",
+    });
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      session: { id: "sess-external" },
+      project: { path: "/tmp/external-repo" },
+      process: {
+        id: "proc-external",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+      },
+      lastMessageText: "External runtime done.",
     });
   });
 

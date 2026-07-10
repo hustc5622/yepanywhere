@@ -1,10 +1,12 @@
 import { Hono } from "hono";
 import type { NotificationService } from "../notifications/index.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import { getDeploymentAvailability, startDeploymentJob } from "./deploy.js";
 
 export interface ServerAdminDeps {
   supervisor: Supervisor;
+  runtimeController?: RuntimeController;
   notificationService?: NotificationService;
   dataDir?: string;
 }
@@ -57,6 +59,52 @@ export function createServerAdminRoutes(deps: ServerAdminDeps): Hono {
       process.kill(process.pid, "SIGTERM");
     }, 100);
 
+    return response;
+  });
+
+  // POST /api/server/runtime/restart - Explicitly replace the dev sidecar.
+  routes.post("/runtime/restart", async (c) => {
+    const runtime = deps.runtimeController;
+    if (
+      !runtime ||
+      runtime.mode !== "external" ||
+      process.env.YEP_RUNTIME_MANAGED_BY_DEV !== "true" ||
+      typeof process.send !== "function"
+    ) {
+      return c.json(
+        { error: "Agent runtime reload is not managed by this dev server" },
+        409,
+      );
+    }
+
+    const body = await c.req
+      .json<{ force?: boolean }>()
+      .catch(() => ({ force: false }));
+    const activity = await runtime.getWorkerActivity();
+    if (activity.hasActiveWork && !body.force) {
+      return c.json(
+        {
+          error: "Agent runtime has active work",
+          activeWorkers: activity.activeWorkers,
+          queueLength: activity.queueLength,
+        },
+        409,
+      );
+    }
+
+    const response = c.json({
+      ok: true,
+      message: "Agent runtime reload starting...",
+    });
+    setTimeout(() => {
+      void (async () => {
+        await deps.notificationService?.flush();
+        await runtime.shutdown({ abortActive: true });
+        process.send?.({ type: "runtime-reload" });
+      })().catch((error) => {
+        console.error("[ServerAdmin] Agent runtime reload failed:", error);
+      });
+    }, 100);
     return response;
   });
 

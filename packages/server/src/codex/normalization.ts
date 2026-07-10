@@ -1,4 +1,5 @@
 export const CODEX_TOOL_NAME_ALIASES: Record<string, string> = {
+  exec: "CodexExec",
   shell_command: "Bash",
   exec_command: "Bash",
   write_stdin: "WriteStdin",
@@ -58,7 +59,13 @@ export function parseCodexToolArguments(argumentsText?: string): unknown {
   }
 }
 
-export function canonicalizeCodexToolName(name: string): string {
+export function canonicalizeCodexToolName(
+  name: string,
+  namespace?: string,
+): string {
+  if (namespace) {
+    return `${namespace}${name}`;
+  }
   return (
     CODEX_TOOL_NAME_ALIASES[name] ??
     CODEX_TOOL_NAME_ALIASES[name.toLowerCase()] ??
@@ -70,6 +77,13 @@ export function normalizeCodexToolInvocation(
   toolName: string,
   input: unknown,
 ): NormalizedCodexToolInvocation {
+  if (toolName === "CodexExec") {
+    if (typeof input === "string") {
+      return { toolName, input: { script: input } };
+    }
+    return { toolName, input };
+  }
+
   if (toolName === "Read") {
     const readShellInfo = createReadShellInfoFromInput(input);
     return readShellInfo
@@ -200,7 +214,15 @@ export function normalizeCodexToolOutputWithContext(
   const exitCode = normalized.exitCode ?? extractExitCodeFromText(content);
   const sessionId = extractSessionIdFromText(content);
 
-  if (context?.toolName === "Grep") {
+  if (context?.toolName === "CodexExec") {
+    const execText = extractCodexExecOutputText(output);
+    if (execText !== undefined) {
+      content = execText;
+      if (/^Script failed\s*$/im.test(execText.split("\n", 1)[0] ?? "")) {
+        isError = true;
+      }
+    }
+  } else if (context?.toolName === "Grep") {
     const grepContent = extractCodexShellOutputContent(content);
     const grepResult = normalizeRipgrepOutput(grepContent);
     const isNoMatchesResult = exitCode === 1 && grepResult.numFiles === 0;
@@ -234,6 +256,41 @@ export function normalizeCodexToolOutputWithContext(
   }
 
   return { content, structured, isError };
+}
+
+function extractCodexExecOutputText(output: unknown): string | undefined {
+  let candidate = output;
+  if (typeof candidate === "string" && candidate.trimStart().startsWith("[")) {
+    const serialized = candidate;
+    try {
+      candidate = JSON.parse(serialized) as unknown;
+    } catch {
+      return serialized;
+    }
+  }
+
+  if (!Array.isArray(candidate)) {
+    return typeof candidate === "string" ? candidate : undefined;
+  }
+
+  const segments = candidate
+    .map((item) =>
+      isRecord(item) &&
+      (item.type === "input_text" || item.type === "output_text") &&
+      typeof item.text === "string"
+        ? item.text
+        : undefined,
+    )
+    .filter((text): text is string => text !== undefined && text.length > 0);
+
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  return segments.reduce((combined, segment) => {
+    if (!combined) return segment;
+    return `${combined}${combined.endsWith("\n") ? "" : "\n"}${segment}`;
+  }, "");
 }
 
 export function normalizeCodexCommandExecutionOutput(

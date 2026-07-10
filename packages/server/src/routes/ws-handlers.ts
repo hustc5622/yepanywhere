@@ -30,15 +30,12 @@ import type { Hono } from "hono";
 import type { DeviceBridgeService } from "../device/DeviceBridgeService.js";
 import { getLogger } from "../logging/logger.js";
 import { WS_INTERNAL_AUTHENTICATED } from "../middleware/internal-auth.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type {
   BrowserProfileService,
   ConnectedBrowsersService,
 } from "../services/index.js";
-import {
-  createActivitySubscription,
-  createSessionSubscription,
-} from "../subscriptions.js";
-import type { Supervisor } from "../supervisor/Supervisor.js";
+import { createActivitySubscription } from "../subscriptions.js";
 import type { TerminalService } from "../terminal/TerminalService.js";
 import type { UploadManager } from "../uploads/manager.js";
 import type { EventBus, FocusedSessionWatchManager } from "../watcher/index.js";
@@ -109,8 +106,8 @@ export interface WsHandlerDeps {
    * prefix here so the wrapped Hono routes (`${basePath}/api/foo`) match.
    */
   basePath?: string;
-  /** Supervisor for subscribing to session events */
-  supervisor: Supervisor;
+  /** Runtime facade for subscribing to session events */
+  runtimeController: RuntimeController;
   /** Event bus for subscribing to activity events */
   eventBus: EventBus;
   /** Upload manager for handling file uploads */
@@ -317,8 +314,8 @@ export function handleSessionSubscribe(
   subscriptions: Map<string, () => void>,
   msg: WireSubscribe,
   send: SendFn,
-  supervisor: Supervisor,
-): void {
+  runtimeController: RuntimeController,
+): Promise<void> {
   const { subscriptionId, sessionId } = msg;
 
   if (!sessionId) {
@@ -328,18 +325,7 @@ export function handleSessionSubscribe(
       status: 400,
       body: { error: "sessionId required for session channel" },
     });
-    return;
-  }
-
-  const process = supervisor.getProcessForSession(sessionId);
-  if (!process) {
-    send({
-      type: "response",
-      id: subscriptionId,
-      status: 404,
-      body: { error: "No active process for session" },
-    });
-    return;
+    return Promise.resolve();
   }
 
   let eventId = 0;
@@ -353,16 +339,39 @@ export function handleSessionSubscribe(
     });
   };
 
-  const { cleanup } = createSessionSubscription(process, sendEvent, {
-    replayAfterMessageId: msg.lastMessageId,
-    onError: (err) => {
-      console.error("[WS] Error in session subscription:", err);
-    },
-  });
+  const pendingController = new AbortController();
+  const pendingCleanup = () => pendingController.abort();
+  subscriptions.set(subscriptionId, pendingCleanup);
 
-  subscriptions.set(subscriptionId, cleanup);
+  return runtimeController
+    .subscribeSession(sessionId, sendEvent, {
+      replayAfterMessageId: msg.lastMessageId,
+      signal: pendingController.signal,
+      onError: (err) => {
+        console.error("[WS] Error in session subscription:", err);
+      },
+    })
+    .then((subscription) => {
+      if (subscriptions.get(subscriptionId) !== pendingCleanup) {
+        subscription?.cleanup();
+        return;
+      }
+      if (!subscription) {
+        subscriptions.delete(subscriptionId);
+        send({
+          type: "response",
+          id: subscriptionId,
+          status: 404,
+          body: { error: "No active process for session" },
+        });
+        return;
+      }
 
-  console.log(`[WS] Subscribed to session ${sessionId} (${subscriptionId})`);
+      subscriptions.set(subscriptionId, () => subscription.cleanup());
+      console.log(
+        `[WS] Subscribed to session ${sessionId} (${subscriptionId})`,
+      );
+    });
 }
 
 /**
@@ -501,12 +510,12 @@ export function handleSubscribe(
   subscriptions: Map<string, () => void>,
   msg: WireSubscribe,
   send: SendFn,
-  supervisor: Supervisor,
+  runtimeController: RuntimeController,
   eventBus: EventBus,
   focusedSessionWatchManager?: FocusedSessionWatchManager,
   connectedBrowsers?: ConnectedBrowsersService,
   browserProfileService?: BrowserProfileService,
-): void {
+): Promise<void> | void {
   const { subscriptionId, channel } = msg;
 
   if (subscriptions.has(subscriptionId)) {
@@ -521,8 +530,12 @@ export function handleSubscribe(
 
   switch (channel) {
     case "session":
-      handleSessionSubscribe(subscriptions, msg, send, supervisor);
-      break;
+      return handleSessionSubscribe(
+        subscriptions,
+        msg,
+        send,
+        runtimeController,
+      );
 
     case "activity":
       handleActivitySubscribe(
@@ -850,7 +863,7 @@ export async function handleMessage(
   deviceSessions?: Set<string>,
   terminalAttachId?: string,
 ): Promise<void> {
-  const { app, baseUrl, supervisor, eventBus, uploadManager } = deps;
+  const { app, baseUrl, runtimeController, eventBus, uploadManager } = deps;
 
   // Debug: log incoming data type and preview
   // Check Buffer BEFORE Uint8Array since Buffer extends Uint8Array
@@ -889,7 +902,7 @@ export async function handleMessage(
           subscriptions,
           subscribeMsg,
           send,
-          supervisor,
+          runtimeController,
           eventBus,
           deps.focusedSessionWatchManager,
           deps.connectedBrowsers,

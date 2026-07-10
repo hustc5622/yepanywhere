@@ -50,6 +50,16 @@ export interface SessionCreatedEvent {
   timestamp: string;
 }
 
+/** Event emitted when a provider replaces a temporary session ID. */
+export interface SessionIdChangedEvent {
+  type: "session-id-changed";
+  oldSessionId: string;
+  newSessionId: string;
+  projectId: UrlProjectId;
+  executor?: string;
+  timestamp: string;
+}
+
 /** Event emitted when source code changes and manual reload is needed */
 export interface SourceChangeEvent {
   type: "source-change";
@@ -131,6 +141,7 @@ export interface WorkerActivityEvent {
   queueLength: number;
   /** True if any worker is running or waiting-input (unsafe to restart) */
   hasActiveWork: boolean;
+  runtimeMode?: "embedded" | "external";
   timestamp: string;
 }
 
@@ -235,6 +246,7 @@ export type BusEvent =
   | FileChangeEvent
   | SessionStatusEvent
   | SessionCreatedEvent
+  | SessionIdChangedEvent
   | SourceChangeEvent
   | BackendReloadedEvent
   | SessionSeenEvent

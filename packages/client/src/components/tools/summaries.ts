@@ -92,6 +92,14 @@ export function getToolSummary(
     return inputSummary;
   }
 
+  // Codex code mode's `exec` input is the useful context; its result is an
+  // orchestration envelope and otherwise collapses every row to just "done".
+  if (toolName === "CodexExec") {
+    return status === "error" || result?.isError
+      ? `${inputSummary} → failed`
+      : inputSummary;
+  }
+
   if (toolName === "WriteStdin") {
     if (inputSummary && inputSummary !== "waiting for output") {
       return `${inputSummary} → ${resultSummary}`;

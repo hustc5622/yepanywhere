@@ -7,7 +7,9 @@
  * web/API process on 8022 when --replace is explicitly passed.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import http from "node:http";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exitIfUnsafeHome } from "./safe-home.js";
@@ -209,6 +211,21 @@ async function getWorkerActivity(serverBaseUrl) {
   }
 }
 
+async function getRuntimeStatus(runtimeControlUrl, runtimeTokenFile) {
+  if (!existsSync(runtimeTokenFile)) return null;
+  const token = readFileSync(runtimeTokenFile, "utf8").trim();
+  if (!token) return null;
+  try {
+    const response = await fetch(`${runtimeControlUrl}/status`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    return response.ok ? await response.json() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getBridgeStatus(bridgeControlUrl) {
   try {
     return await fetchJson(`${bridgeControlUrl}/status`);
@@ -377,6 +394,19 @@ async function main() {
     process.env.MAINTENANCE_PORT === "0"
       ? 0
       : parsePort(process.env.MAINTENANCE_PORT, port + 1);
+  const runtimePort = parsePort(process.env.YEP_RUNTIME_PORT, port + 3);
+  const runtimeControlUrl =
+    process.env.YEP_RUNTIME_CONTROL_URL ?? `http://127.0.0.1:${runtimePort}`;
+  const dataDir =
+    process.env.YEP_ANYWHERE_DATA_DIR ??
+    join(
+      homedir(),
+      process.env.YEP_ANYWHERE_PROFILE
+        ? `.yep-anywhere-${process.env.YEP_ANYWHERE_PROFILE}`
+        : ".yep-anywhere",
+    );
+  const runtimeTokenFile =
+    process.env.YEP_RUNTIME_TOKEN_FILE ?? join(dataDir, "runtime", "token");
   const bridgePort = parsePort(
     process.env.YEP_CODEX_BRIDGE_PORT ?? process.env.CODEX_BRIDGE_PORT,
     DEFAULT_CODEX_BRIDGE_PORT,
@@ -397,8 +427,20 @@ async function main() {
     `  maint:  ${maintenancePort === 0 ? "disabled" : `http://127.0.0.1:${maintenancePort}`}`,
   );
   console.log(`  codex bridge: ${bridgeControlUrl}`);
+  console.log(`  agent runtime: ${runtimeControlUrl}`);
   printPids(`  ${port} listener`, serverPids);
+  printPids(`  ${runtimePort} listener`, getListenPids(runtimePort));
   printPids(`  ${bridgePort} listener`, bridgePids);
+
+  const runtimeStatus = await getRuntimeStatus(
+    runtimeControlUrl,
+    runtimeTokenFile,
+  );
+  if (runtimeStatus) {
+    console.log(
+      `  runtime status: processes=${runtimeStatus.processCount ?? "unknown"}, active=${runtimeStatus.activeWorkers ?? "unknown"}, queue=${runtimeStatus.queueLength ?? "unknown"}`,
+    );
+  }
 
   if (bridgePids.length > 0 && setsOverlap(serverPids, bridgePids)) {
     throw new Error(
@@ -433,12 +475,21 @@ async function main() {
 
   if (serverPids.length > 0) {
     const activity = await getWorkerActivity(serverBaseUrl);
-    if (activity?.hasActiveWork && !options.allowYepSessionInterrupt) {
+    if (
+      activity?.hasActiveWork &&
+      activity.runtimeMode !== "external" &&
+      !options.allowYepSessionInterrupt
+    ) {
       throw new Error(
         `Yep currently reports active managed work (${activity.activeWorkers} process(es), queue=${activity.queueLength}). Replacing ${port} would abort the active turn. Wait for it to finish or pass --allow-yep-session-interrupt.`,
       );
     }
-    if (activity && activity.activeWorkers > 0 && !activity.hasActiveWork) {
+    if (
+      activity &&
+      activity.runtimeMode !== "external" &&
+      activity.activeWorkers > 0 &&
+      !activity.hasActiveWork
+    ) {
       console.warn(
         `Yep reports ${activity.activeWorkers} idle managed process(es). They will be closed by the server restart, but no active turn is running.`,
       );
@@ -477,6 +528,10 @@ async function main() {
     YEP_CODEX_BRIDGE_MODE: "external",
     YEP_CODEX_BRIDGE_CONTROL_URL: bridgeControlUrl,
     YEP_CODEX_BRIDGE_PORT: String(bridgePort),
+    YEP_RUNTIME_MODE: "external",
+    YEP_RUNTIME_PORT: String(runtimePort),
+    YEP_RUNTIME_CONTROL_URL: runtimeControlUrl,
+    YEP_RUNTIME_TOKEN_FILE: runtimeTokenFile,
   };
 
   console.log(

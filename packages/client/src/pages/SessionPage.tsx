@@ -635,6 +635,7 @@ function SessionPageContent({
           mode: permissionMode,
           model,
           thinking,
+          reasoningEffort: session?.reasoningEffort,
           provider: effectiveProvider,
           executor: session?.executor,
         };
@@ -723,6 +724,7 @@ function SessionPageContent({
             mode: permissionMode,
             model,
             thinking,
+            reasoningEffort: session?.reasoningEffort,
             provider: effectiveProvider,
             executor: session?.executor,
           },
@@ -746,6 +748,7 @@ function SessionPageContent({
           currentAttachments.length > 0 ? currentAttachments : undefined,
           tempId,
           thinking,
+          session?.reasoningEffort,
         );
         // If process was restarted due to thinking mode change, reconnect stream
         if (result.restarted && result.processId) {
@@ -775,6 +778,7 @@ function SessionPageContent({
               mode: permissionMode,
               model,
               thinking,
+              reasoningEffort: session?.reasoningEffort,
               provider: effectiveProvider,
               executor: session?.executor,
             },
@@ -837,6 +841,7 @@ function SessionPageContent({
         currentAttachments.length > 0 ? currentAttachments : undefined,
         tempId,
         thinking,
+        session?.reasoningEffort,
         true, // deferred
       );
       removePendingMessage(tempId);

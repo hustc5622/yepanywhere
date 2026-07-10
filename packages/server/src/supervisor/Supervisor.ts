@@ -79,6 +79,8 @@ export interface ModelSettings {
   thinking?: ThinkingConfig;
   /** Effort level for response quality. undefined = SDK default */
   effort?: EffortLevel;
+  /** Exact provider reasoning effort. Currently consumed by Codex. */
+  reasoningEffort?: string;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
   /** OpenCode model limit override. Only consumed by the OpenCode provider. */
@@ -131,6 +133,13 @@ export type OnSessionExecutorCallback = (
   executor: string | undefined,
 ) => Promise<void>;
 
+/** Optional callback to migrate state when a temporary provider ID is replaced. */
+export type OnSessionIdChangedCallback = (
+  oldSessionId: string,
+  newSessionId: string,
+  projectId: UrlProjectId,
+) => Promise<void>;
+
 /** Optional callback to fetch authoritative session summary for reconciliation */
 export type OnSessionSummaryCallback = (
   sessionId: string,
@@ -160,6 +169,8 @@ export interface SupervisorOptions {
   maxQueueSize?: number;
   /** Callback to persist executor when session ID is received (for remote execution resume) */
   onSessionExecutor?: OnSessionExecutorCallback;
+  /** Callback to migrate metadata from a temporary ID to the durable ID. */
+  onSessionIdChanged?: OnSessionIdChangedCallback;
   /** Callback to fetch session summary for initial metadata reconciliation */
   onSessionSummary?: OnSessionSummaryCallback;
 }
@@ -179,8 +190,11 @@ export class Supervisor {
   private idlePreemptThresholdMs: number;
   private workerQueue: WorkerQueue;
   private onSessionExecutor?: OnSessionExecutorCallback;
+  private onSessionIdChanged?: OnSessionIdChangedCallback;
   private onSessionSummary?: OnSessionSummaryCallback;
   private staleCheckTimer: ReturnType<typeof setInterval>;
+  private isShuttingDown = false;
+  private queueProcessingPromise: Promise<void> | null = null;
 
   constructor(options: SupervisorOptions) {
     this.provider = options.provider ?? null;
@@ -198,6 +212,7 @@ export class Supervisor {
       maxQueueSize: options.maxQueueSize,
     });
     this.onSessionExecutor = options.onSessionExecutor;
+    this.onSessionIdChanged = options.onSessionIdChanged;
     this.onSessionSummary = options.onSessionSummary;
     this.staleCheckTimer = setInterval(
       () => this.terminateStaleProcesses(),
@@ -216,6 +231,7 @@ export class Supervisor {
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
   ): Promise<Process | QueuedResponse | QueueFullResponse> {
+    this.assertAcceptingWork();
     const projectId = encodeProjectId(projectPath);
 
     // Check if at capacity
@@ -299,6 +315,7 @@ export class Supervisor {
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
   ): Promise<Process | QueuedResponse | QueueFullResponse> {
+    this.assertAcceptingWork();
     const projectId = encodeProjectId(projectPath);
 
     // Check if at capacity
@@ -536,6 +553,7 @@ export class Supervisor {
       model: modelSettings?.model,
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
+      reasoningEffort: modelSettings?.reasoningEffort,
       executor: modelSettings?.executor,
       permissions: modelSettings?.permissions,
     };
@@ -587,6 +605,7 @@ export class Supervisor {
       model: modelSettings?.model,
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
+      reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
       opencodeModelLimits: modelSettings?.opencodeModelLimits,
       executor: modelSettings?.executor,
@@ -641,6 +660,7 @@ export class Supervisor {
       model: modelSettings?.model,
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
+      reasoningEffort: modelSettings?.reasoningEffort,
       executor: modelSettings?.executor,
       permissions: modelSettings?.permissions,
     };
@@ -711,6 +731,7 @@ export class Supervisor {
       model: modelSettings?.model,
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
+      reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
       opencodeModelLimits: modelSettings?.opencodeModelLimits,
       executor: modelSettings?.executor,
@@ -766,6 +787,7 @@ export class Supervisor {
       model: modelSettings?.model,
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
+      reasoningEffort: modelSettings?.reasoningEffort,
       executor: modelSettings?.executor,
       permissions: modelSettings?.permissions,
     };
@@ -840,6 +862,7 @@ export class Supervisor {
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
   ): Promise<Process | QueuedResponse | QueueFullResponse> {
+    this.assertAcceptingWork();
     const rewind = getRewindSettings(modelSettings);
 
     // Check if already have a process for this session
@@ -873,11 +896,15 @@ export class Supervisor {
             (modelSettings?.thinking?.type ?? undefined);
           const effortChanged =
             existingProcess.effort !== modelSettings?.effort;
+          const reasoningEffortChanged =
+            existingProcess.requestedReasoningEffort !==
+            modelSettings?.reasoningEffort;
 
-          if (thinkingChanged || effortChanged) {
+          if (thinkingChanged || effortChanged || reasoningEffortChanged) {
             if (
               thinkingChanged &&
               !effortChanged &&
+              !reasoningEffortChanged &&
               existingProcess.supportsThinkingModeChange
             ) {
               // Toggle adaptive/disabled dynamically via deprecated API
@@ -912,10 +939,12 @@ export class Supervisor {
                   processId: existingProcess.id,
                   oldThinking: existingProcess.thinking?.type,
                   oldEffort: existingProcess.effort,
+                  oldReasoningEffort: existingProcess.requestedReasoningEffort,
                   newThinking: modelSettings?.thinking?.type,
                   newEffort: modelSettings?.effort,
+                  newReasoningEffort: modelSettings?.reasoningEffort,
                 },
-                "Thinking/effort changed, restarting process",
+                "Thinking or reasoning effort changed, restarting process",
               );
               await existingProcess.abort();
               this.unregisterProcess(existingProcess);
@@ -1068,6 +1097,9 @@ export class Supervisor {
     | { success: true; process: Process; restarted: boolean }
     | { success: false; error: string }
   > {
+    if (this.isShuttingDown) {
+      return { success: false, error: "Runtime is shutting down" };
+    }
     const process = this.getProcessForSession(sessionId);
     if (!process) {
       return { success: false, error: "No active process for session" };
@@ -1081,11 +1113,14 @@ export class Supervisor {
     const thinkingChanged =
       process.thinking?.type !== (modelSettings?.thinking?.type ?? undefined);
     const effortChanged = process.effort !== modelSettings?.effort;
+    const reasoningEffortChanged =
+      process.requestedReasoningEffort !== modelSettings?.reasoningEffort;
 
-    if (thinkingChanged || effortChanged) {
+    if (thinkingChanged || effortChanged || reasoningEffortChanged) {
       if (
         thinkingChanged &&
         !effortChanged &&
+        !reasoningEffortChanged &&
         process.supportsThinkingModeChange
       ) {
         // Toggle thinking dynamically via deprecated API (works for auto↔off)
@@ -1119,10 +1154,12 @@ export class Supervisor {
             processId: process.id,
             oldThinking: process.thinking?.type,
             oldEffort: process.effort,
+            oldReasoningEffort: process.requestedReasoningEffort,
             newThinking: modelSettings?.thinking?.type,
             newEffort: modelSettings?.effort,
+            newReasoningEffort: modelSettings?.reasoningEffort,
           },
-          "Thinking/effort changed on queue, restarting process",
+          "Thinking or reasoning effort changed on queue, restarting process",
         );
 
         await process.abort();
@@ -1331,6 +1368,37 @@ export class Supervisor {
         this.sessionToProcess.set(event.newSessionId, process.id);
         this.everOwnedSessions.add(event.newSessionId);
 
+        this.eventBus?.emit({
+          type: "session-id-changed",
+          oldSessionId: event.oldSessionId,
+          newSessionId: event.newSessionId,
+          projectId: process.projectId,
+          executor: process.executor,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Session creation can return after Process.waitForSessionId() times
+        // out, leaving Yep metadata stored under the temporary UUID. Migrate
+        // that state as soon as the provider later supplies its durable ID.
+        if (this.onSessionIdChanged) {
+          this.onSessionIdChanged(
+            event.oldSessionId,
+            event.newSessionId,
+            process.projectId,
+          ).catch((error) => {
+            log.warn(
+              {
+                event: "session_id_metadata_migration_failed",
+                oldSessionId: event.oldSessionId,
+                newSessionId: event.newSessionId,
+                projectId: process.projectId,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "Failed to migrate metadata to the durable session ID",
+            );
+          });
+        }
+
         // Persist executor for remote execution resume support
         // This saves which SSH host was used so resume can reconnect to the same remote
         if (this.onSessionExecutor && process.executor) {
@@ -1459,8 +1527,11 @@ export class Supervisor {
     // Emit worker activity after unregistering (worker removed)
     this.emitWorkerActivity();
 
-    // Process queue when a worker becomes available
-    void this.processQueue();
+    // Runtime shutdown must not start replacement work after the control
+    // server begins closing.
+    if (!this.isShuttingDown) {
+      this.scheduleProcessQueue();
+    }
   }
 
   /**
@@ -1795,7 +1866,11 @@ export class Supervisor {
    * Process the queue - called when a worker becomes available.
    */
   private async processQueue(): Promise<void> {
-    while (!this.workerQueue.isEmpty && !this.isAtCapacity()) {
+    while (
+      !this.isShuttingDown &&
+      !this.workerQueue.isEmpty &&
+      !this.isAtCapacity()
+    ) {
       const request = this.workerQueue.dequeue();
       if (!request) break;
 
@@ -1824,6 +1899,16 @@ export class Supervisor {
           process = result;
         }
 
+        if (this.isShuttingDown) {
+          await process.abort();
+          this.unregisterProcess(process);
+          request.resolve({
+            status: "cancelled",
+            reason: "Runtime shutting down",
+          });
+          continue;
+        }
+
         // Emit queue removed event
         this.eventBus?.emit({
           type: "queue-request-removed",
@@ -1842,6 +1927,23 @@ export class Supervisor {
         });
       }
     }
+  }
+
+  private scheduleProcessQueue(): void {
+    if (this.isShuttingDown || this.queueProcessingPromise) return;
+    const work = this.processQueue().finally(() => {
+      if (this.queueProcessingPromise === work) {
+        this.queueProcessingPromise = null;
+      }
+      if (
+        !this.isShuttingDown &&
+        !this.workerQueue.isEmpty &&
+        !this.isAtCapacity()
+      ) {
+        this.scheduleProcessQueue();
+      }
+    });
+    this.queueProcessingPromise = work;
   }
 
   /**
@@ -1900,6 +2002,31 @@ export class Supervisor {
   // ============ Public Queue Methods ============
 
   /**
+   * Stop accepting work, cancel queued requests, and terminate all processes.
+   * Process completion can race with explicit aborts, so this is idempotent.
+   */
+  async shutdown(): Promise<void> {
+    this.isShuttingDown = true;
+    clearInterval(this.staleCheckTimer);
+    this.workerQueue.cancelAll();
+    await this.queueProcessingPromise?.catch(() => {});
+
+    while (this.processes.size > 0) {
+      const processIds = [...this.processes.keys()];
+      await Promise.all(
+        processIds.map((processId) => this.abortProcess(processId)),
+      );
+    }
+    this.emitWorkerActivity();
+  }
+
+  private assertAcceptingWork(): void {
+    if (this.isShuttingDown) {
+      throw new Error("Runtime is shutting down");
+    }
+  }
+
+  /**
    * Cancel a queued request.
    * @returns true if cancelled, false if not found
    */
@@ -1945,9 +2072,14 @@ export class Supervisor {
     queueLength: number;
     hasActiveWork: boolean;
   } {
-    const hasActiveWork = Array.from(this.processes.values()).some(
-      (p) => p.state.type === "in-turn" || p.state.type === "waiting-input",
-    );
+    const hasActiveWork =
+      this.workerQueue.length > 0 ||
+      Array.from(this.processes.values()).some(
+        (p) =>
+          p.state.type === "in-turn" ||
+          p.state.type === "waiting-input" ||
+          p.state.type === "hold",
+      );
     return {
       activeWorkers: this.processes.size,
       queueLength: this.workerQueue.length,

@@ -1340,7 +1340,10 @@ function convertCodexCustomToolCallPayload(
 ): CodexToolUseConversion {
   const callId = payload.call_id ?? payload.id ?? `${uuid}-custom-tool`;
   const rawToolName = payload.name ?? "custom_tool_call";
-  const canonicalToolName = canonicalizeCodexToolName(rawToolName);
+  const canonicalToolName = canonicalizeCodexToolName(
+    rawToolName,
+    payload.namespace,
+  );
   const rawInput =
     payload.input !== undefined
       ? payload.input
@@ -1367,6 +1370,7 @@ function convertCodexCustomToolCallPayload(
       content,
     },
     codexToolName: rawToolName,
+    ...(payload.namespace ? { codexToolNamespace: payload.namespace } : {}),
     timestamp,
   };
 

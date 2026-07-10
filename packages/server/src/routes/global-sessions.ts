@@ -32,11 +32,13 @@ import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import {
+  type SessionRuntimeProcess,
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
 } from "../sessions/session-runtime.js";
@@ -57,6 +59,7 @@ export interface GlobalSessionsDeps {
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
   supervisor?: Supervisor;
+  runtimeController?: RuntimeController;
   externalTracker?: ExternalSessionTracker;
   notificationService?: NotificationService;
   sessionIndexService?: SessionIndexService;
@@ -515,6 +518,16 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
 
   // GET /api/sessions - Get all sessions with pagination
   routes.get("/", async (c) => {
+    const processBySessionId = new Map<string, SessionRuntimeProcess>();
+    if (deps.runtimeController) {
+      for (const process of await deps.runtimeController.listProcessSnapshots()) {
+        processBySessionId.set(process.sessionId, process);
+      }
+    } else {
+      for (const process of deps.supervisor?.getAllProcesses?.() ?? []) {
+        processBySessionId.set(process.sessionId, process);
+      }
+    }
     // Parse query params
     const filterProjectId = c.req.query("project");
     const searchQuery = c.req.query("q")?.toLowerCase();
@@ -665,7 +678,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         }
 
         // Compute status
-        const process = deps.supervisor?.getProcessForSession(session.id);
+        const process =
+          processBySessionId.get(session.id) ??
+          deps.supervisor?.getProcessForSession?.(session.id);
         const bridgedSession =
           bridgedSessionById.get(session.id) ??
           (await getBridgeSessionView(deps, session.id));

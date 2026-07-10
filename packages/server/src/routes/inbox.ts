@@ -29,10 +29,16 @@ import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import type { RuntimeController } from "../runtime/types.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
+import {
+  type SessionRuntimeProcess,
+  getProcessActivity,
+  pendingInputTypeFromProcess,
+} from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type {
@@ -47,6 +53,7 @@ export interface InboxDeps {
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
   supervisor?: Supervisor;
+  runtimeController?: RuntimeController;
   notificationService?: NotificationService;
   sessionIndexService?: SessionIndexService;
   sessionMetadataService?: SessionMetadataService;
@@ -149,11 +156,19 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
     const projects = filterProjectId
       ? allProjects.filter((p) => p.id === filterProjectId)
       : allProjects;
-    const activeProcessProjectIds = new Set(
-      deps.supervisor
-        ?.getAllProcesses?.()
-        .map((process) => process.projectId) ?? [],
-    );
+    const processBySessionId = new Map<string, SessionRuntimeProcess>();
+    const activeProcessProjectIds = new Set<string>();
+    if (deps.runtimeController) {
+      for (const process of await deps.runtimeController.listProcessSnapshots()) {
+        processBySessionId.set(process.sessionId, process);
+        activeProcessProjectIds.add(process.projectId);
+      }
+    } else {
+      for (const process of deps.supervisor?.getAllProcesses?.() ?? []) {
+        processBySessionId.set(process.sessionId, process);
+        activeProcessProjectIds.add(process.projectId);
+      }
+    }
     const oldestInboxActivityTime = now - TWENTY_FOUR_HOURS_MS;
     const projectsForInboxScan = filterProjectId
       ? projects
@@ -243,16 +258,12 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
         let pendingInputType: PendingInputType | undefined;
         let activity: AgentActivity | undefined;
 
-        const process = deps.supervisor?.getProcessForSession(session.id);
+        const process =
+          processBySessionId.get(session.id) ??
+          deps.supervisor?.getProcessForSession?.(session.id);
         if (process) {
-          const pendingRequest = process.getPendingInputRequest();
-          if (pendingRequest) {
-            pendingInputType =
-              pendingRequest.type === "tool-approval"
-                ? "tool-approval"
-                : "user-question";
-          }
-          const state = process.state.type;
+          pendingInputType = pendingInputTypeFromProcess(process);
+          const state = getProcessActivity(process);
           if (state === "in-turn" || state === "waiting-input") {
             activity = state;
           }

@@ -7,6 +7,7 @@ import {
   type UrlProjectId,
   asDirProjectId,
 } from "@yep-anywhere/shared";
+import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { decodeProjectId, encodeProjectId } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import { readFirstLine } from "../utils/jsonl.js";
@@ -45,6 +46,13 @@ interface ExternalSessionInfo {
   validationTimeoutId: ReturnType<typeof setTimeout> | null;
 }
 
+interface CodexFileSessionMeta {
+  cwd: string;
+  timestamp: string;
+  model?: string;
+  isSubagent: boolean;
+}
+
 /** Default grace period after abort before external detection resumes (30 seconds) */
 const DEFAULT_ABORT_GRACE_MS = 30000;
 const MISSING_PROJECT_WARNING_INTERVAL_MS = 60_000;
@@ -66,6 +74,10 @@ export interface ExternalSessionTrackerOptions {
     sessionId: string,
     projectId: UrlProjectId,
   ) => Promise<SessionSummary | null>;
+  /** Resolve ownership held by a standalone agent runtime. */
+  getRuntimeProcess?: (
+    sessionId: string,
+  ) => Promise<{ projectId: UrlProjectId } | null>;
 }
 
 /**
@@ -93,6 +105,8 @@ export class ExternalSessionTracker {
     sessionId: string,
     projectId: UrlProjectId,
   ) => Promise<SessionSummary | null>;
+  private getRuntimeProcess?: ExternalSessionTrackerOptions["getRuntimeProcess"];
+  private runtimeOwnedSessions = new Set<string>();
   /** Batches session parsing to prevent OOM from concurrent file reads */
   private sessionParser: BatchProcessor<SessionSummary | null>;
   /** Tracks sessions that have already emitted session-created */
@@ -125,6 +139,7 @@ export class ExternalSessionTracker {
     this.externalProcessProbe =
       options.externalProcessProbe ?? hasActiveExternalProviderProcess;
     this.getSessionSummary = options.getSessionSummary;
+    this.getRuntimeProcess = options.getRuntimeProcess;
 
     // Initialize batch processor for session parsing
     // Limits concurrent JSONL parsing to prevent OOM during bulk file operations
@@ -138,7 +153,9 @@ export class ExternalSessionTracker {
         const now = new Date().toISOString();
 
         // Check if supervisor owns this session
-        const isOwned = !!this.supervisor.getProcessForSession(sessionId);
+        const isOwned =
+          !!this.supervisor.getProcessForSession(sessionId) ||
+          this.runtimeOwnedSessions.has(sessionId);
         const isExternal = this.externalSessions.has(sessionId);
 
         // Clean up external tracking if owned
@@ -428,6 +445,7 @@ export class ExternalSessionTracker {
     }
     this.externalSessions.clear();
     this.recentlyAborted.clear();
+    this.runtimeOwnedSessions.clear();
     this.missingProjectWarningTimestamps.clear();
   }
 
@@ -451,13 +469,19 @@ export class ExternalSessionTracker {
 
     // Check if we own this session
     const process = this.supervisor.getProcessForSession(sessionId);
-    if (process) {
+    const runtimeProcess = process
+      ? null
+      : await this.getRuntimeProcess?.(sessionId);
+    if (runtimeProcess) this.runtimeOwnedSessions.add(sessionId);
+    else this.runtimeOwnedSessions.delete(sessionId);
+    if (process || runtimeProcess) {
       // We own it - remove from external tracking if present
       this.removeExternal(sessionId);
       // Still parse to detect title/messageCount changes for owned sessions
       if (this.getSessionSummary) {
         const getSessionSummary = this.getSessionSummary;
-        const projectId = process.projectId;
+        const projectId = process?.projectId ?? runtimeProcess?.projectId;
+        if (!projectId) return;
         this.sessionParser.enqueue(sessionId, async () => {
           return getSessionSummary(sessionId, projectId);
         });
@@ -535,13 +559,32 @@ export class ExternalSessionTracker {
     const sessionId = this.extractCodexSessionId(event.relativePath);
     if (!sessionId) return;
 
+    const meta = await this.readCodexSessionMeta(event.path);
+    if (!meta) return;
+
+    // Codex persists every collaboration worker as its own rollout file. Those
+    // files are child threads of the visible CLI session, not new sessions.
+    if (meta.isSubagent) {
+      this.removeExternal(sessionId);
+      this.runtimeOwnedSessions.delete(sessionId);
+      this.createdSessions.delete(sessionId);
+      this.sessionStateCache.delete(sessionId);
+      return;
+    }
+
     const process = this.supervisor.getProcessForSession(sessionId);
-    if (process) {
+    const runtimeProcess = process
+      ? null
+      : await this.getRuntimeProcess?.(sessionId);
+    if (runtimeProcess) this.runtimeOwnedSessions.add(sessionId);
+    else this.runtimeOwnedSessions.delete(sessionId);
+    if (process || runtimeProcess) {
       this.removeExternal(sessionId);
       // Still parse to detect title/messageCount changes for owned sessions
       if (this.getSessionSummary) {
         const getSessionSummary = this.getSessionSummary;
-        const projectId = process.projectId;
+        const projectId = process?.projectId ?? runtimeProcess?.projectId;
+        if (!projectId) return;
         this.sessionParser.enqueue(sessionId, async () => {
           return getSessionSummary(sessionId, projectId);
         });
@@ -553,14 +596,18 @@ export class ExternalSessionTracker {
       return;
     }
 
-    const projectId = await this.readCodexProjectIdFromFile(event.path);
-    if (!projectId) return;
+    const projectId = encodeProjectId(meta.cwd);
 
     await this.handleUnownedSessionActivity(sessionId, {
       provider: event.provider,
       projectId,
     });
-    await this.ensureCodexSessionCreated(sessionId, event.path, projectId);
+    await this.ensureCodexSessionCreated(
+      sessionId,
+      event.path,
+      projectId,
+      meta,
+    );
   }
 
   private extractCodexSessionId(relativePath: string): string | null {
@@ -571,37 +618,32 @@ export class ExternalSessionTracker {
     return match?.[1] ?? null;
   }
 
-  private async readCodexProjectIdFromFile(
-    filePath: string,
-  ): Promise<UrlProjectId | null> {
-    const meta = await this.readCodexSessionMeta(filePath);
-    if (!meta) return null;
-    return encodeProjectId(meta.cwd);
-  }
-
   private async readCodexSessionMeta(
     filePath: string,
-  ): Promise<{ cwd: string; timestamp: string; model?: string } | null> {
+  ): Promise<CodexFileSessionMeta | null> {
     try {
       const firstLine = await readFirstLine(filePath);
       if (!firstLine) return null;
 
       const parsed = JSON.parse(firstLine) as {
         type?: string;
-        payload?: { cwd?: string; timestamp?: string; model?: string };
+        payload?: Record<string, unknown>;
       };
       if (
         parsed.type !== "session_meta" ||
-        !parsed.payload?.cwd ||
-        !parsed.payload?.timestamp
+        typeof parsed.payload?.cwd !== "string" ||
+        typeof parsed.payload.timestamp !== "string"
       ) {
         return null;
       }
 
+      const model = parsed.payload.model;
+
       return {
         cwd: parsed.payload.cwd,
         timestamp: parsed.payload.timestamp,
-        model: parsed.payload.model,
+        model: typeof model === "string" ? model : undefined,
+        isSubagent: getCodexSubagentMetadata(parsed.payload).isSubagent,
       };
     } catch {
       return null;
@@ -612,11 +654,9 @@ export class ExternalSessionTracker {
     sessionId: string,
     filePath: string,
     projectId: UrlProjectId,
+    meta: CodexFileSessionMeta,
   ): Promise<void> {
     if (this.createdSessions.has(sessionId)) return;
-
-    const meta = await this.readCodexSessionMeta(filePath);
-    if (!meta) return;
 
     try {
       const stats = await stat(filePath);

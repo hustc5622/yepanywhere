@@ -257,6 +257,8 @@ export interface SessionOptions {
   /** Model ID (e.g., "sonnet", "opus", "qwen2.5-coder:0.5b") */
   model?: string;
   thinking?: ThinkingOption;
+  /** Exact provider reasoning effort (currently used by Codex). */
+  reasoningEffort?: string;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
   /** OpenCode-only per-session model limit override */
@@ -848,6 +850,7 @@ export const api = {
         mode: options?.mode,
         model: options?.model,
         thinking: options?.thinking,
+        reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         opencodeModelLimits: options?.opencodeModelLimits,
@@ -872,6 +875,7 @@ export const api = {
         mode: options?.mode,
         model: options?.model,
         thinking: options?.thinking,
+        reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         opencodeModelLimits: options?.opencodeModelLimits,
@@ -910,6 +914,7 @@ export const api = {
         mode: options?.mode,
         model: options?.model,
         thinking: options?.thinking,
+        reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         opencodeModelLimits: options?.opencodeModelLimits,
@@ -928,6 +933,7 @@ export const api = {
     attachments?: UploadedFile[],
     tempId?: string,
     thinking?: ThinkingOption,
+    reasoningEffort?: string,
     deferred?: boolean,
   ) =>
     fetchJSON<{
@@ -943,6 +949,7 @@ export const api = {
         attachments,
         tempId,
         thinking,
+        reasoningEffort,
         deferred,
       }),
     }),

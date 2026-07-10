@@ -124,4 +124,19 @@ describe("getToolSummary", () => {
       "/repo/packages/client/src/components/blocks/ToolCallRow.tsx → ToolCallRow.tsx",
     );
   });
+
+  it("keeps the Codex code-mode exec command overview after completion", () => {
+    const summary = getToolSummary(
+      "CodexExec",
+      {
+        script:
+          'const result = await tools.exec_command({"cmd": "pnpm lint"});',
+      },
+      { content: "Script completed", isError: false },
+      "complete",
+      { provider: "codex" },
+    );
+
+    expect(summary).toBe("pnpm lint");
+  });
 });

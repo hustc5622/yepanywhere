@@ -873,6 +873,115 @@ describe("Codex Normalization", () => {
     });
   });
 
+  it("normalizes Codex code-mode exec scripts into an Exec tool row", () => {
+    const script =
+      'const result = await tools.exec_command({cmd: "pnpm test", yield_time_ms: 30000});';
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-code-exec",
+          name: "exec",
+          input: script,
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:02Z",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-code-exec",
+          output: [
+            {
+              type: "input_text",
+              text: "Script completed\nWall time 0.2 seconds\nOutput:\n",
+            },
+            { type: "input_text", text: "Tests passed" },
+          ],
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+    const toolUseContent = result.messages[0]?.message?.content;
+    const block = Array.isArray(toolUseContent)
+      ? toolUseContent[0]
+      : toolUseContent;
+
+    expect(block).toMatchObject({
+      type: "tool_use",
+      id: "call-code-exec",
+      name: "CodexExec",
+      input: { script },
+    });
+
+    const toolResultMessage = result.messages[1];
+    const toolResultContent = toolResultMessage?.message?.content;
+    expect(
+      Array.isArray(toolResultContent)
+        ? toolResultContent[0]
+        : toolResultContent,
+    ).toMatchObject({
+      type: "tool_result",
+      tool_use_id: "call-code-exec",
+      content: "Script completed\nWall time 0.2 seconds\nOutput:\nTests passed",
+    });
+    expect(toolResultMessage?.toolUseResult).toEqual([
+      {
+        type: "input_text",
+        text: "Script completed\nWall time 0.2 seconds\nOutput:\n",
+      },
+      { type: "input_text", text: "Tests passed" },
+    ]);
+  });
+
+  it("marks failed Codex code-mode exec output as an error", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-code-exec-failed",
+          name: "exec",
+          input: "throw new Error('boom')",
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:02Z",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-code-exec-failed",
+          output: [
+            {
+              type: "input_text",
+              text: "Script failed\nWall time 0.0 seconds\nOutput:\n",
+            },
+            { type: "input_text", text: "Script error:\nboom" },
+          ],
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+    const toolResultContent = result.messages[1]?.message?.content;
+
+    expect(
+      Array.isArray(toolResultContent)
+        ? toolResultContent[0]
+        : toolResultContent,
+    ).toMatchObject({
+      type: "tool_result",
+      tool_use_id: "call-code-exec-failed",
+      is_error: true,
+      content:
+        "Script failed\nWall time 0.0 seconds\nOutput:\nScript error:\nboom",
+    });
+  });
+
   it("maps ripgrep exec_command calls to Grep and treats no matches as non-error", () => {
     const entries: CodexSessionEntry[] = [
       {
@@ -1363,6 +1472,32 @@ describe("Codex Normalization", () => {
       name: "Edit",
     });
     expect(toolResultMessage?.toolUseResult).toMatchObject({ ok: true });
+  });
+
+  it("preserves custom tool namespaces instead of treating namespaced exec as code mode", () => {
+    const result = normalizeSession(
+      buildLoadedSession([
+        {
+          type: "response_item",
+          timestamp: "2024-01-01T00:00:01Z",
+          payload: {
+            type: "custom_tool_call",
+            call_id: "call-namespaced-exec",
+            namespace: "mcp__python::",
+            name: "exec",
+            input: "print('hello')",
+          },
+        },
+      ]),
+    );
+
+    const content = result.messages[0]?.message?.content;
+    expect(Array.isArray(content) ? content[0] : content).toMatchObject({
+      type: "tool_use",
+      id: "call-namespaced-exec",
+      name: "mcp__python::exec",
+      input: "print('hello')",
+    });
   });
 
   it("normalizes new tooling fixture (update_plan + write_stdin) with readable output text", () => {

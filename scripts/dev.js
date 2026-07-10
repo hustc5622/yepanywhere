@@ -17,13 +17,18 @@
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
   watch,
+  writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getBackendReloadPlan } from "./runtime-reload-classifier.js";
 import { exitIfUnsafeHome } from "./safe-home.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -129,7 +134,8 @@ banner on file changes instead of auto-restarting).
 const backendWatch = !args.includes("--no-watch");
 const noFrontendReload = args.includes("--no-frontend-reload");
 
-// Port configuration: PORT + 0 = server, PORT + 1 = maintenance, PORT + 2 = vite
+// Port configuration: PORT + 0 = server, +1 = maintenance, +2 = vite,
+// +3 = long-lived agent runtime.
 const basePort = process.env.PORT
   ? Number.parseInt(process.env.PORT, 10)
   : 3400;
@@ -140,6 +146,26 @@ const maintenancePort =
   process.env.MAINTENANCE_PORT !== undefined
     ? Number.parseInt(process.env.MAINTENANCE_PORT, 10)
     : basePort + 1;
+const runtimeMode =
+  process.env.YEP_RUNTIME_MODE?.trim().toLowerCase() === "external"
+    ? "external"
+    : "embedded";
+const runtimePort = process.env.YEP_RUNTIME_PORT
+  ? Number.parseInt(process.env.YEP_RUNTIME_PORT, 10)
+  : basePort + 3;
+const runtimeControlUrl =
+  process.env.YEP_RUNTIME_CONTROL_URL ?? `http://127.0.0.1:${runtimePort}`;
+const yepDataDir =
+  process.env.YEP_ANYWHERE_DATA_DIR ??
+  join(
+    homedir(),
+    process.env.YEP_ANYWHERE_PROFILE
+      ? `.yep-anywhere-${process.env.YEP_ANYWHERE_PROFILE}`
+      : ".yep-anywhere",
+  );
+const runtimeTokenFile =
+  process.env.YEP_RUNTIME_TOKEN_FILE ?? join(yepDataDir, "runtime", "token");
+const runtimeDirtyFile = join(yepDataDir, "runtime", "dirty.json");
 const protocol = process.env.HTTPS_SELF_SIGNED === "true" ? "https" : "http";
 const configuredHost = process.env.HOST?.trim();
 const displayHost =
@@ -150,8 +176,9 @@ const displayHost =
 console.log("Starting dev server...");
 console.log(`  Access at: ${protocol}://${displayHost}:${basePort}`);
 console.log(
-  `  Ports: server=${basePort}, maintenance=${maintenancePort}, vite=${vitePort}`,
+  `  Ports: server=${basePort}, maintenance=${maintenancePort}, vite=${vitePort}, runtime=${runtimePort}`,
 );
+console.log(`  Agent runtime: ${runtimeMode.toUpperCase()}`);
 console.log(
   `  Note: Vite output on :${vitePort} is internal HMR only; browse ${protocol}://${displayHost}:${basePort}`,
 );
@@ -170,6 +197,11 @@ const env = {
   VITE_PORT: String(vitePort),
   VITE_API_PORT: String(basePort),
   MAINTENANCE_PORT: String(maintenancePort),
+  YEP_RUNTIME_MODE: runtimeMode,
+  YEP_RUNTIME_PORT: String(runtimePort),
+  YEP_RUNTIME_CONTROL_URL: runtimeControlUrl,
+  YEP_RUNTIME_TOKEN_FILE: runtimeTokenFile,
+  YEP_RUNTIME_MANAGED_BY_DEV: runtimeMode === "external" ? "true" : "",
 };
 
 // Track child processes for cleanup
@@ -177,10 +209,12 @@ const children = [];
 const backendSourceWatchers = [];
 const pendingBackendFiles = new Set();
 let serverProcess = null;
+let runtimeProcess = null;
 let backendRestartTimer = null;
 let restartRequested = false;
 let restartReason = "";
 let isCleaningUp = false;
+let runtimeReloadRequested = false;
 
 function cleanup() {
   isCleaningUp = true;
@@ -212,7 +246,7 @@ function startServer() {
     {
       cwd: serverDir,
       env,
-      stdio: "inherit",
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
     },
   );
 
@@ -241,7 +275,114 @@ function startServer() {
     }
   });
 
+  server.on("message", (message) => {
+    if (
+      message &&
+      typeof message === "object" &&
+      message.type === "runtime-reload"
+    ) {
+      void reloadExternalRuntime().catch((error) => {
+        console.error(
+          `[AgentRuntime] Reload failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+  });
+
   return server;
+}
+
+async function getRuntimeStatus() {
+  if (!existsSync(runtimeTokenFile)) return null;
+  const token = readFileSync(runtimeTokenFile, "utf8").trim();
+  if (!token) return null;
+
+  try {
+    const response = await fetch(`${runtimeControlUrl}/status`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1000),
+    });
+    if (response.status === 401) {
+      throw new Error(
+        `Agent runtime at ${runtimeControlUrl} rejected ${runtimeTokenFile}`,
+      );
+    }
+    if (!response.ok) return null;
+    return response.json();
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("Agent runtime at")
+    ) {
+      throw error;
+    }
+    return null;
+  }
+}
+
+async function ensureExternalRuntime() {
+  if (runtimeMode !== "external") return;
+
+  const existing = await getRuntimeStatus();
+  if (existing) {
+    console.log(
+      `[AgentRuntime] Reusing ${runtimeControlUrl} (${existing.processCount ?? 0} process(es))`,
+    );
+    return;
+  }
+
+  const runtime = spawn(
+    process.execPath,
+    ["--import", "tsx", "--conditions", "source", "src/runtime/standalone.ts"],
+    {
+      cwd: serverDir,
+      env,
+      stdio: "inherit",
+      detached: !isWindows,
+    },
+  );
+  runtimeProcess = runtime;
+  runtime.unref();
+  runtime.on("exit", (code, signal) => {
+    if (runtimeProcess === runtime) runtimeProcess = null;
+    if (!isCleaningUp && !runtimeReloadRequested) {
+      console.error(
+        `[AgentRuntime] Exited unexpectedly (code=${String(code)}, signal=${String(signal)})`,
+      );
+    }
+  });
+
+  const deadline = Date.now() + 7000;
+  while (Date.now() < deadline) {
+    const status = await getRuntimeStatus();
+    if (status) {
+      console.log(`[AgentRuntime] Ready at ${runtimeControlUrl}`);
+      return;
+    }
+    if (runtime.exitCode !== null) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Agent runtime failed to start at ${runtimeControlUrl}`);
+}
+
+async function reloadExternalRuntime() {
+  if (runtimeMode !== "external" || runtimeReloadRequested) return;
+  runtimeReloadRequested = true;
+  try {
+    const deadline = Date.now() + 7000;
+    while (Date.now() < deadline && (await getRuntimeStatus())) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (await getRuntimeStatus()) {
+      throw new Error("Existing agent runtime did not stop before reload");
+    }
+    runtimeProcess = null;
+    await ensureExternalRuntime();
+    clearRuntimeDirty();
+    requestServerRestart("agent runtime reloaded");
+  } finally {
+    runtimeReloadRequested = false;
+  }
 }
 
 function isBackendSourceFile(filename) {
@@ -255,6 +396,23 @@ function isBackendSourceFile(filename) {
 function summarizeFiles(files) {
   const shown = files.slice(0, 3).join(", ");
   return files.length > 3 ? `${shown}, +${files.length - 3} more` : shown;
+}
+
+function markRuntimeDirty(files) {
+  mkdirSync(dirname(runtimeDirtyFile), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    runtimeDirtyFile,
+    `${JSON.stringify({ files, timestamp: new Date().toISOString() }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+}
+
+function clearRuntimeDirty() {
+  try {
+    unlinkSync(runtimeDirtyFile);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
 }
 
 function requestServerRestart(reason) {
@@ -287,7 +445,27 @@ function scheduleBackendRestart() {
     if (files.length > 0) {
       console.log(`[BackendWatch] Source changed: ${summarizeFiles(files)}`);
     }
-    requestServerRestart("source change");
+    if (runtimeMode !== "external") {
+      requestServerRestart("source change");
+      return;
+    }
+
+    const reloadPlan = getBackendReloadPlan(files);
+    const { runtimeImpactingFiles } = reloadPlan;
+    if (runtimeImpactingFiles.length > 0) {
+      markRuntimeDirty(runtimeImpactingFiles);
+      console.log(
+        `[BackendWatch] Agent runtime marked dirty: ${summarizeFiles(runtimeImpactingFiles)}`,
+      );
+    }
+
+    if (reloadPlan.shouldReloadShell) {
+      requestServerRestart("shell source change");
+    } else {
+      console.log(
+        "[BackendWatch] Runtime-impacting changes are waiting for an explicit runtime reload",
+      );
+    }
   }, 300);
 }
 
@@ -404,7 +582,15 @@ function startClient() {
   return client;
 }
 
-// Start both processes
-startServer();
-startBackendSourceWatchers();
-startClient();
+async function main() {
+  await ensureExternalRuntime();
+  startServer();
+  startBackendSourceWatchers();
+  startClient();
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  cleanup();
+  process.exitCode = 1;
+});

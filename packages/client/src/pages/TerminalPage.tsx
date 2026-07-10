@@ -281,6 +281,7 @@ export function TerminalPage() {
   const repeatTimeoutRef = useRef<number | null>(null);
   const repeatIntervalRef = useRef<number | null>(null);
   const modifiersRef = useRef<MobileModifiers>(INITIAL_MODIFIERS);
+  const pageRef = useRef<HTMLDivElement | null>(null);
 
   const [connectionInfo, setConnectionInfo] = useState<{
     pid?: number;
@@ -343,6 +344,24 @@ export function TerminalPage() {
     } catch {
       // Resize events can fire while xterm is between layouts.
     }
+  }, []);
+
+  // Keep the terminal layout inside the visual viewport when the soft keyboard
+  // overlays the fixed app shell on mobile WebViews.
+  const syncViewportBounds = useCallback(() => {
+    const page = pageRef.current;
+    if (!page) return;
+
+    const viewport = window.visualViewport;
+    const visualBottom =
+      (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight);
+    const pageTop = page.getBoundingClientRect().top;
+    const availableHeight = Math.max(1, Math.round(visualBottom - pageTop));
+
+    page.style.setProperty(
+      "--terminal-available-height",
+      `${availableHeight}px`,
+    );
   }, []);
 
   const focusTerminal = useCallback(() => {
@@ -458,28 +477,34 @@ export function TerminalPage() {
     });
     observer.observe(containerRef.current);
 
-    const refitAfterViewportChange = () => {
-      requestAnimationFrame(fitTerminal);
-    };
-    window.visualViewport?.addEventListener("resize", refitAfterViewportChange);
-    window.visualViewport?.addEventListener("scroll", refitAfterViewportChange);
-
     return () => {
       observer.disconnect();
-      window.visualViewport?.removeEventListener(
-        "resize",
-        refitAfterViewportChange,
-      );
-      window.visualViewport?.removeEventListener(
-        "scroll",
-        refitAfterViewportChange,
-      );
       dataDisposable.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
     };
   }, [fitTerminal, handleTerminalData]);
+
+  useEffect(() => {
+    const syncAndFit = () => {
+      syncViewportBounds();
+      requestAnimationFrame(fitTerminal);
+    };
+
+    syncAndFit();
+    window.addEventListener("resize", syncAndFit);
+    window.addEventListener("orientationchange", syncAndFit);
+    window.visualViewport?.addEventListener("resize", syncAndFit);
+    window.visualViewport?.addEventListener("scroll", syncAndFit);
+
+    return () => {
+      window.removeEventListener("resize", syncAndFit);
+      window.removeEventListener("orientationchange", syncAndFit);
+      window.visualViewport?.removeEventListener("resize", syncAndFit);
+      window.visualViewport?.removeEventListener("scroll", syncAndFit);
+    };
+  }, [fitTerminal, syncViewportBounds]);
 
   const stateColor =
     result.state === "connected"
@@ -496,7 +521,7 @@ export function TerminalPage() {
       : null;
 
   return (
-    <div className="main-content-wrapper">
+    <div ref={pageRef} className="main-content-wrapper terminal-page-wrapper">
       <div className="main-content-constrained terminal-page">
         <PageHeader
           title="Terminal"

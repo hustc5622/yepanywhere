@@ -863,6 +863,82 @@ describe("CodexProvider Event Normalization", () => {
         "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
     });
   });
+
+  it("streams raw code-mode exec calls and their results", () => {
+    const testProvider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+        customToolContexts: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const contexts = new Map<string, unknown>();
+
+    const calls = testProvider.convertNotificationToSDKMessages(
+      {
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "custom_tool_call",
+            call_id: "call-exec",
+            name: "exec",
+            input: "const result = await tools.example({ value: 1 });",
+          },
+        },
+      },
+      "session-1",
+      new Map(),
+      contexts,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.message).toMatchObject({
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "call-exec",
+          name: "CodexExec",
+          input: {
+            script: "const result = await tools.example({ value: 1 });",
+          },
+        },
+      ],
+    });
+
+    const results = testProvider.convertNotificationToSDKMessages(
+      {
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "custom_tool_call_output",
+            call_id: "call-exec",
+            output: '{"ok":true}',
+          },
+        },
+      },
+      "session-1",
+      new Map(),
+      contexts,
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.message).toMatchObject({
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "call-exec",
+          content: '{"ok":true}',
+        },
+      ],
+    });
+  });
 });
 
 describe("CodexProvider Configuration", () => {
@@ -929,6 +1005,11 @@ describe("CodexProvider Configuration", () => {
 
     it("ranks the account default model first", () => {
       const result = normalize([
+        {
+          id: "gpt-5.6-sol",
+          model: "gpt-5.6-sol",
+          displayName: "GPT-5.6-Sol",
+        },
         { id: "gpt-5.4", model: "gpt-5.4", displayName: "GPT-5.4" },
         {
           id: "gpt-5.5",

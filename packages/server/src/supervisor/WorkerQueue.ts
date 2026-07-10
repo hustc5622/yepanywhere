@@ -161,6 +161,16 @@ export class WorkerQueue {
     return true;
   }
 
+  /** Cancel every queued request without allowing it to start. */
+  cancelAll(reason = "Runtime shutting down"): number {
+    const queued = this.queue.splice(0);
+    for (const request of queued) {
+      request.resolve({ status: "cancelled", reason });
+      this.emitQueueRemoved(request, "cancelled");
+    }
+    return queued.length;
+  }
+
   /**
    * Find a queued request for a specific session.
    * Used to consolidate multiple messages to the same session.

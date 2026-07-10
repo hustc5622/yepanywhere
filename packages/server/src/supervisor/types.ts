@@ -241,6 +241,8 @@ export interface ProcessInfo {
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
   reasoningEffort?: string;
+  /** Exact reasoning effort requested when this process was started. */
+  requestedReasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;
   /** Context window usage from the last assistant message */
@@ -279,6 +281,8 @@ export interface ProcessOptions {
   effort?: EffortLevel;
   /** Model used for this session (e.g., "claude-opus-4-5-20251101") */
   model?: string;
+  /** Exact provider reasoning effort requested for this process. */
+  reasoningEffort?: string;
   /** SSH host for remote execution (undefined = local) */
   executor?: string;
   /** Permission rules for tool filtering (deny/allow patterns) */
