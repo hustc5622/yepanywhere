@@ -314,6 +314,32 @@ export interface AuthStatus {
   localhostOpen: boolean;
 }
 
+export interface CodexUsageWindow {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+export interface CodexUsageBucket {
+  id: string;
+  name: string | null;
+  primary: CodexUsageWindow | null;
+  secondary: CodexUsageWindow | null;
+  planType: string | null;
+}
+
+export interface CodexUsageResponse {
+  usage: {
+    primary: CodexUsageWindow | null;
+    secondary: CodexUsageWindow | null;
+    planType: string | null;
+    resetCredits: { availableCount: number } | null;
+    additionalBuckets: CodexUsageBucket[];
+    updatedAt: string;
+  } | null;
+  error: string | null;
+}
+
 export async function fetchJSON<T>(
   path: string,
   options?: RequestInit,
@@ -694,6 +720,11 @@ export const api = {
 
   // Server info API (host/port binding for Local Access settings)
   getServerInfo: () => fetchJSON<ServerInfo>("/server-info"),
+
+  getCodexUsage: (options?: { fresh?: boolean }) =>
+    fetchJSON<CodexUsageResponse>(
+      options?.fresh ? "/codex-bridge/usage?fresh=1" : "/codex-bridge/usage",
+    ),
 
   // Network binding API (runtime port/interface configuration)
   getNetworkBinding: () => fetchJSON<NetworkBindingState>("/network-binding"),

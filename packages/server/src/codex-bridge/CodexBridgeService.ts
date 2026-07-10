@@ -9,6 +9,7 @@ import { encodeProjectId } from "../projects/paths.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
+import { readCodexUsage } from "./CodexUsageService.js";
 import { bridgeOwnership, isLiveBridgeSession } from "./session-state.js";
 import type {
   CodexBridgeController,
@@ -19,6 +20,8 @@ import type {
   CodexBridgeSessionView,
   CodexBridgeStatus,
   CodexBridgeUpstreamProfile,
+  CodexUsageRequestOptions,
+  CodexUsageResponse,
   JsonRpcId,
   JsonRpcMessage,
 } from "./types.js";
@@ -109,6 +112,7 @@ interface SessionRecord {
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const JSON_RPC_VERSION = "2.0";
 const MAX_MCP_STARTUP_EVENTS = 50;
+const CODEX_USAGE_CACHE_TTL_MS = 30_000;
 
 interface CodexBridgeUpstreamState {
   process: ChildProcess | null;
@@ -146,6 +150,11 @@ export class CodexBridgeService implements CodexBridgeController {
     CodexBridgeUpstreamState
   >();
   private reservedUpstreamPorts = new Set<number>();
+  private cachedUsage: {
+    response: CodexUsageResponse;
+    expiresAt: number;
+  } | null = null;
+  private usageRequest: Promise<CodexUsageResponse> | null = null;
 
   constructor(options: CodexBridgeServiceOptions) {
     this.enabled = options.enabled;
@@ -266,6 +275,39 @@ export class CodexBridgeService implements CodexBridgeController {
       })),
       lastError: this.lastError,
     };
+  }
+
+  async getUsage(
+    options: CodexUsageRequestOptions = {},
+  ): Promise<CodexUsageResponse> {
+    const now = Date.now();
+    if (
+      !options.fresh &&
+      this.cachedUsage &&
+      this.cachedUsage.expiresAt > now
+    ) {
+      return this.cachedUsage.response;
+    }
+    if (this.usageRequest) return this.usageRequest;
+
+    this.usageRequest = readCodexUsage(this.codexPathOverride)
+      .then((usage) => {
+        const response: CodexUsageResponse = { usage, error: null };
+        this.cachedUsage = {
+          response,
+          expiresAt: Date.now() + CODEX_USAGE_CACHE_TTL_MS,
+        };
+        return response;
+      })
+      .catch((error: unknown) => ({
+        usage: null,
+        error: error instanceof Error ? error.message : String(error),
+      }))
+      .finally(() => {
+        this.usageRequest = null;
+      });
+
+    return this.usageRequest;
   }
 
   listSessionViews(): CodexBridgeSessionView[] {
@@ -401,6 +443,14 @@ export class CodexBridgeService implements CodexBridgeController {
     }
     if (req.method === "GET" && url.pathname === "/status") {
       this.writeJson(res, 200, this.getStatus());
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/usage") {
+      this.writeJson(
+        res,
+        200,
+        await this.getUsage({ fresh: url.searchParams.get("fresh") === "1" }),
+      );
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {

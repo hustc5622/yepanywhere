@@ -60,6 +60,42 @@ export interface CodexBridgeMcpStartupEvent {
   error: string | null;
 }
 
+export interface CodexUsageWindow {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+export interface CodexUsageBucket {
+  id: string;
+  name: string | null;
+  primary: CodexUsageWindow | null;
+  secondary: CodexUsageWindow | null;
+  planType: string | null;
+}
+
+export interface CodexUsageResetCredits {
+  availableCount: number;
+}
+
+export interface CodexUsageSnapshot {
+  primary: CodexUsageWindow | null;
+  secondary: CodexUsageWindow | null;
+  planType: string | null;
+  resetCredits: CodexUsageResetCredits | null;
+  additionalBuckets: CodexUsageBucket[];
+  updatedAt: string;
+}
+
+export interface CodexUsageResponse {
+  usage: CodexUsageSnapshot | null;
+  error: string | null;
+}
+
+export interface CodexUsageRequestOptions {
+  fresh?: boolean;
+}
+
 export interface CodexBridgeSession {
   id: string;
   projectId: UrlProjectId;
@@ -108,6 +144,9 @@ export interface CodexBridgeController {
   start?(): MaybePromise<void>;
   shutdown?(): MaybePromise<void>;
   getStatus(): MaybePromise<CodexBridgeStatus>;
+  getUsage?(
+    options?: CodexUsageRequestOptions,
+  ): MaybePromise<CodexUsageResponse>;
   listSessions(): MaybePromise<CodexBridgeSession[]>;
   listSessionViews(): MaybePromise<CodexBridgeSessionView[]>;
   getSessionView(

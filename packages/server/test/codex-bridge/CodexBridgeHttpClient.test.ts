@@ -2,7 +2,10 @@ import { type Server, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CodexBridgeHttpClient } from "../../src/codex-bridge/CodexBridgeHttpClient.js";
-import type { CodexBridgeSessionView } from "../../src/codex-bridge/types.js";
+import type {
+  CodexBridgeSessionView,
+  CodexUsageResponse,
+} from "../../src/codex-bridge/types.js";
 
 describe("CodexBridgeHttpClient", () => {
   let server: Server;
@@ -31,6 +34,27 @@ describe("CodexBridgeHttpClient", () => {
 
       if (url.pathname === "/session-views") {
         res.end(JSON.stringify({ sessions: sessionViews }));
+        return;
+      }
+
+      if (url.pathname === "/usage") {
+        res.end(
+          JSON.stringify({
+            usage: {
+              primary: {
+                usedPercent: 47,
+                windowDurationMins: 300,
+                resetsAt: 1_783_688_237,
+              },
+              secondary: null,
+              planType: "pro",
+              resetCredits: null,
+              additionalBuckets: [],
+              updatedAt: "2026-07-10T08:00:00.000Z",
+            },
+            error: null,
+          } satisfies CodexUsageResponse),
+        );
         return;
       }
 
@@ -80,6 +104,15 @@ describe("CodexBridgeHttpClient", () => {
     await expect(client.getSessionView("has-messages")).resolves.toMatchObject({
       session: { id: "has-messages", ownership: { owner: "external" } },
       activity: "idle",
+    });
+  });
+
+  it("reads account usage from the bridge sidecar", async () => {
+    const client = new CodexBridgeHttpClient({ baseUrl });
+
+    await expect(client.getUsage({ fresh: true })).resolves.toMatchObject({
+      usage: { planType: "pro", primary: { usedPercent: 47 } },
+      error: null,
     });
   });
 });

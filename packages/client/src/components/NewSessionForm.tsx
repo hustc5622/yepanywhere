@@ -47,6 +47,7 @@ import {
 } from "../lib/codexReasoning";
 import { hasCoarsePointer } from "../lib/deviceDetection";
 import type { PermissionMode } from "../types";
+import { CodexUsageCard } from "./CodexUsageCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
 import { SlashCommandButton } from "./SlashCommandButton";
@@ -1480,6 +1481,8 @@ export function NewSessionForm({
         <h1>{t("newSessionHeaderTitle")}</h1>
         <p className="new-session-subtitle">{t("newSessionHeaderSubtitle")}</p>
       </div>
+
+      <CodexUsageCard />
 
       <div className="new-session-input-area">{inputArea}</div>
 

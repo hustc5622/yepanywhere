@@ -12,6 +12,15 @@ export function createCodexBridgeRoutes(deps: CodexBridgeRoutesDeps): Hono {
     return c.json(await deps.codexBridgeService.getStatus());
   });
 
+  routes.get("/usage", async (c) => {
+    const usage = deps.codexBridgeService.getUsage
+      ? await deps.codexBridgeService.getUsage({
+          fresh: c.req.query("fresh") === "1",
+        })
+      : { usage: null, error: "Codex usage is unavailable" };
+    return c.json(usage);
+  });
+
   routes.get("/sessions", async (c) => {
     return c.json({ sessions: await deps.codexBridgeService.listSessions() });
   });

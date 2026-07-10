@@ -13,6 +13,8 @@ import type {
   CodexBridgeSession,
   CodexBridgeSessionView,
   CodexBridgeStatus,
+  CodexUsageRequestOptions,
+  CodexUsageResponse,
 } from "./types.js";
 
 interface CodexBridgeHttpClientOptions {
@@ -107,6 +109,20 @@ export class CodexBridgeHttpClient implements CodexBridgeController {
         pendingInputCount: 0,
         recentMcpStartupEvents: [],
         lastError: "Codex bridge sidecar is unavailable",
+      }
+    );
+  }
+
+  async getUsage(
+    options: CodexUsageRequestOptions = {},
+  ): Promise<CodexUsageResponse> {
+    const data = await this.fetchJson<CodexUsageResponse>(
+      options.fresh ? "/usage?fresh=1" : "/usage",
+    );
+    return (
+      data ?? {
+        usage: null,
+        error: "Codex bridge sidecar is unavailable",
       }
     );
   }
