@@ -295,6 +295,66 @@ describe("OpenCodeBridgeService", () => {
     expect(bridge.isSessionActive("ses_status")).toBe(false);
   });
 
+  it("preserves the prior title for titleless and boilerplate title events", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.created",
+      properties: {
+        sessionID: "ses_title",
+        info: { title: "New session - 2026-07-10T08:38:04.689Z" },
+      },
+    });
+    handleEvent({
+      type: "message.updated",
+      properties: { sessionID: "ses_title", info: {} },
+    });
+    handleEvent({
+      type: "session.updated",
+      properties: {
+        sessionID: "ses_title",
+        info: { title: "Here's a title for this conversation:" },
+      },
+    });
+
+    expect(bridge.listSessions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "ses_title",
+          title: "New session - 2026-07-10T08:38:04.689Z",
+        }),
+      ]),
+    );
+
+    handleEvent({
+      type: "session.updated",
+      properties: {
+        sessionID: "ses_title",
+        info: { title: "Fix OpenCode session title fallback" },
+      },
+    });
+
+    expect(bridge.listSessions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "ses_title",
+          title: "Fix OpenCode session title fallback",
+        }),
+      ]),
+    );
+  });
+
   it("reconciles cached sessions with the OpenCode active status endpoint", async () => {
     const opencodeServer = createServer((req, res) => {
       if (req.method === "GET" && req.url === "/session/status") {

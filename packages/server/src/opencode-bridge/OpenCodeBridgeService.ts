@@ -846,12 +846,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     properties: Record<string, unknown> | null,
   ): void {
     const info = asRecord(properties?.info);
-    const title = readString(info, "title");
+    const title = normalizeOpenCodeSessionTitle(readString(info, "title"));
     const updatedAt =
       readString(info, "updatedAt") ?? readString(properties, "updatedAt");
     const messageCount = readNumber(info, "messageCount");
     this.updateSessionState(sessionId, {
-      title,
+      // Message events do not include a session title. Avoid replacing the
+      // title recorded from session.created with undefined in that case.
+      ...(title ? { title } : {}),
       messageCount,
       updatedAt: updatedAt ?? undefined,
       activity: "in-turn",
@@ -1476,6 +1478,24 @@ function readString(
 ): string | null {
   const value = record?.[key];
   return typeof value === "string" ? value : null;
+}
+
+/**
+ * OpenCode title generation occasionally returns its own conversational
+ * preamble instead of a usable title. Preserve the existing default title
+ * until OpenCode provides an actual session title.
+ */
+function normalizeOpenCodeSessionTitle(title: string | null): string | null {
+  const normalized = title?.trim();
+  if (!normalized) return null;
+  if (
+    /^(?:(?:here(?:'s| is)|this is)\s+)?(?:a\s+)?title\s+(?:for\s+)?(?:this\s+)?(?:conversation|chat)\s*:?$/i.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+  return normalized;
 }
 
 function readNumber(
