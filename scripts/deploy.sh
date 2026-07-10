@@ -130,7 +130,7 @@ usage() {
 
 Options:
   --server-only       Deploy only the server bundle
-  --dev-server        Replace 8022 with dev hot reload (pnpm dev:8022 --replace)
+  --dev-server        Replace 8022 with dev hot reload after active turns become idle
   --allow-yep-session-interrupt
                       Allow --dev-server to interrupt active Yep-managed work
   --codex-bridge-only Deploy only the 4510 Codex bridge sidecar
@@ -685,9 +685,9 @@ start_dev_server() {
   log "Starting 8022 dev hot reload ..."
   dim "server: ${server_base_url}"
   dim "log:    ${dev_log}"
-  dim "mode:   pnpm dev:8022 --replace"
+  dim "mode:   pnpm dev:8022 --replace --wait-for-yep-sessions"
 
-  local dev_args=(dev:8022 --replace)
+  local dev_args=(dev:8022 --replace --wait-for-yep-sessions)
   if $ALLOW_YEP_SESSION_INTERRUPT; then
     dev_args+=(--allow-yep-session-interrupt)
   fi
@@ -702,10 +702,19 @@ start_dev_server() {
 
   log "Waiting for ${server_base_url}/api/version ..."
   for _ in $(seq 1 120); do
-    if dev_server_ready "${server_base_url}/api/version" &&
+    if grep -Fq "Starting hot reload on " "$dev_log" &&
+      dev_server_ready \
+      "${server_base_url}/api/version" \
+      "${server_base_url}/api/status/workers" &&
       dev_frontend_ready "${server_base_url}/" "${server_base_path:-/}"; then
       log "8022 dev hot reload is running."
       echo "Deploy complete."
+      return 0
+    fi
+    if grep -Fq "YEP_DEV_8022_WAITING_FOR_IDLE" "$dev_log"; then
+      log "8022 dev hot reload cutover is queued."
+      dim "active embedded-runtime turns will finish before 8022 is replaced"
+      dim "follow progress: tail -f $dev_log"
       return 0
     fi
     if ! kill -0 "$dev_pid" 2>/dev/null; then
@@ -737,12 +746,23 @@ dev_frontend_ready() {
 
 dev_server_ready() {
   local version_url="$1"
+  local workers_url="$2"
   local body
+  local workers
   body="$(curl -fsS "$version_url" 2>/dev/null)" || return 1
-  YEP_VERSION_JSON="$body" node -e '
+  workers="$(curl -fsS "$workers_url" 2>/dev/null)" || return 1
+  YEP_VERSION_JSON="$body" YEP_WORKERS_JSON="$workers" node -e '
 const info = JSON.parse(process.env.YEP_VERSION_JSON || "{}");
+const workers = JSON.parse(process.env.YEP_WORKERS_JSON || "{}");
 const build = info && info.build;
-process.exit(build && build.source === "dev" && build.nodeEnv === "development" ? 0 : 1);
+process.exit(
+  build &&
+  build.source === "dev" &&
+  build.nodeEnv === "development" &&
+  workers.runtimeMode === "external"
+    ? 0
+    : 1,
+);
 ' >/dev/null 2>&1
 }
 

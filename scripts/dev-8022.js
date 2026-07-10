@@ -7,11 +7,15 @@
  * web/API process on 8022 when --replace is explicitly passed.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  classifyDevCutover,
+  formatDevCutoverWait,
+} from "./dev-8022-cutover.js";
 import { exitIfUnsafeHome } from "./safe-home.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +34,7 @@ Options:
   --replace                    Stop the current 8022 web/API process first
   --allow-yep-session-interrupt
                                Allow replacing 8022 when Yep-managed sessions are active
+  --wait-for-yep-sessions      Wait for active embedded-runtime turns to become idle
   --no-backend-watch           Disable supervised backend reloads
   --no-frontend-reload         Disable frontend HMR and show reload banners
   --check                      Run preflight checks without starting or stopping anything
@@ -41,6 +46,7 @@ function parseArgs(argv) {
   const options = {
     replace: false,
     allowYepSessionInterrupt: false,
+    waitForYepSessions: false,
     backendWatch: true,
     noFrontendReload: false,
     check: false,
@@ -54,6 +60,8 @@ function parseArgs(argv) {
       options.replace = true;
     } else if (arg === "--allow-yep-session-interrupt") {
       options.allowYepSessionInterrupt = true;
+    } else if (arg === "--wait-for-yep-sessions") {
+      options.waitForYepSessions = true;
     } else if (arg === "--no-backend-watch") {
       options.backendWatch = false;
     } else if (arg === "--no-frontend-reload") {
@@ -209,6 +217,103 @@ async function getWorkerActivity(serverBaseUrl) {
   } catch {
     return null;
   }
+}
+
+async function waitForSafeCutover(serverBaseUrl, port) {
+  let lastMessage = "";
+
+  while (getListenPids(port).length > 0) {
+    const activity = await getWorkerActivity(serverBaseUrl);
+    const cutover = classifyDevCutover(activity);
+    if (cutover === "safe") {
+      return activity;
+    }
+
+    if (cutover === "unknown") {
+      await sleep(1000);
+      continue;
+    }
+
+    const message = formatDevCutoverWait(activity);
+    if (message !== lastMessage) {
+      console.log(message);
+      console.log(
+        "Yep has active embedded-runtime work. The dev cutover will continue automatically after all turns become idle.",
+      );
+      lastMessage = message;
+    }
+    await sleep(1000);
+  }
+
+  return null;
+}
+
+function acquireCutoverLock(port) {
+  const lockFile = join(tmpdir(), `yep-dev-${port}-cutover.lock`);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      writeFileSync(lockFile, `${process.pid}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      return () => {
+        try {
+          unlinkSync(lockFile);
+        } catch {
+          // A stale-lock cleanup or process shutdown may already have removed it.
+        }
+      };
+    } catch (error) {
+      if (!(error instanceof Error) || !Reflect.has(error, "code")) {
+        throw error;
+      }
+      if (error.code !== "EEXIST") throw error;
+
+      let existingPid = "";
+      try {
+        existingPid = readFileSync(lockFile, "utf8").trim();
+      } catch (readError) {
+        if (
+          readError instanceof Error &&
+          Reflect.has(readError, "code") &&
+          readError.code === "ENOENT"
+        ) {
+          continue;
+        }
+        throw readError;
+      }
+      const existingCommand = existingPid ? getCommand(existingPid) : "";
+      if (
+        existingPid &&
+        (existingCommand.includes(`${rootDir}/scripts/dev-8022.js`) ||
+          existingCommand.includes("node scripts/dev-8022.js"))
+      ) {
+        console.log(
+          `${formatDevCutoverWait(null)} existing_pid=${existingPid}`,
+        );
+        console.log(
+          `A dev cutover is already waiting for embedded-runtime work to become idle (pid ${existingPid}).`,
+        );
+        return null;
+      }
+
+      try {
+        unlinkSync(lockFile);
+      } catch (unlinkError) {
+        if (
+          unlinkError instanceof Error &&
+          Reflect.has(unlinkError, "code") &&
+          unlinkError.code === "ENOENT"
+        ) {
+          continue;
+        }
+        throw unlinkError;
+      }
+    }
+  }
+
+  throw new Error(`Could not acquire dev cutover lock: ${lockFile}`);
 }
 
 async function getRuntimeStatus(runtimeControlUrl, runtimeTokenFile) {
@@ -416,6 +521,7 @@ async function main() {
     process.env.CODEX_BRIDGE_CONTROL_URL ??
     `http://127.0.0.1:${bridgePort}`;
   const serverBaseUrl = `http://127.0.0.1:${port}${basePath}`;
+  let releaseCutoverLock = null;
 
   let serverPids = getListenPids(port);
   const bridgePids = getListenPids(bridgePort);
@@ -474,14 +580,23 @@ async function main() {
   }
 
   if (serverPids.length > 0) {
-    const activity = await getWorkerActivity(serverBaseUrl);
+    let activity = await getWorkerActivity(serverBaseUrl);
     if (
-      activity?.hasActiveWork &&
-      activity.runtimeMode !== "external" &&
+      classifyDevCutover(activity) === "wait" &&
+      options.waitForYepSessions &&
+      !options.allowYepSessionInterrupt
+    ) {
+      releaseCutoverLock = acquireCutoverLock(port);
+      if (!releaseCutoverLock) return;
+      activity = await waitForSafeCutover(serverBaseUrl, port);
+      serverPids = getListenPids(port);
+    }
+    if (
+      classifyDevCutover(activity) === "wait" &&
       !options.allowYepSessionInterrupt
     ) {
       throw new Error(
-        `Yep currently reports active managed work (${activity.activeWorkers} process(es), queue=${activity.queueLength}). Replacing ${port} would abort the active turn. Wait for it to finish or pass --allow-yep-session-interrupt.`,
+        `Yep currently reports active managed work (managed processes=${activity.activeWorkers}, queue=${activity.queueLength}). Replacing ${port} would abort at least one active turn. Wait for it to finish, pass --wait-for-yep-sessions, or explicitly pass --allow-yep-session-interrupt.`,
       );
     }
     if (
@@ -538,6 +653,7 @@ async function main() {
     `Starting hot reload on ${serverBaseUrl} (${options.backendWatch ? "backend watch" : "manual backend reload"}, ${options.noFrontendReload ? "frontend manual reload" : "frontend HMR"})`,
   );
   startDevServer(env, options);
+  releaseCutoverLock?.();
 }
 
 main().catch((error) => {
