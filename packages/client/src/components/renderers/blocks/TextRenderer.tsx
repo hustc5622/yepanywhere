@@ -1,3 +1,7 @@
+import {
+  BenchmarkEvalResult,
+  parseBenchmarkEvalResultBlock,
+} from "../../blocks/BenchmarkEvalResult";
 import type { ContentBlock, ContentRenderer, RenderContext } from "../types";
 
 interface TextBlock extends ContentBlock {
@@ -11,6 +15,15 @@ interface TextBlock extends ContentBlock {
  * Text renderer - displays text content with markdown rendering
  */
 function TextRendererComponent({ block }: { block: TextBlock }) {
+  const benchmarkEval = parseBenchmarkEvalResultBlock(block.text);
+  if (benchmarkEval) {
+    return (
+      <div className="text-block">
+        <BenchmarkEvalResult block={benchmarkEval} />
+      </div>
+    );
+  }
+
   // Prefer server-rendered HTML if available
   if (block._renderedHtml) {
     return (

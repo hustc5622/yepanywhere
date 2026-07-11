@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useOptionalSessionMetadata } from "../../contexts/SessionMetadataContext";
 import { useStreamingMarkdownContext } from "../../contexts/StreamingMarkdownContext";
@@ -20,6 +20,10 @@ import {
   extractPathFromLocalImageUrl,
   useLocalMediaClick,
 } from "../LocalMediaModal";
+import {
+  BenchmarkEvalResult,
+  parseBenchmarkEvalResultBlock,
+} from "./BenchmarkEvalResult";
 
 interface Props {
   text: string;
@@ -149,6 +153,10 @@ export const TextBlock = memo(function TextBlock({
   );
   const blockRef = useRef<HTMLDivElement | null>(null);
   const sessionMetadata = useOptionalSessionMetadata();
+  const benchmarkEval = useMemo(
+    () => parseBenchmarkEvalResultBlock(text),
+    [text],
+  );
 
   // Streaming markdown hook for server-rendered content
   const streamingMarkdown = useStreamingMarkdown();
@@ -288,7 +296,9 @@ export const TextBlock = memo(function TextBlock({
 
       {/* Show fallback content when not actively streaming */}
       {!showStreamingContent &&
-        (augmentHtml ? (
+        (benchmarkEval ? (
+          <BenchmarkEvalResult block={benchmarkEval} />
+        ) : augmentHtml ? (
           // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
           <div dangerouslySetInnerHTML={{ __html: augmentHtml }} />
         ) : (
