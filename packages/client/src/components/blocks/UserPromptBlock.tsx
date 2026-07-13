@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import { useRemoteImage } from "../../hooks/useRemoteImage";
+import { useFetchedImage } from "../../hooks/useRemoteImage";
 import {
   type SkillInfo,
   type UploadedFileInfo,
@@ -259,6 +259,58 @@ function mergeUploadedFiles(
   return merged;
 }
 
+function UploadedImageError({ message }: { message: string }) {
+  return (
+    <div className="uploaded-image-error" role="alert">
+      <strong>Failed to load image</strong>
+      <pre>{message}</pre>
+    </div>
+  );
+}
+
+function FetchedUploadedImage({
+  apiPath,
+  alt,
+}: {
+  apiPath: string;
+  alt: string;
+}) {
+  const { url, loading, error, bytes, mimeType } = useFetchedImage(apiPath);
+  const [decodeError, setDecodeError] = useState<string | null>(null);
+
+  if (loading) return <div className="image-loading">Loading image...</div>;
+  if (error) return <UploadedImageError message={error} />;
+  if (!url) {
+    return (
+      <UploadedImageError
+        message={`Image request completed without a preview URL\nURL: ${apiPath}`}
+      />
+    );
+  }
+  if (decodeError) return <UploadedImageError message={decodeError} />;
+
+  return (
+    <img
+      src={url}
+      alt={alt}
+      onError={() => {
+        const message = [
+          "Image bytes were fetched, but Android WebView could not decode them.",
+          `URL: ${apiPath}`,
+          `Blob Content-Type: ${mimeType ?? "unknown"}`,
+          `Blob bytes: ${bytes ?? "unknown"}`,
+        ].join("\n");
+        console.error("[UploadedFileItem] Failed to decode fetched image", {
+          apiPath,
+          mimeType,
+          bytes,
+        });
+        setDecodeError(message);
+      }}
+    />
+  );
+}
+
 /**
  * Single uploaded file attachment - clickable for images
  */
@@ -267,10 +319,6 @@ function UploadedFileItem({ file }: { file: UploadedFileInfo }) {
   const isImage = isImageMimeType(file.mimeType);
   const apiPath = isImage ? getUploadUrl(file.path) : null;
   const directPreviewUrl = isImage ? (file.previewUrl ?? null) : null;
-
-  // Use the remote image hook to handle fetching the image
-  const { url: remoteImageUrl, loading, error } = useRemoteImage(apiPath);
-  const imageUrl = directPreviewUrl ?? remoteImageUrl;
 
   if (isImage && (apiPath || directPreviewUrl)) {
     return (
@@ -286,13 +334,14 @@ function UploadedFileItem({ file }: { file: UploadedFileInfo }) {
         {showModal && (
           <Modal title={file.originalName} onClose={() => setShowModal(false)}>
             <div className="uploaded-image-modal">
-              {apiPath && loading && (
-                <div className="image-loading">Loading...</div>
-              )}
-              {apiPath && error && (
-                <div className="image-error">Failed to load image</div>
-              )}
-              {imageUrl && <img src={imageUrl} alt={file.originalName} />}
+              {directPreviewUrl ? (
+                <img src={directPreviewUrl} alt={file.originalName} />
+              ) : apiPath ? (
+                <FetchedUploadedImage
+                  apiPath={apiPath}
+                  alt={file.originalName}
+                />
+              ) : null}
             </div>
           </Modal>
         )}

@@ -28,6 +28,36 @@ interface RemoteImageResult {
   mimeType: string | null;
 }
 
+const MAX_ERROR_RESPONSE_CHARS = 500;
+
+function truncateErrorResponse(value: string): string {
+  const normalized = value.trim();
+  if (normalized.length <= MAX_ERROR_RESPONSE_CHARS) return normalized;
+  return `${normalized.slice(0, MAX_ERROR_RESPONSE_CHARS)}…`;
+}
+
+async function describeFailedResponse(
+  response: Response,
+  requestUrl: string,
+): Promise<string> {
+  const statusText = response.statusText.trim();
+  const contentType = response.headers.get("content-type") ?? "unknown";
+  const details = [
+    `Image request failed: HTTP ${response.status}${statusText ? ` ${statusText}` : ""}`,
+    `URL: ${requestUrl}`,
+    `Content-Type: ${contentType}`,
+  ];
+
+  try {
+    const responseText = truncateErrorResponse(await response.text());
+    if (responseText) details.push(`Response: ${responseText}`);
+  } catch {
+    details.push("Response: <unreadable response body>");
+  }
+
+  return details.join("\n");
+}
+
 /**
  * Hook for loading images by API path.
  *
@@ -87,9 +117,13 @@ export function useFetchedImage(apiPath: string | null): RemoteImageResult {
       setBlobUrl(null);
     }
 
-    fetch(directApiUrl(apiPath), { credentials: "include" })
-      .then((res) => {
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const requestUrl = directApiUrl(apiPath);
+
+    fetch(requestUrl, { credentials: "include" })
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(await describeFailedResponse(res, requestUrl));
+        }
         return res.blob();
       })
       .then((blob) => {
@@ -103,8 +137,17 @@ export function useFetchedImage(apiPath: string | null): RemoteImageResult {
       })
       .catch((err) => {
         if (cancelled) return;
-        console.error("[useFetchedImage] Failed to fetch image:", err);
-        setError(err instanceof Error ? err.message : "Failed to load image");
+        const rawMessage =
+          err instanceof Error ? err.message : String(err ?? "Unknown error");
+        const message = rawMessage.includes("\nURL:")
+          ? rawMessage
+          : `Image request failed: ${rawMessage}\nURL: ${requestUrl}`;
+        console.error("[useFetchedImage] Failed to fetch image", {
+          apiPath,
+          requestUrl,
+          error: message,
+        });
+        setError(message);
         setBytes(null);
         setMimeType(null);
         setLoading(false);

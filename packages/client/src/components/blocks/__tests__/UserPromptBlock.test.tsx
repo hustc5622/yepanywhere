@@ -1,5 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n";
 import type { ContentBlock } from "../../../types";
 import { UserPromptBlock } from "../UserPromptBlock";
@@ -7,6 +13,8 @@ import { UserPromptBlock } from "../UserPromptBlock";
 describe("UserPromptBlock", () => {
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("renders Codex input_image blocks as uploaded file metadata", () => {
@@ -86,6 +94,40 @@ describe("UserPromptBlock", () => {
     expect(screen.getByText(/Annotated image:/)).toBeDefined();
     expect(screen.queryByText("<image>")).toBeNull();
     expect(screen.getByText(/annotated-shot\.jpg/)).toBeDefined();
+  });
+
+  it("shows detailed request errors for uploaded image attachments", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: "File not found" }), {
+          status: 404,
+          statusText: "Not Found",
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const content =
+      "Check this image.\n\nUser uploaded files:\n- screenshot.jpg (1 KB, image/jpeg): /Users/test/.yep-anywhere/uploads/project-id/session-id/76285622-cb0a-47e3-a0d9-ffcdae95af9b_screenshot.jpg";
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /screenshot\.jpg/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain(
+        "HTTP 404 Not Found",
+      );
+    });
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Content-Type: application/json",
+    );
+    expect(screen.getByRole("alert").textContent).toContain("File not found");
   });
 
   it("renders injected skill blocks as clickable skill references", () => {
