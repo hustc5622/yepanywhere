@@ -59,7 +59,7 @@ export function getDefaultProvider(
   const available = getAvailableProviders(providers);
   if (available.length === 0) return null;
 
-  // Prefer default provider (Claude)
+  // Prefer the configured default provider.
   const defaultProv = available.find((p) => p.name === DEFAULT_PROVIDER);
   if (defaultProv) return defaultProv;
 

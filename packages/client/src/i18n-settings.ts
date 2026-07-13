@@ -119,12 +119,6 @@ export function getSettingsCategories(
       description: t("settingsProvidersDescription"),
     },
     {
-      id: "remote-executors",
-      label: t("settingsRemoteExecutorsTitle"),
-      icon: "🖥️",
-      description: t("settingsRemoteExecutorsDescription"),
-    },
-    {
       id: "source-control",
       label: t("settingsSourceControlTitle"),
       icon: "⑂",

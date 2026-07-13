@@ -6,7 +6,6 @@ import type {
   SlashCommand,
 } from "@yep-anywhere/shared";
 import { markSubagent } from "../augments/index.js";
-import { ClaudeOllamaProvider } from "../sdk/providers/claude-ollama.js";
 import type { UserMessage } from "../sdk/types.js";
 import {
   createSessionSubscription,
@@ -63,20 +62,10 @@ export class EmbeddedRuntimeController implements RuntimeController {
   }
 
   async updateProviderSettings(
-    settings: RuntimeProviderSettings,
+    _settings: RuntimeProviderSettings,
   ): Promise<void> {
-    if (!settings.claudeOllama) return;
-    if ("url" in settings.claudeOllama) {
-      ClaudeOllamaProvider.setOllamaUrl(settings.claudeOllama.url);
-    }
-    if ("systemPrompt" in settings.claudeOllama) {
-      ClaudeOllamaProvider.setSystemPrompt(settings.claudeOllama.systemPrompt);
-    }
-    if ("useFullSystemPrompt" in settings.claudeOllama) {
-      ClaudeOllamaProvider.setUseFullSystemPrompt(
-        settings.claudeOllama.useFullSystemPrompt ?? false,
-      );
-    }
+    // Reserved for provider settings that do not require recreating the
+    // runtime. There are no mutable provider settings at present.
   }
 
   async shutdown(options: { abortActive?: boolean } = {}): Promise<void> {

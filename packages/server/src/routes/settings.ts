@@ -17,8 +17,6 @@ import {
   type ThinkingOption,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { updateClaudeCodeSettings } from "../sdk/providers/claude-settings.js";
-import { testSSHConnection } from "../sdk/remote-spawn.js";
 import type {
   ServerSettings,
   ServerSettingsService,
@@ -34,16 +32,6 @@ export interface SettingsRoutesDeps {
   serverSettingsService: ServerSettingsService;
   /** Callback to apply allowedHosts changes at runtime */
   onAllowedHostsChanged?: (value: string | undefined) => void;
-  /** Callback to apply Ollama URL changes at runtime */
-  onOllamaUrlChanged?: (url: string | undefined) => void | Promise<void>;
-  /** Callback to apply Ollama system prompt changes at runtime */
-  onOllamaSystemPromptChanged?: (
-    prompt: string | undefined,
-  ) => void | Promise<void>;
-  /** Callback to apply Ollama full system prompt toggle at runtime */
-  onOllamaUseFullSystemPromptChanged?: (
-    enabled: boolean,
-  ) => void | Promise<void>;
 }
 
 function parseHostAliasList(rawHosts: unknown[]): {
@@ -86,17 +74,6 @@ function isReasoningEffort(value: unknown): value is string {
     value.length <= 64 &&
     /^[a-z0-9_-]+$/i.test(value)
   );
-}
-
-function getEffortFromThinkingOption(
-  option: ThinkingOption | undefined,
-): EffortLevel | undefined {
-  if (!option || option === "off" || option === "auto") return undefined;
-  if (option.startsWith("on:")) {
-    const effort = option.slice(3);
-    return isEffortLevel(effort) ? effort : undefined;
-  }
-  return isEffortLevel(option) ? option : undefined;
 }
 
 function parsePositiveTokenLimit(value: unknown): number | null {
@@ -290,6 +267,9 @@ function parseNewSessionDefaults(
       return null;
     }
     if (typeof input.provider === "string" && input.provider.length > 0) {
+      if (input.provider === "claude" || input.provider === "claude-ollama") {
+        return null;
+      }
       parsed.provider = input.provider as ProviderName;
     }
   }
@@ -381,13 +361,7 @@ function parseNewSessionDefaults(
 
 export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
   const app = new Hono();
-  const {
-    serverSettingsService,
-    onAllowedHostsChanged,
-    onOllamaUrlChanged,
-    onOllamaSystemPromptChanged,
-    onOllamaUseFullSystemPromptChanged,
-  } = deps;
+  const { serverSettingsService, onAllowedHostsChanged } = deps;
 
   /**
    * GET /api/settings
@@ -411,18 +385,6 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
     if (typeof body.serviceWorkerEnabled === "boolean") {
       updates.serviceWorkerEnabled = body.serviceWorkerEnabled;
     }
-    // Handle remoteExecutors array
-    if (Array.isArray(body.remoteExecutors)) {
-      const { hosts, invalidHost } = parseHostAliasList(body.remoteExecutors);
-      if (invalidHost) {
-        return c.json(
-          { error: `Invalid remote executor host alias: ${invalidHost}` },
-          400,
-        );
-      }
-      updates.remoteExecutors = hosts;
-    }
-
     // Handle chromeOsHosts array
     if (Array.isArray(body.chromeOsHosts)) {
       const { hosts, invalidHost } = parseHostAliasList(body.chromeOsHosts);
@@ -461,37 +423,6 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
       }
     }
 
-    // Handle ollamaUrl string (URL, or undefined/null/"" to clear)
-    if ("ollamaUrl" in body) {
-      if (
-        body.ollamaUrl === undefined ||
-        body.ollamaUrl === null ||
-        body.ollamaUrl === ""
-      ) {
-        updates.ollamaUrl = undefined;
-      } else if (typeof body.ollamaUrl === "string") {
-        updates.ollamaUrl = body.ollamaUrl;
-      }
-    }
-
-    // Handle ollamaSystemPrompt string (free-form text, or undefined/null/"" to clear)
-    if ("ollamaSystemPrompt" in body) {
-      if (
-        body.ollamaSystemPrompt === undefined ||
-        body.ollamaSystemPrompt === null ||
-        body.ollamaSystemPrompt === ""
-      ) {
-        updates.ollamaSystemPrompt = undefined;
-      } else if (typeof body.ollamaSystemPrompt === "string") {
-        updates.ollamaSystemPrompt = body.ollamaSystemPrompt.slice(0, 10000);
-      }
-    }
-
-    // Handle ollamaUseFullSystemPrompt boolean
-    if (typeof body.ollamaUseFullSystemPrompt === "boolean") {
-      updates.ollamaUseFullSystemPrompt = body.ollamaUseFullSystemPrompt;
-    }
-
     // Handle deviceBridgeEnabled boolean
     if (typeof body.deviceBridgeEnabled === "boolean") {
       updates.deviceBridgeEnabled = body.deviceBridgeEnabled;
@@ -501,34 +432,6 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
       const parsedDefaults = parseNewSessionDefaults(body.newSessionDefaults);
       if (parsedDefaults === null) {
         return c.json({ error: "Invalid newSessionDefaults setting" }, 400);
-      }
-      if (parsedDefaults?.provider === "claude") {
-        try {
-          const claudeSettingsPatch: Parameters<
-            typeof updateClaudeCodeSettings
-          >[0] = {};
-          if (parsedDefaults.model !== undefined) {
-            claudeSettingsPatch.model = parsedDefaults.model;
-          }
-          const effortLevel = getEffortFromThinkingOption(
-            parsedDefaults.thinking,
-          );
-          if (effortLevel !== undefined) {
-            claudeSettingsPatch.effortLevel = effortLevel;
-          }
-          if (Object.keys(claudeSettingsPatch).length > 0) {
-            await updateClaudeCodeSettings(claudeSettingsPatch);
-          }
-        } catch (error) {
-          const message =
-            error instanceof Error
-              ? error.message
-              : "Unknown Claude Code settings error";
-          return c.json(
-            { error: `Failed to update Claude Code settings: ${message}` },
-            500,
-          );
-        }
       }
       updates.newSessionDefaults = parsedDefaults;
     }
@@ -575,77 +478,7 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
     if ("allowedHosts" in updates && onAllowedHostsChanged) {
       onAllowedHostsChanged(settings.allowedHosts);
     }
-    if ("ollamaUrl" in updates && onOllamaUrlChanged) {
-      await onOllamaUrlChanged(settings.ollamaUrl);
-    }
-    if ("ollamaSystemPrompt" in updates && onOllamaSystemPromptChanged) {
-      await onOllamaSystemPromptChanged(settings.ollamaSystemPrompt);
-    }
-    if (
-      "ollamaUseFullSystemPrompt" in updates &&
-      onOllamaUseFullSystemPromptChanged
-    ) {
-      await onOllamaUseFullSystemPromptChanged(
-        settings.ollamaUseFullSystemPrompt ?? false,
-      );
-    }
-
     return c.json({ settings });
-  });
-
-  /**
-   * GET /api/settings/remote-executors
-   * Get list of configured remote executors
-   */
-  app.get("/remote-executors", (c) => {
-    const settings = serverSettingsService.getSettings();
-    return c.json({ executors: settings.remoteExecutors ?? [] });
-  });
-
-  /**
-   * PUT /api/settings/remote-executors
-   * Update list of remote executors
-   */
-  app.put("/remote-executors", async (c) => {
-    const body = await c.req.json<{ executors: string[] }>();
-
-    if (!Array.isArray(body.executors)) {
-      return c.json({ error: "executors must be an array" }, 400);
-    }
-
-    const { hosts: validExecutors, invalidHost } = parseHostAliasList(
-      body.executors,
-    );
-    if (invalidHost) {
-      return c.json(
-        { error: `Invalid remote executor host alias: ${invalidHost}` },
-        400,
-      );
-    }
-
-    await serverSettingsService.updateSettings({
-      remoteExecutors: validExecutors,
-    });
-
-    return c.json({ executors: validExecutors });
-  });
-
-  /**
-   * POST /api/settings/remote-executors/:host/test
-   * Test SSH connection to a remote executor
-   */
-  app.post("/remote-executors/:host/test", async (c) => {
-    const host = normalizeSshHostAlias(c.req.param("host"));
-
-    if (!host) {
-      return c.json({ error: "host is required" }, 400);
-    }
-    if (!isValidSshHostAlias(host)) {
-      return c.json({ error: "host must be a valid SSH host alias" }, 400);
-    }
-
-    const result = await testSSHConnection(host);
-    return c.json(result);
   });
 
   return app;

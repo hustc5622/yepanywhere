@@ -2,7 +2,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { loadConfig } from "../config.js";
-import { RealClaudeSDK } from "../sdk/real.js";
+import { getProvider } from "../sdk/providers/index.js";
 import { ServerSettingsService } from "../services/ServerSettingsService.js";
 import { Supervisor } from "../supervisor/Supervisor.js";
 import { EventBus } from "../watcher/index.js";
@@ -68,7 +68,7 @@ export async function runAgentRuntimeOnly(
   if (!controller) {
     const eventBus = new EventBus();
     const supervisor = new Supervisor({
-      realSdk: new RealClaudeSDK(),
+      provider: getProvider("codex") ?? undefined,
       idleTimeoutMs: config.idleTimeoutMs,
       defaultPermissionMode: config.defaultPermissionMode,
       eventBus,
@@ -90,14 +90,6 @@ export async function runAgentRuntimeOnly(
 
     const settingsService = new ServerSettingsService({ dataDir });
     await settingsService.initialize();
-    await controller.updateProviderSettings({
-      claudeOllama: {
-        url: settingsService.getSetting("ollamaUrl"),
-        systemPrompt: settingsService.getSetting("ollamaSystemPrompt"),
-        useFullSystemPrompt:
-          settingsService.getSetting("ollamaUseFullSystemPrompt") ?? false,
-      },
-    });
   }
 
   await controller.start();

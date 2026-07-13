@@ -17,7 +17,6 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   ModelInfo,
   OpenCodeMessagePartUpdatedEvent,
@@ -38,7 +37,11 @@ import {
 } from "../../opencode-bridge/gateway-config.js";
 import { whichCommand } from "../cli-detection.js";
 import { MessageQueue } from "../messageQueue.js";
-import type { SDKMessage, ToolApprovalResult } from "../types.js";
+import type {
+  QueuedUserMessage,
+  SDKMessage,
+  ToolApprovalResult,
+} from "../types.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -2062,7 +2065,7 @@ export class OpenCodeProvider implements AgentProvider {
   /**
    * Extract text content from a user message.
    */
-  private extractTextFromMessage(message: SDKUserMessage): string {
+  private extractTextFromMessage(message: QueuedUserMessage): string {
     const content = message.message?.content;
     if (typeof content === "string") {
       return content;

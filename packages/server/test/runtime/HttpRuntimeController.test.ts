@@ -9,7 +9,6 @@ import { createRuntimeControlApp } from "../../src/runtime/control-server.js";
 import type { RuntimeController } from "../../src/runtime/types.js";
 import { MessageQueue } from "../../src/sdk/messageQueue.js";
 import { MockClaudeSDK } from "../../src/sdk/mock.js";
-import { ClaudeOllamaProvider } from "../../src/sdk/providers/claude-ollama.js";
 import type {
   AgentProvider,
   StartSessionOptions,
@@ -19,8 +18,8 @@ import { EventBus } from "../../src/watcher/EventBus.js";
 
 function createLongRunningProvider(): AgentProvider {
   return {
-    name: "claude",
-    displayName: "Claude",
+    name: "codex",
+    displayName: "Codex",
     supportsPermissionMode: true,
     supportsThinkingToggle: true,
     supportsSlashCommands: false,
@@ -198,28 +197,6 @@ describe("HttpRuntimeController", () => {
     await expect(controller.abortProcess(processId)).resolves.toEqual({
       aborted: true,
     });
-  });
-
-  it("forwards hot provider settings to the external runtime", async () => {
-    const setUrl = vi.spyOn(ClaudeOllamaProvider, "setOllamaUrl");
-    const setPrompt = vi.spyOn(ClaudeOllamaProvider, "setSystemPrompt");
-    const setFullPrompt = vi.spyOn(
-      ClaudeOllamaProvider,
-      "setUseFullSystemPrompt",
-    );
-    const { controller } = createHarness();
-
-    await controller.updateProviderSettings({
-      claudeOllama: {
-        url: "http://ollama.internal:11434",
-        systemPrompt: "Use the repository conventions.",
-        useFullSystemPrompt: true,
-      },
-    });
-
-    expect(setUrl).toHaveBeenCalledWith("http://ollama.internal:11434");
-    expect(setPrompt).toHaveBeenCalledWith("Use the repository conventions.");
-    expect(setFullPrompt).toHaveBeenCalledWith(true);
   });
 
   it("streams session events through the control connection", async () => {

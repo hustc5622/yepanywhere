@@ -33,6 +33,7 @@ import {
   requireCustomHeader,
 } from "./middleware/security.js";
 import type { NotificationService } from "./notifications/index.js";
+import type { OpenCodeBridgeController } from "./opencode-bridge/types.js";
 import {
   CODEX_SESSIONS_DIR,
   CodexSessionScanner,
@@ -71,6 +72,8 @@ import { createGitStatusRoutes } from "./routes/git-status.js";
 import { createGlobalSessionsRoutes } from "./routes/global-sessions.js";
 import { health } from "./routes/health.js";
 import { createInboxRoutes } from "./routes/inbox.js";
+import { createLocalFileRoutes } from "./routes/local-file.js";
+import { createLocalImageRoutes } from "./routes/local-image.js";
 import { createNetworkBindingRoutes } from "./routes/network-binding.js";
 import { createOnboardingRoutes } from "./routes/onboarding.js";
 import { createOpenCodeBridgeRoutes } from "./routes/opencode-bridge.js";
@@ -86,20 +89,12 @@ import { createServerInfoRoutes } from "./routes/server-info.js";
 import { createSessionsRoutes } from "./routes/sessions.js";
 import { createSettingsRoutes } from "./routes/settings.js";
 import { createSharingRoutes } from "./routes/sharing.js";
-import { ClaudeOllamaProvider } from "./sdk/providers/claude-ollama.js";
-
-import type { OpenCodeBridgeController } from "./opencode-bridge/types.js";
-import { createLocalFileRoutes } from "./routes/local-file.js";
-import { createLocalImageRoutes } from "./routes/local-image.js";
 import { type UploadDeps, createUploadRoutes } from "./routes/upload.js";
 import { createVersionRoutes } from "./routes/version.js";
 import { EmbeddedRuntimeController } from "./runtime/EmbeddedRuntimeController.js";
 import type { RuntimeController } from "./runtime/types.js";
-import type {
-  ClaudeSDK,
-  PermissionMode,
-  RealClaudeSDKInterface,
-} from "./sdk/types.js";
+import { getProvider } from "./sdk/providers/index.js";
+import type { ClaudeSDK, PermissionMode } from "./sdk/types.js";
 import type { BrowserProfileService } from "./services/BrowserProfileService.js";
 import type { ConnectedBrowsersService } from "./services/ConnectedBrowsersService.js";
 import type { ModelInfoService } from "./services/ModelInfoService.js";
@@ -126,8 +121,6 @@ import { LifecycleWebhookService } from "./webhooks/LifecycleWebhookService.js";
 export interface AppOptions {
   /** Legacy SDK interface for mock SDK (for testing) */
   sdk?: ClaudeSDK;
-  /** Real SDK interface with full features */
-  realSdk?: RealClaudeSDKInterface;
   projectsDir?: string; // override for testing
   idleTimeoutMs?: number;
   defaultPermissionMode?: PermissionMode;
@@ -513,8 +506,10 @@ export function createApp(options: AppOptions): AppResult {
     return resolved?.summary ?? null;
   };
   const supervisor = new Supervisor({
+    // Claude Code used to be the implicit provider. Codex is the supported
+    // default now; tests can still supply the legacy mock SDK explicitly.
+    provider: options.sdk ? undefined : (getProvider("codex") ?? undefined),
     sdk: options.sdk,
-    realSdk: options.realSdk,
     idleTimeoutMs: options.idleTimeoutMs,
     defaultPermissionMode: options.defaultPermissionMode,
     eventBus: options.eventBus,
@@ -1146,24 +1141,6 @@ export function createApp(options: AppOptions): AppResult {
       createSettingsRoutes({
         serverSettingsService: options.serverSettingsService,
         onAllowedHostsChanged: updateAllowedHosts,
-        onOllamaUrlChanged: async (url) => {
-          ClaudeOllamaProvider.setOllamaUrl(url);
-          await runtimeController.updateProviderSettings({
-            claudeOllama: { url },
-          });
-        },
-        onOllamaSystemPromptChanged: async (prompt) => {
-          ClaudeOllamaProvider.setSystemPrompt(prompt);
-          await runtimeController.updateProviderSettings({
-            claudeOllama: { systemPrompt: prompt },
-          });
-        },
-        onOllamaUseFullSystemPromptChanged: async (enabled) => {
-          ClaudeOllamaProvider.setUseFullSystemPrompt(enabled);
-          await runtimeController.updateProviderSettings({
-            claudeOllama: { useFullSystemPrompt: enabled },
-          });
-        },
       }),
     );
   }

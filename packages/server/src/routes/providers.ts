@@ -1,6 +1,5 @@
 import type { ProviderInfo, ProviderName } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { getClaudeCodeSettings } from "../sdk/providers/claude-settings.js";
 import { getAllProviders } from "../sdk/providers/index.js";
 import type { AgentProvider } from "../sdk/providers/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
@@ -21,9 +20,6 @@ async function buildProviderInfo(
   ]);
   modelInfoService?.ingestModels(provider.name as ProviderName, models);
 
-  const claudeSettings =
-    provider.name === "claude" ? await getClaudeCodeSettings() : null;
-
   return {
     name: provider.name,
     displayName: provider.displayName,
@@ -33,8 +29,6 @@ async function buildProviderInfo(
     expiresAt: authStatus.expiresAt?.toISOString(),
     user: authStatus.user,
     models,
-    currentModel: claudeSettings?.model,
-    currentEffortLevel: claudeSettings?.effortLevel,
     supportsPermissionMode: provider.supportsPermissionMode,
     supportsThinkingToggle: provider.supportsThinkingToggle,
     supportsSlashCommands: provider.supportsSlashCommands,

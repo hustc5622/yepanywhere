@@ -1,5 +1,4 @@
-import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { UserMessage } from "./types.js";
+import type { QueuedUserMessage, UserMessage } from "./types.js";
 
 /**
  * Detect the media type from base64 image data.
@@ -72,9 +71,7 @@ function detectImageMediaType(base64Data: string): string {
 
 /**
  * MessageQueue provides an async generator pattern for queuing user messages
- * to be sent to the Claude SDK.
- *
- * The SDK expects an AsyncGenerator that yields SDKUserMessage objects.
+ * to be sent to providers.
  * This queue allows messages to be pushed at any time, and the generator
  * will yield them as they become available (blocking when empty).
  */
@@ -100,10 +97,10 @@ export class MessageQueue {
   }
 
   /**
-   * Async generator that yields SDK-formatted user messages.
+   * Async generator that yields provider-neutral user messages.
    * Blocks when the queue is empty, waiting for push() to be called.
    */
-  async *generator(): AsyncGenerator<SDKUserMessage> {
+  async *generator(): AsyncGenerator<QueuedUserMessage> {
     while (true) {
       const message = await this.next();
       yield this.toSDKMessage(message);
@@ -135,9 +132,9 @@ export class MessageQueue {
   }
 
   /**
-   * Convert a UserMessage to the SDK's SDKUserMessage format.
+   * Convert a UserMessage to the provider-neutral wire format.
    */
-  private toSDKMessage(msg: UserMessage): SDKUserMessage {
+  private toSDKMessage(msg: UserMessage): QueuedUserMessage {
     let text = msg.text;
 
     // Append attachment paths for agent to access via Read tool
@@ -191,7 +188,7 @@ export class MessageQueue {
           role: "user",
           content,
         },
-      } as SDKUserMessage;
+      };
     }
 
     // Simple text message
@@ -202,7 +199,7 @@ export class MessageQueue {
         role: "user",
         content: text,
       },
-    } as SDKUserMessage;
+    };
   }
 
   /**

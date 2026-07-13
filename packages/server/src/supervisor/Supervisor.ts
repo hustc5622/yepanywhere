@@ -16,12 +16,7 @@ import type { AgentActivity, PendingInputType } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { getProvider } from "../sdk/providers/index.js";
 import type { AgentProvider } from "../sdk/providers/types.js";
-import type {
-  ClaudeSDK,
-  PermissionMode,
-  RealClaudeSDKInterface,
-  UserMessage,
-} from "../sdk/types.js";
+import type { ClaudeSDK, PermissionMode, UserMessage } from "../sdk/types.js";
 import type {
   EventBus,
   ProcessStateEvent,
@@ -85,7 +80,7 @@ export interface ModelSettings {
   codexMcpMode?: CodexMcpMode;
   /** Managed OpenCode provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
-  /** Provider to use for this session. undefined = use default (Claude) */
+  /** Provider to use for this session. undefined = use the runtime default. */
   providerName?: ProviderName;
   /** SSH host for remote execution (undefined = local) */
   executor?: string;
@@ -154,8 +149,6 @@ export interface SupervisorOptions {
   provider?: AgentProvider;
   /** Legacy SDK interface for mock SDK */
   sdk?: ClaudeSDK;
-  /** Real SDK interface with full features */
-  realSdk?: RealClaudeSDKInterface;
   idleTimeoutMs?: number;
   /** Default permission mode for new sessions */
   defaultPermissionMode?: PermissionMode;
@@ -182,7 +175,6 @@ export class Supervisor {
   private terminatedProcesses: ProcessInfo[] = []; // Recently terminated processes
   private provider: AgentProvider | null;
   private sdk: ClaudeSDK | null;
-  private realSdk: RealClaudeSDKInterface | null;
   private idleTimeoutMs?: number;
   private defaultPermissionMode: PermissionMode;
   private eventBus?: EventBus;
@@ -199,7 +191,6 @@ export class Supervisor {
   constructor(options: SupervisorOptions) {
     this.provider = options.provider ?? null;
     this.sdk = options.sdk ?? null;
-    this.realSdk = options.realSdk ?? null;
     this.idleTimeoutMs = options.idleTimeoutMs;
     this.defaultPermissionMode =
       options.defaultPermissionMode ?? DEFAULT_PERMISSION_MODE;
@@ -220,9 +211,39 @@ export class Supervisor {
     );
     this.staleCheckTimer.unref(); // Don't keep process alive for cleanup
 
-    if (!this.provider && !this.sdk && !this.realSdk) {
-      throw new Error("Either provider, sdk, or realSdk must be provided");
+    if (!this.provider && !this.sdk) {
+      throw new Error("Either provider or sdk must be provided");
     }
+  }
+
+  private resolveProvider(modelSettings?: ModelSettings): AgentProvider | null {
+    if (modelSettings?.executor) {
+      throw new Error(
+        "Remote executor sessions are unavailable because Claude Code support was removed.",
+      );
+    }
+
+    if (modelSettings?.providerName) {
+      const provider = getProvider(modelSettings.providerName);
+      if (!provider) {
+        // The legacy SDK is still injected by unit-test and compatibility
+        // harnesses for historical Claude sessions. Keep that explicit test
+        // path working while production runtimes reject retired providers.
+        if (
+          this.sdk &&
+          (modelSettings.providerName === "claude" ||
+            modelSettings.providerName === "claude-ollama")
+        ) {
+          return null;
+        }
+        throw new Error(
+          `Provider \"${modelSettings.providerName}\" is not available in this server.`,
+        );
+      }
+      return provider;
+    }
+
+    return this.provider;
   }
 
   async startSession(
@@ -262,13 +283,7 @@ export class Supervisor {
       }
     }
 
-    // Resolve provider: use specified provider name, or fall back to default provider
-    // If executor is specified, we MUST use a provider (Claude) to enable remote execution
-    const provider = modelSettings?.providerName
-      ? getProvider(modelSettings.providerName)
-      : modelSettings?.executor
-        ? getProvider("claude") // Force Claude provider when executor is specified
-        : this.provider;
+    const provider = this.resolveProvider(modelSettings);
 
     // Use provider if available (preferred)
     if (provider) {
@@ -280,18 +295,6 @@ export class Supervisor {
         permissionMode,
         modelSettings,
         provider,
-      );
-    }
-
-    // Use real SDK if available
-    if (this.realSdk) {
-      return this.startRealSession(
-        projectPath,
-        projectId,
-        message,
-        undefined,
-        permissionMode,
-        modelSettings,
       );
     }
 
@@ -346,13 +349,7 @@ export class Supervisor {
       }
     }
 
-    // Resolve provider: use specified provider name, or fall back to default provider
-    // If executor is specified, we MUST use a provider (Claude) to enable remote execution
-    const provider = modelSettings?.providerName
-      ? getProvider(modelSettings.providerName)
-      : modelSettings?.executor
-        ? getProvider("claude") // Force Claude provider when executor is specified
-        : this.provider;
+    const provider = this.resolveProvider(modelSettings);
 
     // Use provider if available (preferred)
     if (provider) {
@@ -365,217 +362,10 @@ export class Supervisor {
       );
     }
 
-    // Use real SDK if available
-    if (this.realSdk) {
-      return this.createRealSession(
-        projectPath,
-        projectId,
-        permissionMode,
-        modelSettings,
-      );
-    }
-
     // Fall back to legacy mock SDK - not supported for create-only
     throw new Error(
-      "createSession requires provider or real SDK - legacy mock SDK not supported",
+      "createSession requires a provider - legacy mock SDK does not support create-only sessions",
     );
-  }
-
-  /**
-   * Create a session using the real SDK without an initial message.
-   * The session is created and waits for a message to be queued.
-   */
-  private async createRealSession(
-    projectPath: string,
-    projectId: UrlProjectId,
-    permissionMode?: PermissionMode,
-    modelSettings?: ModelSettings,
-  ): Promise<Process> {
-    if (!this.realSdk) {
-      throw new Error("realSdk is not available");
-    }
-
-    const processHolder: { process: Process | null } = { process: null };
-    const effectiveMode = permissionMode ?? this.defaultPermissionMode;
-
-    // Start session WITHOUT an initial message - agent will wait
-    const result = await this.realSdk.startSession({
-      cwd: projectPath,
-      // No initialMessage - queue will block until one is pushed
-      permissionMode: effectiveMode,
-      model: modelSettings?.model,
-      thinking: modelSettings?.thinking,
-      effort: modelSettings?.effort,
-      globalInstructions: modelSettings?.globalInstructions,
-      onToolApproval: async (toolName, input, opts) => {
-        if (!processHolder.process) {
-          return { behavior: "deny", message: "Process not ready" };
-        }
-        return processHolder.process.handleToolApproval(toolName, input, opts);
-      },
-    });
-
-    const {
-      iterator,
-      queue,
-      abort,
-      isProcessAlive,
-      setMaxThinkingTokens,
-      interrupt,
-      supportedModels,
-      supportedCommands,
-      setModel,
-    } = result;
-
-    const tempSessionId = randomUUID();
-    const options: ProcessConstructorOptions = {
-      projectPath,
-      projectId,
-      sessionId: tempSessionId,
-      idleTimeoutMs: this.idleTimeoutMs,
-      queue,
-      abortFn: abort,
-      isProcessAlive,
-      pid: () => {
-        const p = result.pid;
-        return typeof p === "function" ? p() : p;
-      },
-      setMaxThinkingTokensFn: setMaxThinkingTokens,
-      interruptFn: interrupt,
-      supportedModelsFn: supportedModels,
-      supportedCommandsFn: supportedCommands,
-      setModelFn: setModel,
-      permissionMode: effectiveMode,
-      provider: "claude", // Real SDK is always Claude
-      model: modelSettings?.model,
-      thinking: modelSettings?.thinking,
-      effort: modelSettings?.effort,
-      executor: modelSettings?.executor,
-      permissions: modelSettings?.permissions,
-    };
-
-    const process = new Process(iterator, options);
-    processHolder.process = process;
-
-    // Wait for the real session ID from the SDK
-    await process.waitForSessionId();
-
-    // Register as a new session
-    this.registerProcess(process, true);
-
-    return process;
-  }
-
-  /**
-   * Start a session using the real SDK with full features.
-   */
-  private async startRealSession(
-    projectPath: string,
-    projectId: UrlProjectId,
-    message: UserMessage,
-    resumeSessionId?: string,
-    permissionMode?: PermissionMode,
-    modelSettings?: ModelSettings,
-  ): Promise<Process> {
-    // Create a placeholder process first (needed for tool approval callback)
-    const tempSessionId = resumeSessionId ?? randomUUID();
-
-    // realSdk is guaranteed to exist here (checked in startSession)
-    if (!this.realSdk) {
-      throw new Error("realSdk is not available");
-    }
-
-    // We need to reference process in the callback before it's assigned
-    // Using a holder object allows us to set the reference later
-    const processHolder: { process: Process | null } = { process: null };
-
-    // Use provided mode or fall back to default
-    const effectiveMode = permissionMode ?? this.defaultPermissionMode;
-
-    // Generate UUID for the initial message so SDK and SSE use the same ID.
-    // This ensures the client can match the SSE replay to its temp message,
-    // and prevents duplicates when JSONL is later fetched.
-    const messageUuid = randomUUID();
-    const messageWithUuid: UserMessage = { ...message, uuid: messageUuid };
-
-    const result = await this.realSdk.startSession({
-      cwd: projectPath,
-      initialMessage: messageWithUuid,
-      resumeSessionId,
-      permissionMode: effectiveMode,
-      model: modelSettings?.model,
-      thinking: modelSettings?.thinking,
-      effort: modelSettings?.effort,
-      executor: modelSettings?.executor,
-      remoteEnv: modelSettings?.remoteEnv,
-      globalInstructions: modelSettings?.globalInstructions,
-      resumeSessionAt: modelSettings?.resumeSessionAt,
-      onToolApproval: async (toolName, input, opts) => {
-        // Delegate to the process's handleToolApproval
-        if (!processHolder.process) {
-          return { behavior: "deny", message: "Process not ready" };
-        }
-        return processHolder.process.handleToolApproval(toolName, input, opts);
-      },
-    });
-
-    const {
-      iterator,
-      queue,
-      abort,
-      isProcessAlive,
-      setMaxThinkingTokens,
-      interrupt,
-      supportedModels,
-      supportedCommands,
-      setModel,
-    } = result;
-
-    const options: ProcessConstructorOptions = {
-      projectPath,
-      projectId,
-      sessionId: tempSessionId,
-      idleTimeoutMs: this.idleTimeoutMs,
-      queue,
-      abortFn: abort,
-      isProcessAlive,
-      pid: () => {
-        const p = result.pid;
-        return typeof p === "function" ? p() : p;
-      },
-      setMaxThinkingTokensFn: setMaxThinkingTokens,
-      interruptFn: interrupt,
-      supportedModelsFn: supportedModels,
-      supportedCommandsFn: supportedCommands,
-      setModelFn: setModel,
-      permissionMode: effectiveMode,
-      provider: "claude", // Real SDK is always Claude
-      model: modelSettings?.model,
-      thinking: modelSettings?.thinking,
-      effort: modelSettings?.effort,
-      reasoningEffort: modelSettings?.reasoningEffort,
-      executor: modelSettings?.executor,
-      permissions: modelSettings?.permissions,
-    };
-
-    const process = new Process(iterator, options);
-    processHolder.process = process;
-
-    // Add the initial user message to history with the same UUID we passed to SDK.
-    // This ensures SSE replay includes the user message so the client can replace
-    // its temp message. The SDK also writes to JSONL with this UUID, so both SSE
-    // and JSONL will have matching IDs (no duplicates).
-    process.addInitialUserMessage(message.text, messageUuid, message.tempId);
-
-    // Wait for the real session ID from the SDK before registering
-    // This ensures the client gets the correct ID to use for persistence
-    if (!resumeSessionId) {
-      await process.waitForSessionId();
-    }
-
-    this.registerProcess(process, !resumeSessionId);
-
-    return process;
   }
 
   /**
@@ -1025,13 +815,7 @@ export class Supervisor {
       }
     }
 
-    // Resolve provider: use specified provider name, or fall back to default provider
-    // If executor is specified, we MUST use a provider (Claude) to enable remote execution
-    const provider = modelSettings?.providerName
-      ? getProvider(modelSettings.providerName)
-      : modelSettings?.executor
-        ? getProvider("claude") // Force Claude provider when executor is specified
-        : this.provider;
+    const provider = this.resolveProvider(modelSettings);
 
     // Use provider if available (preferred)
     if (provider) {
@@ -1043,18 +827,6 @@ export class Supervisor {
         permissionMode,
         modelSettings,
         provider,
-      );
-    }
-
-    // Use real SDK if available
-    if (this.realSdk) {
-      return this.startRealSession(
-        projectPath,
-        projectId,
-        message,
-        sessionId,
-        permissionMode,
-        modelSettings,
       );
     }
 
@@ -1958,11 +1730,7 @@ export class Supervisor {
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
   ): Promise<Process> {
-    const provider = modelSettings?.providerName
-      ? getProvider(modelSettings.providerName)
-      : modelSettings?.executor
-        ? getProvider("claude")
-        : this.provider;
+    const provider = this.resolveProvider(modelSettings);
 
     // Use provider if available (preferred)
     if (provider) {
@@ -1974,18 +1742,6 @@ export class Supervisor {
         permissionMode,
         modelSettings,
         provider,
-      );
-    }
-
-    // Use real SDK if available
-    if (this.realSdk) {
-      return this.startRealSession(
-        projectPath,
-        projectId,
-        message,
-        resumeSessionId,
-        permissionMode,
-        modelSettings,
       );
     }
 

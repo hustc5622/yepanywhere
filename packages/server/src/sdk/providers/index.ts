@@ -14,10 +14,6 @@ export type {
   StartSessionOptions,
 } from "./types.js";
 
-// Claude provider (uses @anthropic-ai/claude-agent-sdk)
-import { claudeProvider } from "./claude.js";
-export { ClaudeProvider, claudeProvider } from "./claude.js";
-
 // Codex provider (uses codex CLI)
 import { codexProvider } from "./codex.js";
 export {
@@ -50,13 +46,6 @@ export {
   type CodexOSSProviderConfig,
 } from "./codex-oss.js";
 
-// Claude + Ollama provider (uses Claude SDK with Ollama backend)
-import { claudeOllamaProvider } from "./claude-ollama.js";
-export {
-  ClaudeOllamaProvider,
-  claudeOllamaProvider,
-} from "./claude-ollama.js";
-
 // OpenCode provider (uses opencode serve for multi-provider agent)
 import { opencodeProvider } from "./opencode.js";
 export {
@@ -71,8 +60,6 @@ export {
  */
 export function getAllProviders(): AgentProvider[] {
   return [
-    claudeProvider,
-    claudeOllamaProvider,
     codexProvider,
     codexOSSProvider,
     geminiProvider,
@@ -90,10 +77,6 @@ export function getAllProviders(): AgentProvider[] {
  */
 export function getProvider(name: ProviderName): AgentProvider | null {
   switch (name) {
-    case "claude":
-      return claudeProvider;
-    case "claude-ollama":
-      return claudeOllamaProvider;
     case "codex":
       return codexProvider;
     case "codex-oss":

@@ -62,10 +62,8 @@ import { createUploadRoutes } from "./routes/upload.js";
 import { createWsRoutes } from "./routes/ws.js";
 import { HttpRuntimeController } from "./runtime/HttpRuntimeController.js";
 import type { RuntimeController } from "./runtime/types.js";
-import { detectClaudeCli, detectCodexCli } from "./sdk/cli-detection.js";
+import { detectCodexCli } from "./sdk/cli-detection.js";
 import { initMessageLogger } from "./sdk/messageLogger.js";
-import { ClaudeOllamaProvider } from "./sdk/providers/claude-ollama.js";
-import { RealClaudeSDK } from "./sdk/real.js";
 import {
   BrowserProfileService,
   ConnectedBrowsersService,
@@ -86,29 +84,31 @@ import {
   SourceWatcher,
 } from "./watcher/index.js";
 
-// Allow many concurrent Claude sessions without listener warnings.
-// Each SDK session registers an exit handler; default limit is 10.
+// Several provider sessions can attach process-level listeners concurrently.
 process.setMaxListeners(50);
 
-// Prevent unhandled promise rejections from crashing the server.
-// The Claude Agent SDK can throw "ProcessTransport is not ready for writing"
-// from its internal streamInput() in a detached async context when a CLI
-// process dies. This isn't catchable from our Process.processMessages() loop.
+function isRecoverablePipeError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { code?: unknown; message?: unknown };
+  return (
+    value.code === "EPIPE" ||
+    (typeof value.message === "string" &&
+      (value.message.includes("write EPIPE") ||
+        value.message.includes("not ready for writing")))
+  );
+}
+
+// A provider child may close its stdin while an asynchronous write is pending.
+// A broken child pipe is recoverable; an unrelated uncaught exception is not.
+// The latter exits non-zero so launchd can perform a throttled restart.
 process.on("unhandledRejection", (reason) => {
   const message =
     reason instanceof Error ? reason.message : String(reason ?? "unknown");
   const stack = reason instanceof Error ? reason.stack : undefined;
 
-  // Known SDK transport errors — these are already handled by Process via
-  // isProcessTerminationError when they surface through the iterator, but
-  // streamInput failures arrive as unhandled rejections.
-  const isTransportError =
-    message.includes("ProcessTransport is not ready") ||
-    message.includes("not ready for writing");
-
-  if (isTransportError) {
+  if (isRecoverablePipeError(reason)) {
     console.warn(
-      `[unhandledRejection] SDK transport error (session process likely died): ${message}`,
+      `[unhandledRejection] Recoverable provider pipe error: ${message}`,
     );
   } else {
     console.error(`[unhandledRejection] ${message}`);
@@ -134,7 +134,7 @@ let isShuttingDown = false;
  * Embedded mode owns and aborts agent children. External mode only detaches
  * the shell subscriptions so a web/API replacement cannot interrupt work.
  */
-async function gracefulShutdown(signal: string): Promise<void> {
+async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
   if (isShuttingDown) {
     console.log(`[Shutdown] Already shutting down, ignoring ${signal}`);
     return;
@@ -208,12 +208,23 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   closeCodexCorrelationDebugLogger();
   console.log("[Shutdown] Cleanup complete, exiting");
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 // Register shutdown handlers early
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("uncaughtException", (error) => {
+  if (isRecoverablePipeError(error)) {
+    console.warn(
+      `[uncaughtException] Recoverable provider pipe error: ${error.message}`,
+    );
+    return;
+  }
+
+  console.error("[uncaughtException] Fatal server error:", error);
+  void gracefulShutdown("uncaughtException", 1).catch(() => process.exit(1));
+});
 
 // Initialize logging early to capture all output
 initLogger({
@@ -239,20 +250,6 @@ const runtimeBuildInfo = await getRuntimeBuildInfo();
 console.log(
   `[Build] id=${runtimeBuildInfo.buildId} version=${runtimeBuildInfo.version} git=${runtimeBuildInfo.gitCommit?.slice(0, 12) ?? "unknown"} dirty=${String(runtimeBuildInfo.gitDirty)} source=${runtimeBuildInfo.source} builtAt=${runtimeBuildInfo.builtAt}`,
 );
-
-// Check for Claude CLI (optional - warn if not found)
-const cliInfo = detectClaudeCli();
-if (cliInfo.found) {
-  console.log(`Claude CLI found: ${cliInfo.path} (${cliInfo.version})`);
-} else {
-  console.warn("Warning: Claude CLI not found.");
-  console.warn("Claude Code sessions will not be available.");
-  console.warn(
-    process.platform === "win32"
-      ? "Install: irm https://claude.ai/install.ps1 | iex"
-      : "Install: curl -fsSL https://claude.ai/install.sh | bash",
-  );
-}
 
 function parseCodexVersion(raw: string | undefined): string | null {
   if (!raw) return null;
@@ -321,9 +318,6 @@ async function warnIfCodexVersionMismatch(): Promise<void> {
 
 await warnIfCodexVersionMismatch();
 
-// Create the real SDK
-const realSdk = new RealClaudeSDK();
-
 // Create EventBus and FileWatchers for all provider directories
 const eventBus = new EventBus();
 const fileWatchers: FileWatcher[] = [];
@@ -368,7 +362,7 @@ console.log(
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
   watchDir: string,
-  provider: "claude" | "gemini" | "codex",
+  provider: "gemini" | "codex",
 ): void {
   if (fs.existsSync(watchDir)) {
     const periodicRescanMs =
@@ -390,7 +384,6 @@ function createWatcherIfExists(
 
 // Create watchers for session directories only (not full provider dirs)
 // This reduces inotify pressure and memory usage
-createWatcherIfExists(config.claudeSessionsDir, "claude");
 createWatcherIfExists(config.geminiSessionsDir, "gemini");
 createWatcherIfExists(config.codexSessionsDir, "codex");
 
@@ -508,21 +501,6 @@ async function startServer() {
 
   // Seed allowed hosts middleware from persisted settings
   updateAllowedHosts(serverSettingsService.getSetting("allowedHosts"));
-
-  // Seed Ollama settings from persisted settings
-  const savedOllamaUrl = serverSettingsService.getSetting("ollamaUrl");
-  if (savedOllamaUrl) {
-    ClaudeOllamaProvider.setOllamaUrl(savedOllamaUrl);
-  }
-  ClaudeOllamaProvider.setSystemPrompt(
-    serverSettingsService.getSetting("ollamaSystemPrompt"),
-  );
-  ClaudeOllamaProvider.setUseFullSystemPrompt(
-    serverSettingsService.getSetting("ollamaUseFullSystemPrompt") ?? false,
-  );
-
-  // Warm model info cache (non-blocking, best-effort)
-  modelInfoService.warmProvider("claude-ollama").catch(() => {});
 
   // Log auth status
   if (config.authDisabled) {
@@ -643,15 +621,6 @@ async function startServer() {
     };
 
     await configuredRuntimeController.start();
-    await configuredRuntimeController.updateProviderSettings({
-      claudeOllama: {
-        url: serverSettingsService.getSetting("ollamaUrl"),
-        systemPrompt: serverSettingsService.getSetting("ollamaSystemPrompt"),
-        useFullSystemPrompt:
-          serverSettingsService.getSetting("ollamaUseFullSystemPrompt") ??
-          false,
-      },
-    });
     const activitySubscription =
       await configuredRuntimeController.subscribeActivity((event) => {
         void enqueueRuntimeEvent(event).catch((error) => {
@@ -701,7 +670,6 @@ async function startServer() {
   }
 
   const { app, supervisor, runtimeController, scanner } = createApp({
-    realSdk,
     projectsDir: config.claudeProjectsDir,
     idleTimeoutMs: config.idleTimeoutMs,
     defaultPermissionMode: config.defaultPermissionMode,

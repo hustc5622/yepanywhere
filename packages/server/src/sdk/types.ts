@@ -1,4 +1,4 @@
-// Core types for Claude SDK abstraction
+// Core types shared by provider adapters and legacy test doubles.
 
 // Re-export PermissionMode from shared
 export type { PermissionMode } from "@yep-anywhere/shared";
@@ -95,6 +95,34 @@ export interface UserMessage {
   tempId?: string;
 }
 
+/**
+ * Provider-neutral wire representation of a queued user message.
+ *
+ * This used to reuse the Claude Agent SDK type even though OpenCode is the
+ * only remaining runtime consumer. Keeping it local prevents a provider
+ * dependency from leaking into the shared message queue.
+ */
+export interface QueuedUserMessage {
+  type: "user";
+  uuid?: string;
+  message: {
+    role: "user";
+    content:
+      | string
+      | Array<
+          | { type: "text"; text: string }
+          | {
+              type: "image";
+              source: {
+                type: "base64";
+                media_type: string;
+                data: string;
+              };
+            }
+        >;
+  };
+}
+
 export interface SDKSessionOptions {
   cwd: string;
   resume?: string; // session ID to resume
@@ -105,18 +133,12 @@ export interface ClaudeSDK {
   startSession(options: SDKSessionOptions): AsyncIterableIterator<SDKMessage>;
 }
 
-// New interface for real SDK with full features
-import type { MessageQueue } from "./messageQueue.js";
-
+/** Provider-neutral result returned by a user tool-approval decision. */
 export interface ToolApprovalResult {
   behavior: "allow" | "deny";
   updatedInput?: unknown;
   message?: string;
-  /**
-   * If true, interrupt execution and do not continue.
-   * Set to true when user denies without guidance (just clicks "No").
-   * Leave false/unset when user provides feedback for Claude to incorporate.
-   */
+  /** Whether denial should interrupt the current turn. */
   interrupt?: boolean;
 }
 
@@ -125,73 +147,3 @@ export type CanUseTool = (
   input: unknown,
   options: { signal: AbortSignal },
 ) => Promise<ToolApprovalResult>;
-
-export interface StartSessionOptions {
-  cwd: string;
-  initialMessage?: UserMessage;
-  resumeSessionId?: string;
-  /**
-   * Rewind/edit: resume only up to (and including) this message UUID, branching
-   * the conversation in place. Used with resumeSessionId. Maps to the SDK
-   * `resumeSessionAt` option.
-   */
-  resumeSessionAt?: string;
-  permissionMode?: PermissionMode;
-  /** Model to use (e.g., "sonnet", "opus", "haiku"). undefined = use CLI default */
-  model?: string;
-  /** Thinking configuration (undefined = thinking disabled) */
-  thinking?: import("@yep-anywhere/shared").ThinkingConfig;
-  /** Effort level for response quality (undefined = SDK default) */
-  effort?: import("@yep-anywhere/shared").EffortLevel;
-  onToolApproval?: CanUseTool;
-  /** SSH host for remote execution (undefined = local) */
-  executor?: string;
-  /** Environment variables to set on remote (for testing: CLAUDE_SESSIONS_DIR) */
-  remoteEnv?: Record<string, string>;
-  /** Global instructions to append to system prompt (from server settings) */
-  globalInstructions?: string;
-}
-
-export interface StartSessionResult {
-  iterator: AsyncIterableIterator<SDKMessage>;
-  queue: MessageQueue;
-  abort: () => void;
-  /** Check if the underlying CLI process is still alive (undefined = not available) */
-  isProcessAlive?: () => boolean;
-  /** OS PID of the spawned agent child process (undefined if not available) */
-  pid?: number | (() => number | undefined);
-  /**
-   * Change max thinking tokens without restarting the session.
-   * Pass null to disable thinking mode.
-   * Only supported by Claude SDK 0.2.7+.
-   */
-  setMaxThinkingTokens?: (tokens: number | null) => Promise<void>;
-  /**
-   * Interrupt the current turn gracefully without killing the process.
-   * Only supported by Claude SDK 0.2.7+.
-   */
-  interrupt?: () => Promise<void>;
-  /**
-   * Get the list of available models from the SDK.
-   * Only supported by Claude SDK 0.2.7+.
-   */
-  supportedModels?: () => Promise<
-    Array<{ id: string; name: string; description?: string }>
-  >;
-  /**
-   * Get the list of available slash commands from the SDK.
-   * Only supported by Claude SDK 0.2.7+.
-   */
-  supportedCommands?: () => Promise<
-    Array<{ name: string; description: string; argumentHint?: string }>
-  >;
-  /**
-   * Change the model mid-session without restarting.
-   * Only supported by Claude SDK 0.2.7+.
-   */
-  setModel?: (model?: string) => Promise<void>;
-}
-
-export interface RealClaudeSDKInterface {
-  startSession(options: StartSessionOptions): Promise<StartSessionResult>;
-}

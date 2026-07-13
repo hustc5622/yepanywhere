@@ -21,7 +21,6 @@ import { LocalAccessSettings } from "./LocalAccessSettings";
 import { ModelSettings } from "./ModelSettings";
 import { NotificationsSettings } from "./NotificationsSettings";
 import { ProvidersSettings } from "./ProvidersSettings";
-import { RemoteExecutorsSettings } from "./RemoteExecutorsSettings";
 import { SourceControlSettings } from "./SourceControlSettings";
 import type { SettingsCategory } from "./types";
 
@@ -36,7 +35,6 @@ const CATEGORY_COMPONENTS: Record<string, React.ComponentType> = {
   devices: DevicesSettings,
   "local-access": LocalAccessSettings,
   providers: ProvidersSettings,
-  "remote-executors": RemoteExecutorsSettings,
   "source-control": SourceControlSettings,
   emulator: EmulatorSettings,
   about: AboutSettings,

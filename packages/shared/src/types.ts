@@ -1,6 +1,6 @@
 /**
  * Provider name - which AI agent provider to use.
- * - "claude": Claude via Anthropic SDK
+ * - "claude": retained only for reading legacy session metadata
  * - "codex": OpenAI Codex via SDK (cloud models)
  * - "codex-oss": Codex via CLI with --oss (local models via Ollama)
  * - "gemini": Google Gemini via CLI
@@ -32,9 +32,9 @@ export const ALL_PROVIDERS: readonly ProviderName[] = [
 
 /**
  * The default provider when none is specified.
- * Used for backward compatibility with existing sessions that don't have provider set.
+ * Used when a new session does not explicitly select a provider.
  */
-export const DEFAULT_PROVIDER: ProviderName = "claude";
+export const DEFAULT_PROVIDER: ProviderName = "codex";
 
 /**
  * Model information for a provider.

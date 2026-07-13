@@ -1,7 +1,7 @@
 /**
  * Context usage breakdown shape returned by `GET /api/projects/:projectId/sessions/:sessionId/context-status`.
  *
- * Fields mirror SDKControlGetContextUsageResponse from @anthropic-ai/claude-agent-sdk.
+ * Fields mirror the provider control payload used to report context usage.
  * When the live SDK Process is available we return `source: "sdk"` with full breakdown;
  * otherwise we fall back to a coarse estimate derived from the persisted JSONL.
  */

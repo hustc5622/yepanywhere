@@ -162,13 +162,7 @@ export interface RuntimeHoldProcessRequest {
   hold: boolean;
 }
 
-export interface RuntimeProviderSettings {
-  claudeOllama?: {
-    url?: string;
-    systemPrompt?: string;
-    useFullSystemPrompt?: boolean;
-  };
-}
+export type RuntimeProviderSettings = Record<string, never>;
 
 export interface RuntimeController {
   readonly mode: RuntimeMode;

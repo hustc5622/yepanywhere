@@ -16,34 +16,6 @@ export function whichCommand(name: string): string {
 }
 
 /**
- * Information about the Claude CLI installation.
- */
-export interface ClaudeCliInfo {
-  /** Whether the CLI was found */
-  found: boolean;
-  /** Path to the CLI executable */
-  path?: string;
-  /** CLI version string */
-  version?: string;
-  /** Error message if not found */
-  error?: string;
-}
-
-/**
- * Detect the Claude CLI installation.
- *
- * Checks:
- * 1. PATH via `which claude`
- * 2. Common installation locations
- *
- * @returns Information about the CLI installation
- */
-export function detectClaudeCli(): ClaudeCliInfo {
-  // Short-circuit: let the SDK handle CLI spawning and errors
-  return { found: true, path: "claude", version: "(SDK-managed)" };
-}
-
-/**
  * Information about the Codex CLI installation.
  */
 export interface CodexCliInfo {

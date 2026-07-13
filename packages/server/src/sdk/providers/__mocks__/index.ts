@@ -8,7 +8,7 @@
  * ```typescript
  * import { createMockProvider, createStandardScenario } from './providers/__mocks__';
  *
- * const provider = createMockProvider('claude', {
+ * const provider = createMockProvider('codex', {
  *   scenarios: [createStandardScenario('session-1', 'Hello!')]
  * });
  * ```
@@ -25,13 +25,6 @@ export type {
 export { BaseMockProvider } from "./base.js";
 
 // Mock providers
-export {
-  MockClaudeProvider,
-  MockClaudeOllamaProvider,
-  createClaudeScenario,
-  createClaudeToolScenario,
-  createClaudeApprovalScenario,
-} from "./claude.js";
 export {
   MockCodexProvider,
   MockCodexOSSProvider,
