@@ -173,7 +173,9 @@ AI session title deploy config:
   LLM_API_BASE                     Fallback API base for title generation
   SESSION_TITLE_SUB_MODULE         X-Sub-Module header for title generation
   LLM_SUB_MODULE                   Fallback X-Sub-Module header for title generation
-  OPENCODE_LLM_SUB_MODULE          X-Sub-Module header only for OpenCode model requests
+  OPENCODE_LLM_API_KEY             API key for managed OpenCode model requests
+  OPENCODE_LLM_API_BASE            API base for managed OpenCode model requests
+  OPENCODE_LLM_SUB_MODULE          X-Sub-Module header for managed OpenCode model requests
   SESSION_TITLE_MODEL              Title model (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION=false   Disable title generation
   SESSION_TITLE_TIMEOUT_MS         Title request timeout in milliseconds
@@ -665,7 +667,11 @@ sync_server_launchagent_env_if_needed() {
     dim "reasons: ${SERVER_LAUNCHAGENT_SYNC_REASONS[*]}"
   fi
   dim "4510 Codex bridge and 4520 OpenCode bridge are not touched"
-  scripts/install-launchagents.sh --server-only
+  # The following server deploy performs the one intentional start after it
+  # has stopped the old process and arranged the bridge sidecars. Starting
+  # here as well creates a start → immediate stop → start race, and can leave
+  # launchd reporting a running job before the server is actually ready.
+  scripts/install-launchagents.sh --server-only --no-start
 }
 
 start_dev_server() {

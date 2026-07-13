@@ -70,6 +70,8 @@ else
 fi
 SERVER_BASE_URL="http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
 SERVER_LAUNCHD_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
+SERVER_LAUNCHD_LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
+SERVER_CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
 CODEX_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
 OPENCODE_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
 for arg in "$@"; do
@@ -201,7 +203,113 @@ launchd_label_loaded() {
 kickstart_launchd_label() {
   local label="$1"
 
-  launchctl kickstart -k "$(launchd_domain)/${label}"
+  # Every caller has already stopped the process it is replacing. Do not use
+  # `-k` here: it introduces a second forced termination during deployment
+  # and makes the launch sequence race the process cleanup above.
+  launchctl kickstart "$(launchd_domain)/${label}"
+}
+
+tail_server_launchagent_logs() {
+  local stdout_log="$SERVER_LAUNCHD_LOG_DIR/server-launchd.out.log"
+  local stderr_log="$SERVER_LAUNCHD_LOG_DIR/server-launchd.err.log"
+
+  err "LaunchAgent logs: $stdout_log and $stderr_log"
+  if [[ -f "$stderr_log" ]]; then
+    err "Last 40 lines of LaunchAgent stderr:"
+    tail -40 "$stderr_log" >&2 || true
+  fi
+  if [[ -f "$stdout_log" ]]; then
+    # The normal stdout contains session prompts and transcript metadata.
+    # Restrict failure output to server lifecycle/error records so a deploy
+    # failure does not echo unrelated session content into the terminal.
+    err "Recent LaunchAgent startup/error records:"
+    rg -a '\[Server\]|\[NetworkBinding\]|Failed to start|ERROR|\[Shutdown\]' "$stdout_log" \
+      | tail -40 >&2 || true
+  fi
+  if command -v launchctl >/dev/null 2>&1; then
+    err "LaunchAgent status:"
+    launchctl print "$(launchd_domain)/${SERVER_LAUNCHD_LABEL}" >&2 || true
+  fi
+}
+
+server_node_bin() {
+  local node_bin="${YEP_LAUNCHD_NODE:-}"
+  local plist="$HOME/Library/LaunchAgents/${SERVER_LAUNCHD_LABEL}.plist"
+
+  # Prefer the runtime recorded in the server plist. It is chosen during
+  # installation to match the native runtime dependencies, whereas the shell
+  # PATH used for deploy may point at a different Node.js major version.
+  if [[ -z "$node_bin" && -f "$plist" ]] && command -v plutil >/dev/null 2>&1; then
+    node_bin="$(plutil -extract 'ProgramArguments.0' raw "$plist" 2>/dev/null || true)"
+  fi
+  if [[ -z "$node_bin" ]]; then
+    node_bin="$(command -v node 2>/dev/null || true)"
+  fi
+  if [[ -z "$node_bin" || ! -x "$node_bin" ]]; then
+    err "Could not find an executable Node.js runtime for the fallback server."
+    return 1
+  fi
+  printf '%s' "$node_bin"
+}
+
+start_server_fallback() {
+  local node_bin
+  node_bin="$(server_node_bin)" || return 1
+
+  if [[ ! -f "$SERVER_CLI_JS" ]]; then
+    err "Cannot start fallback server: bundled CLI is missing at $SERVER_CLI_JS"
+    return 1
+  fi
+
+  log "Starting yepanywhere outside LaunchAgent (logs: /tmp/yep-server.log) ..."
+  if ! $USE_CODEX_BRIDGE_SIDECAR; then
+    BASE_PATH="${SERVER_BASE_PATH:-/}" \
+      ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+      nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
+    return 0
+  fi
+
+  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
+    BASE_PATH="${SERVER_BASE_PATH:-/}" \
+      ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+      YEP_CODEX_BRIDGE_MODE=external \
+      YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
+      YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
+      YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
+      YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
+      YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
+      YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$OPENCODE_BRIDGE_UPSTREAM_URL" \
+      env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+      nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
+  else
+    BASE_PATH="${SERVER_BASE_PATH:-/}" \
+      ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+      YEP_CODEX_BRIDGE_MODE=external \
+      YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
+      YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
+      YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
+      YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
+      YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
+      env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+      nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
+  fi
+}
+
+stop_launchagent_server_for_fallback() {
+  local pids
+  pids="$(server_process_pids "$SERVER_PORT")"
+  [[ -z "$pids" ]] && return 0
+
+  warn "LaunchAgent server did not become ready; stopping PID(s): ${pids//$'\n'/, }"
+  kill $pids 2>/dev/null || true
+  wait_server_processes_stopped "$SERVER_PORT" || true
+
+  pids="$(server_process_pids "$SERVER_PORT")"
+  if [[ -n "$pids" ]]; then
+    warn "LaunchAgent server did not stop after SIGTERM; sending SIGKILL to PID(s): ${pids//$'\n'/, }"
+    kill -9 $pids 2>/dev/null || true
+    wait_server_processes_stopped "$SERVER_PORT" || true
+  fi
 }
 
 start_codex_bridge_sidecar() {
@@ -482,40 +590,14 @@ if $DO_RESTART; then
   # cleanly (see INFRA.md). The Hono app + client bundle both pick up BASE_PATH.
   # APK / direct-mode tcp tunnel callers are unaffected — they hit ws://host:8022
   # which still serves /yep/api/ws; only the URL prefix changes, not the port.
+  STARTED_SERVER_WITH_LAUNCHAGENT=false
   if launchd_label_loaded "$SERVER_LAUNCHD_LABEL"; then
     dim "using LaunchAgent ${SERVER_LAUNCHD_LABEL}; KeepAlive is not required"
     kickstart_launchd_label "$SERVER_LAUNCHD_LABEL"
-  elif $USE_CODEX_BRIDGE_SIDECAR; then
-    dim "LaunchAgent ${SERVER_LAUNCHD_LABEL} is not loaded; falling back to nohup (logs: /tmp/yep-server.log)"
-    if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
-      BASE_PATH="${SERVER_BASE_PATH:-/}" \
-        ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
-        YEP_CODEX_BRIDGE_MODE=external \
-        YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
-        YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
-        YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
-        YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
-        YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
-        YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$OPENCODE_BRIDGE_UPSTREAM_URL" \
-        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-        nohup yepanywhere --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
-    else
-      BASE_PATH="${SERVER_BASE_PATH:-/}" \
-        ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
-        YEP_CODEX_BRIDGE_MODE=external \
-        YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
-        YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
-        YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
-        YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
-        YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
-        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-        nohup yepanywhere --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
-    fi
+    STARTED_SERVER_WITH_LAUNCHAGENT=true
   else
-    dim "LaunchAgent ${SERVER_LAUNCHD_LABEL} is not loaded; falling back to nohup (logs: /tmp/yep-server.log)"
-    BASE_PATH="${SERVER_BASE_PATH:-/}" \
-      ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
-      nohup yepanywhere --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
+    dim "LaunchAgent ${SERVER_LAUNCHD_LABEL} is not loaded; using direct server process"
+    start_server_fallback
   fi
 
   # Health-check loop. Tries up to 15s; the server usually answers within 2s
@@ -532,6 +614,25 @@ if $DO_RESTART; then
     fi
     sleep 0.25
   done
+
+  # Some macOS launchd/xpcproxy combinations leave Node.js alive but stuck
+  # before application code runs. The same CLI works when started outside
+  # launchd, so use a direct process for this deployment instead of leaving
+  # 8022 unavailable.
+  if ! $HEALTH_OK && $STARTED_SERVER_WITH_LAUNCHAGENT; then
+    warn "LaunchAgent ${SERVER_LAUNCHD_LABEL} did not become ready; retrying outside launchd."
+    tail_server_launchagent_logs
+    stop_launchagent_server_for_fallback
+    start_server_fallback
+
+    for _ in $(seq 1 60); do
+      if curl -fsS "${SERVER_BASE_URL}/api/version" >/dev/null 2>&1; then
+        HEALTH_OK=true
+        break
+      fi
+      sleep 0.25
+    done
+  fi
 
   if $HEALTH_OK; then
     log "Server is up."
@@ -553,8 +654,13 @@ if $DO_RESTART; then
     # Relay (4400) was retired in favor of self-hosted frp tcp tunnels.
     # Skipping relay status check — see INFRA.md.
   else
-    err "Server didn't answer /yep/api/version within 15s. Check /tmp/yep-server.log for crashes."
-    tail -20 /tmp/yep-server.log >&2 || true
+    err "Server didn't answer ${SERVER_BASE_URL}/api/version within 15s."
+    if launchd_label_loaded "$SERVER_LAUNCHD_LABEL"; then
+      tail_server_launchagent_logs
+    else
+      err "Fallback server log: /tmp/yep-server.log"
+      tail -80 /tmp/yep-server.log >&2 || true
+    fi
     exit 1
   fi
 fi

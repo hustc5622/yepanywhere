@@ -23,7 +23,17 @@ OPENCODE_SERVER_HOST="${YEP_OPENCODE_HOST:-127.0.0.1}"
 OPENCODE_SERVER_START_PORT="${YEP_OPENCODE_SERVER_START_PORT:-${YEP_OPENCODE_PORT:-${OPENCODE_SERVER_START_PORT:-${OPENCODE_PORT:-$((OPENCODE_BRIDGE_PORT + 1))}}}}"
 OPENCODE_BRIDGE_UPSTREAM_URL="${YEP_OPENCODE_BRIDGE_UPSTREAM_URL:-${OPENCODE_BRIDGE_UPSTREAM_URL:-}}"
 SERVER_URL="http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
-NODE_BIN="${YEP_LAUNCHD_NODE:-$(command -v node 2>/dev/null || true)}"
+if [[ -n "${YEP_LAUNCHD_NODE:-}" ]]; then
+  NODE_BIN="$YEP_LAUNCHD_NODE"
+elif [[ -n "${NVM_BIN:-}" && -x "$NVM_BIN/node" ]]; then
+  NODE_BIN="$NVM_BIN/node"
+else
+  # launchd does not initialize the interactive shell, and a Homebrew Node
+  # ahead of NVM on PATH can be incompatible with the installed native deps.
+  # Prefer the locally managed NVM runtime when one is available.
+  NVM_NODE_BIN="$(find "$HOME/.nvm/versions/node" -path '*/bin/node' -type f -print 2>/dev/null | sort | tail -n 1)"
+  NODE_BIN="${NVM_NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+fi
 CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
@@ -82,7 +92,9 @@ Environment overrides:
   LLM_API_BASE                 Fallback API base for AI session titles
   SESSION_TITLE_SUB_MODULE     X-Sub-Module header for AI session titles
   LLM_SUB_MODULE               Fallback X-Sub-Module header for AI session titles
-  OPENCODE_LLM_SUB_MODULE      X-Sub-Module header only for OpenCode model requests
+  OPENCODE_LLM_API_KEY         API key for managed OpenCode model requests
+  OPENCODE_LLM_API_BASE        API base for managed OpenCode model requests
+  OPENCODE_LLM_SUB_MODULE      X-Sub-Module header for managed OpenCode model requests
   SESSION_TITLE_MODEL          Model for AI session titles (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION     Set false to disable AI session titles
   SESSION_TITLE_TIMEOUT_MS     Request timeout for AI session title generation
@@ -169,6 +181,8 @@ fi
 SESSION_TITLE_API_KEY="${SESSION_TITLE_LLM_API_KEY:-${LLM_API_KEY:-}}"
 SESSION_TITLE_API_BASE="${SESSION_TITLE_LLM_API_BASE:-${LLM_API_BASE:-}}"
 SESSION_TITLE_SUB_MODULE_VALUE="${SESSION_TITLE_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
+OPENCODE_API_KEY="${OPENCODE_LLM_API_KEY:-$SESSION_TITLE_API_KEY}"
+OPENCODE_API_BASE="${OPENCODE_LLM_API_BASE:-$SESSION_TITLE_API_BASE}"
 OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-}"
 
 chmod +x "$CLI_JS" 2>/dev/null || true
@@ -273,6 +287,15 @@ write_opencode_bridge_plist() {
   )
   if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
     env_args+=("YEP_OPENCODE_BRIDGE_UPSTREAM_URL" "$OPENCODE_BRIDGE_UPSTREAM_URL")
+  fi
+  if [[ -n "$OPENCODE_API_KEY" ]]; then
+    env_args+=("OPENCODE_LLM_API_KEY" "$OPENCODE_API_KEY")
+  fi
+  if [[ -n "$OPENCODE_API_BASE" ]]; then
+    env_args+=("OPENCODE_LLM_API_BASE" "$OPENCODE_API_BASE")
+  fi
+  if [[ -n "$OPENCODE_LLM_SUB_MODULE_VALUE" ]]; then
+    env_args+=("OPENCODE_LLM_SUB_MODULE" "$OPENCODE_LLM_SUB_MODULE_VALUE")
   fi
 
   write_header "$plist" "$OPENCODE_BRIDGE_LABEL" "$LOG_DIR/opencode-bridge-launchd.out.log" "$LOG_DIR/opencode-bridge-launchd.err.log"
