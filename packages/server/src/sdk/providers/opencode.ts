@@ -22,13 +22,20 @@ import type {
   ModelInfo,
   OpenCodeMessagePartUpdatedEvent,
   OpenCodeMessageUpdatedEvent,
-  OpenCodeModelLimits,
   OpenCodePart,
   OpenCodeSSEEvent,
+  OpenCodeSessionConfig,
   PermissionMode,
 } from "@yep-anywhere/shared";
 import { parseOpenCodeSSEEvent } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
+import {
+  buildManagedOpenCodeEnv,
+  fetchOpenCodeGatewayModels,
+  getManagedOpenCodeModelRef,
+  resolveOpenCodeGatewayConfig,
+  resolveOpenCodeOpenAICompatibleBaseURL,
+} from "../../opencode-bridge/gateway-config.js";
 import { whichCommand } from "../cli-detection.js";
 import { MessageQueue } from "../messageQueue.js";
 import type { SDKMessage, ToolApprovalResult } from "../types.js";
@@ -55,18 +62,6 @@ export interface OpenCodeProviderConfig {
 
 type OpenCodePermissionAction = "allow" | "ask" | "deny";
 type OpenCodePermissionConfig = Record<string, OpenCodePermissionAction>;
-
-type OpenCodeProviderModelConfig = Record<
-  string,
-  {
-    models: Record<
-      string,
-      {
-        limit?: OpenCodeModelLimits;
-      }
-    >;
-  }
->;
 
 interface OpenCodePermissionAskedEvent {
   type: "permission.asked";
@@ -114,21 +109,6 @@ interface OpenCodeRuntimeRef {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function mergeOpenCodeConfig(
-  base: Record<string, unknown>,
-  overlay: Record<string, unknown>,
-): Record<string, unknown> {
-  const merged = { ...base };
-  for (const [key, value] of Object.entries(overlay)) {
-    const current = merged[key];
-    merged[key] =
-      isRecord(current) && isRecord(value)
-        ? mergeOpenCodeConfig(current, value)
-        : value;
-  }
-  return merged;
 }
 
 interface OpenCodeSessionCreatePayload {
@@ -196,6 +176,11 @@ export class OpenCodeProvider implements AgentProvider {
 
   private readonly opencodePath?: string;
   private readonly timeout: number;
+  private gatewayModelCache?: {
+    cacheKey: string;
+    expiresAt: number;
+    models: ModelInfo[];
+  };
 
   constructor(config: OpenCodeProviderConfig = {}) {
     this.opencodePath = config.opencodePath;
@@ -248,6 +233,36 @@ export class OpenCodeProvider implements AgentProvider {
     const opencodePath = await this.findOpenCodePath();
     if (!opencodePath) {
       return [];
+    }
+
+    const gatewayConfig = resolveOpenCodeGatewayConfig(process.env);
+    if (gatewayConfig) {
+      const cacheKey = `${gatewayConfig.apiBase}:${gatewayConfig.apiKey}`;
+      if (
+        this.gatewayModelCache?.cacheKey === cacheKey &&
+        this.gatewayModelCache.expiresAt > Date.now()
+      ) {
+        return this.gatewayModelCache.models;
+      }
+      try {
+        const models = await fetchOpenCodeGatewayModels(gatewayConfig);
+        if (models.length > 0) {
+          this.gatewayModelCache = {
+            cacheKey,
+            expiresAt: Date.now() + 60_000,
+            models,
+          };
+          return models;
+        }
+      } catch (error) {
+        getLogger().warn(
+          {
+            apiBase: gatewayConfig.apiBase,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Failed to load OpenCode gateway model catalog; falling back to CLI models",
+        );
+      }
     }
 
     try {
@@ -314,19 +329,24 @@ export class OpenCodeProvider implements AgentProvider {
       get pid() {
         return pidRef.value;
       },
-      supportedModels: () => this.getAvailableModels(),
-      setModel: async (model?: string) => {
-        if (!runtimeRef.baseUrl) return;
-        const normalizedModel = await this.resolveOpenCodeModelOption(model);
-        await this.patchServerConfig(
-          runtimeRef.baseUrl,
-          {
-            model: normalizedModel ?? undefined,
-          },
-          runtimeRef.cwd,
-        );
-        runtimeRef.currentModel = normalizedModel;
-      },
+      ...(options.opencodeConfig
+        ? {}
+        : {
+            supportedModels: () => this.getAvailableModels(),
+            setModel: async (model?: string) => {
+              if (!runtimeRef.baseUrl) return;
+              const normalizedModel =
+                await this.resolveOpenCodeModelOption(model);
+              await this.patchServerConfig(
+                runtimeRef.baseUrl,
+                {
+                  model: normalizedModel ?? undefined,
+                },
+                runtimeRef.cwd,
+              );
+              runtimeRef.currentModel = normalizedModel;
+            },
+          }),
     };
   }
 
@@ -353,7 +373,18 @@ export class OpenCodeProvider implements AgentProvider {
       return;
     }
 
-    const selectedModel = await this.resolveOpenCodeModelOption(options.model);
+    const selectedModel = options.opencodeConfig
+      ? getManagedOpenCodeModelRef(options.opencodeConfig)
+      : await this.resolveOpenCodeModelOption(options.model);
+
+    if (options.opencodeConfig && !resolveOpenCodeGatewayConfig(process.env)) {
+      yield {
+        type: "error",
+        error:
+          "Managed OpenCode configuration requires OPENCODE_LLM_API_KEY or LLM_API_KEY",
+      } as SDKMessage;
+      return;
+    }
 
     // Ask the OS for a free port instead of reusing a counter that resets when
     // Yep restarts. A stale OpenCode server can otherwise impersonate the
@@ -388,7 +419,7 @@ export class OpenCodeProvider implements AgentProvider {
         {
           cwd,
           stdio: ["pipe", "pipe", "pipe"],
-          env: this.getOpenCodeEnv(selectedModel, options.opencodeModelLimits),
+          env: this.getOpenCodeEnv(options.opencodeConfig),
           shell: process.platform === "win32",
         },
       );
@@ -1589,21 +1620,6 @@ export class OpenCodeProvider implements AgentProvider {
     if (model) {
       config.model = model;
     }
-    if (options.opencodeModelLimits) {
-      const providerLimitConfig = this.buildOpenCodeModelConfig(
-        model,
-        options.opencodeModelLimits,
-      );
-      if (!providerLimitConfig) {
-        return {
-          ok: false,
-          error:
-            "OpenCode model limits require an explicit model in provider/model format",
-        };
-      }
-      config.provider = providerLimitConfig;
-    }
-
     try {
       await this.patchServerConfig(baseUrl, config, cwd);
 
@@ -1611,7 +1627,13 @@ export class OpenCodeProvider implements AgentProvider {
         {
           permissionMode: options.permissionMode ?? "default",
           model,
-          opencodeModelLimits: options.opencodeModelLimits,
+          managedOpenCode: options.opencodeConfig
+            ? {
+                model: options.opencodeConfig.model,
+                requestProtocol: options.opencodeConfig.requestProtocol,
+                limits: options.opencodeConfig.limits,
+              }
+            : undefined,
         },
         "Configured OpenCode server",
       );
@@ -1744,32 +1766,6 @@ export class OpenCodeProvider implements AgentProvider {
       providerID: model.slice(0, slash),
       modelID: model.slice(slash + 1),
     };
-  }
-
-  private buildOpenCodeModelConfig(
-    model: string | null | undefined,
-    limits: OpenCodeModelLimits | undefined,
-  ): OpenCodeProviderModelConfig | null {
-    const parsed = this.parseOpenCodeModelOption(model);
-    if (!parsed) return null;
-
-    return {
-      [parsed.providerID]: {
-        models: {
-          [parsed.modelID]: {
-            ...(limits ? { limit: limits } : {}),
-          },
-        },
-      },
-    };
-  }
-
-  private buildOpenCodeConfigOverlay(
-    model: string | null | undefined,
-    limits: OpenCodeModelLimits | undefined,
-  ): Record<string, unknown> | null {
-    const provider = this.buildOpenCodeModelConfig(model, limits);
-    return provider ? { provider } : null;
   }
 
   private buildOpenCodeSessionCreatePayload(
@@ -1925,46 +1921,15 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   private getOpenCodeEnv(
-    model?: string | null,
-    limits?: OpenCodeModelLimits,
+    sessionConfig?: OpenCodeSessionConfig,
   ): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    env.LLM_API_KEY ??=
-      process.env.SESSION_TITLE_LLM_API_KEY ?? process.env.OPENAI_API_KEY;
-    env.LLM_API_BASE ??=
-      process.env.SESSION_TITLE_LLM_API_BASE ?? process.env.LLM_API_BASE;
-    const opencodeSubModule = process.env.OPENCODE_LLM_SUB_MODULE?.trim();
-    if (env.LLM_SUB_MODULE === undefined && opencodeSubModule) {
-      env.LLM_SUB_MODULE = opencodeSubModule;
-    }
-
-    // OpenCode constructs its provider catalog while the server starts.
-    // Register a protocol-specific model before startup; a later /config PATCH
-    // does not make a newly added provider/model pair selectable by that server.
-    const overlay = this.buildOpenCodeConfigOverlay(model, limits);
-    if (!overlay) return env;
-
-    if (env.OPENCODE_CONFIG_CONTENT) {
-      try {
-        const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT) as unknown;
-        if (!isRecord(parsed)) {
-          throw new Error("OPENCODE_CONFIG_CONTENT must be a JSON object");
-        }
-        env.OPENCODE_CONFIG_CONTENT = JSON.stringify(
-          mergeOpenCodeConfig(parsed, overlay),
-        );
-      } catch (error) {
-        getLogger().warn(
-          {
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "Ignoring invalid OPENCODE_CONFIG_CONTENT while preparing OpenCode model config",
-        );
-      }
-    } else {
-      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(overlay);
-    }
-    return env;
+    const gatewayConfig = resolveOpenCodeGatewayConfig(process.env);
+    return buildManagedOpenCodeEnv(process.env, gatewayConfig, {
+      openAICompatibleBaseURL: resolveOpenCodeOpenAICompatibleBaseURL(
+        process.env,
+      ),
+      sessionConfig,
+    });
   }
 
   private extractMessageResponseError(

@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
   CodexMcpMode,
+  OpenCodeSessionConfig,
   ProviderName,
   SessionCreatedBy,
 } from "@yep-anywhere/shared";
@@ -30,6 +31,8 @@ export interface SessionMetadata {
   executor?: string;
   /** Codex MCP profile for app-server sessions. */
   codexMcpMode?: CodexMcpMode;
+  /** Managed OpenCode provider/model settings used to resume the session. */
+  opencodeConfig?: OpenCodeSessionConfig;
   /** Whether Yep created this session, or it was discovered from an external client. */
   createdBy?: SessionCreatedBy;
 }
@@ -224,6 +227,18 @@ export class SessionMetadataService {
     await this.save();
   }
 
+  /** Persist the generated OpenCode provider/model contract for restarts. */
+  async setOpenCodeConfig(
+    sessionId: string,
+    opencodeConfig: OpenCodeSessionConfig | undefined,
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      opencodeConfig,
+    }));
+    await this.save();
+  }
+
   /**
    * Get the provider for a session.
    * Returns undefined if the provider was never explicitly saved.
@@ -246,6 +261,10 @@ export class SessionMetadataService {
    */
   getCodexMcpMode(sessionId: string): CodexMcpMode | undefined {
     return this.getMetadata(sessionId)?.codexMcpMode;
+  }
+
+  getOpenCodeConfig(sessionId: string): OpenCodeSessionConfig | undefined {
+    return this.getMetadata(sessionId)?.opencodeConfig;
   }
 
   /**
@@ -357,6 +376,9 @@ export class SessionMetadataService {
     if (updated.provider) cleaned.provider = updated.provider;
     if (updated.executor) cleaned.executor = updated.executor;
     if (updated.codexMcpMode) cleaned.codexMcpMode = updated.codexMcpMode;
+    if (updated.opencodeConfig) {
+      cleaned.opencodeConfig = updated.opencodeConfig;
+    }
     if (updated.createdBy) cleaned.createdBy = updated.createdBy;
 
     if (Object.keys(cleaned).length === 0) {

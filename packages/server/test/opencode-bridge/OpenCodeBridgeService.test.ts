@@ -463,6 +463,73 @@ describe("OpenCodeBridgeService", () => {
     });
   });
 
+  it("buffers the OpenAI-compatible SSE gateway route for managed OpenCode", async () => {
+    let forwardedBody = "";
+    let forwardedAuthorization: string | undefined;
+    let forwardedSubModule: string | undefined;
+    const upstream = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/global/event") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write("\n");
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        forwardedBody = Buffer.concat(chunks).toString("utf8");
+        forwardedAuthorization = req.headers.authorization;
+        forwardedSubModule = req.headers["x-sub-module"];
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n');
+        res.end("data: [DONE]\n\n");
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const upstreamUrl = await listen(upstream);
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: upstreamUrl,
+      gatewayConfig: {
+        apiKey: "test-key",
+        apiBase: `${upstreamUrl}/v1`,
+        subModule: "claude-code-internal",
+      },
+    });
+
+    await bridge.start();
+    const response = await fetch(
+      `http://127.0.0.1:${bridgePort}/gateway/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer forwarded-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "glm-5.2", stream: true }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(
+      'data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n',
+    );
+    expect(forwardedAuthorization).toBe("Bearer forwarded-key");
+    expect(forwardedSubModule).toBe("claude-code-internal");
+    expect(JSON.parse(forwardedBody)).toEqual({
+      model: "glm-5.2",
+      stream: true,
+    });
+    await bridge.shutdown();
+  });
+
   it("starts and owns a managed OpenCode server when no external URL is configured", async () => {
     const opencodePath = await writeFakeOpenCodeExecutable();
     const startPort = await getFreePort();

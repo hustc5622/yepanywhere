@@ -3,7 +3,7 @@ import type {
   CodexMcpMode,
   ContextStatusSdkPayload,
   ModelInfo,
-  OpenCodeModelLimits,
+  OpenCodeSessionConfig,
   PermissionMode,
   SlashCommand,
 } from "@yep-anywhere/shared";
@@ -73,8 +73,8 @@ export interface StartSessionOptions {
   reasoningEffort?: string;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
-  /** OpenCode model limit override. Only consumed by the OpenCode provider. */
-  opencodeModelLimits?: OpenCodeModelLimits;
+  /** Managed provider/model configuration consumed by OpenCode. */
+  opencodeConfig?: OpenCodeSessionConfig;
   /** Tool approval callback */
   onToolApproval?: CanUseTool;
   /** SSH host for remote execution (undefined = local) */

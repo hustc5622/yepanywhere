@@ -9,7 +9,9 @@ import {
   type CodexMcpMode,
   type EffortLevel,
   type NewSessionDefaults,
+  type OpenCodeJsonObject,
   type OpenCodeModelLimits,
+  type OpenCodeSessionConfig,
   type PermissionMode,
   type ProviderName,
   type ThinkingOption,
@@ -123,10 +125,143 @@ function parseOpenCodeModelLimits(
   if (!hasContext || !hasOutput) return null;
 
   const context = parsePositiveTokenLimit(input.context);
+  const inputLimit =
+    input.input === undefined || input.input === null
+      ? undefined
+      : parsePositiveTokenLimit(input.input);
   const output = parsePositiveTokenLimit(input.output);
 
-  if (context === null || output === null) return null;
-  return { context, output };
+  if (context === null || output === null || inputLimit === null) return null;
+  return {
+    context,
+    ...(inputLimit === undefined ? {} : { input: inputLimit }),
+    output,
+  };
+}
+
+function isJsonObject(value: unknown): value is OpenCodeJsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      return false;
+    }
+    if (!isJsonValue(item, 1)) return false;
+  }
+  return JSON.stringify(value).length <= 65_536;
+}
+
+function isJsonValue(value: unknown, depth: number): boolean {
+  if (depth > 12) return false;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    return value.every((item) => isJsonValue(item, depth + 1));
+  }
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).every(
+    ([key, item]) =>
+      key !== "__proto__" &&
+      key !== "prototype" &&
+      key !== "constructor" &&
+      isJsonValue(item, depth + 1),
+  );
+}
+
+function parseOpenCodeSessionConfig(
+  raw: unknown,
+): OpenCodeSessionConfig | undefined | null {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const input = raw as Record<string, unknown>;
+  const model = typeof input.model === "string" ? input.model.trim() : "";
+  if (
+    !model ||
+    model.length > 512 ||
+    model === "__proto__" ||
+    model === "prototype" ||
+    model === "constructor" ||
+    Array.from(model).some((character) => character.charCodeAt(0) < 32)
+  ) {
+    return null;
+  }
+  if (
+    input.requestProtocol !== "openai-compatible" &&
+    input.requestProtocol !== "anthropic"
+  ) {
+    return null;
+  }
+
+  const limits = parseOpenCodeModelLimits(input.limits);
+  if (limits === null) return null;
+
+  let capabilities: OpenCodeSessionConfig["capabilities"];
+  if (input.capabilities !== undefined && input.capabilities !== null) {
+    if (
+      typeof input.capabilities !== "object" ||
+      Array.isArray(input.capabilities)
+    ) {
+      return null;
+    }
+    capabilities = {};
+    const rawCapabilities = input.capabilities as Record<string, unknown>;
+    for (const key of [
+      "attachment",
+      "reasoning",
+      "temperature",
+      "toolCall",
+    ] as const) {
+      const value = rawCapabilities[key];
+      if (value === undefined) continue;
+      if (typeof value !== "boolean") return null;
+      capabilities[key] = value;
+    }
+  }
+
+  let advanced: OpenCodeSessionConfig["advanced"];
+  if (input.advanced !== undefined && input.advanced !== null) {
+    if (typeof input.advanced !== "object" || Array.isArray(input.advanced)) {
+      return null;
+    }
+    const rawAdvanced = input.advanced as Record<string, unknown>;
+    if (
+      rawAdvanced.provider !== undefined &&
+      !isJsonObject(rawAdvanced.provider)
+    ) {
+      return null;
+    }
+    if (rawAdvanced.model !== undefined && !isJsonObject(rawAdvanced.model)) {
+      return null;
+    }
+    advanced = {
+      provider: rawAdvanced.provider as OpenCodeJsonObject | undefined,
+      model: rawAdvanced.model as OpenCodeJsonObject | undefined,
+    };
+  }
+
+  const name =
+    typeof input.name === "string" && input.name.trim()
+      ? input.name.trim()
+      : undefined;
+  if (name && name.length > 200) return null;
+
+  return {
+    model,
+    requestProtocol: input.requestProtocol,
+    ...(name ? { name } : {}),
+    ...(limits ? { limits } : {}),
+    ...(capabilities && Object.keys(capabilities).length > 0
+      ? { capabilities }
+      : {}),
+    ...(advanced ? { advanced } : {}),
+  };
 }
 
 /**
@@ -235,10 +370,10 @@ function parseNewSessionDefaults(
     }
   }
 
-  if ("opencodeModelLimits" in input) {
-    const limits = parseOpenCodeModelLimits(input.opencodeModelLimits);
-    if (limits === null) return null;
-    if (limits) parsed.opencodeModelLimits = limits;
+  if ("opencodeConfig" in input) {
+    const config = parseOpenCodeSessionConfig(input.opencodeConfig);
+    if (config === null) return null;
+    if (config) parsed.opencodeConfig = config;
   }
 
   return Object.keys(parsed).length > 0 ? parsed : undefined;

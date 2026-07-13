@@ -8,7 +8,11 @@ import {
   type ContextStatusResponse,
   type ContextUsage,
   type ModelOption,
+  type OpenCodeJsonObject,
+  type OpenCodeModelCapabilities,
   type OpenCodeModelLimits,
+  type OpenCodeRequestProtocol,
+  type OpenCodeSessionConfig,
   type PermissionRules,
   type ProviderName,
   type ThinkingOption,
@@ -188,58 +192,249 @@ function parseOptionalPositiveInteger(
   return { value };
 }
 
-function parseOptionalOpenCodeModelLimits(rawLimits: unknown): {
-  opencodeModelLimits: OpenCodeModelLimits | undefined;
+function parseOpenCodeModelLimits(rawLimits: unknown): {
+  limits: OpenCodeModelLimits | undefined;
   error?: string;
 } {
   if (rawLimits === undefined || rawLimits === null || rawLimits === "") {
-    return { opencodeModelLimits: undefined };
+    return { limits: undefined };
   }
-  if (typeof rawLimits !== "object") {
+  if (!isPlainObject(rawLimits)) {
     return {
-      opencodeModelLimits: undefined,
-      error: "opencodeModelLimits must be an object",
+      limits: undefined,
+      error: "opencodeConfig.limits must be an object",
     };
   }
 
-  const input = rawLimits as Record<string, unknown>;
+  const input = rawLimits;
   const hasContext = input.context !== undefined && input.context !== null;
   const hasOutput = input.output !== undefined && input.output !== null;
   if (!hasContext && !hasOutput) {
-    return { opencodeModelLimits: undefined };
+    return { limits: undefined };
   }
   if (!hasContext || !hasOutput) {
     return {
-      opencodeModelLimits: undefined,
-      error: "opencodeModelLimits requires both context and output",
+      limits: undefined,
+      error: "opencodeConfig.limits requires both context and output",
     };
   }
 
   const context = parseOptionalPositiveInteger(
     input.context,
-    "opencodeModelLimits.context",
+    "opencodeConfig.limits.context",
   );
   if (context.error) {
-    return { opencodeModelLimits: undefined, error: context.error };
+    return { limits: undefined, error: context.error };
   }
   const output = parseOptionalPositiveInteger(
     input.output,
-    "opencodeModelLimits.output",
+    "opencodeConfig.limits.output",
   );
   if (output.error) {
-    return { opencodeModelLimits: undefined, error: output.error };
+    return { limits: undefined, error: output.error };
   }
   if (context.value === undefined || output.value === undefined) {
     return {
-      opencodeModelLimits: undefined,
-      error: "opencodeModelLimits requires both context and output",
+      limits: undefined,
+      error: "opencodeConfig.limits requires both context and output",
     };
   }
 
+  const parsedInput = parseOptionalPositiveInteger(
+    input.input,
+    "opencodeConfig.limits.input",
+  );
+  if (parsedInput.error) return { limits: undefined, error: parsedInput.error };
+
   return {
-    opencodeModelLimits: {
+    limits: {
       context: context.value,
+      ...(parsedInput.value === undefined ? {} : { input: parsedInput.value }),
       output: output.value,
+    },
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validateOpenCodeJson(
+  value: unknown,
+  fieldName: string,
+  depth = 0,
+): string | undefined {
+  if (depth > 12) return `${fieldName} is nested too deeply`;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return undefined;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? undefined : `${fieldName} must be JSON`;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const error = validateOpenCodeJson(
+        value[index],
+        `${fieldName}[${index}]`,
+        depth + 1,
+      );
+      if (error) return error;
+    }
+    return undefined;
+  }
+  if (!isPlainObject(value)) return `${fieldName} must be JSON`;
+
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      return `${fieldName} contains a reserved key`;
+    }
+    const error = validateOpenCodeJson(item, `${fieldName}.${key}`, depth + 1);
+    if (error) return error;
+  }
+  return undefined;
+}
+
+function parseOpenCodeAdvancedObject(
+  value: unknown,
+  fieldName: string,
+): { value?: OpenCodeJsonObject; error?: string } {
+  if (value === undefined || value === null) return {};
+  if (!isPlainObject(value)) return { error: `${fieldName} must be an object` };
+  const error = validateOpenCodeJson(value, fieldName);
+  if (error) return { error };
+  if (JSON.stringify(value).length > 65_536) {
+    return { error: `${fieldName} is too large` };
+  }
+  return { value: value as OpenCodeJsonObject };
+}
+
+export function parseOptionalOpenCodeConfig(raw: unknown): {
+  opencodeConfig: OpenCodeSessionConfig | undefined;
+  error?: string;
+} {
+  if (raw === undefined || raw === null || raw === "") {
+    return { opencodeConfig: undefined };
+  }
+  if (!isPlainObject(raw)) {
+    return {
+      opencodeConfig: undefined,
+      error: "opencodeConfig must be an object",
+    };
+  }
+
+  const model = typeof raw.model === "string" ? raw.model.trim() : "";
+  if (
+    !model ||
+    model.length > 512 ||
+    model === "__proto__" ||
+    model === "prototype" ||
+    model === "constructor" ||
+    Array.from(model).some((character) => character.charCodeAt(0) < 32)
+  ) {
+    return {
+      opencodeConfig: undefined,
+      error: "opencodeConfig.model must be a valid model ID",
+    };
+  }
+  const requestProtocol = raw.requestProtocol;
+  if (
+    requestProtocol !== "openai-compatible" &&
+    requestProtocol !== "anthropic"
+  ) {
+    return {
+      opencodeConfig: undefined,
+      error: "opencodeConfig.requestProtocol is invalid",
+    };
+  }
+
+  const parsedLimits = parseOpenCodeModelLimits(raw.limits);
+  if (parsedLimits.error) {
+    return { opencodeConfig: undefined, error: parsedLimits.error };
+  }
+
+  let capabilities: OpenCodeModelCapabilities | undefined;
+  if (raw.capabilities !== undefined && raw.capabilities !== null) {
+    if (!isPlainObject(raw.capabilities)) {
+      return {
+        opencodeConfig: undefined,
+        error: "opencodeConfig.capabilities must be an object",
+      };
+    }
+    capabilities = {};
+    for (const key of [
+      "attachment",
+      "reasoning",
+      "temperature",
+      "toolCall",
+    ] as const) {
+      const value = raw.capabilities[key];
+      if (value === undefined) continue;
+      if (typeof value !== "boolean") {
+        return {
+          opencodeConfig: undefined,
+          error: `opencodeConfig.capabilities.${key} must be a boolean`,
+        };
+      }
+      capabilities[key] = value;
+    }
+  }
+
+  let advanced: OpenCodeSessionConfig["advanced"];
+  if (raw.advanced !== undefined && raw.advanced !== null) {
+    if (!isPlainObject(raw.advanced)) {
+      return {
+        opencodeConfig: undefined,
+        error: "opencodeConfig.advanced must be an object",
+      };
+    }
+    const provider = parseOpenCodeAdvancedObject(
+      raw.advanced.provider,
+      "opencodeConfig.advanced.provider",
+    );
+    if (provider.error) {
+      return { opencodeConfig: undefined, error: provider.error };
+    }
+    const modelPatch = parseOpenCodeAdvancedObject(
+      raw.advanced.model,
+      "opencodeConfig.advanced.model",
+    );
+    if (modelPatch.error) {
+      return { opencodeConfig: undefined, error: modelPatch.error };
+    }
+    if (provider.value || modelPatch.value) {
+      advanced = { provider: provider.value, model: modelPatch.value };
+    }
+  }
+
+  let name: string | undefined;
+  if (raw.name !== undefined && raw.name !== null && raw.name !== "") {
+    if (typeof raw.name !== "string" || raw.name.trim().length > 200) {
+      return {
+        opencodeConfig: undefined,
+        error: "opencodeConfig.name must be a string up to 200 characters",
+      };
+    }
+    name = raw.name.trim();
+  }
+
+  return {
+    opencodeConfig: {
+      model,
+      requestProtocol: requestProtocol as OpenCodeRequestProtocol,
+      ...(name ? { name } : {}),
+      ...(parsedLimits.limits ? { limits: parsedLimits.limits } : {}),
+      ...(capabilities && Object.keys(capabilities).length > 0
+        ? { capabilities }
+        : {}),
+      ...(advanced ? { advanced } : {}),
     },
   };
 }
@@ -386,8 +581,8 @@ interface StartSessionBody {
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
-  /** OpenCode-only per-session model limits. */
-  opencodeModelLimits?: OpenCodeModelLimits;
+  /** OpenCode-only managed provider/model configuration. */
+  opencodeConfig?: OpenCodeSessionConfig;
   /** Client-generated temp ID for optimistic UI tracking */
   tempId?: string;
   /** SSH host alias for remote execution (undefined = local) */
@@ -417,8 +612,8 @@ interface CreateSessionBody {
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
-  /** OpenCode-only per-session model limits. */
-  opencodeModelLimits?: OpenCodeModelLimits;
+  /** OpenCode-only managed provider/model configuration. */
+  opencodeConfig?: OpenCodeSessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
   /** Permission rules for tool filtering (deny/allow patterns) */
@@ -1784,11 +1979,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
-    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
-      body.opencodeModelLimits,
+    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
+      body.opencodeConfig,
     );
-    if (parsedOpenCodeModelLimits.error) {
-      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    if (parsedOpenCodeConfig.error) {
+      return c.json({ error: parsedOpenCodeConfig.error }, 400);
     }
     const parsedReasoningEffort = parseOptionalReasoningEffort(
       body.reasoningEffort,
@@ -1820,7 +2015,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       provider: body.provider,
       executor,
       model: body.model,
-      opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
+      opencodeConfig: parsedOpenCodeConfig.opencodeConfig
+        ? {
+            model: parsedOpenCodeConfig.opencodeConfig.model,
+            requestProtocol:
+              parsedOpenCodeConfig.opencodeConfig.requestProtocol,
+            limits: parsedOpenCodeConfig.opencodeConfig.limits,
+          }
+        : undefined,
     });
 
     const globalInstructions =
@@ -1837,7 +2039,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         reasoningEffort: parsedReasoningEffort.reasoningEffort,
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
-        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
+        opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
         executor,
         globalInstructions,
         permissions: body.permissions,
@@ -1859,9 +2061,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     recordOpenCodeContextWindowOverride(deps, {
       provider: result.provider,
-      model,
+      model: parsedOpenCodeConfig.opencodeConfig?.model ?? model,
       sessionId: result.sessionId,
-      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+      limits: parsedOpenCodeConfig.opencodeConfig?.limits,
     });
 
     // Save provider and executor to session metadata for resume
@@ -1876,6 +2078,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         await deps.sessionMetadataService.setExecutor(
           result.sessionId,
           executor,
+        );
+      }
+      if (parsedOpenCodeConfig.opencodeConfig) {
+        await deps.sessionMetadataService.setOpenCodeConfig(
+          result.sessionId,
+          parsedOpenCodeConfig.opencodeConfig,
         );
       }
       if (result.provider === "codex" && parsedCodexMcpMode.codexMcpMode) {
@@ -1928,11 +2136,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
-    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
-      body.opencodeModelLimits,
+    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
+      body.opencodeConfig,
     );
-    if (parsedOpenCodeModelLimits.error) {
-      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    if (parsedOpenCodeConfig.error) {
+      return c.json({ error: parsedOpenCodeConfig.error }, 400);
     }
     const parsedReasoningEffort = parseOptionalReasoningEffort(
       body.reasoningEffort,
@@ -1963,7 +2171,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         reasoningEffort: parsedReasoningEffort.reasoningEffort,
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
-        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
+        opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
         executor,
         globalInstructions,
         permissions: body.permissions,
@@ -1985,9 +2193,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     recordOpenCodeContextWindowOverride(deps, {
       provider: result.provider,
-      model,
+      model: parsedOpenCodeConfig.opencodeConfig?.model ?? model,
       sessionId: result.sessionId,
-      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+      limits: parsedOpenCodeConfig.opencodeConfig?.limits,
     });
 
     // Save provider and executor to session metadata for resume
@@ -2002,6 +2210,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         await deps.sessionMetadataService.setExecutor(
           result.sessionId,
           executor,
+        );
+      }
+      if (parsedOpenCodeConfig.opencodeConfig) {
+        await deps.sessionMetadataService.setOpenCodeConfig(
+          result.sessionId,
+          parsedOpenCodeConfig.opencodeConfig,
         );
       }
       if (result.provider === "codex" && parsedCodexMcpMode.codexMcpMode) {
@@ -2094,11 +2308,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
-    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
-      body.opencodeModelLimits,
+    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
+      body.opencodeConfig,
     );
-    if (parsedOpenCodeModelLimits.error) {
-      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    if (parsedOpenCodeConfig.error) {
+      return c.json({ error: parsedOpenCodeConfig.error }, 400);
     }
     const parsedReasoningEffort = parseOptionalReasoningEffort(
       body.reasoningEffort,
@@ -2168,6 +2382,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const metadataProvider = deps.sessionMetadataService?.getProvider(
       sessionId,
     ) as ProviderName | undefined;
+    const opencodeConfig =
+      parsedOpenCodeConfig.opencodeConfig ??
+      deps.sessionMetadataService?.getOpenCodeConfig?.(sessionId);
 
     let sessionSummary: SessionSummary | null = null;
     let providerName = metadataProvider ?? body.provider;
@@ -2227,7 +2444,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             : null,
         tempId: body.tempId ?? null,
         messageLength: body.message.length,
-        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
+        opencodeConfig: opencodeConfig
+          ? {
+              model: opencodeConfig.model,
+              requestProtocol: opencodeConfig.requestProtocol,
+              limits: opencodeConfig.limits,
+            }
+          : undefined,
       },
       "Session resume requested",
     );
@@ -2252,7 +2475,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             ? (parsedCodexMcpMode.codexMcpMode ??
               deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
-        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
+        opencodeConfig,
         executor,
         globalInstructions,
         permissions: body.permissions,
@@ -2276,6 +2499,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       await deps.sessionMetadataService.setCodexMcpMode?.(
         sessionId,
         parsedCodexMcpMode.codexMcpMode,
+      );
+    }
+    if (deps.sessionMetadataService && parsedOpenCodeConfig.opencodeConfig) {
+      await deps.sessionMetadataService.setOpenCodeConfig(
+        sessionId,
+        parsedOpenCodeConfig.opencodeConfig,
       );
     }
 
@@ -2318,6 +2547,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           executor,
         );
       }
+      if (opencodeConfig) {
+        await deps.sessionMetadataService.setOpenCodeConfig(
+          actualSessionId,
+          opencodeConfig,
+        );
+      }
     }
     if (actualSessionId !== sessionId) {
       await markSessionCreatedByYep(deps, actualSessionId, project.id);
@@ -2325,9 +2560,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     recordOpenCodeContextWindowOverride(deps, {
       provider: providerName as ProviderName | undefined,
-      model,
+      model: opencodeConfig?.model ?? model,
       sessionId: actualSessionId,
-      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+      limits: opencodeConfig?.limits,
     });
 
     getLogger().info(
@@ -2376,11 +2611,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (parsedCodexMcpMode.error) {
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
-    const parsedOpenCodeModelLimits = parseOptionalOpenCodeModelLimits(
-      body.opencodeModelLimits,
+    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
+      body.opencodeConfig,
     );
-    if (parsedOpenCodeModelLimits.error) {
-      return c.json({ error: parsedOpenCodeModelLimits.error }, 400);
+    if (parsedOpenCodeConfig.error) {
+      return c.json({ error: parsedOpenCodeConfig.error }, 400);
     }
     const parsedReasoningEffort = parseOptionalReasoningEffort(
       body.reasoningEffort,
@@ -2445,6 +2680,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const model =
       body.model && body.model !== "default" ? body.model : process.model;
     const providerName = metadataProvider ?? body.provider ?? process.provider;
+    const opencodeConfig =
+      parsedOpenCodeConfig.opencodeConfig ??
+      deps.sessionMetadataService?.getOpenCodeConfig?.(sessionId);
 
     // Use queueMessageToSession which handles thinking mode changes
     // If thinking mode changed, it will restart the process automatically
@@ -2469,7 +2707,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             ? (parsedCodexMcpMode.codexMcpMode ??
               deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
-        opencodeModelLimits: parsedOpenCodeModelLimits.opencodeModelLimits,
+        opencodeConfig,
         executor:
           executor ??
           metadataExecutor.executor ??
@@ -2492,9 +2730,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     recordOpenCodeContextWindowOverride(deps, {
       provider: providerName,
-      model,
+      model: opencodeConfig?.model ?? model,
       sessionId,
-      limits: parsedOpenCodeModelLimits.opencodeModelLimits,
+      limits: opencodeConfig?.limits,
     });
 
     return c.json({

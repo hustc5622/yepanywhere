@@ -494,6 +494,27 @@ describe("SessionMetadataService", () => {
     });
   });
 
+  describe("OpenCode session configuration", () => {
+    it("persists the request protocol and model configuration for resume", async () => {
+      await service.initialize();
+      const config = {
+        model: "glm-5.2",
+        requestProtocol: "anthropic" as const,
+        limits: { context: 1_000_000, output: 65_536 },
+        capabilities: { reasoning: true, toolCall: true },
+        advanced: {
+          model: { options: { thinking: { type: "enabled" } } },
+        },
+      };
+
+      await service.setOpenCodeConfig("session-1", config);
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+      expect(reloaded.getOpenCodeConfig("session-1")).toEqual(config);
+    });
+  });
+
   describe("setExecutor", () => {
     it("sets executor for a session", async () => {
       await service.initialize();

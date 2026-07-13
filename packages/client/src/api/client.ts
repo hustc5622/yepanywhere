@@ -12,7 +12,7 @@ import type {
   FileContentResponse,
   GitStatusInfo,
   NewSessionDefaults,
-  OpenCodeModelLimits,
+  OpenCodeSessionConfig,
   PendingInputType,
   ProviderInfo,
   ProviderName,
@@ -261,8 +261,8 @@ export interface SessionOptions {
   reasoningEffort?: string;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
-  /** OpenCode-only per-session model limit override */
-  opencodeModelLimits?: OpenCodeModelLimits;
+  /** OpenCode-only managed provider/model configuration. */
+  opencodeConfig?: OpenCodeSessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
 }
@@ -884,7 +884,7 @@ export const api = {
         reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
-        opencodeModelLimits: options?.opencodeModelLimits,
+        opencodeConfig: options?.opencodeConfig,
         executor: options?.executor,
         attachments,
       }),
@@ -909,7 +909,7 @@ export const api = {
         reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
-        opencodeModelLimits: options?.opencodeModelLimits,
+        opencodeConfig: options?.opencodeConfig,
         executor: options?.executor,
       }),
     }),
@@ -948,7 +948,7 @@ export const api = {
         reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
-        opencodeModelLimits: options?.opencodeModelLimits,
+        opencodeConfig: options?.opencodeConfig,
         executor: options?.executor,
         attachments,
         tempId,

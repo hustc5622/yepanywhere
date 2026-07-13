@@ -63,19 +63,67 @@ export interface ModelInfo {
   parentModel?: string;
   /** Quantization level, e.g. "Q4_K_M" */
   quantizationLevel?: string;
+  /** Request protocols exposed for this model by an OpenCode gateway. */
+  supportedRequestProtocols?: OpenCodeRequestProtocol[];
+  /** Upstream owner reported by a model gateway. */
+  ownedBy?: string;
 }
 
 /**
- * Per-session OpenCode model limit override.
- *
- * OpenCode's current config API expects both values when overriding a model
- * limit, so the UI only sends this object when the pair is complete.
+ * Protocol used by the generated per-session OpenCode provider.
  */
+export type OpenCodeRequestProtocol = "openai-compatible" | "anthropic";
+
+export const ALL_OPENCODE_REQUEST_PROTOCOLS: readonly OpenCodeRequestProtocol[] =
+  ["openai-compatible", "anthropic"] as const;
+
 export interface OpenCodeModelLimits {
   /** Maximum context window in tokens */
   context: number;
+  /** Maximum input tokens, when it differs from the total context window. */
+  input?: number;
   /** Maximum output tokens */
   output: number;
+}
+
+export type OpenCodeJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | OpenCodeJsonValue[]
+  | { [key: string]: OpenCodeJsonValue };
+
+export type OpenCodeJsonObject = Record<string, OpenCodeJsonValue>;
+
+export interface OpenCodeModelCapabilities {
+  attachment?: boolean;
+  reasoning?: boolean;
+  temperature?: boolean;
+  toolCall?: boolean;
+}
+
+/**
+ * Full configuration for a managed OpenCode session.
+ *
+ * The browser selects an upstream model and request protocol. Yep then creates
+ * an isolated OpenCode provider/model entry before spawning `opencode serve`,
+ * so one global OpenCode config never has to pretend a model only supports one
+ * API shape. Credentials and the gateway base URL remain server-owned.
+ */
+export interface OpenCodeSessionConfig {
+  /** Upstream model ID as returned by the gateway's /v1/models endpoint. */
+  model: string;
+  requestProtocol: OpenCodeRequestProtocol;
+  /** Optional display name used in OpenCode's model catalog. */
+  name?: string;
+  limits?: OpenCodeModelLimits;
+  capabilities?: OpenCodeModelCapabilities;
+  /** OpenCode provider/model patches for fields not yet modeled by Yep's UI. */
+  advanced?: {
+    provider?: OpenCodeJsonObject;
+    model?: OpenCodeJsonObject;
+  };
 }
 
 /**
@@ -173,8 +221,8 @@ export interface NewSessionDefaults {
   reasoningEffort?: string;
   permissionMode?: PermissionMode;
   codexMcpMode?: CodexMcpMode;
-  /** OpenCode-only per-session model limits */
-  opencodeModelLimits?: OpenCodeModelLimits;
+  /** OpenCode-only managed provider/model configuration. */
+  opencodeConfig?: OpenCodeSessionConfig;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { loadConfig } from "../config.js";
 import { OpenCodeBridgeService } from "./OpenCodeBridgeService.js";
+import { resolveOpenCodeGatewayConfig } from "./gateway-config.js";
 
 export async function runOpenCodeBridgeOnly(): Promise<void> {
   const config = loadConfig();
@@ -11,6 +12,7 @@ export async function runOpenCodeBridgeOnly(): Promise<void> {
     opencodeServerUrl: config.opencodeServerUrl,
     opencodeStartPort: config.opencodeServerStartPort,
     desktopToken: config.desktopAuthToken,
+    gatewayConfig: resolveOpenCodeGatewayConfig(process.env),
   });
 
   let shuttingDown = false;

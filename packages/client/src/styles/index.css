@@ -8591,17 +8591,59 @@ button.context-usage-indicator--button:focus-visible {
   margin: 0 0 var(--space-3);
 }
 
-.new-session-opencode-limits-section {
+.new-session-opencode-config-section {
   margin-bottom: 1.5rem;
 }
 
-.new-session-opencode-limits-section h3 {
+.new-session-opencode-config-section h3,
+.new-session-opencode-config-section h4 {
   font-size: var(--font-size-sm);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin: 0 0 var(--space-3);
+}
+
+.new-session-opencode-config-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.new-session-opencode-config-heading h3 {
+  margin-bottom: var(--space-1);
+}
+
+.new-session-opencode-config-heading p,
+.new-session-opencode-advanced > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.new-session-opencode-advanced-toggle {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.new-session-opencode-advanced-toggle:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.new-session-opencode-config-section h4 {
+  margin-top: var(--space-4);
 }
 
 .new-session-opencode-limits-grid {
@@ -8661,6 +8703,87 @@ button.context-usage-indicator--button:focus-visible {
   margin: var(--space-2) 0 0;
   color: var(--error-color);
   font-size: var(--font-size-sm);
+}
+
+.new-session-opencode-capabilities {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.new-session-opencode-capability {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+}
+
+.new-session-opencode-capability input {
+  flex-shrink: 0;
+}
+
+.new-session-opencode-advanced {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.new-session-opencode-advanced > p {
+  grid-column: 1 / -1;
+}
+
+.new-session-opencode-json-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.new-session-opencode-json-field > span {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.new-session-opencode-json-field textarea {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.new-session-opencode-json-field textarea:focus {
+  outline: none;
+  border-color: var(--focus-border);
+}
+
+@media (max-width: 720px) {
+  .new-session-opencode-capabilities,
+  .new-session-opencode-advanced {
+    grid-template-columns: 1fr;
+  }
+
+  .new-session-opencode-advanced > p {
+    grid-column: auto;
+  }
 }
 
 /* Codex MCP Profile Section */

@@ -5,11 +5,16 @@ import * as path from "node:path";
 import type {
   AgentActivity,
   InputRequest,
+  OpenCodeSessionConfig,
   PendingInputType,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import { encodeProjectId } from "../projects/paths.js";
 import type { SessionSummary } from "../supervisor/types.js";
+import {
+  type OpenCodeGatewayConfig,
+  buildManagedOpenCodeEnv,
+} from "./gateway-config.js";
 import {
   isLiveOpenCodeBridgeSession,
   isLiveOpenCodeBridgeSessionView,
@@ -43,6 +48,7 @@ interface OpenCodeBridgeServiceOptions {
   opencodePath?: string;
   startupTimeoutMs?: number;
   desktopToken?: string;
+  gatewayConfig?: OpenCodeGatewayConfig | null;
 }
 
 interface SessionRecord {
@@ -111,6 +117,7 @@ interface OpenCodeEvent {
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+const OPENAI_GATEWAY_PATH_PREFIX = "/gateway/v1";
 
 export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private readonly enabled: boolean;
@@ -122,6 +129,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private readonly opencodePath: string;
   private readonly startupTimeoutMs: number;
   private readonly defaultDesktopToken?: string;
+  private readonly gatewayConfig?: OpenCodeGatewayConfig | null;
 
   private server: Server | null = null;
   private listening = false;
@@ -148,6 +156,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     this.startupTimeoutMs =
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.defaultDesktopToken = options.desktopToken;
+    this.gatewayConfig = options.gatewayConfig;
   }
 
   async start(): Promise<void> {
@@ -312,6 +321,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
 
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname.startsWith(`${OPENAI_GATEWAY_PATH_PREFIX}/`)) {
+      await this.proxyOpenAICompatibleRequest(req, res, url);
+      return;
+    }
     const parts = url.pathname
       .split("/")
       .filter(Boolean)
@@ -350,6 +363,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       const response = await client.startSession(projectId, request.message, {
         mode: request.mode,
         model: request.model,
+        opencodeConfig: request.opencodeConfig,
       });
       if (response.sessionId) {
         this.recordSession(
@@ -434,6 +448,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           {
             mode: request.mode,
             model: request.model,
+            opencodeConfig: request.opencodeConfig,
             resumeSessionAt: request.resumeSessionAt,
           },
         );
@@ -464,6 +479,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         const response = await client.queueMessage(sessionId, request.message, {
           mode: request.mode,
           model: request.model,
+          opencodeConfig: request.opencodeConfig,
         });
         this.touchSession(sessionId, { processId: response.processId });
         this.writeJson(res, 200, response);
@@ -1105,7 +1121,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const child = spawn(this.opencodePath, spawnArgs, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
-      env: process.env,
+      env: buildManagedOpenCodeEnv(process.env, this.gatewayConfig, {
+        openAICompatibleBaseURL: this.getOpenAICompatibleGatewayUrl(),
+      }),
     });
     this.opencodeProcess = child;
     this.opencodeServerUrl = url;
@@ -1161,6 +1179,79 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     this.lastError = null;
     console.log(`[OpenCodeBridge] Managed OpenCode server ready at ${url}`);
     return url;
+  }
+
+  private getOpenAICompatibleGatewayUrl(): string {
+    return `http://127.0.0.1:${this.port}${OPENAI_GATEWAY_PATH_PREFIX}`;
+  }
+
+  private async proxyOpenAICompatibleRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const gateway = this.gatewayConfig;
+    if (!gateway) {
+      this.writeJson(res, 503, {
+        error: "OpenAI-compatible gateway is not configured",
+      });
+      return;
+    }
+
+    const suffix = url.pathname.slice(OPENAI_GATEWAY_PATH_PREFIX.length);
+    const upstreamUrl = `${gateway.apiBase}${suffix}${url.search}`;
+    const requestBody = await readRequestBody(req);
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (
+        value === undefined ||
+        name === "host" ||
+        name === "connection" ||
+        name === "content-length" ||
+        name === "accept-encoding"
+      ) {
+        continue;
+      }
+      headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+    }
+    if (gateway.subModule) {
+      headers.set("X-Sub-Module", gateway.subModule);
+    }
+    if (process.env.YEP_OPENCODE_GATEWAY_DEBUG === "true") {
+      console.log(
+        "[OpenCodeBridge gateway]",
+        JSON.stringify({
+          ...summarizeOpenAICompatibleBody(requestBody),
+          method: req.method,
+          path: suffix,
+          hasAuthorization: headers.has("authorization"),
+          subModule: headers.get("x-sub-module"),
+        }),
+      );
+    }
+
+    try {
+      const upstream = await fetch(upstreamUrl, {
+        method: req.method,
+        headers,
+        body:
+          requestBody.length > 0 ? requestBody.toString("utf-8") : undefined,
+      });
+      // GLM's Chat Completions stream is valid SSE, but its very small chunks
+      // trigger an OpenCode AI SDK decoding bug around tool calls. Buffering
+      // only this local compatibility route preserves the exact SSE payload
+      // while presenting it as one coherent body to OpenCode.
+      const responseBody = Buffer.from(await upstream.arrayBuffer());
+      res.writeHead(upstream.status, {
+        "content-type":
+          upstream.headers.get("content-type") ?? "application/json",
+      });
+      res.end(responseBody);
+    } catch (error) {
+      this.writeJson(res, 502, {
+        error: `OpenAI-compatible gateway request failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
   }
 
   private async stopManagedOpenCodeServer(reason: string): Promise<void> {
@@ -1227,6 +1318,26 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   }
 }
 
+function summarizeOpenAICompatibleBody(body: Buffer): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(body.toString("utf-8")) as Record<
+      string,
+      unknown
+    >;
+    return {
+      model: parsed.model,
+      stream: parsed.stream,
+      maxTokens: parsed.max_tokens,
+      messageCount: Array.isArray(parsed.messages) ? parsed.messages.length : 0,
+      toolCount: Array.isArray(parsed.tools) ? parsed.tools.length : 0,
+      toolChoice: parsed.tool_choice,
+      requestKeys: Object.keys(parsed).sort(),
+    };
+  } catch {
+    return { invalidJsonBody: true };
+  }
+}
+
 class YepApiClient {
   constructor(
     private readonly serverUrl: string,
@@ -1236,7 +1347,11 @@ class YepApiClient {
   startSession(
     projectId: string,
     message: string,
-    options: { mode?: PermissionMode; model?: string },
+    options: {
+      mode?: PermissionMode;
+      model?: string;
+      opencodeConfig?: OpenCodeSessionConfig;
+    },
   ): Promise<StartSessionResponse> {
     return this.request(`/api/projects/${projectId}/sessions`, {
       method: "POST",
@@ -1244,6 +1359,7 @@ class YepApiClient {
         message,
         mode: options.mode,
         model: options.model,
+        opencodeConfig: options.opencodeConfig,
         provider: "opencode",
       },
     });
@@ -1256,6 +1372,7 @@ class YepApiClient {
     options: {
       mode?: PermissionMode;
       model?: string;
+      opencodeConfig?: OpenCodeSessionConfig;
       resumeSessionAt?: string;
     },
   ): Promise<StartSessionResponse> {
@@ -1267,6 +1384,7 @@ class YepApiClient {
           message,
           mode: options.mode,
           model: options.model,
+          opencodeConfig: options.opencodeConfig,
           resumeSessionAt: options.resumeSessionAt,
           provider: "opencode",
         },
@@ -1289,7 +1407,11 @@ class YepApiClient {
   queueMessage(
     sessionId: string,
     message: string,
-    options: { mode?: PermissionMode; model?: string },
+    options: {
+      mode?: PermissionMode;
+      model?: string;
+      opencodeConfig?: OpenCodeSessionConfig;
+    },
   ): Promise<QueueMessageResponse> {
     return this.request(`/api/sessions/${sessionId}/messages`, {
       method: "POST",
@@ -1297,6 +1419,7 @@ class YepApiClient {
         message,
         mode: options.mode,
         model: options.model,
+        opencodeConfig: options.opencodeConfig,
         provider: "opencode",
       },
     });
@@ -1348,6 +1471,7 @@ function parseSessionRequest(raw: unknown): {
   message?: string;
   mode?: PermissionMode;
   model?: string;
+  opencodeConfig?: OpenCodeSessionConfig;
   resumeSessionAt?: string;
 } {
   const body = asRecord(raw);
@@ -1359,22 +1483,30 @@ function parseSessionRequest(raw: unknown): {
       ? body.mode
       : undefined;
   const model = typeof body?.model === "string" ? body.model : undefined;
+  const opencodeConfig = asRecord(body?.opencodeConfig)
+    ? (body?.opencodeConfig as OpenCodeSessionConfig)
+    : undefined;
   const resumeSessionAt =
     typeof body?.resumeSessionAt === "string"
       ? body.resumeSessionAt
       : undefined;
-  return { cwd, message, mode, model, resumeSessionAt };
+  return { cwd, message, mode, model, opencodeConfig, resumeSessionAt };
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const body = await readRequestBody(req);
+  if (body.length === 0) return null;
+  const text = body.toString("utf-8");
+  if (!text.trim()) return null;
+  return JSON.parse(text) as unknown;
+}
+
+async function readRequestBody(req: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  if (chunks.length === 0) return null;
-  const text = Buffer.concat(chunks).toString("utf-8");
-  if (!text.trim()) return null;
-  return JSON.parse(text) as unknown;
+  return Buffer.concat(chunks);
 }
 
 async function readResponseBody(response: Response): Promise<unknown> {
