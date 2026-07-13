@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { exitIfUnsafeHome } from "./safe-home.js";
 
 const rawArgs = process.argv.slice(2);
@@ -25,6 +27,16 @@ const childEnv = { ...process.env };
 // shells export NODE_ENV=production, which makes React tests load prod bundles.
 if (isVitestCommand(command)) {
   childEnv.NODE_ENV = "test";
+
+  // Node 22+ ships a built-in localStorage global. Without a file path it
+  // returns a stub object whose setItem/getItem are undefined, which shadows
+  // the proper Storage that jsdom installs in the test environment. Give it a
+  // writable temp file so the built-in accessor stops emitting a warning and
+  // jsdom's localStorage can take over.
+  const lsFlag = `--localstorage-file=${join(tmpdir(), "yep-vitest-localstorage")}`;
+  childEnv.NODE_OPTIONS = [childEnv.NODE_OPTIONS, lsFlag]
+    .filter(Boolean)
+    .join(" ");
 }
 
 const child = spawn(command, args, {
