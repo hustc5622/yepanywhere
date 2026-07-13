@@ -1,10 +1,10 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { e2ePaths, expect, test } from "./fixtures.js";
 
-// Set up test files in a temp directory (avoid permission issues with /mockproject)
-const mockProjectPath = join(tmpdir(), "claude-e2e-mockproject");
+// Set up test files in this run's isolated temp directory.
+const mockProjectPath = join(e2ePaths.tempDir, "file-browser-project");
 // Project ID is base64url encoded path (no need to URL encode - it's already URL-safe)
 const projectId = Buffer.from(mockProjectPath).toString("base64url");
 // Session dir name uses the path with slashes replaced by dashes

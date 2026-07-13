@@ -162,6 +162,10 @@ export default async function globalSetup() {
         AUTH_DISABLED: "true",
         HTTPS_SELF_SIGNED: "", // force HTTP so health check URL works
         NODE_ENV: "production",
+        // E2E specs create session fixtures after the server starts. Disable
+        // the production scan cache so those fixtures are visible immediately
+        // instead of depending on the five-second TTL.
+        PROJECT_SCAN_CACHE_TTL_MS: "0",
         CLAUDE_SESSIONS_DIR: E2E_CLAUDE_SESSIONS_DIR,
         CODEX_SESSIONS_DIR: E2E_CODEX_SESSIONS_DIR,
         GEMINI_SESSIONS_DIR: E2E_GEMINI_SESSIONS_DIR,
@@ -197,7 +201,7 @@ export default async function globalSetup() {
   console.log(`[E2E] Maintenance server on port ${maintenancePort}`);
 
   // Health check: wait for server to be ready
-  const healthCheckUrl = `http://localhost:${mainPort}/health`;
+  const healthCheckUrl = `http://127.0.0.1:${mainPort}/health`;
   let attempts = 0;
   const maxAttempts = 30;
   while (attempts < maxAttempts) {
