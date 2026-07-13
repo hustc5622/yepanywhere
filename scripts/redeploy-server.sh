@@ -592,7 +592,7 @@ if $DO_RESTART; then
   # which still serves /yep/api/ws; only the URL prefix changes, not the port.
   STARTED_SERVER_WITH_LAUNCHAGENT=false
   if launchd_label_loaded "$SERVER_LAUNCHD_LABEL"; then
-    dim "using LaunchAgent ${SERVER_LAUNCHD_LABEL}; KeepAlive is not required"
+    dim "using LaunchAgent ${SERVER_LAUNCHD_LABEL}; abnormal exits are restarted with launchd throttling"
     kickstart_launchd_label "$SERVER_LAUNCHD_LABEL"
     STARTED_SERVER_WITH_LAUNCHAGENT=true
   else

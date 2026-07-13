@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install macOS LaunchAgents that start Yep Anywhere once when this user logs in.
 #
-# This intentionally does not set KeepAlive. The services start at login, but
-# manual stops/redeploys remain under the user's control.
+# The 8022 server restarts only after an abnormal exit. Intentional shutdowns
+# and deploys exit successfully and remain under the user's control.
 
 set -euo pipefail
 
@@ -263,6 +263,21 @@ append_program_arguments() {
   } >>"$path"
 }
 
+append_server_recovery_policy() {
+  local path="$1"
+
+  {
+    printf '%s\n' '  <key>KeepAlive</key>'
+    printf '%s\n' '  <dict>'
+    printf '%s\n' '    <key>SuccessfulExit</key>'
+    printf '%s\n' '    <false/>'
+    printf '%s\n' '  </dict>'
+    # Avoid rapid restart loops while still recovering promptly from a crash.
+    printf '%s\n' '  <key>ThrottleInterval</key>'
+    printf '%s\n' '  <integer>10</integer>'
+  } >>"$path"
+}
+
 write_bridge_plist() {
   local plist="$LAUNCH_AGENTS_DIR/$BRIDGE_LABEL.plist"
   write_header "$plist" "$BRIDGE_LABEL" "$LOG_DIR/codex-bridge-launchd.out.log" "$LOG_DIR/codex-bridge-launchd.err.log"
@@ -352,6 +367,7 @@ write_server_plist() {
   fi
 
   write_header "$plist" "$SERVER_LABEL" "$LOG_DIR/server-launchd.out.log" "$LOG_DIR/server-launchd.err.log"
+  append_server_recovery_policy "$plist"
   append_env "$plist" "${env_args[@]}"
   append_program_arguments "$plist" "$NODE_BIN" "$CLI_JS" "--port" "$SERVER_PORT"
   echo "$plist"
@@ -434,4 +450,4 @@ if $INSTALL_SERVER; then
     warn "session titles: no LLM API key was stored in the server LaunchAgent."
   fi
 fi
-dim "KeepAlive is intentionally not set; these agents start at login only."
+dim "8022 restarts after abnormal exits only (10s launchd throttle); bridge agents start at login only."
