@@ -181,23 +181,26 @@ export function useToolApprovalFeedbackDraft(
 
 /**
  * Hook to persist "Other" text inputs for AskUserQuestion panels.
- * Stores a map of question text -> otherText, keyed by sessionId.
+ * Stores a map of question key -> otherText, keyed by session and request.
  *
  * For multi-stage questions (multiple tabs), each question's "Other"
  * input is stored separately under the same session key. When navigating
  * between tabs, each tab's draft is preserved.
  *
  * @param sessionId - The session ID
+ * @param requestId - The pending input request ID
  * @returns [otherTexts, setOtherText, clearAll] tuple
  */
 export function useQuestionOtherDrafts(
   sessionId: string,
+  requestId?: string,
 ): [
   Record<string, string>,
   (question: string, value: string) => void,
   () => void,
 ] {
-  const key = `${TOOL_PROMPT_DRAFT_PREFIX}${sessionId}-questionOther`;
+  const requestSuffix = requestId ? `-${requestId}` : "";
+  const key = `${TOOL_PROMPT_DRAFT_PREFIX}${sessionId}${requestSuffix}-questionOther`;
 
   const [otherTexts, setOtherTextsState] = useState<Record<string, string>>(
     () => {

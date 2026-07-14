@@ -48,6 +48,8 @@ export type {
   EditAugment,
   MarkdownAugment,
   PermissionRules,
+  UserQuestionAnswer,
+  UserQuestionAnswers,
 } from "./types.js";
 export {
   ALL_PROVIDERS,

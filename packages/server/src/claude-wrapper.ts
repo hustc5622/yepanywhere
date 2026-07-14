@@ -1,6 +1,10 @@
 import * as path from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { type Interface, createInterface } from "node:readline/promises";
+import type {
+  UserQuestionAnswer,
+  UserQuestionAnswers,
+} from "@yep-anywhere/shared";
 
 type PermissionMode =
   | "default"
@@ -98,10 +102,12 @@ interface AskUserQuestionInput {
 }
 
 interface Question {
+  id?: string;
   question?: string;
   header?: string;
   options?: Array<{ label?: string; description?: string } | string>;
   multiSelect?: boolean;
+  custom?: boolean;
 }
 
 interface ParsedArgs {
@@ -393,7 +399,7 @@ interface ClaudeSessionClient {
     sessionId: string,
     requestId: string,
     response: InputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
     feedback?: string,
   ): Promise<{ accepted: boolean }>;
 }
@@ -495,7 +501,7 @@ class OpenCodeBridgeApiClient implements ClaudeSessionClient {
     sessionId: string,
     requestId: string,
     response: InputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
     feedback?: string,
   ): Promise<{ accepted: boolean }> {
     return this.request(`/sessions/${sessionId}/input`, {
@@ -634,7 +640,7 @@ class YepApiClient implements ClaudeSessionClient {
     sessionId: string,
     requestId: string,
     response: InputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
     feedback?: string,
   ): Promise<{ accepted: boolean }> {
     return this.request(`/api/sessions/${sessionId}/input`, {
@@ -765,7 +771,7 @@ async function answerPendingInput(
 async function askQuestionAnswers(
   rl: Interface,
   request: InputRequest,
-): Promise<Record<string, string>> {
+): Promise<UserQuestionAnswers> {
   const input = asRecord(request.toolInput) as AskUserQuestionInput | null;
   const questions = input?.questions ?? [];
   if (questions.length === 0) {
@@ -773,7 +779,7 @@ async function askQuestionAnswers(
     return { [request.prompt]: answer };
   }
 
-  const answers: Record<string, string> = {};
+  const answers: UserQuestionAnswers = {};
   for (const question of questions) {
     const prompt = question.question ?? question.header ?? "Question";
     console.log(prompt);
@@ -786,7 +792,7 @@ async function askQuestionAnswers(
       ? "Choice(s), comma-separated numbers or text: "
       : "Choice number or text: ";
     const answer = await askRequiredLine(rl, suffix);
-    answers[prompt] = parseQuestionAnswer(
+    answers[question.id ?? prompt] = parseQuestionAnswer(
       answer,
       options,
       !!question.multiSelect,
@@ -795,24 +801,26 @@ async function askQuestionAnswers(
   return answers;
 }
 
-function parseQuestionAnswer(
+export function parseQuestionAnswer(
   raw: string,
   options: Array<{ label: string; description?: string }>,
   multiSelect: boolean,
-): string {
+): UserQuestionAnswer {
   const trimmed = raw.trim();
-  if (!trimmed) return trimmed;
-  const indexes = trimmed
-    .split(",")
-    .map((part) => Number.parseInt(part.trim(), 10))
-    .filter((value) => Number.isInteger(value));
-  if (indexes.length > 0 && (multiSelect || indexes.length === 1)) {
-    const labels = indexes
-      .map((index) => options[index - 1]?.label)
-      .filter((label): label is string => !!label);
-    if (labels.length > 0) return labels.join(", ");
+  if (!trimmed) return multiSelect ? [] : "";
+
+  const resolvePart = (part: string): string => {
+    const normalized = part.trim();
+    if (!/^\d+$/.test(normalized)) return normalized;
+    const option = options[Number.parseInt(normalized, 10) - 1];
+    return option?.label ?? normalized;
+  };
+
+  if (multiSelect) {
+    return trimmed.split(",").map(resolvePart).filter(Boolean);
   }
-  return trimmed;
+
+  return resolvePart(trimmed);
 }
 
 function normalizeQuestionOptions(

@@ -5,6 +5,7 @@ import type {
   PermissionMode,
   ProviderName,
   SlashCommand,
+  UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import type { SDKMessage, UserMessage } from "../sdk/types.js";
 import type {
@@ -148,7 +149,7 @@ export interface RuntimeInputResponseRequest {
   sessionId: string;
   requestId: string;
   response: "approve" | "deny";
-  answers?: Record<string, string>;
+  answers?: UserQuestionAnswers;
   feedback?: string;
 }
 

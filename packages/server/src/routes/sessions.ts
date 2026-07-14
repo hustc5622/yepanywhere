@@ -18,6 +18,7 @@ import {
   type ThinkingOption,
   type UploadedFile,
   type UrlProjectId,
+  type UserQuestionAnswers,
   escalateContextWindow,
   getModelContextWindow,
   isUrlProjectId,
@@ -552,7 +553,7 @@ async function respondToBridgeInput(
   sessionId: string,
   requestId: string,
   response: CodexBridgeInputResponse | OpenCodeBridgeInputResponse,
-  answers?: Record<string, string>,
+  answers?: UserQuestionAnswers,
 ): Promise<boolean> {
   if (
     await deps.codexBridgeService?.respondToInput(
@@ -635,7 +636,7 @@ interface CreateSessionBody {
 interface InputResponseBody {
   requestId: string;
   response: "approve" | "approve_accept_edits" | "deny" | string;
-  answers?: Record<string, string>;
+  answers?: UserQuestionAnswers;
   feedback?: string;
 }
 

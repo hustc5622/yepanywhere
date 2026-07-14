@@ -3,6 +3,7 @@ import type {
   InputRequest,
   PendingInputType,
   UrlProjectId,
+  UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import type { SessionSummary } from "../supervisor/types.js";
 
@@ -160,6 +161,6 @@ export interface CodexBridgeController {
     sessionId: string,
     requestId: string,
     response: CodexBridgeInputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
   ): MaybePromise<boolean>;
 }

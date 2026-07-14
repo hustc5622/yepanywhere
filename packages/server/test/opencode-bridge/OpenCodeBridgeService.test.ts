@@ -124,8 +124,12 @@ describe("OpenCodeBridgeService", () => {
           {
             question: "怎么修?",
             header: "修复方式",
-            multiple: false,
-            options: [{ label: "放宽列表规则", description: "允许深层 md" }],
+            multiple: true,
+            custom: false,
+            options: [
+              { label: "放宽列表规则", description: "允许深层 md" },
+              { label: "补充测试", description: "覆盖嵌套 fence" },
+            ],
           },
         ],
       },
@@ -141,9 +145,11 @@ describe("OpenCodeBridgeService", () => {
       toolInput: {
         questions: [
           {
+            id: "question-0",
             question: "怎么修?",
             header: "修复方式",
-            multiSelect: false,
+            multiSelect: true,
+            custom: false,
           },
         ],
       },
@@ -151,10 +157,240 @@ describe("OpenCodeBridgeService", () => {
 
     await expect(
       bridge.respondToInput("ses_1", "question-1", "approve", {
-        "怎么修?": "放宽列表规则",
+        "question-0": ["放宽列表规则", "补充测试"],
       }),
     ).resolves.toBe(true);
-    expect(replyBody).toEqual({ answers: [["放宽列表规则"]] });
+    expect(replyBody).toEqual({
+      answers: [["放宽列表规则", "补充测试"]],
+    });
+  });
+
+  it("rejects OpenCode questions without a request body", async () => {
+    let rejectBody = "not received";
+    let rejectContentType: string | undefined;
+    const opencodeServer = createServer((req, res) => {
+      if (
+        req.method === "POST" &&
+        req.url === "/question/question-deny/reject"
+      ) {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        req.on("end", () => {
+          rejectBody = Buffer.concat(chunks).toString("utf-8");
+          rejectContentType = req.headers["content-type"];
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("true");
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+
+    (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent({
+      type: "question.asked",
+      properties: {
+        id: "question-deny",
+        sessionID: "ses_deny",
+        questions: [{ question: "Continue?", options: [] }],
+      },
+    });
+
+    await expect(
+      bridge.respondToInput("ses_deny", "question-deny", "deny"),
+    ).resolves.toBe(true);
+    expect(rejectBody).toBe("");
+    expect(rejectContentType).toBeUndefined();
+  });
+
+  it("does not consume a newer question or send duplicate replies", async () => {
+    let requestCount = 0;
+    let markRequestStarted: () => void = () => undefined;
+    const requestStarted = new Promise<void>((resolve) => {
+      markRequestStarted = resolve;
+    });
+    let releaseResponse: () => void = () => undefined;
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    const opencodeServer = createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/question/question-old/reply") {
+        requestCount += 1;
+        req.resume();
+        markRequestStarted();
+        await responseReleased;
+        const handleOpenCodeEvent = (
+          bridge as unknown as {
+            handleOpenCodeEvent: (event: unknown) => void;
+          }
+        ).handleOpenCodeEvent.bind(bridge);
+        handleOpenCodeEvent({
+          type: "question.replied",
+          properties: {
+            sessionID: "ses_race",
+            requestID: "question-old",
+          },
+        });
+        handleOpenCodeEvent({
+          type: "question.asked",
+          properties: {
+            id: "question-new",
+            sessionID: "ses_race",
+            questions: [{ question: "Second question", options: [] }],
+          },
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("true");
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent({
+      type: "question.asked",
+      properties: {
+        id: "question-old",
+        sessionID: "ses_race",
+        questions: [{ question: "First question", options: [] }],
+      },
+    });
+
+    const firstResponse = bridge.respondToInput(
+      "ses_race",
+      "question-old",
+      "approve",
+      { "question-0": "First answer" },
+    );
+    await requestStarted;
+    const duplicateResponse = bridge.respondToInput(
+      "ses_race",
+      "question-old",
+      "approve",
+      { "question-0": "Duplicate answer" },
+    );
+    expect(requestCount).toBe(1);
+    releaseResponse();
+
+    await expect(
+      Promise.all([firstResponse, duplicateResponse]),
+    ).resolves.toEqual([true, true]);
+    expect(requestCount).toBe(1);
+    expect(bridge.getPendingInputRequest("ses_race")).toMatchObject({
+      id: "question-new",
+      type: "question",
+      prompt: "Second question",
+    });
+    expect(bridge.listSessions()[0]).toMatchObject({
+      activity: "waiting-input",
+      pendingInputType: "user-question",
+    });
+
+    (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent({
+      type: "question.replied",
+      properties: {
+        sessionID: "ses_race",
+        requestID: "question-old",
+      },
+    });
+    expect(bridge.getPendingInputRequest("ses_race")?.id).toBe("question-new");
+    expect(bridge.listSessions()[0]).toMatchObject({
+      activity: "waiting-input",
+      pendingInputType: "user-question",
+    });
+  });
+
+  it("keeps a failed question response pending so it can be retried", async () => {
+    let requestCount = 0;
+    const opencodeServer = createServer((req, res) => {
+      if (
+        req.method === "POST" &&
+        req.url === "/question/question-retry/reply"
+      ) {
+        requestCount += 1;
+        req.resume();
+        if (requestCount === 1) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "temporary failure" }));
+        } else {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("true");
+        }
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent({
+      type: "question.asked",
+      properties: {
+        id: "question-retry",
+        sessionID: "ses_retry",
+        questions: [{ question: "Retry?", options: [] }],
+      },
+    });
+
+    await expect(
+      bridge.respondToInput("ses_retry", "question-retry", "approve", {
+        "question-0": "Yes",
+      }),
+    ).rejects.toThrow("temporary failure");
+    expect(bridge.getPendingInputRequest("ses_retry")?.id).toBe(
+      "question-retry",
+    );
+    expect(bridge.listSessions()[0]).toMatchObject({
+      activity: "waiting-input",
+      pendingInputType: "user-question",
+    });
+
+    await expect(
+      bridge.respondToInput("ses_retry", "question-retry", "approve", {
+        "question-0": "Yes",
+      }),
+    ).resolves.toBe(true);
+    expect(requestCount).toBe(2);
+    expect(bridge.getPendingInputRequest("ses_retry")).toBeNull();
   });
 
   it("unwraps OpenCode global event envelopes", async () => {

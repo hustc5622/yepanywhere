@@ -26,6 +26,7 @@ import type {
   SlashCommand,
   ThinkingOption,
   UploadedFile,
+  UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { authEvents } from "../lib/authEvents";
 import type {
@@ -1026,7 +1027,7 @@ export const api = {
       | "approve_for_session"
       | "approve_always"
       | "deny",
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
     feedback?: string,
   ) =>
     fetchJSON<{ accepted: boolean }>(`/sessions/${sessionId}/input`, {

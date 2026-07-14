@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
 import { basename } from "node:path";
-import type { UrlProjectId } from "@yep-anywhere/shared";
+import type { UrlProjectId, UserQuestionAnswers } from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { encodeProjectId } from "../projects/paths.js";
@@ -368,7 +368,7 @@ export class CodexBridgeService implements CodexBridgeController {
     sessionId: string,
     requestId: string,
     response: CodexBridgeInputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
   ): boolean {
     const pending = this.pendingByInputId.get(requestId);
     if (
@@ -496,7 +496,7 @@ export class CodexBridgeService implements CodexBridgeController {
         const response = parseBridgeInputResponse(body?.response);
         const answers =
           body && typeof body.answers === "object" && body.answers !== null
-            ? (body.answers as Record<string, string>)
+            ? (body.answers as UserQuestionAnswers)
             : undefined;
 
         if (!requestId || !response) {
@@ -1197,7 +1197,7 @@ export class CodexBridgeService implements CodexBridgeController {
   private buildServerRequestResponse(
     pending: PendingServerRequest,
     response: CodexBridgeInputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
   ): unknown {
     const approved = response !== "deny";
     const approveForSession =
@@ -2093,7 +2093,7 @@ function normalizeCodexQuestions(
 
 function buildCodexUserInputAnswers(
   questionsValue: unknown,
-  answers: Record<string, string> | undefined,
+  answers: UserQuestionAnswers | undefined,
 ): Record<string, { answers: string[] }> {
   const result: Record<string, { answers: string[] }> = {};
   if (!Array.isArray(questionsValue)) return result;
@@ -2104,8 +2104,14 @@ function buildCodexUserInputAnswers(
     if (!id) continue;
     const prompt = getString(question?.question) ?? getString(question?.header);
     const answer =
-      (prompt ? answers?.[prompt] : undefined) ?? answers?.[id] ?? "";
-    result[id] = { answers: answer ? [answer] : [] };
+      answers?.[id] ?? (prompt ? answers?.[prompt] : undefined) ?? "";
+    result[id] = {
+      answers: Array.isArray(answer)
+        ? answer.filter(Boolean)
+        : answer
+          ? [answer]
+          : [],
+    };
   }
   return result;
 }

@@ -1,3 +1,4 @@
+import type { UserQuestionAnswer } from "@yep-anywhere/shared";
 import { useEffect, useState } from "react";
 import type { ZodError } from "zod";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
@@ -18,11 +19,16 @@ function QuestionDisplay({
   selectedAnswer,
 }: {
   question: Question;
-  selectedAnswer?: string;
+  selectedAnswer?: UserQuestionAnswer;
 }) {
-  const isCustomAnswer =
-    selectedAnswer &&
-    !question.options.some((opt) => opt.label === selectedAnswer);
+  const selectedAnswers = Array.isArray(selectedAnswer)
+    ? selectedAnswer
+    : selectedAnswer
+      ? [selectedAnswer]
+      : [];
+  const customAnswers = selectedAnswers.filter(
+    (answer) => !question.options.some((opt) => opt.label === answer),
+  );
 
   return (
     <div className="question-item">
@@ -32,7 +38,7 @@ function QuestionDisplay({
       </div>
       <ul className="question-options">
         {question.options.map((option) => {
-          const isSelected = selectedAnswer === option.label;
+          const isSelected = selectedAnswers.includes(option.label);
           return (
             <li
               key={option.label}
@@ -58,15 +64,17 @@ function QuestionDisplay({
             </li>
           );
         })}
-        {isCustomAnswer && (
-          <li className="question-option question-option-selected">
-            <span className="question-option-indicator">●</span>
+        {customAnswers.map((answer) => (
+          <li key={answer} className="question-option question-option-selected">
+            <span className="question-option-indicator">
+              {question.multiSelect ? "☑" : "●"}
+            </span>
             <div className="question-option-content">
               <span className="question-option-label">Other</span>
-              <span className="question-option-desc">{selectedAnswer}</span>
+              <span className="question-option-desc">{answer}</span>
             </div>
           </li>
-        )}
+        ))}
       </ul>
     </div>
   );
@@ -79,7 +87,7 @@ function AskUserQuestionToolUse({ input }: { input: AskUserQuestionInput }) {
   return (
     <div className="question-tool-use">
       {input.questions.map((q, i) => (
-        <QuestionDisplay key={`${q.header}-${i}`} question={q} />
+        <QuestionDisplay key={q.id || `${q.header}-${i}`} question={q} />
       ))}
     </div>
   );
@@ -147,11 +155,12 @@ function AskUserQuestionToolResult({
         <SchemaWarning toolName="AskUserQuestion" errors={validationErrors} />
       )}
       {result.questions.map((q, i) => {
-        // Find the answer by matching the question text
-        const answer = result.answers?.[q.question];
+        const answer =
+          (q.id ? result.answers?.[q.id] : undefined) ??
+          result.answers?.[q.question];
         return (
           <QuestionDisplay
-            key={`${q.header}-${i}`}
+            key={q.id || `${q.header}-${i}`}
             question={q}
             selectedAnswer={answer}
           />

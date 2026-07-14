@@ -6,7 +6,7 @@
  *
  * Architecture:
  * - Each session gets its own `opencode serve` process on a unique port
- * - Messages are sent via HTTP POST to /session/:id/message
+ * - Messages are started via HTTP POST to /session/:id/prompt_async
  * - Responses are streamed via SSE from /event
  * - Server is killed when session is aborted or times out
  */
@@ -27,6 +27,7 @@ import type {
   OpenCodeSessionConfig,
   PermissionMode,
   ReasoningEffortInfo,
+  UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import {
   ALL_OPENCODE_REQUEST_PROTOCOLS,
@@ -95,12 +96,32 @@ interface OpenCodePermissionRepliedEvent {
   };
 }
 
-interface OpenCodeMessageResponse {
-  info?: {
-    error?: {
-      name?: string;
-      data?: unknown;
+interface OpenCodeQuestionAskedEvent {
+  type: "question.asked";
+  properties: {
+    id: string;
+    sessionID: string;
+    questions: unknown;
+    tool?: {
+      messageID?: string;
+      callID?: string;
     };
+  };
+}
+
+interface OpenCodeQuestionResolvedEvent {
+  type: "question.replied" | "question.rejected";
+  properties?: {
+    sessionID?: string;
+    requestID?: string;
+  };
+}
+
+interface OpenCodeSessionErrorEvent {
+  type: "session.error";
+  properties: {
+    sessionID?: string;
+    error?: unknown;
   };
 }
 
@@ -130,6 +151,76 @@ interface OpenCodeConfigProvidersResponse {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface NormalizedOpenCodeQuestion {
+  id: string;
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+  custom?: boolean;
+}
+
+function normalizeOpenCodeQuestions(
+  raw: unknown,
+): NormalizedOpenCodeQuestion[] {
+  if (!Array.isArray(raw)) return [];
+
+  const questions: NormalizedOpenCodeQuestion[] = [];
+  for (const [index, item] of raw.entries()) {
+    if (!isRecord(item) || typeof item.question !== "string") continue;
+    const options = Array.isArray(item.options)
+      ? item.options
+          .map((option) => {
+            if (!isRecord(option) || typeof option.label !== "string") {
+              return null;
+            }
+            return {
+              label: option.label,
+              description:
+                typeof option.description === "string"
+                  ? option.description
+                  : "",
+            };
+          })
+          .filter(
+            (option): option is { label: string; description: string } =>
+              option !== null,
+          )
+      : [];
+
+    questions.push({
+      id: `question-${index}`,
+      question: item.question,
+      header: typeof item.header === "string" ? item.header : "Question",
+      options,
+      multiSelect: Boolean(item.multiSelect ?? item.multiple),
+      ...(typeof item.custom === "boolean" ? { custom: item.custom } : {}),
+    });
+  }
+  return questions;
+}
+
+function buildOpenCodeQuestionAnswers(
+  questions: NormalizedOpenCodeQuestion[],
+  updatedInput: unknown,
+): string[][] {
+  const input = isRecord(updatedInput) ? updatedInput : null;
+  const answers = isRecord(input?.answers)
+    ? (input.answers as UserQuestionAnswers)
+    : undefined;
+
+  return questions.map((question) => {
+    const answer = answers?.[question.id] ?? answers?.[question.question];
+    if (typeof answer === "string") return answer ? [answer] : [];
+    if (Array.isArray(answer)) {
+      return answer.filter(
+        (value): value is string => typeof value === "string" && !!value,
+      );
+    }
+    return [];
+  });
 }
 
 type ReasoningEffortsByProtocol = NonNullable<
@@ -269,7 +360,10 @@ interface OpenCodeEmissionState {
 type OpenCodeRuntimeEvent =
   | OpenCodeSSEEvent
   | OpenCodePermissionAskedEvent
-  | OpenCodePermissionRepliedEvent;
+  | OpenCodePermissionRepliedEvent
+  | OpenCodeQuestionAskedEvent
+  | OpenCodeQuestionResolvedEvent
+  | OpenCodeSessionErrorEvent;
 
 /**
  * OpenCode Provider implementation.
@@ -529,6 +623,7 @@ export class OpenCodeProvider implements AgentProvider {
     const queue = new MessageQueue();
     const abortController = new AbortController();
     const pidRef: { value?: number } = {};
+    const processRef: { value?: ChildProcess } = {};
     const runtimeRef: OpenCodeRuntimeRef = {};
 
     // Push initial message if provided
@@ -542,6 +637,7 @@ export class OpenCodeProvider implements AgentProvider {
       abortController.signal,
       options,
       pidRef,
+      processRef,
       runtimeRef,
     );
 
@@ -551,6 +647,12 @@ export class OpenCodeProvider implements AgentProvider {
       abort: () => abortController.abort(),
       get pid() {
         return pidRef.value;
+      },
+      isProcessAlive: () => {
+        const child = processRef.value;
+        return child
+          ? child.exitCode === null && child.signalCode === null
+          : false;
       },
       ...(options.opencodeConfig
         ? {}
@@ -589,6 +691,7 @@ export class OpenCodeProvider implements AgentProvider {
     signal: AbortSignal,
     options: StartSessionOptions,
     pidRef: { value?: number },
+    processRef: { value?: ChildProcess },
     runtimeRef: OpenCodeRuntimeRef,
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
@@ -653,6 +756,7 @@ export class OpenCodeProvider implements AgentProvider {
         },
       );
       pidRef.value = serverProcess.pid;
+      processRef.value = serverProcess;
     } catch (error) {
       yield {
         type: "error",
@@ -991,6 +1095,12 @@ export class OpenCodeProvider implements AgentProvider {
 
     const sseUrl = this.openCodeUrl(baseUrl, "/event", cwd);
     const sseController = new AbortController();
+    const abortSse = () => sseController.abort();
+    if (signal.aborted) {
+      abortSse();
+    } else {
+      signal.addEventListener("abort", abortSse, { once: true });
+    }
     const emissionState: OpenCodeEmissionState = {
       toolUseIds: new Set(),
       toolResultIds: new Set(),
@@ -1005,8 +1115,13 @@ export class OpenCodeProvider implements AgentProvider {
       postComplete: false,
       postError: null as Error | null,
       responseError: null as string | null,
+      sawSessionIdle: false,
       resolveWaiting: null as (() => void) | null,
     };
+    let resolveSseReady: () => void = () => undefined;
+    const sseReady = new Promise<void>((resolve) => {
+      resolveSseReady = resolve;
+    });
 
     // Start SSE connection immediately (runs in background)
     const ssePromise = (async () => {
@@ -1024,10 +1139,12 @@ export class OpenCodeProvider implements AgentProvider {
           state.sseError = new Error(
             `SSE connection failed: ${response.status}`,
           );
+          resolveSseReady();
           return;
         }
 
         log.debug({ sseUrl }, "SSE connected");
+        resolveSseReady();
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -1049,7 +1166,9 @@ export class OpenCodeProvider implements AgentProvider {
             if (!line.startsWith("data: ")) continue;
 
             const data = line.slice(6);
-            const event = parseOpenCodeSSEEvent(data);
+            const event = parseOpenCodeSSEEvent(
+              data,
+            ) as OpenCodeRuntimeEvent | null;
             if (!event) continue;
 
             log.trace({ event }, "SSE event received");
@@ -1061,6 +1180,21 @@ export class OpenCodeProvider implements AgentProvider {
               "sessionID" in event.properties
             ) {
               if (event.properties.sessionID !== opencodeSessionId) continue;
+            }
+
+            if (event.type === "session.error") {
+              const errorEvent = event as OpenCodeSessionErrorEvent;
+              if (errorEvent.properties.sessionID !== opencodeSessionId) {
+                continue;
+              }
+              const runtimeError = this.formatOpenCodeError(
+                errorEvent.properties.error,
+              );
+              if (runtimeError) {
+                state.responseError = runtimeError;
+                state.resolveWaiting?.();
+              }
+              continue;
             }
 
             if (event.type === "message.updated") {
@@ -1099,6 +1233,7 @@ export class OpenCodeProvider implements AgentProvider {
 
             // Stop on session.idle
             if (event.type === "session.idle") {
+              state.sawSessionIdle = true;
               log.debug({ opencodeSessionId }, "Session idle, stopping SSE");
               return;
             }
@@ -1111,69 +1246,78 @@ export class OpenCodeProvider implements AgentProvider {
             error instanceof Error ? error : new Error(String(error));
         }
       } finally {
+        resolveSseReady();
+        if (
+          !sseController.signal.aborted &&
+          !state.sawSessionIdle &&
+          !state.responseError &&
+          !state.sseError
+        ) {
+          state.sseError = new Error("OpenCode SSE ended before session.idle");
+        }
         state.sseComplete = true;
         state.resolveWaiting?.();
       }
     })();
 
-    // Wait briefly for SSE connection to establish
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Subscribe before starting the async prompt so fast turns cannot finish
+    // before Yep is listening for their terminal session.idle event.
+    const sseHandshakeTimeoutMs = Math.max(1, Math.min(this.timeout, 10_000));
+    const sseHandshakeTimeout = setTimeout(() => {
+      state.sseError = new Error("Timed out connecting to OpenCode SSE");
+      sseController.abort();
+      resolveSseReady();
+    }, sseHandshakeTimeoutMs);
+    await sseReady;
+    clearTimeout(sseHandshakeTimeout);
 
-    // Send the message without blocking SSE draining. The POST response is a
-    // final summary/error envelope; token/content streaming comes from SSE.
-    const messagePromise = (async () => {
-      log.debug(
-        { opencodeSessionId, textLength: text.length },
-        "Sending message to OpenCode",
-      );
-      const response = await fetch(
-        this.openCodeUrl(
-          baseUrl,
-          `/session/${encodeURIComponent(opencodeSessionId)}/message`,
-          cwd,
-        ),
-        {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/json",
-            ...this.openCodeDirectoryHeaders(cwd),
-          },
-          body: JSON.stringify(
-            this.buildOpenCodeMessagePayload(text, model, variant),
-          ),
-          signal,
-        },
-      );
+    // Start the prompt asynchronously so long-running turns cannot hit
+    // undici's response-header timeout while content streams over SSE.
+    const messagePromise = state.sseError
+      ? Promise.resolve()
+      : (async () => {
+          log.debug(
+            { opencodeSessionId, textLength: text.length },
+            "Sending message to OpenCode",
+          );
+          const response = await fetch(
+            this.openCodeUrl(
+              baseUrl,
+              `/session/${encodeURIComponent(opencodeSessionId)}/prompt_async`,
+              cwd,
+            ),
+            {
+              method: "POST",
+              headers: {
+                Accept: "application/json",
+                "Content-Type": "application/json",
+                ...this.openCodeDirectoryHeaders(cwd),
+              },
+              body: JSON.stringify(
+                this.buildOpenCodeMessagePayload(text, model, variant),
+              ),
+              signal,
+            },
+          );
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(
-          `Failed to send message: ${response.status} ${errorText}`,
-        );
-      }
-      const responseBody = (await response
-        .json()
-        .catch(() => null)) as OpenCodeMessageResponse | null;
-      const responseError = this.extractMessageResponseError(responseBody);
-      if (responseError) {
-        log.warn(
-          { opencodeSessionId, error: responseError },
-          "OpenCode message response contained an error",
-        );
-        state.responseError = responseError;
-      }
-      log.debug({ opencodeSessionId }, "Message sent successfully");
-    })()
-      .catch((error) => {
-        if (signal.aborted) return;
-        state.postError =
-          error instanceof Error ? error : new Error(String(error));
-      })
-      .finally(() => {
-        state.postComplete = true;
-        state.resolveWaiting?.();
-      });
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(
+              `Failed to send message: ${response.status} ${errorText}`,
+            );
+          }
+          log.debug({ opencodeSessionId }, "OpenCode prompt accepted");
+        })()
+          .catch((error) => {
+            if (signal.aborted) return;
+            state.postError =
+              error instanceof Error ? error : new Error(String(error));
+          })
+          .finally(() => {
+            state.postComplete = true;
+            state.resolveWaiting?.();
+          });
+    if (state.sseError) state.postComplete = true;
 
     // Yield events from buffer as they arrive
     try {
@@ -1188,6 +1332,7 @@ export class OpenCodeProvider implements AgentProvider {
           sseController.abort();
           const error = state.postError;
           log.error({ error }, "Failed to send message to OpenCode");
+          await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
           yield {
             type: "error",
             session_id: sessionId,
@@ -1198,6 +1343,7 @@ export class OpenCodeProvider implements AgentProvider {
 
         if (state.responseError) {
           sseController.abort();
+          await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
           yield {
             type: "error",
             session_id: sessionId,
@@ -1207,6 +1353,7 @@ export class OpenCodeProvider implements AgentProvider {
         }
 
         if (state.sseError) {
+          await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
           yield {
             type: "error",
             session_id: sessionId,
@@ -1215,8 +1362,8 @@ export class OpenCodeProvider implements AgentProvider {
           break;
         }
 
-        // session.idle closes our SSE reader; wait for the POST summary too so
-        // 200-with-error responses are not lost at turn end.
+        // session.idle closes our SSE reader; also wait for prompt_async to be
+        // accepted so immediate HTTP failures are not lost at turn end.
         if (state.sseComplete && state.postComplete) break;
 
         // Wait for more events
@@ -1229,6 +1376,7 @@ export class OpenCodeProvider implements AgentProvider {
       }
     } finally {
       sseController.abort();
+      signal.removeEventListener("abort", abortSse);
       await Promise.allSettled([ssePromise, messagePromise]);
     }
 
@@ -1259,6 +1407,17 @@ export class OpenCodeProvider implements AgentProvider {
         await this.handlePermissionAsked(
           baseUrl,
           event as OpenCodePermissionAskedEvent,
+          signal,
+          onToolApproval,
+          cwd,
+        );
+        return [];
+      }
+
+      case "question.asked": {
+        await this.handleQuestionAsked(
+          baseUrl,
+          event as OpenCodeQuestionAskedEvent,
           signal,
           onToolApproval,
           cwd,
@@ -1299,6 +1458,8 @@ export class OpenCodeProvider implements AgentProvider {
       case "session.diff":
       case "server.connected":
       case "permission.replied":
+      case "question.replied":
+      case "question.rejected":
         // These are status events, not content - skip
         return [];
 
@@ -2117,6 +2278,122 @@ export class OpenCodeProvider implements AgentProvider {
     return payload;
   }
 
+  private async handleQuestionAsked(
+    baseUrl: string,
+    event: OpenCodeQuestionAskedEvent,
+    signal: AbortSignal,
+    onToolApproval?: StartSessionOptions["onToolApproval"],
+    cwd?: string,
+  ): Promise<void> {
+    const questions = normalizeOpenCodeQuestions(event.properties.questions);
+    if (questions.length === 0) {
+      getLogger().warn(
+        { questionId: event.properties.id },
+        "OpenCode question request did not contain any valid questions",
+      );
+    }
+
+    let result: ToolApprovalResult = {
+      behavior: "deny",
+      message: "No question handler available",
+      interrupt: true,
+    };
+
+    if (questions.length > 0 && onToolApproval) {
+      try {
+        result = await onToolApproval(
+          "AskUserQuestion",
+          {
+            questions,
+            messageID: event.properties.tool?.messageID,
+            callID: event.properties.tool?.callID,
+          },
+          { signal },
+        );
+      } catch (error) {
+        getLogger().warn(
+          { questionId: event.properties.id, error },
+          "OpenCode question callback failed; rejecting question",
+        );
+      }
+    }
+
+    const orderedAnswers = buildOpenCodeQuestionAnswers(
+      questions,
+      result.updatedInput,
+    );
+    const allowed =
+      result.behavior === "allow" &&
+      questions.length > 0 &&
+      orderedAnswers.every((answer) => answer.length > 0);
+    if (result.behavior === "allow" && !allowed) {
+      getLogger().warn(
+        { questionId: event.properties.id },
+        "OpenCode question approval did not contain every answer; rejecting question",
+      );
+    }
+    const path = allowed
+      ? `/question/${encodeURIComponent(event.properties.id)}/reply`
+      : `/question/${encodeURIComponent(event.properties.id)}/reject`;
+    const body = allowed
+      ? {
+          answers: orderedAnswers,
+        }
+      : {};
+    const response = await fetch(this.openCodeUrl(baseUrl, path, cwd), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        ...(allowed ? { "Content-Type": "application/json" } : {}),
+        ...this.openCodeDirectoryHeaders(cwd),
+      },
+      body: allowed ? JSON.stringify(body) : undefined,
+      signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(
+        `Failed to respond to OpenCode question ${event.properties.id}: ${response.status}${errorText ? ` ${errorText}` : ""}`,
+      );
+    }
+  }
+
+  private async abortOpenCodeSession(
+    baseUrl: string,
+    sessionId: string,
+    cwd?: string,
+  ): Promise<void> {
+    try {
+      const response = await fetch(
+        this.openCodeUrl(
+          baseUrl,
+          `/session/${encodeURIComponent(sessionId)}/abort`,
+          cwd,
+        ),
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            ...this.openCodeDirectoryHeaders(cwd),
+          },
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      if (!response.ok) {
+        getLogger().warn(
+          { sessionId, status: response.status },
+          "Failed to abort OpenCode session after a turn error",
+        );
+      }
+    } catch (error) {
+      getLogger().warn(
+        { sessionId, error },
+        "Failed to abort OpenCode session after a turn error",
+      );
+    }
+  }
+
   private async handlePermissionAsked(
     baseUrl: string,
     event: OpenCodePermissionAskedEvent,
@@ -2233,24 +2510,32 @@ export class OpenCodeProvider implements AgentProvider {
     });
   }
 
-  private extractMessageResponseError(
-    response: OpenCodeMessageResponse | null,
-  ): string | null {
-    const error = response?.info?.error;
+  private formatOpenCodeError(error: unknown): string | null {
     if (!error) return null;
 
+    if (typeof error === "string") return error;
+    if (!isRecord(error)) return String(error);
+
     const data = error.data;
-    if (data && typeof data === "object") {
-      const message = (data as { message?: unknown }).message;
+    if (isRecord(data)) {
+      const message = data.message;
       if (typeof message === "string" && message.trim()) {
         return message;
       }
     }
 
+    if (typeof error.message === "string" && error.message.trim()) {
+      return error.message;
+    }
+
     if (typeof error.name === "string" && error.name.trim()) {
       return error.name;
     }
-    return "OpenCode message failed";
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return "OpenCode message failed";
+    }
   }
 
   /** Get an ephemeral localhost port that is currently available. */

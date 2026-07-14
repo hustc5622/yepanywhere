@@ -8,6 +8,7 @@ import type {
   OpenCodeSessionConfig,
   PendingInputType,
   UrlProjectId,
+  UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { encodeProjectId } from "../projects/paths.js";
 import type { SessionSummary } from "../supervisor/types.js";
@@ -92,7 +93,7 @@ interface ProcessInfoResponse {
 interface InputRequestBody {
   requestId?: string;
   response?: InputResponse;
-  answers?: Record<string, string>;
+  answers?: UserQuestionAnswers;
   feedback?: string;
 }
 
@@ -107,10 +108,12 @@ interface ClientConfig {
 }
 
 type OpenCodeQuestion = {
+  id: string;
   question: string;
   header: string;
   options: Array<{ label: string; description: string }>;
   multiSelect: boolean;
+  custom?: boolean;
 };
 
 interface OpenCodeEvent {
@@ -142,6 +145,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private lastError: string | null = null;
   private sessions = new Map<string, SessionRecord>();
   private pendingInputs = new Map<string, OpenCodeBridgePendingInput>();
+  private inputResponses = new Map<string, Promise<boolean>>();
   private eventAbortController: AbortController | null = null;
   private eventReconnectTimer: NodeJS.Timeout | null = null;
 
@@ -279,36 +283,57 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     sessionId: string,
     requestId: string,
     response: OpenCodeBridgeInputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
   ): Promise<boolean> {
+    const responseKey = `${sessionId}\0${requestId}`;
+    const existingResponse = this.inputResponses.get(responseKey);
+    if (existingResponse) return existingResponse;
+
     const pending = this.pendingInputs.get(sessionId);
     if (!pending || pending.request.id !== requestId) return false;
 
-    if (pending.kind === "permission") {
-      const reply =
-        response === "deny"
-          ? "reject"
-          : response === "approve_always"
-            ? "always"
-            : "once";
-      await this.postOpenCodeJson(`/permission/${requestId}/reply`, { reply });
-    } else {
-      if (response === "deny") {
-        await this.postOpenCodeJson(`/question/${requestId}/reject`, {});
+    const operation = (async () => {
+      if (pending.kind === "permission") {
+        const reply =
+          response === "deny"
+            ? "reject"
+            : response === "approve_always"
+              ? "always"
+              : "once";
+        await this.postOpenCodeJson(`/permission/${requestId}/reply`, {
+          reply,
+        });
       } else {
-        await this.postOpenCodeJson(`/question/${requestId}/reply`, {
-          answers: buildOpenCodeQuestionAnswers(pending.request, answers),
+        if (response === "deny") {
+          await this.postOpenCodeJson(`/question/${requestId}/reject`);
+        } else {
+          await this.postOpenCodeJson(`/question/${requestId}/reply`, {
+            answers: buildOpenCodeQuestionAnswers(pending.request, answers),
+          });
+        }
+      }
+
+      // The reply can synchronously unblock OpenCode and produce the next input
+      // request before this HTTP response completes. Only consume the request
+      // we actually answered; never delete a newer request for the session.
+      if (this.pendingInputs.get(sessionId) === pending) {
+        this.pendingInputs.delete(sessionId);
+        this.updateSessionState(sessionId, {
+          activity: "in-turn",
+          pendingInputType: undefined,
+          active: true,
         });
       }
+      return true;
+    })();
+    this.inputResponses.set(responseKey, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.inputResponses.get(responseKey) === operation) {
+        this.inputResponses.delete(responseKey);
+      }
     }
-
-    this.pendingInputs.delete(sessionId);
-    this.updateSessionState(sessionId, {
-      activity: "in-turn",
-      pendingInputType: undefined,
-      active: true,
-    });
-    return true;
   }
 
   private async handleHttpRequest(
@@ -506,15 +531,19 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           });
           return;
         }
-        await this.syncOpenCodeRuntimeState();
-        if (this.pendingInputs.get(sessionId)?.request.id === body.requestId) {
+        const responseKey = `${sessionId}\0${body.requestId}`;
+        if (!this.inputResponses.has(responseKey)) {
+          await this.syncOpenCodeRuntimeState();
+        }
+        const accepted = await this.respondToInput(
+          sessionId,
+          body.requestId,
+          body.response,
+          body.answers,
+        );
+        if (accepted) {
           this.writeJson(res, 200, {
-            accepted: await this.respondToInput(
-              sessionId,
-              body.requestId,
-              body.response,
-              body.answers,
-            ),
+            accepted,
           });
           return;
         }
@@ -983,9 +1012,12 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     sessionId: string,
     properties: Record<string, unknown> | null,
   ): void {
-    const requestId = readString(properties, "requestID");
+    const requestId =
+      readString(properties, "requestID") ?? readString(properties, "id");
+    if (!requestId) return;
     const pending = this.pendingInputs.get(sessionId);
-    if (!requestId || pending?.requestId === requestId) {
+    if (pending) {
+      if (pending.requestId !== requestId) return;
       this.pendingInputs.delete(sessionId);
     }
     this.updateSessionState(sessionId, {
@@ -997,13 +1029,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
   private async postOpenCodeJson(
     pathname: string,
-    body: unknown,
+    body?: unknown,
   ): Promise<void> {
     const opencodeServerUrl = await this.ensureOpenCodeServerUrl();
     const response = await fetch(`${opencodeServerUrl}${pathname}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers:
+        body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!response.ok) {
       const body = await readResponseBody(response);
@@ -1453,7 +1486,7 @@ class YepApiClient {
     sessionId: string,
     requestId: string,
     response: InputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
     feedback?: string,
   ): Promise<{ accepted: boolean }> {
     return this.request(`/api/sessions/${sessionId}/input`, {
@@ -1714,7 +1747,7 @@ function readOpenCodeStatusType(value: unknown): string {
 function normalizeOpenCodeQuestions(raw: unknown): OpenCodeQuestion[] {
   if (!Array.isArray(raw)) return [];
   const questions: OpenCodeQuestion[] = [];
-  for (const item of raw) {
+  for (const [index, item] of raw.entries()) {
     const record = asRecord(item);
     const question = readString(record, "question");
     if (!question) continue;
@@ -1737,10 +1770,12 @@ function normalizeOpenCodeQuestions(raw: unknown): OpenCodeQuestion[] {
       : [];
 
     questions.push({
+      id: `question-${index}`,
       question,
       header: readString(record, "header") ?? "Question",
       options,
       multiSelect: Boolean(record?.multiSelect ?? record?.multiple),
+      ...(typeof record?.custom === "boolean" ? { custom: record.custom } : {}),
     });
   }
   return questions;
@@ -1748,12 +1783,14 @@ function normalizeOpenCodeQuestions(raw: unknown): OpenCodeQuestion[] {
 
 function buildOpenCodeQuestionAnswers(
   request: InputRequest,
-  answers: Record<string, string> | undefined,
+  answers: UserQuestionAnswers | undefined,
 ): string[][] {
   const input = asRecord(request.toolInput);
   const questions = normalizeOpenCodeQuestions(input?.questions);
   return questions.map((question) => {
-    const answer = answers?.[question.question];
-    return answer ? [answer] : [];
+    const answer = answers?.[question.id] ?? answers?.[question.question];
+    if (typeof answer === "string") return answer ? [answer] : [];
+    if (Array.isArray(answer)) return answer.filter(Boolean);
+    return [];
   });
 }

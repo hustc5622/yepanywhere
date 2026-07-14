@@ -277,15 +277,19 @@ const QuestionOptionSchema = z.object({
 });
 
 const QuestionSchema = z.object({
+  id: z.string().optional(),
   question: z.string().optional(),
   header: z.string().optional(),
   options: z.array(QuestionOptionSchema).optional(),
   multiSelect: z.boolean().optional(),
+  custom: z.boolean().optional(),
 });
 
 const AskUserQuestionResultObjectSchema = z.object({
   questions: z.array(QuestionSchema).optional(),
-  answers: z.record(z.string(), z.string()).optional(),
+  answers: z
+    .record(z.string(), z.union([z.string(), z.array(z.string())]))
+    .optional(),
 });
 
 /**

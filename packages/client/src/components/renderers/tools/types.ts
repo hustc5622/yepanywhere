@@ -1,3 +1,4 @@
+import type { UserQuestionAnswers } from "@yep-anywhere/shared";
 import type { ReactNode } from "react";
 import type { ContentBlock, RenderContext } from "../types";
 
@@ -224,15 +225,19 @@ export interface AskUserQuestionInput {
 }
 
 export interface Question {
+  /** Stable provider-supplied identifier used as the answer key when present. */
+  id?: string;
   question: string;
   header: string;
   options: Array<{ label: string; description: string }>;
   multiSelect: boolean;
+  /** Whether the user may provide an answer outside the listed options. */
+  custom?: boolean;
 }
 
 export interface AskUserQuestionResult {
   questions: Question[];
-  answers: Record<string, string>;
+  answers: UserQuestionAnswers;
 }
 
 /**

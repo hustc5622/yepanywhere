@@ -641,14 +641,16 @@ describe("Process", () => {
       const pendingRequest = process.getPendingInputRequest();
       expect(pendingRequest).not.toBeNull();
       expect(pendingRequest?.toolName).toBe("AskUserQuestion");
-      process.respondToInput(pendingRequest?.id, "approve", { "test?": "Yes" });
+      process.respondToInput(pendingRequest?.id, "approve", {
+        "test?": ["Yes", "Definitely"],
+      });
 
       const result = await approvalPromise;
       expect(result.behavior).toBe("allow");
       // Should have updated input with answers
       expect(result.updatedInput).toEqual({
         questions: [{ question: "test?", header: "Test", options: [] }],
-        answers: { "test?": "Yes" },
+        answers: { "test?": ["Yes", "Definitely"] },
       });
       // Should still be in plan mode (AskUserQuestion doesn't exit plan mode)
       expect(process.permissionMode).toBe("plan");

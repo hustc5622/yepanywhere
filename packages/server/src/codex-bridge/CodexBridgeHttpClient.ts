@@ -1,4 +1,8 @@
-import type { AgentActivity, PendingInputType } from "@yep-anywhere/shared";
+import type {
+  AgentActivity,
+  PendingInputType,
+  UserQuestionAnswers,
+} from "@yep-anywhere/shared";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
 import {
@@ -190,7 +194,7 @@ export class CodexBridgeHttpClient implements CodexBridgeController {
     sessionId: string,
     requestId: string,
     response: CodexBridgeInputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
   ): Promise<boolean> {
     const data = await this.fetchJson<{ accepted?: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/input`,

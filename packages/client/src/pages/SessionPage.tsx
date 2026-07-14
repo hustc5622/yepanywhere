@@ -1,4 +1,8 @@
-import type { ProviderName, UploadedFile } from "@yep-anywhere/shared";
+import type {
+  ProviderName,
+  UploadedFile,
+  UserQuestionAnswers,
+} from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Link,
@@ -1064,7 +1068,7 @@ function SessionPageContent({
   );
 
   const handleQuestionSubmit = useCallback(
-    async (answers: Record<string, string>) => {
+    async (answers: UserQuestionAnswers) => {
       if (pendingInputRequest) {
         try {
           await api.respondToInput(
@@ -1735,6 +1739,7 @@ function SessionPageContent({
               pendingInputRequest.sessionId === actualSessionId &&
               isAskUserQuestion && (
                 <QuestionAnswerPanel
+                  key={pendingInputRequest.id}
                   request={pendingInputRequest}
                   sessionId={actualSessionId}
                   onSubmit={handleQuestionSubmit}

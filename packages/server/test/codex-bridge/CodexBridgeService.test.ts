@@ -731,6 +731,57 @@ describe("CodexBridgeService", () => {
             (event as { activity?: string }).activity === "waiting-input",
         ),
       ).toBe(true);
+
+      const forwardedQuestion = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: "question-1",
+          method: "item/tool/requestUserInput",
+          params: {
+            threadId: "thread-b",
+            turnId: "turn-1",
+            itemId: "item-question-1",
+            questions: [
+              {
+                id: "scope",
+                question: "Select scopes",
+                header: "Scopes",
+                options: [{ label: "Read" }, { label: "Write" }],
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(await forwardedQuestion).toMatchObject({
+        id: "question-1",
+        method: "item/tool/requestUserInput",
+      });
+      const pendingQuestion = bridge.getPendingInputRequest("thread-b");
+      expect(pendingQuestion).toMatchObject({
+        type: "question",
+        toolName: "AskUserQuestion",
+      });
+
+      const beforeQuestionResponseCount = upstreamMessages.length;
+      expect(
+        bridge.respondToInput(
+          "thread-b",
+          pendingQuestion?.id ?? "",
+          "approve",
+          { scope: ["Read", "Write"] },
+        ),
+      ).toBe(true);
+      await waitFor(
+        () => upstreamMessages.length === beforeQuestionResponseCount + 1,
+      );
+      expect(upstreamMessages.at(-1)).toMatchObject({
+        id: "question-1",
+        result: {
+          answers: { scope: { answers: ["Read", "Write"] } },
+        },
+      });
     } finally {
       client.close();
     }

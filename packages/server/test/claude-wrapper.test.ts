@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseClaudeWrapperArgs } from "../src/claude-wrapper.js";
+import {
+  parseClaudeWrapperArgs,
+  parseQuestionAnswer,
+} from "../src/claude-wrapper.js";
 
 describe("parseClaudeWrapperArgs", () => {
   beforeEach(() => {
@@ -85,5 +88,21 @@ describe("parseClaudeWrapperArgs", () => {
     expect(() => parseClaudeWrapperArgs(["--mode", "invalid"])).toThrow(
       /Invalid --mode value/,
     );
+  });
+});
+
+describe("parseQuestionAnswer", () => {
+  const options = [{ label: "Read" }, { label: "Write" }, { label: "Deploy" }];
+
+  it("keeps multi-select answers as an ordered array", () => {
+    expect(parseQuestionAnswer("1, 3, custom", options, true)).toEqual([
+      "Read",
+      "Deploy",
+      "custom",
+    ]);
+  });
+
+  it("keeps single-select answers scalar", () => {
+    expect(parseQuestionAnswer("2", options, false)).toBe("Write");
   });
 });

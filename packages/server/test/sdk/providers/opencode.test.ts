@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
-import { type IncomingMessage, createServer } from "node:http";
+import {
+  type IncomingMessage,
+  type ServerResponse,
+  createServer,
+} from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ModelInfo } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it } from "vitest";
@@ -940,6 +944,488 @@ ohmyrouter/deepseek-v4-pro
     expect(replies).toEqual([{ reply: "once" }]);
   });
 
+  it("uses prompt_async and bridges OpenCode questions through Yep", async () => {
+    const provider = new OpenCodeProvider();
+    const sendMessageAndStream = (
+      provider as unknown as {
+        sendMessageAndStream: (
+          baseUrl: string,
+          opencodeSessionId: string,
+          sessionId: string,
+          text: string,
+          signal: AbortSignal,
+          onToolApproval: (
+            toolName: string,
+            input: unknown,
+            options: { signal: AbortSignal },
+          ) => Promise<{
+            behavior: "allow" | "deny";
+            updatedInput?: unknown;
+          }>,
+          model?: string,
+          variant?: string,
+          cwd?: string,
+        ) => AsyncIterableIterator<Record<string, unknown>>;
+      }
+    ).sendMessageAndStream.bind(provider);
+
+    let eventStream: ServerResponse | undefined;
+    let resolveEventStream: () => void = () => undefined;
+    const eventStreamReady = new Promise<void>((resolve) => {
+      resolveEventStream = resolve;
+    });
+    const requests: Array<{
+      path: string;
+      directory: string | null;
+      body: unknown;
+      directoryHeader?: string;
+    }> = [];
+    const approvals: Array<{ toolName: string; input: unknown }> = [];
+
+    const messages = await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          });
+          res.flushHeaders();
+          eventStream = res;
+          resolveEventStream();
+          return;
+        }
+
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_open/prompt_async"
+        ) {
+          requests.push({
+            path: url.pathname,
+            directory: url.searchParams.get("directory"),
+            body: await readJsonBody(req),
+            directoryHeader: req.headers["x-opencode-directory"] as
+              | string
+              | undefined,
+          });
+          res.statusCode = 204;
+          res.end();
+          await eventStreamReady;
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "question.asked",
+              properties: {
+                id: "que_1",
+                sessionID: "ses_open",
+                questions: [
+                  {
+                    question: "Choose one",
+                    header: "First",
+                    custom: false,
+                    options: [{ label: "A", description: "Option A" }],
+                  },
+                  {
+                    question: "Choose many",
+                    header: "Second",
+                    multiple: true,
+                    options: [
+                      { label: "B", description: "Option B" },
+                      { label: "C", description: "Option C" },
+                    ],
+                  },
+                ],
+                tool: { messageID: "msg_1", callID: "call_1" },
+              },
+            })}\n\n`,
+          );
+          return;
+        }
+
+        if (req.method === "POST" && url.pathname === "/question/que_1/reply") {
+          requests.push({
+            path: url.pathname,
+            directory: url.searchParams.get("directory"),
+            body: await readJsonBody(req),
+            directoryHeader: req.headers["x-opencode-directory"] as
+              | string
+              | undefined,
+          });
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.idle",
+              properties: { sessionID: "ses_open" },
+            })}\n\n`,
+          );
+          eventStream?.end();
+          return;
+        }
+
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        const output: Array<Record<string, unknown>> = [];
+        for await (const message of sendMessageAndStream(
+          baseUrl,
+          "ses_open",
+          "yep_session",
+          "hello",
+          new AbortController().signal,
+          async (toolName, input) => {
+            approvals.push({ toolName, input });
+            return {
+              behavior: "allow",
+              updatedInput: {
+                ...(input as Record<string, unknown>),
+                answers: {
+                  "question-0": "A",
+                  "Choose many": ["B", "C"],
+                },
+              },
+            };
+          },
+          "yep-anthropic/glm-5.2",
+          "max",
+          "/repo",
+        )) {
+          output.push(message);
+        }
+        return output;
+      },
+    );
+
+    expect(approvals).toEqual([
+      {
+        toolName: "AskUserQuestion",
+        input: {
+          questions: [
+            {
+              id: "question-0",
+              question: "Choose one",
+              header: "First",
+              options: [{ label: "A", description: "Option A" }],
+              multiSelect: false,
+              custom: false,
+            },
+            {
+              id: "question-1",
+              question: "Choose many",
+              header: "Second",
+              options: [
+                { label: "B", description: "Option B" },
+                { label: "C", description: "Option C" },
+              ],
+              multiSelect: true,
+            },
+          ],
+          messageID: "msg_1",
+          callID: "call_1",
+        },
+      },
+    ]);
+    expect(requests).toEqual([
+      {
+        path: "/session/ses_open/prompt_async",
+        directory: "/repo",
+        directoryHeader: "/repo",
+        body: {
+          parts: [{ type: "text", text: "hello" }],
+          model: { providerID: "yep-anthropic", modelID: "glm-5.2" },
+          variant: "max",
+        },
+      },
+      {
+        path: "/question/que_1/reply",
+        directory: "/repo",
+        directoryHeader: "/repo",
+        body: { answers: [["A"], ["B", "C"]] },
+      },
+    ]);
+    expect(messages.at(-1)).toMatchObject({
+      type: "result",
+      session_id: "yep_session",
+    });
+  });
+
+  it("rejects denied OpenCode questions", async () => {
+    const provider = new OpenCodeProvider();
+    const handleQuestionAsked = (
+      provider as unknown as {
+        handleQuestionAsked: (
+          baseUrl: string,
+          event: unknown,
+          signal: AbortSignal,
+          onToolApproval: () => Promise<{ behavior: "deny" }>,
+        ) => Promise<void>;
+      }
+    ).handleQuestionAsked.bind(provider);
+    const requests: Array<{ url?: string; body: unknown }> = [];
+
+    await withTestServer(
+      async (req, res) => {
+        requests.push({ url: req.url, body: await readJsonBody(req) });
+        res.setHeader("Content-Type", "application/json");
+        res.end("true");
+      },
+      (baseUrl) =>
+        handleQuestionAsked(
+          baseUrl,
+          {
+            type: "question.asked",
+            properties: {
+              id: "que_deny",
+              sessionID: "ses_1",
+              questions: [
+                {
+                  question: "Continue?",
+                  header: "Continue",
+                  options: [{ label: "No", description: "Stop" }],
+                },
+              ],
+            },
+          },
+          new AbortController().signal,
+          async () => ({ behavior: "deny" }),
+        ),
+    );
+
+    expect(requests).toEqual([
+      { url: "/question/que_deny/reject", body: null },
+    ]);
+  });
+
+  it("rejects allowed OpenCode questions when any ordered answer is empty", async () => {
+    const provider = new OpenCodeProvider();
+    const handleQuestionAsked = (
+      provider as unknown as {
+        handleQuestionAsked: (
+          baseUrl: string,
+          event: unknown,
+          signal: AbortSignal,
+          onToolApproval: () => Promise<{
+            behavior: "allow";
+            updatedInput: unknown;
+          }>,
+        ) => Promise<void>;
+      }
+    ).handleQuestionAsked.bind(provider);
+    const requests: Array<{ url?: string; body: unknown }> = [];
+
+    await withTestServer(
+      async (req, res) => {
+        requests.push({ url: req.url, body: await readJsonBody(req) });
+        res.setHeader("Content-Type", "application/json");
+        res.end("true");
+      },
+      (baseUrl) =>
+        handleQuestionAsked(
+          baseUrl,
+          {
+            type: "question.asked",
+            properties: {
+              id: "que_incomplete",
+              sessionID: "ses_1",
+              questions: [
+                {
+                  question: "Continue?",
+                  header: "Continue",
+                  options: [{ label: "Yes", description: "Proceed" }],
+                },
+              ],
+            },
+          },
+          new AbortController().signal,
+          async () => ({
+            behavior: "allow",
+            updatedInput: { answers: { "question-0": [] } },
+          }),
+        ),
+    );
+
+    expect(requests).toEqual([
+      { url: "/question/que_incomplete/reject", body: null },
+    ]);
+  });
+
+  it("times out an unresponsive SSE handshake before sending the prompt", async () => {
+    const provider = new OpenCodeProvider({ timeout: 20 });
+    const sendMessageAndStream = (
+      provider as unknown as {
+        sendMessageAndStream: (
+          baseUrl: string,
+          opencodeSessionId: string,
+          sessionId: string,
+          text: string,
+          signal: AbortSignal,
+        ) => AsyncIterableIterator<Record<string, unknown>>;
+      }
+    ).sendMessageAndStream.bind(provider);
+    let eventRequests = 0;
+    let promptRequests = 0;
+    let abortRequests = 0;
+
+    const messages = await withTestServer(
+      (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          eventRequests += 1;
+          req.once("aborted", () => res.destroy());
+          return;
+        }
+        if (req.method === "POST" && url.pathname.endsWith("/prompt_async")) {
+          promptRequests += 1;
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_timeout/abort"
+        ) {
+          abortRequests += 1;
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          return;
+        }
+        res.statusCode = 404;
+        res.end();
+      },
+      async (baseUrl) => {
+        const output: Array<Record<string, unknown>> = [];
+        for await (const message of sendMessageAndStream(
+          baseUrl,
+          "ses_timeout",
+          "yep_timeout",
+          "hello",
+          new AbortController().signal,
+        )) {
+          output.push(message);
+        }
+        return output;
+      },
+    );
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        session_id: "yep_timeout",
+        error: "Timed out connecting to OpenCode SSE",
+      }),
+    );
+    expect(eventRequests).toBe(1);
+    expect(promptRequests).toBe(0);
+    expect(abortRequests).toBe(1);
+  });
+
+  it("surfaces prompt_async session errors from SSE", async () => {
+    const provider = new OpenCodeProvider();
+    const sendMessageAndStream = (
+      provider as unknown as {
+        sendMessageAndStream: (
+          baseUrl: string,
+          opencodeSessionId: string,
+          sessionId: string,
+          text: string,
+          signal: AbortSignal,
+        ) => AsyncIterableIterator<Record<string, unknown>>;
+      }
+    ).sendMessageAndStream.bind(provider);
+    let eventStream: ServerResponse | undefined;
+    let abortRequests = 0;
+
+    const messages = await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.flushHeaders();
+          eventStream = res;
+          return;
+        }
+        if (req.method === "POST" && url.pathname.endsWith("/prompt_async")) {
+          await readJsonBody(req);
+          res.statusCode = 204;
+          res.end();
+          eventStream?.end(
+            `data: ${JSON.stringify({
+              type: "session.error",
+              properties: {
+                sessionID: "ses_error",
+                error: {
+                  name: "APIError",
+                  data: { message: "Upstream unavailable" },
+                },
+              },
+            })}\n\n`,
+          );
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_error/abort"
+        ) {
+          abortRequests += 1;
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          return;
+        }
+        res.statusCode = 404;
+        res.end();
+      },
+      async (baseUrl) => {
+        const output: Array<Record<string, unknown>> = [];
+        for await (const message of sendMessageAndStream(
+          baseUrl,
+          "ses_error",
+          "yep_error",
+          "hello",
+          new AbortController().signal,
+        )) {
+          output.push(message);
+        }
+        return output;
+      },
+    );
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        session_id: "yep_error",
+        error: "Upstream unavailable",
+      }),
+    );
+    expect(abortRequests).toBe(1);
+  });
+
+  it("exposes OpenCode child-process liveness to stale detection", async () => {
+    const provider = new OpenCodeProvider();
+    const fakeChild = {
+      exitCode: null as number | null,
+      signalCode: null,
+    };
+    const methods = provider as unknown as {
+      runSession: (
+        ...args: unknown[]
+      ) => AsyncIterableIterator<Record<string, unknown>>;
+    };
+    methods.runSession = async function* (...args: unknown[]) {
+      const processRef = args[5] as { value?: unknown };
+      processRef.value = fakeChild;
+      yield { type: "system", subtype: "init" };
+    };
+
+    const session = await provider.startSession({ cwd: "/repo" });
+    expect(session.isProcessAlive?.()).toBe(false);
+    await session.iterator.next();
+    expect(session.isProcessAlive?.()).toBe(true);
+    fakeChild.exitCode = 0;
+    expect(session.isProcessAlive?.()).toBe(false);
+    session.abort();
+  });
+
   it("does not render OpenCode user text parts as assistant messages", () => {
     const provider = new OpenCodeProvider();
     const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
@@ -1342,25 +1828,21 @@ ohmyrouter/deepseek-v4-pro
     });
   });
 
-  it("extracts OpenCode 200-response message errors", () => {
+  it("formats OpenCode session errors", () => {
     const provider = new OpenCodeProvider();
-    const extractMessageResponseError = (
+    const formatOpenCodeError = (
       provider as unknown as {
-        extractMessageResponseError: (response: unknown) => string | null;
+        formatOpenCodeError: (error: unknown) => string | null;
       }
-    ).extractMessageResponseError.bind(provider);
+    ).formatOpenCodeError.bind(provider);
 
     expect(
-      extractMessageResponseError({
-        info: {
-          error: {
-            name: "APIError",
-            data: { message: "Unauthorized: missing token" },
-          },
-        },
+      formatOpenCodeError({
+        name: "APIError",
+        data: { message: "Unauthorized: missing token" },
       }),
     ).toBe("Unauthorized: missing token");
 
-    expect(extractMessageResponseError({ info: {} })).toBeNull();
+    expect(formatOpenCodeError(undefined)).toBeNull();
   });
 });

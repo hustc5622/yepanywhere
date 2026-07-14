@@ -3,6 +3,7 @@ import type {
   InputRequest,
   PendingInputType,
   UrlProjectId,
+  UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import type { SessionSummary } from "../supervisor/types.js";
 
@@ -82,6 +83,6 @@ export interface OpenCodeBridgeController {
     sessionId: string,
     requestId: string,
     response: OpenCodeBridgeInputResponse,
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
   ): MaybePromise<boolean>;
 }

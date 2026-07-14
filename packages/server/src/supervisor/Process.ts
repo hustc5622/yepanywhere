@@ -10,6 +10,7 @@ import type {
   SlashCommand,
   ThinkingConfig,
   UrlProjectId,
+  UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import type { MessageQueue } from "../sdk/messageQueue.js";
@@ -1385,7 +1386,7 @@ export class Process {
   respondToInput(
     requestId: string,
     response: "approve" | "deny",
-    answers?: Record<string, string>,
+    answers?: UserQuestionAnswers,
     feedback?: string,
   ): boolean {
     const pending = this.pendingToolApprovals.get(requestId);

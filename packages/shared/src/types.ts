@@ -470,6 +470,10 @@ export interface PermissionRules {
   deny?: string[];
 }
 
+/** Answers submitted for an interactive user-question request. */
+export type UserQuestionAnswer = string | string[];
+export type UserQuestionAnswers = Record<string, UserQuestionAnswer>;
+
 /**
  * Pre-rendered markdown augment for text blocks.
  * Contains HTML with syntax highlighting from server.
