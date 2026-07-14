@@ -122,6 +122,85 @@ describe("ToolCallRow", () => {
     expect(rawDetails?.hasAttribute("open")).toBe(false);
   });
 
+  it("labels web__run semantically and highlights queries and returned sources", () => {
+    const { container } = render(
+      <ToolCallRow
+        id="tool-code-web"
+        toolName="CodexExec"
+        toolInput={{
+          script:
+            'const r = await tools.web__run({search_query:[{q:"Home Assistant official docs"},{q:"Xiaomi Home integration"}],response_length:"long"});text(JSON.stringify(r));',
+        }}
+        toolResult={{
+          content:
+            'Script completed\nWall time 2.5 seconds\nOutput:\n"Home Assistant (https://www.home-assistant.io/)"',
+          structured: [
+            {
+              type: "input_text",
+              text: "Script completed\nWall time 2.5 seconds\nOutput:\n",
+            },
+            {
+              type: "input_text",
+              text: JSON.stringify(
+                "Home Assistant (https://www.home-assistant.io/)",
+              ),
+            },
+          ],
+          isError: false,
+        }}
+        status="complete"
+        sessionProvider="codex"
+      />,
+    );
+
+    expect(screen.getByText("web")).toBeDefined();
+    expect(container.textContent).toContain("Search · 2 queries");
+    expect(container.textContent).toContain("1 source");
+
+    const header = container.querySelector(".tool-row-header");
+    fireEvent.click(header as HTMLElement);
+
+    expect(screen.getByText("Home Assistant official docs")).toBeDefined();
+    expect(screen.getByText("Xiaomi Home integration")).toBeDefined();
+    expect(
+      screen
+        .getByRole("link", { name: /Home Assistant/i })
+        .getAttribute("href"),
+    ).toBe("https://www.home-assistant.io/");
+    expect(container.textContent).not.toContain("No text output");
+  });
+
+  it("renders wait effects instead of raw JSON", () => {
+    const { container } = render(
+      <ToolCallRow
+        id="tool-wait"
+        toolName="wait"
+        toolInput={{
+          cell_id: "1",
+          yield_time_ms: 10000,
+          poll_count: 3,
+          total_wall_time_seconds: 30,
+        }}
+        toolResult={{
+          content:
+            "Script running with cell ID 1\nWall time 10.0 seconds\nOutput:\n",
+          isError: false,
+        }}
+        status="complete"
+        sessionProvider="codex"
+      />,
+    );
+
+    expect(screen.getByText("wait")).toBeDefined();
+    expect(container.textContent).toContain("Cell 1 still running");
+    expect(container.textContent).toContain("3 polls · 30s");
+
+    const header = container.querySelector(".tool-row-header");
+    fireEvent.click(header as HTMLElement);
+    expect(container.textContent).toContain("no new output arrived");
+    expect(container.textContent).not.toContain('"cell_id"');
+  });
+
   it("does not apply the Codex renderer to another provider's exec tool", () => {
     const { container } = render(
       <ToolCallRow

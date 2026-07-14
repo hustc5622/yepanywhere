@@ -2,6 +2,31 @@ import { describe, expect, it } from "vitest";
 import type { Message } from "../../types";
 import { preprocessMessages } from "../preprocessMessages";
 
+function codexWaitPair(
+  id: string,
+  timestamp: number,
+  output: string,
+  input: Record<string, unknown> = {
+    cell_id: "1",
+    yield_time_ms: 10000,
+  },
+): Message[] {
+  return [
+    {
+      id: `${id}-use`,
+      role: "assistant",
+      content: [{ type: "tool_use", id, name: "wait", input }],
+      timestamp: `2024-01-01T00:00:${String(timestamp).padStart(2, "0")}Z`,
+    },
+    {
+      id: `${id}-result`,
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: id, content: output }],
+      timestamp: `2024-01-01T00:00:${String(timestamp + 1).padStart(2, "0")}Z`,
+    },
+  ];
+}
+
 describe("preprocessMessages", () => {
   it("pairs tool_use with tool_result", () => {
     const messages: Message[] = [
@@ -42,6 +67,81 @@ describe("preprocessMessages", () => {
       status: "complete",
       toolResult: { content: "file contents", isError: false },
     });
+  });
+
+  it("collapses adjacent silent Codex wait polls but preserves progress text", () => {
+    const running =
+      "Script running with cell ID 1\nWall time 10.0 seconds\nOutput:\n";
+    const terminated = "Script terminated\nWall time 0.0 seconds\nOutput:\n";
+    const messages: Message[] = [
+      ...codexWaitPair("wait-1", 1, running),
+      ...codexWaitPair("wait-2", 3, running),
+      ...codexWaitPair("wait-3", 5, running),
+      {
+        id: "progress",
+        type: "assistant",
+        content: "I am checking the official integration status.",
+        codexMessagePhase: "commentary",
+        timestamp: "2024-01-01T00:00:07Z",
+      },
+      ...codexWaitPair("wait-4", 8, running),
+      ...codexWaitPair("wait-5", 10, terminated, {
+        cell_id: "1",
+        yield_time_ms: 1000,
+        terminate: true,
+      }),
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(3);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "wait-1",
+      toolName: "wait",
+      toolInput: {
+        cell_id: "1",
+        poll_count: 3,
+        total_wall_time_seconds: 30,
+      },
+    });
+    expect(items[1]).toMatchObject({
+      type: "text",
+      phase: "commentary",
+      text: "I am checking the official integration status.",
+    });
+    expect(items[2]).toMatchObject({
+      type: "tool_call",
+      id: "wait-4",
+      toolInput: {
+        cell_id: "1",
+        terminate: true,
+        poll_count: 2,
+        total_wall_time_seconds: 10,
+      },
+    });
+  });
+
+  it("does not collapse wait calls that returned useful output", () => {
+    const messages: Message[] = [
+      ...codexWaitPair(
+        "wait-output",
+        1,
+        "Script running with cell ID 1\nWall time 10.0 seconds\nOutput:\nfirst result",
+      ),
+      ...codexWaitPair(
+        "wait-silent",
+        3,
+        "Script running with cell ID 1\nWall time 10.0 seconds\nOutput:\n",
+      ),
+    ];
+
+    const items = preprocessMessages(messages);
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.type === "tool_call" && item.id)).toEqual([
+      "wait-output",
+      "wait-silent",
+    ]);
   });
 
   it("pairs OpenCode tool_result blocks from the same assistant message", () => {

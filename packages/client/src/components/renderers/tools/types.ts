@@ -344,6 +344,8 @@ export interface ToolRenderer<TInput = unknown, TResult = unknown> {
   tool: string;
   /** Display name shown in UI (defaults to tool name) */
   displayName?: string;
+  /** Input-aware display name for multiplexed tools such as Codex code mode. */
+  getDisplayName?(input: TInput): string;
   /** Render the tool_use block (what Claude wants to do) */
   renderToolUse(input: TInput, context: RenderContext): ReactNode;
   /** Render the tool_result block (what happened) */

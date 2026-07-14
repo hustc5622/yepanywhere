@@ -175,7 +175,7 @@ export const ToolCallRow = memo(function ToolCallRow({
         )}
 
         <span className="tool-name">
-          {toolRegistry.getDisplayName(toolName)}
+          {toolRegistry.getDisplayName(toolName, toolInput)}
         </span>
 
         {hasInteractiveSummary && status === "complete" ? (

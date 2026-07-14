@@ -15,6 +15,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   todowrite: "TodoWrite",
   todo: "TodoWrite",
   write_stdin: "WriteStdin",
+  wait: "CodexWait",
   update_plan: "UpdatePlan",
   apply_patch: "Edit",
   web_search_call: "WebSearch",
@@ -132,8 +133,11 @@ class ToolRendererRegistry {
     return null;
   }
 
-  getDisplayName(toolName: string): string {
+  getDisplayName(toolName: string, input?: unknown): string {
     const renderer = this.get(toolName);
+    if (renderer.getDisplayName) {
+      return renderer.getDisplayName(input);
+    }
     return renderer.displayName || toolName;
   }
 }
@@ -168,6 +172,7 @@ import { bashOutputRenderer } from "./BashOutputRenderer";
 import { bashRenderer } from "./BashRenderer";
 import { codexCollaborationRenderers } from "./CodexCollaborationRenderer";
 import { codexExecRenderer } from "./CodexExecRenderer";
+import { codexWaitRenderer } from "./CodexWaitRenderer";
 import { editRenderer } from "./EditRenderer";
 import { exitPlanModeRenderer } from "./ExitPlanModeRenderer";
 import { globRenderer } from "./GlobRenderer";
@@ -187,6 +192,7 @@ import { writeStdinRenderer } from "./WriteStdinRenderer";
 // Tier 1 & 2: Core tools
 toolRegistry.register(bashRenderer);
 toolRegistry.register(codexExecRenderer);
+toolRegistry.register(codexWaitRenderer);
 toolRegistry.register(readRenderer);
 toolRegistry.register(editRenderer);
 toolRegistry.register(writeRenderer);

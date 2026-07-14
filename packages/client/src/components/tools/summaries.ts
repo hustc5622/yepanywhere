@@ -1,4 +1,5 @@
 import { getDisplayBashCommandFromInput } from "../../lib/bashCommand";
+import { getCodexWebRunOverview } from "../../lib/codexWebRun";
 import type { ToolResultData } from "../../types/renderItems";
 import { toolRegistry } from "../renderers/tools";
 
@@ -95,8 +96,11 @@ export function getToolSummary(
   // Codex code mode's `exec` input is the useful context; its result is an
   // orchestration envelope and otherwise collapses every row to just "done".
   if (toolName === "CodexExec") {
-    return status === "error" || result?.isError
-      ? `${inputSummary} → failed`
+    if (status === "error" || result?.isError) {
+      return `${inputSummary} → failed`;
+    }
+    return getCodexWebRunOverview(input) && resultSummary
+      ? `${inputSummary} → ${resultSummary}`
       : inputSummary;
   }
 

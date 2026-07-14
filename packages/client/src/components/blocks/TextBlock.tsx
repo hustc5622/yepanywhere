@@ -27,6 +27,7 @@ import {
 interface Props {
   text: string;
   isStreaming?: boolean;
+  phase?: "commentary" | "final_answer";
   /** Pre-rendered HTML from server (for completed messages) */
   augmentHtml?: string;
 }
@@ -140,6 +141,7 @@ function renderPlainTextWithLocalMediaLinks(text: string): React.ReactNode {
 export const TextBlock = memo(function TextBlock({
   text,
   isStreaming = false,
+  phase,
   augmentHtml,
 }: Props) {
   const [fileModal, setFileModal] = useState<{
@@ -253,9 +255,12 @@ export const TextBlock = memo(function TextBlock({
     // biome-ignore lint/a11y/useKeyWithClickEvents: click handler intercepts local media links only
     <div
       ref={blockRef}
-      className={`text-block timeline-item${isStreaming ? " streaming" : ""}`}
+      className={`text-block timeline-item${isStreaming ? " streaming" : ""}${phase === "commentary" ? " text-block-commentary" : ""}`}
       onClick={handleClick}
     >
+      {phase === "commentary" && (
+        <div className="text-block-phase">Progress</div>
+      )}
       {/* Always render streaming elements when streaming so refs are ready for augments */}
       {renderStreamingContainer && (
         <div style={showStreamingContent ? undefined : { display: "none" }}>

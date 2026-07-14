@@ -7,6 +7,11 @@ import {
   getCodexExecSummary,
   shouldParseCodexExecNestedResults,
 } from "../../../lib/codexExec";
+import {
+  type CodexWebOperation,
+  getCodexWebResultOverview,
+  getCodexWebRunOverview,
+} from "../../../lib/codexWebRun";
 import { Modal } from "../../ui/Modal";
 import type { ToolRenderer } from "./types";
 
@@ -14,7 +19,13 @@ const MAX_OUTPUT_LINES = 30;
 const MAX_OUTPUT_CHARS = 6000;
 
 function pluralize(count: number, singular: string): string {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+  const noun =
+    count === 1
+      ? singular
+      : singular.endsWith("y")
+        ? `${singular.slice(0, -1)}ies`
+        : `${singular}s`;
+  return `${count} ${noun}`;
 }
 
 function truncateOutput(text: string): {
@@ -96,6 +107,161 @@ function RawScriptDetails({ script }: { script: string }) {
       </pre>
     </details>
   );
+}
+
+function formatCharacterCount(count: number): string {
+  if (count < 1000) return `${count} chars`;
+  return `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}K chars`;
+}
+
+function WebOperationList({ operations }: { operations: CodexWebOperation[] }) {
+  return (
+    <section className="codex-web-section">
+      <div className="codex-exec-section-label">Request</div>
+      <div className="codex-web-request-list">
+        {operations.map((operation) => (
+          <div className="codex-web-request" key={operation.kind}>
+            <span className="codex-web-request-kind">{operation.label}</span>
+            <ol>
+              {operation.items.map((item, index) => (
+                <li key={`${operation.kind}-${index}`}>{item}</li>
+              ))}
+            </ol>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function RawWebResponse({ output }: { output: string }) {
+  if (!output) return null;
+  return (
+    <details className="codex-exec-raw-details codex-web-raw-details">
+      <summary>Raw web response</summary>
+      <pre className="code-block codex-exec-raw-script">
+        <code>{output}</code>
+      </pre>
+    </details>
+  );
+}
+
+function WebResultDetails({
+  input,
+  result,
+  isError,
+}: {
+  input: unknown;
+  result: unknown;
+  isError: boolean;
+}) {
+  const request = getCodexWebRunOverview(input);
+  const response = getCodexWebResultOverview(result, isError);
+  const { exec } = response;
+  const status = getStatusLabel(exec.status);
+  const meta = [
+    exec.wallTimeSeconds !== undefined ? `${exec.wallTimeSeconds}s` : null,
+    request?.queryCount ? pluralize(request.queryCount, "query") : null,
+    response.sources.length > 0
+      ? pluralize(response.sources.length, "source")
+      : null,
+    response.outputChars > 0
+      ? formatCharacterCount(response.outputChars)
+      : null,
+  ].filter((item): item is string => !!item);
+
+  return (
+    <div className="codex-exec-details codex-web-details">
+      <div className="codex-exec-meta-row">
+        <span className={`badge ${status.className}`}>{status.label}</span>
+        {exec.cellId && (
+          <span className="badge badge-info">Cell {exec.cellId}</span>
+        )}
+        {request?.responseLength && (
+          <span className="badge badge-muted">
+            {request.responseLength} response
+          </span>
+        )}
+        {meta.length > 0 && (
+          <span className="codex-exec-meta">{meta.join(" · ")}</span>
+        )}
+      </div>
+
+      {request && <WebOperationList operations={request.operations} />}
+
+      {exec.status === "running" ? (
+        <div className="codex-web-effect status-running">
+          <strong>Effect</strong>
+          <span>
+            {`The request is still running${exec.cellId ? ` in Cell ${exec.cellId}` : ""}; no results have arrived yet.`}
+          </span>
+        </div>
+      ) : exec.status === "terminated" && !response.output ? (
+        <div className="codex-web-effect status-terminated">
+          <strong>Effect</strong>
+          <span>The web request was terminated before returning results.</span>
+        </div>
+      ) : response.sources.length > 0 ? (
+        <section className="codex-web-section">
+          <div className="codex-exec-section-label">Sources returned</div>
+          <ol className="codex-web-source-list">
+            {response.sources.slice(0, 8).map((source) => (
+              <li key={source.url}>
+                <a href={source.url} target="_blank" rel="noreferrer">
+                  <span>{source.title}</span>
+                  <small>{source.url}</small>
+                </a>
+              </li>
+            ))}
+          </ol>
+          {response.sources.length > 8 && (
+            <div className="codex-exec-unsupported">
+              {response.sources.length - 8} more sources in the raw response
+            </div>
+          )}
+        </section>
+      ) : response.output ? (
+        <ExecOutput
+          output={response.output}
+          isError={exec.status === "failed"}
+          lineCount={response.outputLineCount}
+        />
+      ) : (
+        <div className="codex-web-effect">
+          <strong>Effect</strong>
+          <span>No result content was returned.</span>
+        </div>
+      )}
+
+      <RawWebResponse output={response.output} />
+      {request && (
+        <RawScriptDetails script={getCodexExecOverview(input).script} />
+      )}
+    </div>
+  );
+}
+
+function getWebResultSummary(result: unknown, isError: boolean): string {
+  const response = getCodexWebResultOverview(result, isError);
+  const { exec } = response;
+  if (exec.status === "running") {
+    return exec.cellId ? `waiting in Cell ${exec.cellId}` : "still running";
+  }
+  if (exec.status === "terminated") return "terminated without results";
+  if (exec.status === "failed") return "failed";
+
+  const details = [
+    response.sources.length > 0
+      ? pluralize(response.sources.length, "source")
+      : response.outputLineCount > 0
+        ? pluralize(response.outputLineCount, "line")
+        : "no content",
+    response.outputChars > 0
+      ? formatCharacterCount(response.outputChars)
+      : null,
+    exec.wallTimeSeconds !== undefined ? `${exec.wallTimeSeconds}s` : null,
+  ].filter((item): item is string => !!item);
+  return details.join(" · ");
 }
 
 function ExecImages({ images }: { images: CodexExecImageOutput[] }) {
@@ -275,7 +441,20 @@ export const codexExecRenderer: ToolRenderer = {
   tool: "CodexExec",
   displayName: "exec",
 
+  getDisplayName(input) {
+    return getCodexWebRunOverview(input) ? "web" : "exec";
+  },
+
   renderToolUse(input) {
+    const web = getCodexWebRunOverview(input);
+    if (web) {
+      return (
+        <div className="codex-exec-details codex-web-details">
+          <WebOperationList operations={web.operations} />
+          <RawScriptDetails script={getCodexExecOverview(input).script} />
+        </div>
+      );
+    }
     const exec = getCodexExecOverview(input);
     return (
       <div className="codex-exec-details">
@@ -288,16 +467,26 @@ export const codexExecRenderer: ToolRenderer = {
   },
 
   renderToolResult(result, isError, _context, input) {
+    if (getCodexWebRunOverview(input)) {
+      return (
+        <WebResultDetails input={input} result={result} isError={isError} />
+      );
+    }
     return (
       <ExecResultDetails input={input} result={result} isError={isError} />
     );
   },
 
   getUseSummary(input) {
+    const web = getCodexWebRunOverview(input);
+    if (web) return web.summary;
     return getCodexExecSummary(input);
   },
 
   getResultSummary(result, isError, input) {
+    if (getCodexWebRunOverview(input)) {
+      return getWebResultSummary(result, isError);
+    }
     const overview = getCodexExecResultOverview(result, isError, {
       parseNestedResults: shouldParseCodexExecNestedResults(input),
     });

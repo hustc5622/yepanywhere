@@ -156,6 +156,21 @@ describe("TextBlock", () => {
     expect(paragraph?.textContent).toBe(text);
   });
 
+  it("highlights Codex commentary as a visible progress update", () => {
+    const { container } = renderWithSessionMetadata(
+      <TextBlock
+        text="I am checking the official integration status."
+        phase="commentary"
+      />,
+    );
+
+    expect(screen.getByText("Progress")).toBeDefined();
+    expect(container.querySelector(".text-block-commentary")).not.toBeNull();
+    expect(
+      screen.getByText("I am checking the official integration status."),
+    ).toBeDefined();
+  });
+
   it("does not render a block-level copy button", () => {
     renderWithSessionMetadata(<TextBlock text="alpha beta gamma" />);
 

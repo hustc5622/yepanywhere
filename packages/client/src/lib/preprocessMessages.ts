@@ -8,6 +8,7 @@ import type {
   ToolResultData,
   UserPromptItem,
 } from "../types/renderItems";
+import { getCodexExecResultOverview } from "./codexExec";
 import { getMessageId } from "./mergeMessages";
 
 const CODEX_TURN_ABORTED_DISPLAY_TEXT = "Conversation stopped by user";
@@ -86,7 +87,8 @@ export function preprocessMessages(
   }
 
   const enrichedItems = enrichWriteStdinWithCommand(items);
-  return collapsePlanProgressItems(collapseSessionSetupRuns(enrichedItems));
+  const compactWaits = collapseCodexWaitPolls(enrichedItems);
+  return collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits));
 }
 
 const SESSION_SETUP_PREFIXES = [
@@ -392,6 +394,112 @@ export function collapsePlanProgressItems(items: RenderItem[]): RenderItem[] {
   return collapsed;
 }
 
+function isCodexWaitItem(item: RenderItem): item is ToolCallItem {
+  if (item.type !== "tool_call") return false;
+  const normalized = item.toolName.trim().toLowerCase().replace(/[_-]/g, "");
+  return normalized === "wait" || normalized === "codexwait";
+}
+
+function getWaitInputRecord(item: ToolCallItem): Record<string, unknown> {
+  return isRecord(item.toolInput) ? item.toolInput : {};
+}
+
+function getWaitCellId(item: ToolCallItem): string {
+  const input = getWaitInputRecord(item);
+  const cellId = input.cell_id ?? input.cellId;
+  return cellId === undefined ? "" : String(cellId);
+}
+
+function isSilentCodexWait(item: ToolCallItem): boolean {
+  if (item.status === "error") return false;
+  if (!item.toolResult) return true;
+  const overview = getCodexExecResultOverview(
+    item.toolResult.structured ?? item.toolResult.content,
+    item.toolResult.isError,
+  );
+  return (
+    !overview.output &&
+    (overview.status === "running" || overview.status === "terminated")
+  );
+}
+
+function collapseCodexWaitRun(run: ToolCallItem[]): ToolCallItem[] {
+  if (run.length < 2) return run;
+  const first = run[0];
+  const last = run[run.length - 1];
+  if (!first || !last) return run;
+
+  let totalWallTimeSeconds = 0;
+  let hasWallTime = false;
+  for (const item of run) {
+    if (!item.toolResult) continue;
+    const overview = getCodexExecResultOverview(
+      item.toolResult.structured ?? item.toolResult.content,
+      item.toolResult.isError,
+    );
+    if (overview.wallTimeSeconds !== undefined) {
+      totalWallTimeSeconds += overview.wallTimeSeconds;
+      hasWallTime = true;
+    }
+  }
+
+  return [
+    {
+      ...last,
+      id: first.id,
+      toolInput: {
+        ...getWaitInputRecord(last),
+        poll_count: run.length,
+        ...(hasWallTime && { total_wall_time_seconds: totalWallTimeSeconds }),
+      },
+      sourceMessages: uniqueSourceMessages(
+        run.flatMap((item) => item.sourceMessages),
+      ),
+    },
+  ];
+}
+
+/**
+ * Codex can poll the same long-running code-mode cell every ten seconds. Keep
+ * progress commentary in the timeline, but collapse adjacent silent polls so
+ * transport mechanics do not dominate the model's visible progress updates.
+ */
+export function collapseCodexWaitPolls(items: RenderItem[]): RenderItem[] {
+  const collapsed: RenderItem[] = [];
+  let index = 0;
+
+  while (index < items.length) {
+    const item = items[index];
+    if (!item || !isCodexWaitItem(item) || !isSilentCodexWait(item)) {
+      if (item) collapsed.push(item);
+      index += 1;
+      continue;
+    }
+
+    const cellId = getWaitCellId(item);
+    const run: ToolCallItem[] = [item];
+    let runIndex = index + 1;
+    while (runIndex < items.length) {
+      const candidate = items[runIndex];
+      if (
+        !candidate ||
+        !isCodexWaitItem(candidate) ||
+        !isSilentCodexWait(candidate) ||
+        getWaitCellId(candidate) !== cellId
+      ) {
+        break;
+      }
+      run.push(candidate);
+      runIndex += 1;
+    }
+
+    collapsed.push(...collapseCodexWaitRun(run));
+    index = runIndex;
+  }
+
+  return collapsed;
+}
+
 function processMessage(
   msg: Message,
   items: RenderItem[],
@@ -501,6 +609,7 @@ function processMessage(
         type: "text",
         id: msgId,
         text: content,
+        ...(msg.codexMessagePhase && { phase: msg.codexMessagePhase }),
         sourceMessages: [msg],
         isSubagent: msg.isSubagent,
         augmentHtml: messageHtml ?? augments?.markdown?.[msgId]?.html,
@@ -567,6 +676,7 @@ function processMessage(
           type: "text",
           id: blockId,
           text: block.text,
+          ...(msg.codexMessagePhase && { phase: msg.codexMessagePhase }),
           sourceMessages: [msg],
           isSubagent: msg.isSubagent,
           // Only show streaming cursor on the last text block

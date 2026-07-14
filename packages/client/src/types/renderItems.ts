@@ -27,6 +27,8 @@ export interface TextItem extends RenderItemBase {
   type: "text";
   id: string;
   text: string;
+  /** Codex assistant phase; commentary is an explicit model progress update. */
+  phase?: "commentary" | "final_answer";
   /** True if this text is still being streamed */
   isStreaming?: boolean;
   /** Pre-rendered HTML from server (for completed messages) */

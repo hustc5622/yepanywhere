@@ -50,6 +50,10 @@
   top: 14px; /* Adjust line start for new dot position */
 }
 
+.text-block-commentary.timeline-item::before {
+  background: var(--thinking-color);
+}
+
 /* Add small top padding so text aligns with tool row text */
 .text-block.timeline-item {
   padding-top: 2px;
