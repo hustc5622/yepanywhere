@@ -76,6 +76,7 @@ describe("OpenCode gateway configuration", () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           authorization: "Bearer opencode-key",
+          "X-Sub-Module": "coding",
         }),
       }),
     );

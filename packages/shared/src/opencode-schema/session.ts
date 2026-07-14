@@ -39,6 +39,14 @@ export const OpenCodeSessionSchema = z.object({
   directory: z.string().optional(),
   title: z.string().optional(),
   parentID: z.string().optional(),
+  model: z
+    .object({
+      id: z.string().optional(),
+      providerID: z.string().optional(),
+      modelID: z.string().optional(),
+      variant: z.string().optional(),
+    })
+    .optional(),
   permission: z.array(z.unknown()).optional(),
   time: z
     .object({
@@ -73,6 +81,7 @@ export const OpenCodeMessageSchema = z.object({
   parentID: z.string().optional(),
   modelID: z.string().optional(),
   providerID: z.string().optional(),
+  variant: z.string().optional(),
   mode: z.string().optional(),
   agent: z.string().optional(),
   path: z
@@ -104,8 +113,10 @@ export const OpenCodeMessageSchema = z.object({
     .optional(),
   model: z
     .object({
+      id: z.string().optional(),
       providerID: z.string().optional(),
       modelID: z.string().optional(),
+      variant: z.string().optional(),
     })
     .optional(),
   tools: z.record(z.string(), z.boolean()).optional(),

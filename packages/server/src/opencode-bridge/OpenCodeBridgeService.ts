@@ -61,6 +61,7 @@ interface SessionRecord {
   updatedAt: string;
   processId?: string;
   model?: string;
+  reasoningEffort?: string;
   mode?: PermissionMode;
   title?: string | null;
   messageCount?: number;
@@ -72,6 +73,7 @@ interface SessionRecord {
 interface StartSessionResponse {
   sessionId?: string;
   processId?: string;
+  reasoningEffort?: string;
   queued?: boolean;
   queueId?: string;
   position?: number;
@@ -363,6 +365,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       const response = await client.startSession(projectId, request.message, {
         mode: request.mode,
         model: request.model,
+        reasoningEffort: request.reasoningEffort,
         opencodeConfig: request.opencodeConfig,
       });
       if (response.sessionId) {
@@ -374,6 +377,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           {
             processId: response.processId,
             model: request.model,
+            reasoningEffort:
+              response.reasoningEffort ?? request.reasoningEffort,
             mode: request.mode,
           },
         );
@@ -448,6 +453,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           {
             mode: request.mode,
             model: request.model,
+            reasoningEffort: request.reasoningEffort,
             opencodeConfig: request.opencodeConfig,
             resumeSessionAt: request.resumeSessionAt,
           },
@@ -461,6 +467,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           {
             processId: response.processId,
             model: request.model,
+            reasoningEffort:
+              response.reasoningEffort ?? request.reasoningEffort,
             mode: request.mode,
           },
         );
@@ -479,9 +487,13 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         const response = await client.queueMessage(sessionId, request.message, {
           mode: request.mode,
           model: request.model,
+          reasoningEffort: request.reasoningEffort,
           opencodeConfig: request.opencodeConfig,
         });
-        this.touchSession(sessionId, { processId: response.processId });
+        this.touchSession(sessionId, {
+          processId: response.processId,
+          reasoningEffort: request.reasoningEffort,
+        });
         this.writeJson(res, 200, response);
         return;
       }
@@ -584,6 +596,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     metadata: {
       processId?: string;
       model?: string;
+      reasoningEffort?: string;
       mode?: PermissionMode;
     },
   ): void {
@@ -599,6 +612,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       updatedAt: now,
       processId: metadata.processId ?? existing?.processId,
       model: metadata.model ?? existing?.model,
+      reasoningEffort: metadata.reasoningEffort ?? existing?.reasoningEffort,
       mode: metadata.mode ?? existing?.mode,
       title: existing?.title,
       messageCount: existing?.messageCount,
@@ -610,12 +624,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
   private touchSession(
     sessionId: string,
-    metadata: { processId?: string },
+    metadata: { processId?: string; reasoningEffort?: string },
   ): void {
     const existing = this.sessions.get(sessionId);
     if (!existing) return;
     existing.updatedAt = new Date().toISOString();
     existing.processId = metadata.processId ?? existing.processId;
+    existing.reasoningEffort =
+      metadata.reasoningEffort ?? existing.reasoningEffort;
   }
 
   private updateSessionState(
@@ -678,6 +694,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       messageCount: record.messageCount ?? 1,
       provider: "opencode",
       model: record.model,
+      reasoningEffort: record.reasoningEffort,
       activity: record.activity,
       pendingInputType: record.pendingInputType,
       active:
@@ -705,6 +722,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         activity: session.activity,
         provider: "opencode",
         model: session.model,
+        reasoningEffort: session.reasoningEffort,
         source: "opencode-bridge",
       } satisfies SessionSummary,
       projectName: session.projectName,
@@ -1350,6 +1368,7 @@ class YepApiClient {
     options: {
       mode?: PermissionMode;
       model?: string;
+      reasoningEffort?: string;
       opencodeConfig?: OpenCodeSessionConfig;
     },
   ): Promise<StartSessionResponse> {
@@ -1359,6 +1378,7 @@ class YepApiClient {
         message,
         mode: options.mode,
         model: options.model,
+        reasoningEffort: options.reasoningEffort,
         opencodeConfig: options.opencodeConfig,
         provider: "opencode",
       },
@@ -1372,6 +1392,7 @@ class YepApiClient {
     options: {
       mode?: PermissionMode;
       model?: string;
+      reasoningEffort?: string;
       opencodeConfig?: OpenCodeSessionConfig;
       resumeSessionAt?: string;
     },
@@ -1384,6 +1405,7 @@ class YepApiClient {
           message,
           mode: options.mode,
           model: options.model,
+          reasoningEffort: options.reasoningEffort,
           opencodeConfig: options.opencodeConfig,
           resumeSessionAt: options.resumeSessionAt,
           provider: "opencode",
@@ -1410,6 +1432,7 @@ class YepApiClient {
     options: {
       mode?: PermissionMode;
       model?: string;
+      reasoningEffort?: string;
       opencodeConfig?: OpenCodeSessionConfig;
     },
   ): Promise<QueueMessageResponse> {
@@ -1419,6 +1442,7 @@ class YepApiClient {
         message,
         mode: options.mode,
         model: options.model,
+        reasoningEffort: options.reasoningEffort,
         opencodeConfig: options.opencodeConfig,
         provider: "opencode",
       },
@@ -1471,6 +1495,7 @@ function parseSessionRequest(raw: unknown): {
   message?: string;
   mode?: PermissionMode;
   model?: string;
+  reasoningEffort?: string;
   opencodeConfig?: OpenCodeSessionConfig;
   resumeSessionAt?: string;
 } {
@@ -1483,6 +1508,10 @@ function parseSessionRequest(raw: unknown): {
       ? body.mode
       : undefined;
   const model = typeof body?.model === "string" ? body.model : undefined;
+  const reasoningEffort =
+    typeof body?.reasoningEffort === "string"
+      ? body.reasoningEffort
+      : undefined;
   const opencodeConfig = asRecord(body?.opencodeConfig)
     ? (body?.opencodeConfig as OpenCodeSessionConfig)
     : undefined;
@@ -1490,7 +1519,15 @@ function parseSessionRequest(raw: unknown): {
     typeof body?.resumeSessionAt === "string"
       ? body.resumeSessionAt
       : undefined;
-  return { cwd, message, mode, model, opencodeConfig, resumeSessionAt };
+  return {
+    cwd,
+    message,
+    mode,
+    model,
+    reasoningEffort,
+    opencodeConfig,
+    resumeSessionAt,
+  };
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {

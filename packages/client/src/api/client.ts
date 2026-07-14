@@ -257,7 +257,7 @@ export interface SessionOptions {
   /** Model ID (e.g., "sonnet", "opus", "qwen2.5-coder:0.5b") */
   model?: string;
   thinking?: ThinkingOption;
-  /** Exact provider reasoning effort (currently used by Codex). */
+  /** Exact provider reasoning effort / OpenCode model variant. */
   reasoningEffort?: string;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
@@ -1008,10 +1008,14 @@ export const api = {
     }>(`/processes/${processId}/models`),
 
   setProcessModel: (processId: string, model?: string) =>
-    fetchJSON<{ success: boolean; model?: string }>(
-      `/processes/${processId}/model`,
-      { method: "POST", body: JSON.stringify({ model }) },
-    ),
+    fetchJSON<{
+      success: boolean;
+      model?: string;
+      reasoningEffort?: string;
+    }>(`/processes/${processId}/model`, {
+      method: "POST",
+      body: JSON.stringify({ model }),
+    }),
 
   respondToInput: (
     sessionId: string,

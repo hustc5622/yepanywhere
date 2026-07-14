@@ -530,6 +530,64 @@ describe("OpenCodeBridgeService", () => {
     await bridge.shutdown();
   });
 
+  it("forwards the selected OpenCode reasoning variant to the Yep API", async () => {
+    let forwardedBody: Record<string, unknown> | undefined;
+    const upstream = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/global/event") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write("\n");
+        return;
+      }
+      if (req.method === "POST" && req.url?.includes("/sessions")) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        forwardedBody = JSON.parse(
+          Buffer.concat(chunks).toString("utf8"),
+        ) as Record<string, unknown>;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            sessionId: "ses_variant",
+            processId: "proc_variant",
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const upstreamUrl = await listen(upstream);
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: upstreamUrl,
+      opencodeServerUrl: upstreamUrl,
+    });
+
+    await bridge.start();
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/tmp/project",
+        message: "think deeply",
+        reasoningEffort: "max",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(forwardedBody).toMatchObject({
+      message: "think deeply",
+      provider: "opencode",
+      reasoningEffort: "max",
+    });
+    await bridge.shutdown();
+  });
+
   it("starts and owns a managed OpenCode server when no external URL is configured", async () => {
     const opencodePath = await writeFakeOpenCodeExecutable();
     const startPort = await getFreePort();

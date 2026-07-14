@@ -46,6 +46,7 @@ import { useI18n } from "../i18n";
 import { getStaticAgentCommandConfigs } from "../lib/agentCommands";
 import {
   getModelReasoningEfforts,
+  getOpenCodeReasoningPickerEfforts,
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
 import { hasCoarsePointer } from "../lib/deviceDetection";
@@ -104,6 +105,7 @@ const THINKING_PRESET_ORDER: readonly ThinkingPreset[] = [
   "on:high",
   "on:max",
 ];
+const OPENCODE_DEFAULT_VARIANT = "__yep_default_variant__";
 const DEFAULT_OPENCODE_CAPABILITIES: OpenCodeModelCapabilities = {
   attachment: false,
   reasoning: false,
@@ -112,11 +114,11 @@ const DEFAULT_OPENCODE_CAPABILITIES: OpenCodeModelCapabilities = {
 };
 
 function getDefaultOpenCodeCapabilities(
-  protocol: OpenCodeRequestProtocol,
+  hasReasoningVariants = false,
 ): OpenCodeModelCapabilities {
   return {
     ...DEFAULT_OPENCODE_CAPABILITIES,
-    reasoning: protocol === "anthropic",
+    reasoning: hasReasoningVariants,
   };
 }
 
@@ -300,6 +302,9 @@ export function NewSessionForm({
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<
     string | null
   >(null);
+  const [opencodeReasoningEffort, setOpenCodeReasoningEffort] = useState<
+    string | null
+  >(null);
   const [selectedOpenCodeProtocol, setSelectedOpenCodeProtocol] =
     useState<OpenCodeRequestProtocol>("openai-compatible");
   const [selectedCodexMcpMode, setSelectedCodexMcpMode] =
@@ -405,8 +410,17 @@ export function NewSessionForm({
               : undefined),
         )
       : undefined;
+  const effectiveOpenCodeReasoningEffort =
+    selectedProvider === "opencode" && opencodeReasoningEffort
+      ? opencodeReasoningEffort
+      : undefined;
+  const selectedReasoningEffort =
+    selectedProvider === "codex" && thinkingMode === "on"
+      ? effectiveCodexReasoningEffort
+      : effectiveOpenCodeReasoningEffort;
   const getEffortLabel = useCallback(
     (effort: string): string => {
+      if (effort === "xhigh") return "XHigh";
       return isEffortLevel(effort) ? t(EFFORT_LABEL_KEYS[effort]) : effort;
     },
     [t],
@@ -484,6 +498,25 @@ export function NewSessionForm({
     },
     [applyThinkingPreset],
   );
+  const openCodeReasoningOptions = useMemo((): FilterOption<string>[] => {
+    return [
+      {
+        value: OPENCODE_DEFAULT_VARIANT,
+        label: t("processInfoDefaultModel"),
+      },
+      ...getOpenCodeReasoningPickerEfforts().map((option) => ({
+        value: option.reasoningEffort,
+        label: getEffortLabel(option.reasoningEffort),
+      })),
+    ];
+  }, [getEffortLabel, t]);
+  const handleOpenCodeReasoningSelect = useCallback((selected: string[]) => {
+    const effort = selected[0];
+    setOpenCodeReasoningEffort(
+      !effort || effort === OPENCODE_DEFAULT_VARIANT ? null : effort,
+    );
+  }, []);
+  const showOpenCodeReasoningSelector = selectedProvider === "opencode";
 
   // Default to true for backwards compatibility with providers that don't set these flags
   const supportsPermissionMode =
@@ -527,6 +560,7 @@ export function NewSessionForm({
         ? getPreferredOpenCodeModelId(
             initialProvider.models ?? [],
             savedDefaults?.opencodeConfig?.model ??
+              savedDefaults?.model ??
               initialProvider.currentModel,
           )
         : getPreferredModelId(
@@ -544,11 +578,16 @@ export function NewSessionForm({
         savedProtocol && supportedProtocols.includes(savedProtocol)
           ? savedProtocol
           : (supportedProtocols[0] ?? "openai-compatible");
+      const initialReasoningEfforts = getModelReasoningEfforts(
+        modelInfo,
+        supportedProtocols.length > 0 ? initialProtocol : undefined,
+      );
       setSelectedOpenCodeProtocol(initialProtocol);
       setOpencodeCapabilities({
-        ...getDefaultOpenCodeCapabilities(initialProtocol),
+        ...getDefaultOpenCodeCapabilities(initialReasoningEfforts.length > 0),
         ...savedDefaults?.opencodeConfig?.capabilities,
       });
+      setOpenCodeReasoningEffort(savedDefaults?.reasoningEffort ?? null);
       setSelectedModel(preferredModel);
     } else {
       setSelectedModel(preferredModel);
@@ -629,8 +668,15 @@ export function NewSessionForm({
         );
         const protocol =
           modelInfo?.supportedRequestProtocols?.[0] ?? "openai-compatible";
+        const reasoningEfforts = getModelReasoningEfforts(
+          modelInfo,
+          modelInfo?.supportedRequestProtocols?.length ? protocol : undefined,
+        );
         setSelectedOpenCodeProtocol(protocol);
-        setOpencodeCapabilities(getDefaultOpenCodeCapabilities(protocol));
+        setOpencodeCapabilities(
+          getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
+        );
+        setOpenCodeReasoningEffort(null);
         setSelectedModel(preferredModel);
       } else {
         setSelectedModel(resolvedPreferredModel);
@@ -696,10 +742,14 @@ export function NewSessionForm({
         )
           ? selectedOpenCodeProtocol
           : (supportedProtocols[0] ?? "openai-compatible");
+        const reasoningEfforts = getModelReasoningEfforts(
+          nextInfo,
+          supportedProtocols.length > 0 ? nextProtocol : undefined,
+        );
         setSelectedOpenCodeProtocol(nextProtocol);
-        if (nextProtocol !== selectedOpenCodeProtocol) {
-          setOpencodeCapabilities(getDefaultOpenCodeCapabilities(nextProtocol));
-        }
+        setOpencodeCapabilities(
+          getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
+        );
         setSelectedModel(nextModel);
         return;
       }
@@ -711,10 +761,16 @@ export function NewSessionForm({
   const handleOpenCodeProtocolSelect = useCallback(
     (protocol: OpenCodeRequestProtocol) => {
       if (!selectedOpenCodeProtocols.includes(protocol)) return;
+      const reasoningEfforts = getModelReasoningEfforts(
+        selectedModelInfo,
+        protocol,
+      );
       setSelectedOpenCodeProtocol(protocol);
-      setOpencodeCapabilities(getDefaultOpenCodeCapabilities(protocol));
+      setOpencodeCapabilities(
+        getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
+      );
     },
-    [selectedOpenCodeProtocols],
+    [selectedModelInfo, selectedOpenCodeProtocols],
   );
 
   // Combined display text: committed text + interim transcript
@@ -878,10 +934,7 @@ export function NewSessionForm({
         thinking: supportsThinkingToggle
           ? getThinkingOption(thinkingMode, thinkingLevel)
           : undefined,
-        reasoningEffort:
-          selectedProvider === "codex" && thinkingMode === "on"
-            ? effectiveCodexReasoningEffort
-            : undefined,
+        reasoningEffort: selectedReasoningEffort,
         permissionMode: mode,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
@@ -901,7 +954,7 @@ export function NewSessionForm({
     mode,
     opencodeConfigForRequest,
     selectedCodexMcpMode,
-    effectiveCodexReasoningEffort,
+    selectedReasoningEffort,
     selectedModelForRequest,
     selectedProvider,
     showToast,
@@ -945,10 +998,7 @@ export function NewSessionForm({
         mode,
         model: selectedModelForRequest,
         thinking,
-        reasoningEffort:
-          selectedProvider === "codex" && thinkingMode === "on"
-            ? effectiveCodexReasoningEffort
-            : undefined,
+        reasoningEffort: selectedReasoningEffort,
         provider: selectedProvider ?? undefined,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
@@ -1197,9 +1247,9 @@ export function NewSessionForm({
       getThinkingOption(thinkingMode, thinkingLevel)
     : true;
   const reasoningEffortDefaultsMatch =
-    selectedProvider === "codex"
+    selectedProvider === "codex" || selectedProvider === "opencode"
       ? (savedDefaults?.reasoningEffort ?? undefined) ===
-        (thinkingMode === "on" ? effectiveCodexReasoningEffort : undefined)
+        selectedReasoningEffort
       : true;
   const opencodeDefaultsMatch =
     selectedProvider === "opencode"
@@ -1429,6 +1479,36 @@ export function NewSessionForm({
           </div>
         </div>
       )}
+      {showOpenCodeReasoningSelector && compact && (
+        <div className="new-session-effort-control">
+          <span className="new-session-effort-label">
+            {t("newSessionEffortTitle")}
+          </span>
+          <div className="new-session-effort-options">
+            {openCodeReasoningOptions.map((option) => {
+              const isDefault = option.value === OPENCODE_DEFAULT_VARIANT;
+              const selected = isDefault
+                ? !effectiveOpenCodeReasoningEffort
+                : effectiveOpenCodeReasoningEffort === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`new-session-effort-option ${selected ? "selected" : ""}`}
+                  onClick={() =>
+                    setOpenCodeReasoningEffort(isDefault ? null : option.value)
+                  }
+                  disabled={isStarting}
+                  aria-pressed={selected}
+                  aria-label={`${t("newSessionEffortTitle")}: ${option.label}`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {pendingFiles.length > 0 && (
         <div className="pending-files-list">
           {pendingFiles.map((pf) => {
@@ -1585,6 +1665,23 @@ export function NewSessionForm({
                       {t("newSessionOpenCodeEndpointAnthropic")}
                     </button>
                   </div>
+                </div>
+              )}
+              {showOpenCodeReasoningSelector && (
+                <div className="new-session-config-field">
+                  <h3>{t("newSessionEffortTitle")}</h3>
+                  <FilterDropdown
+                    label={t("newSessionEffortTitle")}
+                    options={openCodeReasoningOptions}
+                    selected={[
+                      effectiveOpenCodeReasoningEffort ??
+                        OPENCODE_DEFAULT_VARIANT,
+                    ]}
+                    onChange={handleOpenCodeReasoningSelect}
+                    multiSelect={false}
+                    placeholder={t("newSessionEffortTitle")}
+                    align="right"
+                  />
                 </div>
               )}
               {supportsThinkingToggle && (

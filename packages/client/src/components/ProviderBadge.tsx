@@ -99,7 +99,13 @@ export function ProviderBadge({
     effort: string | undefined,
   ): string | null => {
     const normalized = normalizeConfigLabel(effort);
-    if (!normalized || normalized === "none") return null;
+    if (
+      !normalized ||
+      normalized === "none" ||
+      (provider === "opencode" && normalized === "default")
+    ) {
+      return null;
+    }
     if (
       (provider === "codex" || provider === "codex-oss") &&
       normalized === "max"

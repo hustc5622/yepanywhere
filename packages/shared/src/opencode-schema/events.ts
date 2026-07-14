@@ -100,6 +100,7 @@ export const OpenCodeMessageInfoSchema = z.object({
   parentID: z.string().optional(),
   modelID: z.string().optional(),
   providerID: z.string().optional(),
+  variant: z.string().optional(),
   mode: z.string().optional(),
   agent: z.string().optional(),
   path: z
@@ -119,8 +120,10 @@ export const OpenCodeMessageInfoSchema = z.object({
     .optional(),
   model: z
     .object({
+      id: z.string().optional(),
       providerID: z.string().optional(),
       modelID: z.string().optional(),
+      variant: z.string().optional(),
     })
     .optional(),
 });
@@ -148,8 +151,10 @@ export const OpenCodeSessionInfoSchema = z.object({
   agent: z.string().optional(),
   model: z
     .object({
+      id: z.string().optional(),
       providerID: z.string().optional(),
       modelID: z.string().optional(),
+      variant: z.string().optional(),
     })
     .optional(),
   revert: z.unknown().optional(),

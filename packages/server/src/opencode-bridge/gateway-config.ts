@@ -165,6 +165,7 @@ export async function fetchOpenCodeGatewayModels(
     headers: {
       accept: "application/json",
       authorization: `Bearer ${config.apiKey}`,
+      ...gatewayHeaders(config),
     },
     signal: AbortSignal.timeout(10_000),
   });

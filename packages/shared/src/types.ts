@@ -39,6 +39,11 @@ export const DEFAULT_PROVIDER: ProviderName = "codex";
 /**
  * Model information for a provider.
  */
+export interface ReasoningEffortInfo {
+  reasoningEffort: string;
+  description?: string;
+}
+
 export interface ModelInfo {
   /** Model identifier (e.g., "sonnet", "qwen2.5-coder:0.5b") */
   id: string;
@@ -47,10 +52,11 @@ export interface ModelInfo {
   /** Description of the model's capabilities (optional) */
   description?: string;
   /** Reasoning efforts advertised by the provider, in picker display order. */
-  supportedReasoningEfforts?: Array<{
-    reasoningEffort: string;
-    description?: string;
-  }>;
+  supportedReasoningEfforts?: ReasoningEffortInfo[];
+  /** OpenCode reasoning efforts keyed by the request protocol used upstream. */
+  supportedReasoningEffortsByProtocol?: Partial<
+    Record<OpenCodeRequestProtocol, ReasoningEffortInfo[]>
+  >;
   /** Provider-recommended reasoning effort for this model. */
   defaultReasoningEffort?: string;
   /** Model size in bytes (for local models) */
@@ -217,7 +223,7 @@ export interface NewSessionDefaults {
   provider?: ProviderName;
   model?: string;
   thinking?: ThinkingOption;
-  /** Exact provider reasoning effort (currently used by Codex). */
+  /** Exact provider reasoning effort / OpenCode model variant. */
   reasoningEffort?: string;
   permissionMode?: PermissionMode;
   codexMcpMode?: CodexMcpMode;

@@ -17,6 +17,25 @@ function createMockIterator(messages: SDKMessage[]): AsyncIterator<SDKMessage> {
 }
 
 describe("Process", () => {
+  it("keeps a generic OpenCode reasoning preference when switching models", async () => {
+    const setModel = vi.fn(async () => {});
+    const process = new Process(createMockIterator([]), {
+      projectPath: "/test",
+      projectId: "proj-1",
+      sessionId: "sess-variant",
+      provider: "opencode",
+      reasoningEffort: "max",
+      setModelFn: setModel,
+    });
+
+    await expect(process.setModel("ohmyrouter/deepseek-v4-pro")).resolves.toBe(
+      true,
+    );
+    expect(setModel).toHaveBeenCalledWith("ohmyrouter/deepseek-v4-pro");
+    expect(process.requestedReasoningEffort).toBe("max");
+    expect(process.resolvedReasoningEffort).toBe("max");
+  });
+
   describe("event subscription", () => {
     it("emits message events", async () => {
       const messages: SDKMessage[] = [

@@ -4,6 +4,7 @@ import type { SessionIndexService } from "../../src/indexes/index.js";
 import type { SessionMetadataService } from "../../src/metadata/SessionMetadataService.js";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import { createProcessesRoutes } from "../../src/routes/processes.js";
+import type { RuntimeController } from "../../src/runtime/types.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
 import type { Supervisor } from "../../src/supervisor/Supervisor.js";
 import type {
@@ -56,6 +57,40 @@ function createSummary(): SessionSummary {
 }
 
 describe("Processes Routes", () => {
+  it("preserves the OpenCode reasoning preference after a live model switch", async () => {
+    const setModel = vi.fn(async () => ({ success: true }));
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({
+          provider: "opencode",
+          reasoningEffort: "default",
+          requestedReasoningEffort: "max",
+        })),
+        setModel,
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/model", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "ohmyrouter/deepseek-v4-pro" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      success: true,
+      model: "ohmyrouter/deepseek-v4-pro",
+      reasoningEffort: "max",
+    });
+    expect(setModel).toHaveBeenCalledWith(
+      "proc-1",
+      "ohmyrouter/deepseek-v4-pro",
+    );
+  });
+
   it("falls back to the live summary title when the index lookup misses", async () => {
     const project = createProject();
     const process = createProcessInfo();

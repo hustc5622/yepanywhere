@@ -22,11 +22,16 @@ import type {
   OpenCodeMessagePartUpdatedEvent,
   OpenCodeMessageUpdatedEvent,
   OpenCodePart,
+  OpenCodeRequestProtocol,
   OpenCodeSSEEvent,
   OpenCodeSessionConfig,
   PermissionMode,
+  ReasoningEffortInfo,
 } from "@yep-anywhere/shared";
-import { parseOpenCodeSSEEvent } from "@yep-anywhere/shared";
+import {
+  ALL_OPENCODE_REQUEST_PROTOCOLS,
+  parseOpenCodeSSEEvent,
+} from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
 import {
   buildManagedOpenCodeEnv,
@@ -107,11 +112,110 @@ interface OpenCodeModelRef {
 interface OpenCodeRuntimeRef {
   baseUrl?: string;
   currentModel?: string | null;
+  currentVariant?: string;
   cwd?: string;
+}
+
+interface OpenCodeConfigProvidersResponse {
+  providers?: Array<{
+    id?: string;
+    models?: Record<
+      string,
+      {
+        variants?: Record<string, unknown>;
+      }
+    >;
+  }>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type ReasoningEffortsByProtocol = NonNullable<
+  ModelInfo["supportedReasoningEffortsByProtocol"]
+>;
+
+function parseOpenCodeModelHeader(
+  line: string,
+): { catalogId: string; modelId: string } | null {
+  const trimmed = line.trim();
+  if (line !== trimmed || !/^[a-zA-Z0-9._-]+\/\S+$/.test(trimmed)) return null;
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return null;
+  return {
+    catalogId: trimmed,
+    modelId: trimmed.slice(slash + 1),
+  };
+}
+
+function extractFirstJsonObject(value: string): Record<string, unknown> | null {
+  let searchFrom = 0;
+  while (searchFrom < value.length) {
+    const start = value.indexOf("{", searchFrom);
+    if (start < 0) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < value.length; index += 1) {
+      const character = value[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (character === '"') {
+        inString = true;
+      } else if (character === "{") {
+        depth += 1;
+      } else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(value.slice(start, index + 1)) as unknown;
+            if (isRecord(parsed)) return parsed;
+          } catch {
+            // A non-JSON brace block may precede the verbose model payload.
+          }
+          searchFrom = start + 1;
+          break;
+        }
+      }
+    }
+
+    if (depth > 0) return null;
+  }
+  return null;
+}
+
+function requestProtocolForOpenCodeNpm(
+  npm: unknown,
+): OpenCodeRequestProtocol | null {
+  if (npm === "@ai-sdk/openai-compatible") return "openai-compatible";
+  if (npm === "@ai-sdk/anthropic") return "anthropic";
+  return null;
+}
+
+function mergeReasoningEfforts(
+  ...lists: Array<ReasoningEffortInfo[] | undefined>
+): ReasoningEffortInfo[] {
+  const merged: ReasoningEffortInfo[] = [];
+  const seen = new Set<string>();
+  for (const list of lists) {
+    for (const effort of list ?? []) {
+      if (!effort.reasoningEffort || seen.has(effort.reasoningEffort)) continue;
+      seen.add(effort.reasoningEffort);
+      merged.push(effort);
+    }
+  }
+  return merged;
 }
 
 interface OpenCodeSessionCreatePayload {
@@ -129,6 +233,8 @@ interface OpenCodeSessionCreatePayload {
 interface OpenCodeMessagePayload {
   parts: Array<{ type: "text"; text: string }>;
   model?: OpenCodeModelRef;
+  /** OpenCode-native model variant (for example high or max). */
+  variant?: string;
 }
 
 interface OpenCodeSessionResponse {
@@ -247,15 +353,24 @@ export class OpenCodeProvider implements AgentProvider {
       ) {
         return this.gatewayModelCache.models;
       }
+    }
+
+    const cliModelsPromise = this.loadOpenCodeCliModels(opencodePath);
+    if (gatewayConfig) {
+      const cacheKey = `${gatewayConfig.apiBase}:${gatewayConfig.apiKey}`;
       try {
         const models = await fetchOpenCodeGatewayModels(gatewayConfig);
         if (models.length > 0) {
+          const mergedModels = this.mergeGatewayModelReasoningMetadata(
+            models,
+            await cliModelsPromise,
+          );
           this.gatewayModelCache = {
             cacheKey,
             expiresAt: Date.now() + 60_000,
-            models,
+            models: mergedModels,
           };
-          return models;
+          return mergedModels;
         }
       } catch (error) {
         getLogger().warn(
@@ -268,38 +383,143 @@ export class OpenCodeProvider implements AgentProvider {
       }
     }
 
-    try {
-      const { stdout: result } = await execFileAsync(opencodePath, ["models"], {
-        encoding: "utf-8",
-        timeout: 10000,
-      });
+    const cliModels = await cliModelsPromise;
+    if (cliModels.length > 0) return cliModels;
 
-      // Parse model list output. Current OpenCode emits one model per line as
-      // provider/model; older/newer versions may include headings or table art.
-      const models: ModelInfo[] = [];
-      for (const line of result.split("\n")) {
-        const trimmed = line.trim();
-        if (
-          trimmed &&
-          !trimmed.startsWith("─") &&
-          !trimmed.startsWith("opencode models") &&
-          trimmed.includes("/")
-        ) {
-          models.push({
-            id: trimmed,
-            name: this.formatModelName(trimmed),
-          });
-        }
+    // Return default models if both CLI catalog commands fail.
+    return [
+      { id: "opencode/big-pickle", name: "Big Pickle (Free)" },
+      { id: "auto", name: "Auto (recommended)" },
+    ];
+  }
+
+  private async loadOpenCodeCliModels(
+    opencodePath: string,
+  ): Promise<ModelInfo[]> {
+    try {
+      const { stdout } = await execFileAsync(
+        opencodePath,
+        ["models", "--verbose"],
+        {
+          encoding: "utf-8",
+          timeout: 10_000,
+          maxBuffer: 16 * 1024 * 1024,
+        },
+      );
+      return this.parseOpenCodeVerboseModels(stdout);
+    } catch {
+      // Older OpenCode versions do not expose --verbose. Keep their model
+      // catalog usable, just without per-model variant metadata.
+      try {
+        const { stdout } = await execFileAsync(opencodePath, ["models"], {
+          encoding: "utf-8",
+          timeout: 10_000,
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        return this.parseOpenCodeVerboseModels(stdout);
+      } catch {
+        return [];
+      }
+    }
+  }
+
+  private parseOpenCodeVerboseModels(result: string): ModelInfo[] {
+    const lines = result.split(/\r?\n/);
+    const models: ModelInfo[] = [];
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const header = parseOpenCodeModelHeader(lines[index] ?? "");
+      if (!header) continue;
+
+      let nextHeaderIndex = index + 1;
+      while (
+        nextHeaderIndex < lines.length &&
+        !parseOpenCodeModelHeader(lines[nextHeaderIndex] ?? "")
+      ) {
+        nextHeaderIndex += 1;
       }
 
-      return models;
-    } catch {
-      // Return default models if command fails
-      return [
-        { id: "opencode/big-pickle", name: "Big Pickle (Free)" },
-        { id: "auto", name: "Auto (recommended)" },
-      ];
+      const metadata = extractFirstJsonObject(
+        lines.slice(index + 1, nextHeaderIndex).join("\n"),
+      );
+      const api = isRecord(metadata?.api) ? metadata.api : undefined;
+      const protocol = requestProtocolForOpenCodeNpm(api?.npm);
+      const variants = isRecord(metadata?.variants)
+        ? Object.keys(metadata.variants).map((reasoningEffort) => ({
+            reasoningEffort,
+          }))
+        : [];
+      const byProtocol: ReasoningEffortsByProtocol = {};
+      if (protocol && variants.length > 0) byProtocol[protocol] = variants;
+
+      models.push({
+        id: header.catalogId,
+        name: this.formatModelName(header.catalogId),
+        ...(variants.length > 0
+          ? {
+              supportedReasoningEfforts: variants,
+              ...(protocol
+                ? { supportedReasoningEffortsByProtocol: byProtocol }
+                : {}),
+            }
+          : {}),
+      });
+      index = nextHeaderIndex - 1;
     }
+
+    return models;
+  }
+
+  private mergeGatewayModelReasoningMetadata(
+    gatewayModels: ModelInfo[],
+    cliModels: ModelInfo[],
+  ): ModelInfo[] {
+    const discoveredByModel = new Map<string, ReasoningEffortsByProtocol>();
+    for (const cliModel of cliModels) {
+      const modelId = parseOpenCodeModelHeader(cliModel.id)?.modelId;
+      if (!modelId || !cliModel.supportedReasoningEffortsByProtocol) continue;
+
+      const discovered = discoveredByModel.get(modelId) ?? {};
+      for (const protocol of ALL_OPENCODE_REQUEST_PROTOCOLS) {
+        discovered[protocol] = mergeReasoningEfforts(
+          discovered[protocol],
+          cliModel.supportedReasoningEffortsByProtocol[protocol],
+        );
+        if (discovered[protocol]?.length === 0) {
+          delete discovered[protocol];
+        }
+      }
+      discoveredByModel.set(modelId, discovered);
+    }
+
+    return gatewayModels.map((model) => {
+      const protocols = model.supportedRequestProtocols?.length
+        ? model.supportedRequestProtocols
+        : [...ALL_OPENCODE_REQUEST_PROTOCOLS];
+      const discovered = discoveredByModel.get(model.id);
+      const byProtocol: ReasoningEffortsByProtocol = {};
+
+      for (const protocol of protocols) {
+        const efforts = mergeReasoningEfforts(
+          model.supportedReasoningEffortsByProtocol?.[protocol],
+          discovered?.[protocol],
+        );
+        if (efforts.length > 0) byProtocol[protocol] = efforts;
+      }
+
+      const protocolEfforts = protocols.map((protocol) => byProtocol[protocol]);
+      const supportedReasoningEfforts = mergeReasoningEfforts(
+        ...protocolEfforts,
+        model.supportedReasoningEfforts,
+      );
+      if (supportedReasoningEfforts.length === 0) return model;
+
+      return {
+        ...model,
+        supportedReasoningEfforts,
+        supportedReasoningEffortsByProtocol: byProtocol,
+      };
+    });
   }
 
   /**
@@ -348,6 +568,12 @@ export class OpenCodeProvider implements AgentProvider {
                 runtimeRef.cwd,
               );
               runtimeRef.currentModel = normalizedModel;
+              runtimeRef.currentVariant = await this.resolveOpenCodeVariant(
+                runtimeRef.baseUrl,
+                runtimeRef.cwd,
+                normalizedModel,
+                options.reasoningEffort,
+              );
             },
           }),
     };
@@ -477,6 +703,12 @@ export class OpenCodeProvider implements AgentProvider {
       return;
     }
     runtimeRef.currentModel = configApplied.model;
+    runtimeRef.currentVariant = await this.resolveOpenCodeVariant(
+      baseUrl,
+      cwd,
+      configApplied.model,
+      options.reasoningEffort,
+    );
 
     // Create, resume, or fork a session on the server.
     let opencodeSessionId: string;
@@ -528,6 +760,10 @@ export class OpenCodeProvider implements AgentProvider {
       session_id: sessionId,
       cwd,
       model: runtimeRef.currentModel ?? undefined,
+      // Expose the user's model-independent preference to Yep so it survives
+      // later messages and live model switches. The effective variant remains
+      // runtimeRef.currentVariant and is the only value sent to OpenCode.
+      reasoningEffort: options.reasoningEffort ?? "default",
     } as SDKMessage;
 
     try {
@@ -566,6 +802,7 @@ export class OpenCodeProvider implements AgentProvider {
           signal,
           options.onToolApproval,
           runtimeRef.currentModel,
+          runtimeRef.currentVariant,
           cwd,
         );
       }
@@ -747,6 +984,7 @@ export class OpenCodeProvider implements AgentProvider {
     signal: AbortSignal,
     onToolApproval?: StartSessionOptions["onToolApproval"],
     model?: string | null,
+    variant?: string,
     cwd?: string,
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
@@ -901,7 +1139,9 @@ export class OpenCodeProvider implements AgentProvider {
             "Content-Type": "application/json",
             ...this.openCodeDirectoryHeaders(cwd),
           },
-          body: JSON.stringify(this.buildOpenCodeMessagePayload(text, model)),
+          body: JSON.stringify(
+            this.buildOpenCodeMessagePayload(text, model, variant),
+          ),
           signal,
         },
       );
@@ -1673,6 +1913,62 @@ export class OpenCodeProvider implements AgentProvider {
     }
   }
 
+  private async resolveOpenCodeVariant(
+    baseUrl: string,
+    cwd: string | undefined,
+    model: string | null | undefined,
+    requestedVariant: string | undefined,
+  ): Promise<string | undefined> {
+    if (!requestedVariant || requestedVariant === "default") return undefined;
+    const parsedModel = this.parseOpenCodeModelOption(model);
+    if (!parsedModel) return undefined;
+
+    try {
+      const response = await fetch(
+        this.openCodeUrl(baseUrl, "/config/providers", cwd),
+        {
+          headers: {
+            Accept: "application/json",
+            ...this.openCodeDirectoryHeaders(cwd),
+          },
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`OpenCode returned ${response.status}`);
+      }
+
+      const catalog =
+        (await response.json()) as OpenCodeConfigProvidersResponse;
+      const provider = catalog.providers?.find(
+        (item) => item.id === parsedModel.providerID,
+      );
+      const variants = provider?.models?.[parsedModel.modelID]?.variants;
+      if (variants && Object.hasOwn(variants, requestedVariant)) {
+        return requestedVariant;
+      }
+
+      getLogger().info(
+        {
+          model,
+          requestedVariant,
+        },
+        "OpenCode model does not advertise the requested variant; using Default",
+      );
+      return undefined;
+    } catch (error) {
+      getLogger().warn(
+        {
+          model,
+          requestedVariant,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to verify OpenCode model variant; using Default",
+      );
+      return undefined;
+    }
+  }
+
   private mapPermissionModeToOpenCode(
     mode: PermissionMode | undefined,
   ): OpenCodePermissionConfig {
@@ -1810,12 +2106,14 @@ export class OpenCodeProvider implements AgentProvider {
   private buildOpenCodeMessagePayload(
     text: string,
     model: string | null | undefined,
+    variant?: string,
   ): OpenCodeMessagePayload {
     const payload: OpenCodeMessagePayload = {
       parts: [{ type: "text", text }],
     };
     const parsed = this.parseOpenCodeModelOption(model);
     if (parsed) payload.model = parsed;
+    if (variant && variant !== "default") payload.variant = variant;
     return payload;
   }
 

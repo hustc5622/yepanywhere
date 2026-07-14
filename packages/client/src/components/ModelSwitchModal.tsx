@@ -6,7 +6,7 @@ import { Modal } from "./ui/Modal";
 interface ModelSwitchModalProps {
   processId: string;
   currentModel?: string;
-  onModelChanged: (model: string) => void;
+  onModelChanged: (model: string, reasoningEffort?: string) => void;
   onClose: () => void;
 }
 
@@ -41,8 +41,8 @@ export function ModelSwitchModal({
     setSwitching(true);
     setError(null);
     try {
-      await api.setProcessModel(processId, modelId);
-      onModelChanged(modelId);
+      const result = await api.setProcessModel(processId, modelId);
+      onModelChanged(modelId, result.reasoningEffort);
       onClose();
     } catch (err: unknown) {
       setError(

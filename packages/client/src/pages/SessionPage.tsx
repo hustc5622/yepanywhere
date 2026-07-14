@@ -857,8 +857,8 @@ function SessionPageContent({
   };
 
   const handleModelChanged = useCallback(
-    (model: string) => {
-      setSessionModel(model);
+    (model: string, reasoningEffort?: string) => {
+      setSessionModel(model, reasoningEffort);
       showToast(t("sessionSwitchedModel", { model }), "success");
     },
     [setSessionModel, showToast, t],

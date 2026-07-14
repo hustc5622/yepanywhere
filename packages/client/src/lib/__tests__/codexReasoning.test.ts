@@ -2,6 +2,7 @@ import type { ModelInfo } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import {
   getModelReasoningEfforts,
+  getOpenCodeReasoningPickerEfforts,
   resolveModelReasoningEffort,
 } from "../codexReasoning";
 
@@ -41,5 +42,51 @@ describe("Codex model reasoning efforts", () => {
 
   it("keeps a preferred effort when the target model supports it", () => {
     expect(resolveModelReasoningEffort(luna, "xhigh")).toBe("xhigh");
+  });
+
+  it("uses the variants advertised for the selected OpenCode protocol", () => {
+    const glm: ModelInfo = {
+      id: "glm-5.2",
+      name: "GLM-5.2",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "high" },
+        { reasoningEffort: "max" },
+      ],
+      supportedReasoningEffortsByProtocol: {
+        "openai-compatible": [
+          { reasoningEffort: "high" },
+          { reasoningEffort: "max" },
+        ],
+        anthropic: [{ reasoningEffort: "max" }],
+      },
+    };
+
+    expect(
+      getModelReasoningEfforts(glm, "openai-compatible").map(
+        (option) => option.reasoningEffort,
+      ),
+    ).toEqual(["high", "max"]);
+    expect(
+      getModelReasoningEfforts(glm, "anthropic").map(
+        (option) => option.reasoningEffort,
+      ),
+    ).toEqual(["max"]);
+
+    const openAiOnly: ModelInfo = {
+      ...glm,
+      supportedReasoningEffortsByProtocol: {
+        "openai-compatible": [{ reasoningEffort: "max" }],
+      },
+    };
+    expect(getModelReasoningEfforts(openAiOnly, "anthropic")).toEqual([]);
+  });
+
+  it("keeps the OpenCode picker independent from model metadata", () => {
+    expect(
+      getOpenCodeReasoningPickerEfforts().map(
+        (option) => option.reasoningEffort,
+      ),
+    ).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(getModelReasoningEfforts(undefined)).toEqual([]);
   });
 });

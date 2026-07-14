@@ -35,6 +35,7 @@ export interface OpenCodeBridgeSession {
   messageCount: number;
   provider: "opencode";
   model?: string;
+  reasoningEffort?: string;
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
   active: boolean;

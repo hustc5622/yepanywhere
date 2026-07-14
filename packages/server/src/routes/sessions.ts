@@ -439,7 +439,7 @@ export function parseOptionalOpenCodeConfig(raw: unknown): {
   };
 }
 
-function parseOptionalReasoningEffort(rawEffort: unknown): {
+export function parseOptionalReasoningEffort(rawEffort: unknown): {
   reasoningEffort?: string;
   error?: string;
 } {
@@ -454,12 +454,24 @@ function parseOptionalReasoningEffort(rawEffort: unknown): {
   if (
     reasoningEffort.length === 0 ||
     reasoningEffort.length > 64 ||
-    !/^[a-z0-9_-]+$/i.test(reasoningEffort)
+    Array.from(reasoningEffort).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x1f || codePoint === 0x7f;
+    })
   ) {
     return { error: "Invalid reasoningEffort" };
   }
 
   return { reasoningEffort };
+}
+
+export function normalizeReasoningEffortForProvider(
+  provider: ProviderName | undefined,
+  reasoningEffort: string | undefined,
+): string | undefined {
+  return provider === "opencode" && reasoningEffort === "default"
+    ? undefined
+    : reasoningEffort;
 }
 
 export interface SessionsDeps {
@@ -576,7 +588,7 @@ interface StartSessionBody {
   mode?: PermissionMode;
   model?: ModelOption;
   thinking?: ThinkingOption;
-  /** Exact provider reasoning effort. Only used when provider resolves to Codex. */
+  /** Exact provider reasoning effort / OpenCode model variant. */
   reasoningEffort?: string;
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
@@ -607,7 +619,7 @@ interface CreateSessionBody {
   mode?: PermissionMode;
   model?: ModelOption;
   thinking?: ThinkingOption;
-  /** Exact provider reasoning effort. Only used when provider resolves to Codex. */
+  /** Exact provider reasoning effort / OpenCode model variant. */
   reasoningEffort?: string;
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
@@ -2036,7 +2048,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         model,
         thinking,
         effort,
-        reasoningEffort: parsedReasoningEffort.reasoningEffort,
+        reasoningEffort: normalizeReasoningEffortForProvider(
+          body.provider ?? project.provider,
+          parsedReasoningEffort.reasoningEffort,
+        ),
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
         opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
@@ -2168,7 +2183,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         model,
         thinking,
         effort,
-        reasoningEffort: parsedReasoningEffort.reasoningEffort,
+        reasoningEffort: normalizeReasoningEffortForProvider(
+          body.provider ?? project.provider,
+          parsedReasoningEffort.reasoningEffort,
+        ),
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
         opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
@@ -2455,6 +2473,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       "Session resume requested",
     );
 
+    const resumeReasoningEffort =
+      parsedReasoningEffort.reasoningEffort ??
+      (providerName === "codex" || providerName === "opencode"
+        ? sessionSummary?.reasoningEffort
+        : undefined);
+
     const result = await runtimeController.resumeSession({
       sessionId,
       projectPath: project.path,
@@ -2464,11 +2488,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         model,
         thinking,
         effort,
-        reasoningEffort:
-          parsedReasoningEffort.reasoningEffort ??
-          (providerName === "codex"
-            ? sessionSummary?.reasoningEffort
-            : undefined),
+        reasoningEffort: normalizeReasoningEffortForProvider(
+          providerName,
+          resumeReasoningEffort,
+        ),
         providerName,
         codexMcpMode:
           providerName === "codex"
@@ -2584,6 +2607,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       processId: result.id,
       permissionMode: result.permissionMode,
       modeVersion: result.modeVersion,
+      reasoningEffort: resumeReasoningEffort,
     });
   });
 
@@ -2698,9 +2722,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         thinking,
         effort,
         reasoningEffort:
-          parsedReasoningEffort.reasoningEffort ??
-          process.requestedReasoningEffort ??
-          process.reasoningEffort,
+          parsedReasoningEffort.reasoningEffort !== undefined
+            ? normalizeReasoningEffortForProvider(
+                providerName,
+                parsedReasoningEffort.reasoningEffort,
+              )
+            : (process.requestedReasoningEffort ?? process.reasoningEffort),
         providerName,
         codexMcpMode:
           providerName === "codex"

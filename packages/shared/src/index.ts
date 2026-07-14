@@ -20,6 +20,7 @@ export {
 export type {
   ProviderName,
   ProviderInfo,
+  ReasoningEffortInfo,
   ModelInfo,
   OpenCodeRequestProtocol,
   OpenCodeModelLimits,

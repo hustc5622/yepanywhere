@@ -238,7 +238,16 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
       );
     }
 
-    return c.json({ success: true, model: body.model });
+    return c.json({
+      success: true,
+      model: body.model,
+      reasoningEffort:
+        process.provider === "opencode"
+          ? (process.requestedReasoningEffort ??
+            process.reasoningEffort ??
+            "default")
+          : undefined,
+    });
   });
 
   return routes;

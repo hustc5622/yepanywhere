@@ -1269,8 +1269,16 @@ export function useSession(
 
   // Allow external model update (e.g., after /model command switches mid-session)
   const setSessionModel = useCallback(
-    (model: string) => {
-      setSession((prev) => (prev ? { ...prev, model } : prev));
+    (model: string, reasoningEffort?: string) => {
+      setSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              model,
+              ...(reasoningEffort !== undefined && { reasoningEffort }),
+            }
+          : prev,
+      );
     },
     [setSession],
   );

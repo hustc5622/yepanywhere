@@ -44,6 +44,9 @@ async function createOpenCodeDb(
   options: {
     sessionMetadata?: Record<string, unknown> | null;
     sessionTitle?: string;
+    /** null simulates an older session row that did not persist variant. */
+    sessionVariant?: string | null;
+    messageVariants?: Array<string | undefined>;
   } = {},
 ): Promise<boolean> {
   const sqlite = await loadSqliteModule();
@@ -133,7 +136,9 @@ async function createOpenCodeDb(
       JSON.stringify({
         id: "glm-5.2",
         providerID: "anthropic",
-        variant: "default",
+        ...(options.sessionVariant === null
+          ? {}
+          : { variant: options.sessionVariant ?? "default" }),
       }),
       1000,
       50,
@@ -143,19 +148,28 @@ async function createOpenCodeDb(
         : JSON.stringify(options.sessionMetadata),
     );
 
-    db.prepare(
-      "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-    ).run(
-      "msg_user",
-      "ses_test",
-      createdAt + 10,
-      createdAt + 10,
-      JSON.stringify({
-        role: "user",
-        time: { created: createdAt + 10 },
-        model: { providerID: "anthropic", modelID: "glm-5.2" },
-      }),
-    );
+    const messageVariants = options.messageVariants ?? [undefined];
+    for (const [index, variant] of messageVariants.entries()) {
+      const messageId = index === 0 ? "msg_user" : `msg_user_${index}`;
+      const messageTime = index === 0 ? createdAt + 10 : updatedAt + index * 10;
+      db.prepare(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+      ).run(
+        messageId,
+        "ses_test",
+        messageTime,
+        messageTime,
+        JSON.stringify({
+          role: "user",
+          time: { created: messageTime },
+          model: {
+            providerID: "anthropic",
+            modelID: "glm-5.2",
+            ...(variant ? { variant } : {}),
+          },
+        }),
+      );
+    }
     db.prepare(
       "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(
@@ -277,6 +291,43 @@ describe("OpenCode sqlite session support", () => {
     const sessions = await reader.listSessions(encodeProjectId(projectPath));
 
     expect(sessions[0]?.createdBy).toBe("yep");
+  });
+
+  it("reads the current OpenCode model variant as reasoning effort", async () => {
+    const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
+    tempDirs.push(dir);
+    await mkdir(dir, { recursive: true });
+
+    const dbPath = join(dir, "opencode.db");
+    const projectPath = join(dir, "research_tasks");
+    const sqliteAvailable = await createOpenCodeDb(dbPath, projectPath, {
+      sessionVariant: "max",
+    });
+    if (!sqliteAvailable) return;
+
+    const reader = new OpenCodeSessionReader({ dbPath, projectPath });
+    const sessions = await reader.listSessions(encodeProjectId(projectPath));
+
+    expect(sessions[0]?.reasoningEffort).toBe("max");
+  });
+
+  it("treats a later user message without a variant as Default", async () => {
+    const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
+    tempDirs.push(dir);
+    await mkdir(dir, { recursive: true });
+
+    const dbPath = join(dir, "opencode.db");
+    const projectPath = join(dir, "research_tasks");
+    const sqliteAvailable = await createOpenCodeDb(dbPath, projectPath, {
+      sessionVariant: null,
+      messageVariants: ["max", undefined],
+    });
+    if (!sqliteAvailable) return;
+
+    const reader = new OpenCodeSessionReader({ dbPath, projectPath });
+    const sessions = await reader.listSessions(encodeProjectId(projectPath));
+
+    expect(sessions[0]?.reasoningEffort).toBe("default");
   });
 
   it("prefers OpenCode's persisted generated title over the first user prompt", async () => {

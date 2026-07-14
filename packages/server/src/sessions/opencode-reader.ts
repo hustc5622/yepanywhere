@@ -92,6 +92,12 @@ interface OpenCodeSessionJson {
   directory?: string;
   title?: string;
   parentID?: string;
+  model?: {
+    id?: string;
+    modelID?: string;
+    providerID?: string;
+    variant?: string;
+  };
   time?: {
     created?: number;
     updated?: number;
@@ -418,7 +424,15 @@ class OpenCodeJsonSessionReader implements ISessionReader {
       let messageCount = 0;
       let firstUserMessageText: string | null = null;
       const userQuestions: SessionQuestion[] = [];
-      let model: string | undefined;
+      const sessionModelId = session.model?.id ?? session.model?.modelID;
+      let model =
+        sessionModelId && session.model?.providerID
+          ? `${session.model.providerID}/${sessionModelId}`
+          : sessionModelId;
+      const sessionVariantKnown = Boolean(
+        session.model && Object.hasOwn(session.model, "variant"),
+      );
+      let reasoningEffort = normalizeOpenCodeVariant(session.model?.variant);
 
       try {
         const messageFiles = await readdir(messageDir);
@@ -438,6 +452,10 @@ class OpenCodeJsonSessionReader implements ISessionReader {
             // Get model from first assistant message
             if (!model && msg.role === "assistant") {
               model = getMessageModel(msg);
+            }
+
+            if (!sessionVariantKnown && msg.role === "user" && msg.model) {
+              reasoningEffort = getMessageReasoningEffort(msg);
             }
 
             // Get first user message text
@@ -496,6 +514,7 @@ class OpenCodeJsonSessionReader implements ISessionReader {
         contextUsage,
         provider: "opencode",
         model,
+        reasoningEffort,
       };
     } catch {
       return null;
@@ -846,20 +865,39 @@ function parseJsonRecord(value: unknown): Record<string, unknown> {
   }
 }
 
+interface ParsedOpenCodeModel {
+  model?: string;
+  reasoningEffort?: string;
+  variantKnown: boolean;
+}
+
+function normalizeOpenCodeVariant(variant: string | undefined) {
+  const normalized = variant?.trim();
+  return normalized || undefined;
+}
+
 function parseOpenCodeModel(
   model: string | null | undefined,
-): string | undefined {
-  if (!model) return undefined;
+): ParsedOpenCodeModel {
+  if (!model) return { variantKnown: false };
   const trimmed = model.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed) return { variantKnown: false };
 
   const parsed = parseJsonRecord(trimmed);
   const modelId = asString(parsed.id) ?? asString(parsed.modelID);
   const providerId = asString(parsed.providerID);
-  if (modelId && providerId) return `${providerId}/${modelId}`;
-  if (modelId) return modelId;
+  const variant = asString(parsed.variant);
+  const parsedModel =
+    modelId && providerId ? `${providerId}/${modelId}` : modelId;
+  if (parsedModel) {
+    return {
+      model: parsedModel,
+      reasoningEffort: normalizeOpenCodeVariant(variant),
+      variantKnown: Object.hasOwn(parsed, "variant"),
+    };
+  }
 
-  return trimmed;
+  return { model: trimmed, variantKnown: false };
 }
 
 function getNestedRecord(
@@ -1013,10 +1051,19 @@ function computeCumulativeUsage(
 }
 
 function getMessageModel(message: OpenCodeMessage): string | undefined {
-  if (message.providerID && message.modelID) {
-    return `${message.providerID}/${message.modelID}`;
+  const modelId =
+    message.modelID ?? message.model?.modelID ?? message.model?.id;
+  const providerId = message.providerID ?? message.model?.providerID;
+  if (providerId && modelId) {
+    return `${providerId}/${modelId}`;
   }
-  return message.modelID;
+  return modelId;
+}
+
+function getMessageReasoningEffort(
+  message: OpenCodeMessage,
+): string | undefined {
+  return normalizeOpenCodeVariant(message.model?.variant) ?? "default";
 }
 
 function normalizeMetadataString(value: unknown): string {
@@ -1290,7 +1337,9 @@ export class OpenCodeSessionReader implements ISessionReader {
 
     let firstUserMessageText: string | null = null;
     const userQuestions: SessionQuestion[] = [];
-    let model = parseOpenCodeModel(row.model);
+    const parsedModel = parseOpenCodeModel(row.model);
+    let model = parsedModel.model;
+    let reasoningEffort = parsedModel.reasoningEffort;
     let assistantTurnCount = 0;
 
     for (const message of messages) {
@@ -1301,6 +1350,9 @@ export class OpenCodeSessionReader implements ISessionReader {
       }
 
       if (message.role !== "user") continue;
+      if (!parsedModel.variantKnown && message.model) {
+        reasoningEffort = getMessageReasoningEffort(message);
+      }
       const text = this.getSqliteMessageTextFromDb(db, message.id);
       if (!text) continue;
 
@@ -1348,6 +1400,7 @@ export class OpenCodeSessionReader implements ISessionReader {
       cumulativeUsage: computeCumulativeUsage(row, assistantTurnCount),
       provider: "opencode",
       model,
+      reasoningEffort,
       createdBy,
     };
   }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseOptionalOpenCodeConfig } from "../../src/routes/sessions.js";
+import {
+  normalizeReasoningEffortForProvider,
+  parseOptionalOpenCodeConfig,
+  parseOptionalReasoningEffort,
+} from "../../src/routes/sessions.js";
 
 describe("OpenCode session config validation", () => {
   it("accepts a complete managed model configuration", () => {
@@ -65,5 +69,24 @@ describe("OpenCode session config validation", () => {
         advanced,
       }).error,
     ).toContain("reserved key");
+  });
+
+  it("uses OpenCode default as an explicit variant clear marker", () => {
+    expect(normalizeReasoningEffortForProvider("opencode", "default")).toBe(
+      undefined,
+    );
+    expect(normalizeReasoningEffortForProvider("opencode", "max")).toBe("max");
+    expect(normalizeReasoningEffortForProvider("codex", "default")).toBe(
+      "default",
+    );
+  });
+
+  it("accepts printable custom OpenCode variant IDs", () => {
+    expect(parseOptionalReasoningEffort("future.v2:max")).toEqual({
+      reasoningEffort: "future.v2:max",
+    });
+    expect(parseOptionalReasoningEffort("bad\nvariant")).toEqual({
+      error: "Invalid reasoningEffort",
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { type IncomingMessage, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { ModelInfo } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeProvider } from "../../../src/sdk/providers/opencode.js";
 
@@ -189,6 +190,226 @@ describe("OpenCodeProvider", () => {
     ).resolves.toBe("anthropic/claude-sonnet-4");
   });
 
+  it("parses protocol-specific reasoning variants from verbose model output", () => {
+    const provider = new OpenCodeProvider();
+    const parseOpenCodeVerboseModels = (
+      provider as unknown as {
+        parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      }
+    ).parseOpenCodeVerboseModels.bind(provider);
+
+    const models = parseOpenCodeVerboseModels(`opencode models --verbose
+yep-openai-compatible/glm-5.2
+{
+  "id": "glm-5.2",
+  "api": {
+    "url": "https://example.test/{tenant}/v1",
+    "npm": "@ai-sdk/openai-compatible"
+  },
+  "variants": {
+    "high": { "reasoningEffort": "high" },
+    "future-turbo-v9": { "metadata": { "literal": "}" } }
+  }
+}
+yep-anthropic/glm-5.2
+{
+  "id": "glm-5.2",
+  "api": { "npm": "@ai-sdk/anthropic" },
+  "variants": {
+    "high": { "effort": "high" },
+    "max": { "effort": "max" }
+  }
+}`);
+
+    expect(models).toHaveLength(2);
+    expect(models[0]).toMatchObject({
+      id: "yep-openai-compatible/glm-5.2",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "high" },
+        { reasoningEffort: "future-turbo-v9" },
+      ],
+      supportedReasoningEffortsByProtocol: {
+        "openai-compatible": [
+          { reasoningEffort: "high" },
+          { reasoningEffort: "future-turbo-v9" },
+        ],
+      },
+    });
+    expect(models[1]).toMatchObject({
+      id: "yep-anthropic/glm-5.2",
+      supportedReasoningEffortsByProtocol: {
+        anthropic: [{ reasoningEffort: "high" }, { reasoningEffort: "max" }],
+      },
+    });
+  });
+
+  it("does not synthesize variants for ordinary CLI model entries", () => {
+    const provider = new OpenCodeProvider();
+    const parseOpenCodeVerboseModels = (
+      provider as unknown as {
+        parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      }
+    ).parseOpenCodeVerboseModels.bind(provider);
+
+    const [model] = parseOpenCodeVerboseModels(`
+custom-openai/glm-5.2
+{
+  "api": { "npm": "@ai-sdk/openai-compatible" },
+  "capabilities": { "reasoning": false },
+  "variants": {}
+}`);
+
+    expect(model).toMatchObject({
+      id: "custom-openai/glm-5.2",
+    });
+    expect(model).not.toHaveProperty("supportedRequestProtocols");
+    expect(model).not.toHaveProperty("supportedReasoningEfforts");
+    expect(model).not.toHaveProperty("supportedReasoningEffortsByProtocol");
+  });
+
+  it("keeps plain model-list output compatible with older OpenCode versions", () => {
+    const provider = new OpenCodeProvider();
+    const parseOpenCodeVerboseModels = (
+      provider as unknown as {
+        parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      }
+    ).parseOpenCodeVerboseModels.bind(provider);
+
+    expect(
+      parseOpenCodeVerboseModels("opencode/big-pickle\nohmyrouter/glm-5.2\n"),
+    ).toEqual([
+      { id: "opencode/big-pickle", name: "opencode / big-pickle" },
+      { id: "ohmyrouter/glm-5.2", name: "ohmyrouter / glm-5.2" },
+    ]);
+  });
+
+  it("merges gateway reasoning variants by model id and protocol order", () => {
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      mergeGatewayModelReasoningMetadata: (
+        gatewayModels: ModelInfo[],
+        cliModels: ModelInfo[],
+      ) => ModelInfo[];
+    };
+    const cliModels = methods.parseOpenCodeVerboseModels(`
+yep-openai-compatible/model-next
+{
+  "api": { "npm": "@ai-sdk/openai-compatible" },
+  "variants": {
+    "medium": {},
+    "future-ultra": {}
+  }
+}
+yep-anthropic/model-next
+{
+  "api": { "npm": "@ai-sdk/anthropic" },
+  "variants": {
+    "medium": {},
+    "max": {}
+  }
+}`);
+
+    const [model] = methods.mergeGatewayModelReasoningMetadata(
+      [
+        {
+          id: "model-next",
+          name: "Model Next",
+          supportedRequestProtocols: ["openai-compatible", "anthropic"],
+        },
+      ],
+      cliModels,
+    );
+
+    expect(model?.supportedReasoningEffortsByProtocol).toEqual({
+      "openai-compatible": [
+        { reasoningEffort: "medium" },
+        { reasoningEffort: "future-ultra" },
+      ],
+      anthropic: [{ reasoningEffort: "medium" }, { reasoningEffort: "max" }],
+    });
+    expect(model?.supportedReasoningEfforts).toEqual([
+      { reasoningEffort: "medium" },
+      { reasoningEffort: "future-ultra" },
+      { reasoningEffort: "max" },
+    ]);
+  });
+
+  it("uses OpenCode-advertised Claude variants without model-name fallbacks", () => {
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      mergeGatewayModelReasoningMetadata: (
+        gatewayModels: ModelInfo[],
+        cliModels: ModelInfo[],
+      ) => ModelInfo[];
+    };
+    const cliModels = methods.parseOpenCodeVerboseModels(`
+anthropic/claude-opus-4-7
+{
+  "api": { "npm": "@ai-sdk/anthropic" },
+  "capabilities": { "reasoning": true },
+  "variants": {
+    "low": {},
+    "medium": {},
+    "high": {},
+    "xhigh": {},
+    "max": {}
+  }
+}
+ohmyrouter/deepseek-v4-pro
+{
+  "api": { "npm": "@ai-sdk/openai-compatible" },
+  "capabilities": { "reasoning": false },
+  "variants": {}
+}`);
+
+    const [claude, deepseek, kimi] = methods.mergeGatewayModelReasoningMetadata(
+      [
+        {
+          id: "claude-opus-4-7",
+          name: "Claude Opus 4.7",
+          supportedRequestProtocols: ["openai-compatible", "anthropic"],
+        },
+        {
+          id: "deepseek-v4-pro",
+          name: "DeepSeek V4 Pro",
+          supportedRequestProtocols: ["openai-compatible", "anthropic"],
+        },
+        {
+          id: "kimi-k2.6",
+          name: "Kimi K2.6",
+          supportedRequestProtocols: ["openai-compatible", "anthropic"],
+        },
+      ],
+      cliModels,
+    );
+
+    expect(claude?.supportedReasoningEfforts).toEqual([
+      { reasoningEffort: "low" },
+      { reasoningEffort: "medium" },
+      { reasoningEffort: "high" },
+      { reasoningEffort: "xhigh" },
+      { reasoningEffort: "max" },
+    ]);
+    expect(claude?.supportedReasoningEffortsByProtocol).toEqual({
+      anthropic: [
+        { reasoningEffort: "low" },
+        { reasoningEffort: "medium" },
+        { reasoningEffort: "high" },
+        { reasoningEffort: "xhigh" },
+        { reasoningEffort: "max" },
+      ],
+    });
+    expect(deepseek).not.toHaveProperty("supportedReasoningEfforts");
+    expect(deepseek).not.toHaveProperty("supportedReasoningEffortsByProtocol");
+    expect(kimi).toEqual({
+      id: "kimi-k2.6",
+      name: "Kimi K2.6",
+      supportedRequestProtocols: ["openai-compatible", "anthropic"],
+    });
+  });
+
   it("allocates an OpenCode port that is not already listening", async () => {
     const provider = new OpenCodeProvider();
     const getAvailablePort = (
@@ -256,6 +477,7 @@ describe("OpenCodeProvider", () => {
       buildOpenCodeMessagePayload: (
         text: string,
         model?: string | null,
+        variant?: string,
       ) => unknown;
     };
 
@@ -278,7 +500,25 @@ describe("OpenCodeProvider", () => {
     });
 
     expect(
-      methods.buildOpenCodeMessagePayload("hello", "anthropic/claude-fable-5"),
+      methods.buildOpenCodeMessagePayload(
+        "hello",
+        "anthropic/claude-fable-5",
+        "max",
+      ),
+    ).toEqual({
+      parts: [{ type: "text", text: "hello" }],
+      model: {
+        providerID: "anthropic",
+        modelID: "claude-fable-5",
+      },
+      variant: "max",
+    });
+    expect(
+      methods.buildOpenCodeMessagePayload(
+        "hello",
+        "anthropic/claude-fable-5",
+        "default",
+      ),
     ).toEqual({
       parts: [{ type: "text", text: "hello" }],
       model: {
@@ -286,6 +526,95 @@ describe("OpenCodeProvider", () => {
         modelID: "claude-fable-5",
       },
     });
+    expect(
+      methods.buildOpenCodeMessagePayload(
+        "hello",
+        "yep-openai-compatible/kimi-k2.6",
+        "max",
+      ),
+    ).toEqual({
+      parts: [{ type: "text", text: "hello" }],
+      model: {
+        providerID: "yep-openai-compatible",
+        modelID: "kimi-k2.6",
+      },
+      variant: "max",
+    });
+    expect(
+      methods.buildOpenCodeMessagePayload(
+        "hello",
+        "yep-anthropic/future-model",
+        "xhigh",
+      ),
+    ).toEqual({
+      parts: [{ type: "text", text: "hello" }],
+      model: {
+        providerID: "yep-anthropic",
+        modelID: "future-model",
+      },
+      variant: "xhigh",
+    });
+  });
+
+  it("fails closed when the runtime model does not advertise a variant", async () => {
+    const provider = new OpenCodeProvider();
+    const resolveOpenCodeVariant = (
+      provider as unknown as {
+        resolveOpenCodeVariant: (
+          baseUrl: string,
+          cwd: string,
+          model: string,
+          variant: string,
+        ) => Promise<string | undefined>;
+      }
+    ).resolveOpenCodeVariant.bind(provider);
+
+    await withTestServer(
+      (_req, res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            providers: [
+              {
+                id: "yep-anthropic",
+                models: {
+                  "claude-opus-4-7": {
+                    variants: { high: {}, max: {} },
+                  },
+                  "kimi-k2.6": { variants: {} },
+                },
+              },
+            ],
+          }),
+        );
+      },
+      async (baseUrl) => {
+        await expect(
+          resolveOpenCodeVariant(
+            baseUrl,
+            "/repo",
+            "yep-anthropic/claude-opus-4-7",
+            "max",
+          ),
+        ).resolves.toBe("max");
+        await expect(
+          resolveOpenCodeVariant(
+            baseUrl,
+            "/repo",
+            "yep-anthropic/claude-opus-4-7",
+            "xhigh",
+          ),
+        ).resolves.toBeUndefined();
+        await expect(
+          resolveOpenCodeVariant(
+            baseUrl,
+            "/repo",
+            "yep-anthropic/kimi-k2.6",
+            "max",
+          ),
+        ).resolves.toBeUndefined();
+      },
+    );
   });
 
   it("marks newly created OpenCode sessions with Yep metadata", async () => {

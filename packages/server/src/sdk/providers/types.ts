@@ -69,7 +69,7 @@ export interface StartSessionOptions {
   thinking?: import("@yep-anywhere/shared").ThinkingConfig;
   /** Effort level for response quality (undefined = SDK default) */
   effort?: import("@yep-anywhere/shared").EffortLevel;
-  /** Exact provider reasoning effort, when the provider advertises one. */
+  /** Exact provider reasoning effort / OpenCode model variant. */
   reasoningEffort?: string;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
