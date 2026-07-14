@@ -196,6 +196,7 @@ describe("SessionTitleService", () => {
       metadataService,
       apiKey: "test-key",
       minRetryIntervalMs: 0,
+      retryMaxAttempts: 1,
       fetchImpl: fetchMock,
       loadSession: async () =>
         createSession({
@@ -877,6 +878,294 @@ describe("SessionTitleService", () => {
       expect(fetchMock).toHaveBeenCalledOnce();
       expect(metadataService.getMetadata("session-1")?.aiTitle).toBe(
         "终端会话标题",
+      );
+    } finally {
+      service.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("backfills a recent session completed while the service was offline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T08:00:00Z"));
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"title":"重启期间完成会话"}' } }],
+        }),
+        { status: 200 },
+      );
+    });
+    const scanRecentSessions = vi.fn(async () => ({
+      candidates: [
+        {
+          sessionId: "offline-session",
+          projectId: "project-1" as UrlProjectId,
+          updatedAt: "2026-07-14T07:59:00Z",
+          messageCount: 2,
+        },
+      ],
+      scannedProjects: 1,
+      scannedSessions: 1,
+    }));
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      scanRecentSessions,
+      fetchImpl: fetchMock,
+      loadSession: async (sessionId) => createSession({ id: sessionId }),
+    });
+
+    try {
+      service.start();
+      await service.waitForStartupBackfill();
+
+      expect(scanRecentSessions).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(metadataService.getMetadata("offline-session")?.aiTitle).toBe(
+        "重启期间完成会话",
+      );
+    } finally {
+      service.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries 429 and empty model output with bounded backoff", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("rate limited", {
+          status: 429,
+          headers: { "Retry-After": "0" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: null } }] }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"title":"退避重试成功"}' } }],
+          }),
+          { status: 200 },
+        ),
+      );
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      retryMaxAttempts: 3,
+      retryBaseDelayMs: 100,
+      retryMaxDelayMs: 1_000,
+      fetchImpl: fetchMock,
+      loadSession: async () => createSession(),
+    });
+
+    try {
+      const generation = service.generateForSession(
+        "session-1",
+        "project-1" as UrlProjectId,
+      );
+      await vi.runAllTimersAsync();
+      await generation;
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(metadataService.getMetadata("session-1")?.aiTitle).toBe(
+        "退避重试成功",
+      );
+    } finally {
+      service.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds startup backfill by time window, candidate limit, and project limit", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-07-14T08:00:00Z");
+    vi.setSystemTime(now);
+    const candidates = [
+      {
+        sessionId: "too-old",
+        projectId: "project-1" as UrlProjectId,
+        updatedAt: "2026-07-10T07:59:59Z",
+        messageCount: 2,
+      },
+      ...Array.from({ length: 8 }, (_, index) => ({
+        sessionId: `recent-${index}`,
+        projectId: "project-1" as UrlProjectId,
+        updatedAt: `2026-07-14T07:${String(50 - index).padStart(2, "0")}:00Z`,
+        messageCount: 2,
+      })),
+    ];
+    const scanRecentSessions = vi.fn(async () => ({
+      candidates,
+      scannedProjects: 3,
+      scannedSessions: 200,
+    }));
+    const loadSession = vi.fn(async (sessionId: string) =>
+      createSession({ id: sessionId }),
+    );
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"title":"有限启动回补"}' } }],
+          }),
+          { status: 200 },
+        ),
+    );
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      startupBackfillWindowMs: 4 * 24 * 60 * 60 * 1000,
+      startupBackfillLimit: 2,
+      startupBackfillConcurrency: 1,
+      startupBackfillMaxProjects: 3,
+      scanRecentSessions,
+      fetchImpl: fetchMock,
+      loadSession,
+    });
+
+    try {
+      service.start();
+      await service.waitForStartupBackfill();
+
+      expect(scanRecentSessions).toHaveBeenCalledWith({
+        updatedAfterMs: now.getTime() - 4 * 24 * 60 * 60 * 1000,
+        limit: 2,
+        maxProjects: 3,
+      });
+      expect(loadSession).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(loadSession).not.toHaveBeenCalledWith(
+        "too-old",
+        expect.anything(),
+      );
+    } finally {
+      service.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps concurrent startup backfill model requests", async () => {
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    const releases: Array<() => void> = [];
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          activeRequests += 1;
+          maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+          releases.push(() => {
+            activeRequests -= 1;
+            resolve(
+              new Response(
+                JSON.stringify({
+                  choices: [
+                    { message: { content: '{"title":"并发受控回补"}' } },
+                  ],
+                }),
+                { status: 200 },
+              ),
+            );
+          });
+        }),
+    );
+    const waitForFetchCalls = async (expected: number) => {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if (fetchMock.mock.calls.length >= expected) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(expected);
+    };
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      startupBackfillLimit: 3,
+      startupBackfillConcurrency: 2,
+      scanRecentSessions: async () => ({
+        candidates: ["concurrent-1", "concurrent-2", "concurrent-3"].map(
+          (sessionId) => ({
+            sessionId,
+            projectId: "project-1" as UrlProjectId,
+            updatedAt: new Date().toISOString(),
+            messageCount: 2,
+          }),
+        ),
+        scannedProjects: 1,
+        scannedSessions: 3,
+      }),
+      fetchImpl: fetchMock,
+      loadSession: async (sessionId) => createSession({ id: sessionId }),
+    });
+
+    try {
+      service.start();
+      await waitForFetchCalls(2);
+      expect(maxActiveRequests).toBe(2);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      releases.shift()?.();
+      await waitForFetchCalls(3);
+      expect(maxActiveRequests).toBe(2);
+
+      for (const release of releases.splice(0)) release();
+      await service.waitForStartupBackfill();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally {
+      service.stop();
+    }
+  });
+
+  it("does not load or overwrite titled startup backfill candidates", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T08:00:00Z"));
+    await metadataService.setTitle("custom-session", "Manual Title");
+    await metadataService.setAiTitle("ai-session", "Existing AI Title");
+    const loadSession = vi.fn(async () => createSession());
+    const fetchMock = vi.fn();
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      scanRecentSessions: async () => ({
+        candidates: ["custom-session", "ai-session"].map((sessionId) => ({
+          sessionId,
+          projectId: "project-1" as UrlProjectId,
+          updatedAt: "2026-07-14T07:59:00Z",
+          messageCount: 2,
+        })),
+        scannedProjects: 1,
+        scannedSessions: 2,
+      }),
+      fetchImpl: fetchMock,
+      loadSession,
+    });
+
+    try {
+      service.start();
+      await service.waitForStartupBackfill();
+
+      expect(loadSession).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(metadataService.getMetadata("custom-session")?.customTitle).toBe(
+        "Manual Title",
+      );
+      expect(metadataService.getMetadata("ai-session")?.aiTitle).toBe(
+        "Existing AI Title",
       );
     } finally {
       service.stop();

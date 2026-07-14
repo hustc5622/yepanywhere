@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { HttpBindings } from "@hono/node-server";
 import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
+import { isSlashCommandSession } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import {
   ArchiveError,
@@ -108,6 +109,7 @@ import { normalizeSession } from "./sessions/normalization.js";
 import { OpenCodeSessionReader } from "./sessions/opencode-reader.js";
 import {
   findSessionSummaryAcrossProviders,
+  listSessionsAcrossProviders,
   resolveSessionSources,
 } from "./sessions/provider-resolution.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
@@ -566,6 +568,122 @@ export function createApp(options: AppOptions): AppResult {
       eventBus: options.eventBus,
       metadataService: options.sessionMetadataService,
       ...options.sessionTitleGeneration,
+      scanRecentSessions: async ({ updatedAfterMs, limit, maxProjects }) => {
+        const projects = (await scanner.listProjects())
+          .filter((project) => {
+            const lastActivityMs = new Date(
+              project.lastActivity ?? "",
+            ).getTime();
+            return (
+              Number.isFinite(lastActivityMs) &&
+              lastActivityMs >= updatedAfterMs
+            );
+          })
+          .sort(
+            (a, b) =>
+              new Date(b.lastActivity ?? "").getTime() -
+              new Date(a.lastActivity ?? "").getTime(),
+          )
+          .slice(0, maxProjects);
+        const providerCatalog = await buildProviderProjectCatalog({
+          projects,
+          codexScanner,
+          geminiScanner,
+          opencodeScanner,
+        });
+        const candidates: Array<{
+          sessionId: string;
+          projectId: SessionSummary["projectId"];
+          updatedAt: string;
+          messageCount: number;
+        }> = [];
+        let scannedProjects = 0;
+        let scannedSessions = 0;
+
+        for (const project of projects) {
+          const projectLastActivityMs = new Date(
+            project.lastActivity ?? "",
+          ).getTime();
+          const oldestCandidateMs = candidates.at(-1)
+            ? new Date(candidates.at(-1)?.updatedAt ?? "").getTime()
+            : Number.NEGATIVE_INFINITY;
+          if (
+            candidates.length >= limit &&
+            projectLastActivityMs <= oldestCandidateMs
+          ) {
+            break;
+          }
+
+          scannedProjects += 1;
+          let sessions: SessionSummary[];
+          try {
+            sessions = await listSessionsAcrossProviders(
+              project,
+              {
+                readerFactory,
+                sessionIndexService: options.sessionIndexService,
+                codexSessionsDir: CODEX_SESSIONS_DIR,
+                codexReaderFactory,
+                geminiSessionsDir: GEMINI_TMP_DIR,
+                geminiReaderFactory,
+                geminiHashToCwd: providerCatalog.geminiHashToCwd,
+                opencodeDbPath: OPENCODE_DB_PATH,
+                opencodeReaderFactory,
+                // Recovery must observe files written while the server was down.
+                // A stale persisted index can show the pre-crash message count.
+                allowStaleSessionCache: false,
+              },
+              providerCatalog,
+            );
+          } catch (error) {
+            getLogger().warn(
+              { err: error, projectId: project.id, projectPath: project.path },
+              "[SessionTitleService] Skipping project after startup backfill scan failure",
+            );
+            continue;
+          }
+          scannedSessions += sessions.length;
+
+          for (const session of sessions) {
+            const updatedAtMs = new Date(session.updatedAt).getTime();
+            if (
+              !Number.isFinite(updatedAtMs) ||
+              updatedAtMs < updatedAfterMs ||
+              session.messageCount < 2
+            ) {
+              continue;
+            }
+            const metadata = options.sessionMetadataService?.getMetadata(
+              session.id,
+            );
+            if (
+              metadata?.customTitle ||
+              metadata?.aiTitle ||
+              isSlashCommandSession({
+                title: session.fullTitle ?? session.title,
+                customTitle: metadata?.customTitle ?? session.customTitle,
+              })
+            ) {
+              continue;
+            }
+
+            candidates.push({
+              sessionId: session.id,
+              projectId: session.projectId,
+              updatedAt: session.updatedAt,
+              messageCount: session.messageCount,
+            });
+            candidates.sort(
+              (a, b) =>
+                new Date(b.updatedAt).getTime() -
+                new Date(a.updatedAt).getTime(),
+            );
+            if (candidates.length > limit) candidates.pop();
+          }
+        }
+
+        return { candidates, scannedProjects, scannedSessions };
+      },
       loadSession: async (sessionId, projectId) => {
         const project = await scanner.getProject(projectId);
         if (!project) return null;
@@ -608,6 +726,15 @@ export function createApp(options: AppOptions): AppResult {
         model: options.sessionTitleGeneration.model,
         apiBase: options.sessionTitleGeneration.apiBase,
         subModule: options.sessionTitleGeneration.subModule,
+        retryMaxAttempts: options.sessionTitleGeneration.retryMaxAttempts,
+        startupBackfillWindowMs:
+          options.sessionTitleGeneration.startupBackfillWindowMs,
+        startupBackfillLimit:
+          options.sessionTitleGeneration.startupBackfillLimit,
+        startupBackfillConcurrency:
+          options.sessionTitleGeneration.startupBackfillConcurrency,
+        startupBackfillMaxProjects:
+          options.sessionTitleGeneration.startupBackfillMaxProjects,
       },
       "[SessionTitleService] Enabled",
     );

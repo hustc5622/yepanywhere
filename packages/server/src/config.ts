@@ -198,6 +198,20 @@ export interface SessionTitleGenerationConfig {
   subModule?: string;
   /** Request timeout in milliseconds. */
   requestTimeoutMs: number;
+  /** Total model attempts for a recoverable title failure. */
+  retryMaxAttempts: number;
+  /** Initial retry delay; subsequent attempts use exponential backoff. */
+  retryBaseDelayMs: number;
+  /** Upper bound for retry backoff and Retry-After delays. */
+  retryMaxDelayMs: number;
+  /** How far back startup title recovery may inspect sessions. */
+  startupBackfillWindowMs: number;
+  /** Maximum sessions considered for title recovery per startup. */
+  startupBackfillLimit: number;
+  /** Maximum concurrent startup title recovery workers. */
+  startupBackfillConcurrency: number;
+  /** Maximum recent projects whose session indexes are inspected per startup. */
+  startupBackfillMaxProjects: number;
 }
 
 /**
@@ -316,6 +330,37 @@ export function loadConfig(): Config {
     requestTimeoutMs: Math.max(
       1000,
       parseIntOrDefault(process.env.SESSION_TITLE_TIMEOUT_MS, 120000),
+    ),
+    retryMaxAttempts: Math.max(
+      1,
+      parseIntOrDefault(process.env.SESSION_TITLE_RETRY_MAX_ATTEMPTS, 3),
+    ),
+    retryBaseDelayMs: Math.max(
+      0,
+      parseIntOrDefault(process.env.SESSION_TITLE_RETRY_BASE_DELAY_MS, 5000),
+    ),
+    retryMaxDelayMs: Math.max(
+      0,
+      parseIntOrDefault(process.env.SESSION_TITLE_RETRY_MAX_DELAY_MS, 60000),
+    ),
+    startupBackfillWindowMs: Math.max(
+      0,
+      parseIntOrDefault(
+        process.env.SESSION_TITLE_BACKFILL_WINDOW_MS,
+        7 * 24 * 60 * 60 * 1000,
+      ),
+    ),
+    startupBackfillLimit: Math.max(
+      0,
+      parseIntOrDefault(process.env.SESSION_TITLE_BACKFILL_LIMIT, 25),
+    ),
+    startupBackfillConcurrency: Math.max(
+      1,
+      parseIntOrDefault(process.env.SESSION_TITLE_BACKFILL_CONCURRENCY, 2),
+    ),
+    startupBackfillMaxProjects: Math.max(
+      1,
+      parseIntOrDefault(process.env.SESSION_TITLE_BACKFILL_MAX_PROJECTS, 20),
     ),
   };
 

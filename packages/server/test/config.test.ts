@@ -268,6 +268,15 @@ describe("loadConfig codex paths", () => {
       "claude-code-internal",
     );
     expect(config.sessionTitleGeneration.model).toBe("deepseek-v4-pro");
+    expect(config.sessionTitleGeneration).toMatchObject({
+      retryMaxAttempts: 3,
+      retryBaseDelayMs: 5000,
+      retryMaxDelayMs: 60000,
+      startupBackfillWindowMs: 7 * 24 * 60 * 60 * 1000,
+      startupBackfillLimit: 25,
+      startupBackfillConcurrency: 2,
+      startupBackfillMaxProjects: 20,
+    });
   });
 
   it("allows session title submodule override", async () => {
