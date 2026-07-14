@@ -6,7 +6,7 @@ import {
   isSessionKind,
 } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { type GlobalSessionItem, api } from "../api/client";
 import { BulkActionBar } from "../components/BulkActionBar";
 import {
@@ -724,6 +724,28 @@ export function GlobalSessionsPage() {
                 >
                   {t("globalSessionsClearFilters")}
                 </button>
+              )}
+              {projectFilter && (
+                <Link
+                  to={`${basePath}/new-session?projectId=${encodeURIComponent(projectFilter)}`}
+                  className="btn-primary global-sessions-new-session-button"
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  {t("sidebarNewSession")}
+                </Link>
               )}
             </div>
 

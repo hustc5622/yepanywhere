@@ -7396,6 +7396,15 @@ a.sidebar-nav-item {
   color: var(--text-primary);
 }
 
+.global-sessions-new-session-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .filter-dropdowns {
   display: flex;
   gap: var(--space-2);
