@@ -327,6 +327,7 @@
   "contextCumulativeTurns": "{count} ターン",
   "messageActionCopy": "メッセージをコピー",
   "messageActionCopied": "コピーしました！",
+  "messageActionCopyFailed": "コピーできませんでした",
   "toolApprovalExpand": "承認パネルを展開",
   "toolApprovalCollapse": "承認パネルを折りたたむ",
   "toolApprovalPlanTitle": "このプランを承認しますか？",

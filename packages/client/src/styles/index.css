@@ -3554,6 +3554,10 @@ a.sidebar-nav-item {
   color: var(--app-yep-green);
 }
 
+.message-actions-copy.is-failed {
+  color: var(--error-color, #dc2626);
+}
+
 /* Edit/rewind button — same affordance as copy. */
 .message-actions-edit {
   display: inline-flex;

@@ -344,6 +344,7 @@
   "contextCumulativeTurns": "{count} 轮",
   "messageActionCopy": "复制消息",
   "messageActionCopied": "已复制！",
+  "messageActionCopyFailed": "复制失败",
   "toolApprovalExpand": "展开审批面板",
   "toolApprovalCollapse": "收起审批面板",
   "toolApprovalPlanTitle": "接受这个计划吗？",

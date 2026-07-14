@@ -8,6 +8,7 @@ type RecentTextSelection = {
 
 let recentTextSelection: RecentTextSelection | null = null;
 let selectionTrackingCleanup: (() => void) | null = null;
+let suppressSelectionTracking = false;
 
 function hasUsableText(text: string): boolean {
   return text.trim().length > 0;
@@ -62,6 +63,7 @@ function readCurrentTextSelection(
 }
 
 function rememberCurrentTextSelection(): void {
+  if (suppressSelectionTracking) return;
   const selection = readCurrentTextSelection();
   if (selection) {
     recentTextSelection = selection;
@@ -107,24 +109,179 @@ export function getSelectionAwareCopyText(
   return fallbackText;
 }
 
-export async function writeClipboardText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
+type TextControlSelection = {
+  element: HTMLInputElement | HTMLTextAreaElement;
+  start: number;
+  end: number;
+  direction: "forward" | "backward" | "none";
+};
+
+function getTextControlSelection(
+  element: HTMLElement | null,
+): TextControlSelection | null {
+  if (
+    !(element instanceof HTMLInputElement) &&
+    !(element instanceof HTMLTextAreaElement)
+  ) {
+    return null;
   }
+
+  try {
+    const { selectionStart, selectionEnd, selectionDirection } = element;
+    if (selectionStart === null || selectionEnd === null) return null;
+    return {
+      element,
+      start: selectionStart,
+      end: selectionEnd,
+      direction: selectionDirection ?? "none",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function restoreFocusAndSelection(
+  activeElement: HTMLElement | null,
+  textControlSelection: TextControlSelection | null,
+  selection: Selection | null,
+  ranges: Range[],
+): void {
+  if (activeElement?.isConnected) {
+    try {
+      activeElement.focus({ preventScroll: true });
+    } catch {
+      // Focus restoration is best-effort and must not mask the copy result.
+    }
+  }
+
+  if (textControlSelection?.element.isConnected) {
+    try {
+      textControlSelection.element.setSelectionRange(
+        textControlSelection.start,
+        textControlSelection.end,
+        textControlSelection.direction,
+      );
+    } catch {
+      // Some input types expose selectionStart but reject setSelectionRange.
+    }
+  }
+
+  if (selection) {
+    try {
+      selection.removeAllRanges();
+      for (const range of ranges) selection.addRange(range);
+    } catch {
+      // DOM mutations can detach a saved range; restoration remains best-effort.
+    }
+  }
+}
+
+function writeClipboardTextWithExecCommand(text: string): void {
+  if (typeof document === "undefined" || !document.body) {
+    throw new Error("Clipboard fallback requires a document body");
+  }
+
+  const execCommand = document.execCommand;
+  if (typeof execCommand !== "function") {
+    throw new Error("Clipboard fallback is unavailable");
+  }
+
+  const activeElement =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  const textControlSelection = getTextControlSelection(activeElement);
+  const selection =
+    typeof window !== "undefined" ? window.getSelection() : null;
+  const ranges = selection
+    ? Array.from({ length: selection.rangeCount }, (_, index) =>
+        selection.getRangeAt(index).cloneRange(),
+      )
+    : [];
+  const previousRecentTextSelection = recentTextSelection;
 
   const textarea = document.createElement("textarea");
   textarea.value = text;
   textarea.setAttribute("readonly", "");
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.setAttribute("data-yep-clipboard-fallback", "");
+  textarea.tabIndex = -1;
   textarea.style.position = "fixed";
   textarea.style.left = "-9999px";
   textarea.style.top = "0";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
   document.body.appendChild(textarea);
-  textarea.select();
 
+  suppressSelectionTracking = true;
   try {
-    document.execCommand("copy");
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    if (!execCommand.call(document, "copy")) {
+      throw new Error("Clipboard fallback was rejected");
+    }
   } finally {
-    document.body.removeChild(textarea);
+    textarea.remove();
+    restoreFocusAndSelection(
+      activeElement,
+      textControlSelection,
+      selection,
+      ranges,
+    );
+    recentTextSelection = previousRecentTextSelection;
+    suppressSelectionTracking = false;
   }
+}
+
+function getClipboardWriter(): ((text: string) => Promise<void>) | null {
+  if (
+    typeof navigator === "undefined" ||
+    typeof navigator.clipboard?.writeText !== "function"
+  ) {
+    return null;
+  }
+  return navigator.clipboard.writeText.bind(navigator.clipboard);
+}
+
+function createClipboardError(errors: unknown[]): Error {
+  return new AggregateError(errors, "Unable to copy text to the clipboard");
+}
+
+export async function writeClipboardText(text: string): Promise<void> {
+  const clipboardWriter = getClipboardWriter();
+
+  // The async Clipboard API is unavailable by specification in an insecure
+  // context. Going straight to the synchronous fallback also preserves the
+  // transient user activation required by older Android WebViews.
+  if (typeof window !== "undefined" && window.isSecureContext === false) {
+    try {
+      writeClipboardTextWithExecCommand(text);
+      return;
+    } catch (fallbackError) {
+      if (!clipboardWriter) throw fallbackError;
+      try {
+        await clipboardWriter(text);
+        return;
+      } catch (clipboardError) {
+        throw createClipboardError([fallbackError, clipboardError]);
+      }
+    }
+  }
+
+  if (clipboardWriter) {
+    try {
+      await clipboardWriter(text);
+      return;
+    } catch (clipboardError) {
+      try {
+        writeClipboardTextWithExecCommand(text);
+        return;
+      } catch (fallbackError) {
+        throw createClipboardError([clipboardError, fallbackError]);
+      }
+    }
+  }
+
+  writeClipboardTextWithExecCommand(text);
 }

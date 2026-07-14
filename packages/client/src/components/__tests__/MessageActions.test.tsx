@@ -11,6 +11,19 @@ import { I18nProvider } from "../../i18n";
 import { UI_KEYS } from "../../lib/storageKeys";
 import { MessageActions } from "../MessageActions";
 
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(
+  navigator,
+  "clipboard",
+);
+const originalExecCommandDescriptor = Object.getOwnPropertyDescriptor(
+  document,
+  "execCommand",
+);
+const originalSecureContextDescriptor = Object.getOwnPropertyDescriptor(
+  window,
+  "isSecureContext",
+);
+
 function selectTextInElement(element: HTMLElement, selectedText: string): void {
   const textNode = Array.from(element.childNodes).find(
     (node) => node.nodeType === Node.TEXT_NODE,
@@ -36,20 +49,60 @@ function renderWithI18n(ui: ReactNode) {
 
 describe("MessageActions", () => {
   let writeText: ReturnType<typeof vi.fn>;
+  let execCommand: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     localStorage.setItem(UI_KEYS.locale, "en");
     writeText = vi.fn().mockResolvedValue(undefined);
+    execCommand = vi.fn().mockReturnValue(true);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
     });
   });
 
   afterEach(() => {
     window.getSelection()?.removeAllRanges();
     cleanup();
-    vi.clearAllMocks();
+    document.querySelector("[data-yep-clipboard-fallback]")?.remove();
+
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(
+        navigator,
+        "clipboard",
+        originalClipboardDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
+    if (originalExecCommandDescriptor) {
+      Object.defineProperty(
+        document,
+        "execCommand",
+        originalExecCommandDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(document, "execCommand");
+    }
+    if (originalSecureContextDescriptor) {
+      Object.defineProperty(
+        window,
+        "isSecureContext",
+        originalSecureContextDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(window, "isSecureContext");
+    }
+
+    vi.restoreAllMocks();
   });
 
   it("copies active text selection instead of the whole message", async () => {
@@ -66,6 +119,78 @@ describe("MessageActions", () => {
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith("beta");
     });
+    expect(execCommand).not.toHaveBeenCalled();
+  });
+
+  it("uses the synchronous fallback directly in an insecure context", async () => {
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: false,
+    });
+    execCommand.mockImplementation(() => {
+      const textarea = document.querySelector(
+        "textarea[data-yep-clipboard-fallback]",
+      ) as HTMLTextAreaElement | null;
+      expect(textarea?.value).toBe("plain HTTP reply");
+      return true;
+    });
+
+    renderWithI18n(<MessageActions copyText="plain HTTP reply" />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
+
+    expect(await screen.findByRole("button", { name: "Copied!" })).toBeTruthy();
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    expect(writeText).not.toHaveBeenCalled();
+    expect(
+      document.querySelector("textarea[data-yep-clipboard-fallback]"),
+    ).toBeNull();
+  });
+
+  it("falls back when the Clipboard API is unavailable", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+
+    renderWithI18n(<MessageActions copyText="fallback reply" />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
+
+    expect(await screen.findByRole("button", { name: "Copied!" })).toBeTruthy();
+    expect(execCommand).toHaveBeenCalledWith("copy");
+  });
+
+  it("falls back when the Clipboard API rejects the write", async () => {
+    writeText.mockRejectedValueOnce(
+      new DOMException("Clipboard permission denied", "NotAllowedError"),
+    );
+
+    renderWithI18n(<MessageActions copyText="permission fallback" />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
+
+    expect(await screen.findByRole("button", { name: "Copied!" })).toBeTruthy();
+    expect(writeText).toHaveBeenCalledWith("permission fallback");
+    expect(execCommand).toHaveBeenCalledWith("copy");
+  });
+
+  it("shows failure feedback when every copy mechanism fails", async () => {
+    writeText.mockRejectedValueOnce(
+      new DOMException("Clipboard permission denied", "NotAllowedError"),
+    );
+    execCommand.mockReturnValue(false);
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    renderWithI18n(<MessageActions copyText="uncopyable reply" />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Copy failed" }),
+    ).toBeTruthy();
+    expect(consoleError).toHaveBeenCalled();
+    expect(
+      document.querySelector("textarea[data-yep-clipboard-fallback]"),
+    ).toBeNull();
   });
 
   it("renders compact context usage when provided", () => {

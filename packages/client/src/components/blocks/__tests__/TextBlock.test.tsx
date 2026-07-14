@@ -5,11 +5,10 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../../api/client";
 import { SessionMetadataProvider } from "../../../contexts/SessionMetadataContext";
 import { I18nProvider } from "../../../i18n";
-import { UI_KEYS } from "../../../lib/storageKeys";
 import { TextBlock } from "../TextBlock";
 
 vi.mock("../../../api/client", () => ({
@@ -35,39 +34,8 @@ function renderWithSessionMetadata(ui: React.ReactNode) {
   );
 }
 
-function selectTextInElement(element: HTMLElement, selectedText: string): void {
-  const textNode = Array.from(element.childNodes).find(
-    (node) => node.nodeType === Node.TEXT_NODE,
-  );
-  if (!textNode) throw new Error("No text node found");
-
-  const text = textNode.textContent ?? "";
-  const start = text.indexOf(selectedText);
-  if (start === -1) throw new Error(`Text not found: ${selectedText}`);
-
-  const range = document.createRange();
-  range.setStart(textNode, start);
-  range.setEnd(textNode, start + selectedText.length);
-
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-}
-
 describe("TextBlock", () => {
-  let writeText: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    localStorage.setItem(UI_KEYS.locale, "en");
-    writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-  });
-
   afterEach(() => {
-    window.getSelection()?.removeAllRanges();
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
@@ -188,14 +156,9 @@ describe("TextBlock", () => {
     expect(paragraph?.textContent).toBe(text);
   });
 
-  it("copies active text selection instead of the whole block", async () => {
+  it("does not render a block-level copy button", () => {
     renderWithSessionMetadata(<TextBlock text="alpha beta gamma" />);
 
-    selectTextInElement(screen.getByText("alpha beta gamma"), "beta");
-    fireEvent.click(screen.getByRole("button", { name: "Copy markdown" }));
-
-    await waitFor(() => {
-      expect(writeText).toHaveBeenCalledWith("beta");
-    });
+    expect(screen.queryByRole("button", { name: "Copy markdown" })).toBeNull();
   });
 });

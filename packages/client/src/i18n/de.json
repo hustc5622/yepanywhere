@@ -327,6 +327,7 @@
   "contextCumulativeTurns": "{count} Runden",
   "messageActionCopy": "Nachricht kopieren",
   "messageActionCopied": "Kopiert!",
+  "messageActionCopyFailed": "Kopieren fehlgeschlagen",
   "toolApprovalExpand": "Genehmigungsbereich erweitern",
   "toolApprovalCollapse": "Genehmigungsbereich einklappen",
   "toolApprovalPlanTitle": "Diesen Plan akzeptieren?",

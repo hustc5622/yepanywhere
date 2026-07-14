@@ -38,63 +38,6 @@
   user-select: text;
 }
 
-.text-block {
-  /* Keep the hover copy affordance out of the text hit-test area. Without
-     this reserve, the absolutely positioned button sits over the first line
-     and can make drag-selection snap to the containing paragraph. */
-  padding-right: 36px;
-}
-
-/* Copy button for text blocks */
-.text-block-copy {
-  position: absolute;
-  top: 0;
-  right: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  background: var(--bg-secondary, #252525);
-  border: 1px solid var(--border-color, #333);
-  border-radius: var(--radius-sm, 4px);
-  color: var(--text-muted, #888);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-  z-index: 10;
-  pointer-events: none;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.text-block:hover .text-block-copy,
-.text-block-copy:focus {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.text-block-copy:hover {
-  background: var(--bg-tertiary, #333);
-  color: var(--text-primary, #ccc);
-}
-
-.text-block-copy:active {
-  background: var(--bg-tertiary, #444);
-}
-
-.text-block-copy:focus {
-  outline: 1px solid var(--focus-border, #007acc);
-  outline-offset: -1px;
-}
-
-.text-block-copy.copied {
-  color: #4a4;
-  opacity: 1;
-}
-
 .text-block p {
   margin: 0 0 var(--space-2) 0;
 }

@@ -327,6 +327,7 @@
   "contextCumulativeTurns": "{count} turnos",
   "messageActionCopy": "Copiar mensaje",
   "messageActionCopied": "¡Copiado!",
+  "messageActionCopyFailed": "No se pudo copiar",
   "toolApprovalExpand": "Expandir panel de aprobación",
   "toolApprovalCollapse": "Contraer panel de aprobación",
   "toolApprovalPlanTitle": "¿Aceptar este plan?",

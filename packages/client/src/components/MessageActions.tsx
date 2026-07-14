@@ -1,7 +1,10 @@
 import type { ContextUsage } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
-import { getSelectionAwareCopyText } from "../lib/clipboard";
+import {
+  getSelectionAwareCopyText,
+  writeClipboardText,
+} from "../lib/clipboard";
 import { formatTokenCount } from "../lib/tokens";
 
 interface MessageActionsProps {
@@ -17,6 +20,8 @@ interface MessageActionsProps {
    */
   onEdit?: () => void;
 }
+
+type CopyFeedback = { status: "copied" | "failed" } | null;
 
 /**
  * Hover-revealed action row for a chat bubble or assistant turn:
@@ -34,15 +39,16 @@ export function MessageActions({
   onEdit,
 }: MessageActionsProps) {
   const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<CopyFeedback>(null);
   const actionsRef = useRef<HTMLSpanElement | null>(null);
 
-  // Reset the "Copied!" pulse after a short window.
+  // Reset copy success/failure feedback after a short window. A new object is
+  // stored for every attempt so repeated failures restart this timer.
   useEffect(() => {
-    if (!copied) return;
-    const handle = setTimeout(() => setCopied(false), 1500);
+    if (!copyFeedback) return;
+    const handle = setTimeout(() => setCopyFeedback(null), 1500);
     return () => clearTimeout(handle);
-  }, [copied]);
+  }, [copyFeedback]);
 
   const handleCopy = useCallback(async () => {
     if (!copyText) return;
@@ -53,26 +59,21 @@ export function MessageActions({
     const textToCopy = getSelectionAwareCopyText(copyText, selectionRoot);
 
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(textToCopy);
-      } else {
-        // Legacy fallback for non-secure contexts (HTTP without TLS).
-        const textarea = document.createElement("textarea");
-        textarea.value = textToCopy;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.left = "-9999px";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
-      setCopied(true);
-    } catch {
-      // Ignore — failures here are typically permissions-related and we
-      // don't want to surface them noisily inside a chat bubble.
+      await writeClipboardText(textToCopy);
+      setCopyFeedback({ status: "copied" });
+    } catch (error) {
+      console.error("Failed to copy message:", error);
+      setCopyFeedback({ status: "failed" });
     }
   }, [copyText]);
+
+  const copyStatus = copyFeedback?.status;
+  const copyLabel =
+    copyStatus === "copied"
+      ? t("messageActionCopied")
+      : copyStatus === "failed"
+        ? t("messageActionCopyFailed")
+        : t("messageActionCopy");
 
   const contextTokenLabel =
     contextBefore && contextBefore.inputTokens > 0
@@ -88,7 +89,7 @@ export function MessageActions({
   return (
     <span
       ref={actionsRef}
-      className={`message-actions${copied ? " is-active" : ""}`}
+      className={`message-actions${copyFeedback ? " is-active" : ""}`}
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => e.stopPropagation()}
     >
@@ -120,14 +121,25 @@ export function MessageActions({
       {copyText && (
         <button
           type="button"
-          className={`message-actions-copy${copied ? " is-copied" : ""}`}
+          className={`message-actions-copy${
+            copyStatus === "copied"
+              ? " is-copied"
+              : copyStatus === "failed"
+                ? " is-failed"
+                : ""
+          }`}
           onClick={handleCopy}
-          aria-label={
-            copied ? t("messageActionCopied") : t("messageActionCopy")
-          }
-          title={copied ? t("messageActionCopied") : t("messageActionCopy")}
+          aria-label={copyLabel}
+          aria-live="polite"
+          title={copyLabel}
         >
-          {copied ? <CopiedIcon /> : <CopyIcon />}
+          {copyStatus === "copied" ? (
+            <CopiedIcon />
+          ) : copyStatus === "failed" ? (
+            <CopyFailedIcon />
+          ) : (
+            <CopyIcon />
+          )}
         </button>
       )}
     </span>
@@ -186,6 +198,23 @@ function CopiedIcon() {
       aria-hidden="true"
     >
       <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function CopyFailedIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M6 6l12 12M18 6 6 18" />
     </svg>
   );
 }
