@@ -1135,6 +1135,34 @@ function SessionPageContent({
     t,
   ]);
 
+  const handleApproveStrictAutoReview = useCallback(async () => {
+    if (pendingInputRequest) {
+      try {
+        await api.respondToInput(
+          sessionId,
+          pendingInputRequest.id,
+          "approve_strict_auto_review",
+        );
+        markPendingInputResolved("in-turn");
+      } catch (err) {
+        const status = (err as { status?: number }).status;
+        if (status === 404) {
+          handleStalePendingInput();
+          return;
+        }
+        const msg = status ? `Error ${status}` : t("sessionApproveFailed");
+        showToast(msg, "error");
+      }
+    }
+  }, [
+    sessionId,
+    pendingInputRequest,
+    markPendingInputResolved,
+    handleStalePendingInput,
+    showToast,
+    t,
+  ]);
+
   const handleApproveAlways = useCallback(async () => {
     if (pendingInputRequest) {
       try {
@@ -1912,6 +1940,7 @@ function SessionPageContent({
                     onDeny={handleDeny}
                     onApproveAcceptEdits={handleApproveAcceptEdits}
                     onApproveForSession={handleApproveForSession}
+                    onApproveStrictAutoReview={handleApproveStrictAutoReview}
                     onApproveAlways={handleApproveAlways}
                     onDenyWithFeedback={handleDenyWithFeedback}
                     collapsed={approvalCollapsed}

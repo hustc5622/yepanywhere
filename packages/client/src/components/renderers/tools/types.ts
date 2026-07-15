@@ -222,6 +222,10 @@ export interface WebFetchResult {
  */
 export interface AskUserQuestionInput {
   questions: Question[];
+  /** Codex request_user_input permits submitting only the questions answered. */
+  allowPartialSubmission?: boolean;
+  /** Provider hint for an eventual automatic resolution. */
+  autoResolutionMs?: number | null;
 }
 
 export interface Question {
@@ -229,10 +233,22 @@ export interface Question {
   id?: string;
   question: string;
   header: string;
-  options: Array<{ label: string; description: string }>;
+  options: Array<{ label: string; description: string; value?: string }>;
   multiSelect: boolean;
   /** Whether the user may provide an answer outside the listed options. */
   custom?: boolean;
+  /** Optional MCP form fields may be submitted without a value. */
+  required?: boolean;
+  /** Native input type used for free-form Codex/MCP fields. */
+  inputType?:
+    | "text"
+    | "password"
+    | "number"
+    | "email"
+    | "url"
+    | "date"
+    | "datetime-local";
+  defaultValue?: string | string[];
 }
 
 export interface AskUserQuestionResult {

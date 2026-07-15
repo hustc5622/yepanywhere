@@ -49,14 +49,15 @@ describe("CodexBridgeService managed upstream profiles", () => {
     });
     await bridge.start();
 
-    const lightClient = await connect(`ws://127.0.0.1:${bridgePort}`);
-    await waitForArgsLog(argsLogPath, 1);
-    const fullClient = await connect(`ws://127.0.0.1:${bridgePort}`, {
-      authorization: "Bearer full",
-    });
-    await waitForArgsLog(argsLogPath, 2);
     const clearClient = await connect(`ws://127.0.0.1:${bridgePort}`, {
       authorization: "Bearer clear",
+    });
+    await waitForArgsLog(argsLogPath, 1);
+    expect(bridge.getStatus().upstreamRunning).toBe(true);
+    const lightClient = await connect(`ws://127.0.0.1:${bridgePort}`);
+    await waitForArgsLog(argsLogPath, 2);
+    const fullClient = await connect(`ws://127.0.0.1:${bridgePort}`, {
+      authorization: "Bearer full",
     });
     await waitForArgsLog(argsLogPath, 3);
     const fallbackClient = await connect(
@@ -68,19 +69,19 @@ describe("CodexBridgeService managed upstream profiles", () => {
       expect(args).toHaveLength(3);
       expect(args[0]).toEqual([
         "app-server",
-        "--light-profile",
+        "--clear-profile",
         "--listen",
         expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/),
       ]);
       expect(args[1]).toEqual([
         "app-server",
-        "--full-profile",
+        "--light-profile",
         "--listen",
         expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/),
       ]);
       expect(args[2]).toEqual([
         "app-server",
-        "--clear-profile",
+        "--full-profile",
         "--listen",
         expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/),
       ]);

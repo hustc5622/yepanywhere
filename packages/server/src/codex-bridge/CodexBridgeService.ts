@@ -18,6 +18,14 @@ import { findCodexCliPath } from "../sdk/cli-detection.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
 import { readCodexUsage } from "./CodexUsageService.js";
+import {
+  type CodexInteractiveMethod,
+  buildCodexInteractiveResponse,
+  buildCodexPendingInputId,
+  idKey,
+  isCodexInteractiveMethod,
+  toCodexInteractiveRequestView,
+} from "./interactions.js";
 import { bridgeOwnership, isLiveBridgeSession } from "./session-state.js";
 import type {
   CodexBridgeController,
@@ -64,6 +72,7 @@ interface BridgeConnection {
   pendingServerRequests: Map<string, PendingServerRequest>;
   resolvedServerRequestIds: Set<string>;
   threadIds: Set<string>;
+  downstreamAttached: boolean;
   closed: boolean;
 }
 
@@ -82,7 +91,7 @@ interface PendingServerRequest {
   rpcId: JsonRpcId;
   rpcKey: string;
   requestKey: string;
-  method: string;
+  method: CodexInteractiveMethod;
   params: Record<string, unknown>;
   threadId: string;
   turnId?: string;
@@ -91,6 +100,8 @@ interface PendingServerRequest {
   pendingInputType: "tool-approval" | "user-question";
   connection: BridgeConnection;
   createdAt: string;
+  autoResolutionDeadline?: number;
+  autoResolutionTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface SessionRecord {
@@ -113,13 +124,15 @@ interface SessionRecord {
   reasoningEffort?: string;
   serviceTier?: string;
   activity?: "in-turn" | "idle" | "waiting-input";
+  activityBeforePending?: "in-turn" | "idle";
   pendingInputType?: "tool-approval" | "user-question";
   connectionIds: Set<number>;
+  completedTurnIds: Set<string>;
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
-const JSON_RPC_VERSION = "2.0";
 const MAX_MCP_STARTUP_EVENTS = 50;
+const MAX_RESOLVED_SERVER_REQUEST_IDS = 1_000;
 const CODEX_USAGE_CACHE_TTL_MS = 30_000;
 
 interface CodexBridgeUpstreamState {
@@ -274,10 +287,16 @@ export class CodexBridgeService implements CodexBridgeController {
         full: this.getUpstreamStatus("full"),
       },
       connectionCount: this.connections.size,
+      attachedClientCount: Array.from(this.connections.values()).filter(
+        (connection) => connection.downstreamAttached,
+      ).length,
+      detachedConnectionCount: Array.from(this.connections.values()).filter(
+        (connection) => !connection.downstreamAttached,
+      ).length,
       sessionCount: Array.from(this.sessions.values()).filter((record) =>
         this.isTopLevelSessionRecord(record),
       ).length,
-      pendingInputCount: this.pendingByInputId.size,
+      pendingInputCount: this.getLogicalPendingInputCount(),
       recentMcpStartupEvents: this.recentMcpStartupEvents.map((event) => ({
         ...event,
       })),
@@ -393,15 +412,24 @@ export class CodexBridgeService implements CodexBridgeController {
       return false;
     }
 
-    const result = this.buildServerRequestResponse(pending, response, answers);
+    const result = buildCodexInteractiveResponse(
+      pending.method,
+      pending.params,
+      response,
+      answers,
+    );
     const message: JsonRpcMessage = {
-      jsonrpc: JSON_RPC_VERSION,
       id: pending.rpcId,
       result,
     };
-    pending.connection.upstream.send(JSON.stringify(message));
-    pending.connection.resolvedServerRequestIds.add(pending.rpcKey);
-    this.resolvePendingRequest(pending, "yep");
+    try {
+      pending.connection.upstream.send(JSON.stringify(message));
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return false;
+    }
+    this.markLogicalRequestResolved(pending);
+    this.resolveLogicalRequest(pending, "yep");
     return true;
   }
 
@@ -547,6 +575,7 @@ export class CodexBridgeService implements CodexBridgeController {
       pendingServerRequests: new Map(),
       resolvedServerRequestIds: new Set(),
       threadIds: new Set(),
+      downstreamAttached: true,
       closed: false,
     };
     this.connections.set(connection.id, connection);
@@ -555,19 +584,24 @@ export class CodexBridgeService implements CodexBridgeController {
     );
 
     downstream.on("message", (data, isBinary) => {
-      if (!this.observeClientData(connection, data)) {
-        return;
-      }
+      const forwardedFrame = this.observeClientData(connection, data, isBinary);
+      if (!forwardedFrame) return;
       if (connection.upstream?.readyState === WebSocket.OPEN) {
-        sendFrame(connection.upstream, data, isBinary);
+        sendFrame(
+          connection.upstream,
+          forwardedFrame.data,
+          forwardedFrame.isBinary,
+        );
       } else {
-        connection.downstreamQueue.push({ data, isBinary });
+        connection.downstreamQueue.push(forwardedFrame);
       }
     });
-    downstream.on("close", () => this.closeConnection(connection, "client"));
+    downstream.on("close", () =>
+      this.handleDownstreamClosed(connection, "client"),
+    );
     downstream.on("error", (error) => {
       this.lastError = error.message;
-      this.closeConnection(connection, "client-error");
+      this.handleDownstreamClosed(connection, "client-error");
     });
 
     this.connectUpstream(connection).catch((error: unknown) => {
@@ -602,6 +636,7 @@ export class CodexBridgeService implements CodexBridgeController {
             sendFrame(upstream, frame.data, frame.isBinary);
           }
         }
+        this.maybeCloseDetachedConnection(connection, "upstream-open");
         resolve();
       });
 
@@ -620,6 +655,7 @@ export class CodexBridgeService implements CodexBridgeController {
             );
           }
         }
+        this.maybeCloseDetachedConnection(connection, "server-frame");
       });
 
       upstream.on("close", () => this.closeConnection(connection, "upstream"));
@@ -628,6 +664,54 @@ export class CodexBridgeService implements CodexBridgeController {
         reject(error);
       });
     });
+  }
+
+  private handleDownstreamClosed(
+    connection: BridgeConnection,
+    reason: string,
+  ): void {
+    if (connection.closed || !connection.downstreamAttached) return;
+    connection.downstreamAttached = false;
+    this.resolveOverdueDetachedInputs(connection);
+    if (this.shouldRetainDetachedConnection(connection)) {
+      console.log(
+        `[CodexBridge] Retaining detached connection ${connection.id} while Codex is active`,
+      );
+      return;
+    }
+    this.closeConnection(connection, reason);
+  }
+
+  private shouldRetainDetachedConnection(
+    connection: BridgeConnection,
+  ): boolean {
+    if (connection.downstreamAttached || connection.closed) return false;
+    if (
+      connection.downstreamQueue.length > 0 ||
+      connection.pendingClientRequests.size > 0 ||
+      connection.pendingServerRequests.size > 0
+    ) {
+      return true;
+    }
+    for (const threadId of connection.threadIds) {
+      const activity = this.sessions.get(threadId)?.activity;
+      if (activity === "in-turn" || activity === "waiting-input") return true;
+    }
+    return false;
+  }
+
+  private maybeCloseDetachedConnection(
+    connection: BridgeConnection,
+    reason: string,
+  ): void {
+    if (
+      connection.downstreamAttached ||
+      connection.closed ||
+      this.shouldRetainDetachedConnection(connection)
+    ) {
+      return;
+    }
+    this.closeConnection(connection, reason);
   }
 
   private closeConnection(connection: BridgeConnection, reason: string): void {
@@ -640,10 +724,16 @@ export class CodexBridgeService implements CodexBridgeController {
     }
     connection.pendingServerRequests.clear();
 
-    if (connection.downstream.readyState === WebSocket.OPEN) {
+    if (
+      connection.downstream.readyState === WebSocket.OPEN ||
+      connection.downstream.readyState === WebSocket.CONNECTING
+    ) {
       connection.downstream.close();
     }
-    if (connection.upstream?.readyState === WebSocket.OPEN) {
+    if (
+      connection.upstream?.readyState === WebSocket.OPEN ||
+      connection.upstream?.readyState === WebSocket.CONNECTING
+    ) {
       connection.upstream.close();
     }
 
@@ -654,6 +744,7 @@ export class CodexBridgeService implements CodexBridgeController {
       record.updatedAt = new Date().toISOString();
       if (record.connectionIds.size === 0) {
         record.activity = "idle";
+        record.activityBeforePending = undefined;
         record.pendingInputType = undefined;
         this.emitSessionStatus(record, { owner: "none" });
         this.emitProcessState(record, "idle");
@@ -664,38 +755,44 @@ export class CodexBridgeService implements CodexBridgeController {
   private observeClientData(
     connection: BridgeConnection,
     data: RawData,
-  ): boolean {
-    const messages = parseJsonRpcData(data);
-    if (!messages) {
-      return true;
-    }
+    isBinary: boolean,
+  ): ForwardedFrame | null {
+    const envelope = parseJsonRpcEnvelope(data);
+    if (!envelope) return { data, isBinary };
 
-    let shouldForward = true;
-    for (const message of messages) {
+    const messagesToForward: JsonRpcMessage[] = [];
+    for (const message of envelope.messages) {
       if (message.method && message.id !== undefined) {
         connection.pendingClientRequests.set(idKey(message.id), {
           method: message.method,
           params: message.params,
         });
+        messagesToForward.push(message);
         continue;
       }
 
       if (!message.method && message.id !== undefined) {
         const key = idKey(message.id);
+        const alreadyResolved = connection.resolvedServerRequestIds.has(key);
         const pending = this.findPendingByConnectionAndRpcId(
           connection,
           message.id,
         );
-        if (pending) {
-          this.resolvePendingRequest(pending, "tui");
+        if (alreadyResolved) {
+          continue;
         }
-        if (connection.resolvedServerRequestIds.has(key)) {
-          shouldForward = false;
+        if (pending) {
+          this.markLogicalRequestResolved(pending, connection);
+          this.resolveLogicalRequest(pending, "tui");
         }
       }
+      messagesToForward.push(message);
     }
 
-    return shouldForward;
+    if (messagesToForward.length === envelope.messages.length) {
+      return { data, isBinary };
+    }
+    return serializeJsonRpcEnvelope(envelope.isBatch, messagesToForward);
   }
 
   private observeServerData(
@@ -709,11 +806,9 @@ export class CodexBridgeService implements CodexBridgeController {
       return { data, isBinary };
     }
 
-    const messagesToForward: JsonRpcMessage[] = [];
     for (const message of messages) {
       if (message.method && message.id !== undefined) {
         this.recordServerRequest(connection, message);
-        messagesToForward.push(message);
         continue;
       }
 
@@ -723,9 +818,6 @@ export class CodexBridgeService implements CodexBridgeController {
           message.method,
           message.params,
         );
-        if (message.method !== "mcpServer/startupStatus/updated") {
-          messagesToForward.push(message);
-        }
         continue;
       }
 
@@ -736,25 +828,8 @@ export class CodexBridgeService implements CodexBridgeController {
           this.handleClientRequestResponse(connection, request, message);
         }
       }
-      messagesToForward.push(message);
     }
-
-    if (messagesToForward.length === messages.length) {
-      return { data, isBinary };
-    }
-
-    if (messagesToForward.length === 0) {
-      return null;
-    }
-
-    return {
-      data: Buffer.from(
-        JSON.stringify(
-          envelope.isBatch ? messagesToForward : messagesToForward[0],
-        ),
-      ),
-      isBinary: false,
-    };
+    return { data, isBinary };
   }
 
   private handleClientRequestResponse(
@@ -811,11 +886,16 @@ export class CodexBridgeService implements CodexBridgeController {
         if (!threadId) break;
         this.trackThreadConnection(connection, threadId);
         const record = this.ensureSessionRecord(threadId, {});
-        const activity = this.activityFromThreadStatus(p?.status);
+        const pending = this.findPendingForThread(threadId);
+        const statusActivity = this.activityFromThreadStatus(p?.status);
+        const activity = pending ? "waiting-input" : statusActivity;
+        record.activityBeforePending = pending
+          ? statusActivity === "idle"
+            ? "idle"
+            : "in-turn"
+          : undefined;
         record.activity = activity;
-        if (activity !== "waiting-input") {
-          record.pendingInputType = undefined;
-        }
+        record.pendingInputType = pending?.pendingInputType;
         record.updatedAt = new Date().toISOString();
         this.emitSessionStatus(
           record,
@@ -843,11 +923,13 @@ export class CodexBridgeService implements CodexBridgeController {
         if (!threadId) break;
         this.trackThreadConnection(connection, threadId);
         const record = this.ensureSessionRecord(threadId, {});
-        record.activity = "in-turn";
+        const pending = this.findPendingForThread(threadId);
+        record.activityBeforePending = pending ? "in-turn" : undefined;
+        record.activity = pending ? "waiting-input" : "in-turn";
         record.updatedAt = new Date().toISOString();
         this.emitSessionCreated(record);
         this.emitSessionStatus(record, { owner: "external" });
-        this.emitProcessState(record, "in-turn");
+        this.emitProcessState(record, record.activity, record.pendingInputType);
         break;
       }
       case "turn/completed": {
@@ -855,8 +937,14 @@ export class CodexBridgeService implements CodexBridgeController {
         if (!threadId) break;
         const record = this.sessions.get(threadId);
         if (!record) break;
-        record.messageCount += 1;
+        const turnId = getString(asRecord(p?.turn)?.id);
+        if (!turnId || !record.completedTurnIds.has(turnId)) {
+          record.messageCount += 1;
+          if (turnId) record.completedTurnIds.add(turnId);
+        }
+        this.resolvePendingForThread(threadId, "turn-completed");
         record.activity = "idle";
+        record.activityBeforePending = undefined;
         record.pendingInputType = undefined;
         record.updatedAt = new Date().toISOString();
         this.emitSessionCreated(record);
@@ -868,14 +956,36 @@ export class CodexBridgeService implements CodexBridgeController {
         this.emitProcessState(record, "idle");
         break;
       }
+      case "thread/closed": {
+        const threadId = getString(p?.threadId);
+        if (!threadId) break;
+        this.resolvePendingForThread(threadId, "thread-closed");
+        connection.threadIds.delete(threadId);
+        const record = this.sessions.get(threadId);
+        if (!record) break;
+        record.connectionIds.delete(connection.id);
+        record.updatedAt = new Date().toISOString();
+        if (record.connectionIds.size === 0) {
+          record.activity = "idle";
+          record.activityBeforePending = undefined;
+          record.pendingInputType = undefined;
+          this.emitSessionStatus(record, { owner: "none" });
+          this.emitProcessState(record, "idle");
+        }
+        break;
+      }
       case "serverRequest/resolved": {
         const threadId = getString(p?.threadId);
         const requestId = p?.requestId as JsonRpcId | undefined;
         if (!threadId || requestId === undefined) break;
-        const pending = this.findPendingByThreadAndRpcId(threadId, requestId);
+        const rpcKey = idKey(requestId);
+        this.addResolvedServerRequestId(connection, rpcKey);
+        const pending =
+          this.findPendingByConnectionAndRpcId(connection, requestId) ??
+          this.findPendingByThreadAndRpcId(threadId, requestId);
         if (pending) {
-          pending.connection.resolvedServerRequestIds.add(pending.requestKey);
-          this.resolvePendingRequest(pending, "server");
+          this.markLogicalRequestResolved(pending);
+          this.resolveLogicalRequest(pending, "server");
         }
         break;
       }
@@ -991,27 +1101,31 @@ export class CodexBridgeService implements CodexBridgeController {
     message: JsonRpcMessage,
   ): void {
     if (message.id === undefined || !message.method) return;
-    if (!isUserResolvableServerRequest(message.method)) return;
+    if (!isCodexInteractiveMethod(message.method)) return;
 
     const params = asRecord(message.params) ?? {};
-    const threadId = getString(params.threadId);
+    const threadId =
+      getString(params.threadId) ?? getString(params.conversationId);
     if (!threadId) return;
 
     this.trackThreadConnection(connection, threadId);
 
     const rpcKey = idKey(message.id);
-    const requestKey = this.buildPendingInputId(message, threadId, params);
+    const requestKey = buildCodexPendingInputId(
+      connection.id,
+      message,
+      threadId,
+      params,
+    );
     connection.resolvedServerRequestIds.delete(rpcKey);
     const createdAt = new Date().toISOString();
-    const inputRequest = this.toInputRequest(
+    const view = toCodexInteractiveRequestView(
       requestKey,
       message.method,
       threadId,
       params,
       createdAt,
     );
-    const pendingInputType =
-      inputRequest.type === "tool-approval" ? "tool-approval" : "user-question";
     const pending: PendingServerRequest = {
       inputId: requestKey,
       rpcId: message.id,
@@ -1021,9 +1135,9 @@ export class CodexBridgeService implements CodexBridgeController {
       params,
       threadId,
       turnId: getString(params.turnId),
-      itemId: getString(params.itemId),
-      inputRequest,
-      pendingInputType,
+      itemId: getString(params.itemId) ?? getString(params.callId),
+      inputRequest: view.inputRequest,
+      pendingInputType: view.pendingInputType,
       connection,
       createdAt,
     };
@@ -1039,240 +1153,48 @@ export class CodexBridgeService implements CodexBridgeController {
 
     const cwd = getString(params.cwd);
     const record = this.ensureSessionRecord(threadId, cwd ? { cwd } : {});
+    if (record.activity !== "waiting-input") {
+      record.activityBeforePending =
+        getString(params.turnId) ||
+        message.method !== "mcpServer/elicitation/request"
+          ? "in-turn"
+          : record.activity === "in-turn"
+            ? "in-turn"
+            : "idle";
+    }
     record.activity = "waiting-input";
-    record.pendingInputType = pendingInputType;
+    record.pendingInputType = view.pendingInputType;
     record.updatedAt = createdAt;
 
     const visibleRecord =
       this.sessions.get(this.getTopLevelSessionId(threadId)) ?? record;
     if (visibleRecord !== record) {
+      if (visibleRecord.activity !== "waiting-input") {
+        visibleRecord.activityBeforePending =
+          visibleRecord.activity === "in-turn" ? "in-turn" : "idle";
+      }
       visibleRecord.activity = "waiting-input";
-      visibleRecord.pendingInputType = pendingInputType;
+      visibleRecord.pendingInputType = view.pendingInputType;
       visibleRecord.updatedAt = createdAt;
     }
     this.emitSessionCreated(visibleRecord);
     this.emitSessionStatus(visibleRecord, { owner: "external" });
-    this.emitProcessState(visibleRecord, "waiting-input", pendingInputType);
-  }
-
-  private toInputRequest(
-    id: string,
-    method: string,
-    threadId: string,
-    params: Record<string, unknown>,
-    timestamp: string,
-  ): CodexBridgePendingInput["request"] {
-    if (method === "item/tool/requestUserInput") {
-      const questions = normalizeCodexQuestions(params.questions);
-      return {
-        id,
-        sessionId: threadId,
-        type: "question",
-        prompt: questions[0]?.question ?? "Codex needs input",
-        toolName: "AskUserQuestion",
-        toolInput: { questions, codexQuestions: params.questions ?? [] },
-        timestamp,
-      };
-    }
-
-    if (method === "mcpServer/elicitation/request") {
-      if (isMcpToolApprovalElicitation(params)) {
-        const meta = getElicitationMeta(params);
-        const prompt = getString(params.message) ?? "Allow MCP tool execution?";
-        const serverName =
-          getString(params.serverName) ??
-          getString(meta?.connector_name) ??
-          getString(meta?.connector_id);
-        const mcpToolName =
-          getString(meta?.tool_name) ?? parseMcpToolNameFromPrompt(prompt);
-        const toolTitle = getString(meta?.tool_title) ?? mcpToolName;
-
-        return {
-          id,
-          sessionId: threadId,
-          type: "tool-approval",
-          prompt,
-          toolName: "MCP",
-          toolInput: {
-            approvalKind: "mcp_tool_call",
-            approvalPrompt: prompt,
-            serverName,
-            mcpToolName,
-            toolTitle,
-            toolDescription: meta?.tool_description,
-            toolParams: meta?.tool_params,
-            toolParamsDisplay: meta?.tool_params_display,
-            persistScopes: normalizeMcpPersistScopes(meta?.persist),
-            threadId,
-            turnId: params.turnId,
-            raw: params,
-          },
-          timestamp,
-        };
-      }
-
-      return {
-        id,
-        sessionId: threadId,
-        type: "question",
-        prompt: getString(params.message) ?? "Codex needs MCP input",
-        toolName: "AskUserQuestion",
-        toolInput: {
-          questions: [
-            {
-              question: getString(params.message) ?? "Response",
-              options: [],
-            },
-          ],
-          raw: params,
-        },
-        timestamp,
-      };
-    }
-
-    if (method === "item/permissions/requestApproval") {
-      return {
-        id,
-        sessionId: threadId,
-        type: "tool-approval",
-        prompt: getString(params.reason) ?? "Allow requested permissions?",
-        toolName: "Permissions",
-        toolInput: {
-          cwd: params.cwd,
-          reason: params.reason,
-          permissions: params.permissions,
-          environmentId: params.environmentId,
-          threadId,
-          turnId: params.turnId,
-          itemId: params.itemId,
-        },
-        timestamp,
-      };
-    }
-
-    if (
-      method === "item/fileChange/requestApproval" ||
-      method === "applyPatchApproval"
-    ) {
-      return {
-        id,
-        sessionId: threadId,
-        type: "tool-approval",
-        prompt: "Allow file changes?",
-        toolName: "Edit",
-        toolInput: {
-          reason: params.reason,
-          grantRoot: params.grantRoot,
-          fileChanges: params.fileChanges,
-          threadId,
-          turnId: params.turnId,
-          itemId: params.itemId,
-        },
-        timestamp,
-      };
-    }
-
-    return {
-      id,
-      sessionId: threadId,
-      type: "tool-approval",
-      prompt: "Allow command?",
-      toolName: "Bash",
-      toolInput: {
-        command: params.command,
-        cwd: params.cwd,
-        reason: params.reason,
-        commandActions: params.commandActions,
-        additionalPermissions: params.additionalPermissions,
-        availableDecisions: params.availableDecisions,
-        networkApprovalContext: params.networkApprovalContext,
-        proposedExecpolicyAmendment: params.proposedExecpolicyAmendment,
-        proposedNetworkPolicyAmendments: params.proposedNetworkPolicyAmendments,
-        threadId,
-        turnId: params.turnId,
-        itemId: params.itemId,
-        approvalId: params.approvalId,
-      },
-      timestamp,
-    };
-  }
-
-  private buildServerRequestResponse(
-    pending: PendingServerRequest,
-    response: CodexBridgeInputResponse,
-    answers?: UserQuestionAnswers,
-  ): unknown {
-    const approved = response !== "deny";
-    const approveForSession =
-      response === "approve_accept_edits" || response === "approve_for_session";
-    const approveAlways = response === "approve_always";
-
-    switch (pending.method) {
-      case "item/commandExecution/requestApproval":
-        return {
-          decision: approved
-            ? approveForSession
-              ? this.getCommandPersistentApprovalDecision(pending.params)
-              : "accept"
-            : "decline",
-        };
-      case "item/fileChange/requestApproval":
-        return {
-          decision: approved
-            ? approveForSession
-              ? "acceptForSession"
-              : "accept"
-            : "decline",
-        };
-      case "execCommandApproval":
-      case "applyPatchApproval":
-        return { decision: approved ? "approved" : "denied" };
-      case "item/permissions/requestApproval": {
-        if (!approved) {
-          return { permissions: {}, scope: "turn" };
-        }
-        const requested = asRecord(pending.params.permissions);
-        const granted: Record<string, unknown> = {};
-        const network = requested ? requested.network : undefined;
-        const fileSystem = requested ? requested.fileSystem : undefined;
-        if (network !== null && network !== undefined)
-          granted.network = network;
-        if (fileSystem !== null && fileSystem !== undefined)
-          granted.fileSystem = fileSystem;
-        return {
-          permissions: granted,
-          scope: approveForSession ? "session" : "turn",
-        };
-      }
-      case "item/tool/requestUserInput":
-        return {
-          answers: buildCodexUserInputAnswers(
-            pending.params.questions,
-            answers,
-          ),
-        };
-      case "mcpServer/elicitation/request":
-        if (isMcpToolApprovalElicitation(pending.params)) {
-          if (!approved) {
-            return { action: "cancel" };
-          }
-          const content: Record<string, unknown> = {};
-          if (approveForSession) content.persist = "session";
-          if (approveAlways) content.persist = "always";
-          return Object.keys(content).length > 0
-            ? { action: "accept", content }
-            : { action: "accept" };
-        }
-        return approved ? { values: answers ?? {} } : { values: {} };
-      default:
-        return {};
-    }
+    this.emitProcessState(
+      visibleRecord,
+      "waiting-input",
+      view.pendingInputType,
+    );
+    this.armAutoResolution(pending);
   }
 
   private resolvePendingRequest(
     pending: PendingServerRequest,
     _source: string,
   ): void {
+    if (pending.autoResolutionTimer) {
+      clearTimeout(pending.autoResolutionTimer);
+      pending.autoResolutionTimer = undefined;
+    }
     this.pendingByInputId.delete(pending.inputId);
     pending.connection.pendingServerRequests.delete(pending.requestKey);
     const ids = this.pendingIdsByThread.get(pending.threadId);
@@ -1300,6 +1222,115 @@ export class CodexBridgeService implements CodexBridgeController {
         this.findPendingForVisibleSession(visibleRecord.id),
       );
     }
+    this.maybeCloseDetachedConnection(pending.connection, "input-resolved");
+  }
+
+  private armAutoResolution(pending: PendingServerRequest): void {
+    if (pending.method !== "item/tool/requestUserInput") return;
+    const delayMs = pending.params.autoResolutionMs;
+    if (
+      typeof delayMs !== "number" ||
+      !Number.isFinite(delayMs) ||
+      delayMs < 0
+    ) {
+      return;
+    }
+    pending.autoResolutionDeadline = Date.now() + delayMs;
+    pending.autoResolutionTimer = setTimeout(() => {
+      pending.autoResolutionTimer = undefined;
+      if (
+        pending.connection.downstreamAttached ||
+        !this.pendingByInputId.has(pending.inputId)
+      ) {
+        return;
+      }
+      this.respondToInput(pending.threadId, pending.inputId, "approve", {});
+    }, delayMs);
+    pending.autoResolutionTimer.unref?.();
+  }
+
+  private resolveOverdueDetachedInputs(connection: BridgeConnection): void {
+    const now = Date.now();
+    for (const pending of Array.from(
+      connection.pendingServerRequests.values(),
+    )) {
+      if (
+        pending.autoResolutionDeadline !== undefined &&
+        pending.autoResolutionDeadline <= now
+      ) {
+        this.respondToInput(pending.threadId, pending.inputId, "approve", {});
+      }
+    }
+  }
+
+  private resolveLogicalRequest(
+    pending: PendingServerRequest,
+    source: string,
+  ): void {
+    for (const candidate of this.findLogicalRequests(pending)) {
+      this.resolvePendingRequest(candidate, source);
+    }
+  }
+
+  private resolvePendingForThread(threadId: string, source: string): void {
+    const ids = Array.from(this.pendingIdsByThread.get(threadId) ?? []);
+    for (const id of ids) {
+      const pending = this.pendingByInputId.get(id);
+      if (pending) this.resolvePendingRequest(pending, source);
+    }
+  }
+
+  private findLogicalRequests(
+    pending: PendingServerRequest,
+  ): PendingServerRequest[] {
+    return Array.from(this.pendingByInputId.values()).filter(
+      (candidate) =>
+        candidate.threadId === pending.threadId &&
+        candidate.rpcKey === pending.rpcKey &&
+        candidate.method === pending.method &&
+        (this.upstreamUrlOverride !== undefined ||
+          candidate.connection.profile === pending.connection.profile),
+    );
+  }
+
+  private getLogicalPendingInputCount(): number {
+    const keys = new Set<string>();
+    for (const pending of this.pendingByInputId.values()) {
+      const upstreamKey = this.upstreamUrlOverride
+        ? "external"
+        : pending.connection.profile;
+      keys.add(
+        [upstreamKey, pending.threadId, pending.rpcKey, pending.method].join(
+          "|",
+        ),
+      );
+    }
+    return keys.size;
+  }
+
+  private markLogicalRequestResolved(
+    pending: PendingServerRequest,
+    exceptConnection?: BridgeConnection,
+  ): void {
+    for (const candidate of this.findLogicalRequests(pending)) {
+      if (candidate.connection === exceptConnection) continue;
+      this.addResolvedServerRequestId(candidate.connection, candidate.rpcKey);
+    }
+  }
+
+  private addResolvedServerRequestId(
+    connection: BridgeConnection,
+    rpcKey: string,
+  ): void {
+    connection.resolvedServerRequestIds.add(rpcKey);
+    if (
+      connection.resolvedServerRequestIds.size > MAX_RESOLVED_SERVER_REQUEST_IDS
+    ) {
+      const oldest = connection.resolvedServerRequestIds.values().next().value;
+      if (typeof oldest === "string") {
+        connection.resolvedServerRequestIds.delete(oldest);
+      }
+    }
   }
 
   private findPendingForThread(threadId: string): PendingServerRequest | null {
@@ -1326,8 +1357,9 @@ export class CodexBridgeService implements CodexBridgeController {
 
     record.pendingInputType = undefined;
     if (record.activity === "waiting-input") {
-      record.activity = "in-turn";
-      this.emitProcessState(record, "in-turn");
+      record.activity = record.activityBeforePending ?? "in-turn";
+      record.activityBeforePending = undefined;
+      this.emitProcessState(record, record.activity);
     }
   }
 
@@ -1354,66 +1386,6 @@ export class CodexBridgeService implements CodexBridgeController {
       if (pending.rpcKey === key) return pending;
     }
     return null;
-  }
-
-  private buildPendingInputId(
-    message: JsonRpcMessage,
-    threadId: string,
-    params: Record<string, unknown>,
-  ): string {
-    return [
-      idKey(message.id as JsonRpcId),
-      message.method,
-      threadId,
-      getString(params.turnId),
-      getString(params.itemId),
-      getString(params.approvalId),
-    ]
-      .filter((part): part is string => typeof part === "string" && part !== "")
-      .join("|");
-  }
-
-  private getCommandPersistentApprovalDecision(
-    params: Record<string, unknown>,
-  ): unknown {
-    const availableDecisions = Array.isArray(params.availableDecisions)
-      ? params.availableDecisions
-      : [];
-    const offeredPersistentDecision = availableDecisions.find(
-      isPersistentCommandDecision,
-    );
-    if (offeredPersistentDecision) {
-      return offeredPersistentDecision;
-    }
-
-    const execpolicyAmendment = params.proposedExecpolicyAmendment;
-    if (Array.isArray(execpolicyAmendment)) {
-      return {
-        acceptWithExecpolicyAmendment: {
-          execpolicy_amendment: execpolicyAmendment,
-        },
-      };
-    }
-
-    const networkAmendments = Array.isArray(
-      params.proposedNetworkPolicyAmendments,
-    )
-      ? params.proposedNetworkPolicyAmendments
-      : [];
-    const networkAmendment = networkAmendments.find(
-      (value) => asRecord(value) !== null,
-    );
-    if (networkAmendment) {
-      return {
-        applyNetworkPolicyAmendment: {
-          network_policy_amendment: networkAmendment,
-        },
-      };
-    }
-
-    return availableDecisions.includes("acceptForSession")
-      ? "acceptForSession"
-      : "accept";
   }
 
   private upsertThread(
@@ -1448,14 +1420,25 @@ export class CodexBridgeService implements CodexBridgeController {
         ? thread.turns.length
         : undefined,
     });
+    if (Array.isArray(thread.turns)) {
+      for (const rawTurn of thread.turns) {
+        const turnId = getString(asRecord(rawTurn)?.id);
+        if (turnId) record.completedTurnIds.add(turnId);
+      }
+    }
     this.trackThreadConnection(connection, id);
 
     const status = asRecord(thread.status);
     if (status) {
-      record.activity = this.activityFromThreadStatus(status);
-      if (record.activity !== "waiting-input") {
-        record.pendingInputType = undefined;
-      }
+      const pending = this.findPendingForThread(id);
+      const statusActivity = this.activityFromThreadStatus(status);
+      record.activity = pending ? "waiting-input" : statusActivity;
+      record.activityBeforePending = pending
+        ? statusActivity === "idle"
+          ? "idle"
+          : "in-turn"
+        : undefined;
+      record.pendingInputType = pending?.pendingInputType;
     }
 
     this.emitSessionCreated(record);
@@ -1506,6 +1489,7 @@ export class CodexBridgeService implements CodexBridgeController {
       messageCount: 0,
       activity: "idle",
       connectionIds: new Set(),
+      completedTurnIds: new Set(),
     };
 
     if (values.cwd && values.cwd !== record.projectPath) {
@@ -1846,6 +1830,7 @@ export class CodexBridgeService implements CodexBridgeController {
 
   private isAnyManagedUpstreamRunning(): boolean {
     return (
+      this.isManagedUpstreamRunning("clear") ||
       this.isManagedUpstreamRunning("light") ||
       this.isManagedUpstreamRunning("full")
     );
@@ -1855,10 +1840,6 @@ export class CodexBridgeService implements CodexBridgeController {
 interface JsonRpcEnvelope {
   messages: JsonRpcMessage[];
   isBatch: boolean;
-}
-
-function parseJsonRpcData(data: RawData): JsonRpcMessage[] | null {
-  return parseJsonRpcEnvelope(data)?.messages ?? null;
 }
 
 function parseJsonRpcEnvelope(data: RawData): JsonRpcEnvelope | null {
@@ -1873,6 +1854,17 @@ function parseJsonRpcEnvelope(data: RawData): JsonRpcEnvelope | null {
   } catch {
     return null;
   }
+}
+
+function serializeJsonRpcEnvelope(
+  isBatch: boolean,
+  messages: JsonRpcMessage[],
+): ForwardedFrame | null {
+  if (messages.length === 0) return null;
+  return {
+    data: Buffer.from(JSON.stringify(isBatch ? messages : messages[0]), "utf8"),
+    isBinary: false,
+  };
 }
 
 function parseMcpProfile(
@@ -1940,6 +1932,7 @@ function parseBridgeInputResponse(
   return value === "approve" ||
     value === "approve_accept_edits" ||
     value === "approve_for_session" ||
+    value === "approve_strict_auto_review" ||
     value === "approve_always" ||
     value === "deny"
     ? value
@@ -1972,107 +1965,6 @@ function formatDiagnosticValue(value: unknown): string | null {
   } catch {
     return String(value);
   }
-}
-
-function getElicitationMeta(
-  params: Record<string, unknown>,
-): Record<string, unknown> | null {
-  return asRecord(params._meta) ?? asRecord(params.meta);
-}
-
-function isMcpToolApprovalElicitation(
-  params: Record<string, unknown>,
-): boolean {
-  const meta = getElicitationMeta(params);
-  return getString(meta?.codex_approval_kind) === "mcp_tool_call";
-}
-
-function normalizeMcpPersistScopes(value: unknown): string[] {
-  const rawScopes = Array.isArray(value) ? value : [value];
-  const scopes = rawScopes.filter(
-    (scope): scope is string => scope === "session" || scope === "always",
-  );
-  return Array.from(new Set(scopes));
-}
-
-function parseMcpToolNameFromPrompt(prompt: string): string | undefined {
-  return /run tool "([^"]+)"/.exec(prompt)?.[1];
-}
-
-function idKey(id: JsonRpcId): string {
-  return `${typeof id}:${String(id)}`;
-}
-
-function isPersistentCommandDecision(value: unknown): boolean {
-  const decision = asRecord(value);
-  return (
-    !!asRecord(decision?.acceptWithExecpolicyAmendment) ||
-    !!asRecord(decision?.applyNetworkPolicyAmendment)
-  );
-}
-
-function isUserResolvableServerRequest(method: string): boolean {
-  return (
-    method === "item/commandExecution/requestApproval" ||
-    method === "item/fileChange/requestApproval" ||
-    method === "item/permissions/requestApproval" ||
-    method === "item/tool/requestUserInput" ||
-    method === "mcpServer/elicitation/request" ||
-    method === "execCommandApproval" ||
-    method === "applyPatchApproval"
-  );
-}
-
-function normalizeCodexQuestions(
-  value: unknown,
-): Array<{ question: string; options: string[] }> {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((raw) => {
-      const question = asRecord(raw);
-      if (!question) return null;
-      const prompt = getString(question.question) ?? getString(question.header);
-      if (!prompt) return null;
-      const options = Array.isArray(question.options)
-        ? question.options
-            .map((option) =>
-              typeof option === "string"
-                ? option
-                : getString(asRecord(option)?.label),
-            )
-            .filter((option): option is string => !!option)
-        : [];
-      return { question: prompt, options };
-    })
-    .filter(
-      (question): question is { question: string; options: string[] } =>
-        !!question,
-    );
-}
-
-function buildCodexUserInputAnswers(
-  questionsValue: unknown,
-  answers: UserQuestionAnswers | undefined,
-): Record<string, { answers: string[] }> {
-  const result: Record<string, { answers: string[] }> = {};
-  if (!Array.isArray(questionsValue)) return result;
-
-  for (const raw of questionsValue) {
-    const question = asRecord(raw);
-    const id = getString(question?.id);
-    if (!id) continue;
-    const prompt = getString(question?.question) ?? getString(question?.header);
-    const answer =
-      answers?.[id] ?? (prompt ? answers?.[prompt] : undefined) ?? "";
-    result[id] = {
-      answers: Array.isArray(answer)
-        ? answer.filter(Boolean)
-        : answer
-          ? [answer]
-          : [],
-    };
-  }
-  return result;
 }
 
 function timestampFromThreadValue(value: unknown): string | undefined {

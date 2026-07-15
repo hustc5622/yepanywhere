@@ -1045,6 +1045,7 @@ export const api = {
       | "approve"
       | "approve_accept_edits"
       | "approve_for_session"
+      | "approve_strict_auto_review"
       | "approve_always"
       | "deny",
     answers?: UserQuestionAnswers,

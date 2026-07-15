@@ -17,11 +17,12 @@ import type { SessionSummary } from "../supervisor/types.js";
 
 export type MaybePromise<T> = T | Promise<T>;
 
-/** Decision values accepted by both bridges for pending-input responses. */
+/** Decision values carried by the shared pending-input control plane. */
 export type BridgeInputResponse =
   | "approve"
   | "approve_accept_edits"
   | "approve_for_session"
+  | "approve_strict_auto_review"
   | "approve_always"
   | "deny";
 

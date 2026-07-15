@@ -14,6 +14,7 @@ describe("CodexBridgeService", () => {
   let bridgePort: number;
   let bridge: CodexBridgeService;
   let upstreamSocket: WebSocket | null;
+  let upstreamSockets: WebSocket[];
   let upstreamMessages: JsonRpcMessage[];
   let upstreamIsBinaryFlags: boolean[];
   let emittedEvents: unknown[];
@@ -23,12 +24,14 @@ describe("CodexBridgeService", () => {
     upstreamIsBinaryFlags = [];
     emittedEvents = [];
     upstreamSocket = null;
+    upstreamSockets = [];
 
     upstreamPort = await findAvailablePort();
     upstreamServer = createServer();
     upstreamWss = new WebSocketServer({ server: upstreamServer });
     upstreamWss.on("connection", (ws) => {
       upstreamSocket = ws;
+      upstreamSockets.push(ws);
       ws.on("message", (data, isBinary) => {
         upstreamIsBinaryFlags.push(isBinary);
         upstreamMessages.push(JSON.parse(data.toString()) as JsonRpcMessage);
@@ -158,16 +161,12 @@ describe("CodexBridgeService", () => {
     }
   });
 
-  it("records and suppresses MCP startup notifications", async () => {
+  it("records and transparently forwards MCP startup notifications", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {
       await waitFor(() => upstreamSocket !== null);
 
-      let forwarded = false;
-      const onMessage = () => {
-        forwarded = true;
-      };
-      client.on("message", onMessage);
+      const forwardedFrame = waitForJson(client);
       upstreamSocket?.send(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -181,9 +180,14 @@ describe("CodexBridgeService", () => {
         }),
       );
 
-      await delay(100);
-      client.off("message", onMessage);
-      expect(forwarded).toBe(false);
+      expect(await forwardedFrame).toMatchObject({
+        method: "mcpServer/startupStatus/updated",
+        params: {
+          threadId: "thread-mcp-startup",
+          name: "feishu-mcp",
+          status: "ready",
+        },
+      });
 
       await waitFor(
         () => bridge.getStatus().recentMcpStartupEvents.length === 1,
@@ -200,7 +204,7 @@ describe("CodexBridgeService", () => {
     }
   });
 
-  it("filters MCP startup notifications from batched server frames", async () => {
+  it("forwards batched server frames byte-for-byte while observing them", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {
       await waitFor(() => upstreamSocket !== null);
@@ -230,6 +234,16 @@ describe("CodexBridgeService", () => {
       );
 
       expect((await forwardedFrame).message).toEqual([
+        {
+          jsonrpc: "2.0",
+          method: "mcpServer/startupStatus/updated",
+          params: {
+            threadId: "thread-mcp-startup",
+            name: "feishu-mcp",
+            status: "ready",
+            error: null,
+          },
+        },
         {
           jsonrpc: "2.0",
           method: "thread/name/updated",
@@ -324,7 +338,10 @@ describe("CodexBridgeService", () => {
         JSON.stringify({
           jsonrpc: "2.0",
           method: "turn/completed",
-          params: { threadId: "empty-thread" },
+          params: {
+            threadId: "empty-thread",
+            turn: { id: "empty-turn", status: "completed", items: [] },
+          },
         }),
       );
 
@@ -340,6 +357,19 @@ describe("CodexBridgeService", () => {
         },
         activity: "idle",
       });
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: "empty-thread",
+            turn: { id: "empty-turn", status: "completed", items: [] },
+          },
+        }),
+      );
+      await delay(20);
+      expect(bridge.getSessionView("empty-thread")?.session.messageCount).toBe(
+        1,
+      );
       client.close();
       await waitFor(() => bridge.isSessionActive("empty-thread") === false);
       expect(bridge.getSessionView("empty-thread")).toMatchObject({
@@ -712,6 +742,7 @@ describe("CodexBridgeService", () => {
         id: "approval-1",
         result: { decision: "accept" },
       });
+      expect(upstreamMessages.at(-1)).not.toHaveProperty("jsonrpc");
       expect(bridge.getPendingInputRequest("thread-b")).toBeNull();
 
       client.send(
@@ -723,6 +754,26 @@ describe("CodexBridgeService", () => {
       );
       await delay(100);
       expect(upstreamMessages.length).toBe(beforeResponseCount + 1);
+
+      client.send(
+        JSON.stringify([
+          {
+            id: "approval-1",
+            result: { decision: "accept" },
+          },
+          {
+            method: "bridge/test-notification",
+            params: { preserved: true },
+          },
+        ]),
+      );
+      await waitFor(() => upstreamMessages.length === beforeResponseCount + 2);
+      expect(upstreamMessages.at(-1)).toEqual([
+        {
+          method: "bridge/test-notification",
+          params: { preserved: true },
+        },
+      ]);
       expect(
         emittedEvents.some(
           (event) =>
@@ -1120,7 +1171,11 @@ describe("CodexBridgeService", () => {
       );
       expect(upstreamMessages.at(-1)).toMatchObject({
         id: "mcp-approval-1",
-        result: { action: "accept", content: { persist: "session" } },
+        result: {
+          action: "accept",
+          content: null,
+          _meta: { persist: "session" },
+        },
       });
 
       const forwardedAlwaysApproval = waitForJson(client);
@@ -1159,7 +1214,11 @@ describe("CodexBridgeService", () => {
       );
       expect(upstreamMessages.at(-1)).toMatchObject({
         id: "mcp-approval-2",
-        result: { action: "accept", content: { persist: "always" } },
+        result: {
+          action: "accept",
+          content: null,
+          _meta: { persist: "always" },
+        },
       });
 
       const forwardedCancelApproval = waitForJson(client);
@@ -1195,8 +1254,239 @@ describe("CodexBridgeService", () => {
       );
       expect(upstreamMessages.at(-1)).toMatchObject({
         id: "mcp-approval-3",
-        result: { action: "cancel" },
+        result: { action: "cancel", content: null, _meta: null },
       });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("keeps the upstream alive after the terminal disconnects until the turn completes", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    client.send(
+      JSON.stringify({
+        id: 1,
+        method: "thread/read",
+        params: { threadId: "thread-detached" },
+      }),
+    );
+    await waitFor(() => upstreamMessages.length === 1);
+    upstreamSocket?.send(
+      JSON.stringify({
+        id: 1,
+        result: {
+          model: "gpt-5.3-codex",
+          cwd: "/tmp/project-detached",
+          thread: {
+            id: "thread-detached",
+            preview: "Detached takeover",
+            createdAt: 1_780_000_000,
+            updatedAt: 1_780_000_001,
+            cwd: "/tmp/project-detached",
+            status: { type: "active", activeFlags: [] },
+            turns: [],
+          },
+        },
+      }),
+    );
+    await waitFor(() => bridge.isSessionActive("thread-detached"));
+
+    client.close();
+    await waitFor(
+      () =>
+        bridge.getStatus().attachedClientCount === 0 &&
+        bridge.getStatus().detachedConnectionCount === 1,
+    );
+
+    upstreamSocket?.send(
+      JSON.stringify({
+        id: "detached-approval",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-detached",
+          turnId: "turn-detached",
+          itemId: "item-detached",
+          command: "pnpm test",
+          cwd: "/tmp/project-detached",
+        },
+      }),
+    );
+    await waitFor(
+      () => bridge.getPendingInputRequest("thread-detached") !== null,
+    );
+    const pending = bridge.getPendingInputRequest("thread-detached");
+    const beforeResponseCount = upstreamMessages.length;
+    expect(
+      bridge.respondToInput("thread-detached", pending?.id ?? "", "approve"),
+    ).toBe(true);
+    await waitFor(() => upstreamMessages.length === beforeResponseCount + 1);
+    expect(upstreamMessages.at(-1)).toEqual({
+      id: "detached-approval",
+      result: { decision: "accept" },
+    });
+
+    upstreamSocket?.send(
+      JSON.stringify({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-detached",
+          turn: { id: "turn-detached", status: "completed", items: [] },
+        },
+      }),
+    );
+    await waitFor(() => bridge.getStatus().connectionCount === 0);
+    expect(bridge.getStatus()).toMatchObject({
+      attachedClientCount: 0,
+      detachedConnectionCount: 0,
+      pendingInputCount: 0,
+    });
+    expect(bridge.isSessionActive("thread-detached")).toBe(false);
+  });
+
+  it("deduplicates one app-server request broadcast to multiple clients", async () => {
+    const firstClient = await connect(`ws://127.0.0.1:${bridgePort}`);
+    const secondClient = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSockets.length === 2);
+      const firstForwarded = waitForJson(firstClient);
+      const secondForwarded = waitForJson(secondClient);
+      const request = {
+        id: "broadcast-approval",
+        method: "item/fileChange/requestApproval",
+        params: {
+          threadId: "thread-broadcast",
+          turnId: "turn-broadcast",
+          itemId: "item-broadcast",
+          reason: "Apply the generated patch",
+          fileChanges: {},
+        },
+      };
+      upstreamSockets[0]?.send(JSON.stringify(request));
+      upstreamSockets[1]?.send(JSON.stringify(request));
+      await Promise.all([firstForwarded, secondForwarded]);
+      expect(bridge.getStatus().pendingInputCount).toBe(1);
+
+      const pending = bridge.getPendingInputRequest("thread-broadcast");
+      const beforeResponseCount = upstreamMessages.length;
+      expect(
+        bridge.respondToInput("thread-broadcast", pending?.id ?? "", "approve"),
+      ).toBe(true);
+      await waitFor(() => upstreamMessages.length === beforeResponseCount + 1);
+      expect(bridge.getStatus().pendingInputCount).toBe(0);
+
+      firstClient.send(
+        JSON.stringify({
+          id: "broadcast-approval",
+          result: { decision: "accept" },
+        }),
+      );
+      secondClient.send(
+        JSON.stringify({
+          id: "broadcast-approval",
+          result: { decision: "accept" },
+        }),
+      );
+      await delay(100);
+      expect(upstreamMessages.length).toBe(beforeResponseCount + 1);
+    } finally {
+      firstClient.close();
+      secondClient.close();
+    }
+  });
+
+  it("auto-resolves timed Codex questions after the terminal detaches", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    await waitFor(() => upstreamSocket !== null);
+    const forwarded = waitForJson(client);
+    upstreamSocket?.send(
+      JSON.stringify({
+        id: "timed-question",
+        method: "item/tool/requestUserInput",
+        params: {
+          threadId: "thread-timed-question",
+          turnId: "turn-timed-question",
+          itemId: "item-timed-question",
+          autoResolutionMs: 100,
+          questions: [
+            {
+              id: "continue",
+              header: "Continue",
+              question: "Continue automatically?",
+              isOther: false,
+              isSecret: false,
+              options: [{ label: "Wait", description: "Keep waiting" }],
+            },
+          ],
+        },
+      }),
+    );
+    await forwarded;
+    client.close();
+    await waitFor(() => bridge.getStatus().detachedConnectionCount === 1);
+    await waitFor(() => upstreamMessages.length === 1);
+    expect(upstreamMessages[0]).toEqual({
+      id: "timed-question",
+      result: { answers: {} },
+    });
+
+    upstreamSocket?.send(
+      JSON.stringify({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-timed-question",
+          turn: {
+            id: "turn-timed-question",
+            status: "completed",
+            items: [],
+          },
+        },
+      }),
+    );
+    await waitFor(() => bridge.getStatus().connectionCount === 0);
+  });
+
+  it("uses serverRequest/resolved to retire pending UI and suppress late replies", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const forwarded = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          id: "resolved-approval",
+          method: "item/fileChange/requestApproval",
+          params: {
+            threadId: "thread-resolved",
+            turnId: "turn-resolved",
+            itemId: "item-resolved",
+            fileChanges: {},
+          },
+        }),
+      );
+      await forwarded;
+      expect(bridge.getStatus().pendingInputCount).toBe(1);
+
+      const resolvedNotification = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "serverRequest/resolved",
+          params: {
+            threadId: "thread-resolved",
+            requestId: "resolved-approval",
+          },
+        }),
+      );
+      await resolvedNotification;
+      await waitFor(() => bridge.getStatus().pendingInputCount === 0);
+
+      const beforeLateReply = upstreamMessages.length;
+      client.send(
+        JSON.stringify({
+          id: "resolved-approval",
+          result: { decision: "accept" },
+        }),
+      );
+      await delay(50);
+      expect(upstreamMessages.length).toBe(beforeLateReply);
     } finally {
       client.close();
     }

@@ -34,6 +34,8 @@ export interface CodexBridgeStatus extends BridgeStatusBase {
   upstreamMode: "managed" | "external";
   upstreams: Record<CodexBridgeUpstreamProfile, CodexBridgeUpstreamStatus>;
   connectionCount: number;
+  attachedClientCount: number;
+  detachedConnectionCount: number;
   recentMcpStartupEvents: CodexBridgeMcpStartupEvent[];
 }
 

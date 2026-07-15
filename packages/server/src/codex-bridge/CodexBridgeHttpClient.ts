@@ -8,12 +8,14 @@ import { isLiveBridgeSession } from "./session-state.js";
 import type {
   CodexBridgeController,
   CodexBridgeSession,
+  CodexBridgeSessionView,
   CodexBridgeStatus,
   CodexUsageRequestOptions,
   CodexUsageResponse,
 } from "./types.js";
 
 interface CodexSessionPollState extends BridgePollState {
+  view: CodexBridgeSessionView;
   updatedAt: string;
   title: string | null;
   messageCount: number;
@@ -68,6 +70,8 @@ export class CodexBridgeHttpClient
         full: emptyUpstream("full"),
       },
       connectionCount: 0,
+      attachedClientCount: 0,
+      detachedConnectionCount: 0,
       sessionCount: 0,
       pendingInputCount: 0,
       recentMcpStartupEvents: [],
@@ -78,10 +82,26 @@ export class CodexBridgeHttpClient
   protected async collectPollEntries(): Promise<
     BridgePollEntry<CodexSessionPollState>[]
   > {
-    const [sessions, views] = await Promise.all([
-      this.listSessions(),
-      this.listSessionViews(),
+    const [sessionsData, viewsData] = await Promise.all([
+      this.fetchJson<{ sessions?: CodexBridgeSession[] }>("/sessions"),
+      this.fetchJson<{ sessions?: CodexBridgeSessionView[] }>("/session-views"),
     ]);
+    if (!sessionsData || !viewsData) {
+      return Array.from(this.knownSessions.entries()).map(([id, state]) => ({
+        id,
+        view: state.view,
+        state,
+      }));
+    }
+    const sessions = sessionsData.sessions ?? [];
+    const views = (viewsData.sessions ?? [])
+      .filter((view) =>
+        this.isDisplayableBridgeSession(view.session, {
+          activity: view.activity,
+          pendingInputType: view.pendingInputType,
+        }),
+      )
+      .map((view) => this.normalizeSessionView(view));
     const viewsById = new Map(views.map((view) => [view.session.id, view]));
 
     const entries: BridgePollEntry<CodexSessionPollState>[] = [];
@@ -92,6 +112,7 @@ export class CodexBridgeHttpClient
         id: session.id,
         view,
         state: {
+          view,
           projectId: session.projectId,
           updatedAt: session.updatedAt,
           title: session.title,

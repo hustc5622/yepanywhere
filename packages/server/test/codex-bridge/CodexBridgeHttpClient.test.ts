@@ -1,16 +1,19 @@
 import { type Server, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexBridgeHttpClient } from "../../src/codex-bridge/CodexBridgeHttpClient.js";
 import type {
+  CodexBridgeSession,
   CodexBridgeSessionView,
   CodexUsageResponse,
 } from "../../src/codex-bridge/types.js";
+import type { EventBus } from "../../src/watcher/index.js";
 
 describe("CodexBridgeHttpClient", () => {
   let server: Server;
   let baseUrl: string;
   let sessionViews: CodexBridgeSessionView[];
+  let sidecarAvailable: boolean;
 
   beforeEach(async () => {
     sessionViews = [
@@ -27,10 +30,26 @@ describe("CodexBridgeHttpClient", () => {
         activity: "idle",
       }),
     ];
+    sidecarAvailable = true;
 
     server = createServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       res.setHeader("content-type", "application/json");
+
+      if (!sidecarAvailable) {
+        res.statusCode = 503;
+        res.end(JSON.stringify({ error: "temporarily unavailable" }));
+        return;
+      }
+
+      if (url.pathname === "/sessions") {
+        res.end(
+          JSON.stringify({
+            sessions: sessionViews.map(createSessionFromView),
+          }),
+        );
+        return;
+      }
 
       if (url.pathname === "/session-views") {
         res.end(JSON.stringify({ sessions: sessionViews }));
@@ -115,7 +134,67 @@ describe("CodexBridgeHttpClient", () => {
       error: null,
     });
   });
+
+  it("keeps the last Codex poll snapshot during a transient sidecar outage", async () => {
+    const emitted: unknown[] = [];
+    const eventBus = {
+      emit: vi.fn((event) => emitted.push(event)),
+      subscribe: vi.fn(),
+      subscriberCount: 0,
+    } as unknown as EventBus;
+    const client = new CodexBridgeHttpClient({
+      baseUrl,
+      eventBus,
+      pollIntervalMs: 10,
+    });
+    client.start();
+    try {
+      await waitFor(() =>
+        emitted.some(
+          (event) =>
+            (event as { type?: string; session?: { id?: string } }).type ===
+              "session-created" &&
+            (event as { session?: { id?: string } }).session?.id ===
+              "active-empty",
+        ),
+      );
+      emitted.length = 0;
+      sidecarAvailable = false;
+      await delay(40);
+
+      expect(
+        emitted.some(
+          (event) =>
+            (event as { type?: string }).type === "session-status-changed" &&
+            (event as { ownership?: { owner?: string } }).ownership?.owner ===
+              "none",
+        ),
+      ).toBe(false);
+    } finally {
+      client.shutdown();
+    }
+  });
 });
+
+function createSessionFromView(
+  view: CodexBridgeSessionView,
+): CodexBridgeSession {
+  return {
+    id: view.session.id,
+    projectId: view.session.projectId,
+    projectPath: "/tmp/project",
+    projectName: view.projectName,
+    title: view.session.title,
+    fullTitle: view.session.fullTitle,
+    createdAt: view.session.createdAt,
+    updatedAt: view.session.updatedAt,
+    messageCount: view.session.messageCount,
+    provider: "codex",
+    model: view.session.model,
+    activity: view.activity,
+    connectionIds: [1],
+  };
+}
 
 function createView(
   id: string,
@@ -138,4 +217,21 @@ function createView(
     projectName: "project",
     activity: options.activity,
   };
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error("waitFor timeout");
+    }
+    await delay(10);
+  }
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }

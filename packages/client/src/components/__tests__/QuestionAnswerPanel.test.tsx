@@ -10,9 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
 import type { InputRequest } from "../../types";
 import { QuestionAnswerPanel } from "../QuestionAnswerPanel";
-import type { Question } from "../renderers/tools/types";
+import type { AskUserQuestionInput, Question } from "../renderers/tools/types";
 
-function renderPanel(questions: Question[], requestId = "request-1") {
+function renderPanel(
+  questions: Question[],
+  requestId = "request-1",
+  inputOverrides: Partial<AskUserQuestionInput> = {},
+) {
   const onSubmit = vi.fn(async (_answers: UserQuestionAnswers) => undefined);
   const onDeny = vi.fn(async () => undefined);
   const request: InputRequest = {
@@ -21,7 +25,7 @@ function renderPanel(questions: Question[], requestId = "request-1") {
     type: "question",
     prompt: questions[0]?.question ?? "Question",
     toolName: "AskUserQuestion",
-    toolInput: { questions },
+    toolInput: { questions, ...inputOverrides },
     timestamp: "2026-07-14T00:00:00.000Z",
   };
 
@@ -144,5 +148,117 @@ describe("QuestionAnswerPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Other/ }));
 
     expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("");
+  });
+
+  it("submits provider values and typed MCP form fields", async () => {
+    const { onSubmit } = renderPanel([
+      {
+        id: "environment",
+        question: "Choose the target",
+        header: "Environment",
+        options: [
+          { label: "Staging", description: "Preview", value: "staging" },
+          {
+            label: "Production",
+            description: "Live traffic",
+            value: "production",
+          },
+        ],
+        multiSelect: false,
+        custom: false,
+        required: true,
+      },
+      {
+        id: "replicas",
+        question: "Number of replicas",
+        header: "Replicas",
+        options: [],
+        multiSelect: false,
+        custom: true,
+        required: true,
+        inputType: "number",
+        defaultValue: "2",
+      },
+      {
+        id: "note",
+        question: "Optional note",
+        header: "Note",
+        options: [],
+        multiSelect: false,
+        custom: true,
+        required: false,
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Production/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Next/ }));
+    const replicas = screen.getByRole("spinbutton") as HTMLInputElement;
+    expect(replicas.value).toBe("2");
+    fireEvent.change(replicas, { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: /Next/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Submit/ }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({
+        environment: "production",
+        replicas: "3",
+      });
+    });
+  });
+
+  it("allows Codex to submit unanswered questions when partial answers are enabled", async () => {
+    const { onSubmit } = renderPanel(
+      [
+        {
+          id: "secret",
+          question: "Enter a token or skip",
+          header: "Token",
+          options: [],
+          multiSelect: false,
+          custom: true,
+          required: true,
+          inputType: "password",
+        },
+      ],
+      "request-partial",
+      { allowPartialSubmission: true },
+    );
+
+    const input = screen.getByPlaceholderText(/answer/i) as HTMLInputElement;
+    expect(input.type).toBe("password");
+    fireEvent.click(screen.getByRole("button", { name: /Submit/ }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({}));
+  });
+
+  it("never persists secret Other answers to localStorage", () => {
+    renderPanel(
+      [
+        {
+          id: "secret-choice",
+          question: "Choose or enter a secret",
+          header: "Secret",
+          options: [
+            { label: "Use stored token", description: "From keychain" },
+          ],
+          multiSelect: false,
+          custom: true,
+          required: true,
+          inputType: "password",
+        },
+      ],
+      "request-secret-other",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+    const input = screen.getByPlaceholderText(/answer/i) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "do-not-store-me" } });
+
+    expect(input.value).toBe("do-not-store-me");
+    expect(
+      Array.from({ length: localStorage.length }, (_, index) =>
+        localStorage.getItem(localStorage.key(index) ?? ""),
+      ).some((value) => value?.includes("do-not-store-me")),
+    ).toBe(false);
   });
 });

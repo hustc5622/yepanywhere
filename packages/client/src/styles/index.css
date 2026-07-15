@@ -5233,6 +5233,18 @@ a.sidebar-nav-item {
   text-decoration: underline;
 }
 
+.tool-approval-action-link {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-link, #58a6ff);
+  font-size: var(--font-size-sm);
+  text-decoration: none;
+}
+
+.tool-approval-action-link:hover {
+  text-decoration: underline;
+}
+
 .tool-approval-name {
   font-family: var(--font-mono);
   background: var(--bg-code);
@@ -5568,6 +5580,11 @@ a.sidebar-nav-item {
 .question-other-input {
   margin-left: calc(1rem + var(--space-3));
   margin-top: var(--space-2);
+}
+
+.question-direct-input {
+  margin-left: 0;
+  margin-top: 0;
 }
 
 .question-other-input input {
