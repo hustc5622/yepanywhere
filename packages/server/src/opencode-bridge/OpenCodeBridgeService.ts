@@ -10,6 +10,14 @@ import type {
   UrlProjectId,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import {
+  asRecord,
+  findAvailablePort,
+  isChildRunning,
+  isLocalAddress,
+  terminateProcessGroup,
+  writeJson,
+} from "../bridge-common/util.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { normalizeProviderGeneratedTitle } from "../sessions/provider-title-quality.js";
 import type { SessionSummary } from "../supervisor/types.js";
@@ -173,7 +181,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       this.handleHttpRequest(req, res).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         this.lastError = message;
-        this.writeJson(res, 500, { error: message });
+        writeJson(res, 500, { error: message });
       });
     });
 
@@ -341,8 +349,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    if (!this.isLocalAddress(req.socket.remoteAddress ?? "")) {
-      this.writeJson(res, 403, {
+    if (!isLocalAddress(req.socket.remoteAddress ?? "")) {
+      writeJson(res, 403, {
         error: "OpenCode bridge only accepts local connections",
       });
       return;
@@ -360,22 +368,22 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
     if (req.method === "GET" && url.pathname === "/readyz") {
       await this.syncOpenCodeRuntimeState();
-      this.writeJson(res, 200, this.getStatus());
+      writeJson(res, 200, this.getStatus());
       return;
     }
     if (req.method === "GET" && url.pathname === "/status") {
       await this.syncOpenCodeRuntimeState();
-      this.writeJson(res, 200, this.getStatus());
+      writeJson(res, 200, this.getStatus());
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
       await this.syncOpenCodeRuntimeState();
-      this.writeJson(res, 200, { sessions: this.listSessions() });
+      writeJson(res, 200, { sessions: this.listSessions() });
       return;
     }
     if (req.method === "GET" && url.pathname === "/session-views") {
       await this.syncOpenCodeRuntimeState();
-      this.writeJson(res, 200, { sessions: this.listSessionViews() });
+      writeJson(res, 200, { sessions: this.listSessionViews() });
       return;
     }
 
@@ -383,7 +391,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       const body = await readJsonBody(req);
       const request = parseSessionRequest(body);
       if (!request.message) {
-        this.writeJson(res, 400, { error: "message is required" });
+        writeJson(res, 400, { error: "message is required" });
         return;
       }
       const client = this.createClient(req, body);
@@ -409,7 +417,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           },
         );
       }
-      this.writeJson(res, response.queued ? 202 : 200, response);
+      writeJson(res, response.queued ? 202 : 200, response);
       return;
     }
 
@@ -417,7 +425,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       const sessionId = parts[1];
       if (req.method === "GET" && parts[2] === "view") {
         await this.syncOpenCodeRuntimeState();
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           sessionView: this.getSessionView(sessionId),
         });
         return;
@@ -425,7 +433,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
       if (req.method === "GET" && parts[2] === "active") {
         await this.syncOpenCodeRuntimeState();
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           active: this.isSessionActive(sessionId),
         });
         return;
@@ -445,19 +453,19 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           this.getClientConfig(req, undefined, this.sessions.get(sessionId)),
           {},
         );
-        this.writeJson(res, 200, detail);
+        writeJson(res, 200, detail);
         return;
       }
 
       if (req.method === "GET" && parts[2] === "process") {
         const client = this.resolveClient(sessionId, req);
-        this.writeJson(res, 200, await client.getProcessInfo(sessionId));
+        writeJson(res, 200, await client.getProcessInfo(sessionId));
         return;
       }
 
       if (req.method === "GET" && parts[2] === "pending-input") {
         await this.syncOpenCodeRuntimeState();
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           request: this.getPendingInputRequest(sessionId),
         });
         return;
@@ -467,7 +475,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         const body = await readJsonBody(req);
         const request = parseSessionRequest(body);
         if (!request.message) {
-          this.writeJson(res, 400, { error: "message is required" });
+          writeJson(res, 400, { error: "message is required" });
           return;
         }
         const client = this.createClient(req, body);
@@ -498,7 +506,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
             mode: request.mode,
           },
         );
-        this.writeJson(res, response.queued ? 202 : 200, response);
+        writeJson(res, response.queued ? 202 : 200, response);
         return;
       }
 
@@ -506,7 +514,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         const body = await readJsonBody(req);
         const request = parseSessionRequest(body);
         if (!request.message) {
-          this.writeJson(res, 400, { error: "message is required" });
+          writeJson(res, 400, { error: "message is required" });
           return;
         }
         const client = this.createClient(req, body);
@@ -520,14 +528,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           processId: response.processId,
           reasoningEffort: request.reasoningEffort,
         });
-        this.writeJson(res, 200, response);
+        writeJson(res, 200, response);
         return;
       }
 
       if (req.method === "POST" && parts[2] === "input") {
         const body = (await readJsonBody(req)) as InputRequestBody | null;
         if (!body?.requestId || !body.response) {
-          this.writeJson(res, 400, {
+          writeJson(res, 400, {
             error: "requestId and response are required",
           });
           return;
@@ -543,13 +551,13 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           body.answers,
         );
         if (accepted) {
-          this.writeJson(res, 200, {
+          writeJson(res, 200, {
             accepted,
           });
           return;
         }
         const client = this.createClient(req, body);
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           accepted: (
             await client.respondToInput(
               sessionId,
@@ -564,7 +572,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       }
     }
 
-    this.writeJson(res, 404, { error: "Not found" });
+    writeJson(res, 404, { error: "Not found" });
   }
 
   private createClient(req?: IncomingMessage, raw?: unknown): YepApiClient {
@@ -1244,7 +1252,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   ): Promise<void> {
     const gateway = this.gatewayConfig;
     if (!gateway) {
-      this.writeJson(res, 503, {
+      writeJson(res, 503, {
         error: "OpenAI-compatible gateway is not configured",
       });
       return;
@@ -1300,7 +1308,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       });
       res.end(responseBody);
     } catch (error) {
-      this.writeJson(res, 502, {
+      writeJson(res, 502, {
         error: `OpenAI-compatible gateway request failed: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
@@ -1317,34 +1325,15 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       return;
     }
 
-    const pid = process.platform !== "win32" ? -child.pid : child.pid;
-    try {
-      console.log(
-        `[OpenCodeBridge] Stopping managed OpenCode server reason=${reason} pid=${child.pid}`,
-      );
-      process.kill(pid, "SIGTERM");
-    } catch {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {}
-        resolve();
-      }, 1500);
-      child.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
+    console.log(
+      `[OpenCodeBridge] Stopping managed OpenCode server reason=${reason} pid=${child.pid}`,
+    );
+    await terminateProcessGroup(child);
   }
 
   private isManagedOpenCodeServerRunning(): boolean {
     if (this.opencodeServerUrlOverride) return false;
-    const child = this.opencodeProcess;
-    return !!child && !child.killed && child.exitCode === null;
+    return isChildRunning(this.opencodeProcess);
   }
 
   private getOpenCodeServerStatusUrl(): string {
@@ -1352,20 +1341,6 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       this.opencodeServerUrlOverride ??
       this.opencodeServerUrl ??
       `http://127.0.0.1:${this.opencodeStartPort}`
-    );
-  }
-
-  private writeJson(res: ServerResponse, status: number, body: unknown): void {
-    res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(body));
-  }
-
-  private isLocalAddress(address: string): boolean {
-    return (
-      address === "127.0.0.1" ||
-      address === "::1" ||
-      address === "::ffff:127.0.0.1" ||
-      address === "localhost"
     );
   }
 }
@@ -1590,29 +1565,6 @@ async function readResponseBody(response: Response): Promise<unknown> {
   }
 }
 
-async function findAvailablePort(startPort: number): Promise<number> {
-  for (let port = Math.max(1, startPort); port < startPort + 100; port++) {
-    if (await isPortAvailable("127.0.0.1", port)) {
-      return port;
-    }
-  }
-  throw new Error(`No available port found near ${startPort}`);
-}
-
-async function isPortAvailable(host: string, port: number): Promise<boolean> {
-  const { createServer } = await import("node:net");
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.once("error", () => {
-      resolve(false);
-    });
-    server.once("listening", () => {
-      server.close(() => resolve(true));
-    });
-    server.listen(port, host);
-  });
-}
-
 async function waitForOpenCodeHealth(
   baseUrl: string,
   timeoutMs: number,
@@ -1666,12 +1618,6 @@ function readHeader(
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value[0] ?? null;
   return null;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 function unwrapOpenCodeEvent(value: unknown): OpenCodeEvent | null {

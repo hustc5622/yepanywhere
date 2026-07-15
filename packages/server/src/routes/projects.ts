@@ -7,10 +7,12 @@ import {
   toUrlProjectId,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import type {
-  CodexBridgeController,
-  CodexBridgeSessionView,
-} from "../codex-bridge/types.js";
+import {
+  isAnyBridgeSessionActive,
+  listAllBridgeSessionViews,
+} from "../bridge-common/multi.js";
+import type { BridgeSessionView as CommonBridgeSessionView } from "../bridge-common/types.js";
+import type { CodexBridgeController } from "../codex-bridge/types.js";
 import { getProjectGitStatusSummary } from "../git-status-summary.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type {
@@ -18,10 +20,7 @@ import type {
   SessionMetadataService,
 } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
-import type {
-  OpenCodeBridgeController,
-  OpenCodeBridgeSessionView,
-} from "../opencode-bridge/types.js";
+import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -146,26 +145,25 @@ async function loadOwnedProcessViews(
 
 const PROJECT_GIT_STATUS_CONCURRENCY = 6;
 
-type BridgeSessionView = CodexBridgeSessionView | OpenCodeBridgeSessionView;
+type BridgeSessionView = CommonBridgeSessionView;
 
 async function listBridgeSessionViews(
   deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
 ): Promise<BridgeSessionView[]> {
-  const [codexViews, opencodeViews] = await Promise.all([
-    deps.codexBridgeService?.listSessionViews() ?? [],
-    deps.opencodeBridgeService?.listSessionViews() ?? [],
+  return listAllBridgeSessionViews([
+    deps.codexBridgeService,
+    deps.opencodeBridgeService,
   ]);
-  return [...codexViews, ...opencodeViews] as BridgeSessionView[];
 }
 
 async function isBridgeSessionActive(
   deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
   sessionId: string,
 ): Promise<boolean> {
-  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
-    return true;
-  }
-  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+  return isAnyBridgeSessionActive(
+    [deps.codexBridgeService, deps.opencodeBridgeService],
+    sessionId,
+  );
 }
 
 async function getActiveBridgeSessionViews(

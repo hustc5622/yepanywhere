@@ -4,6 +4,14 @@ import type { IncomingMessage } from "node:http";
 import { basename } from "node:path";
 import type { UrlProjectId, UserQuestionAnswers } from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
+import {
+  asRecord,
+  findAvailablePort,
+  isChildRunning,
+  isLocalAddress,
+  terminateProcessGroup,
+  writeJson,
+} from "../bridge-common/util.js";
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
@@ -438,15 +446,15 @@ export class CodexBridgeService implements CodexBridgeController {
       .map((part) => decodeURIComponent(part));
 
     if (req.method === "GET" && url.pathname === "/readyz") {
-      this.writeJson(res, 200, this.getStatus());
+      writeJson(res, 200, this.getStatus());
       return;
     }
     if (req.method === "GET" && url.pathname === "/status") {
-      this.writeJson(res, 200, this.getStatus());
+      writeJson(res, 200, this.getStatus());
       return;
     }
     if (req.method === "GET" && url.pathname === "/usage") {
-      this.writeJson(
+      writeJson(
         res,
         200,
         await this.getUsage({ fresh: url.searchParams.get("fresh") === "1" }),
@@ -454,11 +462,11 @@ export class CodexBridgeService implements CodexBridgeController {
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
-      this.writeJson(res, 200, { sessions: this.listSessions() });
+      writeJson(res, 200, { sessions: this.listSessions() });
       return;
     }
     if (req.method === "GET" && url.pathname === "/session-views") {
-      this.writeJson(res, 200, { sessions: this.listSessionViews() });
+      writeJson(res, 200, { sessions: this.listSessionViews() });
       return;
     }
 
@@ -468,23 +476,23 @@ export class CodexBridgeService implements CodexBridgeController {
         const session =
           this.listSessions().find((candidate) => candidate.id === sessionId) ??
           null;
-        this.writeJson(res, 200, { session });
+        writeJson(res, 200, { session });
         return;
       }
       if (req.method === "GET" && pathParts[2] === "view") {
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           sessionView: this.getSessionView(sessionId),
         });
         return;
       }
       if (req.method === "GET" && pathParts[2] === "active") {
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           active: this.isSessionActive(sessionId),
         });
         return;
       }
       if (req.method === "GET" && pathParts[2] === "pending-input") {
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           request: this.getPendingInputRequest(sessionId),
         });
         return;
@@ -500,13 +508,13 @@ export class CodexBridgeService implements CodexBridgeController {
             : undefined;
 
         if (!requestId || !response) {
-          this.writeJson(res, 400, {
+          writeJson(res, 400, {
             error: "requestId and response are required",
           });
           return;
         }
 
-        this.writeJson(res, 200, {
+        writeJson(res, 200, {
           accepted: this.respondToInput(
             sessionId,
             requestId,
@@ -518,17 +526,12 @@ export class CodexBridgeService implements CodexBridgeController {
       }
     }
 
-    this.writeJson(res, 404, { error: "Not found" });
-  }
-
-  private writeJson(res: ServerResponse, status: number, body: unknown): void {
-    res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(body));
+    writeJson(res, 404, { error: "Not found" });
   }
 
   private handleConnection(downstream: WebSocket, req: IncomingMessage): void {
     const remoteAddress = req.socket.remoteAddress ?? "";
-    if (!this.isLocalAddress(remoteAddress)) {
+    if (!isLocalAddress(remoteAddress)) {
       downstream.close(1008, "Codex bridge only accepts local connections");
       return;
     }
@@ -1789,29 +1792,8 @@ export class CodexBridgeService implements CodexBridgeController {
     state.process = null;
     state.url = null;
     state.startPromise = null;
-    if (!child?.pid || child.exitCode !== null || child.killed) {
-      return;
-    }
-
-    const pid = process.platform !== "win32" ? -child.pid : child.pid;
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {}
-        resolve();
-      }, 1500);
-      child.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
+    if (!child) return;
+    await terminateProcessGroup(child);
   }
 
   private getUpstreamState(
@@ -1826,16 +1808,9 @@ export class CodexBridgeService implements CodexBridgeController {
   }
 
   private async findAvailableManagedPort(startPort: number): Promise<number> {
-    for (let port = Math.max(1, startPort); port < startPort + 100; port++) {
-      if (this.reservedUpstreamPorts.has(port)) continue;
-      this.reservedUpstreamPorts.add(port);
-      const available = await isPortAvailable("127.0.0.1", port);
-      if (available) {
-        return port;
-      }
-      this.reservedUpstreamPorts.delete(port);
-    }
-    throw new Error(`No available port found near ${startPort}`);
+    return findAvailablePort(startPort, {
+      reservedPorts: this.reservedUpstreamPorts,
+    });
   }
 
   private getManagedUpstreamUrl(): string | null {
@@ -1866,23 +1841,13 @@ export class CodexBridgeService implements CodexBridgeController {
   private isManagedUpstreamRunning(
     profile: CodexBridgeUpstreamProfile,
   ): boolean {
-    const child = this.upstreams.get(profile)?.process;
-    return !!child && !child.killed && child.exitCode === null;
+    return isChildRunning(this.upstreams.get(profile)?.process ?? null);
   }
 
   private isAnyManagedUpstreamRunning(): boolean {
     return (
       this.isManagedUpstreamRunning("light") ||
       this.isManagedUpstreamRunning("full")
-    );
-  }
-
-  private isLocalAddress(address: string): boolean {
-    return (
-      address === "127.0.0.1" ||
-      address === "::1" ||
-      address === "::ffff:127.0.0.1" ||
-      address === "localhost"
     );
   }
 }
@@ -1987,12 +1952,6 @@ function sendFrame(ws: WebSocket, data: RawData, isBinary: boolean): void {
 
 function isJsonRpcMessage(value: unknown): value is JsonRpcMessage {
   return !!value && typeof value === "object";
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 function getString(value: unknown): string | undefined {
@@ -2122,17 +2081,6 @@ function timestampFromThreadValue(value: unknown): string | undefined {
   }
   const ms = value > 1_000_000_000_000 ? value : value * 1000;
   return new Date(ms).toISOString();
-}
-
-async function isPortAvailable(host: string, port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.once("error", () => resolve(false));
-    server.once("listening", () => {
-      server.close(() => resolve(true));
-    });
-    server.listen(port, host);
-  });
 }
 
 async function waitForWebSocket(url: string, timeoutMs: number): Promise<void> {

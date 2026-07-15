@@ -14,17 +14,18 @@ import {
   getSessionDisplayTitle,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { isLiveBridgeSessionView } from "../codex-bridge/session-state.js";
+import {
+  isAnyBridgeSessionActive,
+  listAllBridgeSessionViews,
+} from "../bridge-common/multi.js";
+import { isLiveBridgeSessionView } from "../bridge-common/session-state.js";
+import type { BridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/index.js";
-import { isLiveOpenCodeBridgeSessionView } from "../opencode-bridge/session-state.js";
-import type {
-  OpenCodeBridgeController,
-  OpenCodeBridgeSessionView,
-} from "../opencode-bridge/types.js";
+import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -72,26 +73,25 @@ export interface InboxDeps {
 
 async function listBridgeSessionViews(
   deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
-): Promise<OpenCodeBridgeSessionView[]> {
-  const [codexViews, opencodeViews] = await Promise.all([
-    deps.codexBridgeService?.listSessionViews() ?? [],
-    deps.opencodeBridgeService?.listSessionViews() ?? [],
+): Promise<BridgeSessionView[]> {
+  return listAllBridgeSessionViews([
+    deps.codexBridgeService,
+    deps.opencodeBridgeService,
   ]);
-  return [...codexViews, ...opencodeViews] as OpenCodeBridgeSessionView[];
 }
 
 async function isBridgeSessionActive(
   deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
   sessionId: string,
 ): Promise<boolean> {
-  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
-    return true;
-  }
-  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+  return isAnyBridgeSessionActive(
+    [deps.codexBridgeService, deps.opencodeBridgeService],
+    sessionId,
+  );
 }
 
-function isLiveAnyBridgeSessionView(view: OpenCodeBridgeSessionView): boolean {
-  return isLiveBridgeSessionView(view) || isLiveOpenCodeBridgeSessionView(view);
+function isLiveAnyBridgeSessionView(view: BridgeSessionView): boolean {
+  return isLiveBridgeSessionView(view);
 }
 
 export interface InboxItem {

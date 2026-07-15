@@ -98,24 +98,46 @@ describe("OpenCodeBridgeHttpClient", () => {
       baseUrl: "http://127.0.0.1:1",
       eventBus: eventBus as never,
     });
-    const emitChanges = (
+    type TestView = {
+      session: {
+        id: string;
+        projectId: string;
+        title: string;
+        updatedAt: string;
+        messageCount: number;
+        ownership: { owner: "external" };
+        provider: "opencode";
+        activity: "in-turn" | "waiting-input";
+      };
+      projectName: string;
+      activity: "in-turn" | "waiting-input";
+    };
+    const rawEmitChanges = (
       client as unknown as {
-        emitChanges: (view: {
-          session: {
-            id: string;
+        emitChanges: (entry: {
+          id: string;
+          view: TestView;
+          state: {
             projectId: string;
-            title: string;
-            updatedAt: string;
-            messageCount: number;
-            ownership: { owner: "external" };
-            provider: "opencode";
             activity: "in-turn" | "waiting-input";
+            pendingInputType?: string;
+            active: boolean;
           };
-          projectName: string;
-          activity: "in-turn" | "waiting-input";
         }) => void;
       }
     ).emitChanges.bind(client);
+    // Mirrors OpenCodeBridgeHttpClient.collectPollEntries: lifecycle state is
+    // derived from the session view before diffing.
+    const emitChanges = (view: TestView) =>
+      rawEmitChanges({
+        id: view.session.id,
+        view,
+        state: {
+          projectId: view.session.projectId,
+          activity: view.session.activity,
+          active: true,
+        },
+      });
 
     const view = {
       session: {

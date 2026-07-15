@@ -31,19 +31,20 @@ import {
   type SessionArchiveService,
 } from "../archive/index.js";
 import { augmentTextBlocks } from "../augments/markdown-augments.js";
-import { isLiveBridgeSessionView } from "../codex-bridge/session-state.js";
-import type {
-  CodexBridgeController,
-  CodexBridgeInputResponse,
-} from "../codex-bridge/types.js";
+import {
+  type BridgeControllers,
+  getAnyBridgePendingInputRequest,
+  getAnyBridgeSessionView,
+  isAnyBridgeSessionActive,
+  respondToAnyBridgeInput,
+} from "../bridge-common/multi.js";
+import { isLiveBridgeSessionView } from "../bridge-common/session-state.js";
+import type { BridgeInputResponse } from "../bridge-common/types.js";
+import type { CodexBridgeController } from "../codex-bridge/types.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
-import { isLiveOpenCodeBridgeSessionView } from "../opencode-bridge/session-state.js";
-import type {
-  OpenCodeBridgeController,
-  OpenCodeBridgeInputResponse,
-} from "../opencode-bridge/types.js";
+import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -512,73 +513,57 @@ export interface SessionsDeps {
   claudeProjectsDir?: string;
 }
 
-type BridgeSessionView =
-  | Awaited<ReturnType<CodexBridgeController["getSessionView"]>>
-  | Awaited<ReturnType<OpenCodeBridgeController["getSessionView"]>>;
+type BridgeSessionView = Awaited<
+  ReturnType<CodexBridgeController["getSessionView"]>
+>;
+
+function bridgeControllers(
+  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
+): BridgeControllers {
+  return [deps.codexBridgeService, deps.opencodeBridgeService];
+}
 
 async function getBridgeSessionView(
   deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
   sessionId: string,
 ): Promise<NonNullable<BridgeSessionView> | null> {
-  return (
-    (await deps.codexBridgeService?.getSessionView(sessionId)) ??
-    (await deps.opencodeBridgeService?.getSessionView(sessionId)) ??
-    null
-  );
+  return getAnyBridgeSessionView(bridgeControllers(deps), sessionId);
 }
 
 async function isBridgeSessionActive(
   deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
   sessionId: string,
 ): Promise<boolean> {
-  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
-    return true;
-  }
-  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+  return isAnyBridgeSessionActive(bridgeControllers(deps), sessionId);
 }
 
 async function getBridgePendingInputRequest(
   deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
   sessionId: string,
 ) {
-  return (
-    (await deps.codexBridgeService?.getPendingInputRequest(sessionId)) ??
-    (await deps.opencodeBridgeService?.getPendingInputRequest(sessionId)) ??
-    null
-  );
+  return getAnyBridgePendingInputRequest(bridgeControllers(deps), sessionId);
 }
 
 async function respondToBridgeInput(
   deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
   sessionId: string,
   requestId: string,
-  response: CodexBridgeInputResponse | OpenCodeBridgeInputResponse,
+  response: BridgeInputResponse,
   answers?: UserQuestionAnswers,
 ): Promise<boolean> {
-  if (
-    await deps.codexBridgeService?.respondToInput(
-      sessionId,
-      requestId,
-      response as CodexBridgeInputResponse,
-      answers,
-    )
-  ) {
-    return true;
-  }
-  return Boolean(
-    await deps.opencodeBridgeService?.respondToInput(
-      sessionId,
-      requestId,
-      response as OpenCodeBridgeInputResponse,
-      answers,
-    ),
+  return respondToAnyBridgeInput(
+    bridgeControllers(deps),
+    sessionId,
+    requestId,
+    response,
+    answers,
   );
 }
 
 function isLiveAnyBridgeSessionView(
   view: NonNullable<BridgeSessionView>,
 ): boolean {
-  return isLiveBridgeSessionView(view) || isLiveOpenCodeBridgeSessionView(view);
+  return isLiveBridgeSessionView(view);
 }
 
 interface StartSessionBody {

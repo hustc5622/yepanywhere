@@ -1,21 +1,20 @@
-import type { AgentActivity, PendingInputType } from "@yep-anywhere/shared";
-import type { SessionOwnership } from "../supervisor/types.js";
-import type {
-  OpenCodeBridgeSession,
-  OpenCodeBridgeSessionView,
-} from "./types.js";
+import {
+  hasLiveBridgeActivity as hasLiveOpenCodeBridgeActivity,
+  isLiveBridgeSessionView as isLiveOpenCodeBridgeSessionView,
+  bridgeOwnership as opencodeBridgeOwnership,
+} from "../bridge-common/session-state.js";
+import type { OpenCodeBridgeSession } from "./types.js";
 
-export function hasLiveOpenCodeBridgeActivity(state: {
-  activity?: AgentActivity;
-  pendingInputType?: PendingInputType;
-}): boolean {
-  return (
-    state.activity === "in-turn" ||
-    state.activity === "waiting-input" ||
-    Boolean(state.pendingInputType)
-  );
-}
+export {
+  hasLiveOpenCodeBridgeActivity,
+  isLiveOpenCodeBridgeSessionView,
+  opencodeBridgeOwnership,
+};
 
+/**
+ * An opencode bridge session is live while the CLI reports it active or the
+ * bridge observed live runtime activity.
+ */
 export function isLiveOpenCodeBridgeSession(
   session: Pick<
     OpenCodeBridgeSession,
@@ -29,18 +28,4 @@ export function isLiveOpenCodeBridgeSession(
       pendingInputType: session.pendingInputType,
     })
   );
-}
-
-export function isLiveOpenCodeBridgeSessionView(
-  view: Pick<
-    OpenCodeBridgeSessionView,
-    "session" | "activity" | "pendingInputType"
-  >,
-): boolean {
-  if (view.session.ownership.owner === "external") return true;
-  return hasLiveOpenCodeBridgeActivity(view);
-}
-
-export function opencodeBridgeOwnership(isLive: boolean): SessionOwnership {
-  return isLive ? { owner: "external" } : { owner: "none" };
 }

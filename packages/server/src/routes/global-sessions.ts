@@ -18,16 +18,18 @@ import {
   sessionMatchesKind,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { isLiveBridgeSessionView } from "../codex-bridge/session-state.js";
+import {
+  getAnyBridgeSessionView,
+  isAnyBridgeSessionActive,
+  listAllBridgeSessionViews,
+} from "../bridge-common/multi.js";
+import { isLiveBridgeSessionView } from "../bridge-common/session-state.js";
+import type { BridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/index.js";
-import { isLiveOpenCodeBridgeSessionView } from "../opencode-bridge/session-state.js";
-import type {
-  OpenCodeBridgeController,
-  OpenCodeBridgeSessionView,
-} from "../opencode-bridge/types.js";
+import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
@@ -90,21 +92,18 @@ export interface GlobalSessionsDeps {
   opencodeBridgeService?: OpenCodeBridgeController;
 }
 
-type AnyBridgeSessionView =
-  | Awaited<ReturnType<CodexBridgeController["getSessionView"]>>
-  | OpenCodeBridgeSessionView;
+type AnyBridgeSessionView = BridgeSessionView | null;
 
 async function listBridgeSessionViews(
   deps: Pick<
     GlobalSessionsDeps,
     "codexBridgeService" | "opencodeBridgeService"
   >,
-): Promise<OpenCodeBridgeSessionView[]> {
-  const [codexViews, opencodeViews] = await Promise.all([
-    deps.codexBridgeService?.listSessionViews() ?? [],
-    deps.opencodeBridgeService?.listSessionViews() ?? [],
+): Promise<BridgeSessionView[]> {
+  return listAllBridgeSessionViews([
+    deps.codexBridgeService,
+    deps.opencodeBridgeService,
   ]);
-  return [...codexViews, ...opencodeViews] as OpenCodeBridgeSessionView[];
 }
 
 async function getBridgeSessionView(
@@ -114,10 +113,9 @@ async function getBridgeSessionView(
   >,
   sessionId: string,
 ): Promise<NonNullable<AnyBridgeSessionView> | null> {
-  return (
-    (await deps.codexBridgeService?.getSessionView(sessionId)) ??
-    (await deps.opencodeBridgeService?.getSessionView(sessionId)) ??
-    null
+  return getAnyBridgeSessionView(
+    [deps.codexBridgeService, deps.opencodeBridgeService],
+    sessionId,
   );
 }
 
@@ -128,16 +126,16 @@ async function isBridgeSessionActive(
   >,
   sessionId: string,
 ): Promise<boolean> {
-  if (await deps.codexBridgeService?.isSessionActive(sessionId)) {
-    return true;
-  }
-  return Boolean(await deps.opencodeBridgeService?.isSessionActive(sessionId));
+  return isAnyBridgeSessionActive(
+    [deps.codexBridgeService, deps.opencodeBridgeService],
+    sessionId,
+  );
 }
 
 function isLiveAnyBridgeSessionView(
   view: NonNullable<AnyBridgeSessionView>,
 ): boolean {
-  return isLiveBridgeSessionView(view) || isLiveOpenCodeBridgeSessionView(view);
+  return isLiveBridgeSessionView(view);
 }
 
 export interface GlobalSessionItem {

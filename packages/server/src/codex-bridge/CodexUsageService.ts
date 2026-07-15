@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { asRecord } from "../bridge-common/util.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
 import type {
   CodexUsageBucket,
@@ -226,12 +227,6 @@ function normalizeResetCredits(value: unknown): CodexUsageResetCredits | null {
     getNumber(credits.availableCount) ?? getNumber(credits.available_count);
   if (availableCount === null) return null;
   return { availableCount };
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 function getString(value: unknown): string | null {
