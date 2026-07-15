@@ -27,6 +27,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   imageView: "ViewImage",
   image_generation: "ViewImage",
   imageGeneration: "ViewImage",
+  skill: "Skill",
 };
 
 function canonicalizeToolName(toolName: string): string {
@@ -179,6 +180,7 @@ import { globRenderer } from "./GlobRenderer";
 import { grepRenderer } from "./GrepRenderer";
 import { killShellRenderer } from "./KillShellRenderer";
 import { readRenderer } from "./ReadRenderer";
+import { skillRenderer } from "./SkillRenderer";
 import { taskOutputRenderer } from "./TaskOutputRenderer";
 import { taskRenderer } from "./TaskRenderer";
 import { todoWriteRenderer } from "./TodoWriteRenderer";
@@ -199,6 +201,7 @@ toolRegistry.register(writeRenderer);
 toolRegistry.register(globRenderer);
 toolRegistry.register(grepRenderer);
 toolRegistry.register(todoWriteRenderer);
+toolRegistry.register(skillRenderer);
 
 // Tier 3: Less common tools
 toolRegistry.register(taskRenderer);

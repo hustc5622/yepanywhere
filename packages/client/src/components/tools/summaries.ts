@@ -188,6 +188,8 @@ function getOpenCodeInputSummary(toolName: string, input: unknown): string {
   };
 
   switch (lowerToolName) {
+    case "skill":
+      return truncate(stringField("name", "opencodeTitle"), 120);
     case "bash":
     case "shell":
       return truncate(

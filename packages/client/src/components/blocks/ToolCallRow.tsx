@@ -17,6 +17,47 @@ interface Props {
   sessionProvider?: string;
 }
 
+type ToolCallStatus = Props["status"];
+
+const OPENCODE_ACTION_DISPLAY_NAMES = {
+  run: {
+    pending: "Running",
+    complete: "Ran",
+    error: "Run failed",
+    aborted: "Run",
+  },
+  read: {
+    pending: "Reading",
+    complete: "Read",
+    error: "Read failed",
+    aborted: "Read",
+  },
+  write: {
+    pending: "Writing",
+    complete: "Wrote",
+    error: "Write failed",
+    aborted: "Write",
+  },
+  edit: {
+    pending: "Editing",
+    complete: "Edited",
+    error: "Edit failed",
+    aborted: "Edit",
+  },
+  search: {
+    pending: "Searching",
+    complete: "Searched",
+    error: "Search failed",
+    aborted: "Search",
+  },
+  skill: {
+    pending: "Loading skill",
+    complete: "Skill",
+    error: "Skill failed",
+    aborted: "Skill",
+  },
+} as const satisfies Record<string, Record<ToolCallStatus, string>>;
+
 export const ToolCallRow = memo(function ToolCallRow({
   id,
   toolName,
@@ -175,7 +216,7 @@ export const ToolCallRow = memo(function ToolCallRow({
         )}
 
         <span className="tool-name">
-          {toolRegistry.getDisplayName(toolName, toolInput)}
+          {getToolDisplayName(toolName, toolInput, status, sessionProvider)}
         </span>
 
         {hasInteractiveSummary && status === "complete" ? (
@@ -227,11 +268,42 @@ export const ToolCallRow = memo(function ToolCallRow({
   );
 });
 
+function getToolDisplayName(
+  toolName: string,
+  toolInput: unknown,
+  status: ToolCallStatus,
+  sessionProvider?: string,
+): string {
+  if (sessionProvider !== "opencode") {
+    return toolRegistry.getDisplayName(toolName, toolInput);
+  }
+
+  switch (toolName.toLowerCase()) {
+    case "bash":
+    case "shell":
+      return OPENCODE_ACTION_DISPLAY_NAMES.run[status];
+    case "read":
+      return OPENCODE_ACTION_DISPLAY_NAMES.read[status];
+    case "write":
+      return OPENCODE_ACTION_DISPLAY_NAMES.write[status];
+    case "edit":
+    case "apply_patch":
+      return OPENCODE_ACTION_DISPLAY_NAMES.edit[status];
+    case "glob":
+    case "grep":
+      return OPENCODE_ACTION_DISPLAY_NAMES.search[status];
+    case "skill":
+      return OPENCODE_ACTION_DISPLAY_NAMES.skill[status];
+    default:
+      return toolRegistry.getDisplayName(toolName, toolInput);
+  }
+}
+
 function shouldSuppressBashCollapsedPreview(
   toolName: string,
   toolInput: unknown,
   sessionProvider?: string,
-  status?: "pending" | "complete" | "error" | "aborted",
+  status?: ToolCallStatus,
 ): boolean {
   if (!isBashToolName(toolName)) {
     return false;

@@ -209,9 +209,11 @@ function BashToolUse({ input }: { input: BashInput }) {
 function BashToolResult({
   result: rawResult,
   isError,
+  input,
 }: {
   result: BashResult | string;
   isError: boolean;
+  input?: BashInput;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const { enabled, reportValidationError, isToolIgnored } =
@@ -250,6 +252,12 @@ function BashToolResult({
 
   return (
     <div className={`bash-result ${isError ? "bash-result-error" : ""}`}>
+      {input && getBashCommand(input) && (
+        <div className="bash-command-details">
+          <div className="tool-detail-label">Command</div>
+          <BashToolUse input={input} />
+        </div>
+      )}
       {showValidationWarning && validationErrors && (
         <SchemaWarning toolName="Bash" errors={validationErrors} />
       )}
@@ -456,8 +464,18 @@ export const bashRenderer: ToolRenderer<BashInput, BashResult> = {
     return <BashToolUse input={input as BashInput} />;
   },
 
-  renderToolResult(result, isError, _context) {
-    return <BashToolResult result={result as BashResult} isError={isError} />;
+  renderToolResult(result, isError, context, input) {
+    return (
+      <BashToolResult
+        result={result as BashResult}
+        isError={isError}
+        input={
+          context.provider === "opencode"
+            ? (input as BashInput | undefined)
+            : undefined
+        }
+      />
+    );
   },
 
   getUseSummary(input) {

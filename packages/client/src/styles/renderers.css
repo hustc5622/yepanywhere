@@ -693,6 +693,67 @@ details[open] .collapsible__icon {
   border: 1px solid var(--error-color);
 }
 
+.bash-command-details {
+  margin-bottom: 0.75rem;
+}
+
+.tool-detail-label,
+.skill-tool-label {
+  margin-bottom: 0.35rem;
+  color: var(--text-muted, #888);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.skill-tool-details {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.skill-tool-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.skill-tool-heading .skill-tool-label {
+  margin: 0;
+}
+
+.skill-tool-name {
+  color: var(--text-primary, #ccc);
+  font-weight: 600;
+}
+
+.skill-tool-instructions summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text-muted, #888);
+}
+
+.skill-tool-content {
+  max-height: min(55vh, 36rem);
+  margin: 0.5rem 0 0;
+  padding: 0.75rem;
+  overflow: auto;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 4px;
+  background: var(--bg-code);
+  color: var(--text-primary, #ccc);
+  font: inherit;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.skill-tool-error .skill-tool-label {
+  color: var(--error-color);
+}
+
 .codex-exec-details {
   display: flex;
   min-width: 0;

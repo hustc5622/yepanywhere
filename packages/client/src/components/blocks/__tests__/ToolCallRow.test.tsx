@@ -1,6 +1,16 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import { SchemaValidationProvider } from "../../../contexts/SchemaValidationContext";
+import { ToastProvider } from "../../../contexts/ToastContext";
 import { ToolCallRow } from "../ToolCallRow";
+
+function renderWithToolProviders(ui: React.ReactNode) {
+  return render(
+    <ToastProvider>
+      <SchemaValidationProvider>{ui}</SchemaValidationProvider>
+    </ToastProvider>,
+  );
+}
 
 describe("ToolCallRow", () => {
   afterEach(() => {
@@ -8,7 +18,7 @@ describe("ToolCallRow", () => {
   });
 
   it("keeps pending Codex Bash rows collapsed without IN/OUT preview cards", () => {
-    const { container } = render(
+    const { container } = renderWithToolProviders(
       <ToolCallRow
         id="tool-1"
         toolName="Bash"
@@ -218,5 +228,122 @@ describe("ToolCallRow", () => {
 
     expect(container.querySelector(".codex-exec-details")).toBeNull();
     expect(container.querySelector(".tool-fallback")).not.toBeNull();
+  });
+
+  it("uses semantic OpenCode shell titles and includes command in details", () => {
+    const { container } = renderWithToolProviders(
+      <ToolCallRow
+        id="oc-bash"
+        toolName="bash"
+        toolInput={{
+          command: "git status --short",
+          opencodeTitle: "git status",
+        }}
+        toolResult={{ content: " M src/app.ts", isError: false }}
+        status="complete"
+        sessionProvider="opencode"
+      />,
+    );
+
+    expect(screen.getByText("Ran")).toBeDefined();
+    expect(screen.getByText("git status --short")).toBeDefined();
+    expect(container.textContent).not.toContain("Bash command");
+    fireEvent.click(container.querySelector(".tool-row-header") as HTMLElement);
+    expect(screen.getByText("Command")).toBeDefined();
+    expect(screen.getByText("M src/app.ts", { exact: false })).toBeDefined();
+  });
+
+  it.each([
+    ["pending", "Writing"],
+    ["error", "Write failed"],
+    ["aborted", "Write"],
+  ] as const)(
+    "uses a status-aware OpenCode write title while %s",
+    (status, expectedTitle) => {
+      const { container } = renderWithToolProviders(
+        <ToolCallRow
+          id={`oc-write-${status}`}
+          toolName="write"
+          toolInput={{ filePath: "src/app.ts", content: "updated" }}
+          toolResult={
+            status === "error"
+              ? { content: "permission denied", isError: true }
+              : undefined
+          }
+          status={status}
+          sessionProvider="opencode"
+        />,
+      );
+
+      expect(container.querySelector(".tool-name")?.textContent).toBe(
+        expectedTitle,
+      );
+    },
+  );
+
+  it("does not apply OpenCode status titles to another provider", () => {
+    const { container } = renderWithToolProviders(
+      <ToolCallRow
+        id="codex-write-pending"
+        toolName="Write"
+        toolInput={{ file_path: "src/app.ts", content: "updated" }}
+        status="pending"
+        sessionProvider="codex"
+      />,
+    );
+
+    expect(container.querySelector(".tool-name")?.textContent).toBe("Write");
+  });
+
+  it("renders OpenCode skills without exposing the skill_content envelope", () => {
+    const { container } = render(
+      <ToolCallRow
+        id="oc-skill"
+        toolName="skill"
+        toolInput={{
+          name: "git-commit-push",
+          opencodeTitle: "git-commit-push",
+        }}
+        toolResult={{
+          content:
+            '"<skill_content name=\\"git-commit-push\\">\\n# Skill: git-commit-push\\nReview changes first.\\n</skill_content>"',
+          isError: false,
+        }}
+        status="complete"
+        sessionProvider="opencode"
+      />,
+    );
+
+    expect(screen.getByText("Skill")).toBeDefined();
+    expect(screen.getByText("git-commit-push", { exact: false })).toBeDefined();
+    fireEvent.click(container.querySelector(".tool-row-header") as HTMLElement);
+    expect(screen.getByText("Loaded skill")).toBeDefined();
+    expect(container.textContent).not.toContain("<skill_content");
+    fireEvent.click(screen.getByText("Instructions"));
+    expect(container.textContent).toContain("# Skill: git-commit-push");
+  });
+
+  it("renders failed OpenCode skills as errors, not loaded instructions", () => {
+    const { container } = render(
+      <ToolCallRow
+        id="oc-skill-error"
+        toolName="skill"
+        toolInput={{ name: "missing-skill" }}
+        toolResult={{ content: "Skill not found", isError: true }}
+        status="error"
+        sessionProvider="opencode"
+      />,
+    );
+
+    expect(container.querySelector(".tool-name")?.textContent).toBe(
+      "Skill failed",
+    );
+    fireEvent.click(container.querySelector(".tool-row-header") as HTMLElement);
+    expect(screen.getByText("Failed skill")).toBeDefined();
+    expect(screen.getByText("Error details")).toBeDefined();
+    expect(screen.queryByText("Loaded skill")).toBeNull();
+    expect(screen.queryByText("Instructions")).toBeNull();
+    fireEvent.click(screen.getByText("Error details"));
+    expect(container.textContent).toContain("Skill not found");
   });
 });
