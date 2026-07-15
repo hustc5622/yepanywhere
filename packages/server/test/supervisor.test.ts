@@ -9,6 +9,27 @@ import { Supervisor } from "../src/supervisor/Supervisor.js";
 import type { SessionSummary } from "../src/supervisor/types.js";
 import { type BusEvent, EventBus } from "../src/watcher/EventBus.js";
 
+function createOpenCodeTestProvider(
+  startSession: AgentProvider["startSession"],
+): AgentProvider {
+  return {
+    name: "opencode",
+    displayName: "OpenCode",
+    supportsPermissionMode: true,
+    supportsThinkingToggle: true,
+    supportsSlashCommands: false,
+    isInstalled: async () => true,
+    isAuthenticated: async () => true,
+    getAuthStatus: async () => ({
+      installed: true,
+      authenticated: true,
+      enabled: true,
+    }),
+    startSession,
+    getAvailableModels: async () => [],
+  };
+}
+
 describe("Supervisor", () => {
   let mockSdk: MockClaudeSDK;
   let supervisor: Supervisor;
@@ -262,6 +283,306 @@ describe("Supervisor", () => {
         secondStart.aborted = true;
       }
       await providerSupervisor.abortProcess((process2 as { id: string }).id);
+    });
+
+    it("replaces an OpenCode process and registers the native fork session id", async () => {
+      const starts: Array<{
+        aborted: boolean;
+        options: StartSessionOptions;
+      }> = [];
+      const startSession = vi.fn(async (options: StartSessionOptions) => {
+        const start = { aborted: false, options };
+        starts.push(start);
+        const actualSessionId = options.resumeSessionAt
+          ? "ses_forked"
+          : (options.resumeSessionId ?? "ses_created");
+
+        async function* iterator() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: actualSessionId,
+          };
+          while (!start.aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            start.aborted = true;
+          },
+        };
+      });
+      const provider: AgentProvider = {
+        name: "opencode",
+        displayName: "OpenCode",
+        supportsPermissionMode: true,
+        supportsThinkingToggle: true,
+        supportsSlashCommands: false,
+        isInstalled: async () => true,
+        isAuthenticated: async () => true,
+        getAuthStatus: async () => ({
+          installed: true,
+          authenticated: true,
+          enabled: true,
+        }),
+        startSession,
+        getAvailableModels: async () => [],
+      };
+      const providerSupervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+      });
+
+      const original = await providerSupervisor.resumeSession(
+        "ses_parent",
+        "/tmp/test",
+        { text: "original" },
+      );
+      const forked = await providerSupervisor.resumeSession(
+        "ses_parent",
+        "/tmp/test",
+        { text: "edited" },
+        "acceptEdits",
+        {
+          resumeSessionAt: "msg_native_user",
+          reasoningEffort: "max",
+          opencodeConfig: {
+            model: "glm-5.2",
+            requestProtocol: "anthropic",
+            limits: { context: 200_000, output: 16_000 },
+          },
+        },
+      );
+
+      expect(starts[0]?.aborted).toBe(true);
+      expect((forked as { id: string }).id).not.toBe(
+        (original as { id: string }).id,
+      );
+      expect((forked as { sessionId: string }).sessionId).toBe("ses_forked");
+      expect(providerSupervisor.getProcessForSession("ses_parent")).toBe(
+        undefined,
+      );
+      expect(providerSupervisor.getProcessForSession("ses_forked")?.id).toBe(
+        (forked as { id: string }).id,
+      );
+      expect(starts[1]?.options).toEqual(
+        expect.objectContaining({
+          resumeSessionId: "ses_parent",
+          resumeSessionAt: "msg_native_user",
+          permissionMode: "acceptEdits",
+          reasoningEffort: "max",
+          opencodeConfig: expect.objectContaining({ model: "glm-5.2" }),
+        }),
+      );
+
+      const forkStart = starts[1];
+      if (forkStart) {
+        forkStart.aborted = true;
+      }
+      await providerSupervisor.abortProcess((forked as { id: string }).id);
+    });
+
+    it("surfaces an OpenCode fork initialization error instead of reusing the source id", async () => {
+      const starts: Array<{ aborted: boolean; options: StartSessionOptions }> =
+        [];
+      const startSession = vi.fn(async (options: StartSessionOptions) => {
+        const start = { aborted: false, options };
+        starts.push(start);
+        const startIndex = starts.length;
+
+        async function* iterator() {
+          if (startIndex === 1) {
+            yield {
+              type: "system",
+              subtype: "init",
+              session_id: "ses_parent",
+            };
+            while (!start.aborted) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            return;
+          }
+          yield {
+            type: "error",
+            error:
+              "OpenCode fork ses_orphan was created, but Yep fork lineage metadata could not be persisted",
+          };
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            start.aborted = true;
+          },
+        };
+      });
+      const provider: AgentProvider = {
+        name: "opencode",
+        displayName: "OpenCode",
+        supportsPermissionMode: true,
+        supportsThinkingToggle: true,
+        supportsSlashCommands: false,
+        isInstalled: async () => true,
+        isAuthenticated: async () => true,
+        getAuthStatus: async () => ({
+          installed: true,
+          authenticated: true,
+          enabled: true,
+        }),
+        startSession,
+        getAvailableModels: async () => [],
+      };
+      const providerSupervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+      });
+
+      await providerSupervisor.resumeSession("ses_parent", "/tmp/test", {
+        text: "original",
+      });
+
+      await expect(
+        providerSupervisor.resumeSession(
+          "ses_parent",
+          "/tmp/test",
+          { text: "edited" },
+          "acceptEdits",
+          { resumeSessionAt: "msg_native_user" },
+        ),
+      ).rejects.toThrow("Yep fork lineage metadata could not be persisted");
+      expect(starts[0]?.aborted).toBe(true);
+      expect(starts[1]?.aborted).toBe(true);
+      expect(providerSupervisor.getProcessForSession("ses_parent")).toBe(
+        undefined,
+      );
+      expect(providerSupervisor.getProcessForSession("ses_orphan")).toBe(
+        undefined,
+      );
+    });
+
+    it("allows an OpenCode edit fork to return its native id after the legacy five-second fallback", async () => {
+      vi.useFakeTimers();
+      let aborted = false;
+      let releaseAfterInit: (() => void) | undefined;
+      const startSession = vi.fn(async () => {
+        async function* iterator() {
+          await new Promise((resolve) => setTimeout(resolve, 5_500));
+          if (aborted) return;
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: "ses_delayed_fork",
+          };
+          await new Promise<void>((resolve) => {
+            releaseAfterInit = resolve;
+          });
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+            releaseAfterInit?.();
+          },
+        };
+      });
+      const providerSupervisor = new Supervisor({
+        provider: createOpenCodeTestProvider(startSession),
+        idleTimeoutMs: 100,
+        opencodeForkSessionIdTimeoutMs: 10_000,
+      });
+
+      try {
+        const forkPromise = providerSupervisor.resumeSession(
+          "ses_parent",
+          "/tmp/test",
+          { text: "edited" },
+          "acceptEdits",
+          { resumeSessionAt: "msg_native_user" },
+        );
+
+        await vi.advanceTimersByTimeAsync(5_500);
+        const forked = await forkPromise;
+
+        expect((forked as { sessionId: string }).sessionId).toBe(
+          "ses_delayed_fork",
+        );
+        expect(aborted).toBe(false);
+        expect(
+          providerSupervisor.getProcessForSession("ses_delayed_fork")?.id,
+        ).toBe((forked as { id: string }).id);
+      } finally {
+        releaseAfterInit?.();
+        await providerSupervisor.shutdown();
+        vi.useRealTimers();
+      }
+    });
+
+    it("rejects an OpenCode edit fork with an explicit initialization timeout", async () => {
+      vi.useFakeTimers();
+      let aborted = false;
+      let releaseInitialization: (() => void) | undefined;
+      const startSession = vi.fn(async () => {
+        async function* iterator() {
+          await new Promise<void>((resolve) => {
+            releaseInitialization = resolve;
+          });
+          if (aborted) return;
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: "ses_too_late",
+          };
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+            releaseInitialization?.();
+          },
+        };
+      });
+      const providerSupervisor = new Supervisor({
+        provider: createOpenCodeTestProvider(startSession),
+        idleTimeoutMs: 100,
+        opencodeForkSessionIdTimeoutMs: 100,
+      });
+
+      try {
+        const forkPromise = providerSupervisor.resumeSession(
+          "ses_parent",
+          "/tmp/test",
+          { text: "edited" },
+          "acceptEdits",
+          { resumeSessionAt: "msg_native_user" },
+        );
+        const rejection = expect(forkPromise).rejects.toThrow(
+          "Provider initialization timed out after 100ms before returning a session ID",
+        );
+
+        await vi.advanceTimersByTimeAsync(100);
+        await rejection;
+
+        expect(aborted).toBe(true);
+        expect(
+          providerSupervisor.getProcessForSession("ses_parent"),
+        ).toBeUndefined();
+        expect(
+          providerSupervisor.getProcessForSession("ses_too_late"),
+        ).toBeUndefined();
+      } finally {
+        releaseInitialization?.();
+        await providerSupervisor.shutdown();
+        vi.useRealTimers();
+      }
     });
   });
 

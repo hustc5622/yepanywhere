@@ -437,6 +437,82 @@ describe("Sessions API", () => {
       );
     });
 
+    it("returns the OpenCode fork id and copies session metadata to it", async () => {
+      const sessionMetadataService = {
+        getProvider: vi.fn(() => "opencode"),
+        getExecutor: vi.fn(() => undefined),
+        setProvider: vi.fn(async () => undefined),
+        setOpenCodeConfig: vi.fn(async () => undefined),
+        setCreatedBy: vi.fn(async () => undefined),
+      };
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+        sessionMetadataService:
+          sessionMetadataService as unknown as SessionMetadataService,
+      });
+      const resumeSpy = vi
+        .spyOn(supervisor, "resumeSession")
+        .mockResolvedValue({
+          id: "process-opencode-fork",
+          sessionId: "ses_opencode_fork",
+          permissionMode: "acceptEdits",
+          modeVersion: 3,
+        } as unknown as Awaited<ReturnType<typeof supervisor.resumeSession>>);
+      const opencodeConfig = {
+        model: "glm-5.2",
+        requestProtocol: "anthropic" as const,
+        limits: { context: 200_000, output: 16_000 },
+      };
+
+      const res = await app.request(
+        `/api/projects/${projectId}/sessions/sess-existing/resume`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Yep-Anywhere": "true",
+          },
+          body: JSON.stringify({
+            message: "edited OpenCode prompt",
+            mode: "acceptEdits",
+            resumeSessionAt: "msg_native_user",
+            opencodeConfig,
+          }),
+        },
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        sessionId: "ses_opencode_fork",
+        processId: "process-opencode-fork",
+      });
+      expect(resumeSpy).toHaveBeenCalledWith(
+        "sess-existing",
+        expect.any(String),
+        expect.objectContaining({ text: "edited OpenCode prompt" }),
+        "acceptEdits",
+        expect.objectContaining({
+          providerName: "opencode",
+          resumeSessionAt: "msg_native_user",
+          rollbackNumTurns: undefined,
+          opencodeConfig,
+        }),
+      );
+      expect(sessionMetadataService.setProvider).toHaveBeenCalledWith(
+        "ses_opencode_fork",
+        "opencode",
+      );
+      expect(sessionMetadataService.setOpenCodeConfig).toHaveBeenCalledWith(
+        "ses_opencode_fork",
+        opencodeConfig,
+      );
+      expect(sessionMetadataService.setCreatedBy).toHaveBeenCalledWith(
+        "ses_opencode_fork",
+        "yep",
+      );
+    });
+
     it("returns 400 for non-integer rollbackNumTurns", async () => {
       const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
 

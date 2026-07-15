@@ -14,6 +14,7 @@ import {
   type UrlProjectId,
   getModelContextWindow,
 } from "@yep-anywhere/shared";
+import { getLogger } from "../logging/logger.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type {
   ContextUsage,
@@ -21,10 +22,18 @@ import type {
   SessionSummary,
 } from "../supervisor/types.js";
 import {
+  type OpenCodeBranchDiagnostic,
+  type OpenCodeBranchSession,
+  type OpenCodeBranchSessionMetadata,
+  buildOpenCodeBranchView,
+  findOpenCodeBranchFamilySessionIds,
+} from "./opencode-branch.js";
+import {
   OPENCODE_DB_PATH,
   type OpenCodeDatabase,
   withOpenCodeDb,
 } from "./opencode-db.js";
+import { normalizeProviderGeneratedTitle } from "./provider-title-quality.js";
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -494,8 +503,12 @@ class OpenCodeJsonSessionReader implements ISessionReader {
       const stats = await stat(sessionPath);
       const contextUsage = await this.extractContextUsage(sessionId, model);
 
-      // Use session title if available, otherwise first user message
-      const fullTitle = session.title || firstUserMessageText?.trim() || null;
+      // Provider defaults and explanatory preambles are not useful display
+      // titles. Fall back to the first real user message in that case.
+      const fullTitle =
+        normalizeProviderGeneratedTitle(session.title) ||
+        firstUserMessageText?.trim() ||
+        null;
 
       return {
         id: sessionId,
@@ -921,12 +934,6 @@ function truncateOpenCodeTitle(title: string | null): string | null {
   return `${trimmed.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
 }
 
-function isGenericOpenCodeTitle(title: string | null | undefined): boolean {
-  if (!title) return false;
-  const normalized = title.trim().toLowerCase();
-  return normalized === "yep anywhere session" || normalized === "new session";
-}
-
 function mapSqliteSessionRow(
   row: Record<string, unknown> | undefined,
 ): OpenCodeSqliteSessionRow | null {
@@ -970,7 +977,6 @@ function messageFromSqliteRow(
   const id = asString(row.id);
   const sessionID = asString(row.session_id);
   const createdAtMs = asNumber(row.time_created);
-  const updatedAtMs = asNumber(row.time_updated);
   if (!id || !sessionID) return null;
 
   const data = parseJsonRecord(row.data);
@@ -979,6 +985,7 @@ function messageFromSqliteRow(
   if (!role) return null;
 
   const time = getNestedRecord(data, "time") ?? {};
+  const completedAtMs = getNestedNumber(time, "completed");
   const model = getNestedRecord(data, "model") ?? {};
   const modelID =
     asString(data.modelID) ?? asString(model.modelID) ?? asString(model.id);
@@ -992,7 +999,10 @@ function messageFromSqliteRow(
     time: {
       ...time,
       created: getNestedNumber(time, "created") ?? createdAtMs,
-      completed: getNestedNumber(time, "completed") ?? updatedAtMs,
+      // A row update can be an in-progress text/part write. Do not synthesize
+      // message completion from it: legacy completion fallback must only use
+      // OpenCode's persisted `time.completed` signal.
+      ...(completedAtMs !== undefined ? { completed: completedAtMs } : {}),
     },
     ...(modelID ? { modelID } : {}),
     ...(providerID ? { providerID } : {}),
@@ -1026,6 +1036,17 @@ function extractMessageText(parts: OpenCodeStoredPart[]): string | null {
     .map((part) => part.text)
     .join("");
   return text.trim() ? text : null;
+}
+
+function filterEntriesAfterMessage(
+  entries: OpenCodeSessionEntry[],
+  afterMessageId?: string,
+): OpenCodeSessionEntry[] {
+  if (!afterMessageId) return entries;
+  const index = entries.findIndex(
+    (entry) => entry.message.id === afterMessageId,
+  );
+  return index < 0 ? [] : entries.slice(index + 1);
 }
 
 function computeCumulativeUsage(
@@ -1166,21 +1187,40 @@ export class OpenCodeSessionReader implements ISessionReader {
     afterMessageId?: string,
     options?: GetSessionOptions,
   ): Promise<LoadedSession | null> {
-    const summary = await this.getSqliteSessionSummary(sessionId, projectId);
-    if (summary) {
-      return {
-        summary,
-        data: {
-          provider: "opencode",
-          session: {
-            messages: await this.loadSqliteSessionMessages(
-              sessionId,
-              afterMessageId,
-            ),
+    const sqliteSession = await withOpenCodeDb<LoadedSession | undefined>(
+      this.dbPath,
+      undefined,
+      (db) => {
+        const summary = this.getSqliteSessionSummaryFromDb(
+          db,
+          sessionId,
+          projectId,
+        );
+        if (!summary) return undefined;
+
+        const branchData = this.loadSqliteBranchDataFromDb(
+          db,
+          sessionId,
+          options?.branchId,
+        );
+        const allMessages =
+          branchData?.messages ??
+          this.loadSqliteSessionEntriesFromDb(db, sessionId);
+        const messages = filterEntriesAfterMessage(allMessages, afterMessageId);
+
+        return {
+          summary,
+          data: {
+            provider: "opencode",
+            session: { messages },
           },
-        },
-      };
-    }
+          ...(branchData?.branchState
+            ? { branchState: branchData.branchState }
+            : {}),
+        };
+      },
+    );
+    if (sqliteSession) return sqliteSession;
 
     return this.legacyReader.getSession(
       sessionId,
@@ -1370,13 +1410,11 @@ export class OpenCodeSessionReader implements ISessionReader {
       if (question) userQuestions.push(question);
     }
 
-    const nonGenericTitle = isGenericOpenCodeTitle(row.title)
-      ? null
-      : row.title?.trim() || null;
+    const providerTitle = normalizeProviderGeneratedTitle(row.title);
     // OpenCode replaces its generic initial title with a generated session
     // title. Prefer that persisted title so the SQLite reader agrees with the
     // bridge and does not flip back to the first user prompt on each refresh.
-    const fullTitle = nonGenericTitle || firstUserMessageText?.trim() || null;
+    const fullTitle = providerTitle || firstUserMessageText?.trim() || null;
     const contextUsage = this.extractSqliteContextUsageFromMessages(
       messages,
       model,
@@ -1439,31 +1477,164 @@ export class OpenCodeSessionReader implements ISessionReader {
     return deriveOpenCodeCreatedByFromMetadata(parent.metadata);
   }
 
-  private async loadSqliteSessionMessages(
+  private loadSqliteSessionEntriesFromDb(
+    db: OpenCodeDatabase,
     sessionId: string,
-    afterMessageId?: string,
-  ): Promise<OpenCodeSessionEntry[]> {
-    return withOpenCodeDb(this.dbPath, [], (db) => {
-      const messages = this.loadSqliteMessagesFromDb(db, sessionId);
-      const entries: OpenCodeSessionEntry[] = [];
-      let foundAfterMessage = !afterMessageId;
+  ): OpenCodeSessionEntry[] {
+    return this.loadSqliteMessagesFromDb(db, sessionId).map((message) => ({
+      message,
+      parts: this.loadSqliteMessagePartsFromDb(db, message.id),
+    }));
+  }
 
-      for (const message of messages) {
-        if (!foundAfterMessage) {
-          if (message.id === afterMessageId) {
-            foundAfterMessage = true;
-          }
-          continue;
-        }
-
-        entries.push({
-          message,
-          parts: this.loadSqliteMessagePartsFromDb(db, message.id),
-        });
+  private loadSqliteBranchDataFromDb(
+    db: OpenCodeDatabase,
+    currentSessionId: string,
+    selectedBranchId?: string,
+  ):
+    | {
+        messages: OpenCodeSessionEntry[];
+        branchState?: LoadedSession["branchState"];
       }
+    | undefined {
+    const metadataRows = db
+      .prepare(
+        `
+          SELECT id, parent_id, metadata, time_created
+          FROM session
+          WHERE directory = ? AND time_archived IS NULL
+        `,
+      )
+      .all(this.projectPath);
+    const sessionMetadata: Array<
+      OpenCodeBranchSessionMetadata & { createdAt?: string }
+    > = [];
+    for (const row of metadataRows) {
+      const id = asString(row.id);
+      if (!id) continue;
+      const createdAtMs = asNumber(row.time_created);
+      sessionMetadata.push({
+        id,
+        parentId: asString(row.parent_id) ?? null,
+        metadata: asRecord(row.metadata) ?? parseJsonRecord(row.metadata),
+        ...(createdAtMs !== undefined
+          ? { createdAt: new Date(createdAtMs).toISOString() }
+          : {}),
+      });
+    }
 
-      return entries;
+    const diagnostics: OpenCodeBranchDiagnostic[] = [];
+    const familyIds = findOpenCodeBranchFamilySessionIds(
+      sessionMetadata,
+      currentSessionId,
+      diagnostics,
+    );
+    if (familyIds.length <= 1) {
+      this.logOpenCodeBranchDiagnostics(diagnostics);
+      return undefined;
+    }
+
+    const placeholders = familyIds.map(() => "?").join(", ");
+    const partsByMessageId = new Map<string, OpenCodeStoredPart[]>();
+    for (const row of db
+      .prepare(
+        `
+          SELECT id, message_id, session_id, time_created, time_updated, data
+          FROM part
+          WHERE session_id IN (${placeholders})
+          ORDER BY time_created ASC, id ASC
+        `,
+      )
+      .all(...familyIds)) {
+      const part = partFromSqliteRow(row);
+      if (!part) continue;
+      const parts = partsByMessageId.get(part.messageID) ?? [];
+      parts.push(part);
+      partsByMessageId.set(part.messageID, parts);
+    }
+
+    const entriesBySessionId = new Map<string, OpenCodeSessionEntry[]>();
+    for (const row of db
+      .prepare(
+        `
+          SELECT id, session_id, time_created, time_updated, data
+          FROM message
+          WHERE session_id IN (${placeholders})
+          ORDER BY time_created ASC, id ASC
+        `,
+      )
+      .all(...familyIds)) {
+      const message = messageFromSqliteRow(row);
+      if (!message) continue;
+      const entries = entriesBySessionId.get(message.sessionID) ?? [];
+      entries.push({
+        message,
+        parts: partsByMessageId.get(message.id) ?? [],
+      });
+      entriesBySessionId.set(message.sessionID, entries);
+    }
+
+    const metadataById = new Map(
+      sessionMetadata.map((session) => [session.id, session]),
+    );
+    const familySessions: OpenCodeBranchSession[] = familyIds.flatMap((id) => {
+      const metadata = metadataById.get(id);
+      if (!metadata) return [];
+      return [
+        {
+          id,
+          metadata: metadata.metadata,
+          ...(metadata.createdAt ? { createdAt: metadata.createdAt } : {}),
+          messages: entriesBySessionId.get(id) ?? [],
+        },
+      ];
     });
+    const branchView = buildOpenCodeBranchView(
+      familySessions,
+      currentSessionId,
+      selectedBranchId,
+    );
+    this.logOpenCodeBranchDiagnostics([
+      ...diagnostics,
+      ...branchView.diagnostics,
+    ]);
+
+    return {
+      messages: entriesBySessionId.get(currentSessionId) ?? [],
+      ...(branchView.branchState
+        ? { branchState: branchView.branchState }
+        : {}),
+    };
+  }
+
+  private logOpenCodeBranchDiagnostics(
+    diagnostics: OpenCodeBranchDiagnostic[],
+  ): void {
+    const seen = new Set<string>();
+    for (const diagnostic of diagnostics) {
+      const key = JSON.stringify(diagnostic);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const fields = {
+        event: "opencode_branch_relation_ignored",
+        code: diagnostic.code,
+        sessionId: diagnostic.sessionId,
+        parentSessionId: diagnostic.parentSessionId ?? null,
+        forkMessageId: diagnostic.forkMessageId ?? null,
+      };
+      if (
+        diagnostic.code === "missing_parent" ||
+        diagnostic.code === "missing_fork_message" ||
+        diagnostic.code === "lineage_cycle"
+      ) {
+        getLogger().warn(fields, "Ignoring broken OpenCode edit-fork lineage");
+      } else {
+        getLogger().debug(
+          fields,
+          "Ignoring invalid OpenCode edit-fork lineage",
+        );
+      }
+    }
   }
 
   private loadSqliteMessagesFromDb(

@@ -136,7 +136,7 @@ describe("normalizeSession", () => {
                 id: "msg-1",
                 sessionID: "session-1",
                 role: "assistant",
-                time: { created: Date.now() },
+                time: { created: Date.now(), completed: Date.now() + 1 },
               },
               parts: [
                 {
@@ -195,6 +195,229 @@ describe("normalizeSession", () => {
         content: "Edited successfully.",
       },
     ]);
+    expect(normalized.messages[0]?.openCodeHasToolPart).toBe(true);
+    expect(normalized.messages[0]?.openCodeCompleted).toBe(false);
+    expect(normalized.messages[0]?.finish).toBeUndefined();
+  });
+
+  it("marks a persisted legacy OpenCode text response as completed", () => {
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "opencode-legacy-response",
+        projectId: "test-project" as UrlProjectId,
+        title: "OpenCode legacy response",
+        fullTitle: "OpenCode legacy response",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 1,
+        status: { state: "idle" },
+        provider: "opencode",
+      },
+      data: {
+        provider: "opencode",
+        session: {
+          messages: [
+            {
+              message: {
+                id: "msg-legacy",
+                sessionID: "opencode-legacy-response",
+                role: "assistant",
+                time: { created: 1, completed: 2 },
+              },
+              parts: [
+                {
+                  id: "part-text",
+                  sessionID: "opencode-legacy-response",
+                  messageID: "msg-legacy",
+                  type: "text",
+                  text: "The legacy response is complete.",
+                },
+              ],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+
+    expect(normalized.messages[0]?.openCodeCompleted).toBe(true);
+  });
+
+  it("normalizes OpenCode parent IDs and copied cross-session branch aliases", () => {
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "ses_grandchild",
+        projectId: "test-project" as UrlProjectId,
+        title: "OpenCode branch",
+        fullTitle: "OpenCode branch",
+        createdAt: "2026-07-15T00:00:00.000Z",
+        updatedAt: "2026-07-15T00:00:01.000Z",
+        messageCount: 2,
+        status: { state: "idle" },
+        provider: "opencode",
+      },
+      branchState: {
+        // Deliberately differs from the matching option to prove annotation
+        // takes the concrete alternative's target session.
+        sessionId: "ses_parent",
+        provider: "opencode",
+        activeBranchId: "u2_edit",
+        selectedBranchId: "u2_edit",
+        branches: [
+          {
+            id: "u2",
+            sessionId: "ses_parent",
+            parentId: "u1",
+            prompt: "original",
+            title: "original",
+            depth: 2,
+            index: 1,
+            siblingIndex: 1,
+            siblingCount: 2,
+            isActive: false,
+            provider: "opencode",
+          },
+          {
+            id: "u2_edit",
+            sessionId: "ses_child",
+            parentId: "u1",
+            prompt: "edited",
+            title: "edited",
+            depth: 2,
+            index: 2,
+            siblingIndex: 2,
+            siblingCount: 2,
+            isActive: true,
+            createdAt: "2026-07-15T00:00:00.000Z",
+            provider: "opencode",
+          },
+        ],
+      },
+      data: {
+        provider: "opencode",
+        session: {
+          messages: [
+            {
+              message: {
+                id: "u2_edit_copy",
+                sessionID: "ses_grandchild",
+                role: "user",
+                parentID: "native-parent",
+                time: { created: Date.UTC(2026, 6, 15) },
+              },
+              parts: [
+                {
+                  id: "part-u2-edit-copy",
+                  sessionID: "ses_grandchild",
+                  messageID: "u2_edit_copy",
+                  type: "text",
+                  text: "edited",
+                },
+              ],
+            },
+            {
+              message: {
+                id: "a2_edit",
+                sessionID: "ses_grandchild",
+                role: "assistant",
+                parentID: "u2_edit_copy",
+                time: { created: Date.UTC(2026, 6, 15, 0, 0, 1) },
+              },
+              parts: [],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    expect(normalized.branchState).toBe(mockSession.branchState);
+    expect(normalized.messages[0]).toMatchObject({
+      uuid: "u2_edit_copy",
+      parentUuid: "native-parent",
+      parentId: "native-parent",
+      branch: {
+        sessionId: "ses_child",
+        branchId: "u2_edit",
+        siblingCount: 2,
+      },
+    });
+    expect(normalized.messages[1]).toMatchObject({
+      parentUuid: "u2_edit_copy",
+      parentId: "u2_edit_copy",
+    });
+  });
+
+  it("preserves same-session Claude branch annotation", () => {
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "claude-session",
+        projectId: "test-project" as UrlProjectId,
+        title: "Claude branch",
+        fullTitle: "Claude branch",
+        createdAt: "2026-07-15T00:00:00.000Z",
+        updatedAt: "2026-07-15T00:00:01.000Z",
+        messageCount: 1,
+        status: { state: "idle" },
+        provider: "claude",
+      },
+      messagesAlreadyProjected: true,
+      branchState: {
+        sessionId: "claude-session",
+        provider: "claude",
+        activeBranchId: "u2-edit",
+        selectedBranchId: "u2-edit",
+        branches: [
+          {
+            id: "u2-original",
+            sessionId: "claude-session",
+            parentId: "a1",
+            prompt: "original",
+            title: "original",
+            depth: 2,
+            index: 1,
+            siblingIndex: 1,
+            siblingCount: 2,
+            isActive: false,
+            provider: "claude",
+          },
+          {
+            id: "u2-edit",
+            sessionId: "claude-session",
+            parentId: "a1",
+            prompt: "edited",
+            title: "edited",
+            depth: 2,
+            index: 2,
+            siblingIndex: 2,
+            siblingCount: 2,
+            isActive: true,
+            provider: "claude",
+          },
+        ],
+      },
+      data: {
+        provider: "claude",
+        session: {
+          messages: [
+            {
+              type: "user",
+              uuid: "u2-edit",
+              parentUuid: "a1",
+              message: { role: "user", content: "edited" },
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    expect(normalized.messages[0]?.branch).toMatchObject({
+      sessionId: "claude-session",
+      branchId: "u2-edit",
+      siblingCount: 2,
+    });
   });
 
   it("preserves OpenCode edit metadata diff as a raw patch augment", () => {

@@ -91,8 +91,8 @@ export interface ModelSettings {
   /** Permission rules for tool filtering (deny/allow patterns) */
   permissions?: PermissionRules;
   /**
-   * Rewind/edit: resume only up to (and including) this message UUID, branching
-   * the conversation in place. Maps to the SDK `resumeSessionAt` query option.
+   * Provider-native edit boundary. Claude resumes through an ancestor UUID;
+   * OpenCode forks before the native user message ID supplied here.
    */
   resumeSessionAt?: string;
   /**
@@ -143,6 +143,11 @@ export type OnSessionSummaryCallback = (
 
 /** Delays for initial title/messageCount reconciliation after session creation */
 const INITIAL_RECONCILE_DELAYS_MS = [1000, 3000] as const;
+/**
+ * OpenCode emits its fork ID only after server startup, configuration, native
+ * fork creation, and lineage metadata persistence have all completed.
+ */
+const DEFAULT_OPENCODE_FORK_SESSION_ID_TIMEOUT_MS = 60_000;
 
 export interface SupervisorOptions {
   /** Agent provider interface (preferred for new code) */
@@ -166,6 +171,8 @@ export interface SupervisorOptions {
   onSessionIdChanged?: OnSessionIdChangedCallback;
   /** Callback to fetch session summary for initial metadata reconciliation */
   onSessionSummary?: OnSessionSummaryCallback;
+  /** Strict OpenCode edit-fork initialization budget. Primarily configurable for tests. */
+  opencodeForkSessionIdTimeoutMs?: number;
 }
 
 export class Supervisor {
@@ -184,6 +191,7 @@ export class Supervisor {
   private onSessionExecutor?: OnSessionExecutorCallback;
   private onSessionIdChanged?: OnSessionIdChangedCallback;
   private onSessionSummary?: OnSessionSummaryCallback;
+  private opencodeForkSessionIdTimeoutMs: number;
   private staleCheckTimer: ReturnType<typeof setInterval>;
   private isShuttingDown = false;
   private queueProcessingPromise: Promise<void> | null = null;
@@ -205,6 +213,13 @@ export class Supervisor {
     this.onSessionExecutor = options.onSessionExecutor;
     this.onSessionIdChanged = options.onSessionIdChanged;
     this.onSessionSummary = options.onSessionSummary;
+    this.opencodeForkSessionIdTimeoutMs = Math.max(
+      1,
+      Math.floor(
+        options.opencodeForkSessionIdTimeoutMs ??
+          DEFAULT_OPENCODE_FORK_SESSION_ID_TIMEOUT_MS,
+      ),
+    );
     this.staleCheckTimer = setInterval(
       () => this.terminateStaleProcesses(),
       STALE_CHECK_INTERVAL_MS,
@@ -594,7 +609,24 @@ export class Supervisor {
 
     // Wait for the real session ID from the provider before registering
     if (!resumeSessionId || isForkedResume) {
-      await process.waitForSessionId();
+      let resolvedSessionId: string;
+      try {
+        resolvedSessionId = await process.waitForSessionId(
+          isForkedResume ? this.opencodeForkSessionIdTimeoutMs : 5000,
+          {
+            strict: isForkedResume,
+          },
+        );
+      } catch (error) {
+        await process.abort();
+        throw error;
+      }
+      if (isForkedResume && resolvedSessionId === resumeSessionId) {
+        await process.abort();
+        throw new Error(
+          "OpenCode edit fork did not return a new native session ID",
+        );
+      }
     }
 
     this.registerProcess(process, !resumeSessionId || isForkedResume);

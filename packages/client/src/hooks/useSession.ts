@@ -15,11 +15,13 @@ import type {
   InputRequest,
   Message,
   PermissionMode,
+  Session,
   SessionStatus,
 } from "../types";
 import {
   type FileChangeEvent,
   type ProcessStateEvent,
+  type SessionMetadataChangedEvent,
   type SessionStatusEvent,
   type SessionUpdatedEvent,
   useFileActivity,
@@ -158,6 +160,50 @@ export function reconcilePendingMessagesWithConfirmedMessages(
       !messages.some((message) => isPendingMessageConfirmed(pending, message)),
   );
   return next.length === pendingMessages.length ? pendingMessages : next;
+}
+
+function normalizeMetadataTitle(title: string): string | undefined {
+  const normalized = title.trim();
+  return normalized || undefined;
+}
+
+export function mergeSessionMetadataChange(
+  session: Session | null,
+  event: SessionMetadataChangedEvent,
+  expectedSessionId: string,
+): Session | null {
+  if (
+    !session ||
+    event.sessionId !== expectedSessionId ||
+    (event.title === undefined && event.aiTitle === undefined)
+  ) {
+    return session;
+  }
+
+  return {
+    ...session,
+    ...(event.title !== undefined && {
+      customTitle: normalizeMetadataTitle(event.title),
+    }),
+    ...(event.aiTitle !== undefined && {
+      aiTitle: normalizeMetadataTitle(event.aiTitle),
+    }),
+  };
+}
+
+export function shouldRefreshOpenCodeAuthoritativeSnapshot(
+  provider: Session["provider"] | undefined,
+  owner: SessionStatus["owner"],
+  processState: ProcessState,
+  eventSessionId: string,
+  expectedSessionId: string,
+): boolean {
+  return (
+    provider === "opencode" &&
+    owner === "self" &&
+    processState === "idle" &&
+    eventSessionId === expectedSessionId
+  );
 }
 
 function extractUserMessageText(
@@ -370,6 +416,33 @@ export function useSession(
     onLoadComplete: handleLoadComplete,
     onLoadError: handleLoadError,
   });
+
+  // OpenCode's live user echo carries Yep's temporary UUID while persisted
+  // history uses the provider-native message ID required for edit forks. Once
+  // a turn settles, replace the whole visible snapshot so an incremental
+  // `afterMessageId` fetch cannot skip the earlier authoritative user message.
+  const openCodeSnapshotRefreshTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const scheduleOpenCodeAuthoritativeRefresh = useCallback(() => {
+    if (session?.provider !== "opencode") return;
+
+    if (openCodeSnapshotRefreshTimerRef.current) {
+      clearTimeout(openCodeSnapshotRefreshTimerRef.current);
+    }
+    openCodeSnapshotRefreshTimerRef.current = setTimeout(() => {
+      openCodeSnapshotRefreshTimerRef.current = null;
+      void refreshSessionMessages();
+    }, 120);
+  }, [refreshSessionMessages, session?.provider]);
+
+  useEffect(() => {
+    return () => {
+      if (openCodeSnapshotRefreshTimerRef.current) {
+        clearTimeout(openCodeSnapshotRefreshTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     setPendingMessages((prev) =>
@@ -643,6 +716,32 @@ export function useSession(
           }),
         };
       });
+
+      if (
+        shouldRefreshOpenCodeAuthoritativeSnapshot(
+          session?.provider,
+          status.owner,
+          processState,
+          event.sessionId,
+          sessionId,
+        )
+      ) {
+        scheduleOpenCodeAuthoritativeRefresh();
+      }
+    },
+    [
+      processState,
+      scheduleOpenCodeAuthoritativeRefresh,
+      session?.provider,
+      sessionId,
+      setSession,
+      status.owner,
+    ],
+  );
+
+  const handleSessionMetadataChange = useCallback(
+    (event: SessionMetadataChangedEvent) => {
+      setSession((prev) => mergeSessionMetadataChange(prev, event, sessionId));
     },
     [sessionId, setSession],
   );
@@ -669,6 +768,17 @@ export function useSession(
       if (nextProcessState) {
         setProcessState(nextProcessState);
       }
+      if (
+        shouldRefreshOpenCodeAuthoritativeSnapshot(
+          session?.provider,
+          status.owner,
+          nextProcessState ?? processState,
+          event.sessionId,
+          sessionId,
+        )
+      ) {
+        scheduleOpenCodeAuthoritativeRefresh();
+      }
 
       // Always refresh the current request on waiting-input. Codex can emit
       // multiple approvals in one turn, and the latest event may represent a
@@ -688,7 +798,14 @@ export function useSession(
         );
       }
     },
-    [projectId, sessionId],
+    [
+      processState,
+      projectId,
+      scheduleOpenCodeAuthoritativeRefresh,
+      session?.provider,
+      sessionId,
+      status.owner,
+    ],
   );
 
   // Handle activity bus reconnection (e.g., after phone screen wake).
@@ -718,6 +835,7 @@ export function useSession(
   useFileActivity({
     onSessionStatusChange: handleSessionStatusChange,
     onFileChange: handleFileChange,
+    onSessionMetadataChange: handleSessionMetadataChange,
     onSessionUpdated: handleSessionUpdated,
     onProcessStateChange: handleProcessStateChange,
     onReconnect: handleActivityReconnect,
@@ -986,6 +1104,9 @@ export function useSession(
         ) {
           setProcessState(statusData.state as ProcessState);
         }
+        if (statusData.state === "idle") {
+          scheduleOpenCodeAuthoritativeRefresh();
+        }
         // Capture pending input request when waiting for user input
         if (statusData.state === "waiting-input" && statusData.request) {
           setPendingInputRequest(statusData.request);
@@ -1016,6 +1137,7 @@ export function useSession(
         setStatus({ owner: "none" });
         setPendingInputRequest(null);
         setDeferredMessages([]);
+        scheduleOpenCodeAuthoritativeRefresh();
       } else if (data.eventType === "error") {
         clearStreamingPlaceholders({ main: true, allAgents: true });
       } else if (data.eventType === "connected") {
@@ -1197,6 +1319,7 @@ export function useSession(
       handleStreamMessageEvent,
       handleStreamSubagentMessage,
       registerToolUseAgent,
+      scheduleOpenCodeAuthoritativeRefresh,
       setSession,
       fetchNewMessages,
       session?.provider,

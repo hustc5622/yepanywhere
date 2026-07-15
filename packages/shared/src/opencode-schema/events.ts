@@ -146,6 +146,7 @@ export const OpenCodeSessionInfoSchema = z.object({
     .optional(),
   title: z.string().optional(),
   parentID: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
   cost: z.number().optional(),
   tokens: OpenCodeTokensSchema.optional(),
   agent: z.string().optional(),

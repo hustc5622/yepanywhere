@@ -50,6 +50,11 @@ import {
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
 import { hasCoarsePointer } from "../lib/deviceDetection";
+import {
+  HistoricalEditQueueError,
+  requireStartedHistoricalEdit,
+  shouldRestoreHistoricalEditAfterFailure,
+} from "../lib/sessionBranching";
 import type { PermissionMode } from "../types";
 import { CodexUsageCard } from "./CodexUsageCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
@@ -318,6 +323,9 @@ export function NewSessionForm({
   const [opencodeModelPatch, setOpencodeModelPatch] = useState("");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [isStarting, setIsStarting] = useState(false);
+  const [startRetryBlockedMessage, setStartRetryBlockedMessage] = useState<
+    string | null
+  >(null);
   const [uploadProgress, setUploadProgress] = useState<
     Record<string, { uploaded: number; total: number }>
   >({});
@@ -978,7 +986,13 @@ export function NewSessionForm({
     }
 
     const hasContent = finalMessage.trim() || pendingFiles.length > 0;
-    if (!projectId || !hasContent || isStarting || hasOpenCodeConfigError) {
+    if (
+      !projectId ||
+      !hasContent ||
+      isStarting ||
+      startRetryBlockedMessage ||
+      hasOpenCodeConfigError
+    ) {
       return;
     }
 
@@ -986,6 +1000,7 @@ export function NewSessionForm({
 
     setInterimTranscript("");
     setIsStarting(true);
+    let sessionStartOutcomePending = false;
 
     try {
       let sessionId: string;
@@ -1008,7 +1023,13 @@ export function NewSessionForm({
       if (pendingFiles.length > 0) {
         // Two-phase flow: create session first, then upload to real session folder
         // Step 1: Create the session without sending a message
-        const createResult = await api.createSession(projectId, sessionOptions);
+        sessionStartOutcomePending = true;
+        const createResult = await requireStartedHistoricalEdit(
+          await api.createSession(projectId, sessionOptions),
+          api.cancelQueuedRequest,
+          "session start",
+        );
+        sessionStartOutcomePending = false;
         sessionId = createResult.sessionId;
         processId = createResult.processId;
 
@@ -1056,11 +1077,13 @@ export function NewSessionForm({
         );
       } else {
         // No files - use single-step flow for efficiency
-        const result = await api.startSession(
-          projectId,
-          trimmedMessage,
-          sessionOptions,
+        sessionStartOutcomePending = true;
+        const result = await requireStartedHistoricalEdit(
+          await api.startSession(projectId, trimmedMessage, sessionOptions),
+          api.cancelQueuedRequest,
+          "session start",
         );
+        sessionStartOutcomePending = false;
         sessionId = result.sessionId;
         processId = result.processId;
       }
@@ -1086,7 +1109,15 @@ export function NewSessionForm({
       });
     } catch (err) {
       console.error("Failed to start session:", err);
-      draftControls.restoreFromStorage();
+      const restoreForm = shouldRestoreHistoricalEditAfterFailure(
+        err,
+        false,
+        sessionStartOutcomePending,
+      );
+      if (restoreForm) {
+        draftControls.restoreFromStorage();
+        setStartRetryBlockedMessage(null);
+      }
       setIsStarting(false);
 
       // Show user-visible error message
@@ -1107,6 +1138,15 @@ export function NewSessionForm({
         } else {
           errorMessage = err.message;
         }
+      }
+      if (!restoreForm) {
+        if (!(err instanceof HistoricalEditQueueError)) {
+          errorMessage =
+            "The session start status is unknown. Do not retry from this form because the original request may already be running.";
+        }
+        // Preserve the form for inspection, but block every submit path until
+        // navigation/reload resolves the ambiguous queued or transport result.
+        setStartRetryBlockedMessage(errorMessage);
       }
       showToast(errorMessage, "error");
     }
@@ -1441,9 +1481,15 @@ export function NewSessionForm({
         <button
           type="button"
           onClick={handleStartSession}
-          disabled={isStarting || !hasContent || hasOpenCodeConfigError}
+          disabled={
+            isStarting ||
+            Boolean(startRetryBlockedMessage) ||
+            !hasContent ||
+            hasOpenCodeConfigError
+          }
           className="send-button"
           aria-label={t("newSessionStartAction")}
+          title={startRetryBlockedMessage ?? undefined}
         >
           {isStarting ? (
             <span className="send-spinner" />
@@ -1452,6 +1498,11 @@ export function NewSessionForm({
           )}
         </button>
       </div>
+      {startRetryBlockedMessage && (
+        <p className="new-session-limit-error" role="alert">
+          {startRetryBlockedMessage}
+        </p>
+      )}
       {supportsThinkingToggle && compact && (
         <div className="new-session-effort-control">
           <span className="new-session-effort-label">

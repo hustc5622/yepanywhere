@@ -1,5 +1,6 @@
 import { memo, useCallback } from "react";
 import { getMessageId } from "../lib/mergeMessages";
+import { canEditPersistedUserPrompt } from "../lib/sessionBranching";
 import type { RenderItem } from "../types/renderItems";
 import { SessionSetupBlock } from "./blocks/SessionSetupBlock";
 import { TextBlock } from "./blocks/TextBlock";
@@ -203,6 +204,10 @@ export const RenderItemComponent = memo(function RenderItemComponent({
       case "user_prompt": {
         const src = item.sourceMessages[0];
         const uuid = src ? getMessageId(src) : "";
+        const canEdit = canEditPersistedUserPrompt(
+          sessionProvider,
+          src?._source,
+        );
         return (
           <UserPromptBlock
             content={item.content}
@@ -212,7 +217,7 @@ export const RenderItemComponent = memo(function RenderItemComponent({
             codexBranch={src?.codexBranch}
             onSelectBranch={onSelectBranch}
             onEdit={
-              onEditUserPrompt && uuid
+              onEditUserPrompt && uuid && canEdit
                 ? (text) =>
                     onEditUserPrompt({
                       text,

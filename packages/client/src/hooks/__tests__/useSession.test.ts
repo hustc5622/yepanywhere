@@ -1,8 +1,12 @@
+import { getSessionDisplayTitle } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
-import type { Message } from "../../types";
+import type { SessionMetadataChangedEvent } from "../../lib/activityBus";
+import type { Message, Session } from "../../types";
 import {
   type PendingMessage,
+  mergeSessionMetadataChange,
   reconcilePendingMessagesWithConfirmedMessages,
+  shouldRefreshOpenCodeAuthoritativeSnapshot,
 } from "../useSession";
 
 function pending(overrides?: Partial<PendingMessage>): PendingMessage {
@@ -23,6 +27,35 @@ function userMessage(overrides?: Partial<Message>): Message {
       role: "user",
       content: "please do the thing",
     },
+    ...overrides,
+  };
+}
+
+function session(overrides?: Partial<Session>): Session {
+  return {
+    id: "ses-current",
+    projectId: "project" as Session["projectId"],
+    title: "Provider fallback",
+    fullTitle: "Provider fallback",
+    customTitle: undefined,
+    aiTitle: undefined,
+    createdAt: "2026-07-06T12:00:00.000Z",
+    updatedAt: "2026-07-06T12:00:01.000Z",
+    messageCount: 2,
+    ownership: { owner: "none" },
+    provider: "opencode",
+    messages: [],
+    ...overrides,
+  };
+}
+
+function metadataEvent(
+  overrides?: Partial<SessionMetadataChangedEvent>,
+): SessionMetadataChangedEvent {
+  return {
+    type: "session-metadata-changed",
+    sessionId: "ses-current",
+    timestamp: "2026-07-06T12:00:02.000Z",
     ...overrides,
   };
 }
@@ -81,4 +114,93 @@ describe("reconcilePendingMessagesWithConfirmedMessages", () => {
 
     expect(result).toEqual([]);
   });
+});
+
+describe("mergeSessionMetadataChange", () => {
+  it("ignores metadata events for another session", () => {
+    const current = session({ aiTitle: "Existing AI title" });
+
+    const result = mergeSessionMetadataChange(
+      current,
+      metadataEvent({ sessionId: "ses-other", aiTitle: "Wrong AI title" }),
+      "ses-current",
+    );
+
+    expect(result).toBe(current);
+  });
+
+  it("adds an AI title without replacing the provider fallback", () => {
+    const result = mergeSessionMetadataChange(
+      session(),
+      metadataEvent({ aiTitle: "DeepSeek title" }),
+      "ses-current",
+    );
+
+    expect(result).toMatchObject({
+      title: "Provider fallback",
+      aiTitle: "DeepSeek title",
+    });
+    expect(getSessionDisplayTitle(result)).toBe("DeepSeek title");
+  });
+
+  it("keeps custom title above AI title and falls back to AI when custom is cleared", () => {
+    const withAi = session({ aiTitle: "DeepSeek title" });
+    const withCustom = mergeSessionMetadataChange(
+      withAi,
+      metadataEvent({ title: "Custom title" }),
+      "ses-current",
+    );
+
+    expect(withCustom).toMatchObject({
+      title: "Provider fallback",
+      aiTitle: "DeepSeek title",
+      customTitle: "Custom title",
+    });
+    expect(getSessionDisplayTitle(withCustom)).toBe("Custom title");
+
+    const cleared = mergeSessionMetadataChange(
+      withCustom,
+      metadataEvent({ title: "  " }),
+      "ses-current",
+    );
+
+    expect(cleared?.customTitle).toBeUndefined();
+    expect(cleared?.aiTitle).toBe("DeepSeek title");
+    expect(cleared?.title).toBe("Provider fallback");
+    expect(getSessionDisplayTitle(cleared)).toBe("DeepSeek title");
+  });
+});
+
+describe("shouldRefreshOpenCodeAuthoritativeSnapshot", () => {
+  it("refreshes an owned OpenCode session once its turn becomes idle", () => {
+    expect(
+      shouldRefreshOpenCodeAuthoritativeSnapshot(
+        "opencode",
+        "self",
+        "idle",
+        "ses-current",
+        "ses-current",
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["claude", "self", "idle", "ses-current"],
+    ["opencode", "none", "idle", "ses-current"],
+    ["opencode", "self", "in-turn", "ses-current"],
+    ["opencode", "self", "idle", "ses-other"],
+  ] as const)(
+    "does not refresh for provider=%s owner=%s state=%s eventSession=%s",
+    (provider, owner, state, eventSessionId) => {
+      expect(
+        shouldRefreshOpenCodeAuthoritativeSnapshot(
+          provider,
+          owner,
+          state,
+          eventSessionId,
+          "ses-current",
+        ),
+      ).toBe(false);
+    },
+  );
 });

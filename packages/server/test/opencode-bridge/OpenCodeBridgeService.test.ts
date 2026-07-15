@@ -588,7 +588,7 @@ describe("OpenCodeBridgeService", () => {
     );
   });
 
-  it("preserves the prior title for titleless and boilerplate title events", () => {
+  it("rejects generic provider titles without overwriting a usable title", () => {
     const bridge = new OpenCodeBridgeService({
       enabled: false,
       host: "127.0.0.1",
@@ -609,23 +609,12 @@ describe("OpenCodeBridgeService", () => {
         info: { title: "New session - 2026-07-10T08:38:04.689Z" },
       },
     });
-    handleEvent({
-      type: "message.updated",
-      properties: { sessionID: "ses_title", info: {} },
-    });
-    handleEvent({
-      type: "session.updated",
-      properties: {
-        sessionID: "ses_title",
-        info: { title: "Here's a title for this conversation:" },
-      },
-    });
 
     expect(bridge.listSessions()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: "ses_title",
-          title: "New session - 2026-07-10T08:38:04.689Z",
+          title: null,
         }),
       ]),
     );
@@ -634,7 +623,49 @@ describe("OpenCodeBridgeService", () => {
       type: "session.updated",
       properties: {
         sessionID: "ses_title",
-        info: { title: "Fix OpenCode session title fallback" },
+        info: { title: "Benchmark Run #58 失败模式分析" },
+      },
+    });
+    handleEvent({
+      type: "message.updated",
+      properties: { sessionID: "ses_title", info: {} },
+    });
+
+    for (const title of [
+      "New session",
+      "Yep Anywhere Session",
+      "Here's a title for this conversation:",
+      "Based on the conversation, here are some title suggestions:",
+      "根据这个对话的内容，我为其生成的标题是：",
+      "以下是标题：",
+      "对话标题",
+      "建议的标题",
+      "## 对话标题",
+      "## 建议的标题",
+    ]) {
+      handleEvent({
+        type: "session.updated",
+        properties: {
+          sessionID: "ses_title",
+          info: { title },
+        },
+      });
+    }
+
+    expect(bridge.listSessions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "ses_title",
+          title: "Benchmark Run #58 失败模式分析",
+        }),
+      ]),
+    );
+
+    handleEvent({
+      type: "session.updated",
+      properties: {
+        sessionID: "ses_title",
+        info: { title: "修复 OpenCode 标题生成漂移" },
       },
     });
 
@@ -642,7 +673,7 @@ describe("OpenCodeBridgeService", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: "ses_title",
-          title: "Fix OpenCode session title fallback",
+          title: "修复 OpenCode 标题生成漂移",
         }),
       ]),
     );
@@ -821,6 +852,84 @@ describe("OpenCodeBridgeService", () => {
       provider: "opencode",
       reasoningEffort: "max",
     });
+    await bridge.shutdown();
+  });
+
+  it("forwards edit boundaries and records the forked actual session id", async () => {
+    let forwardedBody: Record<string, unknown> | undefined;
+    let forwardedUrl: string | undefined;
+    const upstream = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/global/event") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write("\n");
+        return;
+      }
+      if (req.method === "POST" && req.url?.endsWith("/ses_parent/resume")) {
+        forwardedUrl = req.url;
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        forwardedBody = JSON.parse(
+          Buffer.concat(chunks).toString("utf8"),
+        ) as Record<string, unknown>;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            sessionId: "ses_forked",
+            processId: "proc_forked",
+            permissionMode: "default",
+            modeVersion: 0,
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const upstreamUrl = await listen(upstream);
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: upstreamUrl,
+      opencodeServerUrl: upstreamUrl,
+    });
+
+    await bridge.start();
+    const response = await fetch(
+      `http://127.0.0.1:${bridgePort}/sessions/ses_parent/resume`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          cwd: "/tmp/project",
+          message: "edited prompt",
+          resumeSessionAt: "msg_native_user",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      sessionId: "ses_forked",
+      processId: "proc_forked",
+    });
+    expect(forwardedUrl).toContain("/sessions/ses_parent/resume");
+    expect(forwardedBody).toMatchObject({
+      message: "edited prompt",
+      provider: "opencode",
+      resumeSessionAt: "msg_native_user",
+    });
+    expect(bridge.listSessions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "ses_forked",
+          projectPath: "/tmp/project",
+        }),
+      ]),
+    );
     await bridge.shutdown();
   });
 

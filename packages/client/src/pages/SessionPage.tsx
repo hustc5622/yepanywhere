@@ -11,7 +11,7 @@ import {
   useParams,
   useSearchParams,
 } from "react-router-dom";
-import { api } from "../api/client";
+import { api, isQueuedResumeSessionResponse } from "../api/client";
 import { MessageInput, type UploadProgress } from "../components/MessageInput";
 import { MessageInputToolbar } from "../components/MessageInputToolbar";
 import { MessageList } from "../components/MessageList";
@@ -58,6 +58,14 @@ import {
   type PreprocessMessagesCache,
   preprocessMessagesCached,
 } from "../lib/preprocessMessagesCache";
+import {
+  requireStartedHistoricalEdit,
+  resolveBranchNavigationFocus,
+  resolveBranchNavigationTarget,
+  resolveSessionEditSubmission,
+  shouldRestoreHistoricalEditAfterFailure,
+  supportsHistoricalMessageEditing,
+} from "../lib/sessionBranching";
 import { generateUUID } from "../lib/uuid";
 import type { Message, Session } from "../types";
 import { getSessionDisplayTitle } from "../utils";
@@ -181,10 +189,16 @@ function SessionPageContent({
     initialProvider?: ProviderName;
     /** Message id to scroll to + highlight (set by search deep-links). */
     targetMessageId?: string;
+    /** Branch prompt to focus after cross-session branch navigation. */
+    targetBranchId?: string;
   } | null;
   const initialStatus = navState?.initialStatus;
   const initialTitle = navState?.initialTitle;
   const initialProvider = navState?.initialProvider;
+  const initialBranchFocus = resolveBranchNavigationFocus(
+    navState,
+    selectedBranchId,
+  );
 
   // Get streaming markdown context for server-rendered markdown streaming
   const streamingMarkdownContext = useStreamingMarkdownContext();
@@ -289,10 +303,9 @@ function SessionPageContent({
   const { showToast } = useToastContext();
 
   // Edit/rewind: when set, the next send rewinds from a past user message.
-  // Claude uses `parentUuid` as the SDK resume point. Codex app-server uses
+  // Claude uses `parentUuid` as its resume point. OpenCode uses the persisted
+  // prompt's own native `uuid` as a fork boundary. Codex app-server uses
   // `rollbackNumTurns` to match Codex CLI Esc Esc backtrack semantics.
-  // `uuid` is the edited message's own id, used to optimistically trim the
-  // local list. `preview` is shown in the banner.
   const [editRewind, setEditRewind] = useState<{
     parentUuid: string | null;
     uuid: string;
@@ -301,16 +314,16 @@ function SessionPageContent({
   } | null>(null);
   const [pendingBranchFocusId, setPendingBranchFocusId] = useState<
     string | null
-  >(null);
+  >(initialBranchFocus.branchId);
   const [pendingEditBranchRefresh, setPendingEditBranchRefresh] =
     useState(false);
   const editBranchRefreshAttemptsRef = useRef(0);
   const editBranchRefreshTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
-  // Deep-link target message (from search). Seeded from navigation state once.
+  // Deep-link target message (from search or cross-session branch navigation).
   const [targetMessageId, setTargetMessageId] = useState<string | null>(
-    navState?.targetMessageId ?? null,
+    initialBranchFocus.messageId,
   );
   const [isInspectorOpen, setInspectorOpen] = useState(false);
   const handleTargetFocused = useCallback(() => {
@@ -320,6 +333,16 @@ function SessionPageContent({
     if (!messageId) return;
     setTargetMessageId(messageId);
   }, []);
+
+  // React Router can reuse this component when only the session parameter
+  // changes, so useState initializers alone are not enough for cross-session
+  // branch focus. Reset both targets whenever a different session is entered.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: navigation focus is intentionally consumed on session changes
+  useEffect(() => {
+    const focus = resolveBranchNavigationFocus(navState, selectedBranchId);
+    setPendingBranchFocusId(focus.branchId);
+    setTargetMessageId(focus.messageId);
+  }, [sessionId]);
 
   const sessionBranchState = session?.branchState ?? session?.codexBranchState;
   const isViewingHistoricalBranch = useMemo(() => {
@@ -349,6 +372,26 @@ function SessionPageContent({
 
   const handleSelectBranch = useCallback(
     (branchId: string) => {
+      const target = resolveBranchNavigationTarget(
+        branchId,
+        sessionId,
+        sessionBranchState,
+      );
+      if (target.crossesSession) {
+        const nextSearch = new URLSearchParams({ branch: target.branchId });
+        navigate(
+          `${basePath}/projects/${projectId}/sessions/${target.sessionId}?${nextSearch.toString()}`,
+          {
+            state: {
+              initialProvider: effectiveProvider,
+              targetBranchId: target.focusBranchId,
+              targetMessageId: target.focusMessageId,
+            },
+          },
+        );
+        return;
+      }
+
       setPendingBranchFocusId(branchId);
       setSearchParams(
         (current) => {
@@ -359,7 +402,15 @@ function SessionPageContent({
         { replace: false },
       );
     },
-    [setSearchParams],
+    [
+      basePath,
+      effectiveProvider,
+      navigate,
+      projectId,
+      sessionBranchState,
+      sessionId,
+      setSearchParams,
+    ],
   );
 
   const handleBranchFocused = useCallback(() => {
@@ -599,6 +650,8 @@ function SessionPageContent({
   const handleSend = async (text: string) => {
     // Add to pending queue and get tempId to pass to server
     const tempId = addPendingMessage(text);
+    let historicalEditPostAttempted = false;
+    let historicalEditRequestStarted = false;
     setProcessState("in-turn"); // Optimistic: show processing indicator immediately
     setScrollTrigger((prev) => prev + 1); // Force scroll to bottom
 
@@ -625,13 +678,9 @@ function SessionPageContent({
     }
 
     try {
-      // Edit/rewind: branch the conversation from the chosen message.
-      // For a message with a parent we rewind IN PLACE (same session): the SDK
-      // resumes only up to the parent, the old tail becomes a dead branch the
-      // server filters out, and the edited turn streams in. We optimistically
-      // trim the local tail so it doesn't linger before the stream arrives.
-      // Editing the very first message has no parent to rewind to, so we fall
-      // back to starting a fresh session.
+      // Provider-specific edit semantics: Codex rolls back its current thread,
+      // Claude resumes through the prompt parent, and OpenCode creates a new
+      // native session before the persisted prompt's own message ID.
       if (editRewind) {
         const model = session?.model ?? getModelSetting();
         const thinking = getThinkingSetting();
@@ -645,25 +694,32 @@ function SessionPageContent({
         };
         const attachmentsArg =
           currentAttachments.length > 0 ? currentAttachments : undefined;
-        setEditRewind(null);
-        if (isCodexAppServerProvider(effectiveProvider)) {
-          const rollbackNumTurns =
-            editRewind.rollbackNumTurns ??
-            calculateCodexRollbackNumTurns(messages, editRewind.uuid);
-          if (!rollbackNumTurns) {
-            throw new Error("Could not determine Codex rollback point");
-          }
-          truncateMessagesBefore(editRewind.uuid);
-          const result = await api.resumeSession(
-            projectId,
-            sessionId,
-            text,
-            sessionOptions,
-            attachmentsArg,
-            tempId,
-            undefined,
-            rollbackNumTurns,
+        const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
+          ? (editRewind.rollbackNumTurns ??
+            calculateCodexRollbackNumTurns(messages, editRewind.uuid))
+          : editRewind.rollbackNumTurns;
+        const editSubmission = resolveSessionEditSubmission(effectiveProvider, {
+          ...editRewind,
+          rollbackNumTurns,
+        });
+        if (editSubmission.kind === "codex-resume") {
+          historicalEditPostAttempted = true;
+          const result = await requireStartedHistoricalEdit(
+            await api.resumeSession(
+              projectId,
+              sessionId,
+              text,
+              sessionOptions,
+              attachmentsArg,
+              tempId,
+              undefined,
+              editSubmission.rollbackNumTurns,
+            ),
+            api.cancelQueuedRequest,
           );
+          historicalEditRequestStarted = true;
+          truncateMessagesBefore(editRewind.uuid);
+          setEditRewind(null);
           draftControlsRef.current?.clearDraft();
           setStatus({ owner: "self", processId: result.processId });
           queueEditBranchRefresh();
@@ -674,17 +730,23 @@ function SessionPageContent({
           } else {
             reconnectStream();
           }
-        } else if (editRewind.parentUuid) {
-          truncateMessagesBefore(editRewind.uuid);
-          const result = await api.resumeSession(
-            projectId,
-            sessionId,
-            text,
-            sessionOptions,
-            attachmentsArg,
-            tempId,
-            editRewind.parentUuid,
+        } else if (editSubmission.kind === "claude-resume") {
+          historicalEditPostAttempted = true;
+          const result = await requireStartedHistoricalEdit(
+            await api.resumeSession(
+              projectId,
+              sessionId,
+              text,
+              sessionOptions,
+              attachmentsArg,
+              tempId,
+              editSubmission.resumeSessionAt,
+            ),
+            api.cancelQueuedRequest,
           );
+          historicalEditRequestStarted = true;
+          truncateMessagesBefore(editRewind.uuid);
+          setEditRewind(null);
           draftControlsRef.current?.clearDraft();
           setStatus({ owner: "self", processId: result.processId });
           queueEditBranchRefresh();
@@ -695,18 +757,67 @@ function SessionPageContent({
           } else {
             reconnectStream();
           }
-        } else {
-          // Edited the first message — no parent to rewind to; start fresh.
-          const result = await api.startSession(
-            projectId,
-            text,
-            sessionOptions,
-            attachmentsArg,
+        } else if (editSubmission.kind === "opencode-fork") {
+          historicalEditPostAttempted = true;
+          const result = await requireStartedHistoricalEdit(
+            await api.resumeSession(
+              projectId,
+              sessionId,
+              text,
+              sessionOptions,
+              attachmentsArg,
+              tempId,
+              editSubmission.resumeSessionAt,
+            ),
+            api.cancelQueuedRequest,
           );
+          historicalEditRequestStarted = true;
+          if (result.sessionId === sessionId) {
+            throw new Error(
+              "OpenCode edit fork did not return a new native session ID",
+            );
+          }
+          setEditRewind(null);
+          draftControlsRef.current?.clearDraft();
+          // This pending bubble belongs to the old page. The new session gets
+          // its own provider echo/history after navigation.
+          removePendingMessage(tempId);
+          navigate(
+            `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
+            {
+              state: {
+                initialStatus: {
+                  owner: "self",
+                  processId: result.processId,
+                },
+                initialProvider: effectiveProvider,
+              },
+            },
+          );
+        } else if (editSubmission.kind === "start-new") {
+          // Existing Claude behavior for its first prompt: no ancestor exists.
+          historicalEditPostAttempted = true;
+          const result = await requireStartedHistoricalEdit(
+            await api.startSession(
+              projectId,
+              text,
+              sessionOptions,
+              attachmentsArg,
+            ),
+            api.cancelQueuedRequest,
+          );
+          historicalEditRequestStarted = true;
+          setEditRewind(null);
           draftControlsRef.current?.clearDraft();
           removePendingMessage(tempId);
           navigate(
             `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
+          );
+        } else if (editSubmission.kind === "invalid-codex-boundary") {
+          throw new Error("Could not determine Codex rollback point");
+        } else {
+          throw new Error(
+            `Editing historical messages is not supported for ${effectiveProvider ?? "this provider"}`,
           );
         }
         return;
@@ -735,6 +846,18 @@ function SessionPageContent({
           currentAttachments.length > 0 ? currentAttachments : undefined,
           tempId,
         );
+        if (isQueuedResumeSessionResponse(result)) {
+          updatePendingMessage(tempId, {
+            status: `Queued (#${result.position}) — waiting to start`,
+          });
+          setProcessState("idle");
+          draftControlsRef.current?.clearDraft();
+          showToast(
+            `Request queued at position ${result.position}. It has not started yet.`,
+            "info",
+          );
+          return;
+        }
         // Update status to trigger SSE connection
         setStatus({ owner: "self", processId: result.processId });
         if (result.sessionId !== sessionId) {
@@ -770,7 +893,7 @@ function SessionPageContent({
         err instanceof Error &&
         (err.message.includes("404") ||
           err.message.includes("No active process"));
-      if (is404) {
+      if (is404 && !editRewind) {
         try {
           const model = session?.model ?? getModelSetting();
           const thinking = getThinkingSetting();
@@ -789,6 +912,18 @@ function SessionPageContent({
             currentAttachments.length > 0 ? currentAttachments : undefined,
             tempId,
           );
+          if (isQueuedResumeSessionResponse(result)) {
+            updatePendingMessage(tempId, {
+              status: `Queued (#${result.position}) — waiting to start`,
+            });
+            setProcessState("idle");
+            draftControlsRef.current?.clearDraft();
+            showToast(
+              `Request queued at position ${result.position}. It has not started yet.`,
+              "info",
+            );
+            return;
+          }
           setStatus({ owner: "self", processId: result.processId });
           if (result.sessionId !== sessionId) {
             navigate(
@@ -805,8 +940,26 @@ function SessionPageContent({
 
       // Remove from pending queue and restore draft on error
       removePendingMessage(tempId);
-      draftControlsRef.current?.restoreFromStorage();
-      setAttachments(currentAttachments); // Restore attachments on error
+      const restoreHistoricalEdit =
+        !editRewind ||
+        shouldRestoreHistoricalEditAfterFailure(
+          err,
+          historicalEditRequestStarted,
+          historicalEditPostAttempted,
+        );
+      if (editRewind && restoreHistoricalEdit) {
+        setEditRewind(editRewind);
+      }
+      if (restoreHistoricalEdit) {
+        draftControlsRef.current?.restoreFromStorage();
+        setAttachments(currentAttachments); // Restore attachments on error
+      } else {
+        // The POST may already be running. Remove all retry affordances so the
+        // user cannot accidentally create a duplicate historical fork.
+        setEditRewind(null);
+        draftControlsRef.current?.clearDraft();
+        setAttachments([]);
+      }
       setProcessState("idle");
       const errorMsg = err instanceof Error ? err.message : String(err);
       showToast(t("sessionSendFailed", { message: errorMsg }), "error");
@@ -1712,9 +1865,7 @@ function SessionPageContent({
                   onLoadTargetMessage={loadTargetMessageWindow}
                   onEditUserPrompt={
                     !isViewingHistoricalBranch &&
-                    (session?.provider === "claude" ||
-                      session?.provider === "codex" ||
-                      !session?.provider)
+                    supportsHistoricalMessageEditing(session?.provider)
                       ? handleEditUserPrompt
                       : undefined
                   }

@@ -603,10 +603,9 @@ interface StartSessionBody {
   /** Permission rules for tool filtering (deny/allow patterns) */
   permissions?: PermissionRules;
   /**
-   * Rewind/edit: resume the session only up to (and including) this message
-   * UUID. Claude rewinds in-place; OpenCode forks a native session at this
-   * boundary. Pass the edited message's parentUuid so the edited message and
-   * everything after it are dropped from the new branch.
+   * Provider-native edit boundary. Claude receives the edited prompt's
+   * parentUuid and rewinds in-place; OpenCode receives the edited persisted
+   * user message's own native ID and forks before that message.
    */
   resumeSessionAt?: string;
   /**

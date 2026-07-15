@@ -49,9 +49,9 @@ export interface StartSessionOptions {
   /** Session ID to resume (optional) */
   resumeSessionId?: string;
   /**
-   * Rewind/edit: resume only up to (and including) this message UUID, branching
-   * the conversation in place. Used with resumeSessionId. Maps to the SDK
-   * `resumeSessionAt` option.
+   * Provider-native edit boundary used with resumeSessionId. Claude resumes
+   * through the supplied ancestor UUID; OpenCode forks before the supplied
+   * native user message ID. Maps to the provider's `resumeSessionAt` option.
    */
   resumeSessionAt?: string;
   /**

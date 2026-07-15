@@ -11,6 +11,7 @@ import type {
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { encodeProjectId } from "../projects/paths.js";
+import { normalizeProviderGeneratedTitle } from "../sessions/provider-title-quality.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import {
   type OpenCodeGatewayConfig,
@@ -914,7 +915,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     properties: Record<string, unknown> | null,
   ): void {
     const info = asRecord(properties?.info);
-    const title = normalizeOpenCodeSessionTitle(readString(info, "title"));
+    const title = normalizeProviderGeneratedTitle(readString(info, "title"));
     const updatedAt =
       readOpenCodeUpdatedAt(info) ??
       readString(info, "updatedAt") ??
@@ -1702,24 +1703,6 @@ function readOpenCodeUpdatedAt(
   const updated = readNumber(time, "updated");
   if (updated === undefined) return null;
   return new Date(updated).toISOString();
-}
-
-/**
- * OpenCode title generation occasionally returns its own conversational
- * preamble instead of a usable title. Preserve the existing default title
- * until OpenCode provides an actual session title.
- */
-function normalizeOpenCodeSessionTitle(title: string | null): string | null {
-  const normalized = title?.trim();
-  if (!normalized) return null;
-  if (
-    /^(?:(?:here(?:'s| is)|this is)\s+)?(?:a\s+)?title\s+(?:for\s+)?(?:this\s+)?(?:conversation|chat)\s*:?$/i.test(
-      normalized,
-    )
-  ) {
-    return null;
-  }
-  return normalized;
 }
 
 function readNumber(

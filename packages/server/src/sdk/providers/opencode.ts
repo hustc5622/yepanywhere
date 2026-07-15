@@ -330,6 +330,15 @@ interface OpenCodeMessagePayload {
 
 interface OpenCodeSessionResponse {
   id: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface YepOpenCodeForkMetadata {
+  schemaVersion: 1;
+  kind: "edit-fork";
+  parentSessionId: string;
+  forkMessageId: string;
+  createdAt: string;
 }
 
 interface OpenCodeStreamBlockState {
@@ -817,6 +826,7 @@ export class OpenCodeProvider implements AgentProvider {
     // Create, resume, or fork a session on the server.
     let opencodeSessionId: string;
     let shouldTagSessionCreatedByYep = false;
+    let preparedSessionMetadata: Record<string, unknown> | undefined;
     try {
       const sessionData = await this.prepareOpenCodeSession(
         baseUrl,
@@ -825,8 +835,12 @@ export class OpenCodeProvider implements AgentProvider {
         configApplied.model,
       );
       opencodeSessionId = sessionData.id;
-      shouldTagSessionCreatedByYep =
-        !options.resumeSessionId || Boolean(options.resumeSessionAt);
+      preparedSessionMetadata = sessionData.metadata;
+      // New sessions are already created with Yep metadata in the POST body,
+      // but keep the compatibility PATCH for OpenCode versions that ignored
+      // create-time metadata. Edit forks are patched synchronously inside
+      // prepareOpenCodeSession because lineage is correctness data there.
+      shouldTagSessionCreatedByYep = !options.resumeSessionId;
       log.info(
         {
           opencodeSessionId,
@@ -850,6 +864,7 @@ export class OpenCodeProvider implements AgentProvider {
         baseUrl,
         opencodeSessionId,
         cwd,
+        preparedSessionMetadata,
       );
     }
 
@@ -934,12 +949,25 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     if (options.resumeSessionAt) {
-      return this.forkOpenCodeSession(
+      const forked = await this.forkOpenCodeSession(
         baseUrl,
         options.resumeSessionId,
         options.resumeSessionAt,
         cwd,
       );
+      const metadata = await this.patchOpenCodeForkMetadata(
+        baseUrl,
+        forked,
+        {
+          schemaVersion: 1,
+          kind: "edit-fork",
+          parentSessionId: options.resumeSessionId,
+          forkMessageId: options.resumeSessionAt,
+          createdAt: new Date().toISOString(),
+        },
+        cwd,
+      );
+      return { ...forked, metadata };
     }
 
     await this.getOpenCodeSession(baseUrl, options.resumeSessionId, cwd);
@@ -972,6 +1000,7 @@ export class OpenCodeProvider implements AgentProvider {
     baseUrl: string,
     sessionId: string,
     cwd: string,
+    existingMetadata?: Record<string, unknown>,
   ): Promise<void> {
     try {
       const response = await fetch(
@@ -988,7 +1017,10 @@ export class OpenCodeProvider implements AgentProvider {
             ...this.openCodeDirectoryHeaders(cwd),
           },
           body: JSON.stringify({
-            metadata: this.buildYepOpenCodeSessionMetadata(),
+            metadata: {
+              ...(existingMetadata ?? {}),
+              ...this.buildYepOpenCodeSessionMetadata(),
+            },
           }),
           signal: AbortSignal.timeout(5000),
         },
@@ -1014,6 +1046,120 @@ export class OpenCodeProvider implements AgentProvider {
         "Failed to mark OpenCode session creation source",
       );
     }
+  }
+
+  private async patchOpenCodeForkMetadata(
+    baseUrl: string,
+    forkedSession: OpenCodeSessionResponse,
+    yepFork: YepOpenCodeForkMetadata,
+    cwd?: string,
+  ): Promise<Record<string, unknown>> {
+    const log = getLogger();
+    let existingMetadata = forkedSession.metadata;
+
+    // Current OpenCode returns the complete forked session, including the
+    // metadata cloned from its parent. Fall back to GET for older/alternate
+    // HTTP surfaces so the replacement-style PATCH never discards fields.
+    if (!existingMetadata) {
+      try {
+        const loaded = await this.getOpenCodeSession(
+          baseUrl,
+          forkedSession.id,
+          cwd,
+        );
+        existingMetadata = loaded.metadata;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        log.warn(
+          {
+            event: "opencode_session_fork_metadata_patch_failed",
+            parentSessionId: yepFork.parentSessionId,
+            forkSessionId: forkedSession.id,
+            forkMessageId: yepFork.forkMessageId,
+            error: detail,
+          },
+          "OpenCode edit fork was created but existing metadata could not be loaded",
+        );
+        throw new Error(
+          `OpenCode fork ${forkedSession.id} was created, but Yep fork lineage metadata could not be persisted because existing metadata could not be loaded: ${detail}`,
+        );
+      }
+    }
+
+    const metadata = {
+      ...(existingMetadata ?? {}),
+      ...this.buildYepOpenCodeSessionMetadata(),
+      // Override any yepFork cloned from the parent. This relation must point
+      // from the new child to its direct source session.
+      yepFork,
+    };
+
+    let response: Response;
+    try {
+      response = await fetch(
+        this.openCodeUrl(
+          baseUrl,
+          `/session/${encodeURIComponent(forkedSession.id)}`,
+          cwd,
+        ),
+        {
+          method: "PATCH",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            ...this.openCodeDirectoryHeaders(cwd),
+          },
+          body: JSON.stringify({ metadata }),
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      log.warn(
+        {
+          event: "opencode_session_fork_metadata_patch_failed",
+          parentSessionId: yepFork.parentSessionId,
+          forkSessionId: forkedSession.id,
+          forkMessageId: yepFork.forkMessageId,
+          error: detail,
+        },
+        "OpenCode edit fork was created but lineage metadata could not be persisted",
+      );
+      throw new Error(
+        `OpenCode fork ${forkedSession.id} was created, but Yep fork lineage metadata could not be persisted: ${detail}`,
+      );
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      log.warn(
+        {
+          event: "opencode_session_fork_metadata_patch_failed",
+          parentSessionId: yepFork.parentSessionId,
+          forkSessionId: forkedSession.id,
+          forkMessageId: yepFork.forkMessageId,
+          status: response.status,
+          error: errorText || undefined,
+        },
+        "OpenCode edit fork was created but lineage metadata could not be persisted",
+      );
+      throw new Error(
+        `OpenCode fork ${forkedSession.id} was created, but Yep fork lineage metadata could not be persisted (${response.status}${errorText ? `: ${errorText}` : ""})`,
+      );
+    }
+
+    log.info(
+      {
+        event: "opencode_session_fork_metadata_patched",
+        parentSessionId: yepFork.parentSessionId,
+        forkSessionId: forkedSession.id,
+        forkMessageId: yepFork.forkMessageId,
+        schemaVersion: yepFork.schemaVersion,
+        kind: yepFork.kind,
+      },
+      "OpenCode edit fork lineage metadata persisted",
+    );
+    return metadata;
   }
 
   private async getOpenCodeSession(
@@ -1050,6 +1196,15 @@ export class OpenCodeProvider implements AgentProvider {
     messageId: string,
     cwd?: string,
   ): Promise<OpenCodeSessionResponse> {
+    const log = getLogger();
+    log.info(
+      {
+        event: "opencode_session_fork_requested",
+        parentSessionId: sessionId,
+        forkMessageId: messageId,
+      },
+      "OpenCode edit fork requested",
+    );
     const response = await fetch(
       this.openCodeUrl(
         baseUrl,
@@ -1074,7 +1229,17 @@ export class OpenCodeProvider implements AgentProvider {
       );
     }
 
-    return (await response.json()) as OpenCodeSessionResponse;
+    const forked = (await response.json()) as OpenCodeSessionResponse;
+    log.info(
+      {
+        event: "opencode_session_fork_completed",
+        parentSessionId: sessionId,
+        forkSessionId: forked.id,
+        forkMessageId: messageId,
+      },
+      "OpenCode edit fork created",
+    );
+    return forked;
   }
 
   /**

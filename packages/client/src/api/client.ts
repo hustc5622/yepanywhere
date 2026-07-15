@@ -53,6 +53,33 @@ export interface PaginationInfo {
   targetMessageFound?: boolean;
 }
 
+export interface ResumeSessionStartedResponse {
+  sessionId: string;
+  processId: string;
+  permissionMode: PermissionMode;
+  modeVersion: number;
+  reasoningEffort?: string;
+}
+
+export interface ResumeSessionQueuedResponse {
+  queued: true;
+  queueId: string;
+  position: number;
+}
+
+export type ResumeSessionResponse =
+  | ResumeSessionStartedResponse
+  | ResumeSessionQueuedResponse;
+
+export type StartSessionResponse = ResumeSessionResponse;
+export type CreateSessionResponse = ResumeSessionResponse;
+
+export function isQueuedResumeSessionResponse(
+  response: ResumeSessionResponse,
+): response is ResumeSessionQueuedResponse {
+  return "queued" in response && response.queued === true;
+}
+
 /**
  * An item in the inbox representing a session that may need attention.
  */
@@ -870,12 +897,7 @@ export const api = {
     options?: SessionOptions,
     attachments?: UploadedFile[],
   ) =>
-    fetchJSON<{
-      sessionId: string;
-      processId: string;
-      permissionMode: PermissionMode;
-      modeVersion: number;
-    }>(`/projects/${projectId}/sessions`, {
+    fetchJSON<StartSessionResponse>(`/projects/${projectId}/sessions`, {
       method: "POST",
       body: JSON.stringify({
         message,
@@ -896,12 +918,7 @@ export const api = {
    * Use this for two-phase flow: create session, upload files, then send message.
    */
   createSession: (projectId: string, options?: SessionOptions) =>
-    fetchJSON<{
-      sessionId: string;
-      processId: string;
-      permissionMode: PermissionMode;
-      modeVersion: number;
-    }>(`/projects/${projectId}/sessions/create`, {
+    fetchJSON<CreateSessionResponse>(`/projects/${projectId}/sessions/create`, {
       method: "POST",
       body: JSON.stringify({
         mode: options?.mode,
@@ -923,9 +940,9 @@ export const api = {
     attachments?: UploadedFile[],
     tempId?: string,
     /**
-     * Rewind/edit: resume only up to (and including) this message UUID,
-     * branching the conversation in place (same session). Pass the edited
-     * message's parentUuid. Maps to the SDK `resumeSessionAt` option.
+     * Provider-native edit boundary. Claude receives the edited message's
+     * parentUuid; OpenCode receives the edited persisted user message's own
+     * native ID and forks before it.
      */
     resumeSessionAt?: string,
     /**
@@ -934,28 +951,31 @@ export const api = {
      */
     rollbackNumTurns?: number,
   ) =>
-    fetchJSON<{
-      sessionId: string;
-      processId: string;
-      permissionMode: PermissionMode;
-      modeVersion: number;
-    }>(`/projects/${projectId}/sessions/${sessionId}/resume`, {
-      method: "POST",
-      body: JSON.stringify({
-        message,
-        mode: options?.mode,
-        model: options?.model,
-        thinking: options?.thinking,
-        reasoningEffort: options?.reasoningEffort,
-        provider: options?.provider,
-        codexMcpMode: options?.codexMcpMode,
-        opencodeConfig: options?.opencodeConfig,
-        executor: options?.executor,
-        attachments,
-        tempId,
-        resumeSessionAt,
-        rollbackNumTurns,
-      }),
+    fetchJSON<ResumeSessionResponse>(
+      `/projects/${projectId}/sessions/${sessionId}/resume`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          message,
+          mode: options?.mode,
+          model: options?.model,
+          thinking: options?.thinking,
+          reasoningEffort: options?.reasoningEffort,
+          provider: options?.provider,
+          codexMcpMode: options?.codexMcpMode,
+          opencodeConfig: options?.opencodeConfig,
+          executor: options?.executor,
+          attachments,
+          tempId,
+          resumeSessionAt,
+          rollbackNumTurns,
+        }),
+      },
+    ),
+
+  cancelQueuedRequest: (queueId: string) =>
+    fetchJSON<{ cancelled: boolean }>(`/queue/${encodeURIComponent(queueId)}`, {
+      method: "DELETE",
     }),
 
   queueMessage: (

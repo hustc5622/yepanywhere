@@ -61,6 +61,13 @@ interface PendingToolApproval {
   resolve: (result: ToolApprovalResult) => void;
 }
 
+interface SessionIdWaiter {
+  resolve: (id: string) => void;
+  reject: (error: Error) => void;
+  strict: boolean;
+  timeout: ReturnType<typeof setTimeout> | null;
+}
+
 export interface ProcessConstructorOptions extends ProcessOptions {
   /** MessageQueue for real SDK, undefined for mock SDK */
   queue?: MessageQueue;
@@ -190,9 +197,10 @@ export class Process {
   /** Set after the first time we successfully probe initializationResult() */
   private _initializationResultProbed = false;
 
-  /** Resolvers waiting for the real session ID */
-  private sessionIdResolvers: Array<(id: string) => void> = [];
+  /** Waiters for the real session ID emitted by the provider init message. */
+  private sessionIdWaiters: SessionIdWaiter[] = [];
   private sessionIdResolved = false;
+  private sessionIdInitializationError: Error | null = null;
 
   /** Timestamp of last SDK message received (for staleness detection) */
   private _lastMessageTime: Date;
@@ -747,23 +755,85 @@ export class Process {
    * Wait for the real session ID from the SDK's init message.
    * Returns immediately if already received, or waits with a timeout.
    */
-  waitForSessionId(timeoutMs = 5000): Promise<string> {
+  waitForSessionId(
+    timeoutMs = 5000,
+    options?: { strict?: boolean },
+  ): Promise<string> {
     if (this.sessionIdResolved) {
       return Promise.resolve(this._sessionId);
     }
 
-    return new Promise((resolve) => {
-      this.sessionIdResolvers.push(resolve);
+    const strict = options?.strict === true;
+    const existingError = strict
+      ? (this.sessionIdInitializationError ??
+        this.getProviderInitializationError())
+      : null;
+    if (existingError) return Promise.reject(existingError);
 
-      // Timeout fallback - resolve with current ID even if not updated
-      setTimeout(() => {
-        const index = this.sessionIdResolvers.indexOf(resolve);
+    return new Promise((resolve, reject) => {
+      const waiter: SessionIdWaiter = {
+        resolve,
+        reject,
+        strict,
+        timeout: null,
+      };
+      this.sessionIdWaiters.push(waiter);
+
+      const boundedTimeoutMs = Number.isFinite(timeoutMs)
+        ? Math.max(0, timeoutMs)
+        : 5000;
+      waiter.timeout = setTimeout(() => {
+        const index = this.sessionIdWaiters.indexOf(waiter);
         if (index >= 0) {
-          this.sessionIdResolvers.splice(index, 1);
-          resolve(this._sessionId);
+          this.sessionIdWaiters.splice(index, 1);
+          waiter.timeout = null;
+          if (strict) {
+            reject(
+              new Error(
+                `Provider initialization timed out after ${boundedTimeoutMs}ms before returning a session ID`,
+              ),
+            );
+          } else {
+            // Backwards-compatible fallback for providers that can report
+            // their durable ID after the initial request has returned.
+            resolve(this._sessionId);
+          }
         }
-      }, timeoutMs);
+      }, boundedTimeoutMs);
     });
+  }
+
+  private getProviderInitializationError(): Error | null {
+    const history = this.getMessageHistory();
+    let providerError: SDKMessage | undefined;
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const message = history[index];
+      if (message?.type === "error") {
+        providerError = message;
+        break;
+      }
+    }
+    if (!providerError) return null;
+    const detail =
+      typeof providerError.error === "string"
+        ? providerError.error
+        : "Provider failed before returning a session ID";
+    return new Error(detail);
+  }
+
+  private rejectSessionIdWaiters(error: Error): void {
+    this.sessionIdInitializationError ??= error;
+    const remaining: SessionIdWaiter[] = [];
+    for (const waiter of this.sessionIdWaiters) {
+      if (waiter.strict) {
+        if (waiter.timeout) clearTimeout(waiter.timeout);
+        waiter.timeout = null;
+        waiter.reject(error);
+      } else {
+        remaining.push(waiter);
+      }
+    }
+    this.sessionIdWaiters = remaining;
   }
 
   getInfo(): ProcessInfo {
@@ -1548,6 +1618,11 @@ export class Process {
 
         if (result.done) {
           this.iteratorDone = true;
+          if (!this.sessionIdResolved) {
+            this.rejectSessionIdWaiters(
+              new Error("Provider ended before returning a session ID"),
+            );
+          }
           // Don't transition to idle if we're waiting for input
           if (this._state.type !== "waiting-input") {
             this.transitionToIdle();
@@ -1557,6 +1632,14 @@ export class Process {
 
         const message = this.withTimestamp(result.value);
         this._lastMessageTime = new Date();
+
+        if (!this.sessionIdResolved && message.type === "error") {
+          const detail =
+            typeof message.error === "string"
+              ? message.error
+              : "Provider failed before returning a session ID";
+          this.rejectSessionIdWaiters(new Error(detail));
+        }
 
         // Store message in history for replay to late-joining clients.
         // Exclude stream_event messages - they're transient streaming deltas that
@@ -1622,10 +1705,12 @@ export class Process {
           }
 
           // Resolve any waiters
-          for (const resolve of this.sessionIdResolvers) {
-            resolve(this._sessionId);
+          for (const waiter of this.sessionIdWaiters) {
+            if (waiter.timeout) clearTimeout(waiter.timeout);
+            waiter.timeout = null;
+            waiter.resolve(this._sessionId);
           }
-          this.sessionIdResolvers = [];
+          this.sessionIdWaiters = [];
         }
 
         // Capture resolved model from first assistant message
@@ -1702,6 +1787,9 @@ export class Process {
       );
 
       this.emit({ type: "error", error: err });
+      if (!this.sessionIdResolved) {
+        this.rejectSessionIdWaiters(err);
+      }
 
       // Detect process termination errors - set flag synchronously BEFORE markTerminated
       // to prevent race where queueMessage is called before state changes to terminated

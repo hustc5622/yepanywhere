@@ -1,0 +1,240 @@
+import type { SessionBranchState } from "@yep-anywhere/shared";
+import { describe, expect, it } from "vitest";
+import {
+  HistoricalEditQueueError,
+  canEditPersistedUserPrompt,
+  requireStartedHistoricalEdit,
+  resolveBranchNavigationFocus,
+  resolveBranchNavigationTarget,
+  resolveSessionEditSubmission,
+  shouldRestoreHistoricalEditAfterFailure,
+  supportsHistoricalMessageEditing,
+} from "../sessionBranching";
+
+async function captureError(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+    throw new Error("Expected promise to reject");
+  } catch (error) {
+    return error;
+  }
+}
+
+describe("provider-specific historical message editing", () => {
+  it("uses the persisted OpenCode user message itself as the native boundary", () => {
+    expect(
+      resolveSessionEditSubmission("opencode", {
+        uuid: "msg_user_native",
+        parentUuid: "not-the-boundary",
+      }),
+    ).toEqual({
+      kind: "opencode-fork",
+      resumeSessionAt: "msg_user_native",
+      optimisticTruncate: false,
+      refreshSameSessionBranches: false,
+    });
+  });
+
+  it("forks the first OpenCode prompt instead of starting a new session", () => {
+    expect(
+      resolveSessionEditSubmission("opencode", {
+        uuid: "msg_first_native",
+        parentUuid: null,
+      }),
+    ).toMatchObject({
+      kind: "opencode-fork",
+      resumeSessionAt: "msg_first_native",
+    });
+  });
+
+  it("keeps Claude parent-boundary and Codex rollback semantics", () => {
+    expect(
+      resolveSessionEditSubmission("claude", {
+        uuid: "user-2",
+        parentUuid: "assistant-1",
+      }),
+    ).toMatchObject({
+      kind: "claude-resume",
+      resumeSessionAt: "assistant-1",
+    });
+    expect(
+      resolveSessionEditSubmission("claude", {
+        uuid: "user-1",
+        parentUuid: null,
+      }),
+    ).toEqual({ kind: "start-new" });
+    expect(
+      resolveSessionEditSubmission("codex", {
+        uuid: "codex-turn",
+        parentUuid: null,
+        rollbackNumTurns: 2,
+      }),
+    ).toMatchObject({ kind: "codex-resume", rollbackNumTurns: 2 });
+  });
+
+  it("only enables OpenCode editing after the authoritative disk message arrives", () => {
+    expect(canEditPersistedUserPrompt("opencode", "jsonl")).toBe(true);
+    expect(canEditPersistedUserPrompt("opencode", "sdk")).toBe(false);
+    expect(canEditPersistedUserPrompt("opencode", undefined)).toBe(false);
+    expect(canEditPersistedUserPrompt("claude", "sdk")).toBe(true);
+  });
+
+  it("does not expose editing for unrelated providers", () => {
+    expect(supportsHistoricalMessageEditing("gemini")).toBe(false);
+    expect(supportsHistoricalMessageEditing("gemini-acp")).toBe(false);
+    expect(supportsHistoricalMessageEditing("codex-oss")).toBe(false);
+    expect(supportsHistoricalMessageEditing("claude-ollama")).toBe(false);
+    expect(
+      resolveSessionEditSubmission("gemini", {
+        uuid: "gemini-user",
+        parentUuid: "gemini-parent",
+      }),
+    ).toEqual({ kind: "unsupported" });
+  });
+});
+
+describe("queued historical edit recovery", () => {
+  const queuedResponse = {
+    queued: true as const,
+    queueId: "queue-1",
+    position: 2,
+  };
+
+  it("allows retry only after the queued edit is confirmed cancelled", async () => {
+    const error = await captureError(
+      requireStartedHistoricalEdit(queuedResponse, async () => ({
+        cancelled: true,
+      })),
+    );
+
+    expect(error).toBeInstanceOf(HistoricalEditQueueError);
+    expect(error).toMatchObject({ retrySafe: true });
+    expect(shouldRestoreHistoricalEditAfterFailure(error, false, true)).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    [
+      "cancellation request fails",
+      async () => Promise.reject(new Error("404")),
+    ],
+    ["cancellation is not confirmed", async () => ({ cancelled: false })],
+  ])("removes retry affordances when %s", async (_label, cancel) => {
+    const error = await captureError(
+      requireStartedHistoricalEdit(queuedResponse, cancel),
+    );
+
+    expect(error).toBeInstanceOf(HistoricalEditQueueError);
+    expect(error).toMatchObject({ retrySafe: false });
+    expect(shouldRestoreHistoricalEditAfterFailure(error, false, true)).toBe(
+      false,
+    );
+  });
+
+  it("restores only explicit POST failures and pre-POST validation failures", () => {
+    const explicitHttpFailure = Object.assign(new Error("Bad request"), {
+      status: 400,
+    });
+
+    expect(
+      shouldRestoreHistoricalEditAfterFailure(explicitHttpFailure, false, true),
+    ).toBe(true);
+    expect(
+      shouldRestoreHistoricalEditAfterFailure(
+        new TypeError("Network failed"),
+        false,
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldRestoreHistoricalEditAfterFailure(
+        new Error("Invalid boundary"),
+        false,
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not restore after the server started the historical edit", () => {
+    expect(
+      shouldRestoreHistoricalEditAfterFailure(
+        new Error("later failure"),
+        true,
+        true,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("session branch navigation", () => {
+  const branchState: SessionBranchState = {
+    sessionId: "ses_parent",
+    provider: "opencode",
+    activeBranchId: "msg_original",
+    selectedBranchId: "msg_original",
+    branches: [
+      {
+        id: "msg_original",
+        sessionId: "ses_parent",
+        parentId: "msg_before",
+        prompt: "original",
+        title: "original",
+        depth: 2,
+        index: 1,
+        siblingIndex: 1,
+        siblingCount: 2,
+        isActive: true,
+      },
+      {
+        id: "msg_edited",
+        sessionId: "ses_child",
+        parentId: "msg_before",
+        prompt: "edited",
+        title: "edited",
+        depth: 2,
+        index: 2,
+        siblingIndex: 2,
+        siblingCount: 2,
+        isActive: false,
+      },
+    ],
+  };
+
+  it("targets another native session and carries prompt focus IDs", () => {
+    expect(
+      resolveBranchNavigationTarget("msg_edited", "ses_parent", branchState),
+    ).toEqual({
+      branchId: "msg_edited",
+      sessionId: "ses_child",
+      crossesSession: true,
+      focusBranchId: "msg_edited",
+      focusMessageId: "msg_edited",
+    });
+  });
+
+  it("keeps same-session alternatives on the query-only path", () => {
+    expect(
+      resolveBranchNavigationTarget("msg_original", "ses_parent", branchState),
+    ).toMatchObject({
+      sessionId: "ses_parent",
+      crossesSession: false,
+    });
+  });
+
+  it("restores branch and message focus from navigation state or the URL", () => {
+    expect(
+      resolveBranchNavigationFocus(
+        {
+          targetBranchId: "msg_edited",
+          targetMessageId: "msg_edited",
+        },
+        "stale-query",
+      ),
+    ).toEqual({ branchId: "msg_edited", messageId: "msg_edited" });
+    expect(resolveBranchNavigationFocus(null, "msg_from_query")).toEqual({
+      branchId: "msg_from_query",
+      messageId: "msg_from_query",
+    });
+  });
+});

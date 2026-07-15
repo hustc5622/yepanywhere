@@ -158,11 +158,16 @@ export function normalizeSession(loaded: LoadedSession): Session {
         ...summary,
         messages: convertGeminiMessages(data.session.messages),
       };
-    case "opencode":
+    case "opencode": {
+      const messages = convertOpenCodeEntries(data.session.messages);
       return {
         ...summary,
-        messages: convertOpenCodeEntries(data.session.messages),
+        branchState: loaded.branchState,
+        messages: loaded.branchState
+          ? annotateBranchMessages(messages, loaded.branchState)
+          : messages,
       };
+    }
   }
 }
 
@@ -569,7 +574,9 @@ function annotateBranchMessages(
     const parentKey = branch.parentId ?? "<root>";
     const alternatives = branchesByParent.get(parentKey) ?? [branch];
     const branchMetadata = {
-      sessionId: branchState.sessionId,
+      // OpenCode edit alternatives span native sessions. Claude and Codex
+      // options still carry the same session id as branchState.sessionId.
+      sessionId: branch.sessionId,
       branchId: branch.id,
       activeBranchId: branchState.activeBranchId,
       selectedBranchId: branchState.selectedBranchId,
@@ -1751,6 +1758,9 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
 
     const content = convertOpenCodeParts(parts);
     const usage = createOpenCodeUsage(message.tokens, message.cost, parts);
+    const openCodeHasToolPart =
+      message.role === "assistant" &&
+      parts.some((part) => part.type === "tool");
 
     messages.push({
       uuid,
@@ -1763,12 +1773,24 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
       },
       timestamp,
       // Include OpenCode-specific fields
-      ...(message.parentID && { parentId: message.parentID }),
+      ...(message.parentID && {
+        parentUuid: message.parentID,
+        parentId: message.parentID,
+      }),
       ...(message.providerID && { providerId: message.providerID }),
       ...(message.cost !== undefined && { cost: message.cost }),
       ...(message.mode && { mode: message.mode }),
       ...(message.agent && { agent: message.agent }),
       ...(message.finish && { finish: message.finish }),
+      ...(openCodeHasToolPart && { openCodeHasToolPart: true }),
+      ...(message.role === "assistant" &&
+        !message.finish &&
+        typeof message.time?.completed === "number" && {
+          // Legacy OpenCode messages may omit `finish`. A completed message
+          // that contains a tool part is still an intermediate tool stage,
+          // not the assistant's final response.
+          openCodeCompleted: !openCodeHasToolPart,
+        }),
       ...(message.path && { path: message.path }),
     });
   }

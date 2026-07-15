@@ -132,4 +132,33 @@ describe("MessageList target loading", () => {
     await waitFor(() => expect(onTargetFocused).toHaveBeenCalledTimes(1));
     expect(loadOlderMessages).not.toHaveBeenCalled();
   });
+
+  it("focuses a branch prompt restored from cross-session navigation state", async () => {
+    const onBranchFocused = vi.fn();
+    const item = userPromptItem("edited prompt", "msg_edited");
+    const source = item.sourceMessages[0];
+    if (!source) throw new Error("expected source message");
+    source.branch = {
+      sessionId: "ses_child",
+      branchId: "msg_edited",
+      activeBranchId: "msg_edited",
+      selectedBranchId: "msg_edited",
+      parentId: "msg_before",
+      siblingIndex: 2,
+      siblingCount: 2,
+      alternatives: [],
+    };
+
+    render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[item]}
+        focusBranchId="msg_edited"
+        onBranchFocused={onBranchFocused}
+      />,
+    );
+
+    await waitFor(() => expect(onBranchFocused).toHaveBeenCalledTimes(1));
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  });
 });

@@ -6,7 +6,8 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ModelInfo } from "@yep-anywhere/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { getLogger } from "../../../src/logging/logger.js";
 import { OpenCodeProvider } from "../../../src/sdk/providers/opencode.js";
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -124,6 +125,7 @@ describe("OpenCodeProvider", () => {
   };
 
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {
         Reflect.deleteProperty(process.env, key);
@@ -629,6 +631,7 @@ ohmyrouter/deepseek-v4-pro
           baseUrl: string,
           sessionId: string,
           cwd: string,
+          existingMetadata?: Record<string, unknown>,
         ) => Promise<void>;
       }
     ).markOpenCodeSessionCreatedByYep.bind(provider);
@@ -645,7 +648,10 @@ ohmyrouter/deepseek-v4-pro
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ id: "ses_1" }));
       },
-      (baseUrl) => markOpenCodeSessionCreatedByYep(baseUrl, "ses_1", "/repo"),
+      (baseUrl) =>
+        markOpenCodeSessionCreatedByYep(baseUrl, "ses_1", "/repo", {
+          custom: "preserved",
+        }),
     );
 
     expect(requests).toEqual([
@@ -654,6 +660,7 @@ ohmyrouter/deepseek-v4-pro
         method: "PATCH",
         body: {
           metadata: {
+            custom: "preserved",
             createdBy: "yep",
             source: "yep-anywhere",
           },
@@ -825,7 +832,7 @@ ohmyrouter/deepseek-v4-pro
     ]);
   });
 
-  it("forks an OpenCode session when resuming at a message boundary", async () => {
+  it("forks at the edited native user message and persists merged lineage", async () => {
     const provider = new OpenCodeProvider();
     const prepareOpenCodeSession = (
       provider as unknown as {
@@ -841,6 +848,7 @@ ohmyrouter/deepseek-v4-pro
     const requests: Array<{ url?: string; method?: string; body: unknown }> =
       [];
 
+    const infoSpy = vi.spyOn(getLogger(), "info");
     const result = await withTestServer(
       async (req, res) => {
         requests.push({
@@ -849,6 +857,24 @@ ohmyrouter/deepseek-v4-pro
           body: await readJsonBody(req),
         });
         res.setHeader("Content-Type", "application/json");
+        if (req.method === "POST") {
+          res.end(
+            JSON.stringify({
+              id: "ses_fork",
+              metadata: {
+                custom: "preserved",
+                createdBy: "external",
+                yepFork: {
+                  schemaVersion: 1,
+                  kind: "edit-fork",
+                  parentSessionId: "ses_grandparent",
+                  forkMessageId: "msg_old",
+                },
+              },
+            }),
+          );
+          return;
+        }
         res.end(JSON.stringify({ id: "ses_fork" }));
       },
       (baseUrl) =>
@@ -863,7 +889,21 @@ ohmyrouter/deepseek-v4-pro
         ),
     );
 
-    expect(result).toEqual({ id: "ses_fork" });
+    expect(result).toMatchObject({
+      id: "ses_fork",
+      metadata: {
+        custom: "preserved",
+        createdBy: "yep",
+        source: "yep-anywhere",
+        yepFork: {
+          schemaVersion: 1,
+          kind: "edit-fork",
+          parentSessionId: "ses_parent",
+          forkMessageId: "msg_boundary",
+          createdAt: expect.any(String),
+        },
+      },
+    });
     const url = new URL(requests[0]?.url ?? "", "http://127.0.0.1");
     expect(url.pathname).toBe("/session/ses_parent/fork");
     expect(url.searchParams.get("directory")).toBe("/repo");
@@ -871,6 +911,149 @@ ohmyrouter/deepseek-v4-pro
       method: "POST",
       body: { messageID: "msg_boundary" },
     });
+    expect(requests[1]).toMatchObject({
+      url: "/session/ses_fork?directory=%2Frepo",
+      method: "PATCH",
+      body: {
+        metadata: {
+          custom: "preserved",
+          createdBy: "yep",
+          source: "yep-anywhere",
+          yepFork: {
+            schemaVersion: 1,
+            kind: "edit-fork",
+            parentSessionId: "ses_parent",
+            forkMessageId: "msg_boundary",
+            createdAt: expect.any(String),
+          },
+        },
+      },
+    });
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "opencode_session_fork_requested",
+        parentSessionId: "ses_parent",
+        forkMessageId: "msg_boundary",
+      }),
+      expect.any(String),
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "opencode_session_fork_completed",
+        forkSessionId: "ses_fork",
+      }),
+      expect.any(String),
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "opencode_session_fork_metadata_patched",
+        forkSessionId: "ses_fork",
+        schemaVersion: 1,
+      }),
+      expect.any(String),
+    );
+    for (const [fields] of infoSpy.mock.calls) {
+      if (!fields || typeof fields !== "object") continue;
+      expect(fields).not.toHaveProperty("message");
+      expect(fields).not.toHaveProperty("prompt");
+    }
+  });
+
+  it("forks the first persisted user message instead of creating a new session", async () => {
+    const provider = new OpenCodeProvider();
+    const prepareOpenCodeSession = (
+      provider as unknown as {
+        prepareOpenCodeSession: (
+          baseUrl: string,
+          options: { resumeSessionId?: string; resumeSessionAt?: string },
+          cwd: string,
+          model: string | null,
+        ) => Promise<{ id: string }>;
+      }
+    ).prepareOpenCodeSession.bind(provider);
+    const requests: Array<{ method?: string; url?: string; body: unknown }> =
+      [];
+
+    await withTestServer(
+      async (req, res) => {
+        requests.push({
+          method: req.method,
+          url: req.url,
+          body: await readJsonBody(req),
+        });
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({ id: "ses_first_fork", metadata: { custom: true } }),
+        );
+      },
+      (baseUrl) =>
+        prepareOpenCodeSession(
+          baseUrl,
+          { resumeSessionId: "ses_parent", resumeSessionAt: "msg_first" },
+          "/repo",
+          null,
+        ),
+    );
+
+    expect(requests[0]).toMatchObject({
+      method: "POST",
+      url: "/session/ses_parent/fork?directory=%2Frepo",
+      body: { messageID: "msg_first" },
+    });
+    expect(requests.some((request) => request.url === "/session")).toBe(false);
+  });
+
+  it("fails the edit before prompt submission when lineage PATCH fails", async () => {
+    const provider = new OpenCodeProvider();
+    const prepareOpenCodeSession = (
+      provider as unknown as {
+        prepareOpenCodeSession: (
+          baseUrl: string,
+          options: { resumeSessionId?: string; resumeSessionAt?: string },
+          cwd: string,
+          model: string | null,
+        ) => Promise<{ id: string }>;
+      }
+    ).prepareOpenCodeSession.bind(provider);
+    const requests: Array<{ method?: string; url?: string }> = [];
+
+    await withTestServer(
+      async (req, res) => {
+        requests.push({ method: req.method, url: req.url });
+        if (req.method === "POST") {
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({ id: "ses_orphan", metadata: { custom: true } }),
+          );
+          return;
+        }
+        res.statusCode = 500;
+        res.end("metadata unavailable");
+      },
+      async (baseUrl) => {
+        await expect(
+          prepareOpenCodeSession(
+            baseUrl,
+            {
+              resumeSessionId: "ses_parent",
+              resumeSessionAt: "msg_user",
+            },
+            "/repo",
+            null,
+          ),
+        ).rejects.toThrow(
+          /ses_orphan.*lineage metadata could not be persisted.*500/i,
+        );
+      },
+    );
+
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "/session/ses_parent/fork?directory=%2Frepo",
+      },
+      { method: "PATCH", url: "/session/ses_orphan?directory=%2Frepo" },
+    ]);
   });
 
   it("bridges OpenCode permission requests through Yep tool approval", async () => {

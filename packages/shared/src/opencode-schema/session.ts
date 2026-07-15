@@ -39,6 +39,7 @@ export const OpenCodeSessionSchema = z.object({
   directory: z.string().optional(),
   title: z.string().optional(),
   parentID: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
   model: z
     .object({
       id: z.string().optional(),
