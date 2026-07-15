@@ -24,7 +24,6 @@ import { canonicalizeProjectPath, encodeProjectId } from "./paths.js";
 
 export const CODEX_SESSIONS_DIR =
   process.env.CODEX_SESSIONS_DIR ?? getDefaultCodexSessionsDir();
-export const CODEX_DIR = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 
 export function getDefaultCodexHomeDir(): string {
   return process.env.CODEX_HOME ?? join(homedir(), ".codex");
@@ -127,6 +126,3 @@ export class CodexSessionScanner {
     return manifest.byProjectPath.get(canonicalProjectPath) ?? [];
   }
 }
-
-// Singleton for convenience
-export const codexSessionScanner = new CodexSessionScanner();

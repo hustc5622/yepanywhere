@@ -9,9 +9,7 @@
     "dev:mock": "AUTH_DISABLED=true node ../../scripts/run-with-safe-home.js tsx --conditions source src/index.ts",
     "build": "tsc",
     "test": "node ../../scripts/run-with-safe-home.js vitest run",
-    "test:e2e": "node ../../scripts/run-with-safe-home.js vitest run test/e2e",
-    "test:e2e:real": "REAL_SDK_TESTS=true node ../../scripts/run-with-safe-home.js vitest run test/e2e",
-    "test:e2e:real:fg": "REAL_SDK_TESTS=true FOREGROUND=1 node ../../scripts/run-with-safe-home.js vitest run test/e2e"
+    "test:e2e": "node ../../scripts/run-with-safe-home.js vitest run test/e2e"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.12.0",

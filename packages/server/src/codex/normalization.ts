@@ -1,4 +1,4 @@
-export const CODEX_TOOL_NAME_ALIASES: Record<string, string> = {
+const CODEX_TOOL_NAME_ALIASES: Record<string, string> = {
   exec: "CodexExec",
   shell_command: "Bash",
   exec_command: "Bash",
@@ -28,14 +28,14 @@ export interface CodexToolCallContext {
   writeShellInfo?: CodexWriteShellInfo;
 }
 
-export interface NormalizedCodexToolInvocation {
+interface NormalizedCodexToolInvocation {
   toolName: string;
   input: unknown;
   readShellInfo?: CodexReadShellInfo;
   writeShellInfo?: CodexWriteShellInfo;
 }
 
-export interface NormalizedCodexToolOutput {
+interface NormalizedCodexToolOutput {
   content: string;
   structured?: unknown;
   isError: boolean;

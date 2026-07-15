@@ -10,7 +10,7 @@ export interface OpenCodeGatewayConfig {
   subModule?: string;
 }
 
-export interface OpenCodeGatewayOverlayOptions {
+interface OpenCodeGatewayOverlayOptions {
   openAICompatibleBaseURL?: string;
   sessionConfig?: OpenCodeSessionConfig;
 }
@@ -104,7 +104,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function mergeOpenCodeConfig(
+function mergeOpenCodeConfig(
   base: Record<string, unknown>,
   overlay: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -257,7 +257,7 @@ function buildManagedModelConfig(
 }
 
 /** Build the exact provider/model catalog entry consumed by one session. */
-export function buildOpenCodeGatewayOverlay(
+function buildOpenCodeGatewayOverlay(
   config: OpenCodeGatewayConfig,
   options: OpenCodeGatewayOverlayOptions = {},
 ): Record<string, unknown> {
