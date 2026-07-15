@@ -125,6 +125,17 @@ function getErrorMessage(error: unknown): string {
   return String(error).slice(0, 500);
 }
 
+function getReportedOutputTokens(
+  usage: Record<string, unknown> | undefined,
+): number | undefined {
+  for (const value of [usage?.output_tokens, usage?.completion_tokens]) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 function parseStreamPayload(
   payload: unknown,
   protocol: OpenCodeRequestProtocol,
@@ -135,12 +146,10 @@ function parseStreamPayload(
     data.usage && typeof data.usage === "object"
       ? (data.usage as Record<string, unknown>)
       : undefined;
-  const outputTokens =
-    typeof usage?.output_tokens === "number"
-      ? usage.output_tokens
-      : typeof usage?.completion_tokens === "number"
-        ? usage.completion_tokens
-        : undefined;
+  // OhMyRouter's OpenAI-compatible Claude responses include an `output_tokens`
+  // field set to 0 alongside the actual positive `completion_tokens` value.
+  // A zero is not useful throughput data and must not mask the fallback.
+  const outputTokens = getReportedOutputTokens(usage);
 
   if (protocol === "anthropic") {
     const delta =

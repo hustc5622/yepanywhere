@@ -22,11 +22,11 @@ function sseResponse(lines: string[]): Response {
 }
 
 describe("benchmarkOhMyRouterModel", () => {
-  it("uses the streamed usage count and measures output throughput", async () => {
+  it("falls back to completion_tokens when output_tokens is zero", async () => {
     const fetchImpl = vi.fn(async () =>
       sseResponse([
         'data: {"choices":[{"delta":{"content":"token token"}}]}',
-        'data: {"choices":[],"usage":{"completion_tokens":2}}',
+        'data: {"choices":[],"usage":{"output_tokens":0,"completion_tokens":2}}',
         "data: [DONE]",
       ]),
     );
@@ -100,7 +100,7 @@ describe("OhMyRouterBenchmarkService", () => {
       .mockResolvedValueOnce(
         sseResponse([
           'data: {"choices":[{"delta":{"content":"token token"}}]}',
-          'data: {"choices":[],"usage":{"completion_tokens":2}}',
+          'data: {"choices":[],"usage":{"output_tokens":0,"completion_tokens":2}}',
           "data: [DONE]",
         ]),
       );
