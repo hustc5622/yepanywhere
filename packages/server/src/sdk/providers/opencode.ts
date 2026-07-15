@@ -1260,7 +1260,14 @@ export class OpenCodeProvider implements AgentProvider {
 
     const sseUrl = this.openCodeUrl(baseUrl, "/event", cwd);
     const sseController = new AbortController();
-    const abortSse = () => sseController.abort();
+    let sseReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    let sseReaderCancellation: Promise<void> | null = null;
+    const abortSse = () => {
+      if (sseReader && !sseReaderCancellation) {
+        sseReaderCancellation = sseReader.cancel().catch(() => undefined);
+      }
+      sseController.abort();
+    };
     if (signal.aborted) {
       abortSse();
     } else {
@@ -1312,6 +1319,7 @@ export class OpenCodeProvider implements AgentProvider {
         resolveSseReady();
 
         const reader = response.body.getReader();
+        sseReader = reader;
         const decoder = new TextDecoder();
         let buffer = "";
         let currentAssistantMessageId: string | null = null;
@@ -1430,7 +1438,7 @@ export class OpenCodeProvider implements AgentProvider {
     const sseHandshakeTimeoutMs = Math.max(1, Math.min(this.timeout, 10_000));
     const sseHandshakeTimeout = setTimeout(() => {
       state.sseError = new Error("Timed out connecting to OpenCode SSE");
-      sseController.abort();
+      abortSse();
       resolveSseReady();
     }, sseHandshakeTimeoutMs);
     await sseReady;
@@ -1494,7 +1502,7 @@ export class OpenCodeProvider implements AgentProvider {
         }
 
         if (state.postError) {
-          sseController.abort();
+          abortSse();
           const error = state.postError;
           log.error({ error }, "Failed to send message to OpenCode");
           await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
@@ -1507,7 +1515,7 @@ export class OpenCodeProvider implements AgentProvider {
         }
 
         if (state.responseError) {
-          sseController.abort();
+          abortSse();
           await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
           yield {
             type: "error",
@@ -1540,8 +1548,9 @@ export class OpenCodeProvider implements AgentProvider {
         state.resolveWaiting = null;
       }
     } finally {
-      sseController.abort();
+      abortSse();
       signal.removeEventListener("abort", abortSse);
+      await sseReaderCancellation;
       await Promise.allSettled([ssePromise, messagePromise]);
     }
 
