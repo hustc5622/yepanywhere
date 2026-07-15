@@ -60,8 +60,10 @@ export class ProjectScanner {
   private projectMetadataService: ProjectMetadataService | null;
   private cacheTtlMs: number;
   private cacheDirty = true;
+  private cacheGeneration = 0;
   private snapshot: ProjectSnapshot | null = null;
   private inFlightScan: Promise<ProjectSnapshot> | null = null;
+  private inFlightScanGeneration: number | null = null;
   private unsubscribeEventBus: (() => void) | null = null;
 
   constructor(options: ScannerOptions = {}) {
@@ -89,8 +91,21 @@ export class ProjectScanner {
 
     if (options.eventBus) {
       this.unsubscribeEventBus = options.eventBus.subscribe((event) => {
-        if (event.type !== "file-change") return;
-        this.handleFileChange(event);
+        if (event.type === "file-change") {
+          this.handleFileChange(event);
+          return;
+        }
+        if (
+          event.type === "session-updated" &&
+          event.trigger === "opencode-db-reconcile"
+        ) {
+          // OpenCode stores all projects in one SQLite database. A reconcile
+          // event may be the first evidence of a project created by an
+          // external CLI, so invalidate both cache layers before title/event
+          // consumers resolve the encoded project ID.
+          this.invalidateCache();
+          this.opencodeScanner?.invalidateCache();
+        }
       });
     }
   }
@@ -113,6 +128,7 @@ export class ProjectScanner {
    */
   invalidateCache(): void {
     this.cacheDirty = true;
+    this.cacheGeneration += 1;
   }
 
   private async getSnapshot(forceRefresh = false): Promise<ProjectSnapshot> {
@@ -127,23 +143,33 @@ export class ProjectScanner {
     }
 
     if (this.inFlightScan) {
-      return this.inFlightScan;
+      if (this.inFlightScanGeneration === this.cacheGeneration) {
+        return this.inFlightScan;
+      }
+      // The active scan started before the latest watcher event. Wait for it
+      // to settle, then perform a fresh scan instead of letting a stale result
+      // clear the dirty flag or leak to the caller.
+      await this.inFlightScan;
+      return this.getSnapshot(forceRefresh);
     }
 
+    const scanGeneration = this.cacheGeneration;
     const scanPromise = this.scanProjects()
       .then((projects) => {
         const snapshot = this.buildSnapshot(projects);
         this.snapshot = snapshot;
-        this.cacheDirty = false;
+        this.cacheDirty = this.cacheGeneration !== scanGeneration;
         return snapshot;
       })
       .finally(() => {
         if (this.inFlightScan === scanPromise) {
           this.inFlightScan = null;
+          this.inFlightScanGeneration = null;
         }
       });
 
     this.inFlightScan = scanPromise;
+    this.inFlightScanGeneration = scanGeneration;
     return scanPromise;
   }
 

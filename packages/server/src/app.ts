@@ -47,7 +47,11 @@ import {
   OPENCODE_DB_PATH,
   OpenCodeSessionScanner,
 } from "./projects/opencode-scanner.js";
-import { CLAUDE_PROJECTS_DIR } from "./projects/paths.js";
+import {
+  CLAUDE_PROJECTS_DIR,
+  canonicalizeProjectPath,
+  encodeProjectId,
+} from "./projects/paths.js";
 import { ProjectScanner } from "./projects/scanner.js";
 import {
   type NativePushService,
@@ -569,6 +573,37 @@ export function createApp(options: AppOptions): AppResult {
       metadataService: options.sessionMetadataService,
       ...options.sessionTitleGeneration,
       scanRecentSessions: async ({ updatedAfterMs, limit, maxProjects }) => {
+        const excludedInvalidTitleSessionIds = new Set(
+          Object.entries(options.sessionMetadataService?.getAllMetadata() ?? {})
+            .filter(([, metadata]) => metadata.customTitle || metadata.aiTitle)
+            .map(([sessionId]) => sessionId),
+        );
+        let invalidProviderTitleSessionIds = new Set<string>();
+        let invalidProviderTitleProjectIds = new Set<string>();
+        try {
+          const invalidProviderTitles =
+            await opencodeScanner.listRecentInvalidTitleSessions(
+              updatedAfterMs,
+              limit,
+              excludedInvalidTitleSessionIds,
+            );
+          invalidProviderTitleSessionIds = new Set(
+            invalidProviderTitles.map((session) => session.sessionId),
+          );
+          invalidProviderTitleProjectIds = new Set(
+            invalidProviderTitles.map((session) =>
+              encodeProjectId(canonicalizeProjectPath(session.directory)),
+            ),
+          );
+        } catch (error) {
+          // Invalid-title prioritization is best effort. The regular bounded
+          // startup backfill must still run when OpenCode SQLite is busy.
+          getLogger().warn(
+            { err: error, limit },
+            "[SessionTitleService] Unable to prioritize invalid OpenCode titles during startup backfill",
+          );
+        }
+
         const projects = (await scanner.listProjects())
           .filter((project) => {
             const lastActivityMs = new Date(
@@ -579,11 +614,16 @@ export function createApp(options: AppOptions): AppResult {
               lastActivityMs >= updatedAfterMs
             );
           })
-          .sort(
-            (a, b) =>
+          .sort((a, b) => {
+            const invalidPriority =
+              Number(invalidProviderTitleProjectIds.has(b.id)) -
+              Number(invalidProviderTitleProjectIds.has(a.id));
+            if (invalidPriority !== 0) return invalidPriority;
+            return (
               new Date(b.lastActivity ?? "").getTime() -
-              new Date(a.lastActivity ?? "").getTime(),
-          )
+              new Date(a.lastActivity ?? "").getTime()
+            );
+          })
           .slice(0, maxProjects);
         const providerCatalog = await buildProviderProjectCatalog({
           projects,
@@ -596,24 +636,12 @@ export function createApp(options: AppOptions): AppResult {
           projectId: SessionSummary["projectId"];
           updatedAt: string;
           messageCount: number;
+          providerTitleInvalid?: boolean;
         }> = [];
         let scannedProjects = 0;
         let scannedSessions = 0;
 
         for (const project of projects) {
-          const projectLastActivityMs = new Date(
-            project.lastActivity ?? "",
-          ).getTime();
-          const oldestCandidateMs = candidates.at(-1)
-            ? new Date(candidates.at(-1)?.updatedAt ?? "").getTime()
-            : Number.NEGATIVE_INFINITY;
-          if (
-            candidates.length >= limit &&
-            projectLastActivityMs <= oldestCandidateMs
-          ) {
-            break;
-          }
-
           scannedProjects += 1;
           let sessions: SessionSummary[];
           try {
@@ -672,12 +700,20 @@ export function createApp(options: AppOptions): AppResult {
               projectId: session.projectId,
               updatedAt: session.updatedAt,
               messageCount: session.messageCount,
+              providerTitleInvalid: invalidProviderTitleSessionIds.has(
+                session.id,
+              ),
             });
-            candidates.sort(
-              (a, b) =>
+            candidates.sort((a, b) => {
+              const invalidPriority =
+                Number(Boolean(b.providerTitleInvalid)) -
+                Number(Boolean(a.providerTitleInvalid));
+              if (invalidPriority !== 0) return invalidPriority;
+              return (
                 new Date(b.updatedAt).getTime() -
-                new Date(a.updatedAt).getTime(),
-            );
+                new Date(a.updatedAt).getTime()
+              );
+            });
             if (candidates.length > limit) candidates.pop();
           }
         }
@@ -902,6 +938,7 @@ export function createApp(options: AppOptions): AppResult {
       pushService: options.pushService,
       nativePushService: options.nativePushService,
       notificationService: options.notificationService,
+      sessionMetadataService: options.sessionMetadataService,
       runtimeController,
       supervisor,
       connectedBrowsers: options.connectedBrowsers,
@@ -1227,6 +1264,7 @@ export function createApp(options: AppOptions): AppResult {
       createRecentsRoutes({
         recentsService: options.recentsService,
         notificationService: options.notificationService,
+        sessionMetadataService: options.sessionMetadataService,
         scanner,
         readerFactory,
         sessionIndexService: options.sessionIndexService,

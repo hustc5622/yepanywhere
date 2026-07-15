@@ -863,6 +863,46 @@ describe("PushNotifier", () => {
       expect(payload.sessionTitle).toBe("Existing bridge session");
     });
 
+    it("does not let a provider update replace a cached Yep AI title", async () => {
+      vi.mocked(mockSupervisor.getProcessForSession).mockReturnValue(undefined);
+
+      new PushNotifier({
+        eventBus: mockEventBus,
+        pushService: mockPushService,
+        notificationService: mockNotificationService,
+        supervisor: mockSupervisor,
+      });
+
+      eventHandler?.({
+        type: "session-metadata-changed",
+        sessionId: "session-1",
+        aiTitle: "Yep AI title",
+        timestamp: new Date().toISOString(),
+      });
+      eventHandler?.({
+        type: "session-updated",
+        sessionId: "session-1",
+        projectId: testProjectId,
+        title: "Provider fallback title",
+        timestamp: new Date().toISOString(),
+      });
+      eventHandler?.({
+        type: "process-state-changed",
+        sessionId: "session-1",
+        projectId: testProjectId,
+        activity: "idle",
+        timestamp: new Date().toISOString(),
+      });
+
+      await vi.waitFor(() => {
+        expect(mockPushService.sendToAll).toHaveBeenCalledTimes(1);
+      });
+
+      const payload = vi.mocked(mockPushService.sendToAll).mock.calls[0][0];
+      expect(payload.type).toBe("session-halted");
+      expect(payload.sessionTitle).toBe("Yep AI title");
+    });
+
     it("should still mark session-halted badge state without push subscriptions", async () => {
       vi.mocked(mockPushService.getSubscriptionCount).mockReturnValue(0);
 

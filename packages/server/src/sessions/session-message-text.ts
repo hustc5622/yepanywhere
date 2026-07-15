@@ -51,7 +51,7 @@ export function extractFirstAssistantResponseText(
     }
 
     if (!seenRealUserPrompt || role !== "assistant") continue;
-    if (isAssistantProgressMessage(message)) continue;
+    if (!isFinalAssistantResponseMessage(session, message)) continue;
     const text = extractSessionMessageText(message);
     if (text) return text;
   }
@@ -59,11 +59,69 @@ export function extractFirstAssistantResponseText(
   return null;
 }
 
-function isAssistantProgressMessage(message: Message): boolean {
-  return (
-    (message as { codexMessagePhase?: unknown }).codexMessagePhase ===
-    "commentary"
-  );
+function hasOpenCodeToolPart(message: Message): boolean {
+  if (
+    (message as { openCodeHasToolPart?: unknown }).openCodeHasToolPart === true
+  ) {
+    return true;
+  }
+
+  const content = message.message?.content ?? message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => {
+    if (!block || typeof block !== "object") return false;
+    const type = (block as { type?: unknown }).type;
+    return (
+      typeof type === "string" &&
+      (type.toLowerCase() === "tool_use" || type.toLowerCase() === "tool")
+    );
+  });
+}
+
+function isFinalAssistantResponseMessage(
+  session: Session,
+  message: Message,
+): boolean {
+  const messageType = message.type.toLowerCase();
+  if (
+    messageType === "reasoning" ||
+    messageType === "thinking" ||
+    messageType === "tool_use" ||
+    messageType === "tool_result"
+  ) {
+    return false;
+  }
+
+  const codexMessagePhase = (message as { codexMessagePhase?: unknown })
+    .codexMessagePhase;
+  if (codexMessagePhase === "commentary") return false;
+  if (codexMessagePhase === "final_answer") return true;
+
+  if (session.provider === "opencode") {
+    // OpenCode writes assistant text before executing tools, then marks that
+    // intermediate message as `tool-calls`. Some providers can report `stop`
+    // while also returning tool parts, and OpenCode continues the loop in that
+    // case. A final response must therefore contain no tool part. Error,
+    // cancellation, filtering and truncation must not trigger title generation
+    // from partial text. Older persisted OpenCode messages can lack `finish`;
+    // accept those only when the reader observed OpenCode's real
+    // `time.completed` field.
+    if (hasOpenCodeToolPart(message)) return false;
+    const finish = (message as { finish?: unknown }).finish;
+    if (finish === "stop") return true;
+    if (finish !== undefined) return false;
+    return (
+      (
+        message as {
+          openCodeCompleted?: unknown;
+        }
+      ).openCodeCompleted === true
+    );
+  }
+
+  // Claude, Gemini and legacy Codex sessions do not consistently carry an
+  // explicit completion phase. Preserve their existing text-based fallback.
+  return true;
 }
 
 function extractContentText(content: unknown): string {
@@ -79,10 +137,16 @@ function extractContentText(content: unknown): string {
         if (!block || typeof block !== "object") return "";
 
         const record = block as Record<string, unknown>;
-        const type = typeof record.type === "string" ? record.type : undefined;
+        const type =
+          typeof record.type === "string"
+            ? record.type.toLowerCase()
+            : undefined;
         if (
           type &&
-          (type === "thinking" || type === "tool_use" || type === "tool_result")
+          (type === "reasoning" ||
+            type === "thinking" ||
+            type === "tool_use" ||
+            type === "tool_result")
         ) {
           return "";
         }

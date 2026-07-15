@@ -2,6 +2,10 @@ import { type UrlProjectId, isSlashCommandSession } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import {
+  hasProviderTitleBoilerplatePrefix,
+  isGenericProviderTitle,
+} from "../sessions/provider-title-quality.js";
+import {
   extractFirstAssistantResponseText,
   extractFirstUserPromptText,
 } from "../sessions/session-message-text.js";
@@ -54,6 +58,7 @@ type TitleGenerationTrigger =
   | "completed-unowned-session"
   | "external-session-updated"
   | "unowned-session-updated"
+  | "opencode-db-reconcile"
   | "process-idle"
   | "startup-backfill";
 
@@ -62,6 +67,8 @@ export interface SessionTitleBackfillCandidate {
   projectId: UrlProjectId;
   updatedAt: string;
   messageCount: number;
+  /** Provider fallback title failed the shared quality check. */
+  providerTitleInvalid?: boolean;
 }
 
 export interface SessionTitleBackfillScanResult {
@@ -555,7 +562,14 @@ export class SessionTitleService {
     let skippedAlreadyTitled = 0;
     let skippedDuplicate = 0;
 
-    for (const candidate of scan.candidates) {
+    // Preserve recency order within each group while giving malformed
+    // provider titles the bounded backfill capacity first.
+    const prioritizedCandidates = [...scan.candidates].sort(
+      (left, right) =>
+        Number(Boolean(right.providerTitleInvalid)) -
+        Number(Boolean(left.providerTitleInvalid)),
+    );
+    for (const candidate of prioritizedCandidates) {
       if (candidates.length >= this.startupBackfillLimit) break;
       const updatedAtMs = new Date(candidate.updatedAt).getTime();
       if (!Number.isFinite(updatedAtMs) || updatedAtMs < updatedAfterMs) {
@@ -717,9 +731,11 @@ export class SessionTitleService {
         this.schedule(
           event.sessionId,
           event.projectId,
-          owner === "external"
-            ? "external-session-updated"
-            : "unowned-session-updated",
+          event.trigger === "opencode-db-reconcile"
+            ? "opencode-db-reconcile"
+            : owner === "external"
+              ? "external-session-updated"
+              : "unowned-session-updated",
         );
       }
       return;
@@ -925,7 +941,7 @@ export class SessionTitleService {
         },
       );
     }
-    const title = sanitizeTitle(content);
+    const title = parseStrictTitleOutput(content);
     if (!title) {
       getLogger().warn(
         {
@@ -942,10 +958,10 @@ export class SessionTitleService {
               ? message.reasoning_content.length
               : undefined,
         },
-        "[SessionTitleService] Title model response sanitized to empty title",
+        "[SessionTitleService] Title model response failed strict output validation",
       );
       throw new TitleModelRequestError(
-        "title model response sanitized to an empty title",
+        "title model response was not exactly one valid JSON title",
         {
           retryable: true,
           kind: "invalid-output",
@@ -1045,32 +1061,47 @@ function redactUrlForLog(value: string): string {
   }
 }
 
-function sanitizeTitle(raw: string): string | null {
-  let candidate = raw.trim();
-  const jsonMatch = candidate.match(/\{[\s\S]*\}/);
-  const jsonCandidate = jsonMatch?.[0];
-  if (jsonCandidate) {
-    try {
-      const parsed = JSON.parse(jsonCandidate) as { title?: unknown };
-      if (typeof parsed.title === "string") {
-        candidate = parsed.title;
-      }
-    } catch {
-      // Fall back to cleaning the raw model output.
-    }
+const SINGLE_TITLE_JSON_PATTERN =
+  /^\{\s*"title"\s*:\s*"(?:\\[\s\S]|[^"\\])*"\s*\}$/u;
+
+function parseStrictTitleOutput(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(trimmed);
+  const jsonText = fenced ? fenced[1]?.trim() : trimmed;
+  if (!jsonText || (!fenced && trimmed.startsWith("```"))) return null;
+
+  // Besides requiring a one-key parsed object, constrain the source shape so
+  // duplicate `title` keys cannot be silently collapsed by JSON.parse.
+  if (!SINGLE_TITLE_JSON_PATTERN.test(jsonText)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
   }
 
-  candidate = candidate
-    .replace(/^```(?:json)?/i, "")
-    .replace(/```$/i, "")
-    .replace(/^\s*(?:title|标题)\s*[:：]\s*/i, "")
-    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
-    .replace(/\s+/g, " ")
-    .replace(/[。.!?？；;，,]+$/g, "")
-    .trim();
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== "title") return null;
+  const rawTitle = (parsed as { title?: unknown }).title;
+  if (typeof rawTitle !== "string" || /[\r\n\u2028\u2029]/u.test(rawTitle)) {
+    return null;
+  }
 
-  if (!candidate) return null;
-  return candidate;
+  const title = rawTitle.trim();
+  if (
+    !title ||
+    isGenericProviderTitle(title) ||
+    hasProviderTitleBoilerplatePrefix(title)
+  ) {
+    return null;
+  }
+  return title;
 }
 
 function getPreferredTitleLanguage(userMessage: string): "Chinese" | "English" {

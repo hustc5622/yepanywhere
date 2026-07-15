@@ -128,6 +128,108 @@ describe("SessionTitleService", () => {
     expect(body.model).toBe("deepseek-v4-pro");
   });
 
+  it("accepts a JSON object wrapped in a bare or JSON code fence", async () => {
+    const responses = [
+      '```json\n{"title":"Refactor duplicated logic"}\n```',
+      '```\n{"title":"Refactor duplicated logic again"}\n```',
+    ];
+    const fetchMock = vi.fn(async () => {
+      const content = responses[fetchMock.mock.calls.length - 1];
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content } }] }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      retryMaxAttempts: 1,
+      fetchImpl: fetchMock,
+      loadSession: async (sessionId) => createSession({ id: sessionId }),
+    });
+
+    await service.generateForSession(
+      "fenced-json",
+      "project-1" as UrlProjectId,
+    );
+    await service.generateForSession("bare-fence", "project-1" as UrlProjectId);
+
+    expect(metadataService.getMetadata("fenced-json")?.aiTitle).toBe(
+      "Refactor duplicated logic",
+    );
+    expect(metadataService.getMetadata("bare-fence")?.aiTitle).toBe(
+      "Refactor duplicated logic again",
+    );
+  });
+
+  it("rejects explanations, non-objects, extra keys, duplicate title keys, and multiline titles", async () => {
+    const invalidOutputs = [
+      'Here is the result: {"title":"Refactor duplicated logic"}',
+      '{"title":"Refactor duplicated logic"}\nDone.',
+      '[{"title":"Refactor duplicated logic"}]',
+      '{"title":"Refactor duplicated logic","reason":"concise"}',
+      '{"title":"First title","title":"Second title"}',
+      '{"title":"Refactor duplicated\\nlogic"}',
+    ];
+    const fetchMock = vi.fn(async () => {
+      const content = invalidOutputs[fetchMock.mock.calls.length - 1];
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content } }] }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      retryMaxAttempts: 1,
+      fetchImpl: fetchMock,
+      loadSession: async (sessionId) => createSession({ id: sessionId }),
+    });
+
+    for (let index = 0; index < invalidOutputs.length; index += 1) {
+      const sessionId = `invalid-output-${index}`;
+      await service.generateForSession(sessionId, "project-1" as UrlProjectId);
+      expect(metadataService.getMetadata(sessionId)).toBeUndefined();
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(invalidOutputs.length);
+  });
+
+  it("retries generic and boilerplate title output only up to the configured limit", async () => {
+    const invalidOutputs = [
+      '{"title":"Here\u2019s a title for this conversation:"}',
+      '{"title":"Here is a title for this conversation: Refactor duplicated logic"}',
+      '{"title":"Here\u2019s a title for this conversation:"}',
+    ];
+    const fetchMock = vi.fn(async () => {
+      const content = invalidOutputs[fetchMock.mock.calls.length - 1];
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content } }] }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      retryMaxAttempts: 3,
+      retryBaseDelayMs: 0,
+      retryMaxDelayMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () => createSession(),
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(metadataService.getMetadata("session-1")).toBeUndefined();
+  });
+
   it("requires Chinese titles for Chinese user messages", async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(
@@ -634,6 +736,241 @@ describe("SessionTitleService", () => {
     expect(metadataService.getMetadata("session-1")).toBeUndefined();
   });
 
+  it("waits for a tool-free OpenCode stop response before generating a title", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '{"title":"分析 Benchmark 失败模式"}' } },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    let currentSession = createSession({
+      provider: "opencode",
+      messages: [
+        {
+          type: "user",
+          message: { role: "user", content: "分析 Benchmark 失败模式" },
+        },
+        {
+          type: "assistant",
+          finish: "stop",
+          openCodeHasToolPart: true,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "我将先读取 benchmark 结果。" },
+              { type: "tool_use", id: "call-1", name: "Read", input: {} },
+            ],
+          },
+        },
+      ],
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () => currentSession,
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    currentSession = createSession({
+      provider: "opencode",
+      messageCount: 3,
+      messages: [
+        ...currentSession.messages,
+        {
+          type: "assistant",
+          finish: "stop",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "reasoning", text: "internal reasoning" },
+              { type: "thinking", text: "private thinking" },
+              {
+                type: "tool_result",
+                tool_use_id: "call-1",
+                content: "large tool output",
+              },
+              { type: "text", text: "已完成 Benchmark 失败模式分析。" },
+            ],
+          },
+        },
+      ],
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const prompt = body.messages[1].content as string;
+    expect(prompt).toContain("已完成 Benchmark 失败模式分析。");
+    expect(prompt).not.toContain("我将先读取 benchmark 结果。");
+    expect(prompt).not.toContain("internal reasoning");
+    expect(prompt).not.toContain("private thinking");
+    expect(prompt).not.toContain("large tool output");
+  });
+
+  it.each(["tool-calls", "error", "content-filter", "length", "unknown"])(
+    "does not generate from an OpenCode %s response with partial text",
+    async (finish) => {
+      const fetchMock = vi.fn();
+      const service = new SessionTitleService({
+        eventBus,
+        metadataService,
+        apiKey: "test-key",
+        minRetryIntervalMs: 0,
+        fetchImpl: fetchMock,
+        loadSession: async () =>
+          createSession({
+            provider: "opencode",
+            messages: [
+              {
+                type: "user",
+                message: { role: "user", content: "Inspect the benchmark" },
+              },
+              {
+                type: "assistant",
+                finish,
+                message: {
+                  role: "assistant",
+                  content: "Partial response before the turn failed.",
+                },
+              },
+            ],
+          }),
+      });
+
+      await service.generateForSession(
+        "session-1",
+        "project-1" as UrlProjectId,
+      );
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(metadataService.getMetadata("session-1")).toBeUndefined();
+    },
+  );
+
+  it("keeps completed legacy OpenCode responses without finish compatible", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              { message: { content: '{"title":"Legacy OpenCode response"}' } },
+            ],
+          }),
+          { status: 200 },
+        ),
+    );
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          provider: "opencode",
+          messages: [
+            {
+              type: "user",
+              message: { role: "user", content: "Inspect the old session" },
+            },
+            {
+              type: "assistant",
+              openCodeCompleted: true,
+              message: {
+                role: "assistant",
+                content: "The persisted legacy response is complete.",
+              },
+            },
+          ],
+        }),
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(metadataService.getMetadata("session-1")?.aiTitle).toBe(
+      "Legacy OpenCode response",
+    );
+  });
+
+  it("does not treat an in-progress OpenCode response without finish as complete", async () => {
+    const fetchMock = vi.fn();
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          provider: "opencode",
+          messages: [
+            {
+              type: "user",
+              message: { role: "user", content: "Inspect the live session" },
+            },
+            {
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: "I am still working on the answer.",
+              },
+            },
+          ],
+        }),
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not treat reasoning-only OpenCode stop messages as final responses", async () => {
+    const fetchMock = vi.fn();
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          provider: "opencode",
+          messages: [
+            {
+              type: "user",
+              message: { role: "user", content: "Inspect the benchmark" },
+            },
+            {
+              type: "assistant",
+              finish: "stop",
+              message: {
+                role: "assistant",
+                content: [
+                  { type: "reasoning", text: "internal reasoning" },
+                  { type: "thinking", text: "private thinking" },
+                ],
+              },
+            },
+          ],
+        }),
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("generates only after an owned session becomes idle", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => {
@@ -809,6 +1146,53 @@ describe("SessionTitleService", () => {
       expect(fetchMock).toHaveBeenCalledOnce();
       expect(metadataService.getMetadata("session-1")?.aiTitle).toBe(
         "解析后标题",
+      );
+    } finally {
+      service.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces duplicate bridge and database update events for one session", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '{"title":"Refactor duplicated logic"}' } },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () => createSession(),
+    });
+
+    try {
+      service.start();
+      for (const timestamp of [
+        "2026-01-01T00:00:01Z",
+        "2026-01-01T00:00:01.001Z",
+      ]) {
+        eventBus.emit({
+          type: "session-updated",
+          sessionId: "session-1",
+          projectId: "project-1" as UrlProjectId,
+          messageCount: 2,
+          timestamp,
+        });
+      }
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(metadataService.getMetadata("session-1")?.aiTitle).toBe(
+        "Refactor duplicated logic",
       );
     } finally {
       service.stop();
@@ -1057,6 +1441,70 @@ describe("SessionTitleService", () => {
     }
   });
 
+  it("prioritizes invalid provider titles within the startup backfill limit", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T08:00:00Z"));
+    const loadSession = vi.fn(async (sessionId: string) =>
+      createSession({ id: sessionId }),
+    );
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '{"title":"Recovered provider title"}' } },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      startupBackfillLimit: 1,
+      scanRecentSessions: async () => ({
+        candidates: [
+          {
+            sessionId: "ordinary-untitled",
+            projectId: "project-1" as UrlProjectId,
+            updatedAt: "2026-07-14T07:59:59Z",
+            messageCount: 2,
+          },
+          {
+            sessionId: "invalid-provider-title",
+            projectId: "project-1" as UrlProjectId,
+            updatedAt: "2026-07-14T07:59:58Z",
+            messageCount: 2,
+            providerTitleInvalid: true,
+          },
+        ],
+        scannedProjects: 1,
+        scannedSessions: 2,
+      }),
+      fetchImpl: fetchMock,
+      loadSession,
+    });
+
+    try {
+      service.start();
+      await service.waitForStartupBackfill();
+
+      expect(loadSession).toHaveBeenCalledOnce();
+      expect(loadSession).toHaveBeenCalledWith(
+        "invalid-provider-title",
+        "project-1",
+      );
+      expect(
+        metadataService.getMetadata("invalid-provider-title")?.aiTitle,
+      ).toBe("Recovered provider title");
+      expect(metadataService.getMetadata("ordinary-untitled")).toBeUndefined();
+    } finally {
+      service.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("caps concurrent startup backfill model requests", async () => {
     let activeRequests = 0;
     let maxActiveRequests = 0;
@@ -1222,5 +1670,55 @@ describe("SessionTitleService", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(metadataService.getMetadata("session-1")).toBeUndefined();
+  });
+
+  it("does not skip an expanded command prompt that only contains a slash command", async () => {
+    const expandedPrompt = [
+      "# /bm-analyze-run-result",
+      "",
+      "请分析 Benchmark Run #58 的失败模式。",
+    ].join("\n");
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '{"title":"分析 Run #58 失败模式"}' } },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          title: expandedPrompt,
+          fullTitle: expandedPrompt,
+          messages: [
+            {
+              type: "user",
+              message: { role: "user", content: expandedPrompt },
+            },
+            {
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: "已完成失败模式分析。",
+              },
+            },
+          ],
+        }),
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(metadataService.getMetadata("session-1")?.aiTitle).toBe(
+      "分析 Run #58 失败模式",
+    );
   });
 });

@@ -27,21 +27,44 @@ interface SqliteModule {
   ) => OpenCodeDatabase;
 }
 
+export type OpenCodeDbFailureReason =
+  | "database-unavailable"
+  | "sqlite-unavailable"
+  | "query-failed";
+
+export type OpenCodeDbResult<T> =
+  | { ok: true; value: T }
+  | {
+      ok: false;
+      reason: OpenCodeDbFailureReason;
+      error?: unknown;
+    };
+
 let sqliteModulePromise: Promise<SqliteModule | null> | null = null;
 
 async function loadSqliteModule(): Promise<SqliteModule | null> {
   if (!sqliteModulePromise) {
     const specifier: string = "node:sqlite";
-    sqliteModulePromise = import(specifier)
-      .then((mod) => {
-        const maybeModule = mod as {
-          DatabaseSync?: SqliteModule["DatabaseSync"];
-        };
-        return maybeModule.DatabaseSync
-          ? { DatabaseSync: maybeModule.DatabaseSync }
-          : null;
-      })
-      .catch(() => null);
+    const getBuiltinModule = (
+      process as unknown as {
+        getBuiltinModule?: (name: string) => unknown;
+      }
+    ).getBuiltinModule;
+    const builtin = getBuiltinModule?.call(process, specifier) as
+      | { DatabaseSync?: SqliteModule["DatabaseSync"] }
+      | undefined;
+    sqliteModulePromise = builtin?.DatabaseSync
+      ? Promise.resolve({ DatabaseSync: builtin.DatabaseSync })
+      : import(specifier)
+          .then((mod) => {
+            const maybeModule = mod as {
+              DatabaseSync?: SqliteModule["DatabaseSync"];
+            };
+            return maybeModule.DatabaseSync
+              ? { DatabaseSync: maybeModule.DatabaseSync }
+              : null;
+          })
+          .catch(() => null);
   }
 
   return sqliteModulePromise;
@@ -52,23 +75,44 @@ export async function withOpenCodeDb<T>(
   fallback: T,
   callback: (db: OpenCodeDatabase) => T,
 ): Promise<T> {
+  const result = await withOpenCodeDbResult(dbPath, callback);
+  return result.ok ? result.value : fallback;
+}
+
+/**
+ * Open an OpenCode database read-only while preserving the failure category.
+ *
+ * Most readers intentionally treat a missing/busy OpenCode database as an
+ * empty result. Long-running reconciliation jobs need to distinguish that
+ * case from a successful scan with no rows, so they can leave their cursor in
+ * place and retry on the next poll.
+ */
+export async function withOpenCodeDbResult<T>(
+  dbPath: string,
+  callback: (db: OpenCodeDatabase) => T,
+): Promise<OpenCodeDbResult<T>> {
   try {
     await access(dbPath);
-  } catch {
-    return fallback;
+  } catch (error) {
+    return { ok: false, reason: "database-unavailable", error };
   }
 
   const sqlite = await loadSqliteModule();
-  if (!sqlite) return fallback;
+  if (!sqlite) return { ok: false, reason: "sqlite-unavailable" };
 
   let db: OpenCodeDatabase | null = null;
   try {
     db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
-    return callback(db);
-  } catch {
-    return fallback;
+    return { ok: true, value: callback(db) };
+  } catch (error) {
+    return { ok: false, reason: "query-failed", error };
   } finally {
-    db?.close();
+    try {
+      db?.close();
+    } catch {
+      // The query/open failure above is the actionable diagnostic. Closing a
+      // read-only handle must not turn reconciliation into an unhandled error.
+    }
   }
 }
 

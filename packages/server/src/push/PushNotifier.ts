@@ -13,6 +13,7 @@ import {
   type UrlProjectId,
   getSessionDisplayTitle,
 } from "@yep-anywhere/shared";
+import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/NotificationService.js";
 import { decodeProjectId } from "../projects/paths.js";
 import type { RuntimeController } from "../runtime/types.js";
@@ -41,6 +42,8 @@ export interface PushNotifierOptions {
   nativePushService?: NativePushService;
   /** Tracks notification-backed badge state. */
   notificationService?: NotificationService;
+  /** Durable Yep titles used to keep notification titles provider-agnostic. */
+  sessionMetadataService?: Pick<SessionMetadataService, "getMetadata">;
   /** Live process source. RuntimeController is required for external mode. */
   runtimeController?: Pick<RuntimeController, "getProcessSnapshotForSession">;
   /** Backwards-compatible embedded/test process source. */
@@ -69,11 +72,18 @@ interface NotificationProcessView {
   permissionMode?: string;
 }
 
+interface CachedSessionTitles {
+  providerTitle?: string;
+  aiTitle?: string;
+  customTitle?: string;
+}
+
 export class PushNotifier {
   private eventBus: EventBus;
   private pushService: PushService;
   private nativePushService?: NativePushService;
   private notificationService?: NotificationService;
+  private sessionMetadataService?: PushNotifierOptions["sessionMetadataService"];
   private runtimeController?: PushNotifierOptions["runtimeController"];
   private supervisor?: Supervisor;
   private connectedBrowsers?: ConnectedBrowsersService;
@@ -85,13 +95,14 @@ export class PushNotifier {
    */
   private sessionsWithNotification = new Map<string, true | Promise<boolean>>();
   private sessionsWithHaltedNotification = new Set<string>();
-  private sessionTitleBySessionId = new Map<string, string>();
+  private sessionTitlesBySessionId = new Map<string, CachedSessionTitles>();
 
   constructor(options: PushNotifierOptions) {
     this.eventBus = options.eventBus;
     this.pushService = options.pushService;
     this.nativePushService = options.nativePushService;
     this.notificationService = options.notificationService;
+    this.sessionMetadataService = options.sessionMetadataService;
     this.runtimeController = options.runtimeController;
     this.supervisor = options.supervisor;
     this.connectedBrowsers = options.connectedBrowsers;
@@ -107,16 +118,31 @@ export class PushNotifier {
       } else if (event.type === "session-created") {
         this.cacheSessionTitle(
           event.session.id,
-          getSessionDisplayTitle({
-            customTitle: event.session.customTitle,
-            aiTitle: event.session.aiTitle,
-            title: event.session.title,
-          }),
+          "providerTitle",
+          event.session.title,
+        );
+        this.cacheSessionTitle(
+          event.session.id,
+          "aiTitle",
+          event.session.aiTitle,
+        );
+        this.cacheSessionTitle(
+          event.session.id,
+          "customTitle",
+          event.session.customTitle,
         );
       } else if (event.type === "session-updated") {
-        this.cacheSessionTitle(event.sessionId, event.title);
+        this.cacheSessionTitle(event.sessionId, "providerTitle", event.title, {
+          preserveOnEmpty: true,
+        });
       } else if (event.type === "session-metadata-changed") {
-        this.cacheSessionTitle(event.sessionId, event.title ?? event.aiTitle);
+        if (event.title !== undefined) {
+          this.cacheSessionTitle(event.sessionId, "customTitle", event.title);
+        }
+        if (event.aiTitle !== undefined) {
+          this.cacheSessionTitle(event.sessionId, "aiTitle", event.aiTitle);
+        }
+        this.syncMetadataTitles(event.sessionId);
       }
     });
   }
@@ -196,7 +222,10 @@ export class PushNotifier {
       sessionId: event.sessionId,
       projectId: event.projectId,
       projectName,
-      sessionTitle: this.getSessionTitle(process),
+      sessionTitle: this.getPreferredSessionTitle(
+        event.sessionId,
+        this.getSessionTitle(process),
+      ),
       inputType,
       summary,
       requestId: request.id,
@@ -295,7 +324,7 @@ export class PushNotifier {
 
     this.sessionsWithNotification.delete(event.sessionId);
     this.sessionsWithHaltedNotification.delete(event.sessionId);
-    this.sessionTitleBySessionId.delete(event.sessionId);
+    this.sessionTitlesBySessionId.delete(event.sessionId);
     await this.sendDismiss(event.sessionId);
   }
 
@@ -315,9 +344,10 @@ export class PushNotifier {
 
     const process = await this.getProcess(event.sessionId);
     this.cacheProcessSessionTitle(event.sessionId, process);
-    const sessionTitle =
-      (process ? this.getSessionTitle(process) : undefined) ??
-      this.sessionTitleBySessionId.get(event.sessionId);
+    const sessionTitle = this.getPreferredSessionTitle(
+      event.sessionId,
+      process ? this.getSessionTitle(process) : undefined,
+    );
     const projectName = this.getProjectName(event.projectId);
     const payload: SessionHaltedPayload = {
       type: "session-halted",
@@ -381,19 +411,53 @@ export class PushNotifier {
     process: NotificationProcessView | null | undefined,
   ): void {
     if (!process) return;
-    this.cacheSessionTitle(sessionId, this.getSessionTitle(process));
+    this.cacheSessionTitle(
+      sessionId,
+      "providerTitle",
+      this.getSessionTitle(process),
+      { preserveOnEmpty: true },
+    );
   }
 
   private cacheSessionTitle(
     sessionId: string,
+    field: keyof CachedSessionTitles,
     title: string | null | undefined,
+    options: { preserveOnEmpty?: boolean } = {},
   ): void {
-    const normalized = title?.replace(/\s+/g, " ").trim();
-    if (!normalized) return;
-    this.sessionTitleBySessionId.set(
-      sessionId,
-      normalized.length <= 120 ? normalized : `${normalized.slice(0, 117)}...`,
-    );
+    const normalized = normalizeSessionTitle(title);
+    if (!normalized && options.preserveOnEmpty) return;
+
+    const cached = this.sessionTitlesBySessionId.get(sessionId) ?? {};
+    if (normalized) cached[field] = normalized;
+    else delete cached[field];
+
+    if (cached.customTitle || cached.aiTitle || cached.providerTitle) {
+      this.sessionTitlesBySessionId.set(sessionId, cached);
+    } else {
+      this.sessionTitlesBySessionId.delete(sessionId);
+    }
+  }
+
+  private syncMetadataTitles(sessionId: string): void {
+    const metadata = this.sessionMetadataService?.getMetadata(sessionId);
+    if (!this.sessionMetadataService) return;
+    this.cacheSessionTitle(sessionId, "customTitle", metadata?.customTitle);
+    this.cacheSessionTitle(sessionId, "aiTitle", metadata?.aiTitle);
+  }
+
+  private getPreferredSessionTitle(
+    sessionId: string,
+    processTitle?: string,
+  ): string | undefined {
+    this.syncMetadataTitles(sessionId);
+    const cached = this.sessionTitlesBySessionId.get(sessionId);
+    const title = getSessionDisplayTitle({
+      customTitle: cached?.customTitle,
+      aiTitle: cached?.aiTitle,
+      title: cached?.providerTitle ?? processTitle,
+    });
+    return title === "Untitled" ? undefined : title;
   }
 
   /**
@@ -496,4 +560,14 @@ export class PushNotifier {
       this.unsubscribe = null;
     }
   }
+}
+
+function normalizeSessionTitle(
+  title: string | null | undefined,
+): string | undefined {
+  const normalized = title?.replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length <= 120
+    ? normalized
+    : `${normalized.slice(0, 117)}...`;
 }

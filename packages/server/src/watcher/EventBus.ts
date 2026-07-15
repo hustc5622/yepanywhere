@@ -179,6 +179,8 @@ export interface SessionUpdatedEvent {
   type: "session-updated";
   sessionId: string;
   projectId: UrlProjectId;
+  /** Optional producer identity for diagnostics and downstream dedup logs. */
+  trigger?: "opencode-db-reconcile";
   /** New title (derived from first user message) */
   title?: string | null;
   /** New message count */

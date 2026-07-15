@@ -1,10 +1,12 @@
-import type {
-  EnrichedRecentEntry,
-  ProviderName,
-  UrlProjectId,
+import {
+  type EnrichedRecentEntry,
+  type ProviderName,
+  type UrlProjectId,
+  getSessionDisplayTitle,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import type { ISessionIndexService } from "../indexes/types.js";
+import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
@@ -22,6 +24,7 @@ import type { Project } from "../supervisor/types.js";
 export interface RecentsDeps {
   recentsService: RecentsService;
   notificationService?: NotificationService;
+  sessionMetadataService?: SessionMetadataService;
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
   sessionIndexService?: ISessionIndexService;
@@ -88,11 +91,19 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
         continue;
       }
 
+      const metadata = deps.sessionMetadataService?.getMetadata(
+        entry.sessionId,
+      );
+
       enriched.push({
         sessionId: entry.sessionId,
         projectId: entry.projectId,
         visitedAt: entry.visitedAt,
-        title: resolved.summary.title,
+        title: getSessionDisplayTitle({
+          customTitle: metadata?.customTitle ?? resolved.summary.customTitle,
+          aiTitle: metadata?.aiTitle ?? resolved.summary.aiTitle,
+          title: resolved.summary.title,
+        }),
         projectName,
         provider: resolved.summary.provider as ProviderName,
         cumulativeUsage: resolved.summary.cumulativeUsage,

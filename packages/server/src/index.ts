@@ -70,6 +70,7 @@ import {
   InstallService,
   ModelInfoService,
   NetworkBindingService,
+  OpenCodeSessionChangeMonitor,
   ServerSettingsService,
   SharingService,
 } from "./services/index.js";
@@ -125,6 +126,8 @@ let runtimeControllerForShutdown: RuntimeController | null = null;
 let deviceBridgeForShutdown: DeviceBridgeService | null = null;
 let codexBridgeForShutdown: CodexBridgeController | null = null;
 let opencodeBridgeForShutdown: OpenCodeBridgeController | null = null;
+let opencodeSessionChangeMonitorForShutdown: OpenCodeSessionChangeMonitor | null =
+  null;
 let terminalServiceForShutdown: TerminalService | null = null;
 let sessionArchiveServiceForShutdown: SessionArchiveService | null = null;
 let isShuttingDown = false;
@@ -182,6 +185,18 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
       console.log("[Shutdown] OpenCode bridge client shut down");
     } catch (error) {
       console.error("[Shutdown] Error shutting down OpenCode bridge:", error);
+    }
+  }
+
+  if (opencodeSessionChangeMonitorForShutdown) {
+    try {
+      await opencodeSessionChangeMonitorForShutdown.stop();
+      console.log("[Shutdown] OpenCode session change monitor stopped");
+    } catch (error) {
+      console.error(
+        "[Shutdown] Error stopping OpenCode session change monitor:",
+        error,
+      );
     }
   }
 
@@ -714,6 +729,29 @@ async function startServer() {
     basePath: config.basePath,
     runtimeController: configuredRuntimeController,
   });
+
+  const opencodeProviderEnabled =
+    config.enabledProviders.length === 0 ||
+    config.enabledProviders.includes("opencode");
+  const opencodeMonitorDisabled = ["false", "0", "off", "disabled"].includes(
+    (process.env.OPENCODE_SESSION_CHANGE_MONITOR ?? "").trim().toLowerCase(),
+  );
+  if (
+    config.sessionTitleGeneration.enabled &&
+    opencodeProviderEnabled &&
+    !opencodeMonitorDisabled
+  ) {
+    const opencodeChangeScanner = new OpenCodeSessionScanner();
+    const opencodeSessionChangeMonitor = new OpenCodeSessionChangeMonitor({
+      dbPath: opencodeChangeScanner.databasePath,
+      scanner: opencodeChangeScanner,
+      eventBus,
+    });
+    // createApp starts SessionTitleService before returning, so no database
+    // reconciliation event can race ahead of its EventBus subscription.
+    opencodeSessionChangeMonitor.start();
+    opencodeSessionChangeMonitorForShutdown = opencodeSessionChangeMonitor;
+  }
   if (configuredRuntimeController) {
     const [activity, processes] = await Promise.all([
       runtimeController.getWorkerActivity(),
