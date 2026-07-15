@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
+import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project } from "../supervisor/types.js";
 
 type WatchProvider = "claude" | "codex" | "gemini" | "opencode";
@@ -473,12 +474,7 @@ export class FocusedSessionWatchManager {
   private normalizeProvider(
     provider: string | undefined,
   ): WatchProvider | null {
-    if (!provider) return null;
-    if (provider === "codex" || provider === "codex-oss") return "codex";
-    if (provider === "gemini" || provider === "gemini-acp") return "gemini";
-    if (provider === "opencode") return "opencode";
-    if (provider === "claude") return "claude";
-    return null;
+    return normalizeProviderGroup(provider);
   }
 
   private async fileExists(filePath: string): Promise<boolean> {

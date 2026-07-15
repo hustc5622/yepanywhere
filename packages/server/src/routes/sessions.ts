@@ -66,7 +66,7 @@ import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
-import { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import { normalizeSession } from "../sessions/normalization.js";
 import { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import {
@@ -77,7 +77,12 @@ import {
 } from "../sessions/pagination.js";
 import { augmentPersistedSessionMessages } from "../sessions/persisted-augments.js";
 import { getPersistedAskUserQuestionInputRequest } from "../sessions/persisted-pending-input.js";
-import { findSessionSummaryAcrossProviders } from "../sessions/provider-resolution.js";
+import { normalizeProviderGroup } from "../sessions/provider-groups.js";
+import {
+  type ProviderResolutionDeps,
+  findSessionSummaryAcrossProviders,
+  resolveSessionSources,
+} from "../sessions/provider-resolution.js";
 import {
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
@@ -886,6 +891,19 @@ interface ArchiveTarget {
   sessionFilePath: string;
 }
 
+function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
+  return {
+    readerFactory: deps.readerFactory,
+    codexSessionsDir: deps.codexSessionsDir,
+    codexReaderFactory: deps.codexReaderFactory,
+    geminiSessionsDir: deps.geminiSessionsDir,
+    geminiReaderFactory: deps.geminiReaderFactory,
+    geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+    opencodeDbPath: deps.opencodeDbPath,
+    opencodeReaderFactory: deps.opencodeReaderFactory,
+  };
+}
+
 async function resolveArchiveTarget(
   deps: SessionsDeps,
   sessionId: string,
@@ -898,16 +916,7 @@ async function resolveArchiveTarget(
       project,
       sessionId,
       project.id,
-      {
-        readerFactory: deps.readerFactory,
-        codexSessionsDir: deps.codexSessionsDir,
-        codexReaderFactory: deps.codexReaderFactory,
-        geminiSessionsDir: deps.geminiSessionsDir,
-        geminiReaderFactory: deps.geminiReaderFactory,
-        geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
-        opencodeDbPath: deps.opencodeDbPath,
-        opencodeReaderFactory: deps.opencodeReaderFactory,
-      },
+      toProviderResolutionDeps(deps),
       preferredProvider,
     );
     if (!resolved) continue;
@@ -1231,16 +1240,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       project,
       sessionId,
       projectId as UrlProjectId,
-      {
-        readerFactory: deps.readerFactory,
-        codexSessionsDir: deps.codexSessionsDir,
-        codexReaderFactory: deps.codexReaderFactory,
-        geminiSessionsDir: deps.geminiSessionsDir,
-        geminiReaderFactory: deps.geminiReaderFactory,
-        geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
-        opencodeDbPath: deps.opencodeDbPath,
-        opencodeReaderFactory: deps.opencodeReaderFactory,
-      },
+      toProviderResolutionDeps(deps),
       metadataProvider ?? process?.provider,
     );
     const sessionSummary =
@@ -1393,16 +1393,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
                 project,
                 sessionId,
                 projectId as UrlProjectId,
-                {
-                  readerFactory: deps.readerFactory,
-                  codexSessionsDir: deps.codexSessionsDir,
-                  codexReaderFactory: deps.codexReaderFactory,
-                  geminiSessionsDir: deps.geminiSessionsDir,
-                  geminiReaderFactory: deps.geminiReaderFactory,
-                  geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
-                  opencodeDbPath: deps.opencodeDbPath,
-                  opencodeReaderFactory: deps.opencodeReaderFactory,
-                },
+                toProviderResolutionDeps(deps),
                 process.provider,
               );
               cumulativeUsage = summaryResult?.summary?.cumulativeUsage;
@@ -1431,16 +1422,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         project,
         sessionId,
         projectId as UrlProjectId,
-        {
-          readerFactory: deps.readerFactory,
-          codexSessionsDir: deps.codexSessionsDir,
-          codexReaderFactory: deps.codexReaderFactory,
-          geminiSessionsDir: deps.geminiSessionsDir,
-          geminiReaderFactory: deps.geminiReaderFactory,
-          geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
-          opencodeDbPath: deps.opencodeDbPath,
-          opencodeReaderFactory: deps.opencodeReaderFactory,
-        },
+        toProviderResolutionDeps(deps),
         metadataProvider ?? process?.provider,
       );
       const sessionSummary = sessionSummaryResult?.summary ?? null;
@@ -1585,71 +1567,30 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       },
     );
 
-    // For Claude projects, also check for Codex sessions if primary reader didn't find it
-    // This handles mixed projects that have sessions from multiple providers
-    if (
-      !loadedSession &&
-      project.provider === "claude" &&
-      (deps.codexReaderFactory || deps.codexSessionsDir)
-    ) {
-      const codexReader =
-        deps.codexReaderFactory?.(project.path) ??
-        (deps.codexSessionsDir
-          ? new CodexSessionReader({
-              sessionsDir: deps.codexSessionsDir,
-              projectPath: project.path,
-            })
-          : null);
-      if (codexReader) {
-        loadedSession = await codexReader.getSession(
+    // For mixed projects, fall back to the other providers' session stores if
+    // the primary reader didn't find the session. Candidate ordering and
+    // reader construction are shared with findSessionSummaryAcrossProviders.
+    if (!loadedSession) {
+      const projectGroup = normalizeProviderGroup(project.provider);
+      for (const source of resolveSessionSources(
+        project,
+        toProviderResolutionDeps(deps),
+      )) {
+        if (normalizeProviderGroup(source.provider) === projectGroup) continue;
+        // The opencode fallback keeps the route-level reader so cached
+        // context-window lookups stay attached.
+        const sourceReader =
+          source.kind === "opencode"
+            ? getOpenCodeReader(project.path)
+            : source.reader;
+        loadedSession = await sourceReader.getSession(
           sessionId,
           project.id,
           readerAfterMessageId,
           { includeOrphans: wasEverOwned && !process, branchId },
         );
+        if (loadedSession) break;
       }
-    }
-
-    // For Claude/Codex projects, also check for Gemini sessions if still not found
-    // This handles mixed projects that have sessions from multiple providers
-    if (
-      !loadedSession &&
-      (project.provider === "claude" || project.provider === "codex") &&
-      (deps.geminiReaderFactory || deps.geminiSessionsDir)
-    ) {
-      const geminiReader =
-        deps.geminiReaderFactory?.(project.path) ??
-        (deps.geminiSessionsDir
-          ? new GeminiSessionReader({
-              sessionsDir: deps.geminiSessionsDir,
-              projectPath: project.path,
-              hashToCwd: deps.geminiScanner?.getHashToCwd(),
-            })
-          : null);
-      if (geminiReader) {
-        loadedSession = await geminiReader.getSession(
-          sessionId,
-          project.id,
-          readerAfterMessageId,
-          { includeOrphans: wasEverOwned && !process, branchId },
-        );
-      }
-    }
-
-    // For mixed projects, also check OpenCode sessions if still not found.
-    if (
-      !loadedSession &&
-      (project.provider === "claude" ||
-        project.provider === "codex" ||
-        project.provider === "gemini")
-    ) {
-      const openCodeReader = getOpenCodeReader(project.path);
-      loadedSession = await openCodeReader.getSession(
-        sessionId,
-        project.id,
-        readerAfterMessageId,
-        { includeOrphans: wasEverOwned && !process, branchId },
-      );
     }
 
     let session = loadedSession ? normalizeSession(loadedSession) : null;
@@ -2396,16 +2337,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         project,
         sessionId,
         resolvedProjectId,
-        {
-          readerFactory: deps.readerFactory,
-          codexSessionsDir: deps.codexSessionsDir,
-          codexReaderFactory: deps.codexReaderFactory,
-          geminiSessionsDir: deps.geminiSessionsDir,
-          geminiReaderFactory: deps.geminiReaderFactory,
-          geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
-          opencodeDbPath: deps.opencodeDbPath,
-          opencodeReaderFactory: deps.opencodeReaderFactory,
-        },
+        toProviderResolutionDeps(deps),
         metadataProvider ?? body.provider,
       );
       sessionSummary = sessionSummaryResult?.summary ?? null;

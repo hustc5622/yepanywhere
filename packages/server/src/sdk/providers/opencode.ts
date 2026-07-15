@@ -41,6 +41,11 @@ import {
   resolveOpenCodeGatewayConfig,
   resolveOpenCodeOpenAICompatibleBaseURL,
 } from "../../opencode-bridge/gateway-config.js";
+import {
+  type OpenCodeQuestion,
+  buildOpenCodeQuestionAnswers,
+  normalizeOpenCodeQuestions,
+} from "../../opencode/questions.js";
 import { whichCommand } from "../cli-detection.js";
 import { MessageQueue } from "../messageQueue.js";
 import type {
@@ -153,74 +158,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-interface NormalizedOpenCodeQuestion {
-  id: string;
-  question: string;
-  header: string;
-  options: Array<{ label: string; description: string }>;
-  multiSelect: boolean;
-  custom?: boolean;
-}
-
-function normalizeOpenCodeQuestions(
-  raw: unknown,
-): NormalizedOpenCodeQuestion[] {
-  if (!Array.isArray(raw)) return [];
-
-  const questions: NormalizedOpenCodeQuestion[] = [];
-  for (const [index, item] of raw.entries()) {
-    if (!isRecord(item) || typeof item.question !== "string") continue;
-    const options = Array.isArray(item.options)
-      ? item.options
-          .map((option) => {
-            if (!isRecord(option) || typeof option.label !== "string") {
-              return null;
-            }
-            return {
-              label: option.label,
-              description:
-                typeof option.description === "string"
-                  ? option.description
-                  : "",
-            };
-          })
-          .filter(
-            (option): option is { label: string; description: string } =>
-              option !== null,
-          )
-      : [];
-
-    questions.push({
-      id: `question-${index}`,
-      question: item.question,
-      header: typeof item.header === "string" ? item.header : "Question",
-      options,
-      multiSelect: Boolean(item.multiSelect ?? item.multiple),
-      ...(typeof item.custom === "boolean" ? { custom: item.custom } : {}),
-    });
-  }
-  return questions;
-}
-
-function buildOpenCodeQuestionAnswers(
-  questions: NormalizedOpenCodeQuestion[],
+function buildOpenCodeQuestionAnswersFromUpdatedInput(
+  questions: OpenCodeQuestion[],
   updatedInput: unknown,
 ): string[][] {
   const input = isRecord(updatedInput) ? updatedInput : null;
   const answers = isRecord(input?.answers)
     ? (input.answers as UserQuestionAnswers)
     : undefined;
-
-  return questions.map((question) => {
-    const answer = answers?.[question.id] ?? answers?.[question.question];
-    if (typeof answer === "string") return answer ? [answer] : [];
-    if (Array.isArray(answer)) {
-      return answer.filter(
-        (value): value is string => typeof value === "string" && !!value,
-      );
-    }
-    return [];
-  });
+  return buildOpenCodeQuestionAnswers(questions, answers);
 }
 
 type ReasoningEffortsByProtocol = NonNullable<
@@ -2492,7 +2438,7 @@ export class OpenCodeProvider implements AgentProvider {
       }
     }
 
-    const orderedAnswers = buildOpenCodeQuestionAnswers(
+    const orderedAnswers = buildOpenCodeQuestionAnswersFromUpdatedInput(
       questions,
       result.updatedInput,
     );

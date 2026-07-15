@@ -11,6 +11,7 @@ import { basename, dirname, join } from "node:path";
 import type { ProviderName, UrlProjectId } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { withWritableOpenCodeDb } from "../sessions/opencode-db.js";
+import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 
 export type ArchiveProvider = "claude" | "codex" | "opencode";
@@ -405,10 +406,9 @@ export class SessionArchiveService {
 function normalizeArchiveProvider(
   provider: ProviderName | string | undefined,
 ): ArchiveProvider | null {
-  if (provider === "claude" || provider === "claude-ollama") return "claude";
-  if (provider === "codex" || provider === "codex-oss") return "codex";
-  if (provider === "opencode") return "opencode";
-  return null;
+  const group = normalizeProviderGroup(provider);
+  // Gemini sessions have no archive support.
+  return group === "gemini" ? null : group;
 }
 
 async function setOpenCodeSessionArchived(params: {

@@ -112,6 +112,7 @@ import { CodexSessionReader } from "./sessions/codex-reader.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
 import { normalizeSession } from "./sessions/normalization.js";
 import { OpenCodeSessionReader } from "./sessions/opencode-reader.js";
+import { normalizeProviderGroup } from "./sessions/provider-groups.js";
 import {
   findSessionSummaryAcrossProviders,
   listSessionsAcrossProviders,
@@ -250,9 +251,9 @@ const AUTO_ARCHIVE_AGE_MS = AUTO_ARCHIVE_AGE_DAYS * 24 * 60 * 60 * 1000;
 function normalizeArchiveProviderName(
   provider: string | undefined,
 ): ArchiveProvider | null {
-  if (provider === "claude" || provider === "claude-ollama") return "claude";
-  if (provider === "codex" || provider === "codex-oss") return "codex";
-  return null;
+  const group = normalizeProviderGroup(provider);
+  // Auto-archive only sweeps claude/codex session files.
+  return group === "claude" || group === "codex" ? group : null;
 }
 
 async function findSessionFileForArchive(

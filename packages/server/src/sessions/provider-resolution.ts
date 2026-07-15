@@ -6,10 +6,12 @@ import { CodexSessionReader } from "./codex-reader.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
 import { OPENCODE_DB_PATH } from "./opencode-db.js";
 import { OpenCodeSessionReader } from "./opencode-reader.js";
+import {
+  type ProviderGroup,
+  normalizeProviderGroup,
+} from "./provider-groups.js";
 import { ClaudeSessionReader } from "./reader.js";
 import type { ISessionReader } from "./types.js";
-
-type ProviderGroup = "claude" | "codex" | "gemini" | "opencode";
 
 export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
@@ -41,17 +43,6 @@ export interface SessionSource {
 export interface ResolvedSessionSummary {
   source: SessionSource;
   summary: SessionSummary;
-}
-
-function normalizeProviderGroup(
-  provider: ProviderName | string | undefined,
-): ProviderGroup | null {
-  if (!provider) return null;
-  if (provider === "codex" || provider === "codex-oss") return "codex";
-  if (provider === "gemini" || provider === "gemini-acp") return "gemini";
-  if (provider === "opencode") return "opencode";
-  if (provider === "claude" || provider === "claude-ollama") return "claude";
-  return null;
 }
 
 function mayHaveCodexSessions(

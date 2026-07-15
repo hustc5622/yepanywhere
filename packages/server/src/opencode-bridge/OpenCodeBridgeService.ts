@@ -18,6 +18,10 @@ import {
   terminateProcessGroup,
   writeJson,
 } from "../bridge-common/util.js";
+import {
+  buildOpenCodeQuestionAnswers,
+  normalizeOpenCodeQuestions,
+} from "../opencode/questions.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { normalizeProviderGeneratedTitle } from "../sessions/provider-title-quality.js";
 import type { SessionSummary } from "../supervisor/types.js";
@@ -115,15 +119,6 @@ interface ClientConfig {
   serverUrl: string;
   desktopToken?: string;
 }
-
-type OpenCodeQuestion = {
-  id: string;
-  question: string;
-  header: string;
-  options: Array<{ label: string; description: string }>;
-  multiSelect: boolean;
-  custom?: boolean;
-};
 
 interface OpenCodeEvent {
   type?: unknown;
@@ -317,7 +312,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           await this.postOpenCodeJson(`/question/${requestId}/reject`);
         } else {
           await this.postOpenCodeJson(`/question/${requestId}/reply`, {
-            answers: buildOpenCodeQuestionAnswers(pending.request, answers),
+            answers: buildOpenCodeQuestionAnswersFromRequest(
+              pending.request,
+              answers,
+            ),
           });
         }
       }
@@ -1673,53 +1671,13 @@ function readOpenCodeStatusType(value: unknown): string {
   return readString(record, "type") ?? "running";
 }
 
-function normalizeOpenCodeQuestions(raw: unknown): OpenCodeQuestion[] {
-  if (!Array.isArray(raw)) return [];
-  const questions: OpenCodeQuestion[] = [];
-  for (const [index, item] of raw.entries()) {
-    const record = asRecord(item);
-    const question = readString(record, "question");
-    if (!question) continue;
-
-    const options = Array.isArray(record?.options)
-      ? record.options
-          .map((option) => {
-            const optionRecord = asRecord(option);
-            const label = readString(optionRecord, "label");
-            if (!label) return null;
-            return {
-              label,
-              description: readString(optionRecord, "description") ?? "",
-            };
-          })
-          .filter(
-            (option): option is { label: string; description: string } =>
-              option !== null,
-          )
-      : [];
-
-    questions.push({
-      id: `question-${index}`,
-      question,
-      header: readString(record, "header") ?? "Question",
-      options,
-      multiSelect: Boolean(record?.multiSelect ?? record?.multiple),
-      ...(typeof record?.custom === "boolean" ? { custom: record.custom } : {}),
-    });
-  }
-  return questions;
-}
-
-function buildOpenCodeQuestionAnswers(
+function buildOpenCodeQuestionAnswersFromRequest(
   request: InputRequest,
   answers: UserQuestionAnswers | undefined,
 ): string[][] {
   const input = asRecord(request.toolInput);
-  const questions = normalizeOpenCodeQuestions(input?.questions);
-  return questions.map((question) => {
-    const answer = answers?.[question.id] ?? answers?.[question.question];
-    if (typeof answer === "string") return answer ? [answer] : [];
-    if (Array.isArray(answer)) return answer.filter(Boolean);
-    return [];
-  });
+  return buildOpenCodeQuestionAnswers(
+    normalizeOpenCodeQuestions(input?.questions),
+    answers,
+  );
 }
