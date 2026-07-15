@@ -70,6 +70,7 @@ import {
   InstallService,
   ModelInfoService,
   NetworkBindingService,
+  OhMyRouterBenchmarkService,
   OpenCodeSessionChangeMonitor,
   ServerSettingsService,
   SharingService,
@@ -459,6 +460,9 @@ const connectedBrowsersService = new ConnectedBrowsersService(eventBus);
 const serverSettingsService = new ServerSettingsService({
   dataDir: config.dataDir,
 });
+const ohmyrouterBenchmarkService = new OhMyRouterBenchmarkService({
+  serverSettingsService,
+});
 const sharingService = new SharingService({
   dataDir: config.dataDir,
 });
@@ -508,6 +512,7 @@ async function startServer() {
   }
   await authService.initialize();
   await serverSettingsService.initialize();
+  await ohmyrouterBenchmarkService.initialize();
   await sharingService.initialize();
   await modelInfoService.initialize();
   await networkBindingService.initialize();
@@ -715,6 +720,7 @@ async function startServer() {
     connectedBrowsers: connectedBrowsersService,
     browserProfileService,
     serverSettingsService,
+    ohmyrouterBenchmarkService,
     sharingService,
     deviceBridgeService,
     codexBridgeService,

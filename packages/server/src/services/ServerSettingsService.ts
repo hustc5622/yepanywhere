@@ -8,6 +8,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { NewSessionDefaults } from "@yep-anywhere/shared";
+import type { OhMyRouterThroughputBenchmark } from "./OhMyRouterBenchmarkService.js";
 
 const CURRENT_VERSION = 2;
 
@@ -40,6 +41,8 @@ export interface ServerSettings {
   lifecycleWebhookToken?: string;
   /** When true, include dryRun=true in lifecycle webhook payloads */
   lifecycleWebhookDryRun?: boolean;
+  /** Most recent OhMyRouter model throughput benchmark run. */
+  ohmyrouterThroughputBenchmark?: OhMyRouterThroughputBenchmark;
 }
 
 /** Default settings */

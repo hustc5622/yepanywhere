@@ -17,6 +17,7 @@ import {
   type ThinkingOption,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import type { OhMyRouterBenchmarkService } from "../services/OhMyRouterBenchmarkService.js";
 import type {
   ServerSettings,
   ServerSettingsService,
@@ -30,6 +31,8 @@ const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "max"];
 
 export interface SettingsRoutesDeps {
   serverSettingsService: ServerSettingsService;
+  /** Runs and persists an OhMyRouter model throughput benchmark. */
+  ohmyrouterBenchmarkService?: OhMyRouterBenchmarkService;
   /** Callback to apply allowedHosts changes at runtime */
   onAllowedHostsChanged?: (value: string | undefined) => void;
 }
@@ -361,7 +364,26 @@ function parseNewSessionDefaults(
 
 export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
   const app = new Hono();
-  const { serverSettingsService, onAllowedHostsChanged } = deps;
+  const {
+    serverSettingsService,
+    onAllowedHostsChanged,
+    ohmyrouterBenchmarkService,
+  } = deps;
+
+  if (ohmyrouterBenchmarkService) {
+    app.get("/ohmyrouter-throughput", (c) =>
+      c.json(ohmyrouterBenchmarkService.getStatus()),
+    );
+    app.post("/ohmyrouter-throughput", async (c) => {
+      try {
+        const benchmark = await ohmyrouterBenchmarkService.start();
+        return c.json({ benchmark }, 202);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return c.json({ error: message }, 400);
+      }
+    });
+  }
 
   /**
    * GET /api/settings

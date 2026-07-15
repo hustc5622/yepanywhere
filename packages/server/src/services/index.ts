@@ -39,6 +39,15 @@ export {
 export { ModelInfoService } from "./ModelInfoService.js";
 
 export {
+  OhMyRouterBenchmarkService,
+  benchmarkOhMyRouterModel,
+  type OhMyRouterBenchmarkServiceOptions,
+  type OhMyRouterThroughputBenchmark,
+  type OhMyRouterThroughputResult,
+  type OhMyRouterThroughputStatus,
+} from "./OhMyRouterBenchmarkService.js";
+
+export {
   SessionTitleService,
   type SessionTitleServiceOptions,
 } from "./SessionTitleService.js";

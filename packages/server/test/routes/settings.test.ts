@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSettingsRoutes } from "../../src/routes/settings.js";
+import type { OhMyRouterBenchmarkService } from "../../src/services/OhMyRouterBenchmarkService.js";
 import type {
   ServerSettings,
   ServerSettingsService,
@@ -114,6 +115,50 @@ describe("Settings Routes", () => {
         lifecycleWebhookToken: "secret",
         lifecycleWebhookDryRun: false,
       });
+    });
+  });
+
+  describe("OhMyRouter throughput benchmark", () => {
+    it("returns the persisted benchmark status", async () => {
+      const ohmyrouterBenchmarkService = {
+        getStatus: vi.fn(() => ({
+          available: true,
+          benchmark: { id: "run-1", status: "completed" },
+        })),
+      } as unknown as OhMyRouterBenchmarkService;
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+        ohmyrouterBenchmarkService,
+      });
+
+      const response = await routes.request("/ohmyrouter-throughput");
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        available: true,
+        benchmark: { id: "run-1" },
+      });
+    });
+
+    it("starts a new benchmark run", async () => {
+      const ohmyrouterBenchmarkService = {
+        start: vi.fn(async () => ({ id: "run-2", status: "running" })),
+        getStatus: vi.fn(),
+      } as unknown as OhMyRouterBenchmarkService;
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+        ohmyrouterBenchmarkService,
+      });
+
+      const response = await routes.request("/ohmyrouter-throughput", {
+        method: "POST",
+      });
+
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toMatchObject({
+        benchmark: { id: "run-2", status: "running" },
+      });
+      expect(ohmyrouterBenchmarkService.start).toHaveBeenCalledOnce();
     });
   });
 });

@@ -1508,6 +1508,15 @@ export const api = {
   // Server settings API (persistent server configuration)
   getServerSettings: () => fetchJSON<{ settings: ServerSettings }>("/settings"),
 
+  getOhMyRouterThroughputBenchmark: () =>
+    fetchJSON<OhMyRouterThroughputStatus>("/settings/ohmyrouter-throughput"),
+
+  startOhMyRouterThroughputBenchmark: () =>
+    fetchJSON<{ benchmark: OhMyRouterThroughputBenchmark }>(
+      "/settings/ohmyrouter-throughput",
+      { method: "POST" },
+    ),
+
   updateServerSettings: (settings: Partial<ServerSettings>) =>
     fetchJSON<{ settings: ServerSettings }>("/settings", {
       method: "PUT",
@@ -1595,4 +1604,34 @@ export interface ServerSettings {
   lifecycleWebhookToken?: string;
   /** When true, include dryRun=true in lifecycle webhook payloads */
   lifecycleWebhookDryRun?: boolean;
+}
+
+export interface OhMyRouterThroughputResult {
+  modelId: string;
+  modelName: string;
+  protocol: "openai-compatible" | "anthropic";
+  testedAt: string;
+  outputTokens?: number;
+  tokenCountSource?: "reported" | "estimated";
+  tokensPerSecond?: number;
+  timeToFirstTokenMs?: number;
+  generationDurationMs?: number;
+  error?: string;
+}
+
+export interface OhMyRouterThroughputBenchmark {
+  id: string;
+  status: "running" | "completed" | "failed" | "interrupted";
+  startedAt: string;
+  completedAt?: string;
+  totalModels: number;
+  completedModels: number;
+  results: OhMyRouterThroughputResult[];
+  error?: string;
+}
+
+export interface OhMyRouterThroughputStatus {
+  available: boolean;
+  unavailableReason?: string;
+  benchmark?: OhMyRouterThroughputBenchmark;
 }

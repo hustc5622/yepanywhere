@@ -104,6 +104,7 @@ import type { BrowserProfileService } from "./services/BrowserProfileService.js"
 import type { ConnectedBrowsersService } from "./services/ConnectedBrowsersService.js";
 import type { ModelInfoService } from "./services/ModelInfoService.js";
 import type { NetworkBindingService } from "./services/NetworkBindingService.js";
+import type { OhMyRouterBenchmarkService } from "./services/OhMyRouterBenchmarkService.js";
 import type { ServerSettingsService } from "./services/ServerSettingsService.js";
 import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
@@ -198,6 +199,8 @@ export interface AppOptions {
   browserProfileService?: BrowserProfileService;
   /** ServerSettingsService for server-wide settings */
   serverSettingsService?: ServerSettingsService;
+  /** Runs OhMyRouter model throughput benchmarks from the settings API. */
+  ohmyrouterBenchmarkService?: OhMyRouterBenchmarkService;
   /** ModelInfoService for cached model metadata (context windows, etc.) */
   modelInfoService?: ModelInfoService;
   /** SharingService for session sharing */
@@ -1306,6 +1309,7 @@ export function createApp(options: AppOptions): AppResult {
       createSettingsRoutes({
         serverSettingsService: options.serverSettingsService,
         onAllowedHostsChanged: updateAllowedHosts,
+        ohmyrouterBenchmarkService: options.ohmyrouterBenchmarkService,
       }),
     );
   }

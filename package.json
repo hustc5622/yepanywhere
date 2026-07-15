@@ -7,6 +7,7 @@
     "setup-vapid": "tsx scripts/setup-vapid.ts",
     "codex:protocol:update": "node scripts/update-codex-protocol.mjs",
     "codex:protocol:check": "node scripts/update-codex-protocol.mjs --check",
+    "benchmark:ohmyrouter": "tsx scripts/benchmark-ohmyrouter.ts",
     "deploy": "scripts/deploy.sh",
     "launchd:install": "scripts/install-launchagents.sh",
     "launchd:uninstall": "scripts/uninstall-launchagents.sh",
