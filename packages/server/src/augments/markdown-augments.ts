@@ -69,7 +69,80 @@ export async function renderMarkdownToHtml(markdown: string): Promise<string> {
   if (!markdown.trim()) {
     return "";
   }
-  return cachedRenderMarkdownToHtml(markdown);
+  return cachedRenderMarkdownToHtml(normalizeWrappingTextFence(markdown));
+}
+
+/**
+ * Repair a common LLM markdown mistake: wrapping a copyable prompt in a
+ * three-backtick `text` block while that prompt itself contains fenced code.
+ *
+ * CommonMark cannot nest fences of the same length, so the first inner plain
+ * closing fence ends the outer block and a trailing outer fence becomes an
+ * empty code block. We only repair the unambiguous wrapping shape where:
+ * - the first fence is a text/markdown wrapper;
+ * - the last non-empty line is its intended closing fence; and
+ * - the first same-character fence inside it has a language suffix, which
+ *   identifies an intended nested opener rather than the outer close.
+ */
+export function normalizeWrappingTextFence(markdown: string): string {
+  const lines = markdown.split("\n");
+  const wrapperPattern =
+    /^( {0,3})(`{3,}|~{3,})(text|plaintext|markdown|md)[ \t]*$/i;
+  let openingIndex = -1;
+  let openingMatch: RegExpExecArray | null = null;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? "";
+    if (/^\s*(?:`{3,}|~{3,})/.test(line)) {
+      openingMatch = wrapperPattern.exec(line);
+      openingIndex = openingMatch ? index : -1;
+      break;
+    }
+  }
+
+  if (openingIndex < 0 || !openingMatch?.[2] || !openingMatch[3]) {
+    return markdown;
+  }
+
+  let closingIndex = lines.length - 1;
+  while (closingIndex > openingIndex && !(lines[closingIndex] ?? "").trim()) {
+    closingIndex--;
+  }
+
+  const openingFence = openingMatch[2];
+  const fenceChar = openingFence[0];
+  if (!fenceChar) {
+    return markdown;
+  }
+  const closingMatch = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(
+    lines[closingIndex] ?? "",
+  );
+  if (closingMatch?.[2] !== openingFence) {
+    return markdown;
+  }
+
+  let firstInteriorFenceHasLanguage = false;
+  let maxInteriorFenceLength = 0;
+  for (let index = openingIndex + 1; index < closingIndex; index++) {
+    const match = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(lines[index] ?? "");
+    if (!match?.[2] || match[2][0] !== fenceChar) continue;
+
+    if (maxInteriorFenceLength === 0) {
+      firstInteriorFenceHasLanguage = (match[3]?.trim().length ?? 0) > 0;
+    }
+    maxInteriorFenceLength = Math.max(maxInteriorFenceLength, match[2].length);
+  }
+
+  if (!firstInteriorFenceHasLanguage) {
+    return markdown;
+  }
+
+  const repairedFence = fenceChar.repeat(
+    Math.max(openingFence.length, maxInteriorFenceLength) + 1,
+  );
+  lines[openingIndex] = `${openingMatch[1]}${repairedFence}${openingMatch[3]}`;
+  lines[closingIndex] = `${closingMatch[1]}${repairedFence}`;
+  return lines.join("\n");
 }
 
 export function extractTaskNotificationResult(content: unknown): string | null {
