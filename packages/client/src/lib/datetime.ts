@@ -46,14 +46,10 @@ export function formatSmartTime(
   return `${formatFullDate(date)} ${time}`;
 }
 
-/** "昨天" / "Yesterday" / "Ayer" / etc. — translated standalone. */
+/** "昨天" / "Yesterday" — translated standalone. */
 const YESTERDAY: Record<Locale, string> = {
   en: "Yesterday",
   "zh-CN": "昨天",
-  ja: "昨日",
-  es: "Ayer",
-  de: "Gestern",
-  fr: "Hier",
 };
 
 function startOfDay(d: Date): Date {
@@ -69,17 +65,15 @@ function formatTime(date: Date, locale: Locale): string {
   }).format(date);
 }
 
-/** "周一" / "Mon" / "lun." — short weekday name in the user's locale. */
+/** "周一" / "Mon" — short weekday name in the user's locale. */
 function formatWeekday(date: Date, locale: Locale): string {
   return new Intl.DateTimeFormat(locale, { weekday: "short" }).format(date);
 }
 
-/** "5月20日" / "May 20" / "20 mai" — month + day, locale-formatted. */
+/** "5月20日" / "May 20" — month + day, locale-formatted. */
 function formatMonthDay(date: Date, locale: Locale): string {
-  // CJK locales render "5月20日" with month: "long"; western locales prefer
-  // "May 20" / "20 mai" with month: "short".
-  const month: "long" | "short" =
-    locale === "zh-CN" || locale === "ja" ? "long" : "short";
+  // Chinese renders "5月20日" with month: "long"; English uses "May 20".
+  const month: "long" | "short" = locale === "zh-CN" ? "long" : "short";
   return new Intl.DateTimeFormat(locale, {
     month,
     day: "numeric",

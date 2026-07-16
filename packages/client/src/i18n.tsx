@@ -9,14 +9,7 @@ import {
 import enMessages from "./i18n/en.json";
 import { UI_KEYS } from "./lib/storageKeys";
 
-export const SUPPORTED_LOCALES = [
-  "en",
-  "zh-CN",
-  "es",
-  "fr",
-  "de",
-  "ja",
-] as const;
+export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 
 const DEFAULT_LOCALE: Locale = "en";
@@ -28,10 +21,6 @@ type MessageKey = keyof Messages;
 const localeLoaders: Record<Locale, () => Promise<Partial<Messages>>> = {
   en: async () => defaultMessages,
   "zh-CN": async () => (await import("./i18n/zh-CN.json")).default,
-  es: async () => (await import("./i18n/es.json")).default,
-  fr: async () => (await import("./i18n/fr.json")).default,
-  de: async () => (await import("./i18n/de.json")).default,
-  ja: async () => (await import("./i18n/ja.json")).default,
 };
 
 interface I18nContextValue {
@@ -54,10 +43,6 @@ function detectLocale(): Locale {
       : null;
   if (isLocale(stored)) return stored;
   if (navigator.language.toLowerCase().startsWith("zh")) return "zh-CN";
-  if (navigator.language.toLowerCase().startsWith("es")) return "es";
-  if (navigator.language.toLowerCase().startsWith("fr")) return "fr";
-  if (navigator.language.toLowerCase().startsWith("de")) return "de";
-  if (navigator.language.toLowerCase().startsWith("ja")) return "ja";
   return DEFAULT_LOCALE;
 }
 
