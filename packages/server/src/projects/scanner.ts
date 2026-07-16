@@ -318,6 +318,7 @@ export class ProjectScanner {
   private cloneProject(project: Project): Project {
     return {
       ...project,
+      isRemoteProject: this.isRemoteProjectPath(project.path),
       mergedSessionDirs: project.mergedSessionDirs
         ? [...project.mergedSessionDirs]
         : undefined,
@@ -325,6 +326,17 @@ export class ProjectScanner {
       hasGeminiSessions: project.hasGeminiSessions,
       hasOpenCodeSessions: project.hasOpenCodeSessions,
     };
+  }
+
+  /**
+   * Remote Claude projects are working copies kept in the conventional
+   * `projects` directory below a configured executor's shared local root.
+   * Derive this from settings so the UI never needs a machine-specific path.
+   */
+  private isRemoteProjectPath(projectPath: string): boolean {
+    return this.remoteExecutors.some((executor) =>
+      isLocalPathWithin(projectPath, join(executor.localRoot, "projects")),
+    );
   }
 
   private handleFileChange(event: FileChangeEvent): void {
@@ -735,7 +747,7 @@ export class ProjectScanner {
       sessionDir = this.getClaudeSessionDirForProject(projectPath);
     }
 
-    return {
+    return this.cloneProject({
       id: resolvedProjectId as UrlProjectId,
       path: projectPath,
       name: basename(projectPath),
@@ -748,7 +760,7 @@ export class ProjectScanner {
       activeExternalCount: 0,
       lastActivity: null,
       provider,
-    };
+    });
   }
 
   /**

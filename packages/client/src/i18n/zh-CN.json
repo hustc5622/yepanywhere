@@ -134,6 +134,7 @@
   "projectSelectorChangeProject": "切换项目",
   "projectSelectorSelectProject": "选择项目",
   "projectSelectorSessionsCount": "{count} 个会话",
+  "remoteProjectLabel": "远端 Claude Code 项目",
   "loginLoading": "加载中...",
   "loginSetupSubtitle": "创建账号后即可开始使用",
   "loginSubtitle": "输入密码以继续",

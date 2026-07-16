@@ -799,6 +799,22 @@ h2 {
   white-space: nowrap;
 }
 
+.project-card__name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.remote-project-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  line-height: 1;
+  vertical-align: -0.125em;
+}
+
 .project-card__attention-badge {
   display: inline-flex;
   align-items: center;
@@ -1788,6 +1804,9 @@ h2 {
 
 /* Project breadcrumb in session header */
 .project-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   font-size: var(--font-size-sm);
   color: var(--text-muted);
   text-decoration: none;
@@ -11880,6 +11899,13 @@ button.context-usage-indicator--button:focus-visible {
   white-space: nowrap;
 }
 
+.project-selector-static-title,
+.project-selector-name-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 /* Only truncate on mobile where space is limited */
 @media (max-width: 768px) {
   .project-selector-text {
@@ -11942,6 +11968,10 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .project-selector-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-primary);
   font-weight: 500;
   font-size: var(--font-size-sm);

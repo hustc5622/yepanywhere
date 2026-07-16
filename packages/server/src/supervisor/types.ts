@@ -49,6 +49,8 @@ export interface Project {
   activeExternalCount: number; // sessions controlled by external processes
   lastActivity: string | null; // ISO timestamp of most recent session update
   provider: ProviderName; // which provider's sessions are in this project
+  /** Project lives under a configured remote executor's shared projects root. */
+  isRemoteProject?: boolean;
 }
 
 // Session ownership - who controls the session

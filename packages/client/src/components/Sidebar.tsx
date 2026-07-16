@@ -13,6 +13,7 @@ import { useI18n } from "../i18n";
 import { activityBus } from "../lib/activityBus";
 import { formatSmartTime } from "../lib/datetime";
 import { ProjectGitStatusInline } from "./ProjectGitStatusInline";
+import { RemoteProjectIcon } from "./RemoteProjectIcon";
 import { SessionListItem } from "./SessionListItem";
 import {
   SidebarIcons,
@@ -606,7 +607,8 @@ export function Sidebar({
         );
         const runningLabel = t("agentsRunning");
         const unreadLabel = t("globalSessionsStatusUnread");
-        const gitStatus = projectsById.get(group.projectId)?.gitStatus;
+        const project = projectsById.get(group.projectId);
+        const gitStatus = project?.gitStatus;
 
         return (
           <div
@@ -632,6 +634,9 @@ export function Sidebar({
                     <span className="sidebar-project-name">
                       {group.projectName}
                     </span>
+                    <RemoteProjectIcon
+                      isRemoteProject={project?.isRemoteProject}
+                    />
                     <ProjectGitStatusInline
                       status={gitStatus}
                       variant="sidebar"

@@ -214,5 +214,7 @@ export interface Project {
   activeOwnedCount: number;
   activeExternalCount: number;
   lastActivity: string | null;
+  /** Working copy used through a configured remote Claude executor. */
+  isRemoteProject?: boolean;
   gitStatus?: ProjectGitStatusSummary | null;
 }

@@ -490,6 +490,7 @@ describe("ProjectScanner shared Claude storage", () => {
         path: localProject,
         sessionDir,
         sessionCount: 1,
+        isRemoteProject: true,
       }),
     ]);
     await expect(
@@ -531,6 +532,45 @@ describe("ProjectScanner shared Claude storage", () => {
     ).resolves.toMatchObject({
       path: localProject,
       sessionDir: join(projectsDir, encodePath("/mnt/utm/projects/new demo")),
+      isRemoteProject: true,
+    });
+  });
+
+  it("marks only same-name copies inside the configured remote projects root", async () => {
+    const localRoot = join(tmpdir(), `scanner-shared-${randomUUID()}`);
+    const remoteCopy = join(localRoot, "projects", "yepanywhere");
+    const localCopy = join(localRoot, "work", "yepanywhere");
+    tempDirs.push(localRoot);
+    await Promise.all([
+      mkdir(remoteCopy, { recursive: true }),
+      mkdir(localCopy, { recursive: true }),
+    ]);
+
+    const scanner = new ProjectScanner({
+      projectsDir: join(localRoot, "claude", "projects"),
+      remoteExecutors: [
+        {
+          host: "utm",
+          localRoot,
+          remoteRoot: "/mnt/utm",
+        },
+      ],
+      enableCodex: false,
+      enableGemini: false,
+      enableOpenCode: false,
+    });
+
+    await expect(
+      scanner.getOrCreateProject(encodeProjectId(remoteCopy), "claude"),
+    ).resolves.toMatchObject({
+      name: "yepanywhere",
+      isRemoteProject: true,
+    });
+    await expect(
+      scanner.getOrCreateProject(encodeProjectId(localCopy), "claude"),
+    ).resolves.toMatchObject({
+      name: "yepanywhere",
+      isRemoteProject: false,
     });
   });
 });

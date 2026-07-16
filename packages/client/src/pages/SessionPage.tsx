@@ -19,6 +19,7 @@ import { ModelSwitchModal } from "../components/ModelSwitchModal";
 import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { QuestionAnswerPanel } from "../components/QuestionAnswerPanel";
 import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
+import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
@@ -1664,6 +1665,9 @@ function SessionPageContent({
                   className="project-breadcrumb"
                   title={project.name}
                 >
+                  <RemoteProjectIcon
+                    isRemoteProject={project.isRemoteProject}
+                  />
                   {project.name.length > 12
                     ? `${project.name.slice(0, 12)}...`
                     : project.name}

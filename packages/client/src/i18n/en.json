@@ -134,6 +134,7 @@
   "projectSelectorChangeProject": "Change project",
   "projectSelectorSelectProject": "Select Project",
   "projectSelectorSessionsCount": "{count} sessions",
+  "remoteProjectLabel": "Remote Claude Code project",
   "loginLoading": "Loading...",
   "loginSetupSubtitle": "Create your account to get started",
   "loginSubtitle": "Enter your password to continue",
