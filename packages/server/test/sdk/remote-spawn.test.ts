@@ -1,5 +1,8 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
 
@@ -14,6 +17,7 @@ import {
   buildSshArgs,
   quoteShell,
   runRemoteCommand,
+  testRemoteExecutor,
   translateSharedPath,
 } from "../../src/sdk/remote-spawn.js";
 
@@ -35,6 +39,15 @@ function fakeChild(): ChildProcess {
     exitCode: null,
     killed: false,
     kill: vi.fn(() => true),
+  });
+  return child;
+}
+
+function completedChild(stdout = "", exitCode = 0): ChildProcess {
+  const child = fakeChild();
+  queueMicrotask(() => {
+    if (stdout) child.stdout?.emit("data", Buffer.from(stdout));
+    child.emit("exit", exitCode);
   });
   return child;
 }
@@ -124,6 +137,53 @@ describe("remote Claude spawn", () => {
       spawnOptions,
     );
     expect(built.remoteCommand).not.toContain("CLAUDE_CONFIG_DIR");
+  });
+
+  it("does not reject synthetic remote mount permissions", async () => {
+    const localRoot = await mkdtemp(join(tmpdir(), "yep-shared-root-"));
+    const localProjectsDir = join(localRoot, "claude", "projects");
+    await mkdir(localProjectsDir, { recursive: true });
+    await chmod(localProjectsDir, 0o700);
+
+    try {
+      for (const [stdout, exitCode] of [
+        ["", 0],
+        ["/home/yueyuan", 0],
+        ["2.1.202 (Claude Code)\n", 0],
+        ["", 0],
+        ["", 0],
+        ["777\n", 0],
+        ["", 0],
+        ["", 0],
+        ["", 0],
+      ] as const) {
+        spawnMock.mockImplementationOnce(() =>
+          completedChild(stdout, exitCode),
+        );
+      }
+
+      const result = await testRemoteExecutor({
+        host: executor.host,
+        user: executor.user,
+        localRoot,
+        remoteRoot: "/mnt/utm",
+        claudePath: executor.claudePath,
+        sessionStorage: {
+          mode: "shared",
+          localProjectsDir,
+          remoteProjectsDir: "/mnt/utm/claude/projects",
+        },
+      });
+
+      expect(result).toMatchObject({
+        success: true,
+        localProjectsDirPermissionsSecure: true,
+        remoteProjectsDirPermissionsSecure: false,
+        error: undefined,
+      });
+    } finally {
+      await rm(localRoot, { recursive: true, force: true });
+    }
   });
 
   it("preserves split UTF-8 code points and trailing newlines", async () => {

@@ -386,11 +386,6 @@ export class ClaudeProvider implements AgentProvider {
           "The shared Claude projects directory is unavailable remotely",
         );
       }
-      if (!remoteStatus.remoteProjectsDirPermissionsSecure) {
-        throw new Error(
-          "The remote shared Claude projects directory must use 0700 or 0750 permissions",
-        );
-      }
       if (!remoteStatus.remoteSessionStoreLinked) {
         throw new Error(
           "Remote ~/.claude/projects is not linked to the configured shared projects directory",

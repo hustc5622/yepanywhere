@@ -1,6 +1,6 @@
 # Claude Code 共享 Session 直存方案：现状、修改计划与测试流程
 
-> 状态：实施前方案报告；实机核查日期：2026-07-16；当前目标环境：macOS Yep Anywhere + UTM Ubuntu VM + Claude Code 2.1.202
+> 状态：已按最小 shared 方案实施；实机核查日期：2026-07-16；当前目标环境：macOS Yep Anywhere + UTM Ubuntu VM + Claude Code 2.1.202。VM 使用 `~/.claude/projects -> /mnt/utm/claude/projects` 软链接，Yep 在 macOS 侧直接扫描同一份 JSONL；未采用二次 bindfs 或逐 turn SSH replica。
 
 ## 1. 结论摘要
 

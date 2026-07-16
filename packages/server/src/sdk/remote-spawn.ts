@@ -372,11 +372,12 @@ export async function testRemoteExecutor(
   if (remoteProjectsDirAvailable === false) {
     errors.push("Shared Claude projects directory is not read/write remotely");
   }
-  if (remoteProjectsDirPermissionsSecure === false) {
-    errors.push(
-      "Remote shared Claude projects directory permissions are too broad (expected 0700 or 0750)",
-    );
-  }
+  // Do not reject a shared store based on the mode reported by the remote
+  // mount. Filesystems such as bindfs can intentionally expose synthetic
+  // permissions (for example 0777) even when the authoritative directory on
+  // the Yep host is 0700. The local mode check above protects the persisted
+  // transcript, while the remote checks still require a read/write directory,
+  // a linked ~/.claude/projects, and credentials outside the shared root.
   if (remoteSessionStoreLinked === false) {
     errors.push(
       "Remote ~/.claude/projects does not point at the configured shared projects directory",

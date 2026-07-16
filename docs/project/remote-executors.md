@@ -88,7 +88,7 @@ UTM:   /mnt/utm/projects/yepanywhere
 - UTM 使用 QEMU backend，并把 `/Users/yueyuan/Desktop/file/UTM` 作为 VirtFS/9p 导出，mount tag 为 `share`
 - 原始 9p 共享已通过 `/etc/fstab` 持久挂载到 `/mnt/utm-raw`，再由 `bindfs` 映射到 Claude 使用的 `/mnt/utm`
 - `mnt-utm.mount` 与 `mnt-utm\x2draw.mount` 均由 `remote-fs.target` 自动拉起，当前状态为 `active`
-- 当前通用 `/mnt/utm` 视图对 VM 普通用户显示为目录 `777`、普通文件 `666`；正式启用 transcript 前必须为 `claude/projects` 建立更严格的专用权限映射
+- 当前通用 `/mnt/utm` 视图对 VM 普通用户显示为目录 `777`、普通文件 `666`；当前单用户 VM 以 macOS 侧 `claude/projects` 的 `0700` 顶层目录作为宿主机安全边界，多用户 VM 仍应建立权限更严格的专用映射
 - 已验证 VM 创建的文件可立即在 macOS 读取，Mac 与 Linux 两侧 `README.md` 的 SHA-256 一致
 
 当前仓库 `/Users/yueyuan/Desktop/work/before_work/yepanywhere` 不在导出的共享根目录下；后续交给 Claude 的项目应创建在 `/Users/yueyuan/Desktop/file/UTM` 下。
@@ -109,7 +109,7 @@ share /mnt/utm-raw 9p trans=virtio,version=9p2000.L,rw,access=any,_netdev,nofail
 /mnt/utm-raw /mnt/utm fuse.bindfs force-user=yueyuan,force-group=yueyuan,perms=a+rwX,create-as-mounter,create-with-perms=a+rwX,chown-ignore,chgrp-ignore,allow_other,_netdev,nofail,x-systemd.requires-mounts-for=/mnt/utm-raw 0 0
 ```
 
-单独使用 9p 的 `access=any` 仍会让 Linux 根据 macOS 文件的 UID/GID 和 mode 做本地权限检查，因此 macOS 新建的默认 `0644` 文件无法由 UID 1000 的 `yueyuan` 修改。`bindfs` 让 Claude 看到稳定的 guest owner 和读写权限，同时不把所有普通源码文件误标为可执行。现有 `allow_other` 配合 `a+rwX` 意味着 VM 内其他用户也能读写该视图，不能直接作为正式 transcript 权限模型。shared storage 的本地 projects 目录必须为 `0700` 或 `0750`，JSONL 应为 `0600` 或 `0640`。
+单独使用 9p 的 `access=any` 仍会让 Linux 根据 macOS 文件的 UID/GID 和 mode 做本地权限检查，因此 macOS 新建的默认 `0644` 文件无法由 UID 1000 的 `yueyuan` 修改。`bindfs` 让 Claude 看到稳定的 guest owner 和读写权限，同时不把所有普通源码文件误标为可执行。当前配置中的 `allow_other` 配合 `a+rwX` 意味着 VM 内其他用户也能读写该视图，因此只适用于当前单用户 VM；如果 VM 增加其他登录用户，应改为专用的受限映射。宿主机 shared storage 的本地 projects 顶层目录必须为 `0700` 或 `0750`，从 macOS 侧阻止其他本地用户遍历 transcript。
 
 可用以下命令做非干扰式检查：
 
@@ -155,4 +155,4 @@ ssh -T yueyuan@192.168.64.4 "test -r /mnt/utm && test -w /mnt/utm"
 ssh -T yueyuan@192.168.64.4 'test "$HOME/.claude/projects" -ef /mnt/utm/claude/projects'
 ```
 
-设置页的 Test Connection 还会检查本地/远端 projects 目录、`~/.claude/projects` 是否指向共享 store、凭据目录是否留在共享根外，以及本地目录权限是否不宽于 `0750`。真正的端到端验证应在共享目录挂载并放入项目后，再创建一条 Claude session；这会实际调用 Claude，因此不属于默认静态检查。
+设置页的 Test Connection 还会检查本地/远端 projects 目录、`~/.claude/projects` 是否指向共享 store、凭据目录是否留在共享根外，以及宿主机本地目录权限是否不宽于 `0750`。远端挂载报告的 mode 仅用于诊断，不作为阻断条件，因为 bindfs 等文件系统可能在宿主目录为 `0700` 时仍展示合成的 `0777`。真正的端到端验证应在共享目录挂载并放入项目后，再创建一条 Claude session；这会实际调用 Claude，因此不属于默认静态检查。
