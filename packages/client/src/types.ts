@@ -166,11 +166,21 @@ export interface Message {
 // Type aliases for session types
 import type {
   AppSessionSummary,
+  ProviderName as ProviderNameType,
   SessionOwnership as SessionOwnershipType,
 } from "@yep-anywhere/shared";
 
 export type SessionStatus = SessionOwnershipType;
 export type SessionSummary = AppSessionSummary;
+
+/** Router state used while entering or deep-linking to a session page. */
+export interface SessionNavigationState {
+  initialStatus?: Extract<SessionOwnershipType, { owner: "self" }>;
+  initialTitle?: string;
+  initialProvider?: ProviderNameType;
+  targetMessageId?: string;
+  targetBranchId?: string;
+}
 
 /**
  * Full session with messages.

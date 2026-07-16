@@ -35,7 +35,7 @@ describe("SessionMetadataService", () => {
         "utf-8",
       );
       const state = JSON.parse(content);
-      expect(state.version).toBe(1);
+      expect(state.version).toBe(2);
       expect(state.sessions["session-1"]).toBeDefined();
       expect(state.sessions["session-1"].customTitle).toBe("My Custom Title");
     });
@@ -271,8 +271,21 @@ describe("SessionMetadataService", () => {
 
       const reloaded = new SessionMetadataService({ dataDir: testDir });
       await reloaded.initialize();
-      expect(reloaded.getMetadata("temporary-id")).toBeUndefined();
+      expect(reloaded.getCanonicalSessionId("temporary-id")).toBe("durable-id");
+      expect(reloaded.getMetadata("temporary-id")).toEqual(
+        reloaded.getMetadata("durable-id"),
+      );
       expect(reloaded.getMetadata("durable-id")?.createdBy).toBe("yep");
+    });
+
+    it("persists an ID alias even when no metadata exists yet", async () => {
+      await service.initialize();
+      await service.remapSessionId("temporary-id", "durable-id");
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+
+      expect(reloaded.getCanonicalSessionId("temporary-id")).toBe("durable-id");
     });
 
     it("redirects metadata writes that race after the ID change", async () => {

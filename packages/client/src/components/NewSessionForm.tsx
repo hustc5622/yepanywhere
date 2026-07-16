@@ -56,7 +56,7 @@ import {
   requireStartedHistoricalEdit,
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
-import type { PermissionMode } from "../types";
+import type { PermissionMode, SessionNavigationState } from "../types";
 import { ClaudeUsageCard, CodexUsageCard } from "./CodexUsageCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
@@ -1220,12 +1220,13 @@ export function NewSessionForm({
       // without waiting for getSession to complete
       // Also pass initial message as optimistic title (session name = first message)
       // Pass provider so provider-specific controls can render immediately
+      const navigationState: SessionNavigationState = {
+        initialStatus: { owner: "self", processId },
+        initialTitle: trimmedMessage,
+        initialProvider: selectedProvider ?? undefined,
+      };
       navigate(`${basePath}/projects/${projectId}/sessions/${sessionId}`, {
-        state: {
-          initialStatus: { state: "owned", processId },
-          initialTitle: trimmedMessage,
-          initialProvider: selectedProvider,
-        },
+        state: navigationState,
       });
     } catch (err) {
       console.error("Failed to start session:", err);

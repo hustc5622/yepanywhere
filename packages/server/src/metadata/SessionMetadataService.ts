@@ -40,11 +40,13 @@ export interface SessionMetadata {
 export interface SessionMetadataState {
   /** Map of sessionId -> metadata */
   sessions: Record<string, SessionMetadata>;
+  /** Durable mapping from provider bootstrap IDs to their final session IDs. */
+  sessionIdAliases?: Record<string, string>;
   /** Schema version for future migrations */
   version: number;
 }
 
-const CURRENT_VERSION = 1;
+const CURRENT_VERSION = 2;
 
 export interface SessionMetadataServiceOptions {
   /** Directory to store metadata state (defaults to ~/.yep-anywhere) */
@@ -55,12 +57,7 @@ export class SessionMetadataService {
   private state: SessionMetadataState;
   private dataDir: string;
   private filePath: string;
-  /**
-   * Providers may initially expose a temporary session ID and replace it with
-   * the durable ID after their init event arrives. Keep that relationship in
-   * memory so metadata writes racing with the init event land on the durable
-   * session instead of recreating an orphaned temporary entry.
-   */
+  /** Providers may replace a temporary bootstrap ID with a durable ID. */
   private sessionIdAliases = new Map<string, string>();
   private savePromise: Promise<void> | null = null;
   private pendingSave = false;
@@ -73,7 +70,11 @@ export class SessionMetadataService {
         ".yep-anywhere",
       );
     this.filePath = path.join(this.dataDir, "session-metadata.json");
-    this.state = { sessions: {}, version: CURRENT_VERSION };
+    this.state = {
+      sessions: {},
+      sessionIdAliases: {},
+      version: CURRENT_VERSION,
+    };
   }
 
   /**
@@ -95,15 +96,22 @@ export class SessionMetadataService {
 
       // Validate and migrate if needed
       if (parsed.version === CURRENT_VERSION) {
-        this.state = parsed;
+        this.state = {
+          ...parsed,
+          sessionIdAliases: parsed.sessionIdAliases ?? {},
+        };
       } else {
-        // Future: handle migrations here
+        // Version 1 had no durable session ID aliases.
         this.state = {
           sessions: parsed.sessions ?? {},
+          sessionIdAliases: parsed.sessionIdAliases ?? {},
           version: CURRENT_VERSION,
         };
         await this.save();
       }
+      this.sessionIdAliases = new Map(
+        Object.entries(this.state.sessionIdAliases ?? {}),
+      );
     } catch (error) {
       // File doesn't exist or is invalid - start fresh
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -112,7 +120,12 @@ export class SessionMetadataService {
           error,
         );
       }
-      this.state = { sessions: {}, version: CURRENT_VERSION };
+      this.state = {
+        sessions: {},
+        sessionIdAliases: {},
+        version: CURRENT_VERSION,
+      };
+      this.sessionIdAliases.clear();
     }
   }
 
@@ -294,10 +307,12 @@ export class SessionMetadataService {
         this.sessionIdAliases.set(alias, resolvedNewSessionId);
       }
     }
+    this.state.sessionIdAliases = Object.fromEntries(this.sessionIdAliases);
 
     const oldMetadata = this.state.sessions[resolvedOldSessionId];
     const newMetadata = this.state.sessions[resolvedNewSessionId];
     if (!oldMetadata && !newMetadata) {
+      await this.save();
       return;
     }
 
@@ -400,6 +415,11 @@ export class SessionMetadataService {
       resolved = next;
     }
     return resolved;
+  }
+
+  /** Resolve a temporary provider ID to the durable ID used on disk. */
+  getCanonicalSessionId(sessionId: string): string {
+    return this.resolveSessionId(sessionId);
   }
 
   /**

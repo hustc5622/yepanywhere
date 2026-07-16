@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
 import { describe, expect, it, vi } from "vitest";
 import { SessionArchiveService } from "../../src/archive/index.js";
+import { SessionMetadataService } from "../../src/metadata/SessionMetadataService.js";
 import { encodeProjectId } from "../../src/projects/paths.js";
 import {
   type SessionsDeps,
@@ -187,6 +188,67 @@ function createSummary(): SessionSummary {
 }
 
 describe("Sessions metadata route", () => {
+  it("loads the durable session when a URL still contains its temporary ID", async () => {
+    const testDir = join(tmpdir(), `session-alias-route-${randomUUID()}`);
+    const project = createProject();
+    const metadata = new SessionMetadataService({ dataDir: testDir });
+    const getSession = vi.fn(async (sessionId: string) =>
+      sessionId === "durable-id"
+        ? {
+            summary: {
+              ...createSummary(),
+              id: "durable-id",
+              provider: "claude" as const,
+              model: "claude-sonnet-5",
+            },
+            data: {
+              provider: "claude" as const,
+              session: { messages: [] },
+            },
+            messagesAlreadyProjected: true,
+          }
+        : null,
+    );
+
+    try {
+      await metadata.initialize();
+      await metadata.remapSessionId("temporary-id", "durable-id");
+
+      const routes = createSessionsRoutes({
+        supervisor: {} as SessionsDeps["supervisor"],
+        runtimeController: {
+          getProcessSnapshotForSession: vi.fn(async () => null),
+          wasEverOwned: vi.fn(async () => true),
+        } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+        } as unknown as SessionsDeps["scanner"],
+        readerFactory: vi.fn(
+          () => ({ getSession }) as unknown as ISessionReader,
+        ),
+        sessionMetadataService: metadata,
+      });
+
+      const response = await routes.request(
+        `/projects/${project.id}/sessions/temporary-id`,
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        session: { id: "durable-id", model: "claude-sonnet-5" },
+        messages: [],
+      });
+      expect(getSession).toHaveBeenCalledWith(
+        "durable-id",
+        project.id,
+        undefined,
+        expect.any(Object),
+      );
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("resolves metadata across providers for mixed-provider projects", async () => {
     const project = createProject();
     const summary = createSummary();

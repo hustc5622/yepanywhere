@@ -1495,7 +1495,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   //   ?branchId=<id> - derived branch id to render
   routes.get("/projects/:projectId/sessions/:sessionId", async (c) => {
     const projectId = c.req.param("projectId");
-    const sessionId = c.req.param("sessionId");
+    const requestedSessionId = c.req.param("sessionId");
     const afterMessageId = c.req.query("afterMessageId");
     const tailCompactionsParam = c.req.query("tailCompactions");
     const beforeMessageId = c.req.query("beforeMessageId");
@@ -1524,8 +1524,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     // Check if session is actively owned by a process
-    const process =
-      await runtimeController.getProcessSnapshotForSession(sessionId);
+    let process =
+      await runtimeController.getProcessSnapshotForSession(requestedSessionId);
+    const sessionId =
+      process?.sessionId ??
+      deps.sessionMetadataService?.getCanonicalSessionId?.(
+        requestedSessionId,
+      ) ??
+      requestedSessionId;
+    if (!process && sessionId !== requestedSessionId) {
+      process = await runtimeController.getProcessSnapshotForSession(sessionId);
+    }
     const bridgeView = await getBridgeSessionView(deps, sessionId);
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;

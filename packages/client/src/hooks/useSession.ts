@@ -327,6 +327,13 @@ export function useSession(
   // Handle initial load completion from useSessionMessages
   const handleLoadComplete = useCallback(
     (result: SessionLoadResult) => {
+      // A durable provider ID may arrive while the client was disconnected.
+      // Let REST canonicalization repair the URL even when the live ID-change
+      // event was missed.
+      if (result.session.id && result.session.id !== sessionId) {
+        setActualSessionId(result.session.id);
+      }
+
       // Only update status from REST if we don't already have an owned status from navigation.
       // This prevents a race condition where:
       // 1. Session created with initialStatus = {owner: "self"}
@@ -374,7 +381,7 @@ export function useSession(
         setSlashCommands(result.slashCommands.map((c) => c.name));
       }
     },
-    [applyServerModeUpdate],
+    [applyServerModeUpdate, sessionId],
   );
 
   // Handle initial load error

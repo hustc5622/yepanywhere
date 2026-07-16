@@ -67,7 +67,7 @@ import {
   supportsHistoricalMessageEditing,
 } from "../lib/sessionBranching";
 import { generateUUID } from "../lib/uuid";
-import type { Message, Session } from "../types";
+import type { Message, Session, SessionNavigationState } from "../types";
 import { getSessionDisplayTitle } from "../utils";
 
 export function SessionPage() {
@@ -183,15 +183,7 @@ function SessionPageContent({
   // Get initial status and title from navigation state (passed by NewSessionPage)
   // This allows SSE to connect immediately and show optimistic title without waiting for getSession
   // Also get provider so provider-specific controls can render immediately
-  const navState = location.state as {
-    initialStatus?: { owner: "self"; processId: string };
-    initialTitle?: string;
-    initialProvider?: ProviderName;
-    /** Message id to scroll to + highlight (set by search deep-links). */
-    targetMessageId?: string;
-    /** Branch prompt to focus after cross-session branch navigation. */
-    targetBranchId?: string;
-  } | null;
+  const navState = location.state as SessionNavigationState | null;
   const initialStatus = navState?.initialStatus;
   const initialTitle = navState?.initialTitle;
   const initialProvider = navState?.initialProvider;
