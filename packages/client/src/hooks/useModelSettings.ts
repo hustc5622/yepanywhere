@@ -18,13 +18,10 @@ export type { EffortLevel, ModelOption, ThinkingMode, ThinkingOption };
 
 export const MODEL_OPTIONS: { value: ModelOption; label: string }[] = [
   { value: "default", label: "Default" },
-  { value: "best", label: "Best" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "sonnet[1m]", label: "Sonnet 1M" },
-  { value: "opus", label: "Opus" },
-  { value: "opus[1m]", label: "Opus 1M" },
-  { value: "haiku", label: "Haiku" },
-  { value: "opusplan", label: "Opus Plan" },
+  { value: "sonnet", label: "Sonnet 5" },
+  { value: "claude-fable-5[1m]", label: "Fable 5 (1M)" },
+  { value: "opus", label: "Opus 4.8" },
+  { value: "haiku", label: "Haiku 4.5" },
 ];
 
 export const EFFORT_LEVEL_OPTIONS: {
@@ -35,13 +32,27 @@ export const EFFORT_LEVEL_OPTIONS: {
   { value: "low", label: "Low", description: "Fastest responses" },
   { value: "medium", label: "Medium", description: "Moderate thinking" },
   { value: "high", label: "High", description: "Deep reasoning" },
+  {
+    value: "xhigh",
+    label: "Extra High",
+    description: "Extra-deep reasoning",
+  },
   { value: "max", label: "Max", description: "Maximum effort" },
 ];
 
 function loadModel(): ModelOption {
   const stored = getServerScoped("model", LEGACY_KEYS.model);
-  if (stored && MODEL_OPTIONS.some((option) => option.value === stored)) {
-    return stored as ModelOption;
+  const remapped =
+    stored === "fable"
+      ? "claude-fable-5[1m]"
+      : stored === "sonnet[1m]"
+        ? "sonnet"
+        : stored === "opus[1m]" || stored === "best"
+          ? "opus"
+          : stored;
+  if (remapped && MODEL_OPTIONS.some((option) => option.value === remapped)) {
+    if (remapped !== stored) saveModel(remapped as ModelOption);
+    return remapped as ModelOption;
   }
   return "default";
 }
@@ -61,7 +72,7 @@ function loadEffortLevel(): EffortLevel {
   const stored = getServerScoped("thinkingLevel", LEGACY_KEYS.thinkingLevel);
   if (stored) {
     // Check for new effort level values
-    if (["low", "medium", "high", "max"].includes(stored)) {
+    if (["low", "medium", "high", "xhigh", "max"].includes(stored)) {
       return stored as EffortLevel;
     }
     // Migrate old thinking level values

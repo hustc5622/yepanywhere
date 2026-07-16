@@ -8378,6 +8378,10 @@ button.context-usage-indicator--button:focus-visible {
   background: var(--provider-codex);
 }
 
+.claude-usage-card .codex-usage-progress-value {
+  background: var(--provider-claude);
+}
+
 .codex-usage-reset {
   display: block;
   margin-top: var(--space-1);
@@ -11472,6 +11476,30 @@ button.context-usage-indicator--button:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
+}
+
+.filter-dropdown-button-content {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.filter-dropdown-button-content .filter-dropdown-button-label {
+  flex: 0 1 auto;
+}
+
+.filter-dropdown-button-description {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .filter-dropdown-button:hover {

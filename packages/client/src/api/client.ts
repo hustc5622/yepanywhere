@@ -369,6 +369,9 @@ export interface CodexUsageResponse {
   error: string | null;
 }
 
+/** Claude usage is normalized server-side to the same window/bucket shape. */
+export type ClaudeUsageResponse = CodexUsageResponse;
+
 export async function fetchJSON<T>(
   path: string,
   options?: RequestInit,
@@ -753,6 +756,13 @@ export const api = {
   getCodexUsage: (options?: { fresh?: boolean }) =>
     fetchJSON<CodexUsageResponse>(
       options?.fresh ? "/codex-bridge/usage?fresh=1" : "/codex-bridge/usage",
+    ),
+
+  getClaudeUsage: (options?: { fresh?: boolean }) =>
+    fetchJSON<ClaudeUsageResponse>(
+      options?.fresh
+        ? "/providers/claude/usage?fresh=1"
+        : "/providers/claude/usage",
     ),
 
   // Network binding API (runtime port/interface configuration)

@@ -103,21 +103,29 @@ function AdditionalBucket({ bucket }: { bucket: CodexUsageBucket }) {
   );
 }
 
-export function CodexUsageCard() {
+interface ProviderUsageCardProps {
+  provider: "claude" | "codex";
+  load: (options?: { fresh?: boolean }) => Promise<CodexUsageResponse>;
+}
+
+function ProviderUsageCard({ provider, load }: ProviderUsageCardProps) {
   const { t } = useI18n();
   const [response, setResponse] = useState<CodexUsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadUsage = useCallback(async (fresh = false) => {
-    setLoading(true);
-    try {
-      setResponse(await api.getCodexUsage({ fresh }));
-    } catch {
-      setResponse({ usage: null, error: "request-failed" });
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const loadUsage = useCallback(
+    async (fresh = false) => {
+      setLoading(true);
+      try {
+        setResponse(await load({ fresh }));
+      } catch {
+        setResponse({ usage: null, error: "request-failed" });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [load],
+  );
 
   useEffect(() => {
     void loadUsage();
@@ -129,10 +137,17 @@ export function CodexUsageCard() {
   );
 
   return (
-    <section className="codex-usage-card" aria-live="polite">
+    <section
+      className={`codex-usage-card ${provider === "claude" ? "claude-usage-card" : ""}`}
+      aria-live="polite"
+    >
       <div className="codex-usage-header">
         <div>
-          <h3>{t("newSessionCodexUsageTitle")}</h3>
+          <h3>
+            {provider === "claude"
+              ? t("newSessionClaudeUsageTitle")
+              : t("newSessionCodexUsageTitle")}
+          </h3>
           {usage?.planType && (
             <span className="codex-usage-plan">
               {t("newSessionCodexUsagePlan", { plan: usage.planType })}
@@ -152,7 +167,11 @@ export function CodexUsageCard() {
       </div>
 
       {loading && !usage ? (
-        <p className="codex-usage-state">{t("newSessionCodexUsageLoading")}</p>
+        <p className="codex-usage-state">
+          {provider === "claude"
+            ? t("newSessionClaudeUsageLoading")
+            : t("newSessionCodexUsageLoading")}
+        </p>
       ) : windows.length > 0 ? (
         <>
           <div className="codex-usage-windows">
@@ -173,7 +192,9 @@ export function CodexUsageCard() {
           {usage && usage.additionalBuckets.length > 0 && (
             <div className="codex-usage-additional">
               <span className="codex-usage-additional-title">
-                {t("newSessionCodexUsageAdditionalTitle")}
+                {provider === "claude"
+                  ? t("newSessionClaudeUsageAdditionalTitle")
+                  : t("newSessionCodexUsageAdditionalTitle")}
               </span>
               {usage.additionalBuckets.map((bucket) => (
                 <AdditionalBucket key={bucket.id} bucket={bucket} />
@@ -183,9 +204,19 @@ export function CodexUsageCard() {
         </>
       ) : (
         <p className="codex-usage-state">
-          {t("newSessionCodexUsageUnavailable")}
+          {provider === "claude"
+            ? t("newSessionClaudeUsageUnavailable")
+            : t("newSessionCodexUsageUnavailable")}
         </p>
       )}
     </section>
   );
+}
+
+export function CodexUsageCard() {
+  return <ProviderUsageCard provider="codex" load={api.getCodexUsage} />;
+}
+
+export function ClaudeUsageCard() {
+  return <ProviderUsageCard provider="claude" load={api.getClaudeUsage} />;
 }

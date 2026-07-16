@@ -7,7 +7,6 @@ import {
   type ContextCumulativeUsage,
   type ContextStatusResponse,
   type ContextUsage,
-  type ModelOption,
   type OpenCodeJsonObject,
   type OpenCodeModelCapabilities,
   type OpenCodeModelLimits,
@@ -576,7 +575,7 @@ interface StartSessionBody {
   documents?: string[];
   attachments?: UploadedFile[];
   mode?: PermissionMode;
-  model?: ModelOption;
+  model?: string;
   thinking?: ThinkingOption;
   /** Exact provider reasoning effort / OpenCode model variant. */
   reasoningEffort?: string;
@@ -606,7 +605,7 @@ interface StartSessionBody {
 
 interface CreateSessionBody {
   mode?: PermissionMode;
-  model?: ModelOption;
+  model?: string;
   thinking?: ThinkingOption;
   /** Exact provider reasoning effort / OpenCode model variant. */
   reasoningEffort?: string;

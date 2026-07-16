@@ -92,6 +92,8 @@ export interface ReasoningEffortInfo {
 export interface ModelInfo {
   /** Model identifier (e.g., "sonnet", "qwen2.5-coder:0.5b") */
   id: string;
+  /** Canonical provider model id resolved from an alias, when available. */
+  resolvedModel?: string;
   /** Human-readable name */
   name: string;
   /** Description of the model's capabilities (optional) */
@@ -104,6 +106,14 @@ export interface ModelInfo {
   >;
   /** Provider-recommended reasoning effort for this model. */
   defaultReasoningEffort?: string;
+  /** Whether the provider reports named effort controls for this model. */
+  supportsEffort?: boolean;
+  /** Whether the model supports provider-managed adaptive thinking. */
+  supportsAdaptiveThinking?: boolean;
+  /** Whether the model supports the provider's fast service mode. */
+  supportsFastMode?: boolean;
+  /** Whether the model supports the provider's automatic model mode. */
+  supportsAutoMode?: boolean;
   /** Model size in bytes (for local models) */
   size?: number;
   /** Context window size in tokens (for local models) */
@@ -282,6 +292,7 @@ export interface NewSessionDefaults {
  * - "best": Use Claude Code's best available model alias
  * - "sonnet": Claude Sonnet
  * - "sonnet[1m]": Claude Sonnet with 1M context when available
+ * - "claude-fable-5[1m]": Claude Fable 5 with its advertised 1M context
  * - "opus": Claude Opus
  * - "opus[1m]": Claude Opus with 1M context when available
  * - "haiku": Claude Haiku
@@ -292,6 +303,7 @@ export type ModelOption =
   | "best"
   | "sonnet"
   | "sonnet[1m]"
+  | "claude-fable-5[1m]"
   | "opus"
   | "opus[1m]"
   | "haiku"
@@ -316,7 +328,7 @@ export function resolveModel(
  * Effort level for Claude's response quality.
  * Maps to the SDK's effort parameter.
  */
-export type EffortLevel = "low" | "medium" | "high" | "max";
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
  * Thinking mode for the 3-way toggle.
@@ -331,7 +343,7 @@ export type ThinkingMode = "off" | "auto" | "on";
  * Wire format (backward compatible):
  * - "off": Thinking disabled
  * - "auto": Adaptive thinking, no effort override
- * - "on:low" | "on:medium" | "on:high" | "on:max": Forced-on thinking at effort level
+ * - "on:low" | "on:medium" | "on:high" | "on:xhigh" | "on:max": Forced-on thinking at effort level
  * - EffortLevel (plain): Adaptive thinking with effort (backward compat with old clients)
  */
 export type ThinkingOption = "off" | "auto" | `on:${EffortLevel}` | EffortLevel;

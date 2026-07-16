@@ -16,7 +16,6 @@ import {
   type ModelInfo,
   type RemoteExecutorConfig,
   type SlashCommand,
-  getModelContextWindow,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
 import { logSDKMessage } from "../messageLogger.js";
@@ -37,6 +36,12 @@ import {
 } from "../remote-spawn.js";
 import { materializeRemoteSessionFile } from "../session-sync.js";
 import type { ContentBlock, SDKMessage, UserMessage } from "../types.js";
+import {
+  type ClaudeControlProbeResult,
+  type ClaudeUsageResponse,
+  mapClaudeSdkModel,
+  probeRemoteClaudeControl,
+} from "./claude-control.js";
 import { filterEnvForChildProcess } from "./env-filter.js";
 import type {
   AgentProvider,
@@ -46,44 +51,81 @@ import type {
   StartSessionOptions,
 } from "./types.js";
 
-const CLAUDE_MODELS: ModelInfo[] = [
+const CLAUDE_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"].map(
+  (reasoningEffort) => ({ reasoningEffort }),
+);
+
+const CLAUDE_MODELS_FALLBACK: ModelInfo[] = [
   {
     id: "default",
-    name: "Default (recommended)",
-    description: "Claude Code chooses the recommended model for the account",
-    contextWindow: getModelContextWindow("default", "claude"),
+    resolvedModel: "claude-sonnet-5",
+    name: "Default (Sonnet 5)",
+    description: "Sonnet 5 · Efficient for routine tasks",
+    contextWindow: 1_000_000,
+    supportsEffort: true,
+    supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS,
+    supportsAdaptiveThinking: true,
+    supportsAutoMode: true,
   },
   {
     id: "sonnet",
-    name: "Sonnet",
-    description: "Balanced Claude Code model for everyday coding",
-    contextWindow: getModelContextWindow("sonnet", "claude"),
+    resolvedModel: "claude-sonnet-5",
+    name: "Sonnet 5",
+    description: "Sonnet 5 · Efficient for routine tasks",
+    contextWindow: 1_000_000,
+    supportsEffort: true,
+    supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS,
+    supportsAdaptiveThinking: true,
+    supportsAutoMode: true,
   },
   {
-    id: "sonnet[1m]",
-    name: "Sonnet 1M",
-    description: "Sonnet with the extended context window",
-    contextWindow: getModelContextWindow("sonnet[1m]", "claude"),
+    id: "claude-fable-5[1m]",
+    resolvedModel: "claude-fable-5",
+    name: "Fable 5",
+    description:
+      "Fable 5 · Most capable for your hardest and longest-running tasks",
+    contextWindow: 1_000_000,
+    supportsEffort: true,
+    supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS,
+    supportsAdaptiveThinking: true,
+    supportsAutoMode: true,
   },
   {
     id: "opus",
-    name: "Opus",
-    description: "Highest-capability Claude Code model",
-    contextWindow: getModelContextWindow("opus", "claude"),
-  },
-  {
-    id: "opus[1m]",
-    name: "Opus 1M",
-    description: "Opus with the extended context window",
-    contextWindow: getModelContextWindow("opus[1m]", "claude"),
+    resolvedModel: "claude-opus-4-8",
+    name: "Opus 4.8",
+    description:
+      "Opus 4.8 · Best for everyday, complex tasks · ~2× usage vs Sonnet",
+    contextWindow: 1_000_000,
+    supportsEffort: true,
+    supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS,
+    supportsAdaptiveThinking: true,
+    supportsFastMode: true,
+    supportsAutoMode: true,
   },
   {
     id: "haiku",
-    name: "Haiku",
-    description: "Fast model for small tasks",
-    contextWindow: getModelContextWindow("haiku", "claude"),
+    resolvedModel: "claude-haiku-4-5-20251001",
+    name: "Haiku 4.5",
+    description: "Haiku 4.5 · Fastest for quick answers",
+    contextWindow: 200_000,
+    supportsEffort: false,
+    supportsAdaptiveThinking: false,
+    supportsFastMode: false,
+    supportsAutoMode: false,
   },
 ];
+
+const CLAUDE_USAGE_CACHE_TTL_MS = 30_000;
+
+function cloneClaudeModels(models: ModelInfo[]): ModelInfo[] {
+  return models.map((model) => ({
+    ...model,
+    supportedReasoningEfforts: model.supportedReasoningEfforts?.map(
+      (effort) => ({ ...effort }),
+    ),
+  }));
+}
 
 export interface ClaudeProviderConfig {
   remoteExecutors?: RemoteExecutorConfig[];
@@ -257,6 +299,10 @@ export class ClaudeProvider implements AgentProvider {
   private onSessionFileUpdated:
     | ((update: ClaudeSessionFileUpdate) => void)
     | undefined;
+  private cachedModels: ModelInfo[] | null = null;
+  private cachedUsage: ClaudeUsageResponse | null = null;
+  private cachedUsageExpiresAt = 0;
+  private controlProbe: Promise<ClaudeControlProbeResult> | null = null;
 
   constructor(config: ClaudeProviderConfig = {}) {
     this.remoteExecutors = [...(config.remoteExecutors ?? [])];
@@ -272,6 +318,9 @@ export class ClaudeProvider implements AgentProvider {
 
   setRemoteExecutors(executors: RemoteExecutorConfig[]): void {
     this.remoteExecutors = executors.map((executor) => ({ ...executor }));
+    this.cachedModels = null;
+    this.cachedUsage = null;
+    this.cachedUsageExpiresAt = 0;
   }
 
   setSessionFileObserver(
@@ -301,9 +350,84 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   async getAvailableModels(): Promise<ModelInfo[]> {
-    // The live session refreshes this list through supportedModels(). Keeping
-    // provider discovery static avoids starting a paid probe turn.
-    return CLAUDE_MODELS.map((model) => ({ ...model }));
+    if (this.cachedModels) return cloneClaudeModels(this.cachedModels);
+    if (this.remoteExecutors.length === 0) {
+      return cloneClaudeModels(CLAUDE_MODELS_FALLBACK);
+    }
+
+    try {
+      const result = await this.refreshRemoteControl();
+      if (result.models?.length) return cloneClaudeModels(result.models);
+      getLogger().warn(
+        {
+          event: "claude_remote_model_probe_failed",
+          error: result.modelsError,
+        },
+        "Unable to read the remote Claude model catalog; using fallback metadata",
+      );
+    } catch (error) {
+      getLogger().warn(
+        {
+          event: "claude_remote_model_probe_failed",
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Unable to read the remote Claude model catalog; using fallback metadata",
+      );
+    }
+    return cloneClaudeModels(CLAUDE_MODELS_FALLBACK);
+  }
+
+  async getUsage(
+    options: { fresh?: boolean } = {},
+  ): Promise<ClaudeUsageResponse> {
+    if (this.remoteExecutors.length === 0) {
+      return { usage: null, error: "No Claude SSH executor is configured" };
+    }
+    if (
+      !options.fresh &&
+      this.cachedUsage &&
+      this.cachedUsageExpiresAt > Date.now()
+    ) {
+      return this.cachedUsage;
+    }
+
+    try {
+      const result = await this.refreshRemoteControl();
+      if (result.usage) {
+        return { usage: result.usage, error: null };
+      }
+      return {
+        usage: null,
+        error: result.usageError ?? "Claude plan usage is unavailable",
+      };
+    } catch (error) {
+      return {
+        usage: null,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private async refreshRemoteControl(): Promise<ClaudeControlProbeResult> {
+    if (this.controlProbe) return this.controlProbe;
+    const executor = this.remoteExecutors[0];
+    if (!executor) throw new Error("No Claude SSH executor is configured");
+
+    this.controlProbe = probeRemoteClaudeControl(executor)
+      .then((result) => {
+        if (result.models?.length) {
+          this.cachedModels = cloneClaudeModels(result.models);
+        }
+        if (result.usage) {
+          this.cachedUsage = { usage: result.usage, error: null };
+          this.cachedUsageExpiresAt = Date.now() + CLAUDE_USAGE_CACHE_TTL_MS;
+        }
+        return result;
+      })
+      .finally(() => {
+        this.controlProbe = null;
+      });
+    return this.controlProbe;
   }
 
   private resolveExecutor(options: StartSessionOptions): RemoteExecutorConfig {
@@ -516,14 +640,14 @@ export class ClaudeProvider implements AgentProvider {
       },
       supportedModels: async () => {
         const models = await sdkQuery.supportedModels();
-        return models.map((model) => ({
-          id: model.value,
-          name: model.displayName,
-          description: model.description,
-          contextWindow:
-            (model as { contextWindow?: number }).contextWindow ??
-            getModelContextWindow(model.value, "claude"),
-        }));
+        const mappedModels = models.map((model) =>
+          mapClaudeSdkModel(
+            model,
+            (model as { contextWindow?: number }).contextWindow,
+          ),
+        );
+        this.cachedModels = cloneClaudeModels(mappedModels);
+        return cloneClaudeModels(mappedModels);
       },
       supportedCommands: async (): Promise<SlashCommand[]> => {
         const commands = await sdkQuery.supportedCommands();

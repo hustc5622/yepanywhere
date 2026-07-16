@@ -57,7 +57,7 @@ import {
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
 import type { PermissionMode } from "../types";
-import { CodexUsageCard } from "./CodexUsageCard";
+import { ClaudeUsageCard, CodexUsageCard } from "./CodexUsageCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
 import { SlashCommandButton } from "./SlashCommandButton";
@@ -84,11 +84,13 @@ const EFFORT_LABEL_KEYS: Record<
   | "newSessionEffortLow"
   | "newSessionEffortMedium"
   | "newSessionEffortHigh"
+  | "newSessionEffortXHigh"
   | "newSessionEffortMax"
 > = {
   low: "newSessionEffortLow",
   medium: "newSessionEffortMedium",
   high: "newSessionEffortHigh",
+  xhigh: "newSessionEffortXHigh",
   max: "newSessionEffortMax",
 };
 
@@ -109,6 +111,7 @@ const THINKING_PRESET_ORDER: readonly ThinkingPreset[] = [
   "on:low",
   "on:medium",
   "on:high",
+  "on:xhigh",
   "on:max",
 ];
 const OPENCODE_DEFAULT_VARIANT = "__yep_default_variant__";
@@ -157,6 +160,14 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function formatContextWindow(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
+  }
+  return `${Math.round(tokens / 1_000)}K`;
+}
+
 function getPreferredModelId(
   models: ModelInfo[],
   preferredModelId?: string | null,
@@ -178,6 +189,25 @@ function getPreferredModelId(
       (m) => m.id === configuredModelId,
     );
     if (matchingPreferredModel) return matchingPreferredModel.id;
+
+    const matchingResolvedModel = models.find(
+      (model) =>
+        model.id !== "default" && model.resolvedModel === configuredModelId,
+    );
+    if (matchingResolvedModel) return matchingResolvedModel.id;
+
+    const legacyClaudeModel = {
+      fable: "claude-fable-5[1m]",
+      "sonnet[1m]": "sonnet",
+      "opus[1m]": "opus",
+      best: "opus",
+    }[configuredModelId];
+    if (legacyClaudeModel) {
+      const matchingLegacyModel = models.find(
+        (model) => model.id === legacyClaudeModel,
+      );
+      if (matchingLegacyModel) return matchingLegacyModel.id;
+    }
   }
 
   return (
@@ -410,6 +440,13 @@ export function NewSessionForm({
     () => getModelReasoningEfforts(selectedModelInfo),
     [selectedModelInfo],
   );
+  const claudeReasoningEfforts = useMemo(
+    () =>
+      selectedProvider === "claude"
+        ? getModelReasoningEfforts(selectedModelInfo)
+        : [],
+    [selectedModelInfo, selectedProvider],
+  );
   const effectiveCodexReasoningEffort =
     selectedProvider === "codex"
       ? resolveModelReasoningEffort(
@@ -432,17 +469,24 @@ export function NewSessionForm({
       : effectiveOpenCodeReasoningEffort;
   const getEffortLabel = useCallback(
     (effort: string): string => {
-      if (effort === "xhigh") return "XHigh";
       return isEffortLevel(effort) ? t(EFFORT_LABEL_KEYS[effort]) : effort;
     },
     [t],
   );
+  const resolvedClaudeThinkingEffort =
+    selectedProvider === "claude"
+      ? resolveModelReasoningEffort(selectedModelInfo, thinkingLevel)
+      : undefined;
+  const effectiveThinkingEffort =
+    resolvedClaudeThinkingEffort && isEffortLevel(resolvedClaudeThinkingEffort)
+      ? resolvedClaudeThinkingEffort
+      : thinkingLevel;
   const selectedThinkingPreset: ThinkingPreset =
     selectedProvider === "codex" &&
     thinkingMode === "on" &&
     effectiveCodexReasoningEffort
       ? `on:${effectiveCodexReasoningEffort}`
-      : getThinkingPreset(thinkingMode, thinkingLevel);
+      : getThinkingPreset(thinkingMode, effectiveThinkingEffort);
   const thinkingOptions = useMemo((): FilterOption<ThinkingPreset>[] => {
     const presets: Array<{
       value: ThinkingPreset;
@@ -450,8 +494,12 @@ export function NewSessionForm({
     }> = [
       { value: "off" },
       { value: "auto" },
-      ...(selectedProvider === "codex" && codexReasoningEfforts.length > 0
-        ? codexReasoningEfforts.map((option) => ({
+      ...((selectedProvider === "codex" && codexReasoningEfforts.length > 0) ||
+      (selectedProvider === "claude" && claudeReasoningEfforts.length > 0)
+        ? (selectedProvider === "claude"
+            ? claudeReasoningEfforts
+            : codexReasoningEfforts
+          ).map((option) => ({
             value: `on:${option.reasoningEffort}` as ThinkingPreset,
             description: option.description,
           }))
@@ -480,7 +528,13 @@ export function NewSessionForm({
         description,
       };
     });
-  }, [codexReasoningEfforts, getEffortLabel, selectedProvider, t]);
+  }, [
+    claudeReasoningEfforts,
+    codexReasoningEfforts,
+    getEffortLabel,
+    selectedProvider,
+    t,
+  ]);
   const applyThinkingPreset = useCallback(
     (preset: ThinkingPreset) => {
       if (preset === "off" || preset === "auto") {
@@ -533,8 +587,14 @@ export function NewSessionForm({
   // Default to true for backwards compatibility with providers that don't set these flags
   const supportsPermissionMode =
     selectedProviderInfo?.supportsPermissionMode ?? true;
-  const supportsThinkingToggle =
+  const providerSupportsThinkingToggle =
     selectedProviderInfo?.supportsThinkingToggle ?? true;
+  const supportsThinkingToggle =
+    providerSupportsThinkingToggle &&
+    (selectedProvider !== "claude" ||
+      !selectedModelInfo ||
+      selectedModelInfo.supportsAdaptiveThinking === true ||
+      selectedModelInfo.supportsEffort === true);
   const commandButtons = useMemo(() => getStaticAgentCommandConfigs(), []);
 
   // Initialize provider/model/mode from saved defaults once settings and providers load.
@@ -714,7 +774,21 @@ export function NewSessionForm({
       const parts: string[] = description ? [description] : [];
       if (model.parameterSize) parts.push(model.parameterSize);
       if (model.contextWindow) {
-        parts.push(`${Math.round(model.contextWindow / 1024)}K ctx`);
+        parts.push(
+          t("newSessionModelContextWindow", {
+            size: formatContextWindow(model.contextWindow),
+          }),
+        );
+      }
+      const reasoningEfforts = getModelReasoningEfforts(model);
+      if (reasoningEfforts.length > 0) {
+        parts.push(
+          t("newSessionModelThinkingEfforts", {
+            levels: reasoningEfforts
+              .map((effort) => getEffortLabel(effort.reasoningEffort))
+              .join(" / "),
+          }),
+        );
       }
       if (model.parentModel) parts.push(model.parentModel);
       if (model.quantizationLevel) parts.push(model.quantizationLevel);
@@ -733,7 +807,30 @@ export function NewSessionForm({
     }
 
     return options;
-  }, [availableModels]);
+  }, [availableModels, getEffortLabel, t]);
+
+  const selectedModelCapabilitySummary = useMemo(() => {
+    if (selectedProvider !== "claude" || !selectedModelInfo) return null;
+    const parts: string[] = [];
+    if (selectedModelInfo.contextWindow) {
+      parts.push(
+        t("newSessionModelContextWindow", {
+          size: formatContextWindow(selectedModelInfo.contextWindow),
+        }),
+      );
+    }
+    const efforts = getModelReasoningEfforts(selectedModelInfo);
+    if (efforts.length > 0) {
+      parts.push(
+        t("newSessionModelThinkingEfforts", {
+          levels: efforts
+            .map((effort) => getEffortLabel(effort.reasoningEffort))
+            .join(" / "),
+        }),
+      );
+    }
+    return parts.join(" · ") || null;
+  }, [getEffortLabel, selectedModelInfo, selectedProvider, t]);
 
   const showOpenCodeEndpointSelector =
     selectedProvider === "opencode" &&
@@ -948,6 +1045,9 @@ export function NewSessionForm({
     selectedProvider === "opencode" && isManagedOpenCodeModel
       ? undefined
       : (selectedModel ?? undefined);
+  const thinkingForRequest = supportsThinkingToggle
+    ? getThinkingOption(thinkingMode, effectiveThinkingEffort)
+    : undefined;
   const claudeExecutorUnavailable =
     selectedProvider === "claude" &&
     (executorsLoading || selectedExecutor === null);
@@ -958,9 +1058,7 @@ export function NewSessionForm({
       await updateServerSetting("newSessionDefaults", {
         provider: selectedProvider ?? undefined,
         model: selectedModelForRequest,
-        thinking: supportsThinkingToggle
-          ? getThinkingOption(thinkingMode, thinkingLevel)
-          : undefined,
+        thinking: thinkingForRequest,
         reasoningEffort: selectedReasoningEffort,
         permissionMode: mode,
         codexMcpMode:
@@ -985,10 +1083,8 @@ export function NewSessionForm({
     selectedModelForRequest,
     selectedProvider,
     showToast,
-    supportsThinkingToggle,
     t,
-    thinkingLevel,
-    thinkingMode,
+    thinkingForRequest,
     updateServerSetting,
   ]);
 
@@ -1028,7 +1124,7 @@ export function NewSessionForm({
       const uploadedFiles: UploadedFile[] = [];
 
       // Get model and thinking settings
-      const thinking = getThinkingOption(thinkingMode, thinkingLevel);
+      const thinking = thinkingForRequest;
       const sessionOptions = {
         mode,
         model: selectedModelForRequest,
@@ -1307,8 +1403,7 @@ export function NewSessionForm({
       ? (savedDefaults?.codexMcpMode ?? "standard") === selectedCodexMcpMode
       : true;
   const thinkingDefaultsMatch = supportsThinkingToggle
-    ? (savedDefaults?.thinking ?? undefined) ===
-      getThinkingOption(thinkingMode, thinkingLevel)
+    ? (savedDefaults?.thinking ?? undefined) === thinkingForRequest
     : true;
   const reasoningEffortDefaultsMatch =
     selectedProvider === "codex" || selectedProvider === "opencode"
@@ -1658,7 +1753,8 @@ export function NewSessionForm({
         <p className="new-session-subtitle">{t("newSessionHeaderSubtitle")}</p>
       </div>
 
-      <CodexUsageCard />
+      {selectedProvider === "codex" && <CodexUsageCard />}
+      {selectedProvider === "claude" && <ClaudeUsageCard />}
 
       <div className="new-session-input-area">{inputArea}</div>
 
@@ -1705,6 +1801,9 @@ export function NewSessionForm({
                     onChange={handleModelSelect}
                     multiSelect={false}
                     placeholder={t("newSessionModelPlaceholder")}
+                    selectedDescription={
+                      selectedModelCapabilitySummary ?? undefined
+                    }
                   />
                 </div>
               )}

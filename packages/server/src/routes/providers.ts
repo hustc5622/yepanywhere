@@ -1,6 +1,7 @@
 import type { ProviderInfo, ProviderName } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { getAllProviders } from "../sdk/providers/index.js";
+import type { ClaudeUsageResponse } from "../sdk/providers/claude-control.js";
+import { claudeProvider, getAllProviders } from "../sdk/providers/index.js";
 import type { AgentProvider } from "../sdk/providers/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 
@@ -8,6 +9,10 @@ interface ProviderRouteDeps {
   modelInfoService?: ModelInfoService;
   /** If non-empty, only these provider names are exposed. */
   enabledProviders?: string[];
+  /** Test seam for the remote Claude control channel. */
+  getClaudeUsage?: (options: {
+    fresh?: boolean;
+  }) => Promise<ClaudeUsageResponse>;
 }
 
 async function buildProviderInfo(
@@ -43,6 +48,16 @@ async function buildProviderInfo(
  */
 export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
   const routes = new Hono();
+
+  // GET /api/providers/claude/usage - Claude.ai plan utilization from the
+  // configured VM's structured Claude Code /usage control response.
+  routes.get("/claude/usage", async (c) => {
+    const getUsage =
+      deps.getClaudeUsage ??
+      ((options: { fresh?: boolean }) => claudeProvider.getUsage(options));
+    return c.json(await getUsage({ fresh: c.req.query("fresh") === "1" }));
+  });
+
   // GET /api/providers - Get all available providers with auth status and models
   routes.get("/", async (c) => {
     let providers = getAllProviders();

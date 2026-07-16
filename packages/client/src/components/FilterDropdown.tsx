@@ -21,6 +21,7 @@ export interface FilterDropdownProps<T extends string> {
   multiSelect?: boolean; // default true
   placeholder?: string; // shown when nothing selected
   align?: "left" | "right"; // dropdown alignment, default left
+  selectedDescription?: string; // optional secondary text shown inside the trigger
 }
 
 /**
@@ -36,6 +37,7 @@ export function FilterDropdown<T extends string>({
   multiSelect = true,
   placeholder,
   align = "left",
+  selectedDescription,
 }: FilterDropdownProps<T>) {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
@@ -270,7 +272,16 @@ export function FilterDropdown<T extends string>({
         aria-haspopup="listbox"
         aria-expanded={isOpen}
       >
-        <span className="filter-dropdown-button-label">{displayText}</span>
+        {selected.length > 0 && selectedDescription ? (
+          <span className="filter-dropdown-button-content">
+            <span className="filter-dropdown-button-label">{displayText}</span>
+            <span className="filter-dropdown-button-description">
+              {selectedDescription}
+            </span>
+          </span>
+        ) : (
+          <span className="filter-dropdown-button-label">{displayText}</span>
+        )}
         <svg
           className="filter-dropdown-chevron"
           width="12"
