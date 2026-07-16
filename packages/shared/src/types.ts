@@ -288,7 +288,7 @@ export interface NewSessionDefaults {
 
 /**
  * Model option for Claude sessions.
- * - "default": Use the CLI's default model
+ * - "default": Use Yep's advertised Claude default (Sonnet 5)
  * - "best": Use Claude Code's best available model alias
  * - "sonnet": Claude Sonnet
  * - "sonnet[1m]": Claude Sonnet with 1M context when available
@@ -315,8 +315,8 @@ export type ModelOption =
 export const DEFAULT_MODEL: ModelOption = "default";
 
 /**
- * Resolve a saved model option to the explicit value sent to Claude Code.
- * Returning undefined means "use Claude Code's tier-dependent default".
+ * Resolve a saved model option for picker matching. The server performs the
+ * provider-specific execution mapping for the logical "default" token.
  */
 export function resolveModel(
   model: ModelOption | undefined,

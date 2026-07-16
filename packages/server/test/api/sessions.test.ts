@@ -134,6 +134,39 @@ describe("Sessions API", () => {
       expect(json.processId).toBeDefined();
     });
 
+    it("starts the displayed Claude default with an explicit Sonnet model", async () => {
+      mockSdk.addScenario(createMockScenario("new-session", "Hello!"));
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const startSession = vi.spyOn(supervisor, "startSession");
+
+      const res = await app.request(`/api/projects/${projectId}/sessions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Yep-Anywhere": "true",
+        },
+        body: JSON.stringify({
+          message: "hello",
+          provider: "claude",
+          model: "default",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(startSession).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ text: "hello" }),
+        undefined,
+        expect.objectContaining({
+          model: "sonnet",
+          providerName: "claude",
+        }),
+      );
+    });
+
     it("accepts permission mode parameter", async () => {
       mockSdk.addScenario(createMockScenario("new-session", "Hello!"));
       const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });

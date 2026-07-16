@@ -104,6 +104,7 @@ import {
   normalizeSshHostAlias,
 } from "../utils/sshHostAlias.js";
 import type { EventBus } from "../watcher/index.js";
+import { resolveSessionModel } from "./session-model.js";
 
 /**
  * Type guard to check if a result is a QueuedResponse
@@ -1953,9 +1954,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       ? thinkingOptionToConfig(body.thinking)
       : { thinking: undefined, effort: undefined };
 
-    // Convert model option (undefined or "default" means use CLI default)
-    const model =
-      body.model && body.model !== "default" ? body.model : undefined;
+    // Claude advertises "default" as Sonnet 5, so keep execution aligned
+    // with the picker instead of inheriting the remote VM's user setting.
+    const model = resolveSessionModel(
+      body.model,
+      body.provider ?? project.provider,
+    );
 
     // Debug: log what we received
     console.log("[startSession] Request body:", {
@@ -2104,9 +2108,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       ? thinkingOptionToConfig(body.thinking)
       : { thinking: undefined, effort: undefined };
 
-    // Convert model option (undefined or "default" means use CLI default)
-    const model =
-      body.model && body.model !== "default" ? body.model : undefined;
+    // Claude advertises "default" as Sonnet 5, so keep execution aligned
+    // with the picker instead of inheriting the remote VM's user setting.
+    const model = resolveSessionModel(
+      body.model,
+      body.provider ?? project.provider,
+    );
 
     const globalInstructions =
       deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
@@ -2290,10 +2297,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       ? thinkingOptionToConfig(body.thinking)
       : { thinking: undefined, effort: undefined };
 
-    // Convert model option (undefined or "default" means use CLI default)
-    const model =
-      body.model && body.model !== "default" ? body.model : undefined;
-
     // Use client-provided executor, falling back to saved executor from metadata.
     let executor = parsedBodyExecutor.executor;
     if (!executor) {
@@ -2345,6 +2348,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         body.provider ??
         project.provider;
     }
+
+    const model = resolveSessionModel(body.model, providerName);
 
     getLogger().info(
       {
@@ -2615,9 +2620,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: executorError }, 400);
     }
 
-    const model =
-      body.model && body.model !== "default" ? body.model : process.model;
     const providerName = metadataProvider ?? body.provider ?? process.provider;
+    const model =
+      body.model === undefined
+        ? process.model
+        : resolveSessionModel(body.model, providerName);
     const opencodeConfig =
       parsedOpenCodeConfig.opencodeConfig ??
       deps.sessionMetadataService?.getOpenCodeConfig?.(sessionId);
