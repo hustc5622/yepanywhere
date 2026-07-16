@@ -4,6 +4,7 @@ import type {
   ModelInfo,
   PermissionMode,
   ProviderName,
+  RemoteExecutorConfig,
   SlashCommand,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
@@ -19,7 +20,7 @@ import type {
 import type { ProcessInfo } from "../supervisor/types.js";
 import type { BusEvent } from "../watcher/index.js";
 
-export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 2;
+export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 3;
 
 export type RuntimeMode = "embedded" | "external";
 
@@ -163,7 +164,9 @@ export interface RuntimeHoldProcessRequest {
   hold: boolean;
 }
 
-export type RuntimeProviderSettings = Record<string, never>;
+export interface RuntimeProviderSettings {
+  claudeRemoteExecutors?: RemoteExecutorConfig[];
+}
 
 export interface RuntimeController {
   readonly mode: RuntimeMode;

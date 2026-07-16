@@ -2,7 +2,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { loadConfig } from "../config.js";
-import { getProvider } from "../sdk/providers/index.js";
+import {
+  configureClaudeRemoteExecutors,
+  configureClaudeSessionFileObserver,
+  getProvider,
+} from "../sdk/providers/index.js";
 import { ServerSettingsService } from "../services/ServerSettingsService.js";
 import { Supervisor } from "../supervisor/Supervisor.js";
 import { EventBus } from "../watcher/index.js";
@@ -66,7 +70,24 @@ export async function runAgentRuntimeOnly(
 
   let controller = options.controller;
   if (!controller) {
+    const settingsService = new ServerSettingsService({ dataDir });
+    await settingsService.initialize();
+    configureClaudeRemoteExecutors(
+      settingsService.getSetting("remoteExecutors") ?? [],
+    );
+
     const eventBus = new EventBus();
+    configureClaudeSessionFileObserver((update) => {
+      eventBus.emit({
+        type: "file-change",
+        provider: "claude",
+        path: update.localPath,
+        relativePath: path.relative(update.projectsDir, update.localPath),
+        changeType: "modify",
+        timestamp: new Date().toISOString(),
+        fileType: "session",
+      });
+    });
     const supervisor = new Supervisor({
       provider: getProvider("codex") ?? undefined,
       idleTimeoutMs: config.idleTimeoutMs,
@@ -87,9 +108,6 @@ export async function runAgentRuntimeOnly(
       eventBus,
       eventStore,
     );
-
-    const settingsService = new ServerSettingsService({ dataDir });
-    await settingsService.initialize();
   }
 
   await controller.start();

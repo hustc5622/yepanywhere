@@ -4,9 +4,15 @@ import { basename, join } from "node:path";
 import {
   DEFAULT_PROVIDER,
   type ProviderName,
+  type RemoteExecutorConfig,
   type UrlProjectId,
 } from "@yep-anywhere/shared";
 import type { ProjectMetadataService } from "../metadata/index.js";
+import {
+  isLocalPathWithin,
+  tryMapLocalPathToRemote,
+  tryMapRemotePathToLocal,
+} from "../sdk/remote-path-mapping.js";
 import type { Project } from "../supervisor/types.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
 import { CODEX_SESSIONS_DIR, CodexSessionScanner } from "./codex-scanner.js";
@@ -36,6 +42,8 @@ export interface ScannerOptions {
   enableGemini?: boolean; // whether to include Gemini projects (default: true)
   enableOpenCode?: boolean; // whether to include OpenCode projects (default: true)
   projectMetadataService?: ProjectMetadataService; // for persisting added projects
+  /** Remote Claude executors whose shared stores should also be scanned. */
+  remoteExecutors?: RemoteExecutorConfig[];
   /** Optional EventBus for watcher-driven cache invalidation */
   eventBus?: EventBus;
   /** Project snapshot TTL in milliseconds (default: 5000) */
@@ -49,8 +57,14 @@ interface ProjectSnapshot {
   timestamp: number;
 }
 
+interface ClaudeSessionSource {
+  projectsDir: string;
+  executor?: RemoteExecutorConfig;
+}
+
 export class ProjectScanner {
   private projectsDir: string;
+  private remoteExecutors: RemoteExecutorConfig[];
   private codexScanner: CodexSessionScanner | null;
   private geminiScanner: GeminiSessionScanner | null;
   private opencodeScanner: OpenCodeSessionScanner | null;
@@ -68,6 +82,7 @@ export class ProjectScanner {
 
   constructor(options: ScannerOptions = {}) {
     this.projectsDir = options.projectsDir ?? CLAUDE_PROJECTS_DIR;
+    this.remoteExecutors = [...(options.remoteExecutors ?? [])];
     this.enableCodex = options.enableCodex ?? true;
     this.enableGemini = options.enableGemini ?? true;
     this.enableOpenCode = options.enableOpenCode ?? true;
@@ -116,6 +131,83 @@ export class ProjectScanner {
   setProjectMetadataService(service: ProjectMetadataService): void {
     this.projectMetadataService = service;
     this.invalidateCache();
+  }
+
+  setRemoteExecutors(executors: RemoteExecutorConfig[]): void {
+    this.remoteExecutors = executors.map((executor) => ({
+      ...executor,
+      sessionStorage: executor.sessionStorage
+        ? { ...executor.sessionStorage }
+        : undefined,
+    }));
+    this.invalidateCache();
+  }
+
+  private getClaudeSessionSources(): ClaudeSessionSource[] {
+    const sources: ClaudeSessionSource[] = [];
+    const seen = new Set<string>();
+
+    // Prefer authoritative shared stores over a stale compatibility replica
+    // when both still contain the same session.
+    for (const executor of this.remoteExecutors) {
+      const projectsDir = executor.sessionStorage?.localProjectsDir;
+      if (executor.sessionStorage?.mode !== "shared" || !projectsDir) continue;
+      if (seen.has(projectsDir)) continue;
+      seen.add(projectsDir);
+      sources.push({ projectsDir, executor });
+    }
+
+    if (!seen.has(this.projectsDir)) {
+      sources.push({ projectsDir: this.projectsDir });
+    } else {
+      // If the environment override points at the same shared store, retain
+      // its executor mapping instead of adding an un-mapped duplicate source.
+      const source = sources.find(
+        (candidate) => candidate.projectsDir === this.projectsDir,
+      );
+      if (!source) sources.push({ projectsDir: this.projectsDir });
+    }
+    return sources;
+  }
+
+  /** Map a semantic cwd according to the physical session source that owns it. */
+  mapSessionCwdToLocal(cwd: string, sessionDir: string): string {
+    const sources = this.getClaudeSessionSources()
+      .filter((source) => isLocalPathWithin(sessionDir, source.projectsDir))
+      .sort((a, b) => b.projectsDir.length - a.projectsDir.length);
+    const executor = sources[0]?.executor;
+    return executor ? (tryMapRemotePathToLocal(cwd, executor) ?? cwd) : cwd;
+  }
+
+  private getClaudeSessionDirForProject(projectPath: string): string {
+    const candidates = this.remoteExecutors
+      .filter(
+        (executor) =>
+          executor.sessionStorage?.mode === "shared" &&
+          executor.sessionStorage.localProjectsDir,
+      )
+      .map((executor) => ({
+        executor,
+        remoteCwd: tryMapLocalPathToRemote(projectPath, executor),
+      }))
+      .filter(
+        (
+          candidate,
+        ): candidate is {
+          executor: RemoteExecutorConfig;
+          remoteCwd: string;
+        } => Boolean(candidate.remoteCwd),
+      )
+      .sort(
+        (a, b) => b.executor.localRoot.length - a.executor.localRoot.length,
+      );
+
+    const selected = candidates[0];
+    const projectsDir = selected?.executor.sessionStorage?.localProjectsDir;
+    if (selected && projectsDir) {
+      return join(projectsDir, selected.remoteCwd.replace(/[/\\:]/g, "-"));
+    }
+    return join(this.projectsDir, projectPath.replace(/[/\\:]/g, "-"));
   }
 
   async listProjects(): Promise<Project[]> {
@@ -206,9 +298,15 @@ export class ProjectScanner {
   }
 
   private sessionDirToSuffix(sessionDir: string): string {
-    // Claude session dirs live under projectsDir; codex/gemini do not.
-    const relative = sessionDir.startsWith(this.projectsDir)
-      ? sessionDir.slice(this.projectsDir.length)
+    // Claude session dirs can live under the default replica or a configured
+    // shared projects root. Codex/Gemini paths are left untouched.
+    const source = this.getClaudeSessionSources()
+      .filter((candidate) =>
+        isLocalPathWithin(sessionDir, candidate.projectsDir),
+      )
+      .sort((a, b) => b.projectsDir.length - a.projectsDir.length)[0];
+    const relative = source
+      ? sessionDir.slice(source.projectsDir.length)
       : sessionDir;
     return relative.replace(/^[\\/]+/, "");
   }
@@ -250,19 +348,6 @@ export class ProjectScanner {
     const seenPaths = new Set<string>();
     // Map from normalized path to project index for cross-machine dedup
     const normalizedIndex = new Map<string, number>();
-
-    // ~/.claude/projects/ can have two structures:
-    // 1. Projects directly as -home-user-project/
-    // 2. Projects under hostname/ as hostname/-home-user-project/
-    let dirs: string[] = [];
-    try {
-      await access(this.projectsDir);
-      const entries = await readdir(this.projectsDir, { withFileTypes: true });
-      dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
-    } catch {
-      // Directory doesn't exist or unreadable — skip Claude project scanning
-      // but continue to Codex/Gemini/metadata merge below
-    }
 
     // Helper to add a Claude project, merging cross-machine duplicates
     const addOrMerge = (
@@ -331,47 +416,61 @@ export class ProjectScanner {
       }
     };
 
-    for (const dir of dirs) {
-      const dirPath = join(this.projectsDir, dir);
-
-      // Check if this is a project directory
-      // On Unix/macOS: /home/user/project → -home-user-project (starts with -)
-      // On Windows: C:\Users\kaa\project → c--Users-kaa-project (drive letter + --)
-      if (dir.startsWith("-") || /^[a-zA-Z]--/.test(dir)) {
-        const info = await this.getProjectDirInfo(dirPath);
-        if (info) {
-          addOrMerge(
-            info.projectPath,
-            dirPath,
-            info.sessionCount,
-            info.lastActivity,
-          );
-        }
-        continue;
-      }
-
-      // Otherwise, treat as hostname directory
-      // Format: ~/.claude/projects/hostname/-project-path/
-      let projectDirs: string[];
+    for (const source of this.getClaudeSessionSources()) {
+      // Claude projects roots can have two structures:
+      // 1. Projects directly as -home-user-project/
+      // 2. Projects under hostname/ as hostname/-home-user-project/
+      let dirs: string[] = [];
       try {
-        const subEntries = await readdir(dirPath, { withFileTypes: true });
-        projectDirs = subEntries
-          .filter((e) => e.isDirectory())
-          .map((e) => e.name);
+        await access(source.projectsDir);
+        const entries = await readdir(source.projectsDir, {
+          withFileTypes: true,
+        });
+        dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
       } catch {
         continue;
       }
 
-      for (const projectDir of projectDirs) {
-        const projectDirPath = join(dirPath, projectDir);
-        const info = await this.getProjectDirInfo(projectDirPath);
-        if (!info) continue;
-        addOrMerge(
-          info.projectPath,
-          projectDirPath,
-          info.sessionCount,
-          info.lastActivity,
-        );
+      for (const dir of dirs) {
+        const dirPath = join(source.projectsDir, dir);
+
+        // On Unix/macOS: /home/user/project → -home-user-project.
+        // On Windows: C:\Users\name\project → c--Users-name-project.
+        if (dir.startsWith("-") || /^[a-zA-Z]--/.test(dir)) {
+          const info = await this.getProjectDirInfo(dirPath, source);
+          if (info) {
+            addOrMerge(
+              info.projectPath,
+              dirPath,
+              info.sessionCount,
+              info.lastActivity,
+            );
+          }
+          continue;
+        }
+
+        // Otherwise, treat it as a hostname directory.
+        let projectDirs: string[];
+        try {
+          const subEntries = await readdir(dirPath, { withFileTypes: true });
+          projectDirs = subEntries
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name);
+        } catch {
+          continue;
+        }
+
+        for (const projectDir of projectDirs) {
+          const projectDirPath = join(dirPath, projectDir);
+          const info = await this.getProjectDirInfo(projectDirPath, source);
+          if (!info) continue;
+          addOrMerge(
+            info.projectPath,
+            projectDirPath,
+            info.sessionCount,
+            info.lastActivity,
+          );
+        }
       }
     }
 
@@ -495,13 +594,12 @@ export class ProjectScanner {
         }
 
         seenPaths.add(projectPath);
-        const encodedPath = projectPath.replace(/[/\\:]/g, "-");
         projects.push({
           id: encodeProjectId(projectPath),
           path: projectPath,
           name: basename(projectPath),
           sessionCount: 0,
-          sessionDir: join(this.projectsDir, encodedPath),
+          sessionDir: this.getClaudeSessionDirForProject(projectPath),
           hasCodexSessions: false,
           hasGeminiSessions: false,
           hasOpenCodeSessions: false,
@@ -517,13 +615,12 @@ export class ProjectScanner {
     // home directory so sessions can always be created even if detection is broken
     if (projects.length === 0) {
       const home = homedir();
-      const encodedPath = home.replace(/[/\\:]/g, "-");
       projects.push({
         id: encodeProjectId(home),
         path: home,
         name: basename(home) || "Home",
         sessionCount: 0,
-        sessionDir: join(this.projectsDir, encodedPath),
+        sessionDir: this.getClaudeSessionDirForProject(home),
         hasCodexSessions: false,
         hasGeminiSessions: false,
         hasOpenCodeSessions: false,
@@ -626,8 +723,6 @@ export class ProjectScanner {
 
     // Create a virtual project entry
     // The session directory will be created by the SDK when the first session starts
-    const encodedPath = projectPath.replace(/[/\\:]/g, "-");
-
     // Determine the session directory based on provider
     let sessionDir: string;
     if (provider === "codex") {
@@ -637,7 +732,7 @@ export class ProjectScanner {
     } else if (provider === "opencode") {
       sessionDir = OPENCODE_DB_PATH;
     } else {
-      sessionDir = join(this.projectsDir, encodedPath);
+      sessionDir = this.getClaudeSessionDirForProject(projectPath);
     }
 
     return {
@@ -682,7 +777,10 @@ export class ProjectScanner {
    * Uses directory mtime as a cheap proxy for lastActivity (one stat
    * on the dir itself instead of stat-ing every session file).
    */
-  private async getProjectDirInfo(projectDirPath: string): Promise<{
+  private async getProjectDirInfo(
+    projectDirPath: string,
+    source: ClaudeSessionSource,
+  ): Promise<{
     projectPath: string;
     sessionCount: number;
     lastActivity: string | null;
@@ -721,7 +819,10 @@ export class ProjectScanner {
         const filePath = join(projectDirPath, file);
         const cwd = await readCwdFromSessionFile(filePath);
         if (cwd) {
-          return { projectPath: cwd, sessionCount, lastActivity };
+          const projectPath = source.executor
+            ? (tryMapRemotePathToLocal(cwd, source.executor) ?? cwd)
+            : cwd;
+          return { projectPath, sessionCount, lastActivity };
         }
       }
 

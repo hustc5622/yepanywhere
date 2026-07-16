@@ -369,6 +369,26 @@ describe("Project Path Utilities", () => {
       expect(recovered).toBe(realPath);
     });
 
+    it("applies a remote-to-local cwd mapper before validating recovery", async () => {
+      const stalePath = join(testDir, "moved-away");
+      const realPath = join(testDir, "shared-project");
+      const sessionDir = join(testDir, "sessions");
+      await mkdir(realPath, { recursive: true });
+      await mkdir(sessionDir, { recursive: true });
+      await writeFile(
+        join(sessionDir, "sess-remote.jsonl"),
+        '{"type":"user","cwd":"/mnt/utm/projects/shared","message":"hi"}\n',
+      );
+
+      const recovered = await resolveResumeCwd(
+        stalePath,
+        sessionDir,
+        "sess-remote",
+        (cwd) => (cwd === "/mnt/utm/projects/shared" ? realPath : cwd),
+      );
+      expect(recovered).toBe(realPath);
+    });
+
     it("returns null when both projectPath and recovered cwd are missing", async () => {
       const stalePath = join(testDir, "moved-away");
       const alsoGone = join(testDir, "also-gone");

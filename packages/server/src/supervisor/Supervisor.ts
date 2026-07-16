@@ -82,10 +82,8 @@ export interface ModelSettings {
   opencodeConfig?: OpenCodeSessionConfig;
   /** Provider to use for this session. undefined = use the runtime default. */
   providerName?: ProviderName;
-  /** SSH host for remote execution (undefined = local) */
+  /** Configured SSH host for Claude remote execution. */
   executor?: string;
-  /** Environment variables to set on remote (for testing: CLAUDE_SESSIONS_DIR) */
-  remoteEnv?: Record<string, string>;
   /** Global instructions to append to system prompt (from server settings) */
   globalInstructions?: string;
   /** Permission rules for tool filtering (deny/allow patterns) */
@@ -232,30 +230,35 @@ export class Supervisor {
   }
 
   private resolveProvider(modelSettings?: ModelSettings): AgentProvider | null {
-    if (modelSettings?.executor) {
-      throw new Error(
-        "Remote executor sessions are unavailable because Claude Code support was removed.",
-      );
-    }
-
     if (modelSettings?.providerName) {
+      // Explicit SDK injection is the legacy unit-test seam. Production does
+      // not provide it and therefore always resolves Claude to the SSH-only
+      // provider below.
+      if (
+        this.sdk &&
+        (modelSettings.providerName === "claude" ||
+          modelSettings.providerName === "claude-ollama")
+      ) {
+        return null;
+      }
       const provider = getProvider(modelSettings.providerName);
       if (!provider) {
-        // The legacy SDK is still injected by unit-test and compatibility
-        // harnesses for historical Claude sessions. Keep that explicit test
-        // path working while production runtimes reject retired providers.
-        if (
-          this.sdk &&
-          (modelSettings.providerName === "claude" ||
-            modelSettings.providerName === "claude-ollama")
-        ) {
-          return null;
-        }
         throw new Error(
           `Provider \"${modelSettings.providerName}\" is not available in this server.`,
         );
       }
+      if (modelSettings.executor && provider.name !== "claude") {
+        throw new Error(
+          "SSH executors are supported only by the Claude provider.",
+        );
+      }
       return provider;
+    }
+
+    if (modelSettings?.executor && this.provider?.name !== "claude") {
+      throw new Error(
+        "SSH executors are supported only by the Claude provider.",
+      );
     }
 
     return this.provider;
@@ -414,7 +417,6 @@ export class Supervisor {
       codexMcpMode: modelSettings?.codexMcpMode,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
-      remoteEnv: modelSettings?.remoteEnv,
       globalInstructions: modelSettings?.globalInstructions,
       onToolApproval: async (toolName, input, opts) => {
         if (!processHolder.process) {
@@ -540,7 +542,6 @@ export class Supervisor {
       codexMcpMode: modelSettings?.codexMcpMode,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
-      remoteEnv: modelSettings?.remoteEnv,
       globalInstructions: modelSettings?.globalInstructions,
       resumeSessionAt: modelSettings?.resumeSessionAt,
       rollbackNumTurns: modelSettings?.rollbackNumTurns,

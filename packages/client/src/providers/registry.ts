@@ -1,3 +1,4 @@
+import { ClaudeProvider } from "./implementations/ClaudeProvider";
 import {
   CodexOssProvider,
   CodexProvider,
@@ -8,6 +9,7 @@ import { OpenCodeProvider } from "./implementations/OpenCodeProvider";
 import type { Provider, ProviderMetadata } from "./types";
 
 const providers: Record<string, Provider> = {
+  claude: new ClaudeProvider(),
   gemini: new GeminiProvider(),
   "gemini-acp": new GeminiACPProvider(),
   codex: new CodexProvider(),

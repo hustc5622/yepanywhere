@@ -6,6 +6,7 @@ import type {
   SlashCommand,
 } from "@yep-anywhere/shared";
 import { markSubagent } from "../augments/index.js";
+import { configureClaudeRemoteExecutors } from "../sdk/providers/index.js";
 import type { UserMessage } from "../sdk/types.js";
 import {
   createSessionSubscription,
@@ -62,10 +63,11 @@ export class EmbeddedRuntimeController implements RuntimeController {
   }
 
   async updateProviderSettings(
-    _settings: RuntimeProviderSettings,
+    settings: RuntimeProviderSettings,
   ): Promise<void> {
-    // Reserved for provider settings that do not require recreating the
-    // runtime. There are no mutable provider settings at present.
+    if (settings.claudeRemoteExecutors) {
+      configureClaudeRemoteExecutors(settings.claudeRemoteExecutors);
+    }
   }
 
   async shutdown(options: { abortActive?: boolean } = {}): Promise<void> {

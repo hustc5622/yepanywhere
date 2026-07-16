@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
 import { createNodeWebSocket } from "@hono/node-ws";
+import type { RemoteExecutorConfig } from "@yep-anywhere/shared";
 import { createApp } from "./app.js";
 import { SessionArchiveService } from "./archive/index.js";
 import { AuthService } from "./auth/AuthService.js";
@@ -337,6 +338,8 @@ await warnIfCodexVersionMismatch();
 // Create EventBus and FileWatchers for all provider directories
 const eventBus = new EventBus();
 const fileWatchers: FileWatcher[] = [];
+const fileWatcherByKey = new Map<string, FileWatcher>();
+const persistentWatcherKeys = new Set<string>();
 const codexBridgeService: CodexBridgeController | undefined =
   config.codexBridgeMode === "disabled"
     ? undefined
@@ -378,11 +381,31 @@ console.log(
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
   watchDir: string,
-  provider: "gemini" | "codex",
+  provider: "claude" | "gemini" | "codex",
+  ensureDirectory = false,
+  persistent = false,
+  periodicRescanOverrideMs?: number,
 ): void {
+  const key = `${provider}:${path.resolve(watchDir)}`;
+  if (fileWatcherByKey.has(key)) {
+    if (persistent) persistentWatcherKeys.add(key);
+    return;
+  }
+  if (ensureDirectory) {
+    try {
+      fs.mkdirSync(watchDir, { recursive: true });
+    } catch (error) {
+      console.warn(
+        `[FileWatcher] Unable to create ${provider} replica directory (${watchDir}):`,
+        error,
+      );
+      return;
+    }
+  }
   if (fs.existsSync(watchDir)) {
     const periodicRescanMs =
-      provider === "codex" ? config.codexWatchPeriodicRescanMs : 0;
+      periodicRescanOverrideMs ??
+      (provider === "codex" ? config.codexWatchPeriodicRescanMs : 0);
 
     const watcher = new FileWatcher({
       watchDir,
@@ -393,15 +416,51 @@ function createWatcherIfExists(
     });
     watcher.start();
     fileWatchers.push(watcher);
+    fileWatcherByKey.set(key, watcher);
+    if (persistent) persistentWatcherKeys.add(key);
   } else {
     console.log(`[FileWatcher] Skipping ${provider} (${watchDir} not found)`);
   }
 }
 
+function syncClaudeSharedSessionWatchers(
+  executors: RemoteExecutorConfig[],
+): void {
+  const desired = new Set(
+    executors.flatMap((executor) => {
+      const projectsDir = executor.sessionStorage?.localProjectsDir;
+      return executor.sessionStorage?.mode === "shared" && projectsDir
+        ? [`claude:${path.resolve(projectsDir)}`]
+        : [];
+    }),
+  );
+
+  for (const [key, watcher] of fileWatcherByKey.entries()) {
+    if (
+      !key.startsWith("claude:") ||
+      persistentWatcherKeys.has(key) ||
+      desired.has(key)
+    ) {
+      continue;
+    }
+    watcher.stop();
+    fileWatcherByKey.delete(key);
+  }
+
+  for (const executor of executors) {
+    const projectsDir = executor.sessionStorage?.localProjectsDir;
+    if (executor.sessionStorage?.mode === "shared" && projectsDir) {
+      createWatcherIfExists(projectsDir, "claude", false, false, 5_000);
+    }
+  }
+}
+
 // Create watchers for session directories only (not full provider dirs)
 // This reduces inotify pressure and memory usage
-createWatcherIfExists(config.geminiSessionsDir, "gemini");
-createWatcherIfExists(config.codexSessionsDir, "codex");
+// Claude's directory stores local replicas of the authoritative VM JSONL files.
+createWatcherIfExists(config.claudeSessionsDir, "claude", true, true);
+createWatcherIfExists(config.geminiSessionsDir, "gemini", false, true);
+createWatcherIfExists(config.codexSessionsDir, "codex", false, true);
 
 // When running without tsx watch (NO_BACKEND_RELOAD=true), start source watcher
 // to notify the UI when server code changes and needs manual reload
@@ -512,6 +571,9 @@ async function startServer() {
   }
   await authService.initialize();
   await serverSettingsService.initialize();
+  syncClaudeSharedSessionWatchers(
+    serverSettingsService.getSetting("remoteExecutors") ?? [],
+  );
   await ohmyrouterBenchmarkService.initialize();
   await sharingService.initialize();
   await modelInfoService.initialize();
@@ -641,6 +703,10 @@ async function startServer() {
     };
 
     await configuredRuntimeController.start();
+    await configuredRuntimeController.updateProviderSettings({
+      claudeRemoteExecutors:
+        serverSettingsService.getSetting("remoteExecutors") ?? [],
+    });
     const activitySubscription =
       await configuredRuntimeController.subscribeActivity((event) => {
         void enqueueRuntimeEvent(event).catch((error) => {
@@ -720,6 +786,7 @@ async function startServer() {
     connectedBrowsers: connectedBrowsersService,
     browserProfileService,
     serverSettingsService,
+    onRemoteExecutorsChanged: syncClaudeSharedSessionWatchers,
     ohmyrouterBenchmarkService,
     sharingService,
     deviceBridgeService,

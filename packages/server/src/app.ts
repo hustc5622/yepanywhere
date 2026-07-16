@@ -2,7 +2,10 @@ import { stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { HttpBindings } from "@hono/node-server";
 import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
-import { isSlashCommandSession } from "@yep-anywhere/shared";
+import {
+  type RemoteExecutorConfig,
+  isSlashCommandSession,
+} from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import {
   ArchiveError,
@@ -98,7 +101,11 @@ import { type UploadDeps, createUploadRoutes } from "./routes/upload.js";
 import { createVersionRoutes } from "./routes/version.js";
 import { EmbeddedRuntimeController } from "./runtime/EmbeddedRuntimeController.js";
 import type { RuntimeController } from "./runtime/types.js";
-import { getProvider } from "./sdk/providers/index.js";
+import {
+  configureClaudeRemoteExecutors,
+  configureClaudeSessionFileObserver,
+  getProvider,
+} from "./sdk/providers/index.js";
 import type { ClaudeSDK, PermissionMode } from "./sdk/types.js";
 import type { BrowserProfileService } from "./services/BrowserProfileService.js";
 import type { ConnectedBrowsersService } from "./services/ConnectedBrowsersService.js";
@@ -200,6 +207,10 @@ export interface AppOptions {
   browserProfileService?: BrowserProfileService;
   /** ServerSettingsService for server-wide settings */
   serverSettingsService?: ServerSettingsService;
+  /** Keep filesystem watchers in sync with shared Claude session sources. */
+  onRemoteExecutorsChanged?: (
+    executors: RemoteExecutorConfig[],
+  ) => void | Promise<void>;
   /** Runs OhMyRouter model throughput benchmarks from the settings API. */
   ohmyrouterBenchmarkService?: OhMyRouterBenchmarkService;
   /** ModelInfoService for cached model metadata (context windows, etc.) */
@@ -321,6 +332,10 @@ export function shouldSkipAutoArchiveForStarredSession(
 }
 
 export function createApp(options: AppOptions): AppResult {
+  configureClaudeRemoteExecutors(
+    options.serverSettingsService?.getSetting("remoteExecutors") ?? [],
+  );
+
   // When running behind a reverse proxy that adds a path prefix (Caddy
   // exposes us at /yep/), wrap the Hono instance so every subsequent
   // .use/.route/.get call matches the prefixed URL automatically — we
@@ -367,12 +382,26 @@ export function createApp(options: AppOptions): AppResult {
   const opencodeScanner = new OpenCodeSessionScanner();
   const scanner = new ProjectScanner({
     projectsDir: options.projectsDir,
+    remoteExecutors:
+      options.serverSettingsService?.getSetting("remoteExecutors") ?? [],
     codexScanner,
     geminiScanner,
     opencodeScanner,
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
     cacheTtlMs: options.projectScanCacheTtlMs,
+  });
+  configureClaudeSessionFileObserver((update) => {
+    scanner.invalidateCache();
+    options.eventBus?.emit({
+      type: "file-change",
+      provider: "claude",
+      path: update.localPath,
+      relativePath: relative(update.projectsDir, update.localPath),
+      changeType: "modify",
+      timestamp: new Date().toISOString(),
+      fileType: "session",
+    });
   });
   const readerCache = new Map<string, ISessionReader>();
   const maxReaderCacheSize = 500;
@@ -1310,6 +1339,14 @@ export function createApp(options: AppOptions): AppResult {
       createSettingsRoutes({
         serverSettingsService: options.serverSettingsService,
         onAllowedHostsChanged: updateAllowedHosts,
+        onRemoteExecutorsChanged: async (executors) => {
+          configureClaudeRemoteExecutors(executors);
+          scanner.setRemoteExecutors(executors);
+          await options.onRemoteExecutorsChanged?.(executors);
+          await runtimeController.updateProviderSettings({
+            claudeRemoteExecutors: executors,
+          });
+        },
         ohmyrouterBenchmarkService: options.ohmyrouterBenchmarkService,
       }),
     );

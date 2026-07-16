@@ -1,380 +1,322 @@
-/**
- * Session sync implementation for remote executors.
- *
- * Uses rsync to synchronize session files between local and remote machines.
- */
+/** Synchronize a remote Claude JSONL session into Yep's local project store. */
 
-import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { access, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import path, { join, posix } from "node:path";
+import type { RemoteExecutorConfig } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
+import { getRemoteSessionStorageMode } from "./remote-executor-config.js";
+import {
+  executorLabel,
+  inLoginShell,
+  quoteShell,
+  runRemoteCommand,
+} from "./remote-spawn.js";
 
-/**
- * Options for session sync operations.
- */
-export interface SyncOptions {
-  /** SSH host alias */
-  host: string;
-  /** Project directory name (e.g., "home-user-project") */
-  projectDir: string;
-  /** Sync direction */
-  direction: "from-remote" | "to-remote";
-  /** Base session directory (defaults to ~/.claude/projects/) */
-  sessionsDir?: string;
-  /** Remote sessions directory override (for testing) */
-  remoteSessionsDir?: string;
+const remoteHomeCache = new Map<string, string>();
+
+export interface RemoteSessionSyncOptions {
+  executor: RemoteExecutorConfig;
+  /** Project cwd as seen by Yep/macOS. */
+  localCwd: string;
+  /** The same project cwd as seen inside the remote VM. */
+  remoteCwd: string;
+  sessionId: string;
+  /** Local Claude projects root. */
+  localSessionsDir?: string;
+  /** Shared-file visibility wait override, primarily for tests. */
+  sharedVisibilityTimeoutMs?: number;
 }
 
-/**
- * Result of a sync operation.
- */
 export interface SyncResult {
   success: boolean;
-  /** Files transferred */
-  filesTransferred?: number;
-  /** Error message if failed */
+  mode: "shared" | "ssh-replica";
+  localPath?: string;
+  remotePath?: string;
+  bytesTransferred?: number;
   error?: string;
-  /** Sync duration in ms */
-  durationMs?: number;
+  durationMs: number;
 }
 
-/**
- * Convert a working directory path to SDK's project directory name.
- *
- * The SDK stores sessions in ~/.claude/projects/{encoded-path}/
- * where encoded-path is the path with all / replaced by -.
- *
- * For example: /home/kgraehl/code/project → -home-kgraehl-code-project
- */
+/** Claude encodes an absolute cwd by replacing separators and colons. */
 export function getProjectDirFromCwd(cwd: string): string {
-  // Replace all slashes (and colons on Windows, e.g. C:) with dashes
   return cwd.replace(/[/\\:]/g, "-");
 }
 
-/**
- * Get the full path to a project's session directory.
- */
-export function getSessionsPath(projectDir: string, baseDir?: string): string {
-  const sessionsDir = baseDir ?? join(homedir(), ".claude", "projects");
-  // Session files are stored directly under projects dir (no hostname subdirectory)
-  return join(sessionsDir, projectDir);
-}
-
-/**
- * Ensure remote directory exists via SSH mkdir.
- * Works with older rsync versions that don't support --mkpath.
- */
-async function ensureRemoteDir(
-  host: string,
-  remotePath: string,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const sshProcess = spawn(
-      "ssh",
-      [
-        "-o",
-        "BatchMode=yes",
-        "--", // End option parsing before host
-        host,
-        `mkdir -p '${remotePath}'`,
-      ],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
-
-    let stderr = "";
-    sshProcess.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    sshProcess.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(stderr.trim() || `mkdir failed with code ${code}`));
-      }
-    });
-
-    sshProcess.on("error", (error) => {
-      reject(error);
-    });
-  });
-}
-
-/**
- * Sync session files between local and remote.
- *
- * Uses rsync with archive mode (-a) and compression (-z).
- * Does not delete files on the destination (--delete is not used).
- */
-export async function syncSessions(options: SyncOptions): Promise<SyncResult> {
-  const log = getLogger();
-  const startTime = Date.now();
-
-  const { host, projectDir, direction, sessionsDir, remoteSessionsDir } =
-    options;
-
-  const localPath = getSessionsPath(projectDir, sessionsDir);
-  // Remote path has same structure (no hostname subdirectory)
-  const remotePath = remoteSessionsDir
-    ? join(remoteSessionsDir, projectDir)
-    : `~/.claude/projects/${projectDir}`;
-
-  // Build rsync command
-  // -a: archive mode (preserves permissions, timestamps, etc.)
-  // -z: compress during transfer
-  // -v: verbose (for logging)
-  // Note: --mkpath requires rsync 3.2.3+, so we create dirs manually via ssh
-  let source: string;
-  let dest: string;
-
-  if (direction === "from-remote") {
-    source = `${host}:${remotePath}/`;
-    dest = `${localPath}/`;
-  } else {
-    source = `${localPath}/`;
-    dest = `${host}:${remotePath}/`;
-
-    // Ensure remote directory exists before syncing to-remote
-    try {
-      await ensureRemoteDir(host, remotePath);
-    } catch (error) {
-      const durationMs = Date.now() - startTime;
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      log.warn(
-        {
-          event: "session_sync_mkdir_failed",
-          direction,
-          host,
-          projectDir,
-          error: errorMsg,
-          durationMs,
-        },
-        `Failed to create remote directory: ${errorMsg}`,
-      );
-      return {
-        success: false,
-        error: `Failed to create remote directory: ${errorMsg}`,
-        durationMs,
-      };
-    }
-  }
-
-  log.info(
-    {
-      event: "session_sync_start",
-      direction,
-      host,
-      projectDir,
-      source,
-      dest,
-    },
-    `Starting session sync ${direction}: ${projectDir}`,
-  );
-
-  return new Promise((resolve) => {
-    const rsyncProcess = spawn(
-      "rsync",
-      ["-az", "-e", "ssh -o BatchMode=yes", "--", source, dest],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
-
-    let stdout = "";
-    let stderr = "";
-
-    rsyncProcess.stdout.on("data", (data: Buffer) => {
-      stdout += data.toString();
-    });
-
-    rsyncProcess.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    rsyncProcess.on("exit", (code) => {
-      const durationMs = Date.now() - startTime;
-
-      if (code === 0) {
-        // Count files from verbose output (lines that don't start with special chars)
-        const fileLines = stdout
-          .trim()
-          .split("\n")
-          .filter((line) => {
-            return (
-              line && !line.startsWith("sent") && !line.startsWith("total")
-            );
-          });
-        const filesTransferred = fileLines.length;
-
-        log.info(
-          {
-            event: "session_sync_success",
-            direction,
-            host,
-            projectDir,
-            filesTransferred,
-            durationMs,
-          },
-          `Session sync complete: ${filesTransferred} files in ${durationMs}ms`,
-        );
-
-        resolve({
-          success: true,
-          filesTransferred,
-          durationMs,
-        });
-      } else {
-        const error = stderr.trim() || `rsync exited with code ${code}`;
-
-        log.warn(
-          {
-            event: "session_sync_failed",
-            direction,
-            host,
-            projectDir,
-            error,
-            durationMs,
-          },
-          `Session sync failed: ${error}`,
-        );
-
-        resolve({
-          success: false,
-          error,
-          durationMs,
-        });
-      }
-    });
-
-    rsyncProcess.on("error", (error) => {
-      const durationMs = Date.now() - startTime;
-
-      log.warn(
-        {
-          event: "session_sync_error",
-          direction,
-          host,
-          projectDir,
-          error: error.message,
-          durationMs,
-        },
-        `Session sync error: ${error.message}`,
-      );
-
-      resolve({
-        success: false,
-        error: error.message,
-        durationMs,
-      });
-    });
-  });
-}
-
-/**
- * Sync a specific session file from remote.
- *
- * Used for quick sync of a single session after a turn completes.
- */
-export async function syncSessionFile(
-  host: string,
-  projectDir: string,
+export function getLocalSessionPath(
+  cwd: string,
   sessionId: string,
-  sessionsDir?: string,
-  remoteSessionsDir?: string,
-): Promise<SyncResult> {
-  const log = getLogger();
-  const startTime = Date.now();
+  sessionsDir = join(homedir(), ".claude", "projects"),
+): string {
+  return join(sessionsDir, getProjectDirFromCwd(cwd), `${sessionId}.jsonl`);
+}
 
-  const localPath = getSessionsPath(projectDir, sessionsDir);
-  // Remote path has same structure (no hostname subdirectory)
-  const remotePath = remoteSessionsDir
-    ? join(remoteSessionsDir, projectDir)
-    : `~/.claude/projects/${projectDir}`;
-
-  const source = `${host}:${remotePath}/${sessionId}.jsonl`;
-  const dest = `${localPath}/`;
-
-  log.debug(
-    {
-      event: "session_file_sync_start",
-      host,
-      projectDir,
-      sessionId,
-      source,
-      dest,
-    },
-    `Syncing session file: ${sessionId}`,
+export function getSharedSessionPath(
+  executor: RemoteExecutorConfig,
+  remoteCwd: string,
+  sessionId: string,
+): string | null {
+  const storage = executor.sessionStorage;
+  if (storage?.mode !== "shared" || !storage.localProjectsDir) return null;
+  return join(
+    storage.localProjectsDir,
+    getProjectDirFromCwd(remoteCwd),
+    `${sessionId}.jsonl`,
   );
+}
 
-  // Ensure local directory exists for from-remote sync
-  try {
-    mkdirSync(localPath, { recursive: true });
-  } catch {
-    // Ignore if already exists
+function replaceCwdPrefix(
+  value: string,
+  remoteCwd: string,
+  localCwd: string,
+): string {
+  const normalizedRemote = posix.normalize(remoteCwd);
+  const normalizedValue = posix.normalize(value);
+  if (normalizedValue === normalizedRemote) return path.normalize(localCwd);
+  if (!normalizedValue.startsWith(`${normalizedRemote}/`)) return value;
+
+  const suffix = normalizedValue.slice(normalizedRemote.length + 1);
+  return join(localCwd, ...suffix.split("/"));
+}
+
+/**
+ * Rewrite only semantic cwd fields in the local replica. Message text and
+ * tool payloads remain byte-for-byte equivalent so transcript content is not
+ * accidentally changed.
+ */
+export function rewriteSessionCwds(
+  content: string,
+  remoteCwd: string,
+  localCwd: string,
+): string {
+  const hadTrailingNewline = content.endsWith("\n");
+  const lines = content.split("\n");
+  if (hadTrailingNewline) lines.pop();
+
+  const rewritten = lines.map((line) => {
+    if (!line.trim()) return line;
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      if (typeof entry.cwd === "string") {
+        entry.cwd = replaceCwdPrefix(entry.cwd, remoteCwd, localCwd);
+      }
+      return JSON.stringify(entry);
+    } catch {
+      // Preserve malformed/partial lines. The regular reader already handles
+      // them defensively, and sync must never destroy the remote transcript.
+      return line;
+    }
+  });
+
+  return `${rewritten.join("\n")}${hadTrailingNewline ? "\n" : ""}`;
+}
+
+async function getRemoteHome(
+  executor: RemoteExecutorConfig,
+): Promise<string | null> {
+  const key = executorLabel(executor);
+  const cached = remoteHomeCache.get(key);
+  if (cached) return cached;
+
+  const result = await runRemoteCommand(
+    executor,
+    inLoginShell('printf "%s" "$HOME"'),
+  );
+  if (!result.success || !result.stdout) return null;
+  const remoteHome = result.stdout.trim();
+  if (!remoteHome) return null;
+  remoteHomeCache.set(key, remoteHome);
+  return remoteHome;
+}
+
+async function getRemoteSessionsDir(
+  executor: RemoteExecutorConfig,
+): Promise<string | null> {
+  if (executor.remoteSessionsDir) return executor.remoteSessionsDir;
+  if (executor.remoteClaudeConfigDir) {
+    return posix.join(executor.remoteClaudeConfigDir, "projects");
+  }
+  const remoteHome = await getRemoteHome(executor);
+  return remoteHome ? posix.join(remoteHome, ".claude", "projects") : null;
+}
+
+/**
+ * Pull the authoritative remote JSONL after a turn and store a local replica
+ * under the local cwd's encoded project directory.
+ */
+export async function syncRemoteSessionFile(
+  options: RemoteSessionSyncOptions,
+): Promise<SyncResult> {
+  const startedAt = Date.now();
+  const remoteSessionsDir = await getRemoteSessionsDir(options.executor);
+  if (!remoteSessionsDir) {
+    return {
+      success: false,
+      mode: "ssh-replica",
+      error: "Unable to determine the remote Claude sessions directory",
+      durationMs: Date.now() - startedAt,
+    };
   }
 
-  return new Promise((resolve) => {
-    const rsyncProcess = spawn(
-      "rsync",
-      ["-az", "-e", "ssh -o BatchMode=yes", "--", source, dest],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
+  const remotePath = posix.join(
+    remoteSessionsDir,
+    getProjectDirFromCwd(options.remoteCwd),
+    `${options.sessionId}.jsonl`,
+  );
+  const localPath = getLocalSessionPath(
+    options.localCwd,
+    options.sessionId,
+    options.localSessionsDir,
+  );
+  const result = await runRemoteCommand(
+    options.executor,
+    inLoginShell(`cat -- ${quoteShell(remotePath)}`),
+    30_000,
+    128 * 1024 * 1024,
+  );
 
-    let stderr = "";
+  if (!result.success) {
+    return {
+      success: false,
+      mode: "ssh-replica",
+      localPath,
+      remotePath,
+      error: result.error ?? "Failed to read remote session file",
+      durationMs: Date.now() - startedAt,
+    };
+  }
 
-    rsyncProcess.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
+  const localContent = rewriteSessionCwds(
+    result.stdout,
+    options.remoteCwd,
+    options.localCwd,
+  );
+  const tempPath = `${localPath}.tmp-${process.pid}-${Date.now()}`;
 
-    rsyncProcess.on("exit", (code) => {
-      const durationMs = Date.now() - startTime;
+  try {
+    await mkdir(path.dirname(localPath), { recursive: true });
+    await writeFile(tempPath, localContent, "utf8");
+    await rename(tempPath, localPath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    return {
+      success: false,
+      mode: "ssh-replica",
+      localPath,
+      remotePath,
+      error: error instanceof Error ? error.message : String(error),
+      durationMs: Date.now() - startedAt,
+    };
+  }
 
-      if (code === 0) {
-        log.debug(
+  const durationMs = Date.now() - startedAt;
+  getLogger().debug(
+    {
+      event: "claude_remote_session_synced",
+      executor: executorLabel(options.executor),
+      sessionId: options.sessionId,
+      localPath,
+      remotePath,
+      durationMs,
+    },
+    "Synced remote Claude session into the local session store",
+  );
+
+  return {
+    success: true,
+    mode: "ssh-replica",
+    localPath,
+    remotePath,
+    bytesTransferred: Buffer.byteLength(result.stdout),
+    durationMs,
+  };
+}
+
+function defaultSharedVisibilityTimeoutMs(): number {
+  const configured = Number.parseInt(
+    process.env.YEP_CLAUDE_SHARED_SESSION_WAIT_MS ?? "",
+    10,
+  );
+  return Number.isFinite(configured) && configured >= 0 ? configured : 2_000;
+}
+
+async function sleep(delayMs: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+}
+
+export async function waitForSharedSessionFile(
+  options: RemoteSessionSyncOptions,
+): Promise<SyncResult> {
+  const startedAt = Date.now();
+  const localPath = getSharedSessionPath(
+    options.executor,
+    options.remoteCwd,
+    options.sessionId,
+  );
+  if (!localPath) {
+    return {
+      success: false,
+      mode: "shared",
+      error: "Shared session storage is missing localProjectsDir",
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  const timeoutMs =
+    options.sharedVisibilityTimeoutMs ?? defaultSharedVisibilityTimeoutMs();
+  const deadline = startedAt + timeoutMs;
+  do {
+    try {
+      await access(localPath);
+      const fileStat = await stat(localPath);
+      if (fileStat.isFile() && fileStat.size > 0) {
+        const durationMs = Date.now() - startedAt;
+        getLogger().debug(
           {
-            event: "session_file_sync_success",
-            host,
-            projectDir,
-            sessionId,
+            event: "claude_shared_session_visible",
+            executor: executorLabel(options.executor),
+            sessionId: options.sessionId,
+            localPath,
             durationMs,
           },
-          `Session file sync complete: ${sessionId} in ${durationMs}ms`,
+          "Shared Claude session file is visible locally",
         );
-
-        resolve({
+        return {
           success: true,
-          filesTransferred: 1,
+          mode: "shared",
+          localPath,
+          bytesTransferred: 0,
           durationMs,
-        });
-      } else {
-        const error = stderr.trim() || `rsync exited with code ${code}`;
-
-        log.warn(
-          {
-            event: "session_file_sync_failed",
-            host,
-            projectDir,
-            sessionId,
-            error,
-            durationMs,
-          },
-          `Session file sync failed: ${error}`,
-        );
-
-        resolve({
-          success: false,
-          error,
-          durationMs,
-        });
+        };
       }
-    });
+    } catch {
+      // 9p visibility can lag briefly after Claude emits its result message.
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(Math.min(50, Math.max(1, deadline - Date.now())));
+  } while (Date.now() <= deadline);
 
-    rsyncProcess.on("error", (error) => {
-      const durationMs = Date.now() - startTime;
-      resolve({
-        success: false,
-        error: error.message,
-        durationMs,
-      });
-    });
-  });
+  return {
+    success: false,
+    mode: "shared",
+    localPath,
+    error: `Shared Claude session file was not visible after ${timeoutMs}ms`,
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+export interface RemoteSessionStorageDependencies {
+  syncReplica?: (options: RemoteSessionSyncOptions) => Promise<SyncResult>;
+  waitForShared?: (options: RemoteSessionSyncOptions) => Promise<SyncResult>;
+}
+
+/** Resolve the turn's JSONL through exactly one configured storage strategy. */
+export function materializeRemoteSessionFile(
+  options: RemoteSessionSyncOptions,
+  dependencies: RemoteSessionStorageDependencies = {},
+): Promise<SyncResult> {
+  if (getRemoteSessionStorageMode(options.executor) === "shared") {
+    return (dependencies.waitForShared ?? waitForSharedSessionFile)(options);
+  }
+  return (dependencies.syncReplica ?? syncRemoteSessionFile)(options);
 }

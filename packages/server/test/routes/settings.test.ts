@@ -18,6 +18,7 @@ describe("Settings Routes", () => {
 
     mockServerSettingsService = {
       getSettings: vi.fn(() => settings),
+      getSetting: vi.fn((key: keyof ServerSettings) => settings[key]),
       updateSettings: vi.fn(async (updates: Partial<ServerSettings>) => {
         settings = { ...settings, ...updates };
         return settings;
@@ -25,7 +26,122 @@ describe("Settings Routes", () => {
     } as unknown as ServerSettingsService;
   });
 
+  describe("remote executors", () => {
+    it("persists a normalized shared-root mapping and applies it at runtime", async () => {
+      const onRemoteExecutorsChanged = vi.fn();
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+        onRemoteExecutorsChanged,
+      });
+
+      const response = await routes.request("/remote-executors", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          executors: [
+            {
+              host: " 192.168.64.4 ",
+              user: " yueyuan ",
+              localRoot: "/Users/yueyuan/Desktop/file/UTM/",
+              remoteRoot: "/mnt/utm/",
+              claudePath: "/home/yueyuan/.local/bin/claude",
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const expected = [
+        {
+          host: "192.168.64.4",
+          user: "yueyuan",
+          localRoot: "/Users/yueyuan/Desktop/file/UTM",
+          remoteRoot: "/mnt/utm",
+          claudePath: "/home/yueyuan/.local/bin/claude",
+        },
+      ];
+      await expect(response.json()).resolves.toEqual({ executors: expected });
+      expect(mockServerSettingsService.updateSettings).toHaveBeenCalledWith({
+        remoteExecutors: expected,
+      });
+      expect(onRemoteExecutorsChanged).toHaveBeenCalledWith(expected);
+    });
+
+    it("rejects an option-like SSH host", async () => {
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+      });
+
+      const response = await routes.request("/remote-executors", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          executors: [
+            {
+              host: "-oProxyCommand=bad",
+              localRoot: "/local",
+              remoteRoot: "/remote",
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(mockServerSettingsService.updateSettings).not.toHaveBeenCalled();
+    });
+
+    it("round-trips a validated shared Claude projects directory", async () => {
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+      });
+      const executor = {
+        host: "utm",
+        localRoot: "/Users/me/UTM",
+        remoteRoot: "/mnt/utm",
+        sessionStorage: {
+          mode: "shared",
+          localProjectsDir: "/Users/me/UTM/claude/projects",
+          remoteProjectsDir: "/mnt/utm/claude/projects",
+        },
+      };
+
+      const response = await routes.request("/remote-executors", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ executors: [executor] }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ executors: [executor] });
+    });
+  });
+
   describe("PUT /", () => {
+    it("accepts Claude as the default provider", async () => {
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+      });
+
+      const response = await routes.request("/", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          newSessionDefaults: {
+            provider: "claude",
+            model: "sonnet",
+          },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(mockServerSettingsService.updateSettings).toHaveBeenCalledWith({
+        newSessionDefaults: {
+          provider: "claude",
+          model: "sonnet",
+        },
+      });
+    });
+
     it("accepts clearing globalInstructions with null", async () => {
       settings = {
         ...settings,

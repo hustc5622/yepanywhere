@@ -16,6 +16,7 @@ import type {
   PendingInputType,
   ProviderInfo,
   ProviderName,
+  RemoteExecutorConfig,
   ReportDocumentResponse,
   ReportUploadResponse,
   ReportsListResponse,
@@ -1529,6 +1530,26 @@ export const api = {
       ),
     }),
 
+  getRemoteExecutors: () =>
+    fetchJSON<{ executors: RemoteExecutorConfig[] }>(
+      "/settings/remote-executors",
+    ),
+
+  updateRemoteExecutors: (executors: RemoteExecutorConfig[]) =>
+    fetchJSON<{ executors: RemoteExecutorConfig[] }>(
+      "/settings/remote-executors",
+      {
+        method: "PUT",
+        body: JSON.stringify({ executors }),
+      },
+    ),
+
+  testRemoteExecutor: (executor: RemoteExecutorConfig) =>
+    fetchJSON<RemoteExecutorTestResult>("/settings/remote-executors/test", {
+      method: "POST",
+      body: JSON.stringify({ executor }),
+    }),
+
   // Sharing API
   getSharingStatus: () => fetchJSON<{ configured: boolean }>("/sharing/status"),
 
@@ -1583,10 +1604,32 @@ export const api = {
     }>("/devices/bridge/download", { method: "POST" }),
 };
 
+export interface RemoteExecutorTestResult {
+  success: boolean;
+  host: string;
+  homeDir?: string;
+  claudeAvailable?: boolean;
+  claudeVersion?: string;
+  localRootAvailable?: boolean;
+  sharedRootAvailable?: boolean;
+  sessionStorageMode?: "shared" | "ssh-replica";
+  localProjectsDirAvailable?: boolean;
+  localProjectsDirPermissionsSecure?: boolean;
+  remoteProjectsDirAvailable?: boolean;
+  remoteProjectsDirPermissionsSecure?: boolean;
+  remoteSessionStoreLinked?: boolean;
+  credentialStoragePrivate?: boolean;
+  remoteClaudeConfigDirUnset?: boolean;
+  error?: string;
+  connectionTimeMs?: number;
+}
+
 /** Server-wide settings that persist across restarts */
 export interface ServerSettings {
   /** Whether clients should register the service worker */
   serviceWorkerEnabled: boolean;
+  /** Remote-only Claude Code executors and path mappings. */
+  remoteExecutors?: RemoteExecutorConfig[];
   /** SSH host aliases for ChromeOS device bridge targets */
   chromeOsHosts?: string[];
   /** Allowed hostnames for host/origin validation. "*" = allow all, comma-separated = specific hosts. */

@@ -435,3 +435,102 @@ describe("ProjectScanner stale-cwd recovery", () => {
     });
   });
 });
+
+describe("ProjectScanner shared Claude storage", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs
+        .splice(0)
+        .map((dir) => rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  it("maps a shared JSONL remote cwd to the local project without rewriting it", async () => {
+    const localRoot = join(tmpdir(), `scanner-shared-${randomUUID()}`);
+    const projectsDir = join(localRoot, "claude", "projects");
+    const fallbackDir = join(localRoot, "local-replica");
+    const localProject = join(localRoot, "projects", "demo");
+    const remoteProject = "/mnt/utm/projects/demo";
+    const sessionDir = join(projectsDir, encodePath(remoteProject));
+    const sessionFile = join(sessionDir, "shared-session.jsonl");
+    tempDirs.push(localRoot);
+    await mkdir(sessionDir, { recursive: true });
+    await mkdir(localProject, { recursive: true });
+    const original = `${JSON.stringify({
+      type: "user",
+      cwd: remoteProject,
+      message: { content: "keep /mnt/utm in the transcript" },
+    })}\n`;
+    await writeFile(sessionFile, original);
+
+    const scanner = new ProjectScanner({
+      projectsDir: fallbackDir,
+      remoteExecutors: [
+        {
+          host: "utm",
+          localRoot,
+          remoteRoot: "/mnt/utm",
+          sessionStorage: {
+            mode: "shared",
+            localProjectsDir: projectsDir,
+            remoteProjectsDir: "/mnt/utm/claude/projects",
+          },
+        },
+      ],
+      enableCodex: false,
+      enableGemini: false,
+      enableOpenCode: false,
+    });
+
+    await expect(scanner.listProjects()).resolves.toEqual([
+      expect.objectContaining({
+        id: encodeProjectId(localProject),
+        path: localProject,
+        sessionDir,
+        sessionCount: 1,
+      }),
+    ]);
+    await expect(
+      import("node:fs/promises").then(({ readFile }) =>
+        readFile(sessionFile, "utf8"),
+      ),
+    ).resolves.toBe(original);
+  });
+
+  it("uses the remote cwd encoding for a new virtual shared project", async () => {
+    const localRoot = join(tmpdir(), `scanner-shared-${randomUUID()}`);
+    const projectsDir = join(localRoot, "claude", "projects");
+    const localProject = join(localRoot, "projects", "new demo");
+    tempDirs.push(localRoot);
+    await mkdir(projectsDir, { recursive: true });
+    await mkdir(localProject, { recursive: true });
+
+    const scanner = new ProjectScanner({
+      projectsDir: join(localRoot, "local-replica"),
+      remoteExecutors: [
+        {
+          host: "utm",
+          localRoot,
+          remoteRoot: "/mnt/utm",
+          sessionStorage: {
+            mode: "shared",
+            localProjectsDir: projectsDir,
+            remoteProjectsDir: "/mnt/utm/claude/projects",
+          },
+        },
+      ],
+      enableCodex: false,
+      enableGemini: false,
+      enableOpenCode: false,
+    });
+
+    await expect(
+      scanner.getOrCreateProject(encodeProjectId(localProject), "claude"),
+    ).resolves.toMatchObject({
+      path: localProject,
+      sessionDir: join(projectsDir, encodePath("/mnt/utm/projects/new demo")),
+    });
+  });
+});

@@ -41,6 +41,7 @@ import {
   useProviders,
 } from "../hooks/useProviders";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
+import { useRemoteExecutors } from "../hooks/useRemoteExecutors";
 import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
 import { getStaticAgentCommandConfigs } from "../lib/agentCommands";
@@ -303,6 +304,7 @@ export function NewSessionForm({
   const [selectedProvider, setSelectedProvider] = useState<ProviderName | null>(
     null,
   );
+  const [selectedExecutor, setSelectedExecutor] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<
     string | null
@@ -362,6 +364,8 @@ export function NewSessionForm({
     isLoading: settingsLoading,
     updateSetting: updateServerSetting,
   } = useServerSettings();
+  const { executors: remoteExecutors, loading: executorsLoading } =
+    useRemoteExecutors();
 
   const availableProviders = getAvailableProviders(providers);
   const resolvedPlaceholder = placeholder ?? t("newSessionPlaceholder");
@@ -804,6 +808,18 @@ export function NewSessionForm({
     }
   }, [autoFocus]);
 
+  useEffect(() => {
+    if (selectedProvider !== "claude") {
+      setSelectedExecutor(null);
+      return;
+    }
+    setSelectedExecutor((current) =>
+      current && remoteExecutors.some((executor) => executor.host === current)
+        ? current
+        : (remoteExecutors[0]?.host ?? null),
+    );
+  }, [remoteExecutors, selectedProvider]);
+
   // Check for FAB pre-fill on mount (when coming from FloatingActionButton)
   useEffect(() => {
     const prefill = getFabPrefill();
@@ -932,6 +948,9 @@ export function NewSessionForm({
     selectedProvider === "opencode" && isManagedOpenCodeModel
       ? undefined
       : (selectedModel ?? undefined);
+  const claudeExecutorUnavailable =
+    selectedProvider === "claude" &&
+    (executorsLoading || selectedExecutor === null);
 
   const handleSaveDefaults = useCallback(async () => {
     setIsSavingDefaults(true);
@@ -991,7 +1010,8 @@ export function NewSessionForm({
       !hasContent ||
       isStarting ||
       startRetryBlockedMessage ||
-      hasOpenCodeConfigError
+      hasOpenCodeConfigError ||
+      claudeExecutorUnavailable
     ) {
       return;
     }
@@ -1018,6 +1038,10 @@ export function NewSessionForm({
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
         opencodeConfig: opencodeConfigForRequest,
+        executor:
+          selectedProvider === "claude"
+            ? (selectedExecutor ?? undefined)
+            : undefined,
       };
 
       if (pendingFiles.length > 0) {
@@ -1485,7 +1509,8 @@ export function NewSessionForm({
             isStarting ||
             Boolean(startRetryBlockedMessage) ||
             !hasContent ||
-            hasOpenCodeConfigError
+            hasOpenCodeConfigError ||
+            claudeExecutorUnavailable
           }
           className="send-button"
           aria-label={t("newSessionStartAction")}
@@ -1908,6 +1933,44 @@ export function NewSessionForm({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {selectedProvider === "claude" && (
+        <div className="new-session-executor-section">
+          <h3>{t("newSessionRunOnTitle")}</h3>
+          {executorsLoading ? (
+            <p className="settings-hint">
+              {t("newSessionRemoteExecutorLoading")}
+            </p>
+          ) : remoteExecutors.length === 0 ? (
+            <p className="new-session-limit-error" role="alert">
+              {t("newSessionRemoteExecutorRequired")}
+            </p>
+          ) : (
+            <div className="executor-options">
+              {remoteExecutors.map((executor) => (
+                <button
+                  key={executor.host}
+                  type="button"
+                  className={`executor-option ${selectedExecutor === executor.host ? "selected" : ""}`}
+                  onClick={() => setSelectedExecutor(executor.host)}
+                  disabled={isStarting}
+                >
+                  <span className="executor-option-dot executor-remote" />
+                  <div className="executor-option-content">
+                    <span className="executor-option-label">
+                      {executor.user ? `${executor.user}@` : ""}
+                      {executor.host}
+                    </span>
+                    <span className="executor-option-desc">
+                      {executor.localRoot} → {executor.remoteRoot}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

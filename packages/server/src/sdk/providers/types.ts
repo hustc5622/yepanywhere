@@ -77,10 +77,8 @@ export interface StartSessionOptions {
   opencodeConfig?: OpenCodeSessionConfig;
   /** Tool approval callback */
   onToolApproval?: CanUseTool;
-  /** SSH host for remote execution (undefined = local) */
+  /** Configured SSH host for Claude remote execution. */
   executor?: string;
-  /** Environment variables to set on remote (for testing: CLAUDE_SESSIONS_DIR) */
-  remoteEnv?: Record<string, string>;
   /** Global instructions to append to system prompt (from server settings) */
   globalInstructions?: string;
 }

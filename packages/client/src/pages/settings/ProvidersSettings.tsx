@@ -3,6 +3,7 @@ import { type OhMyRouterThroughputStatus, api } from "../../api/client";
 import { useProviders } from "../../hooks/useProviders";
 import { useI18n } from "../../i18n";
 import { getAllProviders } from "../../providers/registry";
+import { RemoteExecutorsSettings } from "./RemoteExecutorsSettings";
 
 function formatMilliseconds(value: number | undefined): string {
   if (value === undefined) return "—";
@@ -223,6 +224,7 @@ export function ProvidersSettings() {
           ))}
         </div>
       </section>
+      <RemoteExecutorsSettings />
       <OhMyRouterThroughputBenchmark />
     </>
   );

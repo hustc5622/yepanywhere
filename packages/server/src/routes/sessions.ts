@@ -60,7 +60,6 @@ import type {
   RuntimeController,
   RuntimeStartResponse,
 } from "../runtime/types.js";
-import { getProjectDirFromCwd, syncSessions } from "../sdk/session-sync.js";
 import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
@@ -1876,9 +1875,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // session we can't read the named session's jsonl (it doesn't exist
     // yet) — scan the project's session directory instead. Any existing
     // jsonl carries the SDK-written cwd, which is the source of truth.
+    const recoverySessionDir = project.sessionDir;
     const recoveredCwd = await resolveStartCwd(
       project.path,
-      project.sessionDir,
+      recoverySessionDir,
+      (cwd) => deps.scanner.mapSessionCwdToLocal(cwd, recoverySessionDir),
     );
     if (recoveredCwd) {
       const recoveredId = encodeProjectId(recoveredCwd);
@@ -2201,10 +2202,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // then fail with ENOENT, which the SDK mis-renders as "binary exists but
     // failed to launch". Recover the real cwd from the session's jsonl (the
     // SDK rewrites it on every turn) and re-resolve the project.
+    const recoverySessionDir = project.sessionDir;
     const recoveredCwd = await resolveResumeCwd(
       project.path,
-      project.sessionDir,
+      recoverySessionDir,
       sessionId,
+      (cwd) => deps.scanner.mapSessionCwdToLocal(cwd, recoverySessionDir),
     );
     if (recoveredCwd) {
       const recoveredId = encodeProjectId(recoveredCwd);
@@ -2295,23 +2298,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       executor = parsedSavedExecutor.executor;
     }
 
-    // For remote sessions, sync local files TO remote before resuming
-    // This ensures the remote has the latest session state
     if (executor) {
-      const projectDir = getProjectDirFromCwd(project.path);
-      const syncResult = await syncSessions({
-        host: executor,
-        projectDir,
-        direction: "to-remote",
-      });
-      if (!syncResult.success) {
-        console.warn(
-          `[resume] Failed to pre-sync session to ${executor}: ${syncResult.error}`,
-        );
-        // Continue anyway - remote may have the files from before
-      }
-
-      // Save executor to metadata if not already saved (e.g. client provided it)
+      // Persist only the selected executor. Shared mode reads the VM-authored
+      // JSONL in place; compatibility mode updates a local replica after turns.
       if (deps.sessionMetadataService) {
         await deps.sessionMetadataService.setExecutor(sessionId, executor);
       }

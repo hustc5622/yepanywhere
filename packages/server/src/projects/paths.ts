@@ -251,6 +251,7 @@ export async function resolveResumeCwd(
   projectPath: string,
   sessionDir: string,
   sessionId: string,
+  mapCwd: (cwd: string) => string = (cwd) => cwd,
 ): Promise<string | null> {
   try {
     const s = await stat(projectPath);
@@ -261,11 +262,12 @@ export async function resolveResumeCwd(
 
   const sessionFile = getSessionFilePath(sessionDir, sessionId);
   let recoveredCwd = await readCwdFromSessionFile(sessionFile);
+  if (recoveredCwd) recoveredCwd = mapCwd(recoveredCwd);
   if (!recoveredCwd) {
     // sessionId.jsonl might not exist (e.g. new session, or the session is
     // tracked in a sibling directory after a rename). Fall back to scanning
     // any jsonl in the sessionDir.
-    recoveredCwd = await recoverCwdFromSessionDir(sessionDir);
+    recoveredCwd = await recoverCwdFromSessionDir(sessionDir, mapCwd);
   }
   if (!recoveredCwd) return null;
 
@@ -294,6 +296,7 @@ export async function resolveResumeCwd(
  */
 export async function recoverCwdFromSessionDir(
   sessionDir: string,
+  mapCwd: (cwd: string) => string = (cwd) => cwd,
 ): Promise<string | null> {
   let entries: string[];
   try {
@@ -304,8 +307,9 @@ export async function recoverCwdFromSessionDir(
 
   const jsonlFiles = entries.filter((f) => f.endsWith(".jsonl"));
   for (const file of jsonlFiles) {
-    const cwd = await readCwdFromSessionFile(join(sessionDir, file));
-    if (!cwd) continue;
+    const rawCwd = await readCwdFromSessionFile(join(sessionDir, file));
+    if (!rawCwd) continue;
+    const cwd = mapCwd(rawCwd);
     try {
       const s = await stat(cwd);
       if (s.isDirectory()) return cwd;
@@ -327,6 +331,7 @@ export async function recoverCwdFromSessionDir(
 export async function resolveStartCwd(
   projectPath: string,
   sessionDir: string,
+  mapCwd: (cwd: string) => string = (cwd) => cwd,
 ): Promise<string | null> {
   try {
     const s = await stat(projectPath);
@@ -335,7 +340,7 @@ export async function resolveStartCwd(
     // fall through to recovery
   }
 
-  const recovered = await recoverCwdFromSessionDir(sessionDir);
+  const recovered = await recoverCwdFromSessionDir(sessionDir, mapCwd);
   return recovered ?? null;
 }
 

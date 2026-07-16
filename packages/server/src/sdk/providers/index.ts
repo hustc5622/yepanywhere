@@ -14,6 +14,17 @@ export type {
   StartSessionOptions,
 } from "./types.js";
 
+// Claude provider (Agent SDK protocol, remote CLI over SSH only)
+import { claudeProvider } from "./claude.js";
+export {
+  ClaudeProvider,
+  claudeProvider,
+  configureClaudeRemoteExecutors,
+  configureClaudeSessionFileObserver,
+  type ClaudeProviderConfig,
+  type ClaudeSessionFileUpdate,
+} from "./claude.js";
+
 // Codex provider (uses codex CLI)
 import { codexProvider } from "./codex.js";
 export {
@@ -60,6 +71,7 @@ export {
  */
 export function getAllProviders(): AgentProvider[] {
   return [
+    claudeProvider,
     codexProvider,
     codexOSSProvider,
     geminiProvider,
@@ -77,6 +89,8 @@ export function getAllProviders(): AgentProvider[] {
  */
 export function getProvider(name: ProviderName): AgentProvider | null {
   switch (name) {
+    case "claude":
+      return claudeProvider;
     case "codex":
       return codexProvider;
     case "codex-oss":

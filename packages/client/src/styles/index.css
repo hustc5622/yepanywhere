@@ -9094,6 +9094,25 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 /* Remote Executors Settings */
+.remote-executor-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.remote-executor-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.remote-executor-form-grid-wide {
+  grid-column: 1 / -1;
+}
+
 .remote-executor-add {
   display: flex;
   gap: var(--space-2);
@@ -9102,6 +9121,9 @@ button.context-usage-indicator--button:focus-visible {
 
 .remote-executor-input {
   flex: 1;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   padding: var(--space-2) var(--space-3);
   background: var(--bg-input);
   border: 1px solid var(--border-input);
@@ -9217,6 +9239,16 @@ button.context-usage-indicator--button:focus-visible {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   padding: var(--space-2);
+}
+
+@media (max-width: 600px) {
+  .remote-executor-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .remote-executor-form-grid-wide {
+    grid-column: auto;
+  }
 }
 
 /* Sidebar New Session Button */

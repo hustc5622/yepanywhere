@@ -15,7 +15,7 @@ describe("ServerSettingsService", () => {
     );
   });
 
-  it("removes retired Claude settings during migration", async () => {
+  it("removes retired Claude settings and legacy executor aliases during migration", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "yep-settings-"));
     dataDirs.push(dataDir);
     const settingsPath = join(dataDir, "server-settings.json");
@@ -46,8 +46,61 @@ describe("ServerSettingsService", () => {
       version: number;
       settings: Record<string, unknown>;
     };
-    expect(persisted.version).toBe(2);
+    expect(persisted.version).toBe(4);
     expect(persisted.settings).not.toHaveProperty("ollamaUrl");
     expect(persisted.settings).not.toHaveProperty("remoteExecutors");
+  });
+
+  it("preserves and normalizes mapped remote executors", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "yep-settings-"));
+    dataDirs.push(dataDir);
+    const settingsPath = join(dataDir, "server-settings.json");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        version: 2,
+        settings: {
+          serviceWorkerEnabled: true,
+          remoteExecutors: [
+            {
+              host: " 192.168.64.4 ",
+              user: " yueyuan ",
+              localRoot: "/Users/yueyuan/Desktop/file/UTM/",
+              remoteRoot: "/mnt/utm/",
+              claudePath: "/home/yueyuan/.local/bin/claude",
+              sessionStorage: {
+                mode: "shared",
+                localProjectsDir:
+                  "/Users/yueyuan/Desktop/file/UTM/claude/projects/",
+                remoteProjectsDir: "/mnt/utm/claude/projects/",
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const service = new ServerSettingsService({ dataDir });
+    await service.initialize();
+
+    expect(service.getSetting("remoteExecutors")).toEqual([
+      {
+        host: "192.168.64.4",
+        user: "yueyuan",
+        localRoot: "/Users/yueyuan/Desktop/file/UTM",
+        remoteRoot: "/mnt/utm",
+        claudePath: "/home/yueyuan/.local/bin/claude",
+        sessionStorage: {
+          mode: "shared",
+          localProjectsDir: "/Users/yueyuan/Desktop/file/UTM/claude/projects",
+          remoteProjectsDir: "/mnt/utm/claude/projects",
+        },
+      },
+    ]);
+
+    const persisted = JSON.parse(await readFile(settingsPath, "utf-8")) as {
+      version: number;
+    };
+    expect(persisted.version).toBe(4);
   });
 });

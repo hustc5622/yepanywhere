@@ -14,9 +14,15 @@ import {
   type OpenCodeSessionConfig,
   type PermissionMode,
   type ProviderName,
+  type RemoteExecutorConfig,
   type ThinkingOption,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import {
+  parseRemoteExecutorConfig,
+  parseRemoteExecutorConfigs,
+} from "../sdk/remote-executor-config.js";
+import { testRemoteExecutor } from "../sdk/remote-spawn.js";
 import type { OhMyRouterBenchmarkService } from "../services/OhMyRouterBenchmarkService.js";
 import type {
   ServerSettings,
@@ -35,6 +41,10 @@ export interface SettingsRoutesDeps {
   ohmyrouterBenchmarkService?: OhMyRouterBenchmarkService;
   /** Callback to apply allowedHosts changes at runtime */
   onAllowedHostsChanged?: (value: string | undefined) => void;
+  /** Callback to refresh Claude provider discovery after executor changes. */
+  onRemoteExecutorsChanged?: (
+    executors: RemoteExecutorConfig[],
+  ) => void | Promise<void>;
 }
 
 function parseHostAliasList(rawHosts: unknown[]): {
@@ -270,7 +280,7 @@ function parseNewSessionDefaults(
       return null;
     }
     if (typeof input.provider === "string" && input.provider.length > 0) {
-      if (input.provider === "claude" || input.provider === "claude-ollama") {
+      if (input.provider === "claude-ollama") {
         return null;
       }
       parsed.provider = input.provider as ProviderName;
@@ -367,6 +377,7 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
   const {
     serverSettingsService,
     onAllowedHostsChanged,
+    onRemoteExecutorsChanged,
     ohmyrouterBenchmarkService,
   } = deps;
 
@@ -406,6 +417,16 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
     // Handle boolean settings
     if (typeof body.serviceWorkerEnabled === "boolean") {
       updates.serviceWorkerEnabled = body.serviceWorkerEnabled;
+    }
+    if ("remoteExecutors" in body) {
+      const parsed = parseRemoteExecutorConfigs(body.remoteExecutors);
+      if (!parsed.executors) {
+        return c.json(
+          { error: parsed.error ?? "Invalid remoteExecutors setting" },
+          400,
+        );
+      }
+      updates.remoteExecutors = parsed.executors;
     }
     // Handle chromeOsHosts array
     if (Array.isArray(body.chromeOsHosts)) {
@@ -500,7 +521,48 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
     if ("allowedHosts" in updates && onAllowedHostsChanged) {
       onAllowedHostsChanged(settings.allowedHosts);
     }
+    if ("remoteExecutors" in updates && onRemoteExecutorsChanged) {
+      await onRemoteExecutorsChanged(settings.remoteExecutors ?? []);
+    }
     return c.json({ settings });
+  });
+
+  app.get("/remote-executors", (c) => {
+    return c.json({
+      executors: serverSettingsService.getSetting("remoteExecutors") ?? [],
+    });
+  });
+
+  app.put("/remote-executors", async (c) => {
+    let body: { executors?: unknown };
+    try {
+      body = await c.req.json<{ executors?: unknown }>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const parsed = parseRemoteExecutorConfigs(body.executors);
+    if (!parsed.executors) {
+      return c.json({ error: parsed.error ?? "Invalid executors" }, 400);
+    }
+    const settings = await serverSettingsService.updateSettings({
+      remoteExecutors: parsed.executors,
+    });
+    await onRemoteExecutorsChanged?.(parsed.executors);
+    return c.json({ executors: settings.remoteExecutors ?? [] });
+  });
+
+  app.post("/remote-executors/test", async (c) => {
+    let body: { executor?: unknown };
+    try {
+      body = await c.req.json<{ executor?: unknown }>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const parsed = parseRemoteExecutorConfig(body.executor);
+    if (!parsed.executor) {
+      return c.json({ error: parsed.error ?? "Invalid executor" }, 400);
+    }
+    return c.json(await testRemoteExecutor(parsed.executor));
   });
 
   return app;

@@ -592,14 +592,10 @@ export class SessionIndexService implements ISessionIndexService {
     }
 
     if (event.provider === "claude") {
-      const fileName = path.basename(event.relativePath);
+      const fileName = path.basename(event.path);
       if (!fileName.endsWith(".jsonl")) return;
       const sessionId = fileName.slice(0, -6);
-      const relativeDir = path.dirname(event.relativePath);
-      const sessionDir =
-        relativeDir === "."
-          ? this.projectsDir
-          : path.join(this.projectsDir, relativeDir);
+      const sessionDir = path.dirname(event.path);
 
       this.markSessionDirty(sessionDir, sessionId);
 

@@ -20,6 +20,9 @@ export {
 export type {
   ProviderName,
   ProviderInfo,
+  RemoteExecutorConfig,
+  RemoteSessionStorageConfig,
+  RemoteSessionStorageMode,
   ReasoningEffortInfo,
   ModelInfo,
   OpenCodeRequestProtocol,

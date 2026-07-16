@@ -1,6 +1,6 @@
 /**
  * Provider name - which AI agent provider to use.
- * - "claude": retained only for reading legacy session metadata
+ * - "claude": Claude Code CLI running through a configured SSH executor
  * - "codex": OpenAI Codex via SDK (cloud models)
  * - "codex-oss": Codex via CLI with --oss (local models via Ollama)
  * - "gemini": Google Gemini via CLI
@@ -35,6 +35,51 @@ export const ALL_PROVIDERS: readonly ProviderName[] = [
  * Used when a new session does not explicitly select a provider.
  */
 export const DEFAULT_PROVIDER: ProviderName = "codex";
+
+export type RemoteSessionStorageMode = "shared" | "ssh-replica";
+
+/**
+ * How a remote Claude executor exposes its JSONL transcripts to Yep.
+ *
+ * `shared` means Claude writes directly into a filesystem visible to both
+ * machines. `ssh-replica` keeps the compatibility path that pulls the remote
+ * JSONL over SSH after every turn.
+ */
+export interface RemoteSessionStorageConfig {
+  mode: RemoteSessionStorageMode;
+  /** Local/Yep view of Claude's projects directory (required for shared). */
+  localProjectsDir?: string;
+  /** Remote/Claude view of the same projects directory (required for shared). */
+  remoteProjectsDir?: string;
+}
+
+/**
+ * SSH executor used by the Claude provider.
+ *
+ * Claude runs inside the remote machine, while Yep and the project catalog
+ * remain on the local machine. `localRoot` and `remoteRoot` describe the same
+ * shared directory as seen from each side.
+ */
+export interface RemoteExecutorConfig {
+  /** SSH config alias or hostname/IP address. */
+  host: string;
+  /** Optional SSH user. Prefer this over embedding `user@` in host. */
+  user?: string;
+  /** Optional SSH port (defaults to 22). */
+  port?: number;
+  /** Absolute shared-directory root on the Yep host. */
+  localRoot: string;
+  /** Absolute shared-directory mount root inside the remote machine. */
+  remoteRoot: string;
+  /** Absolute remote Claude executable path; login-shell `claude` when omitted. */
+  claudePath?: string;
+  /** Optional remote Claude config root (sets CLAUDE_CONFIG_DIR). */
+  remoteClaudeConfigDir?: string;
+  /** Optional remote projects/session root; defaults to config-dir/projects or ~/.claude/projects. */
+  remoteSessionsDir?: string;
+  /** Transcript storage strategy. Omitted legacy configs use ssh-replica. */
+  sessionStorage?: RemoteSessionStorageConfig;
+}
 
 /**
  * Model information for a provider.

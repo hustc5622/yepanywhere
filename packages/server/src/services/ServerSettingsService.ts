@@ -7,16 +7,19 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { NewSessionDefaults } from "@yep-anywhere/shared";
+import type {
+  NewSessionDefaults,
+  RemoteExecutorConfig,
+} from "@yep-anywhere/shared";
+import { parseRemoteExecutorConfigs } from "../sdk/remote-executor-config.js";
 import type { OhMyRouterThroughputBenchmark } from "./OhMyRouterBenchmarkService.js";
 
-const CURRENT_VERSION = 2;
+const CURRENT_VERSION = 4;
 
 const LEGACY_CLAUDE_SETTING_KEYS = [
   "ollamaUrl",
   "ollamaSystemPrompt",
   "ollamaUseFullSystemPrompt",
-  "remoteExecutors",
 ] as const;
 
 /** Server-wide settings */
@@ -25,6 +28,8 @@ export interface ServerSettings {
   serviceWorkerEnabled: boolean;
   /** SSH host aliases for ChromeOS device-bridge targets */
   chromeOsHosts?: string[];
+  /** Remote-only Claude Code executors and shared-directory path mappings. */
+  remoteExecutors?: RemoteExecutorConfig[];
   /** Allowed hostnames for host/origin validation. "*" = allow all, comma-separated = specific hosts. */
   allowedHosts?: string;
   /** Free-form instructions appended to the system prompt for all sessions */
@@ -73,6 +78,22 @@ function removeLegacyClaudeSettings(settings: unknown): {
   for (const key of LEGACY_CLAUDE_SETTING_KEYS) {
     if (key in cleaned) {
       delete cleaned[key];
+      changed = true;
+    }
+  }
+
+  if ("remoteExecutors" in cleaned) {
+    const parsed = parseRemoteExecutorConfigs(cleaned.remoteExecutors);
+    if (parsed.executors) {
+      if (
+        JSON.stringify(cleaned.remoteExecutors) !==
+        JSON.stringify(parsed.executors)
+      ) {
+        changed = true;
+      }
+      cleaned.remoteExecutors = parsed.executors;
+    } else {
+      Reflect.deleteProperty(cleaned, "remoteExecutors");
       changed = true;
     }
   }
