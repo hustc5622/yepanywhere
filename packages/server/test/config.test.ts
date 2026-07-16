@@ -108,6 +108,8 @@ describe("loadConfig codex paths", () => {
       "mcp_servers.node_repl.enabled=false",
       "-c",
       "mcp_servers.feishu-mcp.enabled=false",
+      "-c",
+      "mcp_servers.openaiDeveloperDocs.enabled=false",
     ]);
     expect(config.codexBridgeFullUpstreamArgs).toEqual([]);
   });
@@ -163,6 +165,8 @@ describe("loadConfig codex paths", () => {
       "mcp_servers.node_repl.enabled=false",
       "-c",
       "mcp_servers.feishu-mcp.enabled=false",
+      "-c",
+      "mcp_servers.openaiDeveloperDocs.enabled=false",
     ]);
     expect(config.codexBridgeFullUpstreamArgs).toEqual([]);
   });

@@ -15,6 +15,8 @@ export const CODEX_CLEAR_MCP_APP_SERVER_ARGS = [
   "mcp_servers.node_repl.enabled=false",
   "-c",
   "mcp_servers.feishu-mcp.enabled=false",
+  "-c",
+  "mcp_servers.openaiDeveloperDocs.enabled=false",
 ] as const;
 
 export function getCodexMcpAppServerArgs(

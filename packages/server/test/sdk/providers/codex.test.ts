@@ -329,6 +329,8 @@ process.stdin.on("data", (chunk) => {
             "mcp_servers.node_repl.enabled=false",
             "-c",
             "mcp_servers.feishu-mcp.enabled=false",
+            "-c",
+            "mcp_servers.openaiDeveloperDocs.enabled=false",
             "--listen",
             "stdio://",
           ],
