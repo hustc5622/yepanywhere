@@ -35,7 +35,12 @@ import {
   translateSharedPath,
 } from "../remote-spawn.js";
 import { materializeRemoteSessionFile } from "../session-sync.js";
-import type { ContentBlock, SDKMessage, UserMessage } from "../types.js";
+import type {
+  ContentBlock,
+  QueuedUserMessage,
+  SDKMessage,
+  UserMessage,
+} from "../types.js";
 import {
   type ClaudeControlProbeResult,
   type ClaudeUsageResponse,
@@ -170,10 +175,12 @@ export function safeAttachmentName(
  */
 class RemoteMessageQueue extends MessageQueue {
   private readonly uploadDir: string;
+  private handedMessageCount = 0;
 
   constructor(
     private readonly executor: RemoteExecutorConfig,
     sessionToken: string,
+    private readonly startupId?: string,
   ) {
     super();
     this.uploadDir = join(
@@ -211,6 +218,24 @@ class RemoteMessageQueue extends MessageQueue {
     });
 
     return super.push({ ...message, attachments });
+  }
+
+  override async *generator(): AsyncGenerator<QueuedUserMessage> {
+    for await (const message of super.generator()) {
+      this.handedMessageCount += 1;
+      getLogger().info(
+        {
+          event: "claude_remote_prompt_handed_to_sdk",
+          startupId: this.startupId,
+          executor: executorLabel(this.executor),
+          messageUuid: message.uuid,
+          promptSequence: this.handedMessageCount,
+          queueDepth: this.depth,
+        },
+        "Handed remote Claude prompt to the Agent SDK",
+      );
+      yield message;
+    }
   }
 
   cleanup(): void {
@@ -453,10 +478,37 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
+    const startupStartedAt = Date.now();
     const executor = this.resolveExecutor(options);
     assertLocalSharedRoot(executor);
     const remoteCwd = translateSharedPath(options.cwd, executor);
+    getLogger().info(
+      {
+        event: "claude_remote_preflight_start",
+        startupId: options.startupId,
+        executor: executorLabel(executor),
+        localCwd: options.cwd,
+        remoteCwd,
+        resumeSessionId: options.resumeSessionId,
+      },
+      "Starting remote Claude preflight",
+    );
+    const preflightStartedAt = Date.now();
     const remoteStatus = await testRemoteExecutor(executor);
+    getLogger().info(
+      {
+        event: "claude_remote_preflight_complete",
+        startupId: options.startupId,
+        executor: executorLabel(executor),
+        remoteCwd,
+        success: remoteStatus.success,
+        durationMs: Date.now() - preflightStartedAt,
+        claudeVersion: remoteStatus.claudeVersion,
+        sessionStorageMode: remoteStatus.sessionStorageMode,
+        error: remoteStatus.error,
+      },
+      "Completed remote Claude preflight",
+    );
     if (!remoteStatus.success) {
       throw new Error(
         `SSH connection to ${executorLabel(executor)} failed: ${remoteStatus.error ?? "unknown error"}`,
@@ -527,11 +579,24 @@ export class ClaudeProvider implements AgentProvider {
       }
     }
 
+    const cwdCheckStartedAt = Date.now();
     const cwdCheck = await runRemoteCommand(
       executor,
       inLoginShell(
         `test -d ${quoteShell(remoteCwd)} && test -r ${quoteShell(remoteCwd)} && test -w ${quoteShell(remoteCwd)}`,
       ),
+    );
+    getLogger().info(
+      {
+        event: "claude_remote_cwd_check_complete",
+        startupId: options.startupId,
+        executor: executorLabel(executor),
+        remoteCwd,
+        success: cwdCheck.success,
+        durationMs: Date.now() - cwdCheckStartedAt,
+        error: cwdCheck.error,
+      },
+      "Completed remote Claude project directory check",
     );
     if (!cwdCheck.success) {
       throw new Error(
@@ -540,8 +605,29 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     const abortController = new AbortController();
-    const queue = new RemoteMessageQueue(executor, randomUUID());
-    if (options.initialMessage) queue.push(options.initialMessage);
+    const queue = new RemoteMessageQueue(
+      executor,
+      randomUUID(),
+      options.startupId,
+    );
+    if (options.initialMessage) {
+      const queueDepth = queue.push(options.initialMessage);
+      getLogger().info(
+        {
+          event: "claude_remote_initial_prompt_queued",
+          startupId: options.startupId,
+          executor: executorLabel(executor),
+          remoteCwd,
+          messageUuid: options.initialMessage.uuid,
+          messageChars: options.initialMessage.text.length,
+          attachmentCount: options.initialMessage.attachments?.length ?? 0,
+          imageCount: options.initialMessage.images?.length ?? 0,
+          queueDepth,
+          requestElapsedMs: Date.now() - startupStartedAt,
+        },
+        "Queued initial prompt for remote Claude",
+      );
+    }
 
     const onToolApproval = options.onToolApproval;
     const canUseTool: ClaudeCanUseTool | undefined = onToolApproval
@@ -567,12 +653,24 @@ export class ClaudeProvider implements AgentProvider {
     let capturedProcess: ChildProcess | null = null;
     const spawnClaudeCodeProcess = createRemoteSpawn({
       executor,
+      startupId: options.startupId,
       onSpawn: (process) => {
         capturedProcess = process;
       },
     });
 
     let sdkQuery: Query;
+    const queryCreateStartedAt = Date.now();
+    getLogger().info(
+      {
+        event: "claude_remote_sdk_query_create_start",
+        startupId: options.startupId,
+        executor: executorLabel(executor),
+        remoteCwd,
+        requestElapsedMs: queryCreateStartedAt - startupStartedAt,
+      },
+      "Creating remote Claude Agent SDK query",
+    );
     try {
       sdkQuery = query({
         prompt: queue.generator() as AsyncGenerator<SDKUserMessage>,
@@ -602,6 +700,17 @@ export class ClaudeProvider implements AgentProvider {
           spawnClaudeCodeProcess,
         },
       });
+      getLogger().info(
+        {
+          event: "claude_remote_sdk_query_created",
+          startupId: options.startupId,
+          executor: executorLabel(executor),
+          remoteCwd,
+          durationMs: Date.now() - queryCreateStartedAt,
+          requestElapsedMs: Date.now() - startupStartedAt,
+        },
+        "Created remote Claude Agent SDK query",
+      );
     } catch (error) {
       queue.cleanup();
       throw new Error(

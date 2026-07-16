@@ -22,6 +22,7 @@ import { mapLocalPathToRemote } from "./remote-path-mapping.js";
 const DEFAULT_CONNECT_TIMEOUT_MS = 8_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 12_000;
 const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
+const REMOTE_STARTUP_STALL_THRESHOLDS_MS = [10_000, 30_000, 120_000] as const;
 
 // These values describe the Agent SDK transport itself. Authentication,
 // provider selection, proxy settings, and every other machine-specific value
@@ -31,6 +32,15 @@ const REMOTE_SDK_ENV_KEYS = [
   "CLAUDE_AGENT_SDK_VERSION",
   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
 ] as const;
+
+// A Yep-owned SDK process should not block session initialization on CLI
+// updates, plugin marketplace refreshes, or UI-only background prefetches.
+// These values apply only to the spawned process and do not change the VM's
+// persistent Claude configuration or interactive terminal sessions.
+const REMOTE_RUNTIME_ENV = {
+  DISABLE_AUTOUPDATER: "1",
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+} as const;
 
 export interface RemoteExecutorTestResult {
   success: boolean;
@@ -62,6 +72,8 @@ export interface RemoteCommandResult {
 
 export interface RemoteSpawnOptions {
   executor: RemoteExecutorConfig;
+  /** Correlates SSH transport logs with the provider/session startup attempt. */
+  startupId?: string;
   /** Called with the local SSH child, primarily for liveness/PID reporting. */
   onSpawn?: (process: ChildProcess) => void;
 }
@@ -439,10 +451,15 @@ export function buildRemoteClaudeCommand(
 ): RemoteClaudeCommand {
   const cli = executor.claudePath ?? "claude";
   const args = remoteClaudeArgs(spawnOptions.command, spawnOptions.args);
-  const envParts = REMOTE_SDK_ENV_KEYS.flatMap((key) => {
-    const value = spawnOptions.env[key];
-    return value === undefined ? [] : [`${key}=${quoteShell(value)}`];
-  });
+  const envParts = Object.entries(REMOTE_RUNTIME_ENV).map(
+    ([key, value]) => `${key}=${quoteShell(value)}`,
+  );
+  envParts.push(
+    ...REMOTE_SDK_ENV_KEYS.flatMap((key) => {
+      const value = spawnOptions.env[key];
+      return value === undefined ? [] : [`${key}=${quoteShell(value)}`];
+    }),
+  );
   if (
     executor.remoteClaudeConfigDir &&
     getRemoteSessionStorageMode(executor) !== "shared"
@@ -507,6 +524,10 @@ export function createRemoteSpawn(
 ): (spawnOptions: SpawnOptions) => SpawnedProcess {
   return (spawnOptions) => {
     const { executor } = options;
+    const startedAt = Date.now();
+    let sshProcessSpawnedAt: number | null = null;
+    let firstStdoutAt: number | null = null;
+    let firstStderrAt: number | null = null;
     const { cli, args, remoteCommand } = buildRemoteClaudeCommand(
       executor,
       spawnOptions,
@@ -515,6 +536,7 @@ export function createRemoteSpawn(
     getLogger().info(
       {
         event: "claude_remote_spawn_start",
+        startupId: options.startupId,
         executor: executorLabel(executor),
         cwd: spawnOptions.cwd,
         cli,
@@ -528,13 +550,114 @@ export function createRemoteSpawn(
     });
     options.onSpawn?.(child);
 
+    const stallTimers = REMOTE_STARTUP_STALL_THRESHOLDS_MS.map(
+      (thresholdMs) => {
+        const timer = setTimeout(() => {
+          if (firstStdoutAt !== null || child.exitCode !== null) return;
+          getLogger().warn(
+            {
+              event: "claude_remote_startup_stalled",
+              startupId: options.startupId,
+              executor: executorLabel(executor),
+              cwd: spawnOptions.cwd,
+              phase:
+                sshProcessSpawnedAt === null
+                  ? "starting_ssh_process"
+                  : "awaiting_claude_stdout",
+              elapsedMs: Date.now() - startedAt,
+              thresholdMs,
+              hasStderr: firstStderrAt !== null,
+            },
+            "Remote Claude startup has not produced stdout",
+          );
+        }, thresholdMs);
+        timer.unref();
+        return timer;
+      },
+    );
+    const clearStallTimers = () => {
+      for (const timer of stallTimers) clearTimeout(timer);
+    };
+
+    child.once("spawn", () => {
+      sshProcessSpawnedAt = Date.now();
+      getLogger().info(
+        {
+          event: "claude_remote_ssh_process_spawned",
+          startupId: options.startupId,
+          executor: executorLabel(executor),
+          cwd: spawnOptions.cwd,
+          elapsedMs: sshProcessSpawnedAt - startedAt,
+        },
+        "SSH process spawned for remote Claude",
+      );
+    });
+
+    // Adding our own "data" listener would switch stdout into flowing mode and
+    // could race the SDK listener. Observe the first emitted chunk without
+    // consuming it or changing stream backpressure.
+    const stdout = child.stdout;
+    let restoreStdoutObserver = () => {};
+    if (stdout) {
+      const originalEmit = stdout.emit;
+      const observedEmit = ((
+        event: string | symbol,
+        ...eventArgs: unknown[]
+      ) => {
+        if (event === "data" && firstStdoutAt === null) {
+          firstStdoutAt = Date.now();
+          clearStallTimers();
+          stdout.emit = originalEmit;
+          const chunk = eventArgs[0];
+          const firstChunkBytes =
+            typeof chunk === "string"
+              ? Buffer.byteLength(chunk)
+              : ArrayBuffer.isView(chunk)
+                ? chunk.byteLength
+                : undefined;
+          getLogger().info(
+            {
+              event: "claude_remote_first_stdout",
+              startupId: options.startupId,
+              executor: executorLabel(executor),
+              cwd: spawnOptions.cwd,
+              elapsedMs: firstStdoutAt - startedAt,
+              firstChunkBytes,
+              hadPriorStderr: firstStderrAt !== null,
+            },
+            "Remote Claude produced first stdout",
+          );
+        }
+        return Reflect.apply(originalEmit, stdout, [event, ...eventArgs]);
+      }) as typeof stdout.emit;
+      stdout.emit = observedEmit;
+      restoreStdoutObserver = () => {
+        if (stdout.emit === observedEmit) stdout.emit = originalEmit;
+      };
+    }
+
     const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
+      if (firstStderrAt === null) {
+        firstStderrAt = Date.now();
+        getLogger().info(
+          {
+            event: "claude_remote_first_stderr",
+            startupId: options.startupId,
+            executor: executorLabel(executor),
+            cwd: spawnOptions.cwd,
+            elapsedMs: firstStderrAt - startedAt,
+            firstChunkBytes: chunk.byteLength,
+          },
+          "Remote Claude produced first stderr",
+        );
+      }
       const stderr = stderrDecoder.write(chunk).trim();
       if (!stderr) return;
       getLogger().debug(
         {
           event: "claude_remote_stderr",
+          startupId: options.startupId,
           executor: executorLabel(executor),
           stderr,
         },
@@ -548,18 +671,52 @@ export function createRemoteSpawn(
     } else {
       spawnOptions.signal.addEventListener("abort", abort, { once: true });
     }
-    child.once("exit", () => {
+    child.once("error", (error) => {
+      clearStallTimers();
+      restoreStdoutObserver();
+      getLogger().error(
+        {
+          event: "claude_remote_transport_error",
+          startupId: options.startupId,
+          executor: executorLabel(executor),
+          cwd: spawnOptions.cwd,
+          elapsedMs: Date.now() - startedAt,
+          err: error,
+        },
+        "Remote Claude SSH transport failed",
+      );
+    });
+    child.once("exit", (code, signal) => {
+      clearStallTimers();
+      restoreStdoutObserver();
       const trailingStderr = stderrDecoder.end().trim();
       if (trailingStderr) {
         getLogger().debug(
           {
             event: "claude_remote_stderr",
+            startupId: options.startupId,
             executor: executorLabel(executor),
             stderr: trailingStderr,
           },
           "Remote Claude stderr",
         );
       }
+      getLogger().info(
+        {
+          event: "claude_remote_exit",
+          startupId: options.startupId,
+          executor: executorLabel(executor),
+          cwd: spawnOptions.cwd,
+          code,
+          signal,
+          elapsedMs: Date.now() - startedAt,
+          firstStdoutElapsedMs:
+            firstStdoutAt === null ? undefined : firstStdoutAt - startedAt,
+          firstStderrElapsedMs:
+            firstStderrAt === null ? undefined : firstStderrAt - startedAt,
+        },
+        "Remote Claude SSH process exited",
+      );
       spawnOptions.signal.removeEventListener("abort", abort);
     });
 

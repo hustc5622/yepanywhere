@@ -69,6 +69,10 @@ interface SessionIdWaiter {
 }
 
 export interface ProcessConstructorOptions extends ProcessOptions {
+  /** Correlates the request, provider transport, and first-output logs. */
+  startupId?: string;
+  /** Wall-clock start of the provider request, before preflight work. */
+  startupStartedAtMs?: number;
   /** MessageQueue for real SDK, undefined for mock SDK */
   queue?: MessageQueue;
   /** Abort function from real SDK */
@@ -106,6 +110,7 @@ export interface ProcessConstructorOptions extends ProcessOptions {
 
 export class Process {
   readonly id: string;
+  readonly startupId: string | undefined;
   private _sessionId: string;
   readonly projectPath: string;
   readonly projectId: UrlProjectId;
@@ -116,6 +121,9 @@ export class Process {
   readonly requestedReasoningEffort: string | undefined;
   /** SSH host for remote execution (undefined = local) */
   readonly executor: string | undefined;
+  private readonly startupStartedAtMs: number;
+  private firstProviderMessageLogged = false;
+  private firstProviderOutputLogged = false;
 
   private legacyQueue: UserMessage[] = [];
   private messageQueue: MessageQueue | null;
@@ -239,10 +247,13 @@ export class Process {
     options: ProcessConstructorOptions,
   ) {
     this.id = randomUUID();
+    this.startupId = options.startupId;
     this._sessionId = options.sessionId;
     this.projectPath = options.projectPath;
     this.projectId = options.projectId;
     this.startedAt = new Date();
+    this.startupStartedAtMs =
+      options.startupStartedAtMs ?? this.startedAt.getTime();
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 
     // Real SDK provides these, mock SDK doesn't
@@ -1603,6 +1614,22 @@ export class Process {
   }
 
   private async processMessages(): Promise<void> {
+    if (this.startupId) {
+      getLogger().info(
+        {
+          event: "provider_first_message_wait_started",
+          startupId: this.startupId,
+          sessionId: this._sessionId,
+          processId: this.id,
+          projectId: this.projectId,
+          provider: this.provider,
+          executor: this.executor,
+          requestElapsedMs: Date.now() - this.startupStartedAtMs,
+        },
+        "Waiting for first provider message",
+      );
+    }
+
     try {
       while (!this.iteratorDone) {
         // Check if held - pause before calling iterator.next()
@@ -1618,6 +1645,21 @@ export class Process {
 
         if (result.done) {
           this.iteratorDone = true;
+          if (this.startupId && !this.firstProviderMessageLogged) {
+            getLogger().warn(
+              {
+                event: "provider_ended_before_first_message",
+                startupId: this.startupId,
+                sessionId: this._sessionId,
+                processId: this.id,
+                projectId: this.projectId,
+                provider: this.provider,
+                executor: this.executor,
+                requestElapsedMs: Date.now() - this.startupStartedAtMs,
+              },
+              "Provider ended before emitting its first message",
+            );
+          }
           if (!this.sessionIdResolved) {
             this.rejectSessionIdWaiters(
               new Error("Provider ended before returning a session ID"),
@@ -1632,6 +1674,64 @@ export class Process {
 
         const message = this.withTimestamp(result.value);
         this._lastMessageTime = new Date();
+
+        const isProviderOutput =
+          message.type === "assistant" || message.type === "stream_event";
+        if (
+          !this.firstProviderMessageLogged ||
+          (!this.firstProviderOutputLogged && isProviderOutput)
+        ) {
+          const messageRecord = message as unknown as Record<string, unknown>;
+          const streamEvent =
+            messageRecord.event && typeof messageRecord.event === "object"
+              ? (messageRecord.event as Record<string, unknown>)
+              : undefined;
+          const milestoneFields = {
+            startupId: this.startupId,
+            sessionId: this._sessionId,
+            processId: this.id,
+            projectId: this.projectId,
+            provider: this.provider,
+            executor: this.executor,
+            messageType: message.type,
+            messageSubtype:
+              typeof messageRecord.subtype === "string"
+                ? messageRecord.subtype
+                : undefined,
+            streamEventType:
+              typeof streamEvent?.type === "string"
+                ? streamEvent.type
+                : undefined,
+            requestElapsedMs: Date.now() - this.startupStartedAtMs,
+            processElapsedMs: Date.now() - this.startedAt.getTime(),
+          };
+
+          if (!this.firstProviderMessageLogged) {
+            this.firstProviderMessageLogged = true;
+            if (this.startupId) {
+              getLogger().info(
+                {
+                  event: "provider_first_message_received",
+                  ...milestoneFields,
+                },
+                "Received first provider message",
+              );
+            }
+          }
+
+          if (!this.firstProviderOutputLogged && isProviderOutput) {
+            this.firstProviderOutputLogged = true;
+            if (this.startupId) {
+              getLogger().info(
+                {
+                  event: "provider_first_output_received",
+                  ...milestoneFields,
+                },
+                "Received first provider output",
+              );
+            }
+          }
+        }
 
         if (!this.sessionIdResolved && message.type === "error") {
           const detail =
@@ -1690,6 +1790,12 @@ export class Process {
               previousTempId: oldSessionId,
               processId: this.id,
               projectId: this.projectId,
+              startupId: this.startupId,
+              requestToInitializationDurationMs:
+                this.startupId === undefined
+                  ? undefined
+                  : Date.now() - this.startupStartedAtMs,
+              initializationDurationMs: Date.now() - this.startedAt.getTime(),
             },
             `Session ID received from SDK: ${this._sessionId}`,
           );
@@ -1776,12 +1882,17 @@ export class Process {
       log.error(
         {
           event: "process_error",
+          startupId: this.startupId,
           sessionId: this._sessionId,
           processId: this.id,
           projectId: this.projectId,
           errorMessage: err.message,
           errorStack: err.stack,
           currentState: this._state.type,
+          requestElapsedMs:
+            this.startupId === undefined
+              ? undefined
+              : Date.now() - this.startupStartedAtMs,
         },
         `Process error: ${this._sessionId} - ${err.message}`,
       );

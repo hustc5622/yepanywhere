@@ -404,9 +404,29 @@ export class Supervisor {
 
     const processHolder: { process: Process | null } = { process: null };
     const effectiveMode = permissionMode ?? this.defaultPermissionMode;
+    const tempSessionId = randomUUID();
+    const startupId =
+      activeProvider.name === "claude" ? randomUUID() : undefined;
+    const startupStartedAtMs = Date.now();
+
+    if (startupId) {
+      getLogger().info(
+        {
+          event: "provider_session_create_requested",
+          startupId,
+          tempSessionId,
+          providerName: activeProvider.name,
+          projectId,
+          projectPath,
+          executor: modelSettings?.executor,
+        },
+        "Provider session creation requested",
+      );
+    }
 
     // Start session WITHOUT an initial message - agent will wait
     const result = await activeProvider.startSession({
+      startupId,
       cwd: projectPath,
       // No initialMessage - queue will block until one is pushed
       permissionMode: effectiveMode,
@@ -425,6 +445,20 @@ export class Supervisor {
         return processHolder.process.handleToolApproval(toolName, input, opts);
       },
     });
+    if (startupId) {
+      getLogger().info(
+        {
+          event: "provider_session_handle_created",
+          startupId,
+          tempSessionId,
+          providerName: activeProvider.name,
+          projectId,
+          executor: modelSettings?.executor,
+          requestElapsedMs: Date.now() - startupStartedAtMs,
+        },
+        "Provider returned a session handle",
+      );
+    }
 
     const {
       iterator,
@@ -441,8 +475,9 @@ export class Supervisor {
       initializationResult,
     } = result;
 
-    const tempSessionId = randomUUID();
     const options: ProcessConstructorOptions = {
+      startupId,
+      startupStartedAtMs,
       projectPath,
       projectId,
       sessionId: tempSessionId,
@@ -502,6 +537,9 @@ export class Supervisor {
     }
 
     const tempSessionId = resumeSessionId ?? randomUUID();
+    const startupId =
+      activeProvider.name === "claude" ? randomUUID() : undefined;
+    const startupStartedAtMs = Date.now();
 
     // We need to reference process in the callback before it's assigned
     const processHolder: { process: Process | null } = { process: null };
@@ -517,6 +555,8 @@ export class Supervisor {
     getLogger().info(
       {
         event: "provider_session_start_requested",
+        startupId,
+        tempSessionId,
         providerName: activeProvider.name,
         projectId,
         projectPath,
@@ -531,6 +571,7 @@ export class Supervisor {
     );
 
     const result = await activeProvider.startSession({
+      startupId,
       cwd: projectPath,
       initialMessage: messageWithUuid,
       resumeSessionId,
@@ -552,6 +593,20 @@ export class Supervisor {
         return processHolder.process.handleToolApproval(toolName, input, opts);
       },
     });
+    if (startupId) {
+      getLogger().info(
+        {
+          event: "provider_session_handle_created",
+          startupId,
+          tempSessionId,
+          providerName: activeProvider.name,
+          projectId,
+          executor: modelSettings?.executor,
+          requestElapsedMs: Date.now() - startupStartedAtMs,
+        },
+        "Provider returned a session handle",
+      );
+    }
 
     const {
       iterator,
@@ -569,6 +624,8 @@ export class Supervisor {
     } = result;
 
     const options: ProcessConstructorOptions = {
+      startupId,
+      startupStartedAtMs,
       projectPath,
       projectId,
       sessionId: tempSessionId,
@@ -1090,6 +1147,7 @@ export class Supervisor {
     log.info(
       {
         event: "session_registered",
+        startupId: process.startupId,
         sessionId: process.sessionId,
         processId: process.id,
         projectId: process.projectId,
@@ -1158,6 +1216,7 @@ export class Supervisor {
         log.info(
           {
             event: "session_id_mapping_updated",
+            startupId: process.startupId,
             oldSessionId: event.oldSessionId,
             newSessionId: event.newSessionId,
             processId: process.id,

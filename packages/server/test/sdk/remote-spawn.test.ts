@@ -4,17 +4,27 @@ import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const loggerMock = vi.hoisted(() => ({
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+}));
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return { ...actual, spawn: spawnMock };
 });
+vi.mock("../../src/logging/logger.js", () => ({
+  getLogger: () => loggerMock,
+}));
 
 import {
   buildRemoteClaudeCommand,
   buildSshArgs,
+  createRemoteSpawn,
   quoteShell,
   runRemoteCommand,
   testRemoteExecutor,
@@ -34,6 +44,7 @@ const executor = {
 function fakeChild(): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
   Object.assign(child, {
+    stdin: new EventEmitter(),
     stdout: new EventEmitter(),
     stderr: new EventEmitter(),
     exitCode: null,
@@ -53,6 +64,11 @@ function completedChild(stdout = "", exitCode = 0): ChildProcess {
 }
 
 describe("remote Claude spawn", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+    for (const method of Object.values(loggerMock)) method.mockClear();
+  });
+
   it("maps only paths beneath the configured shared root", () => {
     expect(
       translateSharedPath(
@@ -112,6 +128,10 @@ describe("remote Claude spawn", () => {
     expect(built.args).toEqual(["--output-format", "stream-json"]);
     expect(built.remoteCommand).toContain("CLAUDE_CODE_ENTRYPOINT");
     expect(built.remoteCommand).toContain("CLAUDE_AGENT_SDK_VERSION");
+    expect(built.remoteCommand).toMatch(/DISABLE_AUTOUPDATER=.*1/);
+    expect(built.remoteCommand).toMatch(
+      /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=.*1/,
+    );
     expect(built.remoteCommand).toContain("CLAUDE_CONFIG_DIR");
     expect(built.remoteCommand).not.toContain("must-not-leave-the-mac");
     expect(built.remoteCommand).toContain("exec env");
@@ -137,6 +157,88 @@ describe("remote Claude spawn", () => {
       spawnOptions,
     );
     expect(built.remoteCommand).not.toContain("CLAUDE_CONFIG_DIR");
+  });
+
+  it("logs correlated SSH and first-stdout startup milestones", () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    const spawnRemote = createRemoteSpawn({
+      executor,
+      startupId: "startup-1",
+    });
+    const signal = new AbortController().signal;
+
+    spawnRemote({
+      command: "node",
+      args: ["/local/node_modules/claude-agent-sdk/cli.js"],
+      cwd: "/mnt/utm/projects/yep",
+      env: {},
+      signal,
+    });
+    expect((child.stdout as EventEmitter).listenerCount("data")).toBe(0);
+    child.emit("spawn");
+    child.stdout?.emit("data", Buffer.from('{"type":"system"}\n'));
+
+    expect(loggerMock.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "claude_remote_spawn_start",
+        startupId: "startup-1",
+      }),
+      expect.any(String),
+    );
+    expect(loggerMock.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "claude_remote_ssh_process_spawned",
+        startupId: "startup-1",
+      }),
+      expect.any(String),
+    );
+    expect(loggerMock.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "claude_remote_first_stdout",
+        startupId: "startup-1",
+        firstChunkBytes: 18,
+      }),
+      expect.any(String),
+    );
+
+    child.emit("exit", 0, null);
+  });
+
+  it("warns while remote Claude has not produced stdout", async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    try {
+      const spawnRemote = createRemoteSpawn({
+        executor,
+        startupId: "startup-stalled",
+      });
+      spawnRemote({
+        command: "node",
+        args: ["/local/node_modules/claude-agent-sdk/cli.js"],
+        cwd: "/mnt/utm/projects/yep",
+        env: {},
+        signal: new AbortController().signal,
+      });
+      child.emit("spawn");
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(loggerMock.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "claude_remote_startup_stalled",
+          startupId: "startup-stalled",
+          phase: "awaiting_claude_stdout",
+          thresholdMs: 30_000,
+        }),
+        expect.any(String),
+      );
+      child.stdout?.emit("data", Buffer.from("ready"));
+      child.emit("exit", 0, null);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not reject synthetic remote mount permissions", async () => {

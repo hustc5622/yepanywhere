@@ -42,6 +42,8 @@ export interface AuthStatus {
  * Options for starting a new agent session.
  */
 export interface StartSessionOptions {
+  /** Correlates provider startup logs for one create/resume attempt. */
+  startupId?: string;
   /** Working directory for the session */
   cwd: string;
   /** Initial message to send (optional - session can wait for message) */
