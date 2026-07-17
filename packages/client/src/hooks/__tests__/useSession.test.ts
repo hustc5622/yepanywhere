@@ -5,6 +5,7 @@ import type { Message, Session } from "../../types";
 import {
   type PendingMessage,
   mergeSessionMetadataChange,
+  processStateFromProcessEvent,
   reconcilePendingMessagesWithConfirmedMessages,
   sessionTurnHealthFromSession,
   shouldRefreshOpenCodeAuthoritativeSnapshot,
@@ -204,6 +205,23 @@ describe("shouldRefreshOpenCodeAuthoritativeSnapshot", () => {
       ).toBe(false);
     },
   );
+});
+
+describe("processStateFromProcessEvent", () => {
+  it("treats explicit pending input as waiting even while a bridge reports in-turn", () => {
+    expect(
+      processStateFromProcessEvent({
+        activity: "in-turn",
+        pendingInputType: "tool-approval",
+      }),
+    ).toBe("waiting-input");
+  });
+
+  it("uses the reported activity when there is no pending input", () => {
+    expect(processStateFromProcessEvent({ activity: "in-turn" })).toBe(
+      "in-turn",
+    );
+  });
 });
 
 describe("sessionTurnHealthFromSession", () => {

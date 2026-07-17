@@ -80,6 +80,16 @@ function processStateFromActivity(
   return undefined;
 }
 
+export function processStateFromProcessEvent(
+  event: Pick<ProcessStateEvent, "activity" | "pendingInputType">,
+): ProcessState | undefined {
+  // pendingInputType is the direct signal that a prompt exists. In
+  // particular, bridge snapshots can briefly pair it with the provider's
+  // underlying in-turn/busy activity while the tool call is blocked.
+  if (event.pendingInputType) return "waiting-input";
+  return processStateFromActivity(event.activity);
+}
+
 function keepPersistedPendingInputForSession(
   request: InputRequest | null,
   sessionId: string,
@@ -797,7 +807,7 @@ export function useSession(
       if (event.sessionId !== sessionId) return;
 
       // Update process state from activity bus
-      const nextProcessState = processStateFromActivity(event.activity);
+      const nextProcessState = processStateFromProcessEvent(event);
       if (nextProcessState) {
         setProcessState(nextProcessState);
       }
@@ -824,19 +834,21 @@ export function useSession(
         scheduleOpenCodeAuthoritativeRefresh();
       }
 
-      // Always refresh the current request on waiting-input. Codex can emit
-      // multiple approvals in one turn, and the latest event may represent a
-      // different queued request than the one currently shown.
-      if (event.activity === "waiting-input" && event.pendingInputType) {
+      // Always refresh the current request when the event advertises pending
+      // input. Codex can emit multiple approvals in one turn, and OpenCode's
+      // underlying runtime may still report in-turn while permission-blocked.
+      // Use the dedicated endpoint so the focused page only refreshes the
+      // prompt instead of reloading all session metadata.
+      if (event.pendingInputType) {
         api
-          .getSessionMetadata(projectId, sessionId)
+          .getPendingInputRequest(sessionId)
           .then((result) => {
-            setPendingInputRequest(result.pendingInputRequest ?? null);
+            setPendingInputRequest(result.request ?? null);
           })
           .catch(() => {
             // Non-critical. A later activity event or reconnect will refresh it.
           });
-      } else if (event.activity !== "waiting-input") {
+      } else {
         setPendingInputRequest((prev) =>
           keepPersistedPendingInputForSession(prev, sessionId),
         );
@@ -844,7 +856,6 @@ export function useSession(
     },
     [
       processState,
-      projectId,
       scheduleOpenCodeAuthoritativeRefresh,
       session?.provider,
       sessionId,

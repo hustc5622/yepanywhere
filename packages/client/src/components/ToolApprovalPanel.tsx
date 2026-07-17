@@ -40,6 +40,10 @@ function getApprovalKind(request: InputRequest): string | undefined {
   return getString(asRecord(request.toolInput)?.approvalKind);
 }
 
+function getAvailableApprovalDecisions(request: InputRequest): string[] {
+  return getStringArray(asRecord(request.toolInput)?.availableDecisions);
+}
+
 function getApprovalPrompt(request: InputRequest): string | undefined {
   return getString(asRecord(request.toolInput)?.approvalPrompt);
 }
@@ -145,6 +149,10 @@ export function ToolApprovalPanel({
   const mcpApprovalScopes = getMcpApprovalScopes(request);
   const isScopedMcpApproval = mcpApprovalScopes.length > 0;
   const isPermissionsApproval = approvalKind === "permissions";
+  const isOpenCodeApproval = approvalKind === "opencode_permission";
+  const canApproveOpenCodeAlways =
+    isOpenCodeApproval &&
+    getAvailableApprovalDecisions(request).includes("always");
   const usesProviderSessionApproval =
     approvalKind === "command_execution" || approvalKind === "file_change";
   const canApproveMcpForSession = mcpApprovalScopes.includes("session");
@@ -297,6 +305,27 @@ export function ToolApprovalPanel({
           e.preventDefault();
           handleApprove();
         }
+      } else if (isOpenCodeApproval) {
+        if (e.key === "1") {
+          e.preventDefault();
+          handleApprove();
+        } else if (
+          e.key === "2" &&
+          canApproveOpenCodeAlways &&
+          onApproveAlways
+        ) {
+          e.preventDefault();
+          handleApproveAlways();
+        } else if (
+          e.key === "Escape" ||
+          e.key === (canApproveOpenCodeAlways ? "3" : "2")
+        ) {
+          e.preventDefault();
+          handleDeny();
+        } else if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          handleApprove();
+        }
       } else if (isPlanMode) {
         // ExitPlanMode: 1=auto-accept, 2=manual, 3=deny
         if (e.key === "1" && onApproveAcceptEdits) {
@@ -363,7 +392,9 @@ export function ToolApprovalPanel({
     canApprovePersistently,
     canApproveMcpAlways,
     canApproveMcpForSession,
+    canApproveOpenCodeAlways,
     hasPersistentApprovalHandler,
+    isOpenCodeApproval,
     isPermissionsApproval,
     isScopedMcpApproval,
     onApproveAlways,
@@ -573,6 +604,40 @@ export function ToolApprovalPanel({
                   disabled={!armed || submitting}
                 >
                   <kbd>4</kbd>
+                  <span>{t("toolApprovalCancel")}</span>
+                </button>
+              </>
+            ) : isOpenCodeApproval ? (
+              <>
+                <button
+                  type="button"
+                  className="tool-approval-option primary"
+                  onClick={handleApprove}
+                  disabled={!armed || submitting}
+                >
+                  <kbd>1</kbd>
+                  <span>{t("toolApprovalAllowOnce")}</span>
+                </button>
+
+                {canApproveOpenCodeAlways && onApproveAlways && (
+                  <button
+                    type="button"
+                    className="tool-approval-option"
+                    onClick={handleApproveAlways}
+                    disabled={!armed || submitting}
+                  >
+                    <kbd>2</kbd>
+                    <span>{t("toolApprovalAlwaysAllow")}</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  className="tool-approval-option"
+                  onClick={handleDeny}
+                  disabled={!armed || submitting}
+                >
+                  <kbd>{canApproveOpenCodeAlways ? "3" : "2"}</kbd>
                   <span>{t("toolApprovalCancel")}</span>
                 </button>
               </>

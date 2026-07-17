@@ -1082,6 +1082,11 @@ export const api = {
       body: JSON.stringify({ requestId, response, answers, feedback }),
     }),
 
+  getPendingInputRequest: (sessionId: string) =>
+    fetchJSON<{ request: InputRequest | null }>(
+      `/sessions/${encodeURIComponent(sessionId)}/pending-input`,
+    ),
+
   setPermissionMode: (sessionId: string, mode: PermissionMode) =>
     fetchJSON<{ permissionMode: PermissionMode; modeVersion: number }>(
       `/sessions/${sessionId}/mode`,

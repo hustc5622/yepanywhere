@@ -1097,6 +1097,28 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     >,
     origin?: { instanceId: string; directory?: string },
   ): void {
+    // OpenCode continues to report the underlying turn as busy while a tool
+    // permission or question is blocking it. Keep the more specific
+    // waiting-input state until a reply/error path explicitly clears the
+    // pending input; otherwise the main server sees in-turn + pendingInputType
+    // and focused clients do not know that they should fetch the prompt.
+    const pendingInput = this.pendingInputs.get(sessionId);
+    const updatesRuntimeState =
+      state.activity !== undefined ||
+      state.active !== undefined ||
+      Object.prototype.hasOwnProperty.call(state, "pendingInputType");
+    const effectiveState =
+      pendingInput && updatesRuntimeState
+        ? {
+            ...state,
+            activity: "waiting-input" as const,
+            pendingInputType:
+              pendingInput.request.type === "tool-approval"
+                ? ("tool-approval" as const)
+                : ("user-question" as const),
+            active: true,
+          }
+        : state;
     const existing = this.sessions.get(sessionId);
     const now = new Date().toISOString();
     if (existing) {
@@ -1109,21 +1131,23 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           existing.projectId = encodeProjectId(origin.directory);
         }
       }
-      const stateChanged = Object.entries(state).some(([key, value]) => {
-        if (key === "retryStatus") {
-          return !retryStatusEquals(
-            existing.retryStatus,
-            value as SessionRecord["retryStatus"],
-          );
-        }
-        return existing[key as keyof SessionRecord] !== value;
-      });
+      const stateChanged = Object.entries(effectiveState).some(
+        ([key, value]) => {
+          if (key === "retryStatus") {
+            return !retryStatusEquals(
+              existing.retryStatus,
+              value as SessionRecord["retryStatus"],
+            );
+          }
+          return existing[key as keyof SessionRecord] !== value;
+        },
+      );
       if (!stateChanged) return;
 
       // Runtime status polling is not session content. Preserve the timestamp
       // supplied by OpenCode and do not manufacture a fresh updatedAt merely
       // because a repeated busy/idle poll arrived.
-      Object.assign(existing, state);
+      Object.assign(existing, effectiveState);
       this.eventNotifier.notify();
       return;
     }
@@ -1138,14 +1162,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       serverUrl: this.defaultServerUrl,
       desktopToken: this.defaultDesktopToken,
       createdAt: now,
-      updatedAt: state.updatedAt ?? now,
-      title: state.title,
-      messageCount: state.messageCount,
-      activity: state.activity,
-      pendingInputType: state.pendingInputType,
-      active: state.active,
-      lastErrorMessage: state.lastErrorMessage,
-      retryStatus: state.retryStatus,
+      updatedAt: effectiveState.updatedAt ?? now,
+      title: effectiveState.title,
+      messageCount: effectiveState.messageCount,
+      activity: effectiveState.activity,
+      pendingInputType: effectiveState.pendingInputType,
+      active: effectiveState.active,
+      lastErrorMessage: effectiveState.lastErrorMessage,
+      retryStatus: effectiveState.retryStatus,
       instanceId: origin?.instanceId,
     });
     this.eventNotifier.notify();
@@ -1308,6 +1332,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       const message = readOpenCodeErrorMessage(properties?.error);
       if (sessionId && this.sessions.has(sessionId)) {
         const pending = this.pendingInputs.get(sessionId);
+        this.pendingInputs.delete(sessionId);
         this.updateSessionState(
           sessionId,
           {
@@ -1319,7 +1344,6 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           },
           origin,
         );
-        this.pendingInputs.delete(sessionId);
         this.discardExternalDecision(
           pending,
           new Error(message ?? "OpenCode reported an error"),
@@ -1514,6 +1538,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const patterns = readStringArray(
       properties?.[protocol === "v2" ? "resources" : "patterns"],
     );
+    const persistentPatterns = readStringArray(
+      properties?.[protocol === "v2" ? "save" : "always"],
+    );
+    const supportsPersistentApproval = persistentPatterns.length > 0;
     const prompt = `Allow ${permission}${patterns.length ? ` ${patterns.join(", ")}` : ""}?`;
     const timestamp = new Date().toISOString();
     const previous = this.pendingInputs.get(sessionId);
@@ -1542,12 +1570,19 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         sessionId,
         type: "tool-approval",
         prompt,
-        options: ["Approve", "Deny"],
+        options: supportsPersistentApproval
+          ? ["Approve", "Approve always", "Deny"]
+          : ["Approve", "Deny"],
         toolName: "OpenCode",
         toolInput: {
           approvalKind: "opencode_permission",
+          approvalProtocol: protocol,
+          availableDecisions: supportsPersistentApproval
+            ? ["once", "always", "reject"]
+            : ["once", "reject"],
           permission,
           patterns,
+          persistentPatterns,
           metadata: properties?.metadata,
           raw: properties,
         },

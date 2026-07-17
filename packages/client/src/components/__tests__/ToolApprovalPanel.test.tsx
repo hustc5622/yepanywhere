@@ -140,4 +140,45 @@ describe("ToolApprovalPanel", () => {
     await waitFor(() => expect(onApproveForSession).toHaveBeenCalledTimes(1));
     expect(onApproveAcceptEdits).not.toHaveBeenCalled();
   });
+
+  it("offers OpenCode's always approval when the bridge advertises it", async () => {
+    const onApproveAlways = vi.fn(async () => undefined);
+    const request: InputRequest = {
+      id: "approval-opencode",
+      sessionId: "session-opencode",
+      type: "tool-approval",
+      prompt: "Allow external_directory /tmp/*?",
+      toolName: "OpenCode",
+      toolInput: {
+        approvalKind: "opencode_permission",
+        availableDecisions: ["once", "always", "reject"],
+        permission: "external_directory",
+        patterns: ["/tmp/*"],
+        persistentPatterns: ["/tmp/*"],
+      },
+      timestamp: "2026-07-17T00:00:00.000Z",
+    };
+    render(
+      <I18nProvider>
+        <ToolApprovalPanel
+          request={request}
+          sessionId="session-opencode"
+          onApprove={vi.fn(async () => undefined)}
+          onApproveAlways={onApproveAlways}
+          onDeny={vi.fn(async () => undefined)}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByRole("button", { name: /^1\s*Allow$/i })).toBeTruthy();
+    const alwaysApproval = screen.getByRole("button", {
+      name: /Always allow/i,
+    });
+    expect(screen.getByRole("button", { name: /Cancel/i })).toBeTruthy();
+    await waitFor(() =>
+      expect((alwaysApproval as HTMLButtonElement).disabled).toBe(false),
+    );
+    fireEvent.click(alwaysApproval);
+    await waitFor(() => expect(onApproveAlways).toHaveBeenCalledTimes(1));
+  });
 });

@@ -266,11 +266,19 @@ describe("OpenCodeBridgeService", () => {
         sessionID: "ses/v2",
         action: "write",
         resources: ["src/app.ts"],
+        save: ["*"],
       },
     });
-    expect(bridge.getPendingInputRequest("ses/v2")?.prompt).toContain(
-      "write src/app.ts",
-    );
+    expect(bridge.getPendingInputRequest("ses/v2")).toMatchObject({
+      prompt: expect.stringContaining("write src/app.ts"),
+      options: ["Approve", "Approve always", "Deny"],
+      toolInput: {
+        approvalKind: "opencode_permission",
+        approvalProtocol: "v2",
+        availableDecisions: ["once", "always", "reject"],
+        persistentPatterns: ["*"],
+      },
+    });
     await expect(
       bridge.respondToInput("ses/v2", "per_v2", "approve_always"),
     ).resolves.toBe(true);
@@ -297,6 +305,71 @@ describe("OpenCodeBridgeService", () => {
         body: undefined,
       },
     ]);
+  });
+
+  it("keeps a permission request waiting while OpenCode still reports the turn as busy", async () => {
+    const opencodeServer = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/session/status") {
+        res.end(JSON.stringify({ ses_pending: { type: "busy" } }));
+        return;
+      }
+      if (req.url === "/question") {
+        res.end("[]");
+        return;
+      }
+      res.statusCode = 404;
+      res.end("{}");
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    const internals = bridge as unknown as {
+      handleOpenCodeEvent: (event: unknown) => void;
+      syncOpenCodeRuntimeState: () => Promise<void>;
+    };
+
+    internals.handleOpenCodeEvent({
+      type: "permission.asked",
+      properties: {
+        id: "per_pending",
+        sessionID: "ses_pending",
+        permission: "external_directory",
+        patterns: ["/tmp/*"],
+        always: ["/tmp/*"],
+      },
+    });
+    await internals.syncOpenCodeRuntimeState();
+
+    expect(bridge.getSessionView("ses_pending")).toMatchObject({
+      activity: "waiting-input",
+      pendingInputType: "tool-approval",
+      session: {
+        activity: "waiting-input",
+        pendingInputType: "tool-approval",
+      },
+    });
+    expect(bridge.getPendingInputRequest("ses_pending")).toMatchObject({
+      id: "per_pending",
+    });
+
+    internals.handleOpenCodeEvent({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_pending",
+        error: { data: { message: "provider stopped" } },
+      },
+    });
+    expect(bridge.getSessionView("ses_pending")).toMatchObject({
+      activity: "idle",
+      session: { activity: "idle", lastErrorMessage: "provider stopped" },
+    });
+    expect(bridge.getPendingInputRequest("ses_pending")).toBeNull();
   });
 
   it("does not consume a newer question or send duplicate replies", async () => {
@@ -1331,6 +1404,7 @@ describe("OpenCodeBridgeService", () => {
               id: "perm_1",
               permission: "bash",
               patterns: ["rm -rf node_modules"],
+              always: ["rm -rf node_modules"],
             },
           },
         }),
@@ -1348,6 +1422,13 @@ describe("OpenCodeBridgeService", () => {
       expect(bridge.getPendingInputRequest("ses_ext")).toMatchObject({
         id: "perm_1",
         type: "tool-approval",
+        options: ["Approve", "Approve always", "Deny"],
+        toolInput: {
+          approvalKind: "opencode_permission",
+          approvalProtocol: "v1",
+          availableDecisions: ["once", "always", "reject"],
+          persistentPatterns: ["rm -rf node_modules"],
+        },
       });
 
       // Start a long-poll first, then answer from Yep: the decision must
