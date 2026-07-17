@@ -1650,6 +1650,67 @@ describe("CodexBridgeService", () => {
     }
   });
 
+  it("pushes a changed signal over /events on session state changes", async () => {
+    const abort = new AbortController();
+    const received: string[] = [];
+    const streamReady = (async () => {
+      const response = await fetch(`http://127.0.0.1:${bridgePort}/events`, {
+        headers: { accept: "text/event-stream" },
+        signal: abort.signal,
+      });
+      expect(response.ok).toBe(true);
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("no body");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        for (const line of buffer.split("\n")) {
+          if (line.startsWith("event: ")) {
+            received.push(line.slice("event: ".length).trim());
+          }
+        }
+        if (received.includes("changed")) return;
+      }
+    })();
+
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const started = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: { id: "thread-sse", cwd: "/tmp/project-sse" },
+          },
+        }),
+      );
+      await started;
+      const turnStarted = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/started",
+          params: { threadId: "thread-sse", turn: { id: "turn-1" } },
+        }),
+      );
+      await turnStarted;
+
+      await Promise.race([
+        streamReady,
+        delay(2000).then(() => {
+          throw new Error("timed out waiting for changed signal");
+        }),
+      ]);
+      expect(received).toContain("changed");
+    } finally {
+      abort.abort();
+      client.close();
+    }
+  });
+
   it("restores persisted session metadata across bridge restarts", async () => {
     const statePath = join(
       tmpdir(),

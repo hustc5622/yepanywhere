@@ -5,6 +5,7 @@ import type { IncomingMessage } from "node:http";
 import { basename, dirname } from "node:path";
 import type { UrlProjectId, UserQuestionAnswers } from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
+import { BridgeEventNotifier } from "../bridge-common/BridgeEventNotifier.js";
 import {
   asRecord,
   findAvailablePort,
@@ -219,6 +220,7 @@ export class CodexBridgeService implements CodexBridgeController {
   private usageRequest: Promise<CodexUsageResponse> | null = null;
   private readonly statePath?: string;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly eventNotifier = new BridgeEventNotifier();
 
   constructor(options: CodexBridgeServiceOptions) {
     this.enabled = options.enabled;
@@ -309,6 +311,7 @@ export class CodexBridgeService implements CodexBridgeController {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
+    this.eventNotifier.close();
     await this.persistSessions();
 
     if (this.wss) {
@@ -531,6 +534,11 @@ export class CodexBridgeService implements CodexBridgeController {
     }
     if (req.method === "GET" && url.pathname === "/status") {
       writeJson(res, 200, this.getStatus());
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/events") {
+      // SSE change signal for the main server's poll-on-push subscription.
+      this.eventNotifier.attach(res);
       return;
     }
     if (req.method === "GET" && url.pathname === "/usage") {
@@ -1800,6 +1808,7 @@ export class CodexBridgeService implements CodexBridgeController {
     if (!this.isDisplayableBridgeSession(session)) {
       return;
     }
+    this.eventNotifier.notify();
     if (this.emittedSessionIds.has(record.id)) {
       return;
     }
@@ -1816,6 +1825,7 @@ export class CodexBridgeService implements CodexBridgeController {
     ownership: SessionSummary["ownership"],
   ): void {
     if (!this.isTopLevelSessionRecord(record)) return;
+    this.eventNotifier.notify();
     this.eventBus?.emit({
       type: "session-status-changed",
       sessionId: record.id,
@@ -1831,6 +1841,7 @@ export class CodexBridgeService implements CodexBridgeController {
     pendingInputType?: "tool-approval" | "user-question",
   ): void {
     if (!this.isTopLevelSessionRecord(record)) return;
+    this.eventNotifier.notify();
     this.eventBus?.emit({
       type: "process-state-changed",
       sessionId: record.id,
@@ -1843,6 +1854,7 @@ export class CodexBridgeService implements CodexBridgeController {
 
   private emitSessionUpdated(record: SessionRecord): void {
     if (!this.isTopLevelSessionRecord(record)) return;
+    this.eventNotifier.notify();
     this.eventBus?.emit({
       type: "session-updated",
       sessionId: record.id,

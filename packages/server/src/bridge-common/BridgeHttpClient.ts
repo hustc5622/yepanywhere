@@ -38,12 +38,18 @@ export interface BridgePollEntry<TState extends BridgePollState> {
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const EVENT_STREAM_RETRY_MS = 5_000;
 
 /**
  * Base class for the main-server side of a bridge sidecar: forwards control
  * calls over HTTP and polls `/session-views`, replaying lifecycle changes
  * (session-created / session-status-changed / process-state-changed) onto the
  * local EventBus so bridge sessions appear alongside owned sessions.
+ *
+ * Besides interval polling, it subscribes to the sidecar's `/events` SSE
+ * change signal and polls immediately on each notification, so bridge state
+ * changes (e.g. waiting-input) reach the UI without a full poll interval of
+ * latency. Interval polling remains as the fallback when SSE is unavailable.
  *
  * Subclasses supply the status fallback shape, how a poll snapshot is
  * collected, and may emit provider-specific extra events per diff.
@@ -59,6 +65,8 @@ export abstract class BridgeHttpClient<
   private readonly pollIntervalMs: number;
   private pollTimer: NodeJS.Timeout | null = null;
   private polling = false;
+  private pollQueued = false;
+  private eventStreamAbort: AbortController | null = null;
   protected knownSessions = new Map<string, TState>();
 
   constructor(options: BridgeHttpClientOptions) {
@@ -89,6 +97,7 @@ export abstract class BridgeHttpClient<
       void this.pollSessions();
     }, this.pollIntervalMs);
     void this.pollSessions();
+    this.startEventStream();
   }
 
   shutdown(): void {
@@ -96,6 +105,57 @@ export abstract class BridgeHttpClient<
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.eventStreamAbort?.abort();
+    this.eventStreamAbort = null;
+  }
+
+  /**
+   * Subscribe to the sidecar's `/events` SSE change stream and poll
+   * immediately on each signal. Reconnects with a fixed backoff; absence of
+   * the endpoint (older sidecar) degrades to interval polling.
+   */
+  private startEventStream(): void {
+    if (this.eventStreamAbort) return;
+    const abort = new AbortController();
+    this.eventStreamAbort = abort;
+
+    const run = async (): Promise<void> => {
+      while (!abort.signal.aborted) {
+        try {
+          const response = await fetch(`${this.baseUrl}/events`, {
+            headers: { accept: "text/event-stream" },
+            signal: abort.signal,
+          });
+          if (response.ok && response.body) {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            while (!abort.signal.aborted) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              let newlineIndex = buffer.indexOf("\n");
+              while (newlineIndex >= 0) {
+                const line = buffer.slice(0, newlineIndex).trim();
+                buffer = buffer.slice(newlineIndex + 1);
+                if (line === "event: changed") {
+                  void this.pollSessions();
+                }
+                newlineIndex = buffer.indexOf("\n");
+              }
+            }
+          }
+        } catch {
+          // Connection failure - fall through to retry.
+        }
+        if (abort.signal.aborted) return;
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, EVENT_STREAM_RETRY_MS);
+          timer.unref?.();
+        });
+      }
+    };
+    void run();
   }
 
   async getStatus(): Promise<TStatus> {
@@ -195,7 +255,13 @@ export abstract class BridgeHttpClient<
   }
 
   private async pollSessions(): Promise<void> {
-    if (!this.eventBus || this.polling) return;
+    if (!this.eventBus) return;
+    if (this.polling) {
+      // Coalesce push-triggered polls that race an in-flight poll so the
+      // final state is always re-read after the current cycle completes.
+      this.pollQueued = true;
+      return;
+    }
     this.polling = true;
     try {
       const entries = await this.collectPollEntries();
@@ -220,6 +286,10 @@ export abstract class BridgeHttpClient<
       }
     } finally {
       this.polling = false;
+      if (this.pollQueued) {
+        this.pollQueued = false;
+        void this.pollSessions();
+      }
     }
   }
 

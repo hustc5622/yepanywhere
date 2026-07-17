@@ -10,6 +10,7 @@ import type {
   UrlProjectId,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import { BridgeEventNotifier } from "../bridge-common/BridgeEventNotifier.js";
 import {
   asRecord,
   findAvailablePort,
@@ -160,6 +161,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private lastError: string | null = null;
   private sessions = new Map<string, SessionRecord>();
   private pendingInputs = new Map<string, OpenCodeBridgePendingInput>();
+  private readonly eventNotifier = new BridgeEventNotifier();
   private inputResponses = new Map<string, Promise<boolean>>();
   private eventAbortController: AbortController | null = null;
   private eventReconnectTimer: NodeJS.Timeout | null = null;
@@ -233,6 +235,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   }
 
   async shutdown(): Promise<void> {
+    this.eventNotifier.close();
     this.stopOpenCodeEventStream();
     if (this.server) {
       await new Promise<void>((resolve) => this.server?.close(() => resolve()));
@@ -383,6 +386,11 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (req.method === "GET" && url.pathname === "/status") {
       await this.syncOpenCodeRuntimeState();
       writeJson(res, 200, this.getStatus());
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/events") {
+      // SSE change signal for the main server's poll-on-push subscription.
+      this.eventNotifier.attach(res);
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
@@ -709,6 +717,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       // supplied by OpenCode and do not manufacture a fresh updatedAt merely
       // because a repeated busy/idle poll arrived.
       Object.assign(existing, state);
+      this.eventNotifier.notify();
       return;
     }
 
@@ -727,6 +736,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       pendingInputType: state.pendingInputType,
       active: state.active,
     });
+    this.eventNotifier.notify();
   }
 
   private toBridgeSession(record: SessionRecord): OpenCodeBridgeSession {
@@ -899,6 +909,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (type === "session.deleted") {
       this.sessions.delete(sessionId);
       this.pendingInputs.delete(sessionId);
+      this.eventNotifier.notify();
       return;
     }
 
