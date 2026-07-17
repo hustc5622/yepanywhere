@@ -15,6 +15,8 @@ interface Props {
   toolResult?: ToolResultData;
   status: "pending" | "complete" | "error" | "aborted";
   sessionProvider?: string;
+  /** Live streaming output preview while the tool is still running. */
+  partialOutput?: string;
 }
 
 type ToolCallStatus = Props["status"];
@@ -65,6 +67,7 @@ export const ToolCallRow = memo(function ToolCallRow({
   toolResult,
   status,
   sessionProvider,
+  partialOutput,
 }: Props) {
   // Create a minimal render context for tool renderers
   const renderContext: RenderContext = useMemo(
@@ -246,6 +249,11 @@ export const ToolCallRow = memo(function ToolCallRow({
         </div>
       )}
 
+      {/* Live output stream while the command is still running (Codex TUI parity) */}
+      {status === "pending" && partialOutput && (
+        <LiveOutputPreview output={partialOutput} />
+      )}
+
       {expanded && !isNonExpandable && (
         <div className="tool-row-content">
           {status === "pending" || status === "aborted" ? (
@@ -339,6 +347,30 @@ function shouldSuppressBashCollapsedPreview(
 function isBashToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === "bash" || normalized === "shell";
+}
+
+const LIVE_OUTPUT_MAX_LINES = 12;
+
+/** Scrolling tail of a running command's output, like the Codex TUI exec cell. */
+function LiveOutputPreview({ output }: { output: string }) {
+  const tail = useMemo(() => {
+    const lines = output.replace(/\r\n?/g, "\n").split("\n");
+    // Drop a trailing blank line from a final newline so the tail stays dense.
+    if (lines.length > 1 && lines[lines.length - 1] === "") {
+      lines.pop();
+    }
+    return lines.slice(-LIVE_OUTPUT_MAX_LINES).join("\n");
+  }, [output]);
+
+  if (!tail.trim()) {
+    return null;
+  }
+
+  return (
+    <div className="tool-live-output" aria-live="polite">
+      <pre>{tail}</pre>
+    </div>
+  );
 }
 
 function ToolUseExpanded({

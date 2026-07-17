@@ -1738,6 +1738,78 @@ Details with a &gt; comparison.</result>
     });
   });
 
+  describe("streaming partial output", () => {
+    it("carries partialOutput onto the pending tool call", () => {
+      const messages: Message[] = [
+        {
+          id: "msg-1",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-live",
+              name: "Bash",
+              input: { command: "make build" },
+              partialOutput: "compiling...\n",
+            },
+          ],
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        type: "tool_call",
+        id: "tool-live",
+        status: "pending",
+        partialOutput: "compiling...\n",
+      });
+    });
+
+    it("refreshes partialOutput from replayed tool_use snapshots", () => {
+      const messages: Message[] = [
+        {
+          id: "msg-1",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-live",
+              name: "Bash",
+              input: { command: "make build" },
+              partialOutput: "compiling...\n",
+            },
+          ],
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+        {
+          id: "msg-2",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-live",
+              name: "Bash",
+              input: { command: "make build" },
+              partialOutput: "compiling...\nlinking...\n",
+            },
+          ],
+          timestamp: "2024-01-01T00:00:01Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        type: "tool_call",
+        partialOutput: "compiling...\nlinking...\n",
+      });
+    });
+  });
+
   describe("duplicate & batched tool results", () => {
     it("does not fan out message-level toolUseResult to parallel tool results", () => {
       const messages: Message[] = [

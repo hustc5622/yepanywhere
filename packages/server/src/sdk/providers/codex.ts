@@ -128,6 +128,8 @@ const MODEL_LIST_TIMEOUT_MS = 15000;
 const APP_SERVER_INIT_REQUEST_ID = 1;
 const APP_SERVER_MODEL_LIST_REQUEST_ID = 2;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
+/** Max characters of live command output kept for the streaming preview. */
+const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
 const CODEX_CLOUD_MODEL_PROVIDER = "openai";
 const CODEX_MODEL_PROVIDER_NAMES = new Set(["openai", "azure"]);
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
@@ -1261,6 +1263,9 @@ export class CodexProvider implements AgentProvider {
     let sessionId = options.resumeSessionId ?? "";
     const usageByTurnId = new Map<string, TokenUsageSnapshot>();
     const customToolContexts = new Map<string, CodexToolCallContext>();
+    // Accumulated live stdout/stderr per command item (itemId-turnId), so the
+    // UI can stream command output like the Codex TUI does.
+    const commandOutputBuffers = new Map<string, string>();
     const logMessage = (message: SDKMessage): SDKMessage => {
       const messageSessionId =
         typeof (message as { session_id?: unknown }).session_id === "string"
@@ -1474,6 +1479,7 @@ export class CodexProvider implements AgentProvider {
             sessionId,
             usageByTurnId,
             customToolContexts,
+            commandOutputBuffers,
           );
           for (const msg of messages) {
             yield logMessage(msg);
@@ -1840,6 +1846,7 @@ export class CodexProvider implements AgentProvider {
     sessionId: string,
     usageByTurnId: Map<string, TokenUsageSnapshot>,
     customToolContexts: Map<string, CodexToolCallContext> = new Map(),
+    commandOutputBuffers: Map<string, string> = new Map(),
   ): SDKMessage[] {
     switch (notification.method) {
       case "turn/completed": {
@@ -1920,6 +1927,82 @@ export class CodexProvider implements AgentProvider {
           sessionId,
           customToolContexts,
         );
+
+      case "item/commandExecution/outputDelta": {
+        // Live command output streaming - mirror the Codex TUI's scrolling
+        // exec cell. The delta merges into the pending tool_use block via the
+        // shared block-merge path (same message uuid, same tool_use id).
+        const params = notification.params as
+          | {
+              threadId?: string;
+              turnId?: string;
+              itemId?: string;
+              delta?: string;
+            }
+          | undefined;
+        const itemId = this.getOptionalString(params?.itemId);
+        const turnId = this.getOptionalString(params?.turnId);
+        const delta =
+          typeof params?.delta === "string" ? params.delta : undefined;
+        if (!itemId || !turnId || !delta) return [];
+
+        const bufferKey = `${itemId}-${turnId}`;
+        const combined = (commandOutputBuffers.get(bufferKey) ?? "") + delta;
+        // Keep the streaming preview bounded; the complete output arrives
+        // with the item/completed tool_result.
+        const bounded =
+          combined.length > CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT
+            ? combined.slice(-CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT)
+            : combined;
+        commandOutputBuffers.set(bufferKey, bounded);
+
+        return [
+          withCodexTimestamp({
+            type: "assistant",
+            session_id: sessionId,
+            uuid: bufferKey,
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: itemId,
+                  partialOutput: bounded,
+                },
+              ],
+            },
+          } as unknown as SDKMessage),
+        ];
+      }
+
+      case "warning":
+      case "guardianWarning":
+      case "deprecationNotice":
+      case "configWarning": {
+        // The Codex TUI renders these as notice cells; without them the web
+        // transcript silently drops safety and deprecation context.
+        const params = notification.params as
+          | {
+              message?: string;
+              summary?: string;
+              details?: string | null;
+            }
+          | undefined;
+        const summary =
+          this.getOptionalString(params?.message) ??
+          this.getOptionalString(params?.summary);
+        if (!summary) return [];
+        const details = this.getOptionalString(params?.details ?? undefined);
+        return [
+          withCodexTimestamp({
+            type: "system",
+            subtype: "warning",
+            session_id: sessionId,
+            content: details ? `${summary}\n${details}` : summary,
+            warningKind: notification.method,
+          } as SDKMessage),
+        ];
+      }
 
       case "account/rateLimits/updated": {
         // account/rateLimits/updated is telemetry, not a terminal turn error.

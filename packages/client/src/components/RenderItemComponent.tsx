@@ -198,6 +198,7 @@ export const RenderItemComponent = memo(function RenderItemComponent({
             toolResult={item.toolResult}
             status={item.status}
             sessionProvider={sessionProvider}
+            partialOutput={item.partialOutput}
           />
         );
 
@@ -238,10 +239,11 @@ export const RenderItemComponent = memo(function RenderItemComponent({
         const isCompacting =
           item.subtype === "status" && item.status === "compacting";
         const isError = item.subtype === "error";
-        const icon = isError ? "!" : "⟳";
+        const isWarning = item.subtype === "warning";
+        const icon = isError ? "!" : isWarning ? "⚠" : "⟳";
         return (
           <div
-            className={`system-message ${isCompacting ? "system-message-compacting" : ""} ${isError ? "system-message-error" : ""}`}
+            className={`system-message ${isCompacting ? "system-message-compacting" : ""} ${isError ? "system-message-error" : ""} ${isWarning ? "system-message-warning" : ""}`}
           >
             <span
               className={`system-message-icon ${isCompacting ? "spinning" : ""}`}

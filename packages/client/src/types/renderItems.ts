@@ -50,6 +50,8 @@ export interface ToolCallItem extends RenderItemBase {
   toolInput: unknown; // tool_use.input
   toolResult?: ToolResultData; // undefined while pending
   status: "pending" | "complete" | "error" | "aborted";
+  /** Live streaming output preview while the tool is still running. */
+  partialOutput?: string;
 }
 
 export interface ToolResultData {

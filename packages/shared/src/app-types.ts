@@ -41,6 +41,8 @@ export interface AppContentBlock {
   id?: string;
   name?: string;
   input?: unknown;
+  /** Live streaming output preview for a still-running tool (Codex exec). */
+  partialOutput?: string;
   // tool_result block
   tool_use_id?: string;
   content?: string | AppContentBlock[];

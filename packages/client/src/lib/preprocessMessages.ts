@@ -542,8 +542,12 @@ function processMessage(
   // Handle system entries (compact_boundary, status, etc.)
   if (msg.type === "system") {
     const subtype = (msg as { subtype?: string }).subtype ?? "unknown";
-    // Render compact_boundary as a visible system message
-    if (subtype === "compact_boundary" || subtype === "turn_aborted") {
+    // Render compact_boundary / turn_aborted / warning as visible markers
+    if (
+      subtype === "compact_boundary" ||
+      subtype === "turn_aborted" ||
+      subtype === "warning"
+    ) {
       const systemItem: SystemItem = {
         type: "system",
         id: msgId,
@@ -553,7 +557,9 @@ function processMessage(
             ? CODEX_TURN_ABORTED_DISPLAY_TEXT
             : typeof msg.content === "string"
               ? msg.content
-              : "Context compacted",
+              : subtype === "warning"
+                ? "Warning"
+                : "Context compacted",
         sourceMessages: [msg],
       };
       items.push(systemItem);
@@ -726,11 +732,21 @@ function processMessage(
                 Object.keys(existingInput as Record<string, unknown>).length ===
                   0);
             const nextItem = appendSourceMessage(existingItem, msg);
+            const incomingPartialOutput =
+              typeof block.partialOutput === "string" &&
+              block.partialOutput.length >
+                (existingItem.partialOutput?.length ?? 0)
+                ? block.partialOutput
+                : existingItem.partialOutput;
             const withInput =
               incomingHasInput &&
               (existingIsEmpty || existingItem.toolResult === undefined)
-                ? { ...nextItem, toolInput: incomingInput }
-                : nextItem;
+                ? {
+                    ...nextItem,
+                    toolInput: incomingInput,
+                    partialOutput: incomingPartialOutput,
+                  }
+                : { ...nextItem, partialOutput: incomingPartialOutput };
             items[existingIndex] =
               existingItem.status === "pending" && replayStatus !== "pending"
                 ? { ...withInput, status: replayStatus }
@@ -754,6 +770,10 @@ function processMessage(
           status: getInitialToolStatus(block, isOrphaned),
           sourceMessages: [msg],
           isSubagent: msg.isSubagent,
+          ...(typeof block.partialOutput === "string" &&
+          block.partialOutput.length > 0
+            ? { partialOutput: block.partialOutput }
+            : {}),
         };
         const itemIndex = items.length;
         toolCallIndices.set(block.id, itemIndex);

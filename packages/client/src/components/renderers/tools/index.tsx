@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { RenderContext } from "../types";
+import { mcpToolRenderer, parseMcpToolName } from "./McpToolRenderer";
 import type { ToolRenderer } from "./types";
 
 const TOOL_NAME_ALIASES: Record<string, string> = {
@@ -55,7 +56,16 @@ class ToolRendererRegistry {
 
   get(toolName: string): ToolRenderer {
     const canonicalToolName = canonicalizeToolName(toolName);
-    return this.tools.get(canonicalToolName) || this.fallback;
+    const registered = this.tools.get(canonicalToolName);
+    if (registered) {
+      return registered;
+    }
+    // MCP tools (server:tool / mcp__server__tool) get a structured renderer
+    // instead of the raw-JSON fallback.
+    if (parseMcpToolName(canonicalToolName)) {
+      return mcpToolRenderer;
+    }
+    return this.fallback;
   }
 
   renderToolUse(
@@ -136,6 +146,12 @@ class ToolRendererRegistry {
 
   getDisplayName(toolName: string, input?: unknown): string {
     const renderer = this.get(toolName);
+    if (renderer === mcpToolRenderer) {
+      const identity = parseMcpToolName(canonicalizeToolName(toolName));
+      if (identity) {
+        return `${identity.server} · ${identity.tool}`;
+      }
+    }
     if (renderer.getDisplayName) {
       return renderer.getDisplayName(input);
     }

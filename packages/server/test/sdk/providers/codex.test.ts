@@ -941,6 +941,116 @@ describe("CodexProvider Event Normalization", () => {
       ],
     });
   });
+
+  it("streams command output deltas into the pending tool_use block", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+        customToolContexts?: Map<string, unknown>,
+        commandOutputBuffers?: Map<string, string>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const buffers = new Map<string, string>();
+
+    const first = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/commandExecution/outputDelta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-cmd",
+          delta: "line one\n",
+        },
+      },
+      "session-1",
+      new Map(),
+      new Map(),
+      buffers,
+    );
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({
+      type: "assistant",
+      uuid: "item-cmd-turn-1",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "item-cmd",
+            partialOutput: "line one\n",
+          },
+        ],
+      },
+    });
+
+    const second = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/commandExecution/outputDelta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-cmd",
+          delta: "line two\n",
+        },
+      },
+      "session-1",
+      new Map(),
+      new Map(),
+      buffers,
+    );
+    const block = ((second[0]?.message as { content?: unknown[] })?.content ??
+      [])[0] as Record<string, unknown>;
+    expect(block.partialOutput).toBe("line one\nline two\n");
+  });
+
+  it("converts warning notifications into visible system messages", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const warning = provider.convertNotificationToSDKMessages(
+      {
+        method: "warning",
+        params: { threadId: "thread-1", message: "Sandbox degraded" },
+      },
+      "session-1",
+      new Map(),
+    );
+    expect(warning).toHaveLength(1);
+    expect(warning[0]).toMatchObject({
+      type: "system",
+      subtype: "warning",
+      content: "Sandbox degraded",
+      warningKind: "warning",
+    });
+
+    const deprecation = provider.convertNotificationToSDKMessages(
+      {
+        method: "deprecationNotice",
+        params: { summary: "Old flag", details: "Use --new-flag instead" },
+      },
+      "session-1",
+      new Map(),
+    );
+    expect(deprecation[0]).toMatchObject({
+      type: "system",
+      subtype: "warning",
+      content: "Old flag\nUse --new-flag instead",
+    });
+
+    const empty = provider.convertNotificationToSDKMessages(
+      { method: "configWarning", params: {} },
+      "session-1",
+      new Map(),
+    );
+    expect(empty).toEqual([]);
+  });
 });
 
 describe("CodexProvider Configuration", () => {
