@@ -187,4 +187,99 @@ describe("reconcileCodexLinearMessages", () => {
     expect(result[0]?._source).toBe("jsonl");
     expect(result[0]?.uuid).toBe("jsonl-1");
   });
+
+  it("merges partial sdk tool_result with complete jsonl copy by tool_use_id", () => {
+    const messages: Message[] = [
+      {
+        uuid: "sdk-result",
+        type: "user",
+        timestamp: "2026-03-09T10:00:00.500Z",
+        _source: "sdk",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call-1",
+              content: "partial str",
+            },
+          ],
+        },
+      },
+      {
+        uuid: "jsonl-result",
+        type: "user",
+        timestamp: "2026-03-09T10:00:01.200Z",
+        _source: "jsonl",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call-1",
+              content: "partial stream output, now complete",
+            },
+          ],
+        },
+      },
+    ];
+
+    const result = reconcileCodexLinearMessages(messages);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?._source).toBe("jsonl");
+    expect(result[0]?.message?.content).toMatchObject([
+      {
+        type: "tool_result",
+        tool_use_id: "call-1",
+        content: "partial stream output, now complete",
+      },
+    ]);
+  });
+
+  it("merges sdk tool_use with partial input into the jsonl copy", () => {
+    const messages: Message[] = [
+      {
+        uuid: "sdk-use",
+        type: "assistant",
+        timestamp: "2026-03-09T10:00:00.000Z",
+        _source: "sdk",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call-1", name: "Bash", input: {} },
+          ],
+        },
+      },
+      {
+        uuid: "jsonl-use",
+        type: "assistant",
+        timestamp: "2026-03-09T10:00:00.900Z",
+        _source: "jsonl",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call-1",
+              name: "Bash",
+              input: { command: "ls -la" },
+            },
+          ],
+        },
+      },
+    ];
+
+    const result = reconcileCodexLinearMessages(messages);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?._source).toBe("jsonl");
+    expect(result[0]?.message?.content).toMatchObject([
+      {
+        type: "tool_use",
+        id: "call-1",
+        input: { command: "ls -la" },
+      },
+    ]);
+  });
 });

@@ -631,7 +631,7 @@ function processMessage(
     // Attach results to pending tool calls
     for (const block of content) {
       if (block.type === "tool_result" && block.tool_use_id) {
-        attachToolResult(block, msg, items, pendingToolCalls);
+        attachToolResult(block, msg, items, toolCallIndices, pendingToolCalls);
       }
     }
     return;
@@ -743,7 +743,7 @@ function processMessage(
       // OpenCode persists tool_use and tool_result blocks together in the
       // assistant message. Pair those results here; Claude/Codex usually put
       // tool_result blocks in a following user message handled above.
-      attachToolResult(block, msg, items, pendingToolCalls);
+      attachToolResult(block, msg, items, toolCallIndices, pendingToolCalls);
     }
   }
 }
@@ -1143,20 +1143,61 @@ function extractAgentDisplayContent(
   return displayBlocks.length > 0 ? displayBlocks : undefined;
 }
 
+/**
+ * Count tool_result blocks carried by a message. The message-level
+ * `toolUseResult` field is only unambiguous when the message carries exactly
+ * one tool_result block; with parallel tool calls batched into one message the
+ * field belongs to an unknown block and must not be fanned out to all calls.
+ */
+function countToolResultBlocks(message: Message): number {
+  const content =
+    (message.message as { content?: string | ContentBlock[] } | undefined)
+      ?.content ?? message.content;
+  if (!Array.isArray(content)) return 0;
+  let count = 0;
+  for (const block of content) {
+    if (block?.type === "tool_result") count += 1;
+  }
+  return count;
+}
+
+/** Rough completeness score used to decide which duplicate result to keep. */
+function scoreToolResult(result: ToolResultData): number {
+  let score = result.content.length;
+  if (result.structured !== undefined && result.structured !== null) {
+    // Structured payloads unlock rich renderers; weigh them heavily so a
+    // JSONL-complete result beats a partial streaming snapshot.
+    score += 10_000;
+  }
+  return score;
+}
+
 function attachToolResult(
   block: ContentBlock,
   resultMessage: Message,
   items: RenderItem[],
+  toolCallIndices: Map<string, number>,
   pendingToolCalls: Map<string, number>,
 ): void {
   const toolUseId = block.tool_use_id;
   if (!toolUseId) return;
 
-  const index = pendingToolCalls.get(toolUseId);
+  let index = pendingToolCalls.get(toolUseId);
+  let existingResult: ToolResultData | undefined;
   if (index === undefined) {
-    // Orphan result - shouldn't happen normally
-    console.warn(`Tool result for unknown tool_use: ${toolUseId}`);
-    return;
+    // Late duplicate: the SDK stream and JSONL persistence can both deliver a
+    // result for the same tool_use id (streaming partial vs complete). Allow
+    // the richer copy to upgrade the already-attached result instead of
+    // dropping it on the floor.
+    index = toolCallIndices.get(toolUseId);
+    if (index === undefined) {
+      // Orphan result - shouldn't happen normally
+      console.warn(`Tool result for unknown tool_use: ${toolUseId}`);
+      return;
+    }
+    const existingItem = items[index];
+    if (!existingItem || existingItem.type !== "tool_call") return;
+    existingResult = existingItem.toolResult;
   }
 
   const item = items[index];
@@ -1165,9 +1206,13 @@ function attachToolResult(
   // Attach result to existing tool call
   // Handle both camelCase (toolUseResult) and snake_case (tool_use_result) from SDK
   const content = typeof block.content === "string" ? block.content : "";
+  // Only trust the message-level structured result when it unambiguously
+  // belongs to this block (single tool_result per message).
   let structured =
-    resultMessage.toolUseResult ??
-    (resultMessage as Record<string, unknown>).tool_use_result;
+    countToolResultBlocks(resultMessage) <= 1
+      ? (resultMessage.toolUseResult ??
+        (resultMessage as Record<string, unknown>).tool_use_result)
+      : undefined;
 
   if (!structured) {
     structured = normalizeOpenCodeToolResult(
@@ -1189,6 +1234,14 @@ function attachToolResult(
     isError: block.is_error || false,
     structured,
   };
+
+  if (
+    existingResult &&
+    scoreToolResult(existingResult) >= scoreToolResult(resultData)
+  ) {
+    // Existing copy is at least as complete; keep it.
+    return;
+  }
 
   // Create a new ToolCallItem to ensure React sees the change
   const updatedItem: ToolCallItem = {

@@ -113,6 +113,24 @@ function blocksAreSameStream(
   );
 }
 
+/**
+ * Richness score for tool_result content so streaming partials never
+ * clobber a more complete snapshot: structured arrays beat strings,
+ * longer strings beat shorter ones, anything beats null/undefined.
+ */
+function getToolResultContentRichness(value: unknown): number {
+  if (Array.isArray(value)) {
+    return 1_000_000 + value.length;
+  }
+  if (typeof value === "string") {
+    return value.length;
+  }
+  if (value === null || value === undefined) {
+    return -1;
+  }
+  return 0;
+}
+
 function mergeBlocks(
   existing: MergeableContentBlock,
   incoming: MergeableContentBlock,
@@ -140,6 +158,19 @@ function mergeBlocks(
           ? existingText
           : incomingText,
     };
+  }
+
+  if (incoming.type === "tool_result") {
+    // Shallow spread would let a partial streaming snapshot (short or empty
+    // content) overwrite the complete result. Keep the richer content copy.
+    const merged: MergeableContentBlock = { ...existing, ...incoming };
+    if (
+      getToolResultContentRichness(existing.content) >
+      getToolResultContentRichness(incoming.content)
+    ) {
+      merged.content = existing.content;
+    }
+    return merged;
   }
 
   return { ...existing, ...incoming };

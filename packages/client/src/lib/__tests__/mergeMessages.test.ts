@@ -455,6 +455,88 @@ describe("mergeStreamMessage", () => {
       ]);
     });
 
+    it("keeps the richer tool_result content when a partial snapshot arrives later", () => {
+      const existing: Message[] = [
+        {
+          id: "user-1",
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-1",
+                content: "complete tool output with details",
+              },
+            ],
+          },
+          _source: "sdk",
+        },
+      ];
+      const incoming: Message = {
+        id: "user-1",
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-1", content: "comp" },
+          ],
+        },
+      };
+
+      const result = mergeStreamMessage(existing, incoming);
+      const content = result.messages[0]?.message?.content;
+
+      expect(content).toMatchObject([
+        {
+          type: "tool_result",
+          tool_use_id: "tool-1",
+          content: "complete tool output with details",
+        },
+      ]);
+    });
+
+    it("lets a longer tool_result snapshot replace a shorter one", () => {
+      const existing: Message[] = [
+        {
+          id: "user-1",
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "tool-1", content: "comp" },
+            ],
+          },
+          _source: "sdk",
+        },
+      ];
+      const incoming: Message = {
+        id: "user-1",
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-1",
+              content: "complete tool output with details",
+            },
+          ],
+        },
+      };
+
+      const result = mergeStreamMessage(existing, incoming);
+      const content = result.messages[0]?.message?.content;
+
+      expect(content).toMatchObject([
+        {
+          type: "tool_result",
+          tool_use_id: "tool-1",
+          content: "complete tool output with details",
+        },
+      ]);
+    });
+
     it("returns same array if no change", () => {
       const existing: Message[] = [
         { id: "msg-1", content: "same", _source: "jsonl" },

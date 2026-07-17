@@ -69,11 +69,29 @@ function normalizeContentBlock(block: unknown): string {
     case "thinking":
       return `thinking:${typeof typedBlock.thinking === "string" ? typedBlock.thinking : ""}`;
 
-    case "tool_use":
-      return `tool_use:${typeof typedBlock.id === "string" ? typedBlock.id : ""}:${typeof typedBlock.name === "string" ? typedBlock.name : ""}:${stableStringify(typedBlock.input)}`;
+    // Tool ids are unique per call, so they alone identify the block. Input
+    // and result content are intentionally excluded: streaming (SDK) snapshots
+    // carry partial input/output while JSONL persists the complete copy, and a
+    // content-sensitive fingerprint would keep both messages alive instead of
+    // reconciling them (the partial copy then wins the tool_result pairing).
+    case "tool_use": {
+      const id = typeof typedBlock.id === "string" ? typedBlock.id : "";
+      if (id) {
+        return `tool_use:${id}`;
+      }
+      return `tool_use::${typeof typedBlock.name === "string" ? typedBlock.name : ""}:${stableStringify(typedBlock.input)}`;
+    }
 
-    case "tool_result":
-      return `tool_result:${typeof typedBlock.tool_use_id === "string" ? typedBlock.tool_use_id : ""}:${typedBlock.is_error === true ? "1" : "0"}:${typeof typedBlock.content === "string" ? typedBlock.content : stableStringify(typedBlock.content)}`;
+    case "tool_result": {
+      const toolUseId =
+        typeof typedBlock.tool_use_id === "string"
+          ? typedBlock.tool_use_id
+          : "";
+      if (toolUseId) {
+        return `tool_result:${toolUseId}`;
+      }
+      return `tool_result::${typedBlock.is_error === true ? "1" : "0"}:${typeof typedBlock.content === "string" ? typedBlock.content : stableStringify(typedBlock.content)}`;
+    }
 
     default:
       return `${type}:${stableStringify(typedBlock)}`;

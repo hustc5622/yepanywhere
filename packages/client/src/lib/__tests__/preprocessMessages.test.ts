@@ -1737,4 +1737,193 @@ Details with a &gt; comparison.</result>
       });
     });
   });
+
+  describe("duplicate & batched tool results", () => {
+    it("does not fan out message-level toolUseResult to parallel tool results", () => {
+      const messages: Message[] = [
+        {
+          id: "msg-1",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-a",
+              name: "Read",
+              input: { file_path: "a.ts" },
+            },
+            {
+              type: "tool_use",
+              id: "tool-b",
+              name: "Read",
+              input: { file_path: "b.ts" },
+            },
+          ],
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+        {
+          id: "msg-2",
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-a", content: "aaa" },
+            { type: "tool_result", tool_use_id: "tool-b", content: "bbb" },
+          ],
+          timestamp: "2024-01-01T00:00:01Z",
+          // Ambiguous: belongs to one of the two blocks, not both.
+          toolUseResult: { lineCount: 1, filePath: "/a.ts" },
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items).toHaveLength(2);
+      for (const item of items) {
+        expect(item.type).toBe("tool_call");
+        if (item.type === "tool_call") {
+          expect(item.toolResult?.structured).not.toEqual({
+            lineCount: 1,
+            filePath: "/a.ts",
+          });
+        }
+      }
+    });
+
+    it("still attaches message-level toolUseResult for single-result messages", () => {
+      const messages: Message[] = [
+        {
+          id: "msg-1",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-a",
+              name: "Read",
+              input: { file_path: "a.ts" },
+            },
+          ],
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+        {
+          id: "msg-2",
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-a", content: "aaa" },
+          ],
+          timestamp: "2024-01-01T00:00:01Z",
+          toolUseResult: { lineCount: 1, filePath: "/a.ts" },
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items).toHaveLength(1);
+      const item = items[0];
+      if (item?.type === "tool_call") {
+        expect(item.toolResult?.structured).toEqual({
+          lineCount: 1,
+          filePath: "/a.ts",
+        });
+      }
+    });
+
+    it("upgrades a partial result when a richer duplicate arrives later", () => {
+      const messages: Message[] = [
+        {
+          id: "msg-1",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-a",
+              name: "Bash",
+              input: { command: "ls" },
+            },
+          ],
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+        {
+          id: "msg-2",
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-a", content: "par" },
+          ],
+          timestamp: "2024-01-01T00:00:01Z",
+        },
+        {
+          id: "msg-3",
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-a",
+              content: "partial output now complete",
+            },
+          ],
+          timestamp: "2024-01-01T00:00:02Z",
+          toolUseResult: { stdout: "partial output now complete" },
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items).toHaveLength(1);
+      const item = items[0];
+      expect(item?.type).toBe("tool_call");
+      if (item?.type === "tool_call") {
+        expect(item.toolResult?.content).toBe("partial output now complete");
+        expect(item.toolResult?.structured).toEqual({
+          stdout: "partial output now complete",
+        });
+      }
+    });
+
+    it("keeps the richer result when a shorter duplicate arrives later", () => {
+      const messages: Message[] = [
+        {
+          id: "msg-1",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-a",
+              name: "Bash",
+              input: { command: "ls" },
+            },
+          ],
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+        {
+          id: "msg-2",
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-a",
+              content: "complete output",
+            },
+          ],
+          timestamp: "2024-01-01T00:00:01Z",
+          toolUseResult: { stdout: "complete output" },
+        },
+        {
+          id: "msg-3",
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool-a", content: "com" },
+          ],
+          timestamp: "2024-01-01T00:00:02Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items).toHaveLength(1);
+      const item = items[0];
+      if (item?.type === "tool_call") {
+        expect(item.toolResult?.content).toBe("complete output");
+        expect(item.toolResult?.structured).toEqual({
+          stdout: "complete output",
+        });
+      }
+    });
+  });
 });
