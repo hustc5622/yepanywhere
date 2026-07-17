@@ -1003,6 +1003,45 @@ describe("CodexProvider Event Normalization", () => {
     const block = ((second[0]?.message as { content?: unknown[] })?.content ??
       [])[0] as Record<string, unknown>;
     expect(block.partialOutput).toBe("line one\nline two\n");
+
+    provider.convertNotificationToSDKMessages(
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "item-cmd",
+            type: "commandExecution",
+            command: "printf 'done'",
+            aggregatedOutput: "done",
+            exitCode: 0,
+            status: "completed",
+          },
+        },
+      },
+      "session-1",
+      new Map(),
+      new Map(),
+      buffers,
+    );
+    expect(buffers.size).toBe(0);
+
+    buffers.set("turn-1\0orphaned-item", "partial output");
+    provider.convertNotificationToSDKMessages(
+      {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", status: "completed", items: [] },
+        },
+      },
+      "session-1",
+      new Map(),
+      new Map(),
+      buffers,
+    );
+    expect(buffers.size).toBe(0);
   });
 
   it("converts warning notifications into visible system messages", () => {

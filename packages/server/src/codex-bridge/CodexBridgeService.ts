@@ -220,6 +220,8 @@ export class CodexBridgeService implements CodexBridgeController {
   private usageRequest: Promise<CodexUsageResponse> | null = null;
   private readonly statePath?: string;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Serializes atomic writes so concurrent state changes cannot race on .tmp. */
+  private persistChain: Promise<void> = Promise.resolve();
   private readonly eventNotifier = new BridgeEventNotifier();
 
   constructor(options: CodexBridgeServiceOptions) {
@@ -1679,8 +1681,9 @@ export class CodexBridgeService implements CodexBridgeController {
     this.persistTimer.unref?.();
   }
 
-  private async persistSessions(): Promise<void> {
-    if (!this.statePath) return;
+  private persistSessions(): Promise<void> {
+    const statePath = this.statePath;
+    if (!statePath) return Promise.resolve();
     const records: PersistedSessionRecord[] = Array.from(this.sessions.values())
       .filter((record) => !record.isSubagent && record.projectPathKnown)
       .map((record) => ({
@@ -1703,22 +1706,23 @@ export class CodexBridgeService implements CodexBridgeController {
         completedTurnIds: Array.from(record.completedTurnIds),
         emitted: this.emittedSessionIds.has(record.id),
       }));
-    try {
-      await mkdir(dirname(this.statePath), { recursive: true });
-      const tmpPath = `${this.statePath}.tmp`;
-      await writeFile(
-        tmpPath,
-        JSON.stringify({ version: 1, sessions: records }),
-        "utf8",
-      );
-      await rename(tmpPath, this.statePath);
-    } catch (error) {
-      console.warn(
-        `[CodexBridge] Failed to persist session state: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
+    const payload = JSON.stringify({ version: 1, sessions: records });
+    const writeSnapshot = async (): Promise<void> => {
+      try {
+        await mkdir(dirname(statePath), { recursive: true });
+        const tmpPath = `${statePath}.tmp`;
+        await writeFile(tmpPath, payload, "utf8");
+        await rename(tmpPath, statePath);
+      } catch (error) {
+        console.warn(
+          `[CodexBridge] Failed to persist session state: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+    this.persistChain = this.persistChain.then(writeSnapshot, writeSnapshot);
+    return this.persistChain;
   }
 
   private async restorePersistedSessions(): Promise<void> {

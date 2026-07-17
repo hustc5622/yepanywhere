@@ -1852,6 +1852,12 @@ export class CodexProvider implements AgentProvider {
       case "turn/completed": {
         const params = this.asTurnCompletedNotification(notification.params);
         const turnId = params?.turn.id ?? null;
+        if (turnId) {
+          const keyPrefix = `${turnId}\0`;
+          for (const key of commandOutputBuffers.keys()) {
+            if (key.startsWith(keyPrefix)) commandOutputBuffers.delete(key);
+          }
+        }
         const usage = turnId ? usageByTurnId.get(turnId) : undefined;
         const message = withCodexTimestamp({
           type: "system",
@@ -1912,6 +1918,9 @@ export class CodexProvider implements AgentProvider {
         }
 
         const turnId = params.turnId;
+        if (notification.method === "item/completed") {
+          commandOutputBuffers.delete(`${turnId}\0${normalized.id}`);
+        }
 
         return this.convertItemToSDKMessages(
           normalized,
@@ -1946,7 +1955,7 @@ export class CodexProvider implements AgentProvider {
           typeof params?.delta === "string" ? params.delta : undefined;
         if (!itemId || !turnId || !delta) return [];
 
-        const bufferKey = `${itemId}-${turnId}`;
+        const bufferKey = `${turnId}\0${itemId}`;
         const combined = (commandOutputBuffers.get(bufferKey) ?? "") + delta;
         // Keep the streaming preview bounded; the complete output arrives
         // with the item/completed tool_result.
@@ -1960,7 +1969,7 @@ export class CodexProvider implements AgentProvider {
           withCodexTimestamp({
             type: "assistant",
             session_id: sessionId,
-            uuid: bufferKey,
+            uuid: `${itemId}-${turnId}`,
             message: {
               role: "assistant",
               content: [
