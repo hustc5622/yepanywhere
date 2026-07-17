@@ -200,6 +200,52 @@ describe("normalizeSession", () => {
     expect(normalized.messages[0]?.finish).toBeUndefined();
   });
 
+  it("does not persist an unnamed OpenCode data URI attachment as text", () => {
+    const dataUri = `data:application/pdf;base64,${"A".repeat(8_192)}`;
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "opencode-file-session",
+        projectId: "test-project" as UrlProjectId,
+        title: "OpenCode File",
+        fullTitle: "OpenCode File",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 1,
+        provider: "opencode",
+      },
+      data: {
+        provider: "opencode",
+        session: {
+          messages: [
+            {
+              message: {
+                id: "msg-file",
+                sessionID: "opencode-file-session",
+                role: "user",
+                time: { created: Date.now() },
+              },
+              parts: [
+                {
+                  id: "part-file",
+                  sessionID: "opencode-file-session",
+                  messageID: "msg-file",
+                  type: "file",
+                  mime: "application/pdf",
+                  url: dataUri,
+                },
+              ],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    const text = JSON.stringify(normalized.messages[0]?.message?.content);
+    expect(text).toContain("📎 attachment (application/pdf)");
+    expect(text).not.toContain("data:application/pdf;base64");
+  });
+
   it("marks a persisted legacy OpenCode text response as completed", () => {
     const mockSession: LoadedSession = {
       summary: {

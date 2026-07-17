@@ -343,6 +343,7 @@ export type {
   OpenCodeSessionDiffEvent,
   OpenCodeMessageUpdatedEvent,
   OpenCodeMessagePartUpdatedEvent,
+  OpenCodeMessagePartDeltaEvent,
   OpenCodeSSEEvent,
   // Session storage types
   OpenCodeProject,

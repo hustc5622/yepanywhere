@@ -77,6 +77,7 @@ interface OpenCodeTestEmissionState {
   toolResultIds: Set<string>;
   toolUseInputs: Map<string, string>;
   markerPartIds: Set<string>;
+  streamingPartTypes: Map<string, "text" | "reasoning">;
 }
 
 type ConvertPartToSDKMessages = (
@@ -99,12 +100,34 @@ function getConvertPartToSDKMessages(
   ).convertPartToSDKMessages.bind(provider);
 }
 
+type ConvertSSEEventToSDKMessages = (
+  event: { type: string; properties: Record<string, unknown> },
+  baseUrl: string,
+  sessionId: string,
+  currentMessageId: string | null,
+  signal: AbortSignal,
+  messageRoles: ReadonlyMap<string, "user" | "assistant">,
+  emissionState: OpenCodeTestEmissionState,
+  submittedText: string,
+) => Promise<Array<Record<string, unknown>>>;
+
+function getConvertSSEEventToSDKMessages(
+  provider: OpenCodeProvider,
+): ConvertSSEEventToSDKMessages {
+  return (
+    provider as unknown as {
+      convertSSEEventToSDKMessages: ConvertSSEEventToSDKMessages;
+    }
+  ).convertSSEEventToSDKMessages.bind(provider);
+}
+
 function createEmissionState(): OpenCodeTestEmissionState {
   return {
     toolUseIds: new Set<string>(),
     toolResultIds: new Set<string>(),
     toolUseInputs: new Map<string, string>(),
     markerPartIds: new Set<string>(),
+    streamingPartTypes: new Map<string, "text" | "reasoning">(),
   };
 }
 
@@ -1727,6 +1750,114 @@ ohmyrouter/deepseek-v4-pro
     ]);
   });
 
+  it.each([
+    {
+      partType: "text" as const,
+      expectedDelta: { type: "text_delta", text: "Hello" },
+    },
+    {
+      partType: "reasoning" as const,
+      expectedDelta: { type: "thinking_delta", thinking: "Hello" },
+    },
+  ])(
+    "consumes standalone message.part.delta for $partType parts",
+    async ({ partType, expectedDelta }) => {
+      const provider = new OpenCodeProvider();
+      const convertEvent = getConvertSSEEventToSDKMessages(provider);
+      const emissionState = createEmissionState();
+      const messageRoles = new Map([["msg_assistant", "assistant" as const]]);
+      const common = [
+        "http://127.0.0.1:1",
+        "yep_session",
+        null,
+        new AbortController().signal,
+        messageRoles,
+        emissionState,
+        "",
+      ] as const;
+
+      await expect(
+        convertEvent(
+          {
+            type: "message.part.updated",
+            properties: {
+              part: {
+                id: "part_streaming",
+                sessionID: "ses_1",
+                messageID: "msg_assistant",
+                type: partType,
+                text: "",
+              },
+            },
+          },
+          ...common,
+        ),
+      ).resolves.toEqual([]);
+
+      const deltaMessages = await convertEvent(
+        {
+          type: "message.part.delta",
+          properties: {
+            sessionID: "ses_1",
+            messageID: "msg_assistant",
+            partID: "part_streaming",
+            field: "text",
+            delta: "Hello",
+          },
+        },
+        ...common,
+      );
+      expect(deltaMessages).toEqual([
+        expect.objectContaining({
+          type: "stream_event",
+          event: expect.objectContaining({ type: "message_start" }),
+        }),
+        expect.objectContaining({
+          type: "stream_event",
+          event: expect.objectContaining({ type: "content_block_start" }),
+        }),
+        expect.objectContaining({
+          type: "stream_event",
+          event: expect.objectContaining({
+            type: "content_block_delta",
+            delta: expectedDelta,
+          }),
+        }),
+      ]);
+
+      await convertEvent(
+        {
+          type: "message.part.delta",
+          properties: {
+            sessionID: "ses_1",
+            messageID: "msg_assistant",
+            partID: "part_streaming",
+            field: "text",
+            delta: " world",
+          },
+        },
+        ...common,
+      );
+      await expect(
+        convertEvent(
+          {
+            type: "message.part.updated",
+            properties: {
+              part: {
+                id: "part_streaming",
+                sessionID: "ses_1",
+                messageID: "msg_assistant",
+                type: partType,
+                text: "Hello world",
+              },
+            },
+          },
+          ...common,
+        ),
+      ).resolves.toEqual([]);
+    },
+  );
+
   it("derives deltas from cumulative OpenCode assistant text parts", () => {
     const provider = new OpenCodeProvider();
     const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
@@ -1961,6 +2092,38 @@ ohmyrouter/deepseek-v4-pro
         emissionState,
       ),
     ).toEqual([]);
+  });
+
+  it("does not copy an unnamed data URI attachment into streamed transcript text", () => {
+    const provider = new OpenCodeProvider();
+    const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
+    const emissionState = createEmissionState();
+    const part = {
+      id: "prt_inline_file",
+      sessionID: "ses_1",
+      messageID: "msg_user",
+      type: "file",
+      mime: "image/png",
+      url: `data:image/png;base64,${"A".repeat(8_192)}`,
+    } as unknown as Parameters<typeof convertPartToSDKMessages>[0];
+
+    const messages = convertPartToSDKMessages(
+      part,
+      "yep_session",
+      undefined,
+      null,
+      "user",
+      emissionState,
+    );
+    expect(messages).toMatchObject([
+      {
+        type: "user",
+        message: {
+          content: [{ type: "text", text: "📎 attachment (image/png)" }],
+        },
+      },
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("data:image/png;base64");
   });
 
   it("emits full OpenCode usage from step-finish parts", () => {

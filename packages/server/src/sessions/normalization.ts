@@ -46,6 +46,7 @@ import {
   normalizeCodexToolOutputWithContext,
   parseCodexToolArguments,
 } from "../codex/normalization.js";
+import { getOpenCodeAttachmentLabel } from "../opencode/attachments.js";
 import type { ContentBlock, Message, Session } from "../supervisor/types.js";
 import { collectVisibleClaudeEntries } from "./claude-messages.js";
 import { applyCodexRollbackMarkers } from "./codex-rollback.js";
@@ -1921,7 +1922,7 @@ function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
           mime?: string;
           url?: string;
         };
-        const label = file.filename ?? file.url ?? "attachment";
+        const label = getOpenCodeAttachmentLabel(file);
         blocks.push({
           type: "text",
           text: `📎 ${label}${file.mime ? ` (${file.mime})` : ""}`,

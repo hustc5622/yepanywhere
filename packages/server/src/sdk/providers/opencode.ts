@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
   ModelInfo,
+  OpenCodeMessagePartDeltaEvent,
   OpenCodeMessagePartUpdatedEvent,
   OpenCodeMessageUpdatedEvent,
   OpenCodePart,
@@ -41,6 +42,7 @@ import {
   resolveOpenCodeGatewayConfig,
   resolveOpenCodeOpenAICompatibleBaseURL,
 } from "../../opencode-bridge/gateway-config.js";
+import { getOpenCodeAttachmentLabel } from "../../opencode/attachments.js";
 import {
   type OpenCodeQuestion,
   buildOpenCodeQuestionAnswers,
@@ -313,6 +315,8 @@ interface OpenCodeEmissionState {
   toolUseInputs: Map<string, string>;
   /** Part ids already emitted as standalone marker messages (subtask/file/compaction). */
   markerPartIds: Set<string>;
+  /** Part kind learned from message.part.updated before standalone deltas. */
+  streamingPartTypes: Map<string, "text" | "reasoning">;
   assistantStream?: OpenCodeAssistantStreamState;
   latestUsage?: Record<string, unknown>;
   latestCost?: number;
@@ -1233,6 +1237,7 @@ export class OpenCodeProvider implements AgentProvider {
       toolResultIds: new Set(),
       toolUseInputs: new Map(),
       markerPartIds: new Set(),
+      streamingPartTypes: new Map(),
     };
 
     // Event buffer and signaling for producer/consumer pattern
@@ -1575,6 +1580,9 @@ export class OpenCodeProvider implements AgentProvider {
         const partEvent = event as OpenCodeMessagePartUpdatedEvent;
         const part = partEvent.properties.part;
         const delta = partEvent.properties.delta;
+        if (part.type === "text" || part.type === "reasoning") {
+          emissionState.streamingPartTypes.set(part.id, part.type);
+        }
 
         return this.convertPartToSDKMessages(
           part,
@@ -1582,6 +1590,30 @@ export class OpenCodeProvider implements AgentProvider {
           delta,
           currentMessageId,
           messageRoles.get(part.messageID),
+          emissionState,
+          submittedText,
+        );
+      }
+
+      case "message.part.delta": {
+        const deltaEvent = event as OpenCodeMessagePartDeltaEvent;
+        const { properties } = deltaEvent;
+        if (properties.field !== "text") return [];
+        const partType =
+          emissionState.streamingPartTypes.get(properties.partID) ?? "text";
+        const part = {
+          id: properties.partID,
+          sessionID: properties.sessionID,
+          messageID: properties.messageID,
+          type: partType,
+          text: "",
+        } as OpenCodePart;
+        return this.convertPartToSDKMessages(
+          part,
+          sessionId,
+          properties.delta,
+          currentMessageId,
+          messageRoles.get(properties.messageID),
           emissionState,
           submittedText,
         );
@@ -1916,7 +1948,7 @@ export class OpenCodeProvider implements AgentProvider {
           mime?: string;
           url?: string;
         };
-        const label = file.filename ?? file.url ?? "attachment";
+        const label = getOpenCodeAttachmentLabel(file);
         const roleForFile = role === "user" ? "user" : "assistant";
         return [
           {

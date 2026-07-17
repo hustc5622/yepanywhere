@@ -19,6 +19,7 @@ export type {
   OpenCodeSessionDiffEvent,
   OpenCodeMessageUpdatedEvent,
   OpenCodeMessagePartUpdatedEvent,
+  OpenCodeMessagePartDeltaEvent,
   OpenCodeSSEEvent,
 } from "./events.js";
 
