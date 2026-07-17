@@ -28,7 +28,7 @@ import { normalizeProviderGeneratedTitle } from "../sessions/provider-title-qual
 import type { SessionSummary } from "../supervisor/types.js";
 import {
   type OpenCodeGatewayConfig,
-  buildManagedOpenCodeEnv,
+  buildUserConfiguredOpenCodeEnv,
 } from "./gateway-config.js";
 import {
   isLiveOpenCodeBridgeSession,
@@ -303,7 +303,16 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     this.externalDecisionWaiters.clear();
     this.stopOpenCodeEventStream();
     if (this.server) {
-      await new Promise<void>((resolve) => this.server?.close(() => resolve()));
+      const server = this.server;
+      // server.close() stops new TCP connections but waits for existing
+      // keep-alive sockets. External OpenCode plugins immediately issue their
+      // next decision long-poll on the same socket, which can otherwise keep a
+      // LaunchAgent shutdown parked forever. Stop accepting first, then tear
+      // down the remaining sockets so the managed child can be terminated.
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
       this.server = null;
     }
     this.listening = false;
@@ -1817,9 +1826,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       env: {
-        ...buildManagedOpenCodeEnv(process.env, this.gatewayConfig, {
-          openAICompatibleBaseURL: this.getOpenAICompatibleGatewayUrl(),
-        }),
+        // Attached CLI sessions consume the user's normal opencode.json, so
+        // keep its environment references available in this shared server.
+        ...buildUserConfiguredOpenCodeEnv(process.env, this.gatewayConfig),
         // The Yep forwarder plugin (installed globally in
         // ~/.config/opencode/plugin) must stay inert inside Yep-managed
         // servers: their events already reach the bridge via /global/event.
@@ -1880,10 +1889,6 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     this.lastError = null;
     console.log(`[OpenCodeBridge] Managed OpenCode server ready at ${url}`);
     return url;
-  }
-
-  private getOpenAICompatibleGatewayUrl(): string {
-    return `http://127.0.0.1:${this.port}${OPENAI_GATEWAY_PATH_PREFIX}`;
   }
 
   private async proxyOpenAICompatibleRequest(

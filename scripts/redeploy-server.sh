@@ -209,6 +209,82 @@ kickstart_launchd_label() {
   launchctl kickstart "$(launchd_domain)/${label}"
 }
 
+launchd_label_pid() {
+  local label="$1"
+  launchctl print "$(launchd_domain)/${label}" 2>/dev/null |
+    awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+}
+
+alive_pids() {
+  local candidates="$1"
+  local pid
+  for pid in $candidates; do
+    if kill -0 "$pid" 2>/dev/null; then
+      printf '%s\n' "$pid"
+    fi
+  done
+}
+
+wait_pids_exited() {
+  local candidates="$1"
+  for _ in $(seq 1 20); do
+    if [[ -z "$(alive_pids "$candidates")" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+direct_child_pids() {
+  local parents="$1"
+  local parent
+  for parent in $parents; do
+    pgrep -P "$parent" 2>/dev/null || true
+  done | sort -u
+}
+
+stop_opencode_bridge_sidecar() {
+  local listener_pids="${1:-}"
+  local job_pid=""
+  local target_pids child_pids remaining remaining_children
+
+  if launchd_label_loaded "$OPENCODE_BRIDGE_LAUNCHD_LABEL"; then
+    job_pid="$(launchd_label_pid "$OPENCODE_BRIDGE_LAUNCHD_LABEL")"
+  fi
+  target_pids="$(printf '%s\n%s\n' "$listener_pids" "$job_pid" | awk 'NF' | sort -u)"
+  [[ -z "$target_pids" ]] && return 0
+
+  # Capture managed children before asking the parent to shut down. A bridge
+  # stuck in server.close() may stop listening while its detached OpenCode
+  # child remains alive, so port checks alone are not sufficient.
+  child_pids="$(direct_child_pids "$target_pids")"
+  kill $target_pids 2>/dev/null || true
+  wait_pids_exited "$target_pids" || true
+
+  remaining="$(alive_pids "$target_pids")"
+  remaining_children="$(alive_pids "$child_pids")"
+  if [[ -n "$remaining" ]]; then
+    warn "OpenCode bridge process(es) did not stop after SIGTERM: ${remaining//$'\n'/, }. Sending SIGKILL ..."
+    [[ -n "$remaining_children" ]] && kill -9 $remaining_children 2>/dev/null || true
+    kill -9 $remaining 2>/dev/null || true
+    wait_pids_exited "$remaining" || true
+  fi
+
+  remaining_children="$(alive_pids "$child_pids")"
+  if [[ -n "$remaining_children" ]]; then
+    warn "Managed OpenCode child process(es) survived bridge shutdown: ${remaining_children//$'\n'/, }. Sending SIGKILL ..."
+    kill -9 $remaining_children 2>/dev/null || true
+    wait_pids_exited "$remaining_children" || true
+  fi
+
+  remaining="$(alive_pids "$target_pids")"
+  if [[ -n "$remaining" ]]; then
+    err "OpenCode bridge process(es) are still running after stop: ${remaining//$'\n'/, }"
+    return 1
+  fi
+}
+
 tail_server_launchagent_logs() {
   local stdout_log="$SERVER_LAUNCHD_LOG_DIR/server-launchd.out.log"
   local stderr_log="$SERVER_LAUNCHD_LOG_DIR/server-launchd.err.log"
@@ -343,8 +419,10 @@ start_opencode_bridge_sidecar() {
   local server_url="$3"
   local opencode_start_port="$4"
   local opencode_bridge_upstream_url="${5:-}"
+  local using_launchd=false
 
   if launchd_label_loaded "$OPENCODE_BRIDGE_LAUNCHD_LABEL"; then
+    using_launchd=true
     log "Starting OpenCode bridge LaunchAgent ${OPENCODE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
     kickstart_launchd_label "$OPENCODE_BRIDGE_LAUNCHD_LABEL"
   else
@@ -374,8 +452,55 @@ start_opencode_bridge_sidecar() {
   done
 
   err "OpenCode CLI bridge sidecar didn't answer ${bridge_url}/status within 15s."
-  tail -20 /tmp/yep-opencode-bridge.log >&2 || true
+  if $using_launchd; then
+    local stdout_log="$SERVER_LAUNCHD_LOG_DIR/opencode-bridge-launchd.out.log"
+    local stderr_log="$SERVER_LAUNCHD_LOG_DIR/opencode-bridge-launchd.err.log"
+    if [[ -f "$stderr_log" ]]; then
+      err "Recent OpenCode bridge LaunchAgent stderr:"
+      tail -40 "$stderr_log" >&2 || true
+    fi
+    if [[ -f "$stdout_log" ]]; then
+      err "Recent OpenCode bridge lifecycle/error records:"
+      rg -a '\[OpenCodeBridge\]|Failed to start|ERROR|Error|error' "$stdout_log" |
+        tail -40 >&2 || true
+    fi
+    err "OpenCode bridge LaunchAgent status:"
+    launchctl print "$(launchd_domain)/${OPENCODE_BRIDGE_LAUNCHD_LABEL}" 2>/dev/null |
+      rg '^\s*(state|path|program|pid|runs|last exit code|last terminating signal|reason)\s*=' >&2 || true
+  else
+    tail -20 /tmp/yep-opencode-bridge.log >&2 || true
+  fi
   return 1
+}
+
+runtime_dependencies_installed() {
+  [[ -d "$REPO_ROOT/dist/npm-package/node_modules" ]] || return 1
+  (
+    cd "$REPO_ROOT/dist/npm-package"
+    npm ls --omit=dev --depth=0 --silent >/dev/null 2>&1
+  )
+}
+
+install_runtime_dependencies() {
+  log "Installing runtime dependencies in dist/npm-package ..."
+  (
+    cd "$REPO_ROOT/dist/npm-package"
+    npm install --omit=dev --no-audit --no-fund --silent
+  )
+  chmod +x "$REPO_ROOT"/dist/npm-package/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
+}
+
+ensure_bundle_ready() {
+  if [[ ! -f "$SERVER_CLI_JS" ]]; then
+    err "Expected $SERVER_CLI_JS, but it's missing. Rebuild before restarting."
+    return 1
+  fi
+
+  chmod +x "$SERVER_CLI_JS"
+  if ! runtime_dependencies_installed; then
+    warn "Bundled runtime dependencies are missing or incomplete; repairing them before restart."
+    install_runtime_dependencies
+  fi
 }
 
 # ----- build -----
@@ -383,22 +508,11 @@ if $DO_BUILD; then
   log "Building bundle (NPM_VERSION=${NPM_VERSION}) ..."
   NPM_VERSION="$NPM_VERSION" pnpm build:bundle
 
-  # The build sometimes drops the +x bit on the CLI entry — restore it so
-  # node's shebang launcher works.
-  if [[ -f dist/npm-package/dist/cli.js ]]; then
-    chmod +x dist/npm-package/dist/cli.js
-  else
-    err "Expected dist/npm-package/dist/cli.js after build, but it's missing."
-    exit 1
-  fi
-
   # build-bundle.ts only stages the package for publishing — it doesn't
   # install runtime dependencies. When npm publishes, `npm i -g yepanywhere`
   # installs the dependencies for end users; for local dev we have to do
   # it ourselves, otherwise `yepanywhere` boots with ERR_MODULE_NOT_FOUND.
-  log "Installing runtime dependencies in dist/npm-package ..."
-  (cd dist/npm-package && npm install --omit=dev --no-audit --no-fund --silent)
-  chmod +x dist/npm-package/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
+  install_runtime_dependencies
 
   # Sanity-check the linked global command resolves to our bundle.
   GLOBAL_BIN="$(command -v yepanywhere 2>/dev/null || true)"
@@ -419,6 +533,10 @@ if $DO_BUILD; then
   if [[ "$ACTUAL_VERSION" != "v${NPM_VERSION}" && "$ACTUAL_VERSION" != "${NPM_VERSION}" ]]; then
     warn "Bundle reports version '${ACTUAL_VERSION}' but expected 'v${NPM_VERSION}'."
   fi
+fi
+
+if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
+  ensure_bundle_ready
 fi
 
 # ----- restart -----
@@ -509,10 +627,13 @@ if $DO_RESTART; then
     ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$CODEX_BRIDGE_LISTEN_PIDS"; then
     kill $CODEX_BRIDGE_LISTEN_PIDS 2>/dev/null || true
   fi
-  if $RESTART_OPENCODE_BRIDGE &&
-    [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] &&
-    ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
-    kill $OPENCODE_BRIDGE_LISTEN_PIDS 2>/dev/null || true
+  if $RESTART_OPENCODE_BRIDGE; then
+    OPENCODE_BRIDGE_STOP_PIDS=""
+    if [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] &&
+      ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
+      OPENCODE_BRIDGE_STOP_PIDS="$OPENCODE_BRIDGE_LISTEN_PIDS"
+    fi
+    stop_opencode_bridge_sidecar "$OPENCODE_BRIDGE_STOP_PIDS"
   fi
 
   # Wait briefly for the old process to release the port.
@@ -705,10 +826,8 @@ if ! $DO_RESTART && $RESTART_OPENCODE_BRIDGE; then
     exit 1
   fi
 
-  if [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]]; then
-    kill $OPENCODE_BRIDGE_LISTEN_PIDS 2>/dev/null || true
-    wait_port_released "$OPENCODE_BRIDGE_PORT" || true
-  fi
+  stop_opencode_bridge_sidecar "$OPENCODE_BRIDGE_LISTEN_PIDS"
+  wait_port_released "$OPENCODE_BRIDGE_PORT" || true
 
   LISTEN_PIDS="$(lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
   if [[ -n "$LISTEN_PIDS" ]]; then

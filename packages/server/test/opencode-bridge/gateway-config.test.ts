@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildManagedOpenCodeEnv,
+  buildUserConfiguredOpenCodeEnv,
   fetchOpenCodeGatewayModels,
   getManagedOpenCodeModelRef,
   resolveOpenCodeGatewayConfig,
@@ -195,11 +196,54 @@ describe("OpenCode gateway configuration", () => {
         apiKey: "opencode-key",
         apiBase: "https://api.ohmyrouter.com/v1",
       },
+      {
+        sessionConfig: {
+          model: "glm-5.2",
+          requestProtocol: "anthropic",
+        },
+      },
     );
 
     expect(env).not.toHaveProperty("LLM_API_KEY");
     expect(env).not.toHaveProperty("LLM_API_BASE");
     expect(env).not.toHaveProperty("LLM_SUB_MODULE");
     expect(env.YEP_OPENCODE_LLM_API_KEY).toBe("opencode-key");
+  });
+
+  it("keeps legacy LLM aliases available to user-configured OpenCode servers", () => {
+    const env = buildUserConfiguredOpenCodeEnv(
+      {
+        OPENCODE_LLM_API_KEY: "dedicated-key",
+      },
+      {
+        apiKey: "dedicated-key",
+        apiBase: "https://api.ohmyrouter.com/v1",
+        subModule: "claude-code-internal",
+      },
+    );
+
+    expect(env.LLM_API_KEY).toBe("dedicated-key");
+    expect(env.LLM_API_BASE).toBe("https://api.ohmyrouter.com/v1");
+    expect(env.LLM_SUB_MODULE).toBe("claude-code-internal");
+    expect(env).not.toHaveProperty("YEP_OPENCODE_LLM_API_KEY");
+  });
+
+  it("does not overwrite explicit generic LLM values in user config", () => {
+    const env = buildUserConfiguredOpenCodeEnv(
+      {
+        LLM_API_KEY: "user-key",
+        LLM_API_BASE: "https://user.example/v1",
+        LLM_SUB_MODULE: "user-module",
+      },
+      {
+        apiKey: "dedicated-key",
+        apiBase: "https://api.ohmyrouter.com/v1",
+        subModule: "claude-code-internal",
+      },
+    );
+
+    expect(env.LLM_API_KEY).toBe("user-key");
+    expect(env.LLM_API_BASE).toBe("https://user.example/v1");
+    expect(env.LLM_SUB_MODULE).toBe("user-module");
   });
 });

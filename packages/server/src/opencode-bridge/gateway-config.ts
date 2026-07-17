@@ -10,9 +10,9 @@ export interface OpenCodeGatewayConfig {
   subModule?: string;
 }
 
-interface OpenCodeGatewayOverlayOptions {
+interface ManagedOpenCodeGatewayOverlayOptions {
   openAICompatibleBaseURL?: string;
-  sessionConfig?: OpenCodeSessionConfig;
+  sessionConfig: OpenCodeSessionConfig;
 }
 
 type Env = NodeJS.ProcessEnv;
@@ -259,11 +259,9 @@ function buildManagedModelConfig(
 /** Build the exact provider/model catalog entry consumed by one session. */
 function buildOpenCodeGatewayOverlay(
   config: OpenCodeGatewayConfig,
-  options: OpenCodeGatewayOverlayOptions = {},
+  options: ManagedOpenCodeGatewayOverlayOptions,
 ): Record<string, unknown> {
   const sessionConfig = options.sessionConfig;
-  if (!sessionConfig) return {};
-
   const headers = gatewayHeaders(config);
   const providerID = MANAGED_PROVIDER_IDS[sessionConfig.requestProtocol];
   const baseURL =
@@ -297,10 +295,31 @@ function buildOpenCodeGatewayOverlay(
   };
 }
 
-export function buildManagedOpenCodeEnv(
+/**
+ * Build the environment for an OpenCode process that consumes the user's
+ * normal global config. LaunchAgents receive dedicated OPENCODE_LLM_* values,
+ * while existing user config may still reference the legacy LLM_* names.
+ * Preserve explicit generic values and backfill only the missing aliases.
+ */
+export function buildUserConfiguredOpenCodeEnv(
   baseEnv: Env,
   config?: OpenCodeGatewayConfig | null,
-  options: OpenCodeGatewayOverlayOptions = {},
+): Env {
+  const env: Env = { ...baseEnv };
+  if (!config) return env;
+
+  if (!clean(env.LLM_API_KEY)) env.LLM_API_KEY = config.apiKey;
+  if (!clean(env.LLM_API_BASE)) env.LLM_API_BASE = config.apiBase;
+  if (!clean(env.LLM_SUB_MODULE) && config.subModule) {
+    env.LLM_SUB_MODULE = config.subModule;
+  }
+  return env;
+}
+
+export function buildManagedOpenCodeEnv(
+  baseEnv: Env,
+  config: OpenCodeGatewayConfig | null | undefined,
+  options: ManagedOpenCodeGatewayOverlayOptions,
 ): Env {
   const env: Env = { ...baseEnv };
   if (!config) return env;
@@ -319,8 +338,6 @@ export function buildManagedOpenCodeEnv(
   managedEnv[OPENCODE_GATEWAY_API_KEY_ENV] = config.apiKey;
 
   const overlay = buildOpenCodeGatewayOverlay(config, options);
-  if (Object.keys(overlay).length === 0) return managedEnv;
-
   if (!managedEnv.OPENCODE_CONFIG_CONTENT) {
     managedEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify(overlay);
     return managedEnv;

@@ -2167,7 +2167,7 @@ ohmyrouter/deepseek-v4-pro
     );
   });
 
-  it("does not manufacture a provider before a managed model is selected", () => {
+  it("preserves user-config credentials before a managed model is selected", () => {
     Reflect.deleteProperty(process.env, "LLM_API_KEY");
     Reflect.deleteProperty(process.env, "LLM_API_BASE");
     Reflect.deleteProperty(process.env, "LLM_SUB_MODULE");
@@ -2195,7 +2195,9 @@ ohmyrouter/deepseek-v4-pro
       provider?: Record<string, { options?: Record<string, unknown> }>;
     };
 
-    expect(env.YEP_OPENCODE_LLM_API_KEY).toBe("test-key");
+    expect(env.LLM_API_KEY).toBe("test-key");
+    expect(env.LLM_API_BASE).toBe("https://example.test/v1");
+    expect(env).not.toHaveProperty("YEP_OPENCODE_LLM_API_KEY");
     expect(config.provider).toBeUndefined();
     expect(env).not.toHaveProperty("LLM_SUB_MODULE");
   });

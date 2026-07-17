@@ -15,6 +15,7 @@ afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
     await rm(dir, { force: true, recursive: true });
   }
+  vi.unstubAllEnvs();
 });
 
 function listen(server: ReturnType<typeof createServer>): Promise<string> {
@@ -70,6 +71,16 @@ const server = http.createServer((req, res) => {
       "cache-control": "no-cache"
     });
     res.write("\\n");
+    return;
+  }
+  if (req.url === "/test/env") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      llmApiKey: process.env.LLM_API_KEY ?? null,
+      llmApiBase: process.env.LLM_API_BASE ?? null,
+      llmSubModule: process.env.LLM_SUB_MODULE ?? null,
+      managedApiKey: process.env.YEP_OPENCODE_LLM_API_KEY ?? null
+    }));
     return;
   }
   res.writeHead(404);
@@ -1005,6 +1016,10 @@ describe("OpenCodeBridgeService", () => {
   });
 
   it("starts and owns a managed OpenCode server when no external URL is configured", async () => {
+    vi.stubEnv("LLM_API_KEY", undefined);
+    vi.stubEnv("LLM_API_BASE", undefined);
+    vi.stubEnv("LLM_SUB_MODULE", undefined);
+    vi.stubEnv("YEP_OPENCODE_LLM_API_KEY", undefined);
     const opencodePath = await writeFakeOpenCodeExecutable();
     const startPort = await getFreePort();
     const bridge = new OpenCodeBridgeService({
@@ -1014,6 +1029,11 @@ describe("OpenCodeBridgeService", () => {
       serverUrl: "http://127.0.0.1:3400",
       opencodePath,
       opencodeStartPort: startPort,
+      gatewayConfig: {
+        apiKey: "bridge-key",
+        apiBase: "https://api.ohmyrouter.com/v1",
+        subModule: "claude-code-internal",
+      },
     });
 
     const url = await (
@@ -1029,6 +1049,14 @@ describe("OpenCodeBridgeService", () => {
       opencodeServerRunning: true,
     });
     expect(bridge.getStatus().opencodeServerPid).toEqual(expect.any(Number));
+    await expect(
+      fetch(`${url}/test/env`).then((response) => response.json()),
+    ).resolves.toEqual({
+      llmApiKey: "bridge-key",
+      llmApiBase: "https://api.ohmyrouter.com/v1",
+      llmSubModule: "claude-code-internal",
+      managedApiKey: null,
+    });
 
     await bridge.shutdown();
     expect(bridge.getStatus()).toMatchObject({
@@ -1433,6 +1461,63 @@ describe("OpenCodeBridgeService", () => {
     } finally {
       await bridge.shutdown();
     }
+  });
+
+  it("shuts down while an external instance continuously long-polls", async () => {
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    await bridge.start();
+    const base = `http://127.0.0.1:${bridgePort}`;
+    const registered = await fetch(`${base}/external/instances`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        instanceId: "inst-shutdown",
+        directory: "/tmp/project-shutdown",
+      }),
+    });
+    expect(registered.status).toBe(200);
+
+    let polling = true;
+    let pollAttempts = 0;
+    const pollLoop = (async () => {
+      while (polling) {
+        pollAttempts += 1;
+        try {
+          const response = await fetch(
+            `${base}/external/instances/inst-shutdown/decisions?waitMs=5000`,
+          );
+          if (!response.ok) break;
+          await response.json();
+        } catch {
+          break;
+        }
+      }
+    })();
+
+    const internals = bridge as unknown as {
+      externalInstances: Map<string, { waiters: unknown[] }>;
+    };
+    await vi.waitFor(() => {
+      expect(
+        internals.externalInstances.get("inst-shutdown")?.waiters,
+      ).toHaveLength(1);
+    });
+    await expect(
+      Promise.race([
+        bridge.shutdown().then(() => "stopped"),
+        new Promise((resolve) => setTimeout(() => resolve("timed-out"), 1000)),
+      ]),
+    ).resolves.toBe("stopped");
+    polling = false;
+    await pollLoop;
+    expect(pollAttempts).toBeGreaterThanOrEqual(1);
   });
 
   it("queues question decisions with ordered answers for external instances", async () => {

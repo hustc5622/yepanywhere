@@ -37,6 +37,7 @@ import {
 import { getLogger } from "../../logging/logger.js";
 import {
   buildManagedOpenCodeEnv,
+  buildUserConfiguredOpenCodeEnv,
   fetchOpenCodeGatewayModels,
   getManagedOpenCodeModelRef,
   resolveOpenCodeGatewayConfig,
@@ -2780,13 +2781,16 @@ export class OpenCodeProvider implements AgentProvider {
     sessionConfig?: OpenCodeSessionConfig,
   ): NodeJS.ProcessEnv {
     const gatewayConfig = resolveOpenCodeGatewayConfig(process.env);
+    const env = sessionConfig
+      ? buildManagedOpenCodeEnv(process.env, gatewayConfig, {
+          openAICompatibleBaseURL: resolveOpenCodeOpenAICompatibleBaseURL(
+            process.env,
+          ),
+          sessionConfig,
+        })
+      : buildUserConfiguredOpenCodeEnv(process.env, gatewayConfig);
     return {
-      ...buildManagedOpenCodeEnv(process.env, gatewayConfig, {
-        openAICompatibleBaseURL: resolveOpenCodeOpenAICompatibleBaseURL(
-          process.env,
-        ),
-        sessionConfig,
-      }),
+      ...env,
       // Keep the global Yep forwarder plugin inert inside Yep-managed
       // per-session servers; the provider consumes their events directly.
       YEP_MANAGED_OPENCODE: "1",
