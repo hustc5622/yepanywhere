@@ -21,6 +21,14 @@ const CLIENT_DIST = path.join(ROOT_DIR, "packages/client/dist");
 const SERVER_PACKAGE = path.join(ROOT_DIR, "packages/server");
 const SERVER_DIST = path.join(SERVER_PACKAGE, "dist");
 const SHARED_DIST = path.join(ROOT_DIR, "packages/shared/dist");
+const OPENCODE_PLUGIN_SOURCE = path.join(
+  SERVER_PACKAGE,
+  "resources/opencode-plugin/yep-bridge.ts",
+);
+const OPENCODE_PLUGIN_INSTALLER = path.join(
+  ROOT_DIR,
+  "scripts/install-opencode-yep-plugin.sh",
+);
 
 // Staging directory for npm publishing (keeps workspace package.json intact)
 const STAGING_DIR = path.join(ROOT_DIR, "dist/npm-package");
@@ -321,6 +329,34 @@ step("Bundle client into staging", () => {
   log("  Client assets bundled into staging");
 });
 
+// Include the OpenCode forwarder and a stable npm bin entry that installs it
+// into the user's OpenCode plugin directory.
+step("Bundle OpenCode approval plugin", () => {
+  const pluginDest = path.join(
+    STAGING_DIR,
+    "resources/opencode-plugin/yep-bridge.ts",
+  );
+  const installerDest = path.join(
+    STAGING_DIR,
+    "scripts/install-opencode-yep-plugin.sh",
+  );
+  if (!fs.existsSync(OPENCODE_PLUGIN_SOURCE)) {
+    throw new Error(`OpenCode plugin not found at ${OPENCODE_PLUGIN_SOURCE}`);
+  }
+  if (!fs.existsSync(OPENCODE_PLUGIN_INSTALLER)) {
+    throw new Error(
+      `OpenCode plugin installer not found at ${OPENCODE_PLUGIN_INSTALLER}`,
+    );
+  }
+
+  fs.mkdirSync(path.dirname(pluginDest), { recursive: true });
+  fs.mkdirSync(path.dirname(installerDest), { recursive: true });
+  fs.copyFileSync(OPENCODE_PLUGIN_SOURCE, pluginDest);
+  fs.copyFileSync(OPENCODE_PLUGIN_INSTALLER, installerDest);
+  fs.chmodSync(installerDest, 0o755);
+  log("  OpenCode plugin and installer bundled into staging");
+});
+
 // Generate package.json for publishing (in staging, not modifying original)
 step("Generate package.json for npm", () => {
   log("Generating package.json for npm publishing...");
@@ -339,6 +375,7 @@ step("Generate package.json for npm", () => {
     bin: {
       yepanywhere: "./dist/cli.js",
       yc: "./dist/cli.js",
+      "yepanywhere-opencode-plugin": "./scripts/install-opencode-yep-plugin.sh",
     },
     scripts: {
       postinstall:
@@ -348,7 +385,14 @@ step("Generate package.json for npm", () => {
     exports: {
       ".": "./dist/index.js",
     },
-    files: ["dist", "client-dist", "bundled", "README.md"],
+    files: [
+      "dist",
+      "client-dist",
+      "bundled",
+      "resources",
+      "scripts",
+      "README.md",
+    ],
     // Copy dependencies from source, excluding workspace deps
     dependencies: Object.fromEntries(
       Object.entries(sourcePackageJson.dependencies || {}).filter(

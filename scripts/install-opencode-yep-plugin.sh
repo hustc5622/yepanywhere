@@ -3,11 +3,18 @@
 # directory so that default `opencode` TUI sessions (which expose no HTTP
 # server) report permission/question requests to the Yep bridge on 4520.
 #
-# Usage: scripts/install-opencode-yep-plugin.sh [--uninstall]
+# Usage (repository): scripts/install-opencode-yep-plugin.sh [--uninstall]
+# Usage (npm):        yepanywhere-opencode-plugin [--uninstall]
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE="$REPO_ROOT/packages/server/resources/opencode-plugin/yep-bridge.ts"
+PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "$PACKAGE_ROOT/resources/opencode-plugin/yep-bridge.ts" ]]; then
+  # Published npm package layout.
+  SOURCE="$PACKAGE_ROOT/resources/opencode-plugin/yep-bridge.ts"
+else
+  # Source repository layout.
+  SOURCE="$PACKAGE_ROOT/packages/server/resources/opencode-plugin/yep-bridge.ts"
+fi
 TARGET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin"
 TARGET="$TARGET_DIR/yep-bridge.ts"
 
