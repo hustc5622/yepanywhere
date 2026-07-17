@@ -1897,6 +1897,48 @@ function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
       case "step-finish":
         break;
 
+      case "subtask": {
+        // Subagent launch marker: keep subagent work visible in transcripts.
+        const subtask = part as unknown as {
+          prompt?: string;
+          description?: string;
+          agent?: string;
+        };
+        const description =
+          subtask.description?.trim() || subtask.prompt?.trim() || "";
+        const agentName = subtask.agent?.trim() || "subagent";
+        blocks.push({
+          type: "text",
+          text: `**Subagent (${agentName})**: ${description}`,
+        });
+        break;
+      }
+
+      case "file": {
+        // Attachment marker (user uploads / tool-produced files).
+        const file = part as unknown as {
+          filename?: string;
+          mime?: string;
+          url?: string;
+        };
+        const label = file.filename ?? file.url ?? "attachment";
+        blocks.push({
+          type: "text",
+          text: `📎 ${label}${file.mime ? ` (${file.mime})` : ""}`,
+        });
+        break;
+      }
+
+      // retry: transient backoff bookkeeping; patch/snapshot: internal VCS
+      // state; agent: @-mention reference duplicated in the text part.
+      // compaction is emitted as a session-level system marker elsewhere.
+      case "retry":
+      case "patch":
+      case "snapshot":
+      case "agent":
+      case "compaction":
+        break;
+
       default:
         // Unknown part type - skip
         break;

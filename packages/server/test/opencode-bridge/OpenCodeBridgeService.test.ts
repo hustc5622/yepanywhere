@@ -992,4 +992,155 @@ describe("OpenCodeBridgeService", () => {
       opencodeServerPid: null,
     });
   });
+
+  it("surfaces retry status without dropping the active turn", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_retry", status: { type: "busy" } },
+    });
+    handleEvent({
+      type: "session.status",
+      properties: {
+        sessionID: "ses_retry",
+        status: {
+          type: "retry",
+          attempt: 3,
+          message: "rate limited",
+          next: 1_783_673_500_000,
+          action: { label: "Open provider", link: "https://example.com" },
+        },
+      },
+    });
+
+    expect(bridge.isSessionActive("ses_retry")).toBe(true);
+    const session = bridge
+      .listSessions()
+      .find((item) => item.id === "ses_retry");
+    expect(session?.retryStatus).toMatchObject({
+      attempt: 3,
+      message: "rate limited",
+      next: 1_783_673_500_000,
+      actionLabel: "Open provider",
+      actionLink: "https://example.com",
+    });
+
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_retry", status: { type: "busy" } },
+    });
+    expect(
+      bridge.listSessions().find((item) => item.id === "ses_retry")
+        ?.retryStatus,
+    ).toBeUndefined();
+  });
+
+  it("marks sessions idle with an error message on session.error", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_err", status: { type: "busy" } },
+    });
+    expect(bridge.isSessionActive("ses_err")).toBe(true);
+
+    handleEvent({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_err",
+        error: { name: "ProviderError", data: { message: "model exploded" } },
+      },
+    });
+
+    expect(bridge.isSessionActive("ses_err")).toBe(false);
+    const session = bridge.listSessions().find((item) => item.id === "ses_err");
+    expect(session?.lastErrorMessage).toBe("model exploded");
+  });
+
+  it("removes sessions on session.deleted", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.created",
+      properties: { sessionID: "ses_gone", info: { title: "Doomed" } },
+    });
+    expect(bridge.listSessions().some((item) => item.id === "ses_gone")).toBe(
+      true,
+    );
+
+    handleEvent({
+      type: "session.deleted",
+      properties: { sessionID: "ses_gone" },
+    });
+    expect(bridge.listSessions().some((item) => item.id === "ses_gone")).toBe(
+      false,
+    );
+  });
+
+  it("does not treat user message persistence as an active turn", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "message.updated",
+      properties: {
+        sessionID: "ses_user_msg",
+        info: { id: "msg_1", role: "user" },
+      },
+    });
+    expect(bridge.isSessionActive("ses_user_msg")).toBe(false);
+
+    handleEvent({
+      type: "message.updated",
+      properties: {
+        sessionID: "ses_user_msg",
+        info: { id: "msg_2", role: "assistant" },
+      },
+    });
+    expect(bridge.isSessionActive("ses_user_msg")).toBe(true);
+  });
 });

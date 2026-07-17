@@ -82,6 +82,17 @@ interface SessionRecord {
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
   active?: boolean;
+  /** Most recent session.error message, cleared when a new turn starts. */
+  lastErrorMessage?: string;
+  /** Present while OpenCode is retrying a failed provider request. */
+  retryStatus?: {
+    attempt?: number;
+    message?: string;
+    /** Epoch ms of the next retry attempt. */
+    next?: number;
+    actionLabel?: string;
+    actionLink?: string;
+  };
 }
 
 interface StartSessionResponse {
@@ -681,6 +692,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         | "pendingInputType"
         | "active"
         | "updatedAt"
+        | "lastErrorMessage"
+        | "retryStatus"
       >
     >,
   ): void {
@@ -733,6 +746,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       reasoningEffort: record.reasoningEffort,
       activity: record.activity,
       pendingInputType: record.pendingInputType,
+      lastErrorMessage: record.lastErrorMessage,
+      retryStatus: record.retryStatus,
       active:
         record.active ??
         (record.activity === "in-turn" || record.activity === "waiting-input"),
@@ -860,22 +875,81 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const sessionId =
       readString(properties, "sessionID") ??
       readString(properties, "sessionId");
+
+    // session.error may arrive without a sessionID for server-level failures.
+    if (type === "session.error") {
+      const message = readOpenCodeErrorMessage(properties?.error);
+      if (sessionId && this.sessions.has(sessionId)) {
+        this.updateSessionState(sessionId, {
+          activity: "idle",
+          pendingInputType: undefined,
+          active: false,
+          lastErrorMessage: message ?? "OpenCode reported an error",
+          retryStatus: undefined,
+        });
+        this.pendingInputs.delete(sessionId);
+      } else if (message) {
+        this.lastError = message;
+      }
+      return;
+    }
+
     if (!sessionId) return;
 
+    if (type === "session.deleted") {
+      this.sessions.delete(sessionId);
+      this.pendingInputs.delete(sessionId);
+      return;
+    }
+
+    // Deprecated upstream in favor of session.status(type=idle); kept for
+    // compatibility with older OpenCode servers.
     if (type === "session.idle") {
       this.updateSessionState(sessionId, {
         activity: "idle",
         pendingInputType: undefined,
         active: false,
+        retryStatus: undefined,
       });
       return;
     }
 
     if (type === "session.status") {
-      const status = readOpenCodeStatusType(properties?.status);
+      const status = asRecord(properties?.status);
+      const statusType = readOpenCodeStatusType(properties?.status);
+      if (statusType === "retry") {
+        // Retry keeps the turn alive; surface backoff metadata so the UI can
+        // show "retrying" instead of a silent spinner.
+        const action = asRecord(status?.action);
+        this.updateSessionState(sessionId, {
+          activity: "in-turn",
+          active: true,
+          retryStatus: {
+            attempt: readNumber(status, "attempt"),
+            message: readString(status, "message") ?? undefined,
+            next: readNumber(status, "next"),
+            actionLabel: readString(action, "label") ?? undefined,
+            actionLink: readString(action, "link") ?? undefined,
+          },
+        });
+        return;
+      }
       this.updateSessionState(sessionId, {
-        activity: status === "idle" ? "idle" : "in-turn",
-        active: status !== "idle",
+        activity: statusType === "idle" ? "idle" : "in-turn",
+        active: statusType !== "idle",
+        retryStatus: undefined,
+        ...(statusType !== "idle" ? { lastErrorMessage: undefined } : {}),
+      });
+      return;
+    }
+
+    if (type === "message.updated") {
+      // A user message being persisted does not mean the agent is working;
+      // only assistant-side updates imply an active turn.
+      const info = asRecord(properties?.info);
+      const role = readString(info, "role");
+      this.recordOpenCodeSessionEvent(sessionId, properties, {
+        implyActive: role !== "user",
       });
       return;
     }
@@ -883,11 +957,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (
       type === "session.created" ||
       type === "session.updated" ||
-      type === "message.updated" ||
       type === "message.part.updated" ||
       type === "message.part.delta"
     ) {
-      this.recordOpenCodeSessionEvent(sessionId, properties);
+      this.recordOpenCodeSessionEvent(sessionId, properties, {
+        // Session metadata updates (e.g. title generation, archive) can occur
+        // while idle; only streaming part events imply an active turn.
+        implyActive: type.startsWith("message.part."),
+      });
       return;
     }
 
@@ -919,7 +996,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private recordOpenCodeSessionEvent(
     sessionId: string,
     properties: Record<string, unknown> | null,
+    options: { implyActive?: boolean } = {},
   ): void {
+    const implyActive = options.implyActive ?? true;
     const info = asRecord(properties?.info);
     const title = normalizeProviderGeneratedTitle(readString(info, "title"));
     const updatedAt =
@@ -933,8 +1012,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       ...(title ? { title } : {}),
       ...(messageCount !== undefined ? { messageCount } : {}),
       ...(updatedAt ? { updatedAt } : {}),
-      activity: "in-turn",
-      active: true,
+      ...(implyActive
+        ? { activity: "in-turn" as const, active: true, retryStatus: undefined }
+        : {}),
     });
   }
 
@@ -1080,10 +1160,27 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const activeStatus = asRecord(body) ?? {};
     const activeSessionIds = new Set(Object.keys(activeStatus));
     for (const sessionId of activeSessionIds) {
+      const status = asRecord(activeStatus[sessionId]);
       const statusType = readOpenCodeStatusType(activeStatus[sessionId]);
+      if (statusType === "retry") {
+        const action = asRecord(status?.action);
+        this.updateSessionState(sessionId, {
+          activity: "in-turn",
+          active: true,
+          retryStatus: {
+            attempt: readNumber(status, "attempt"),
+            message: readString(status, "message") ?? undefined,
+            next: readNumber(status, "next"),
+            actionLabel: readString(action, "label") ?? undefined,
+            actionLink: readString(action, "link") ?? undefined,
+          },
+        });
+        continue;
+      }
       this.updateSessionState(sessionId, {
         activity: statusType === "idle" ? "idle" : "in-turn",
         active: statusType !== "idle",
+        retryStatus: undefined,
       });
     }
 
@@ -1094,6 +1191,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         activity: "idle",
         pendingInputType: undefined,
         active: false,
+        retryStatus: undefined,
       });
     }
   }
@@ -1669,6 +1767,24 @@ function readOpenCodeStatusType(value: unknown): string {
   if (typeof value === "string") return value;
   const record = asRecord(value);
   return readString(record, "type") ?? "running";
+}
+
+/**
+ * Extract a human-readable message from an OpenCode session.error payload.
+ * Upstream shape is the assistant error union: `{ name, data: { message } }`.
+ */
+function readOpenCodeErrorMessage(value: unknown): string | undefined {
+  const record = asRecord(value);
+  if (!record) {
+    return typeof value === "string" ? value : undefined;
+  }
+  const data = asRecord(record.data);
+  return (
+    readString(data, "message") ??
+    readString(record, "message") ??
+    readString(record, "name") ??
+    undefined
+  );
 }
 
 function buildOpenCodeQuestionAnswersFromRequest(

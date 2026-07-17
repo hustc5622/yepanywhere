@@ -75,6 +75,8 @@ interface OpenCodeTestPart {
 interface OpenCodeTestEmissionState {
   toolUseIds: Set<string>;
   toolResultIds: Set<string>;
+  toolUseInputs: Map<string, string>;
+  markerPartIds: Set<string>;
 }
 
 type ConvertPartToSDKMessages = (
@@ -101,6 +103,8 @@ function createEmissionState(): OpenCodeTestEmissionState {
   return {
     toolUseIds: new Set<string>(),
     toolResultIds: new Set<string>(),
+    toolUseInputs: new Map<string, string>(),
+    markerPartIds: new Set<string>(),
   };
 }
 
@@ -1832,6 +1836,131 @@ ohmyrouter/deepseek-v4-pro
         }),
       }),
     ]);
+  });
+
+  it("re-emits tool_use when running-stage input materializes", () => {
+    const provider = new OpenCodeProvider();
+    const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
+    const emissionState = createEmissionState();
+
+    const pending = convertPartToSDKMessages(
+      {
+        id: "prt_tool2",
+        sessionID: "ses_1",
+        messageID: "msg_assistant",
+        type: "tool",
+        callID: "call_2",
+        tool: "bash",
+        state: { status: "pending", input: {} },
+      },
+      "yep_session",
+      undefined,
+      null,
+      "assistant",
+      emissionState,
+    );
+    expect(pending).toHaveLength(1);
+
+    const running = convertPartToSDKMessages(
+      {
+        id: "prt_tool2",
+        sessionID: "ses_1",
+        messageID: "msg_assistant",
+        type: "tool",
+        callID: "call_2",
+        tool: "bash",
+        state: { status: "running", input: { command: "ls -la" } },
+      },
+      "yep_session",
+      undefined,
+      null,
+      "assistant",
+      emissionState,
+    );
+    expect(running).toEqual([
+      expect.objectContaining({
+        type: "assistant",
+        message: expect.objectContaining({
+          content: [
+            expect.objectContaining({
+              type: "tool_use",
+              id: "call_2",
+              input: { command: "ls -la" },
+              opencodeStatus: "running",
+            }),
+          ],
+        }),
+      }),
+    ]);
+
+    // Unchanged input does not re-emit.
+    const runningAgain = convertPartToSDKMessages(
+      {
+        id: "prt_tool2",
+        sessionID: "ses_1",
+        messageID: "msg_assistant",
+        type: "tool",
+        callID: "call_2",
+        tool: "bash",
+        state: { status: "running", input: { command: "ls -la" } },
+      },
+      "yep_session",
+      undefined,
+      null,
+      "assistant",
+      emissionState,
+    );
+    expect(runningAgain).toEqual([]);
+  });
+
+  it("emits a visible marker for OpenCode subtask parts", () => {
+    const provider = new OpenCodeProvider();
+    const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
+    const emissionState = createEmissionState();
+
+    const part = {
+      id: "prt_subtask",
+      sessionID: "ses_1",
+      messageID: "msg_assistant",
+      type: "subtask",
+      prompt: "Investigate flaky test",
+      description: "Investigate the flaky auth test",
+      agent: "explore",
+    } as unknown as Parameters<typeof convertPartToSDKMessages>[0];
+
+    const messages = convertPartToSDKMessages(
+      part,
+      "yep_session",
+      undefined,
+      null,
+      "assistant",
+      emissionState,
+    );
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "assistant",
+        message: expect.objectContaining({
+          content: [
+            expect.objectContaining({
+              type: "text",
+              text: "**Subagent (explore)**: Investigate the flaky auth test",
+            }),
+          ],
+        }),
+      }),
+    ]);
+
+    // Duplicate part updates do not re-emit the marker.
+    expect(
+      convertPartToSDKMessages(
+        part,
+        "yep_session",
+        undefined,
+        null,
+        "assistant",
+        emissionState,
+      ),
+    ).toEqual([]);
   });
 
   it("emits full OpenCode usage from step-finish parts", () => {

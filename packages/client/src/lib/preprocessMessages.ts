@@ -700,7 +700,9 @@ function processMessage(
     } else if (block.type === "tool_use") {
       if (block.id && block.name) {
         // Stream reconnects/resume can replay the same tool_use id from a
-        // different assistant message snapshot. Keep one render item per tool id.
+        // different assistant message snapshot. Keep one render item per tool
+        // id, but let a richer input snapshot refresh the arguments (OpenCode
+        // streams pending tools with empty input and fills it while running).
         const existingIndex = toolCallIndices.get(block.id);
         if (existingIndex !== undefined) {
           const existingItem = items[existingIndex];
@@ -709,11 +711,30 @@ function processMessage(
               block,
               orphanedToolIds.has(block.id),
             );
+            const incomingInput = normalizeOpenCodeToolInput(block);
+            const incomingHasInput =
+              incomingInput !== undefined &&
+              incomingInput !== null &&
+              (typeof incomingInput !== "object" ||
+                Object.keys(incomingInput as Record<string, unknown>).length >
+                  0);
+            const existingInput = existingItem.toolInput;
+            const existingIsEmpty =
+              existingInput === undefined ||
+              existingInput === null ||
+              (typeof existingInput === "object" &&
+                Object.keys(existingInput as Record<string, unknown>).length ===
+                  0);
             const nextItem = appendSourceMessage(existingItem, msg);
+            const withInput =
+              incomingHasInput &&
+              (existingIsEmpty || existingItem.toolResult === undefined)
+                ? { ...nextItem, toolInput: incomingInput }
+                : nextItem;
             items[existingIndex] =
               existingItem.status === "pending" && replayStatus !== "pending"
-                ? { ...nextItem, status: replayStatus }
-                : nextItem;
+                ? { ...withInput, status: replayStatus }
+                : withInput;
             if (existingItem.status === "pending") {
               pendingToolCalls.set(block.id, existingIndex);
             }

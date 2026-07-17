@@ -14,10 +14,27 @@
 import { z } from "zod";
 
 /**
- * Session status from OpenCode (busy or idle).
+ * Session status from OpenCode (busy, idle, or retry).
+ *
+ * `retry` carries backoff metadata: the attempt number, a human-readable
+ * message, the epoch-ms timestamp of the next attempt, and an optional
+ * user action (e.g. a provider link to lift a rate limit).
  */
 export const OpenCodeSessionStatusSchema = z.object({
-  type: z.enum(["busy", "idle"]),
+  type: z.enum(["busy", "idle", "retry"]),
+  attempt: z.number().optional(),
+  message: z.string().optional(),
+  next: z.number().optional(),
+  action: z
+    .object({
+      reason: z.string().optional(),
+      provider: z.string().optional(),
+      title: z.string().optional(),
+      message: z.string().optional(),
+      label: z.string().optional(),
+      link: z.string().optional(),
+    })
+    .optional(),
 });
 
 export type OpenCodeSessionStatus = z.infer<typeof OpenCodeSessionStatusSchema>;
@@ -284,6 +301,87 @@ export type OpenCodeMessagePartUpdatedEvent = z.infer<
 >;
 
 /**
+ * Standalone streaming delta event. Unlike the legacy inline
+ * `message.part.updated.properties.delta`, this carries only the changed
+ * field and the delta string - not the full part snapshot.
+ */
+export const OpenCodeMessagePartDeltaEventSchema = z.object({
+  type: z.literal("message.part.delta"),
+  properties: z.object({
+    sessionID: z.string(),
+    messageID: z.string(),
+    partID: z.string(),
+    field: z.string(),
+    delta: z.string(),
+  }),
+});
+
+export type OpenCodeMessagePartDeltaEvent = z.infer<
+  typeof OpenCodeMessagePartDeltaEventSchema
+>;
+
+/**
+ * Message removed event (revert/unrevert or deletion).
+ */
+export const OpenCodeMessageRemovedEventSchema = z.object({
+  type: z.literal("message.removed"),
+  properties: z.object({
+    sessionID: z.string(),
+    messageID: z.string(),
+  }),
+});
+
+export type OpenCodeMessageRemovedEvent = z.infer<
+  typeof OpenCodeMessageRemovedEventSchema
+>;
+
+/**
+ * Message part removed event.
+ */
+export const OpenCodeMessagePartRemovedEventSchema = z.object({
+  type: z.literal("message.part.removed"),
+  properties: z.object({
+    sessionID: z.string(),
+    messageID: z.string(),
+    partID: z.string(),
+  }),
+});
+
+export type OpenCodeMessagePartRemovedEvent = z.infer<
+  typeof OpenCodeMessagePartRemovedEventSchema
+>;
+
+/**
+ * Session error event. `sessionID` may be absent for server-level errors.
+ */
+export const OpenCodeSessionErrorEventSchema = z.object({
+  type: z.literal("session.error"),
+  properties: z.object({
+    sessionID: z.string().optional(),
+    error: z.unknown().optional(),
+  }),
+});
+
+export type OpenCodeSessionErrorEvent = z.infer<
+  typeof OpenCodeSessionErrorEventSchema
+>;
+
+/**
+ * Session deleted event.
+ */
+export const OpenCodeSessionDeletedEventSchema = z.object({
+  type: z.literal("session.deleted"),
+  properties: z.object({
+    sessionID: z.string().optional(),
+    info: OpenCodeSessionInfoSchema.optional(),
+  }),
+});
+
+export type OpenCodeSessionDeletedEvent = z.infer<
+  typeof OpenCodeSessionDeletedEventSchema
+>;
+
+/**
  * Union of all OpenCode SSE event types.
  */
 export const OpenCodeSSEEventSchema = z.discriminatedUnion("type", [
@@ -293,8 +391,13 @@ export const OpenCodeSSEEventSchema = z.discriminatedUnion("type", [
   OpenCodeSessionUpdatedEventSchema,
   OpenCodeSessionIdleEventSchema,
   OpenCodeSessionDiffEventSchema,
+  OpenCodeSessionErrorEventSchema,
+  OpenCodeSessionDeletedEventSchema,
   OpenCodeMessageUpdatedEventSchema,
+  OpenCodeMessageRemovedEventSchema,
   OpenCodeMessagePartUpdatedEventSchema,
+  OpenCodeMessagePartDeltaEventSchema,
+  OpenCodeMessagePartRemovedEventSchema,
 ]);
 
 export type OpenCodeSSEEvent = z.infer<typeof OpenCodeSSEEventSchema>;

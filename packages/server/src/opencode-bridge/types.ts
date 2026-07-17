@@ -22,6 +22,15 @@ export interface OpenCodeBridgeStatus extends BridgeStatusBase {
 export interface OpenCodeBridgeSession extends BridgeSessionBase {
   provider: "opencode";
   active: boolean;
+  /** Present while OpenCode is retrying a failed provider request. */
+  retryStatus?: {
+    attempt?: number;
+    message?: string;
+    /** Epoch ms of the next retry attempt. */
+    next?: number;
+    actionLabel?: string;
+    actionLink?: string;
+  };
 }
 
 export type OpenCodeBridgeSessionView = BridgeSessionView;

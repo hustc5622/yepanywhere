@@ -304,6 +304,15 @@ interface OpenCodeAssistantStreamState {
 interface OpenCodeEmissionState {
   toolUseIds: Set<string>;
   toolResultIds: Set<string>;
+  /**
+   * Last emitted input fingerprint per tool call. OpenCode streams tool parts
+   * through pending (often empty input) -> running (full input); when the
+   * input materializes we re-emit the tool_use so the UI shows real
+   * arguments instead of `{}`.
+   */
+  toolUseInputs: Map<string, string>;
+  /** Part ids already emitted as standalone marker messages (subtask/file/compaction). */
+  markerPartIds: Set<string>;
   assistantStream?: OpenCodeAssistantStreamState;
   latestUsage?: Record<string, unknown>;
   latestCost?: number;
@@ -1222,6 +1231,8 @@ export class OpenCodeProvider implements AgentProvider {
     const emissionState: OpenCodeEmissionState = {
       toolUseIds: new Set(),
       toolResultIds: new Set(),
+      toolUseInputs: new Map(),
+      markerPartIds: new Set(),
     };
 
     // Event buffer and signaling for producer/consumer pattern
@@ -1350,11 +1361,26 @@ export class OpenCodeProvider implements AgentProvider {
             // Wake up consumer if waiting
             if (sdkMessages.length > 0) state.resolveWaiting?.();
 
-            // Stop on session.idle
+            // Terminal signal: session.status(type=idle) is the current
+            // upstream contract; session.idle is deprecated but still emitted
+            // by older servers.
             if (event.type === "session.idle") {
               state.sawSessionIdle = true;
               log.debug({ opencodeSessionId }, "Session idle, stopping SSE");
               return;
+            }
+            if (event.type === "session.status") {
+              const statusType = (
+                event as { properties?: { status?: { type?: string } } }
+              ).properties?.status?.type;
+              if (statusType === "idle") {
+                state.sawSessionIdle = true;
+                log.debug(
+                  { opencodeSessionId },
+                  "Session status idle, stopping SSE",
+                );
+                return;
+              }
             }
           }
         }
@@ -1728,8 +1754,23 @@ export class OpenCodeProvider implements AgentProvider {
         );
         const status = part.state?.status;
 
-        if (!emissionState.toolUseIds.has(toolUseId)) {
+        // OpenCode tool state flows pending (input often empty) -> running
+        // (full input) -> completed/error. Re-emit the tool_use whenever the
+        // input materially changes and no result exists yet, so the UI shows
+        // real arguments instead of the initial `{}` snapshot.
+        const inputFingerprint = JSON.stringify(input) ?? "";
+        const previousFingerprint = emissionState.toolUseInputs.get(toolUseId);
+        const isNewToolUse = !emissionState.toolUseIds.has(toolUseId);
+        const inputChanged =
+          !isNewToolUse &&
+          !emissionState.toolResultIds.has(toolUseId) &&
+          previousFingerprint !== undefined &&
+          previousFingerprint !== inputFingerprint &&
+          inputFingerprint !== "{}";
+
+        if (isNewToolUse || inputChanged) {
           emissionState.toolUseIds.add(toolUseId);
+          emissionState.toolUseInputs.set(toolUseId, inputFingerprint);
           messages.push({
             type: "assistant",
             session_id: sessionId,
@@ -1833,6 +1874,91 @@ export class OpenCodeProvider implements AgentProvider {
           } as unknown as SDKMessage,
         ];
       }
+
+      case "subtask": {
+        // Subagent launch. Emit once as a visible marker so subagent work is
+        // not silently dropped from the transcript.
+        if (emissionState.markerPartIds.has(part.id)) return [];
+        emissionState.markerPartIds.add(part.id);
+        const subtask = part as unknown as {
+          prompt?: string;
+          description?: string;
+          agent?: string;
+        };
+        const description =
+          subtask.description?.trim() || subtask.prompt?.trim() || "";
+        const agentName = subtask.agent?.trim() || "subagent";
+        return [
+          {
+            type: "assistant",
+            session_id: sessionId,
+            uuid: `opencode-subtask-${part.id}`,
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "text",
+                  text: `**Subagent (${agentName})**: ${description}`,
+                },
+              ],
+            },
+          } as unknown as SDKMessage,
+        ];
+      }
+
+      case "file": {
+        // User attachment (or tool-produced file). Surface as a marker so
+        // attachments are visible in the transcript.
+        if (emissionState.markerPartIds.has(part.id)) return [];
+        emissionState.markerPartIds.add(part.id);
+        const file = part as unknown as {
+          filename?: string;
+          mime?: string;
+          url?: string;
+        };
+        const label = file.filename ?? file.url ?? "attachment";
+        const roleForFile = role === "user" ? "user" : "assistant";
+        return [
+          {
+            type: roleForFile,
+            session_id: sessionId,
+            uuid: `opencode-file-${part.id}`,
+            message: {
+              role: roleForFile,
+              content: [
+                {
+                  type: "text",
+                  text: `📎 ${label}${file.mime ? ` (${file.mime})` : ""}`,
+                },
+              ],
+            },
+          } as unknown as SDKMessage,
+        ];
+      }
+
+      case "compaction": {
+        // Context compaction boundary - align with the Claude/Codex
+        // compact_boundary system marker the client already renders.
+        if (emissionState.markerPartIds.has(part.id)) return [];
+        emissionState.markerPartIds.add(part.id);
+        return [
+          {
+            type: "system",
+            subtype: "compact_boundary",
+            session_id: sessionId,
+            uuid: `opencode-compaction-${part.id}`,
+            content: "Context compacted",
+          } as unknown as SDKMessage,
+        ];
+      }
+
+      case "retry":
+      case "patch":
+      case "snapshot":
+      case "agent":
+        // retry: surfaced via session.status; patch/snapshot: internal VCS
+        // bookkeeping; agent: @-mention reference already present in text.
+        return [];
 
       default:
         return [];
