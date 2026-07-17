@@ -239,6 +239,14 @@ export function shouldRefreshOpenCodeAuthoritativeSnapshot(
   );
 }
 
+export function shouldRefreshFullPersistedSession(
+  provider: Session["provider"] | undefined,
+): boolean {
+  return (
+    provider === "codex" || provider === "codex-oss" || provider === "opencode"
+  );
+}
+
 function extractUserMessageText(
   sdkMessage: Record<string, unknown>,
 ): string | null {
@@ -670,7 +678,11 @@ export function useSession(
 
   const fetchPersistedSessionChanges = useCallback(() => {
     const provider = session?.provider;
-    if (provider === "codex" || provider === "codex-oss") {
+    // Codex can rewrite recent transcript entries, while OpenCode updates tool
+    // parts in place inside the latest assistant message. An exclusive
+    // `afterMessageId` fetch misses both cases, so reload the authoritative
+    // bounded window instead.
+    if (shouldRefreshFullPersistedSession(provider)) {
       void refreshSessionMessages();
       return;
     }

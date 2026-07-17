@@ -8,6 +8,7 @@ import {
   processStateFromProcessEvent,
   reconcilePendingMessagesWithConfirmedMessages,
   sessionTurnHealthFromSession,
+  shouldRefreshFullPersistedSession,
   shouldRefreshOpenCodeAuthoritativeSnapshot,
 } from "../useSession";
 
@@ -203,6 +204,22 @@ describe("shouldRefreshOpenCodeAuthoritativeSnapshot", () => {
           "ses-current",
         ),
       ).toBe(false);
+    },
+  );
+});
+
+describe("shouldRefreshFullPersistedSession", () => {
+  it.each(["codex", "codex-oss", "opencode"] as const)(
+    "reloads the authoritative window for %s in-place updates",
+    (provider) => {
+      expect(shouldRefreshFullPersistedSession(provider)).toBe(true);
+    },
+  );
+
+  it.each(["claude", "gemini", undefined] as const)(
+    "keeps incremental fetching for %s",
+    (provider) => {
+      expect(shouldRefreshFullPersistedSession(provider)).toBe(false);
     },
   );
 });
