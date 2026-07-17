@@ -16,8 +16,17 @@ import type {
   Message,
   PermissionMode,
   Session,
+  SessionLastTurnStatus,
+  SessionRetryStatus,
   SessionStatus,
 } from "../types";
+
+/** Bridge-reported health of the most recent turn (retry/failure surface). */
+export interface SessionTurnHealth {
+  lastTurnStatus?: SessionLastTurnStatus;
+  lastErrorMessage?: string;
+  retryStatus?: SessionRetryStatus;
+}
 import {
   type FileChangeEvent,
   type ProcessStateEvent,
@@ -252,6 +261,7 @@ export function useSession(
   );
   const [pendingInputRequest, setPendingInputRequest] =
     useState<InputRequest | null>(null);
+  const [turnHealth, setTurnHealth] = useState<SessionTurnHealth | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
   // Actual session ID from server (may differ from URL sessionId during temp→real ID transition)
@@ -775,6 +785,17 @@ export function useSession(
       if (nextProcessState) {
         setProcessState(nextProcessState);
       }
+      // Mirror bridge-reported turn health (retry/failure). Events always
+      // carry the server's latest truth, so absence clears stale state.
+      setTurnHealth(
+        event.lastTurnStatus || event.lastErrorMessage || event.retryStatus
+          ? {
+              lastTurnStatus: event.lastTurnStatus,
+              lastErrorMessage: event.lastErrorMessage,
+              retryStatus: event.retryStatus,
+            }
+          : null,
+      );
       if (
         shouldRefreshOpenCodeAuthoritativeSnapshot(
           session?.provider,
@@ -1423,6 +1444,7 @@ export function useSession(
     markdownAugments, // Pre-rendered markdown HTML from REST response (keyed by blockId)
     status,
     processState,
+    turnHealth, // Bridge-reported retry/failure state of the latest turn
     isCompacting, // True when context is being compressed
     isHeld: processState === "hold", // Derived from process state
     pendingInputRequest,

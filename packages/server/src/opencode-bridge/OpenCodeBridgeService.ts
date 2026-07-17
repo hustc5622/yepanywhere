@@ -784,6 +784,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         provider: "opencode",
         model: session.model,
         reasoningEffort: session.reasoningEffort,
+        lastErrorMessage: session.lastErrorMessage,
+        retryStatus: session.retryStatus,
         source: "opencode-bridge",
       } satisfies SessionSummary,
       projectName: session.projectName,

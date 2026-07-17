@@ -2,6 +2,8 @@ import type {
   AgentActivity,
   InputRequest,
   PendingInputType,
+  SessionLastTurnStatus,
+  SessionRetryStatus,
   UrlProjectId,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
@@ -28,6 +30,12 @@ export interface BridgePollState {
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
   active: boolean;
+  /** Terminal status of the most recent turn (bridge-reported). */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request. */
+  retryStatus?: SessionRetryStatus;
 }
 
 /** One session observed during a poll cycle. */
@@ -39,6 +47,21 @@ export interface BridgePollEntry<TState extends BridgePollState> {
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const EVENT_STREAM_RETRY_MS = 5_000;
+
+function retryStatusEquals(
+  a: SessionRetryStatus | undefined,
+  b: SessionRetryStatus | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.attempt === b.attempt &&
+    a.message === b.message &&
+    a.next === b.next &&
+    a.actionLabel === b.actionLabel &&
+    a.actionLink === b.actionLink
+  );
+}
 
 /**
  * Base class for the main-server side of a bridge sidecar: forwards control
@@ -324,7 +347,10 @@ export abstract class BridgeHttpClient<
     if (
       !previous ||
       previous.activity !== state.activity ||
-      previous.pendingInputType !== state.pendingInputType
+      previous.pendingInputType !== state.pendingInputType ||
+      previous.lastTurnStatus !== state.lastTurnStatus ||
+      previous.lastErrorMessage !== state.lastErrorMessage ||
+      !retryStatusEquals(previous.retryStatus, state.retryStatus)
     ) {
       this.eventBus.emit({
         type: "process-state-changed",
@@ -332,6 +358,9 @@ export abstract class BridgeHttpClient<
         projectId: state.projectId,
         activity: state.activity ?? "idle",
         pendingInputType: state.pendingInputType,
+        lastTurnStatus: state.lastTurnStatus,
+        lastErrorMessage: state.lastErrorMessage,
+        retryStatus: state.retryStatus,
         timestamp,
       });
     }

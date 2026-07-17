@@ -1037,6 +1037,12 @@ describe("OpenCodeBridgeService", () => {
       actionLink: "https://example.com",
     });
 
+    // The session view (what feeds the UI) carries the retry state too.
+    const view = bridge
+      .listSessionViews()
+      .find((item) => item.session.id === "ses_retry");
+    expect(view?.session.retryStatus).toMatchObject({ attempt: 3 });
+
     handleEvent({
       type: "session.status",
       properties: { sessionID: "ses_retry", status: { type: "busy" } },

@@ -1069,5 +1069,8 @@
   "sessionInspectorPending": "等待中",
   "sessionInspectorExternal": "外部",
   "sessionInspectorSelf": "本会话",
-  "sessionInspectorIdle": "空闲"
+  "sessionInspectorIdle": "空闲",
+  "statusBadgeRetrying": "重试中",
+  "statusBadgeRetryingAttempt": "重试中（第 {attempt} 次）",
+  "statusBadgeFailed": "失败"
 }

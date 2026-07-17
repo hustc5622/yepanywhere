@@ -219,6 +219,7 @@ function SessionPageContent({
     markdownAugments,
     status,
     processState,
+    turnHealth,
     isCompacting,
     pendingInputRequest,
     actualSessionId,
@@ -1986,6 +1987,49 @@ function SessionPageContent({
                     }
                   />
                 </>
+              )}
+
+            {/* Bridge-reported turn health: retry backoff / failed turn */}
+            {turnHealth?.retryStatus && processState === "in-turn" && (
+              <div
+                className="turn-health-banner turn-health-banner-retry"
+                data-testid="turn-health-retry"
+              >
+                <span className="turn-health-banner-text">
+                  {typeof turnHealth.retryStatus.attempt === "number" &&
+                  turnHealth.retryStatus.attempt > 0
+                    ? t("statusBadgeRetryingAttempt", {
+                        attempt: String(turnHealth.retryStatus.attempt),
+                      })
+                    : t("statusBadgeRetrying")}
+                  {turnHealth.retryStatus.message
+                    ? ` — ${turnHealth.retryStatus.message}`
+                    : ""}
+                </span>
+                {turnHealth.retryStatus.actionLink && (
+                  <a
+                    className="turn-health-banner-action"
+                    href={turnHealth.retryStatus.actionLink}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {turnHealth.retryStatus.actionLabel ??
+                      turnHealth.retryStatus.actionLink}
+                  </a>
+                )}
+              </div>
+            )}
+            {turnHealth?.lastErrorMessage &&
+              turnHealth.lastTurnStatus === "failed" &&
+              processState === "idle" && (
+                <div
+                  className="turn-health-banner turn-health-banner-error"
+                  data-testid="turn-health-error"
+                >
+                  <span className="turn-health-banner-text">
+                    {t("statusBadgeFailed")}: {turnHealth.lastErrorMessage}
+                  </span>
+                </div>
               )}
 
             {/* Edit/rewind banner: shown while editing a past message */}

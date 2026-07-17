@@ -1848,6 +1848,8 @@ export class CodexBridgeService implements CodexBridgeController {
       projectId: record.projectId,
       activity,
       pendingInputType,
+      lastTurnStatus: record.lastTurnStatus,
+      lastErrorMessage: record.lastErrorMessage,
       timestamp: new Date().toISOString(),
     });
   }
@@ -1907,6 +1909,8 @@ export class CodexBridgeService implements CodexBridgeController {
       model: session.model,
       reasoningEffort: session.reasoningEffort,
       serviceTier: session.serviceTier,
+      lastTurnStatus: session.lastTurnStatus,
+      lastErrorMessage: session.lastErrorMessage,
       originator: "Yep Codex Bridge",
       createdBy: "external",
       source: "codex-bridge",

@@ -841,6 +841,9 @@ export function GlobalSessionsPage() {
                         status={session.ownership}
                         provider={session.provider}
                         interrupted={session.interrupted}
+                        lastTurnStatus={session.lastTurnStatus}
+                        lastErrorMessage={session.lastErrorMessage}
+                        retryStatus={session.retryStatus}
                         model={session.model}
                         reasoningEffort={session.reasoningEffort}
                         serviceTier={session.serviceTier}

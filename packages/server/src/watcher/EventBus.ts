@@ -8,6 +8,8 @@ import type {
   ContextCumulativeUsage,
   ContextUsage,
   PendingInputType,
+  SessionLastTurnStatus,
+  SessionRetryStatus,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import type { SessionOwnership, SessionSummary } from "../supervisor/types.js";
@@ -92,6 +94,12 @@ export interface ProcessStateEvent {
   activity: AgentActivity;
   /** Type of pending input (only set when activity is "waiting-input") */
   pendingInputType?: PendingInputType;
+  /** Terminal status of the most recent turn (bridge-reported). */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request (OpenCode). */
+  retryStatus?: SessionRetryStatus;
   timestamp: string;
 }
 

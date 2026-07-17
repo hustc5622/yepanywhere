@@ -123,6 +123,8 @@ export class CodexBridgeHttpClient
           activity: session.activity,
           pendingInputType: session.pendingInputType,
           active: isLiveBridgeSession(session),
+          lastTurnStatus: session.lastTurnStatus,
+          lastErrorMessage: session.lastErrorMessage,
         },
       });
     }

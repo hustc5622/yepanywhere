@@ -1069,5 +1069,8 @@
   "sessionInspectorPending": "Pending",
   "sessionInspectorExternal": "External",
   "sessionInspectorSelf": "Owned",
-  "sessionInspectorIdle": "Idle"
+  "sessionInspectorIdle": "Idle",
+  "statusBadgeRetrying": "Retrying",
+  "statusBadgeRetryingAttempt": "Retrying ({attempt})",
+  "statusBadgeFailed": "Failed"
 }

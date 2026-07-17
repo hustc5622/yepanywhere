@@ -177,6 +177,8 @@ export type {
   SessionBranchMetadata,
   CodexBranchOption,
   CodexBranchState,
+  SessionLastTurnStatus,
+  SessionRetryStatus,
   AppSessionSummary,
   AppSession,
   // Agent session types

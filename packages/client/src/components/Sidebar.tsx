@@ -572,6 +572,9 @@ export function Sidebar({
       pendingInputType={session.pendingInputType}
       hasUnread={session.hasUnread}
       interrupted={session.interrupted}
+      lastTurnStatus={session.lastTurnStatus}
+      lastErrorMessage={session.lastErrorMessage}
+      retryStatus={session.retryStatus}
       isStarred={session.isStarred}
       isArchived={session.isArchived}
       mode="compact"

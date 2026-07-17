@@ -13,6 +13,8 @@ import type {
   PendingInputType,
   ProviderName,
   SessionCreatedBy,
+  SessionLastTurnStatus,
+  SessionRetryStatus,
   SessionRuntime,
   SessionStatus,
 } from "../types";
@@ -49,6 +51,12 @@ interface SessionListItemProps {
    * restart) and it can be resumed. Only set for owner==="none" sessions.
    */
   interrupted?: boolean;
+  /** Terminal status of the most recent turn (bridge-reported). */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request (OpenCode). */
+  retryStatus?: SessionRetryStatus;
   /** SSH host for remote execution (undefined = local) */
   executor?: string;
   /** Explicit creation owner recorded by Yep metadata. */
@@ -200,6 +208,9 @@ export function SessionListItem({
   status,
   provider,
   interrupted,
+  lastTurnStatus,
+  lastErrorMessage,
+  retryStatus,
   executor,
   createdBy,
   originator,
@@ -425,7 +436,19 @@ export function SessionListItem({
       );
     }
 
-    // Priority 2: In-turn (thinking)
+    // Priority 2: Retrying - still working, but surface the backoff
+    if (activity === "in-turn" && retryStatus) {
+      return (
+        <span
+          className="session-badge session-badge-continue"
+          title={retryStatus.message}
+        >
+          Retry
+        </span>
+      );
+    }
+
+    // Priority 3: In-turn (thinking)
     if (activity === "in-turn") {
       return <ThinkingIndicator />;
     }
@@ -434,8 +457,20 @@ export function SessionListItem({
       return <span className="session-badge session-badge-external">Hold</span>;
     }
 
-    // Priority 3: Interrupted (e.g. by a server restart) - prompt to continue
-    if (interrupted) {
+    // Priority 4: The last turn failed - surface the provider error
+    if (lastTurnStatus === "failed" || lastErrorMessage) {
+      return (
+        <span
+          className="session-badge session-badge-failed"
+          title={lastErrorMessage}
+        >
+          Fail
+        </span>
+      );
+    }
+
+    // Priority 5: Interrupted (e.g. by a server restart) - prompt to continue
+    if (interrupted || lastTurnStatus === "interrupted") {
       return (
         <span
           className="session-badge session-badge-continue"
@@ -608,6 +643,9 @@ export function SessionListItem({
                     hasUnread={hasUnread}
                     activity={activity}
                     interrupted={interrupted}
+                    lastTurnStatus={lastTurnStatus}
+                    lastErrorMessage={lastErrorMessage}
+                    retryStatus={retryStatus}
                   />
                 )}
               </span>

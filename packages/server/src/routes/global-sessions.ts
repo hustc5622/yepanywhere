@@ -51,7 +51,9 @@ import type {
   AgentActivity,
   PendingInputType,
   Project,
+  SessionLastTurnStatus,
   SessionOwnership,
+  SessionRetryStatus,
   SessionSummary,
 } from "../supervisor/types.js";
 import type { BusEvent, EventBus } from "../watcher/index.js";
@@ -191,6 +193,12 @@ export interface GlobalSessionItem {
    * ownership.owner === "none" and the session is not externally active.
    */
   interrupted?: boolean;
+  /** Terminal status of the most recent turn (bridge-reported). */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request (OpenCode). */
+  retryStatus?: SessionRetryStatus;
 }
 
 /** Stats about all sessions (computed during full scan) */
@@ -737,6 +745,13 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
             serviceTier: session.serviceTier,
             interrupted:
               ownership.owner === "none" ? session.interrupted : undefined,
+            lastTurnStatus:
+              bridgedSession?.session.lastTurnStatus ?? session.lastTurnStatus,
+            lastErrorMessage:
+              bridgedSession?.session.lastErrorMessage ??
+              session.lastErrorMessage,
+            retryStatus:
+              bridgedSession?.session.retryStatus ?? session.retryStatus,
           },
           maxCandidates,
         );
@@ -844,6 +859,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
           model: session.model,
           reasoningEffort: session.reasoningEffort,
           serviceTier: session.serviceTier,
+          lastTurnStatus: session.lastTurnStatus,
+          lastErrorMessage: session.lastErrorMessage,
+          retryStatus: session.retryStatus,
           interrupted:
             runtime.ownership.owner === "none"
               ? session.interrupted

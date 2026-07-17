@@ -11,7 +11,9 @@ import type {
   ProviderName,
   SessionBranchState,
   SessionCreatedBy,
+  SessionLastTurnStatus,
   SessionQuestion,
+  SessionRetryStatus,
   SessionRuntime,
   ThinkingConfig,
   UrlProjectId,
@@ -32,6 +34,8 @@ export type {
   ContextUsage,
   InputRequest,
   PendingInputType,
+  SessionLastTurnStatus,
+  SessionRetryStatus,
 } from "@yep-anywhere/shared";
 
 // Project discovery
@@ -145,6 +149,12 @@ export interface SessionSummary {
    * session is not externally active.
    */
   interrupted?: boolean;
+  /** Terminal status of the most recent turn (bridge-reported). */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request (OpenCode). */
+  retryStatus?: SessionRetryStatus;
 }
 
 /**

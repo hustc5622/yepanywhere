@@ -549,6 +549,9 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
           ...session,
           activity: event.activity,
           pendingInputType,
+          lastTurnStatus: event.lastTurnStatus,
+          lastErrorMessage: event.lastErrorMessage,
+          retryStatus: event.retryStatus,
           runtime: updateRuntimeSnapshot(
             session,
             session.ownership,

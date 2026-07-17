@@ -1,6 +1,12 @@
 import { cleanup, render } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
+import { I18nProvider } from "../../i18n";
 import { SessionStatusBadge } from "../StatusBadge";
+
+function renderBadge(ui: ReactElement) {
+  return render(<I18nProvider>{ui}</I18nProvider>);
+}
 
 describe("SessionStatusBadge", () => {
   afterEach(() => {
@@ -8,7 +14,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("shows Thinking badge when activity is in-turn", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge
         status={{
           owner: "self",
@@ -27,7 +33,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("shows nothing when owned but not in-turn", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge
         status={{
           owner: "self",
@@ -44,7 +50,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("does not show an external badge from ownership alone", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge status={{ owner: "external" }} />,
     );
 
@@ -53,7 +59,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("shows nothing when unowned", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge status={{ owner: "none" }} />,
     );
 
@@ -62,7 +68,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("prioritizes needs-input over in-turn", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge
         status={{
           owner: "self",
@@ -86,7 +92,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("shows Thinking badge even when hasUnread is true", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge
         status={{
           owner: "self",
@@ -106,7 +112,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("shows nothing for unowned sessions (unread handled via CSS class)", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge status={{ owner: "none" }} hasUnread={true} />,
     );
 
@@ -116,7 +122,7 @@ describe("SessionStatusBadge", () => {
   });
 
   it("shows nothing for owned sessions with unread (unread handled via CSS class)", () => {
-    const { container } = render(
+    const { container } = renderBadge(
       <SessionStatusBadge
         status={{
           owner: "self",
@@ -131,5 +137,65 @@ describe("SessionStatusBadge", () => {
     // No badge or indicator - unread is handled via CSS class on parent
     expect(container.querySelector(".status-badge")).toBeNull();
     expect(container.querySelector(".status-indicator")).toBeNull();
+  });
+
+  it("shows a retrying badge instead of the thinking pulse while retrying", () => {
+    const { container } = renderBadge(
+      <SessionStatusBadge
+        status={{ owner: "external" }}
+        activity="in-turn"
+        retryStatus={{ attempt: 3, message: "rate limited" }}
+      />,
+    );
+
+    const badge = container.querySelector(".notification-continue");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toContain("Retrying");
+    expect(badge?.textContent).toContain("3");
+    expect(badge?.getAttribute("title")).toBe("rate limited");
+    expect(container.querySelector(".thinking-indicator-pill")).toBeNull();
+  });
+
+  it("shows a failed badge with the error as tooltip after a failed turn", () => {
+    const { container } = renderBadge(
+      <SessionStatusBadge
+        status={{ owner: "none" }}
+        lastTurnStatus="failed"
+        lastErrorMessage="model exploded"
+      />,
+    );
+
+    const badge = container.querySelector(".notification-failed");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe("Failed");
+    expect(badge?.getAttribute("title")).toBe("model exploded");
+  });
+
+  it("maps a bridge-reported interrupted turn to the continue badge", () => {
+    const { container } = renderBadge(
+      <SessionStatusBadge
+        status={{ owner: "none" }}
+        lastTurnStatus="interrupted"
+      />,
+    );
+
+    const badge = container.querySelector(".notification-continue");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe("Continue");
+  });
+
+  it("prioritizes needs-input over retrying", () => {
+    const { container } = renderBadge(
+      <SessionStatusBadge
+        status={{ owner: "external" }}
+        activity="waiting-input"
+        pendingInputType="tool-approval"
+        retryStatus={{ attempt: 1 }}
+      />,
+    );
+
+    const badge = container.querySelector(".notification-needs-input");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe("Approval Needed");
   });
 });

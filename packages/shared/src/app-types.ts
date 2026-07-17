@@ -456,6 +456,19 @@ export interface EnrichedRecentEntry {
   compactEvents?: ContextCompactEvent[];
 }
 
+/** Terminal status of a session's most recent turn (bridge/provider-reported). */
+export type SessionLastTurnStatus = "completed" | "interrupted" | "failed";
+
+/** Provider retry/backoff state while a turn is being retried (OpenCode). */
+export interface SessionRetryStatus {
+  attempt?: number;
+  message?: string;
+  /** Epoch ms of the next retry attempt. */
+  next?: number;
+  actionLabel?: string;
+  actionLink?: string;
+}
+
 /**
  * Session summary for list views.
  * Contains metadata without full message content.
@@ -521,6 +534,12 @@ export interface AppSessionSummary {
    * session is not externally active.
    */
   interrupted?: boolean;
+  /** Terminal status of the most recent turn (bridge-reported). */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request (OpenCode). */
+  retryStatus?: SessionRetryStatus;
 }
 
 /**

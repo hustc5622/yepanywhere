@@ -22,7 +22,9 @@ import type {
   ReportsListResponse,
   SessionCreatedBy,
   SessionKind,
+  SessionLastTurnStatus,
   SessionQuestion,
+  SessionRetryStatus,
   SessionRuntime,
   SlashCommand,
   ThinkingOption,
@@ -161,6 +163,12 @@ export interface GlobalSessionItem {
    * restart) and it can be resumed. Only set for owner==="none" sessions.
    */
   interrupted?: boolean;
+  /** Terminal status of the most recent turn (bridge-reported). */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request (OpenCode). */
+  retryStatus?: SessionRetryStatus;
 }
 
 /** Stats about all sessions (computed during full scan on server) */

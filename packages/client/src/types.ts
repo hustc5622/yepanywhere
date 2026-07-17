@@ -53,6 +53,8 @@ export type {
   CodexBranchState,
   SessionOwnership,
   SessionRuntime,
+  SessionLastTurnStatus,
+  SessionRetryStatus,
   AppSessionSummary,
   AppSession,
   AgentStatus,

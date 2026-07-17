@@ -1,9 +1,11 @@
 import type { AgentActivity } from "../hooks/useFileActivity";
+import { useI18n } from "../i18n";
+import type { SessionLastTurnStatus, SessionRetryStatus } from "../types";
 import type { SessionStatus } from "../types";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 
 type BadgeVariant = "self" | "external" | "none";
-type NotificationVariant = "needs-input" | "unread" | "continue";
+type NotificationVariant = "needs-input" | "unread" | "continue" | "failed";
 type PendingInputType = "tool-approval" | "user-question";
 
 interface SessionStatusBadgeProps {
@@ -17,6 +19,12 @@ interface SessionStatusBadgeProps {
   activity?: AgentActivity;
   /** Whether the session was interrupted and can be resumed */
   interrupted?: boolean;
+  /** Terminal status of the most recent turn (bridge-reported) */
+  lastTurnStatus?: SessionLastTurnStatus;
+  /** Most recent provider error message, shown as tooltip on the failed badge */
+  lastErrorMessage?: string;
+  /** Present while the provider is retrying a failed request (OpenCode) */
+  retryStatus?: SessionRetryStatus;
 }
 
 interface CountBadgeProps {
@@ -31,6 +39,8 @@ interface NotificationBadgeProps {
   variant: NotificationVariant;
   /** Optional label override */
   label?: string;
+  /** Optional hover tooltip (e.g. the provider error message) */
+  title?: string;
 }
 
 /**
@@ -38,17 +48,24 @@ interface NotificationBadgeProps {
  * - "needs-input" (blue): Tool approval or user question pending
  * - "unread" (orange): New content since last viewed
  * - "continue" (amber): Session was interrupted (e.g. by a server restart) and can be resumed
+ * - "failed" (red): The last turn ended with a provider error
  */
-export function NotificationBadge({ variant, label }: NotificationBadgeProps) {
+export function NotificationBadge({
+  variant,
+  label,
+  title,
+}: NotificationBadgeProps) {
   const defaultLabel =
     variant === "needs-input"
       ? "Input Needed"
       : variant === "continue"
         ? "Continue"
-        : "New";
+        : variant === "failed"
+          ? "Failed"
+          : "New";
 
   return (
-    <span className={`status-badge notification-${variant}`}>
+    <span className={`status-badge notification-${variant}`} title={title}>
       {label ?? defaultLabel}
     </span>
   );
@@ -56,7 +73,8 @@ export function NotificationBadge({ variant, label }: NotificationBadgeProps) {
 
 /**
  * Status badge for a single session in a list.
- * Priority: needs-input (blue) > in-turn (pulsing) > hold > unread (CSS) > idle (nothing).
+ * Priority: needs-input (blue) > retrying (amber) > in-turn (pulsing) > hold >
+ * failed (red) > interrupted (continue) > idle (nothing).
  * Ownership is intentionally not treated as activity.
  */
 export function SessionStatusBadge({
@@ -65,7 +83,12 @@ export function SessionStatusBadge({
   hasUnread: _hasUnread,
   activity,
   interrupted,
+  lastTurnStatus,
+  lastErrorMessage,
+  retryStatus,
 }: SessionStatusBadgeProps) {
+  const { t } = useI18n();
+
   // Priority 1: Needs input (tool approval or user question)
   if (pendingInputType || activity === "waiting-input") {
     const label =
@@ -73,7 +96,25 @@ export function SessionStatusBadge({
     return <NotificationBadge variant="needs-input" label={label} />;
   }
 
-  // Priority 2: In-turn (agent is thinking) - show pulsing indicator
+  // Priority 2: Provider is retrying a failed request - still working, but
+  // surface the backoff instead of showing a silent thinking pulse.
+  if (activity === "in-turn" && retryStatus) {
+    const label =
+      typeof retryStatus.attempt === "number" && retryStatus.attempt > 0
+        ? t("statusBadgeRetryingAttempt", {
+            attempt: String(retryStatus.attempt),
+          })
+        : t("statusBadgeRetrying");
+    return (
+      <NotificationBadge
+        variant="continue"
+        label={label}
+        title={retryStatus.message}
+      />
+    );
+  }
+
+  // Priority 3: In-turn (agent is thinking) - show pulsing indicator
   if (activity === "in-turn") {
     return <ThinkingIndicator variant="pill" />;
   }
@@ -85,8 +126,21 @@ export function SessionStatusBadge({
   // Unread content is now handled via CSS class on session list item
   // (bold/bright text like Gmail instead of a badge)
 
-  // Priority 3: Interrupted (e.g. by a server restart) - prompt the user to continue
-  if (interrupted) {
+  // Priority 4: The last turn failed - show a red badge with the provider
+  // error as tooltip so failures are visible without opening the session.
+  if (lastTurnStatus === "failed" || lastErrorMessage) {
+    return (
+      <NotificationBadge
+        variant="failed"
+        label={t("statusBadgeFailed")}
+        title={lastErrorMessage}
+      />
+    );
+  }
+
+  // Priority 5: Interrupted (server restart / provider-reported interrupted
+  // turn) - prompt the user to continue
+  if (interrupted || lastTurnStatus === "interrupted") {
     return <NotificationBadge variant="continue" />;
   }
 
