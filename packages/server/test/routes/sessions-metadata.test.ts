@@ -346,6 +346,78 @@ describe("Sessions metadata route", () => {
     });
   });
 
+  it("overlays bridge turn health on metadata and persisted detail responses", async () => {
+    const project = createProject();
+    const persistedSummary: SessionSummary = {
+      ...createSummary(),
+      provider: "opencode",
+      lastTurnStatus: "failed",
+      lastErrorMessage: "stale persisted error",
+    };
+    const bridgeSummary: SessionSummary = {
+      ...persistedSummary,
+      ownership: { owner: "external" },
+      activity: "in-turn",
+      source: "opencode-bridge",
+      lastTurnStatus: undefined,
+      lastErrorMessage: undefined,
+      retryStatus: {
+        attempt: 4,
+        message: "provider rate limited",
+        next: 1_789_000_000_000,
+      },
+    };
+    const reader = {
+      getSessionSummary: vi.fn(async () => persistedSummary),
+      getSession: vi.fn(async () => ({
+        summary: persistedSummary,
+        data: {
+          provider: "opencode" as const,
+          session: { messages: [] },
+        },
+        messagesAlreadyProjected: true,
+      })),
+    } as unknown as ISessionReader;
+    const bridgeView = {
+      session: bridgeSummary,
+      projectName: project.name,
+      activity: "in-turn" as const,
+    };
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+        wasEverOwned: vi.fn(async () => false),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(() => reader),
+      opencodeBridgeService: {
+        getSessionView: vi.fn(async () => bridgeView),
+        isSessionActive: vi.fn(async () => true),
+        getPendingInputRequest: vi.fn(async () => null),
+      } as unknown as NonNullable<SessionsDeps["opencodeBridgeService"]>,
+    });
+
+    for (const suffix of ["/metadata", ""] as const) {
+      const response = await routes.request(
+        `/projects/${project.id}/sessions/${persistedSummary.id}${suffix}`,
+      );
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.session).toMatchObject({
+        retryStatus: {
+          attempt: 4,
+          message: "provider rate limited",
+          next: 1_789_000_000_000,
+        },
+      });
+      expect(json.session.lastTurnStatus).toBeUndefined();
+      expect(json.session.lastErrorMessage).toBeUndefined();
+    }
+  });
+
   it("prefers persisted provider over conflicting client resume provider", async () => {
     const project = createProject();
     const resumeSession = vi.fn(async () => ({

@@ -27,6 +27,20 @@ export interface SessionTurnHealth {
   lastErrorMessage?: string;
   retryStatus?: SessionRetryStatus;
 }
+
+export function sessionTurnHealthFromSession(
+  session: Pick<Session, "lastTurnStatus" | "lastErrorMessage" | "retryStatus">,
+): SessionTurnHealth | null {
+  return session.lastTurnStatus ||
+    session.lastErrorMessage ||
+    session.retryStatus
+    ? {
+        lastTurnStatus: session.lastTurnStatus,
+        lastErrorMessage: session.lastErrorMessage,
+        retryStatus: session.retryStatus,
+      }
+    : null;
+}
 import {
   type FileChangeEvent,
   type ProcessStateEvent,
@@ -310,6 +324,7 @@ export function useSession(
   // biome-ignore lint/correctness/useExhaustiveDependencies: effect intentionally runs on session switches
   useEffect(() => {
     hasHandledConnectedEventRef.current = false;
+    setTurnHealth(null);
   }, [sessionId]);
 
   // Slash commands available for this session (from init message)
@@ -385,6 +400,7 @@ export function useSession(
       } else if (result.status.owner === "none") {
         setProcessState("idle");
       }
+      setTurnHealth(sessionTurnHealthFromSession(result.session));
       // Set slash commands from API response so the "/" button appears reliably
       // (the SSE init message that normally carries these is discarded after ~30s)
       if (result.slashCommands?.length) {
@@ -847,6 +863,7 @@ export function useSession(
       const data = await api.getSessionMetadata(projectId, sessionId);
       setStatus(data.ownership);
       setPendingInputRequest(data.pendingInputRequest ?? null);
+      setTurnHealth(sessionTurnHealthFromSession(data.session));
       const nextProcessState = processStateFromActivity(
         data.session.runtime?.activity ?? data.session.activity,
       );

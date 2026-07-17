@@ -1301,6 +1301,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         cumulativeUsage: sessionSummary?.cumulativeUsage,
         compactCount: sessionSummary?.compactCount,
         compactEvents: sessionSummary?.compactEvents,
+        lastTurnStatus: bridgedSession
+          ? bridgedSession.session.lastTurnStatus
+          : sessionSummary?.lastTurnStatus,
+        lastErrorMessage: bridgedSession
+          ? bridgedSession.session.lastErrorMessage
+          : sessionSummary?.lastErrorMessage,
+        retryStatus: bridgedSession
+          ? bridgedSession.session.retryStatus
+          : sessionSummary?.retryStatus,
         customTitle: metadata?.customTitle,
         aiTitle: metadata?.aiTitle ?? sessionSummary?.aiTitle,
         isArchived: metadata?.isArchived,
@@ -1866,6 +1875,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         createdBy: metadata?.createdBy ?? session.createdBy,
         // Model comes from the session reader (extracted from JSONL)
         model: session.model,
+        lastTurnStatus: bridgedSession
+          ? bridgedSession.session.lastTurnStatus
+          : session.lastTurnStatus,
+        lastErrorMessage: bridgedSession
+          ? bridgedSession.session.lastErrorMessage
+          : session.lastErrorMessage,
+        retryStatus: bridgedSession
+          ? bridgedSession.session.retryStatus
+          : session.retryStatus,
         lastSeenAt,
         hasUnread,
       },

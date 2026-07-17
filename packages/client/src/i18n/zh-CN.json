@@ -1072,5 +1072,7 @@
   "sessionInspectorIdle": "空闲",
   "statusBadgeRetrying": "重试中",
   "statusBadgeRetryingAttempt": "重试中（第 {attempt} 次）",
-  "statusBadgeFailed": "失败"
+  "statusBadgeFailed": "失败",
+  "statusBadgeRetryShort": "重试",
+  "statusBadgeFailedShort": "失败"
 }

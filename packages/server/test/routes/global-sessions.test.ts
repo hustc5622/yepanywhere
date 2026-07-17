@@ -932,6 +932,46 @@ describe("Global Sessions Routes", () => {
       expect(result.sessions[0].activity).toBe("idle");
     });
 
+    it("uses bridge turn health as authoritative over stale persisted state", async () => {
+      const project = createProject("proj1", "project", "/sessions/proj1");
+      const session = createSession("sess1", "proj1", minutesAgo(5), {
+        provider: "codex",
+        lastTurnStatus: "failed",
+        lastErrorMessage: "stale persisted error",
+        retryStatus: { attempt: 2, message: "stale retry" },
+      });
+      const codexBridgeService = {
+        listSessionViews: vi.fn(async () => []),
+        getSessionView: vi.fn(async () => ({
+          session: {
+            ...session,
+            ownership: { owner: "external" },
+            source: "codex-bridge",
+            lastTurnStatus: undefined,
+            lastErrorMessage: undefined,
+            retryStatus: undefined,
+          },
+          projectName: "project",
+          activity: "idle",
+        })),
+        isSessionActive: vi.fn(async () => true),
+      } as unknown as CodexBridgeController;
+
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
+      sessionsByDir.set("/sessions/proj1", [session]);
+
+      const routes = createGlobalSessionsRoutes(
+        getDeps({ codexBridgeService }),
+      );
+      const response = await routes.request("/");
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as GlobalSessionsResponse;
+
+      expect(result.sessions[0].lastTurnStatus).toBeUndefined();
+      expect(result.sessions[0].lastErrorMessage).toBeUndefined();
+      expect(result.sessions[0].retryStatus).toBeUndefined();
+    });
+
     it("enriches with pendingInputType", async () => {
       const project = createProject("proj1", "project", "/sessions/proj1");
       const session = createSession("sess1", "proj1", minutesAgo(5));

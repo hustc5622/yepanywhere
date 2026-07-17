@@ -6,6 +6,7 @@ import {
   type PendingMessage,
   mergeSessionMetadataChange,
   reconcilePendingMessagesWithConfirmedMessages,
+  sessionTurnHealthFromSession,
   shouldRefreshOpenCodeAuthoritativeSnapshot,
 } from "../useSession";
 
@@ -203,4 +204,43 @@ describe("shouldRefreshOpenCodeAuthoritativeSnapshot", () => {
       ).toBe(false);
     },
   );
+});
+
+describe("sessionTurnHealthFromSession", () => {
+  it("restores retry details from a REST session snapshot", () => {
+    expect(
+      sessionTurnHealthFromSession(
+        session({
+          retryStatus: {
+            attempt: 3,
+            message: "rate limited",
+            next: 1_789_000_000_000,
+          },
+        }),
+      ),
+    ).toEqual({
+      lastTurnStatus: undefined,
+      lastErrorMessage: undefined,
+      retryStatus: {
+        attempt: 3,
+        message: "rate limited",
+        next: 1_789_000_000_000,
+      },
+    });
+  });
+
+  it("restores failures and clears sessions without health state", () => {
+    expect(
+      sessionTurnHealthFromSession(
+        session({
+          lastTurnStatus: "failed",
+          lastErrorMessage: "provider unavailable",
+        }),
+      ),
+    ).toMatchObject({
+      lastTurnStatus: "failed",
+      lastErrorMessage: "provider unavailable",
+    });
+    expect(sessionTurnHealthFromSession(session())).toBeNull();
+  });
 });

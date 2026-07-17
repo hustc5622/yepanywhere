@@ -745,13 +745,15 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
             serviceTier: session.serviceTier,
             interrupted:
               ownership.owner === "none" ? session.interrupted : undefined,
-            lastTurnStatus:
-              bridgedSession?.session.lastTurnStatus ?? session.lastTurnStatus,
-            lastErrorMessage:
-              bridgedSession?.session.lastErrorMessage ??
-              session.lastErrorMessage,
-            retryStatus:
-              bridgedSession?.session.retryStatus ?? session.retryStatus,
+            lastTurnStatus: bridgedSession
+              ? bridgedSession.session.lastTurnStatus
+              : session.lastTurnStatus,
+            lastErrorMessage: bridgedSession
+              ? bridgedSession.session.lastErrorMessage
+              : session.lastErrorMessage,
+            retryStatus: bridgedSession
+              ? bridgedSession.session.retryStatus
+              : session.retryStatus,
           },
           maxCandidates,
         );

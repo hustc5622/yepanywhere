@@ -53,6 +53,7 @@ import {
   getAgentCommandConfig,
   getStaticAgentCommandConfigs,
 } from "../lib/agentCommands";
+import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { preprocessMessages } from "../lib/preprocessMessages";
 import {
@@ -260,6 +261,9 @@ function SessionPageContent({
     initialStatus,
     streamingMarkdownCallbacks,
     selectedBranchId,
+  );
+  const retryActionLink = normalizeExternalHttpUrl(
+    turnHealth?.retryStatus?.actionLink,
   );
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -2006,15 +2010,14 @@ function SessionPageContent({
                     ? ` — ${turnHealth.retryStatus.message}`
                     : ""}
                 </span>
-                {turnHealth.retryStatus.actionLink && (
+                {retryActionLink && (
                   <a
                     className="turn-health-banner-action"
-                    href={turnHealth.retryStatus.actionLink}
+                    href={retryActionLink}
                     target="_blank"
                     rel="noreferrer"
                   >
-                    {turnHealth.retryStatus.actionLabel ??
-                      turnHealth.retryStatus.actionLink}
+                    {turnHealth.retryStatus.actionLabel ?? retryActionLink}
                   </a>
                 )}
               </div>

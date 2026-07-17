@@ -1072,5 +1072,7 @@
   "sessionInspectorIdle": "Idle",
   "statusBadgeRetrying": "Retrying",
   "statusBadgeRetryingAttempt": "Retrying ({attempt})",
-  "statusBadgeFailed": "Failed"
+  "statusBadgeFailed": "Failed",
+  "statusBadgeRetryShort": "Retry",
+  "statusBadgeFailedShort": "Fail"
 }

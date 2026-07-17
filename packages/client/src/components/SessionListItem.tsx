@@ -443,7 +443,7 @@ export function SessionListItem({
           className="session-badge session-badge-continue"
           title={retryStatus.message}
         >
-          Retry
+          {t("statusBadgeRetryShort")}
         </span>
       );
     }
@@ -464,7 +464,7 @@ export function SessionListItem({
           className="session-badge session-badge-failed"
           title={lastErrorMessage}
         >
-          Fail
+          {t("statusBadgeFailedShort")}
         </span>
       );
     }
