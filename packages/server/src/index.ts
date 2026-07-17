@@ -358,6 +358,7 @@ const codexBridgeService: CodexBridgeController | undefined =
           clearUpstreamArgs: config.codexBridgeClearUpstreamArgs,
           fullUpstreamArgs: config.codexBridgeFullUpstreamArgs,
           eventBus,
+          statePath: path.join(config.dataDir, "codex-bridge", "sessions.json"),
         });
 console.log(
   `[CodexBridge] mode=${config.codexBridgeMode}${

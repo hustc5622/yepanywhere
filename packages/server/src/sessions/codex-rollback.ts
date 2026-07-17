@@ -360,3 +360,93 @@ export function applyCodexRollbackMarkers(
 ): CodexSessionEntry[] {
   return buildCodexBranchView(entries, "codex-session").entries;
 }
+
+export interface CodexRollbackTarget {
+  /** Entry timestamp of the edited user turn, when known. */
+  timestamp?: string;
+  /** Prompt text of the edited user turn. */
+  prompt: string;
+}
+
+function orderedActivePath(branchState: CodexBranchState): CodexBranchOption[] {
+  const byId = new Map(
+    branchState.branches.map((branch) => [branch.id, branch]),
+  );
+  const path: CodexBranchOption[] = [];
+  let cursor = branchState.activeBranchId;
+  const visited = new Set<string>();
+  while (cursor && !visited.has(cursor)) {
+    visited.add(cursor);
+    const node = byId.get(cursor);
+    if (!node) break;
+    path.push(node);
+    cursor = node.parentId;
+  }
+  return path.reverse();
+}
+
+/**
+ * Compute the authoritative `thread/rollback` turn count for editing a user
+ * prompt. Codex rollback semantics count user turns on the *active* path, so
+ * the count must come from the persisted turn tree - not from however many
+ * user prompts the client happened to render (setup folding, dedupe, and
+ * viewing an older branch all skew the client-side count).
+ *
+ * When the edited turn sits on a sibling branch, the rollback unwinds the
+ * active path back to the deepest common ancestor.
+ */
+export function computeCodexRollbackNumTurns(
+  branchState: CodexBranchState,
+  target: CodexRollbackTarget,
+): number | null {
+  const activePath = orderedActivePath(branchState);
+  if (activePath.length === 0) return null;
+
+  const targetPrompt = target.prompt.trim();
+  if (!targetPrompt) return null;
+
+  const promptMatches = branchState.branches.filter(
+    (branch) => branch.prompt.trim() === targetPrompt,
+  );
+  if (promptMatches.length === 0) return null;
+
+  const timestampMatches = target.timestamp
+    ? promptMatches.filter((branch) => branch.createdAt === target.timestamp)
+    : [];
+  const candidates =
+    timestampMatches.length > 0 ? timestampMatches : promptMatches;
+
+  // Prefer a candidate on the active path; otherwise take the most recent.
+  const activeIds = new Map(activePath.map((node, index) => [node.id, index]));
+  const onActive = candidates.filter((branch) => activeIds.has(branch.id));
+  const candidate =
+    onActive.length > 0
+      ? (onActive[onActive.length - 1] as CodexBranchOption)
+      : (candidates[candidates.length - 1] as CodexBranchOption);
+
+  const activeIndex = activeIds.get(candidate.id);
+  if (activeIndex !== undefined) {
+    const numTurns = activePath.length - activeIndex;
+    return numTurns > 0 ? numTurns : null;
+  }
+
+  // Edited turn is on a sibling branch: roll back to the deepest ancestor
+  // shared with the active path (the new prompt becomes a fresh sibling).
+  const byId = new Map(
+    branchState.branches.map((branch) => [branch.id, branch]),
+  );
+  let cursor = candidate.parentId;
+  const visited = new Set<string>();
+  while (cursor && !visited.has(cursor)) {
+    visited.add(cursor);
+    const ancestorIndex = activeIds.get(cursor);
+    if (ancestorIndex !== undefined) {
+      const numTurns = activePath.length - (ancestorIndex + 1);
+      return numTurns > 0 ? numTurns : null;
+    }
+    cursor = byId.get(cursor)?.parentId ?? null;
+  }
+
+  // No shared ancestor: unwind the entire active path.
+  return activePath.length;
+}

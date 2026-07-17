@@ -304,6 +304,8 @@ function SessionPageContent({
     uuid: string;
     preview: string;
     rollbackNumTurns?: number | null;
+    /** Entry timestamp of the edited message (Codex authoritative rewind). */
+    timestamp?: string;
   } | null>(null);
   const [pendingBranchFocusId, setPendingBranchFocusId] = useState<
     string | null
@@ -356,7 +358,20 @@ function SessionPageContent({
       const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
         ? calculateCodexRollbackNumTurns(messagesRef.current, uuid)
         : null;
-      setEditRewind({ parentUuid, uuid, preview: text, rollbackNumTurns });
+      const editedMessage = messagesRef.current.find(
+        (message) => getMessageId(message) === uuid,
+      );
+      const timestamp =
+        typeof editedMessage?.timestamp === "string"
+          ? editedMessage.timestamp
+          : undefined;
+      setEditRewind({
+        parentUuid,
+        uuid,
+        preview: text,
+        rollbackNumTurns,
+        timestamp,
+      });
       draftControlsRef.current?.setText(text);
       setScrollTrigger((prev) => prev + 1);
     },
@@ -707,6 +722,12 @@ function SessionPageContent({
               tempId,
               undefined,
               editSubmission.rollbackNumTurns,
+              // Original prompt identity so the server can recompute the
+              // rollback count from the persisted Codex turn tree.
+              {
+                timestamp: editRewind.timestamp,
+                text: editRewind.preview,
+              },
             ),
             api.cancelQueuedRequest,
           );

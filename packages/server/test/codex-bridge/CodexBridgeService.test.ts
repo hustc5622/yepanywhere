@@ -1491,6 +1491,250 @@ describe("CodexBridgeService", () => {
       client.close();
     }
   });
+
+  it("marks a session failed-idle on a non-retryable error notification", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const started = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: { id: "thread-err", cwd: "/tmp/project-err" },
+          },
+        }),
+      );
+      await started;
+      const turnStarted = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/started",
+          params: { threadId: "thread-err", turn: { id: "turn-1" } },
+        }),
+      );
+      await turnStarted;
+      await waitFor(
+        () =>
+          bridge.listSessions().find((s) => s.id === "thread-err")?.activity ===
+          "in-turn",
+      );
+
+      // Retryable error keeps the turn alive.
+      const retryable = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "error",
+          params: {
+            threadId: "thread-err",
+            turnId: "turn-1",
+            willRetry: true,
+            error: { message: "rate limited" },
+          },
+        }),
+      );
+      await retryable;
+      expect(
+        bridge.listSessions().find((s) => s.id === "thread-err")?.activity,
+      ).toBe("in-turn");
+
+      // Non-retryable error terminates the turn.
+      const fatal = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "error",
+          params: {
+            threadId: "thread-err",
+            turnId: "turn-1",
+            willRetry: false,
+            error: { message: "model exploded" },
+          },
+        }),
+      );
+      await fatal;
+      await waitFor(
+        () =>
+          bridge.listSessions().find((s) => s.id === "thread-err")?.activity ===
+          "idle",
+      );
+      const session = bridge.listSessions().find((s) => s.id === "thread-err");
+      expect(session?.lastTurnStatus).toBe("failed");
+      expect(session?.lastErrorMessage).toBe("model exploded");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("records interrupted/failed turn status from turn/completed", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const started = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: { id: "thread-int", cwd: "/tmp/project-int" },
+          },
+        }),
+      );
+      await started;
+      const turnStarted = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/started",
+          params: { threadId: "thread-int", turn: { id: "turn-1" } },
+        }),
+      );
+      await turnStarted;
+      const completed = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-int",
+            turn: { id: "turn-1", status: "interrupted" },
+          },
+        }),
+      );
+      await completed;
+      await waitFor(
+        () =>
+          bridge.listSessions().find((s) => s.id === "thread-int")?.activity ===
+          "idle",
+      );
+      expect(
+        bridge.listSessions().find((s) => s.id === "thread-int")
+          ?.lastTurnStatus,
+      ).toBe("interrupted");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("hides sessions until their project path is known", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const turnStarted = waitForJson(client);
+      // Bare threadId with no cwd: previously misfiled under process.cwd().
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/started",
+          params: { threadId: "thread-nocwd", turn: { id: "turn-1" } },
+        }),
+      );
+      await turnStarted;
+      await delay(50);
+      expect(
+        bridge.listSessions().find((s) => s.id === "thread-nocwd"),
+      ).toBeUndefined();
+
+      const started = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: { id: "thread-nocwd", cwd: "/tmp/project-late" },
+          },
+        }),
+      );
+      await started;
+      await waitFor(
+        () =>
+          bridge.listSessions().find((s) => s.id === "thread-nocwd")
+            ?.projectPath === "/tmp/project-late",
+      );
+    } finally {
+      client.close();
+    }
+  });
+
+  it("restores persisted session metadata across bridge restarts", async () => {
+    const statePath = join(
+      tmpdir(),
+      `codex-bridge-state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    );
+    const portA = await findAvailablePort();
+    const first = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: portA,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      statePath,
+    });
+    await first.start();
+    const client = await connect(`ws://127.0.0.1:${portA}`);
+    try {
+      await waitFor(() => upstreamSockets.length >= 1);
+      const latestUpstream = upstreamSockets[upstreamSockets.length - 1];
+      const started = waitForJson(client);
+      latestUpstream?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: {
+              id: "thread-persist",
+              cwd: "/tmp/project-persist",
+              name: "Persisted session",
+            },
+          },
+        }),
+      );
+      await started;
+      const turnStarted = waitForJson(client);
+      latestUpstream?.send(
+        JSON.stringify({
+          method: "turn/started",
+          params: { threadId: "thread-persist", turn: { id: "turn-1" } },
+        }),
+      );
+      await turnStarted;
+      const completed = waitForJson(client);
+      latestUpstream?.send(
+        JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-persist",
+            turn: { id: "turn-1", status: "completed" },
+          },
+        }),
+      );
+      await completed;
+      await waitFor(
+        () =>
+          first.listSessions().find((s) => s.id === "thread-persist")
+            ?.messageCount === 1,
+      );
+    } finally {
+      client.close();
+    }
+    await first.shutdown();
+
+    const portB = await findAvailablePort();
+    const second = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: portB,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      statePath,
+    });
+    await second.start();
+    try {
+      const restored = second
+        .listSessions()
+        .find((s) => s.id === "thread-persist");
+      expect(restored).toMatchObject({
+        id: "thread-persist",
+        projectPath: "/tmp/project-persist",
+        title: "Persisted session",
+        messageCount: 1,
+        activity: "idle",
+      });
+    } finally {
+      await second.shutdown();
+    }
+  });
 });
 
 async function findAvailablePort(): Promise<number> {

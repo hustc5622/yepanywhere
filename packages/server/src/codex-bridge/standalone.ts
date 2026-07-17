@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { runBridgeSidecar } from "../bridge-common/standalone.js";
 import { CodexBridgeService } from "./CodexBridgeService.js";
 
@@ -14,6 +15,7 @@ export async function runCodexBridgeOnly(): Promise<void> {
         lightUpstreamArgs: config.codexBridgeLightUpstreamArgs,
         clearUpstreamArgs: config.codexBridgeClearUpstreamArgs,
         fullUpstreamArgs: config.codexBridgeFullUpstreamArgs,
+        statePath: join(config.dataDir, "codex-bridge", "sessions.json"),
       }),
   });
 }

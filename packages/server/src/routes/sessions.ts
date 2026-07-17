@@ -63,6 +63,7 @@ import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
+import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import { normalizeSession } from "../sessions/normalization.js";
@@ -600,8 +601,20 @@ interface StartSessionBody {
   /**
    * Rewind/edit for Codex app-server: drop this many trailing user turns via
    * `thread/rollback` before sending the edited prompt in the same session.
+   * Used as a fallback when `rollbackTarget` cannot be resolved server-side.
    */
   rollbackNumTurns?: number;
+  /**
+   * Identity of the edited user turn for Codex rewind. When present the
+   * server recomputes the authoritative rollback count from the persisted
+   * turn tree instead of trusting the client-rendered prompt count.
+   */
+  rollbackTarget?: {
+    /** Entry timestamp of the edited user turn, when known. */
+    timestamp?: string;
+    /** Original prompt text of the edited user turn. */
+    text?: string;
+  };
 }
 
 interface CreateSessionBody {
@@ -2351,6 +2364,56 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     const model = resolveSessionModel(body.model, providerName);
 
+    // Codex rewind: the client's rollbackNumTurns is derived from rendered
+    // prompt items, which can drift from the app-server turn count (setup
+    // folding, dedupe, viewing an older branch). When the edited turn's
+    // identity is provided, recompute the count from the persisted turn tree.
+    let effectiveRollbackNumTurns = parsedRollbackNumTurns.value;
+    if (
+      providerName === "codex" &&
+      typeof body.rollbackTarget?.text === "string" &&
+      body.rollbackTarget.text.trim().length > 0
+    ) {
+      const codexReader = getCodexReader(project.path);
+      if (codexReader) {
+        try {
+          const loaded = await codexReader.getSession(
+            sessionId,
+            resolvedProjectId,
+          );
+          const branchState = loaded?.codexBranchState ?? loaded?.branchState;
+          const computed = branchState
+            ? computeCodexRollbackNumTurns(branchState, {
+                timestamp: body.rollbackTarget.timestamp,
+                prompt: body.rollbackTarget.text,
+              })
+            : null;
+          getLogger().info(
+            {
+              event: "codex_rollback_numturns_resolved",
+              sessionId,
+              clientRollbackNumTurns: parsedRollbackNumTurns.value ?? null,
+              computedRollbackNumTurns: computed,
+              rollbackTargetTimestamp: body.rollbackTarget.timestamp ?? null,
+            },
+            "Resolved Codex rollback turn count from persisted turn tree",
+          );
+          if (computed !== null) {
+            effectiveRollbackNumTurns = computed;
+          }
+        } catch (error) {
+          getLogger().warn(
+            {
+              event: "codex_rollback_numturns_resolution_failed",
+              sessionId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "Falling back to client-provided rollbackNumTurns",
+          );
+        }
+      }
+    }
+
     getLogger().info(
       {
         event: "session_resume_requested",
@@ -2369,9 +2432,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           ? (body.resumeSessionAt ?? null)
           : null,
         rollbackNumTurns:
-          providerName === "codex"
-            ? (parsedRollbackNumTurns.value ?? null)
-            : null,
+          providerName === "codex" ? (effectiveRollbackNumTurns ?? null) : null,
         ignoredResumeSessionAt: !supportsResumeSessionAt(providerName)
           ? (body.resumeSessionAt ?? null)
           : null,
@@ -2429,7 +2490,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         // Codex app-server models Codex CLI Esc Esc backtrack as a
         // same-thread rollback count, not as a message UUID.
         rollbackNumTurns:
-          providerName === "codex" ? parsedRollbackNumTurns.value : undefined,
+          providerName === "codex" ? effectiveRollbackNumTurns : undefined,
       },
     });
 

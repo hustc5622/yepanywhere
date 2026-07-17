@@ -961,6 +961,12 @@ export const api = {
      * `thread/rollback` before sending the edited prompt in the same session.
      */
     rollbackNumTurns?: number,
+    /**
+     * Identity of the edited user turn (original prompt text + timestamp).
+     * Lets the server recompute the authoritative rollback count from the
+     * persisted Codex turn tree instead of trusting the client-side count.
+     */
+    rollbackTarget?: { timestamp?: string; text?: string },
   ) =>
     fetchJSON<ResumeSessionResponse>(
       `/projects/${projectId}/sessions/${sessionId}/resume`,
@@ -980,6 +986,7 @@ export const api = {
           tempId,
           resumeSessionAt,
           rollbackNumTurns,
+          rollbackTarget,
         }),
       },
     ),

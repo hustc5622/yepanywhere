@@ -41,6 +41,10 @@ export interface BridgeSessionBase {
   reasoningEffort?: string;
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
+  /** Terminal status of the most recent turn (provider-reported). */
+  lastTurnStatus?: "completed" | "interrupted" | "failed";
+  /** Most recent provider error message, if the last turn failed. */
+  lastErrorMessage?: string;
 }
 
 export interface BridgeSessionView {

@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import type { UrlProjectId, UserQuestionAnswers } from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
 import {
@@ -55,6 +56,11 @@ interface CodexBridgeServiceOptions {
   codexPath?: string;
   eventBus?: EventBus;
   startupTimeoutMs?: number;
+  /**
+   * When set, session records survive bridge restarts by being persisted to
+   * this JSON file (metadata only; live connection state is rebuilt).
+   */
+  statePath?: string;
 }
 
 interface ClientRequestRecord {
@@ -115,6 +121,13 @@ interface SessionRecord {
   projectId: UrlProjectId;
   projectPath: string;
   projectName: string;
+  /**
+   * True once a real cwd arrived from thread metadata. Records created from
+   * bare threadIds fall back to the bridge process cwd, which must never be
+   * exposed as the session's project (it files the session under the wrong
+   * project in the UI).
+   */
+  projectPathKnown: boolean;
   title: string | null;
   fullTitle: string | null;
   createdAt: string;
@@ -125,9 +138,37 @@ interface SessionRecord {
   serviceTier?: string;
   activity?: "in-turn" | "idle" | "waiting-input";
   activityBeforePending?: "in-turn" | "idle";
+  /** True while a turn is in progress (turn/started .. turn terminal). */
+  turnActive?: boolean;
+  /** Terminal status of the most recent turn, from turn/completed. */
+  lastTurnStatus?: "completed" | "interrupted" | "failed";
+  /** Message of the most recent turn error/`error` notification. */
+  lastErrorMessage?: string;
   pendingInputType?: "tool-approval" | "user-question";
   connectionIds: Set<number>;
   completedTurnIds: Set<string>;
+}
+
+/** JSON-serializable subset of SessionRecord persisted across bridge restarts. */
+interface PersistedSessionRecord {
+  id: string;
+  isSubagent: boolean;
+  threadMetadataKnown: boolean;
+  parentThreadId?: string;
+  projectPath: string;
+  projectPathKnown: boolean;
+  title: string | null;
+  fullTitle: string | null;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  model?: string;
+  reasoningEffort?: string;
+  serviceTier?: string;
+  lastTurnStatus?: "completed" | "interrupted" | "failed";
+  lastErrorMessage?: string;
+  completedTurnIds: string[];
+  emitted: boolean;
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
@@ -176,6 +217,8 @@ export class CodexBridgeService implements CodexBridgeController {
     expiresAt: number;
   } | null = null;
   private usageRequest: Promise<CodexUsageResponse> | null = null;
+  private readonly statePath?: string;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: CodexBridgeServiceOptions) {
     this.enabled = options.enabled;
@@ -192,12 +235,15 @@ export class CodexBridgeService implements CodexBridgeController {
     this.eventBus = options.eventBus;
     this.startupTimeoutMs =
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    this.statePath = options.statePath;
   }
 
   async start(): Promise<void> {
     if (!this.enabled || this.server) {
       return;
     }
+
+    await this.restorePersistedSessions();
 
     const server = createServer((req, res) => {
       this.handleHttpRequest(req, res).catch((error: unknown) => {
@@ -258,6 +304,12 @@ export class CodexBridgeService implements CodexBridgeController {
       this.closeConnection(connection, "shutdown");
     }
     this.connections.clear();
+
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    await this.persistSessions();
 
     if (this.wss) {
       await new Promise<void>((resolve) => this.wss?.close(() => resolve()));
@@ -744,12 +796,14 @@ export class CodexBridgeService implements CodexBridgeController {
       record.updatedAt = new Date().toISOString();
       if (record.connectionIds.size === 0) {
         record.activity = "idle";
+        record.turnActive = false;
         record.activityBeforePending = undefined;
         record.pendingInputType = undefined;
         this.emitSessionStatus(record, { owner: "none" });
         this.emitProcessState(record, "idle");
       }
     }
+    this.schedulePersist();
   }
 
   private observeClientData(
@@ -889,6 +943,10 @@ export class CodexBridgeService implements CodexBridgeController {
         const pending = this.findPendingForThread(threadId);
         const statusActivity = this.activityFromThreadStatus(p?.status);
         const activity = pending ? "waiting-input" : statusActivity;
+        record.turnActive = statusActivity !== "idle";
+        if (getString(asRecord(p?.status)?.type) === "systemError") {
+          record.lastTurnStatus = "failed";
+        }
         record.activityBeforePending = pending
           ? statusActivity === "idle"
             ? "idle"
@@ -902,6 +960,7 @@ export class CodexBridgeService implements CodexBridgeController {
           bridgeOwnership(this.isSessionActive(threadId)),
         );
         this.emitProcessState(record, activity, record.pendingInputType);
+        this.schedulePersist();
         break;
       }
       case "thread/name/updated": {
@@ -924,12 +983,16 @@ export class CodexBridgeService implements CodexBridgeController {
         this.trackThreadConnection(connection, threadId);
         const record = this.ensureSessionRecord(threadId, {});
         const pending = this.findPendingForThread(threadId);
+        record.turnActive = true;
+        record.lastTurnStatus = undefined;
+        record.lastErrorMessage = undefined;
         record.activityBeforePending = pending ? "in-turn" : undefined;
         record.activity = pending ? "waiting-input" : "in-turn";
         record.updatedAt = new Date().toISOString();
         this.emitSessionCreated(record);
         this.emitSessionStatus(record, { owner: "external" });
         this.emitProcessState(record, record.activity, record.pendingInputType);
+        this.schedulePersist();
         break;
       }
       case "turn/completed": {
@@ -937,12 +1000,28 @@ export class CodexBridgeService implements CodexBridgeController {
         if (!threadId) break;
         const record = this.sessions.get(threadId);
         if (!record) break;
-        const turnId = getString(asRecord(p?.turn)?.id);
+        const turn = asRecord(p?.turn);
+        const turnId = getString(turn?.id);
         if (!turnId || !record.completedTurnIds.has(turnId)) {
           record.messageCount += 1;
           if (turnId) record.completedTurnIds.add(turnId);
         }
+        // turn/completed is the terminal notification for every turn; the
+        // turn.status field distinguishes completed/interrupted/failed.
+        const turnStatus = getString(turn?.status);
+        record.lastTurnStatus =
+          turnStatus === "failed"
+            ? "failed"
+            : turnStatus === "interrupted"
+              ? "interrupted"
+              : "completed";
+        record.lastErrorMessage =
+          turnStatus === "failed"
+            ? (getString(asRecord(turn?.error)?.message) ??
+              record.lastErrorMessage)
+            : undefined;
         this.resolvePendingForThread(threadId, "turn-completed");
+        record.turnActive = false;
         record.activity = "idle";
         record.activityBeforePending = undefined;
         record.pendingInputType = undefined;
@@ -954,6 +1033,33 @@ export class CodexBridgeService implements CodexBridgeController {
           bridgeOwnership(this.isSessionActive(threadId)),
         );
         this.emitProcessState(record, "idle");
+        this.schedulePersist();
+        break;
+      }
+      case "error": {
+        // Non-retryable errors terminate the active turn. Retryable errors
+        // (willRetry=true) keep the turn alive per the app-server contract.
+        const threadId = getString(p?.threadId);
+        if (!threadId) break;
+        const record = this.sessions.get(threadId);
+        if (!record) break;
+        const message = getString(asRecord(p?.error)?.message);
+        record.lastErrorMessage = message ?? "Codex reported an error";
+        record.updatedAt = new Date().toISOString();
+        if (p?.willRetry !== true) {
+          record.lastTurnStatus = "failed";
+          record.turnActive = false;
+          this.resolvePendingForThread(threadId, "turn-error");
+          record.activity = "idle";
+          record.activityBeforePending = undefined;
+          record.pendingInputType = undefined;
+          this.emitSessionStatus(
+            record,
+            bridgeOwnership(this.isSessionActive(threadId)),
+          );
+          this.emitProcessState(record, "idle");
+        }
+        this.schedulePersist();
         break;
       }
       case "thread/closed": {
@@ -967,11 +1073,13 @@ export class CodexBridgeService implements CodexBridgeController {
         record.updatedAt = new Date().toISOString();
         if (record.connectionIds.size === 0) {
           record.activity = "idle";
+          record.turnActive = false;
           record.activityBeforePending = undefined;
           record.pendingInputType = undefined;
           this.emitSessionStatus(record, { owner: "none" });
           this.emitProcessState(record, "idle");
         }
+        this.schedulePersist();
         break;
       }
       case "serverRequest/resolved": {
@@ -1357,7 +1465,11 @@ export class CodexBridgeService implements CodexBridgeController {
 
     record.pendingInputType = undefined;
     if (record.activity === "waiting-input") {
-      record.activity = record.activityBeforePending ?? "in-turn";
+      // Fall back to the tracked turn state: defaulting to "in-turn" left
+      // sessions stuck as "running" when the pending input outlived the turn.
+      record.activity =
+        record.activityBeforePending ??
+        (record.turnActive ? "in-turn" : "idle");
       record.activityBeforePending = undefined;
       this.emitProcessState(record, record.activity);
     }
@@ -1482,12 +1594,14 @@ export class CodexBridgeService implements CodexBridgeController {
       projectId: encodeProjectId(projectPath),
       projectPath,
       projectName: basename(projectPath),
+      projectPathKnown: values.cwd !== undefined,
       title: null,
       fullTitle: null,
       createdAt: values.createdAt ?? now,
       updatedAt: values.updatedAt ?? now,
       messageCount: 0,
       activity: "idle",
+      turnActive: false,
       connectionIds: new Set(),
       completedTurnIds: new Set(),
     };
@@ -1496,6 +1610,9 @@ export class CodexBridgeService implements CodexBridgeController {
       record.projectPath = values.cwd;
       record.projectId = encodeProjectId(values.cwd);
       record.projectName = basename(values.cwd);
+    }
+    if (values.cwd) {
+      record.projectPathKnown = true;
     }
     // Classification is monotonic: once Codex identifies a child thread, a
     // later partial notification must not promote it back to a root session.
@@ -1527,6 +1644,7 @@ export class CodexBridgeService implements CodexBridgeController {
     }
 
     this.sessions.set(threadId, record);
+    this.schedulePersist();
     return record;
   }
 
@@ -1537,6 +1655,112 @@ export class CodexBridgeService implements CodexBridgeController {
     connection.threadIds.add(threadId);
     const record = this.ensureSessionRecord(threadId, {});
     record.connectionIds.add(connection.id);
+  }
+
+  /**
+   * Debounced persistence of session metadata. The bridge previously kept all
+   * session state in memory only, so a 4510 restart forgot every external
+   * session until the TUI reconnected.
+   */
+  private schedulePersist(): void {
+    if (!this.statePath || this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.persistSessions();
+    }, 500);
+    this.persistTimer.unref?.();
+  }
+
+  private async persistSessions(): Promise<void> {
+    if (!this.statePath) return;
+    const records: PersistedSessionRecord[] = Array.from(this.sessions.values())
+      .filter((record) => !record.isSubagent && record.projectPathKnown)
+      .map((record) => ({
+        id: record.id,
+        isSubagent: record.isSubagent,
+        threadMetadataKnown: record.threadMetadataKnown,
+        parentThreadId: record.parentThreadId,
+        projectPath: record.projectPath,
+        projectPathKnown: record.projectPathKnown,
+        title: record.title,
+        fullTitle: record.fullTitle,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        messageCount: record.messageCount,
+        model: record.model,
+        reasoningEffort: record.reasoningEffort,
+        serviceTier: record.serviceTier,
+        lastTurnStatus: record.lastTurnStatus,
+        lastErrorMessage: record.lastErrorMessage,
+        completedTurnIds: Array.from(record.completedTurnIds),
+        emitted: this.emittedSessionIds.has(record.id),
+      }));
+    try {
+      await mkdir(dirname(this.statePath), { recursive: true });
+      const tmpPath = `${this.statePath}.tmp`;
+      await writeFile(
+        tmpPath,
+        JSON.stringify({ version: 1, sessions: records }),
+        "utf8",
+      );
+      await rename(tmpPath, this.statePath);
+    } catch (error) {
+      console.warn(
+        `[CodexBridge] Failed to persist session state: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private async restorePersistedSessions(): Promise<void> {
+    if (!this.statePath) return;
+    let parsed: { version?: number; sessions?: PersistedSessionRecord[] };
+    try {
+      parsed = JSON.parse(await readFile(this.statePath, "utf8"));
+    } catch {
+      return; // No state file yet, or unreadable - start fresh.
+    }
+    if (!Array.isArray(parsed.sessions)) return;
+    for (const stored of parsed.sessions) {
+      if (!stored || typeof stored.id !== "string" || !stored.projectPath) {
+        continue;
+      }
+      if (this.sessions.has(stored.id)) continue;
+      const record: SessionRecord = {
+        id: stored.id,
+        isSubagent: stored.isSubagent === true,
+        threadMetadataKnown: stored.threadMetadataKnown === true,
+        parentThreadId: stored.parentThreadId,
+        projectId: encodeProjectId(stored.projectPath),
+        projectPath: stored.projectPath,
+        projectName: basename(stored.projectPath),
+        projectPathKnown: stored.projectPathKnown === true,
+        title: stored.title ?? null,
+        fullTitle: stored.fullTitle ?? null,
+        createdAt: stored.createdAt,
+        updatedAt: stored.updatedAt,
+        messageCount:
+          typeof stored.messageCount === "number" ? stored.messageCount : 0,
+        model: stored.model,
+        reasoningEffort: stored.reasoningEffort,
+        serviceTier: stored.serviceTier,
+        // Restored sessions have no live connection; they are idle until a
+        // TUI reconnects and reports fresh status.
+        activity: "idle",
+        turnActive: false,
+        lastTurnStatus: stored.lastTurnStatus,
+        lastErrorMessage: stored.lastErrorMessage,
+        connectionIds: new Set(),
+        completedTurnIds: new Set(
+          Array.isArray(stored.completedTurnIds) ? stored.completedTurnIds : [],
+        ),
+      };
+      this.sessions.set(record.id, record);
+      if (stored.emitted) {
+        this.emittedSessionIds.add(record.id);
+      }
+    }
   }
 
   private activityFromThreadStatus(
@@ -1559,7 +1783,15 @@ export class CodexBridgeService implements CodexBridgeController {
   }
 
   private isTopLevelSessionRecord(record: SessionRecord): boolean {
-    return record.threadMetadataKnown && !record.isSubagent;
+    // projectPathKnown gate: sessions created from bare threadIds fall back
+    // to the bridge process cwd. Exposing them would file the session under
+    // the wrong project, so they stay hidden until thread metadata arrives
+    // (thread/start response or thread/started notification carries cwd).
+    return (
+      record.threadMetadataKnown &&
+      !record.isSubagent &&
+      record.projectPathKnown
+    );
   }
 
   private emitSessionCreated(record: SessionRecord): void {
@@ -1642,6 +1874,8 @@ export class CodexBridgeService implements CodexBridgeController {
       serviceTier: record.serviceTier,
       activity: record.activity,
       pendingInputType: record.pendingInputType,
+      lastTurnStatus: record.lastTurnStatus,
+      lastErrorMessage: record.lastErrorMessage,
       connectionIds: Array.from(record.connectionIds),
     };
   }

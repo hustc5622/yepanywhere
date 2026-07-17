@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import type { CodexBranchState, CodexSessionEntry } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import { preprocessMessages } from "../../../client/src/lib/preprocessMessages.ts";
-import { buildCodexBranchView } from "../../src/sessions/codex-rollback.js";
+import {
+  buildCodexBranchView,
+  computeCodexRollbackNumTurns,
+} from "../../src/sessions/codex-rollback.js";
 import { normalizeSession } from "../../src/sessions/normalization.js";
 import type { LoadedSession } from "../../src/sessions/types.js";
 
@@ -1759,5 +1762,96 @@ describe("Codex Normalization", () => {
       subtype: "compact_boundary",
       content: "Context compacted",
     });
+  });
+});
+
+describe("computeCodexRollbackNumTurns", () => {
+  const entries: CodexSessionEntry[] = [
+    codexUserMessage("q1", 1),
+    codexAssistantMessage("a1", 2),
+    codexUserMessage("q2", 3),
+    codexAssistantMessage("a2", 4),
+    codexUserMessage("q3", 5),
+    codexAssistantMessage("a3", 6),
+  ];
+
+  it("counts turns from the edited prompt to the active tip", () => {
+    const { branchState } = buildCodexBranchView(entries, "s");
+
+    expect(
+      computeCodexRollbackNumTurns(branchState, {
+        prompt: "q2",
+        timestamp: "2024-01-01T00:00:03Z",
+      }),
+    ).toBe(2);
+    expect(computeCodexRollbackNumTurns(branchState, { prompt: "q1" })).toBe(3);
+    expect(computeCodexRollbackNumTurns(branchState, { prompt: "q3" })).toBe(1);
+  });
+
+  it("returns null for unknown prompts", () => {
+    const { branchState } = buildCodexBranchView(entries, "s");
+    expect(
+      computeCodexRollbackNumTurns(branchState, { prompt: "missing" }),
+    ).toBeNull();
+    expect(
+      computeCodexRollbackNumTurns(branchState, { prompt: "   " }),
+    ).toBeNull();
+  });
+
+  it("counts turns on the active path after a prior rollback", () => {
+    const rolled: CodexSessionEntry[] = [
+      ...entries,
+      codexRollbackMarker(2, 7),
+      codexUserMessage("q2-1", 8),
+      codexAssistantMessage("a2-1", 9),
+    ];
+    const { branchState } = buildCodexBranchView(rolled, "s");
+
+    // Active path is q1 -> q2-1.
+    expect(computeCodexRollbackNumTurns(branchState, { prompt: "q2-1" })).toBe(
+      1,
+    );
+    expect(computeCodexRollbackNumTurns(branchState, { prompt: "q1" })).toBe(2);
+  });
+
+  it("unwinds to the common ancestor when editing a sibling branch turn", () => {
+    const rolled: CodexSessionEntry[] = [
+      ...entries,
+      codexRollbackMarker(2, 7),
+      codexUserMessage("q2-1", 8),
+      codexAssistantMessage("a2-1", 9),
+    ];
+    const { branchState } = buildCodexBranchView(rolled, "s");
+
+    // q2/q3 live on the rolled-back sibling branch. Editing q2 should unwind
+    // the active path back to q1 (drop q2-1 only).
+    expect(computeCodexRollbackNumTurns(branchState, { prompt: "q2" })).toBe(1);
+  });
+
+  it("disambiguates duplicate prompts by timestamp", () => {
+    const dup: CodexSessionEntry[] = [
+      codexUserMessage("same", 1),
+      codexAssistantMessage("a1", 2),
+      codexUserMessage("same", 3),
+      codexAssistantMessage("a2", 4),
+    ];
+    const { branchState } = buildCodexBranchView(dup, "s");
+
+    expect(
+      computeCodexRollbackNumTurns(branchState, {
+        prompt: "same",
+        timestamp: "2024-01-01T00:00:01Z",
+      }),
+    ).toBe(2);
+    expect(
+      computeCodexRollbackNumTurns(branchState, {
+        prompt: "same",
+        timestamp: "2024-01-01T00:00:03Z",
+      }),
+    ).toBe(1);
+    // Without a timestamp the most recent occurrence wins.
+    expect(computeCodexRollbackNumTurns(branchState, { prompt: "same" })).toBe(
+      1,
+    );
   });
 });
