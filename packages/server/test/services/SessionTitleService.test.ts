@@ -1672,6 +1672,52 @@ describe("SessionTitleService", () => {
     expect(metadataService.getMetadata("session-1")).toBeUndefined();
   });
 
+  it("generates a title for git commit push workflow sessions", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '{"title":"Review and publish changes"}' } },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          provider: "codex",
+          title: "$git-commit-push",
+          fullTitle: "$git-commit-push",
+          messages: [
+            {
+              type: "user",
+              message: { role: "user", content: "$git-commit-push" },
+            },
+            {
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: "I reviewed, committed, and pushed the changes.",
+              },
+            },
+          ],
+        }),
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(metadataService.getMetadata("session-1")?.aiTitle).toBe(
+      "Review and publish changes",
+    );
+  });
+
   it("does not skip an expanded command prompt that only contains a slash command", async () => {
     const expandedPrompt = [
       "# /bm-analyze-run-result",

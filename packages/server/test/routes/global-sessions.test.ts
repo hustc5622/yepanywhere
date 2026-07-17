@@ -412,12 +412,20 @@ describe("Global Sessions Routes", () => {
             "<command-message>kb-map-repo-capabilities</command-message> done",
         },
       );
-      const dollarCommandSession = createSession(
-        "sess-dollar-command",
+      const dollarSkillSession = createSession(
+        "sess-dollar-skill",
         "proj1",
         minutesAgo(7),
         {
-          title: "$git commit push",
+          title: "$imagegen",
+        },
+      );
+      const gitCommitPushSession = createSession(
+        "sess-git-commit-push",
+        "proj1",
+        minutesAgo(8),
+        {
+          title: "$git-commit-push",
         },
       );
       const normalSession = createSession(
@@ -432,7 +440,8 @@ describe("Global Sessions Routes", () => {
       vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
       sessionsByDir.set("/sessions/proj1", [
         commandSession,
-        dollarCommandSession,
+        dollarSkillSession,
+        gitCommitPushSession,
         normalSession,
       ]);
 
@@ -440,7 +449,7 @@ describe("Global Sessions Routes", () => {
 
       expect(result.sessions.map((session) => session.id)).toEqual([
         "sess-command",
-        "sess-dollar-command",
+        "sess-dollar-skill",
       ]);
     });
 
@@ -455,10 +464,18 @@ describe("Global Sessions Routes", () => {
             "<command-message>kb-map-repo-capabilities</command-message> done",
         },
       );
-      const dollarCommandSession = createSession(
-        "sess-dollar-command",
+      const dollarSkillSession = createSession(
+        "sess-dollar-skill",
         "proj1",
         minutesAgo(7),
+        {
+          title: "$imagegen",
+        },
+      );
+      const gitCommitPushSession = createSession(
+        "sess-git-commit-push",
+        "proj1",
+        minutesAgo(8),
         {
           title: "$git commit push",
         },
@@ -475,13 +492,15 @@ describe("Global Sessions Routes", () => {
       vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
       sessionsByDir.set("/sessions/proj1", [
         commandSession,
-        dollarCommandSession,
+        dollarSkillSession,
+        gitCommitPushSession,
         normalSession,
       ]);
 
       const result = await makeRequest("?excludeKind=slash-command");
 
       expect(result.sessions.map((session) => session.id)).toEqual([
+        "sess-git-commit-push",
         "sess-normal",
       ]);
     });

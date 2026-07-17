@@ -5,6 +5,8 @@ export const COMMAND_MESSAGE_SESSION_TITLE = "<command-message>";
 
 const COMMAND_MESSAGE_TAG_PATTERN = /^<command-message(?:\s|>)/i;
 const COMMAND_TITLE_PATTERN = /^[$/][A-Za-z][A-Za-z0-9_-]*(?:\s|$)/;
+const GIT_COMMIT_PUSH_WORKFLOW_PATTERN =
+  /^\$git(?:-|\s+)commit(?:-|\s+)push(?:\s|$)/i;
 
 interface SessionTitleSource {
   title?: string | null;
@@ -22,6 +24,11 @@ export function isSlashCommandSessionTitle(
 ): boolean {
   const trimmedTitle = title?.trim();
   if (!trimmedTitle) return false;
+
+  // Codex git-commit-push sessions often continue into review and follow-up
+  // work, so keep them in the regular session library instead of filing them
+  // with one-off slash/skill commands.
+  if (GIT_COMMIT_PUSH_WORKFLOW_PATTERN.test(trimmedTitle)) return false;
 
   return (
     COMMAND_MESSAGE_TAG_PATTERN.test(trimmedTitle) ||
