@@ -1149,4 +1149,171 @@ describe("OpenCodeBridgeService", () => {
     });
     expect(bridge.isSessionActive("ses_user_msg")).toBe(true);
   });
+
+  it("supports external instances: events in, decisions out via long-poll", async () => {
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    await bridge.start();
+    const base = `http://127.0.0.1:${bridgePort}`;
+    try {
+      // Plugin registers its instance.
+      const hello = await fetch(`${base}/external/instances`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instanceId: "inst-1",
+          directory: "/tmp/project-ext",
+        }),
+      });
+      expect(hello.status).toBe(200);
+
+      // Forwarded permission.asked creates a pending input attributed to the
+      // instance's real working directory.
+      const asked = await fetch(`${base}/external/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instanceId: "inst-1",
+          directory: "/tmp/project-ext",
+          event: {
+            type: "permission.asked",
+            properties: {
+              sessionID: "ses_ext",
+              id: "perm_1",
+              permission: "bash",
+              patterns: ["rm -rf node_modules"],
+            },
+          },
+        }),
+      });
+      expect(asked.status).toBe(200);
+
+      const session = bridge
+        .listSessions()
+        .find((item) => item.id === "ses_ext");
+      expect(session).toMatchObject({
+        projectPath: "/tmp/project-ext",
+        activity: "waiting-input",
+        pendingInputType: "tool-approval",
+      });
+      expect(bridge.getPendingInputRequest("ses_ext")).toMatchObject({
+        id: "perm_1",
+        type: "tool-approval",
+      });
+
+      // Start a long-poll first, then answer from Yep: the decision must
+      // wake the parked poll instead of waiting for the timeout.
+      const pollPromise = fetch(
+        `${base}/external/instances/inst-1/decisions?waitMs=5000`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const accepted = await bridge.respondToInput(
+        "ses_ext",
+        "perm_1",
+        "approve_always",
+      );
+      expect(accepted).toBe(true);
+
+      const pollResponse = await pollPromise;
+      expect(pollResponse.status).toBe(200);
+      const payload = (await pollResponse.json()) as {
+        decisions: unknown[];
+      };
+      expect(payload.decisions).toEqual([
+        {
+          kind: "permission",
+          requestId: "perm_1",
+          sessionId: "ses_ext",
+          reply: "always",
+        },
+      ]);
+
+      // The pending input is consumed and the session returns to in-turn.
+      expect(bridge.getPendingInputRequest("ses_ext")).toBeNull();
+      expect(
+        bridge.listSessions().find((item) => item.id === "ses_ext")?.activity,
+      ).toBe("in-turn");
+
+      // The plugin's permission.replied echo is a no-op at this point.
+      await fetch(`${base}/external/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instanceId: "inst-1",
+          directory: "/tmp/project-ext",
+          event: {
+            type: "permission.replied",
+            properties: { sessionID: "ses_ext", requestID: "perm_1" },
+          },
+        }),
+      });
+      expect(bridge.getPendingInputRequest("ses_ext")).toBeNull();
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it("queues question decisions with ordered answers for external instances", async () => {
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    await bridge.start();
+    const base = `http://127.0.0.1:${bridgePort}`;
+    try {
+      await fetch(`${base}/external/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instanceId: "inst-q",
+          directory: "/tmp/project-q",
+          event: {
+            type: "question.asked",
+            properties: {
+              sessionID: "ses_q",
+              id: "q_1",
+              questions: [
+                {
+                  question: "Pick one",
+                  options: [{ label: "A" }, { label: "B" }],
+                },
+              ],
+            },
+          },
+        }),
+      });
+
+      const request = bridge.getPendingInputRequest("ses_q");
+      expect(request).toMatchObject({ id: "q_1", type: "question" });
+
+      const accepted = await bridge.respondToInput("ses_q", "q_1", "approve", {
+        answers: [["A"]],
+      } as never);
+      expect(accepted).toBe(true);
+
+      const poll = await fetch(
+        `${base}/external/instances/inst-q/decisions?waitMs=0`,
+      );
+      const payload = (await poll.json()) as { decisions: unknown[] };
+      expect(payload.decisions).toHaveLength(1);
+      expect(payload.decisions[0]).toMatchObject({
+        kind: "question",
+        requestId: "q_1",
+        sessionId: "ses_q",
+        action: "reply",
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
 });

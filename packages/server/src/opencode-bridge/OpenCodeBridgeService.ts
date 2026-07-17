@@ -36,6 +36,7 @@ import {
   opencodeBridgeOwnership,
 } from "./session-state.js";
 import type {
+  ExternalOpenCodeDecision,
   OpenCodeBridgeController,
   OpenCodeBridgeInputResponse,
   OpenCodeBridgePendingInput,
@@ -43,6 +44,13 @@ import type {
   OpenCodeBridgeSessionView,
   OpenCodeBridgeStatus,
 } from "./types.js";
+
+/** External instances silent for longer than this are considered gone. */
+const EXTERNAL_INSTANCE_STALE_MS = 90_000;
+/** Stale external instances are forgotten entirely after this long. */
+const EXTERNAL_INSTANCE_FORGET_MS = 10 * 60_000;
+/** Upper bound for the plugin decision long-poll. */
+const EXTERNAL_DECISION_MAX_WAIT_MS = 25_000;
 
 type PermissionMode =
   | "default"
@@ -94,6 +102,26 @@ interface SessionRecord {
     actionLabel?: string;
     actionLink?: string;
   };
+  /**
+   * Present when the session lives in an external OpenCode instance (default
+   * `opencode` TUI etc.) observed via the Yep forwarder plugin rather than
+   * the bridge-managed server.
+   */
+  instanceId?: string;
+}
+
+/**
+ * An external OpenCode instance (default TUI / `opencode run` / standalone
+ * serve) connected through the Yep forwarder plugin. The plugin pushes events
+ * to the bridge and long-polls for user decisions; `lastSeenAt` doubles as a
+ * liveness heartbeat since these instances have no reachable HTTP server.
+ */
+interface ExternalOpenCodeInstance {
+  id: string;
+  directory: string;
+  lastSeenAt: number;
+  queue: ExternalOpenCodeDecision[];
+  waiters: Array<(decisions: ExternalOpenCodeDecision[]) => void>;
 }
 
 interface StartSessionResponse {
@@ -161,6 +189,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private lastError: string | null = null;
   private sessions = new Map<string, SessionRecord>();
   private pendingInputs = new Map<string, OpenCodeBridgePendingInput>();
+  private externalInstances = new Map<string, ExternalOpenCodeInstance>();
   private readonly eventNotifier = new BridgeEventNotifier();
   private inputResponses = new Map<string, Promise<boolean>>();
   private eventAbortController: AbortController | null = null;
@@ -236,6 +265,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
   async shutdown(): Promise<void> {
     this.eventNotifier.close();
+    for (const instance of this.externalInstances.values()) {
+      for (const waiter of instance.waiters.splice(0)) waiter([]);
+    }
     this.stopOpenCodeEventStream();
     if (this.server) {
       await new Promise<void>((resolve) => this.server?.close(() => resolve()));
@@ -310,6 +342,48 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const pending = this.pendingInputs.get(sessionId);
     if (!pending || pending.request.id !== requestId) return false;
 
+    // Requests from external OpenCode instances (default TUI etc.) have no
+    // reachable HTTP server. Queue the decision for the forwarder plugin,
+    // which applies it through its in-process SDK client; the resulting
+    // permission.replied/question.replied event closes the loop.
+    if (pending.instanceId) {
+      const decision: ExternalOpenCodeDecision =
+        pending.kind === "permission"
+          ? {
+              kind: "permission",
+              requestId,
+              sessionId,
+              reply:
+                response === "deny"
+                  ? "reject"
+                  : response === "approve_always"
+                    ? "always"
+                    : "once",
+            }
+          : response === "deny"
+            ? { kind: "question", requestId, sessionId, action: "reject" }
+            : {
+                kind: "question",
+                requestId,
+                sessionId,
+                action: "reply",
+                answers: buildOpenCodeQuestionAnswersFromRequest(
+                  pending.request,
+                  answers,
+                ),
+              };
+      this.enqueueExternalDecision(pending.instanceId, decision);
+      if (this.pendingInputs.get(sessionId) === pending) {
+        this.pendingInputs.delete(sessionId);
+        this.updateSessionState(sessionId, {
+          activity: "in-turn",
+          pendingInputType: undefined,
+          active: true,
+        });
+      }
+      return true;
+    }
+
     const operation = (async () => {
       if (pending.kind === "permission") {
         const reply =
@@ -357,6 +431,103 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
   }
 
+  private touchExternalInstance(
+    instanceId: string,
+    directory?: string,
+  ): ExternalOpenCodeInstance {
+    let instance = this.externalInstances.get(instanceId);
+    if (!instance) {
+      instance = {
+        id: instanceId,
+        directory: directory ?? process.cwd(),
+        lastSeenAt: Date.now(),
+        queue: [],
+        waiters: [],
+      };
+      this.externalInstances.set(instanceId, instance);
+      return instance;
+    }
+    instance.lastSeenAt = Date.now();
+    if (directory) instance.directory = directory;
+    return instance;
+  }
+
+  private enqueueExternalDecision(
+    instanceId: string,
+    decision: ExternalOpenCodeDecision,
+  ): void {
+    const instance = this.touchExternalInstance(instanceId);
+    instance.queue.push(decision);
+    const waiters = instance.waiters.splice(0);
+    if (waiters.length > 0) {
+      const decisions = instance.queue.splice(0);
+      for (const waiter of waiters) waiter(decisions);
+    }
+  }
+
+  /**
+   * Long-poll endpoint body: waits up to `waitMs` for queued decisions. The
+   * poll doubles as the instance liveness heartbeat.
+   */
+  private async collectExternalDecisions(
+    instanceId: string,
+    waitMs: number,
+  ): Promise<ExternalOpenCodeDecision[]> {
+    const instance = this.touchExternalInstance(instanceId);
+    if (instance.queue.length > 0) {
+      return instance.queue.splice(0);
+    }
+    const boundedWait = Math.min(
+      Math.max(waitMs, 0),
+      EXTERNAL_DECISION_MAX_WAIT_MS,
+    );
+    if (boundedWait === 0) return [];
+    return await new Promise<ExternalOpenCodeDecision[]>((resolve) => {
+      const timer = setTimeout(() => {
+        const index = instance.waiters.indexOf(waiter);
+        if (index >= 0) instance.waiters.splice(index, 1);
+        resolve([]);
+      }, boundedWait);
+      timer.unref?.();
+      const waiter = (decisions: ExternalOpenCodeDecision[]) => {
+        clearTimeout(timer);
+        this.touchExternalInstance(instanceId);
+        resolve(decisions);
+      };
+      instance.waiters.push(waiter);
+    });
+  }
+
+  /**
+   * External instances cannot be status-polled; their long-poll heartbeat is
+   * the only liveness signal. Mark sessions of silent instances idle so they
+   * do not stay "running" forever after the terminal exits.
+   */
+  private sweepExternalInstances(): void {
+    const now = Date.now();
+    for (const [instanceId, instance] of this.externalInstances) {
+      const age = now - instance.lastSeenAt;
+      if (age < EXTERNAL_INSTANCE_STALE_MS) continue;
+      for (const [sessionId, record] of this.sessions) {
+        if (record.instanceId !== instanceId) continue;
+        if (this.pendingInputs.get(sessionId)?.instanceId === instanceId) {
+          this.pendingInputs.delete(sessionId);
+        }
+        if (record.activity !== "idle" || record.active) {
+          this.updateSessionState(sessionId, {
+            activity: "idle",
+            pendingInputType: undefined,
+            active: false,
+            retryStatus: undefined,
+          });
+        }
+      }
+      if (age > EXTERNAL_INSTANCE_FORGET_MS) {
+        this.externalInstances.delete(instanceId);
+      }
+    }
+  }
+
   private async handleHttpRequest(
     req: IncomingMessage,
     res: ServerResponse,
@@ -391,6 +562,59 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (req.method === "GET" && url.pathname === "/events") {
       // SSE change signal for the main server's poll-on-push subscription.
       this.eventNotifier.attach(res);
+      return;
+    }
+
+    // External instance API: used by the Yep forwarder plugin running inside
+    // default `opencode` TUI / `opencode run` processes (which expose no
+    // HTTP server of their own).
+    if (req.method === "POST" && url.pathname === "/external/instances") {
+      const body = asRecord(await readJsonBody(req));
+      const instanceId = readString(body, "instanceId");
+      const directory = readString(body, "directory") ?? undefined;
+      if (!instanceId) {
+        writeJson(res, 400, { error: "instanceId is required" });
+        return;
+      }
+      this.touchExternalInstance(instanceId, directory);
+      writeJson(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/external/events") {
+      const body = asRecord(await readJsonBody(req));
+      const instanceId = readString(body, "instanceId");
+      const directory = readString(body, "directory") ?? undefined;
+      const event = asRecord(body?.event);
+      if (!instanceId || !event) {
+        writeJson(res, 400, { error: "instanceId and event are required" });
+        return;
+      }
+      this.touchExternalInstance(instanceId, directory);
+      this.handleOpenCodeEvent(event as OpenCodeEvent, {
+        instanceId,
+        directory,
+      });
+      writeJson(res, 200, { ok: true });
+      return;
+    }
+    if (
+      req.method === "GET" &&
+      url.pathname.startsWith("/external/instances/") &&
+      url.pathname.endsWith("/decisions")
+    ) {
+      const instanceId = decodeURIComponent(
+        url.pathname.slice("/external/instances/".length, -"/decisions".length),
+      );
+      if (!instanceId) {
+        writeJson(res, 400, { error: "instanceId is required" });
+        return;
+      }
+      const waitMs = Number.parseInt(url.searchParams.get("waitMs") ?? "0", 10);
+      const decisions = await this.collectExternalDecisions(
+        instanceId,
+        Number.isFinite(waitMs) ? waitMs : 0,
+      );
+      writeJson(res, 200, { decisions });
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
@@ -704,10 +928,20 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         | "retryStatus"
       >
     >,
+    origin?: { instanceId: string; directory?: string },
   ): void {
     const existing = this.sessions.get(sessionId);
     const now = new Date().toISOString();
     if (existing) {
+      // A late origin can still improve attribution (e.g. the session was
+      // first observed through a path that had to guess the cwd).
+      if (origin && !existing.instanceId) {
+        existing.instanceId = origin.instanceId;
+        if (origin.directory && existing.cwd !== origin.directory) {
+          existing.cwd = origin.directory;
+          existing.projectId = encodeProjectId(origin.directory);
+        }
+      }
       const stateChanged = Object.entries(state).some(
         ([key, value]) => existing[key as keyof SessionRecord] !== value,
       );
@@ -721,7 +955,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       return;
     }
 
-    const cwd = process.cwd();
+    // External instances report their real working directory; without one we
+    // can only guess the bridge process cwd (legacy behavior).
+    const cwd = origin?.directory ?? process.cwd();
     this.sessions.set(sessionId, {
       id: sessionId,
       projectId: encodeProjectId(cwd),
@@ -735,6 +971,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       activity: state.activity,
       pendingInputType: state.pendingInputType,
       active: state.active,
+      instanceId: origin?.instanceId,
     });
     this.eventNotifier.notify();
   }
@@ -881,7 +1118,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
   }
 
-  private handleOpenCodeEvent(event: OpenCodeEvent): void {
+  private handleOpenCodeEvent(
+    event: OpenCodeEvent,
+    origin?: { instanceId: string; directory?: string },
+  ): void {
     const type = typeof event.type === "string" ? event.type : "";
     const properties = asRecord(event.properties);
     const sessionId =
@@ -892,13 +1132,17 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (type === "session.error") {
       const message = readOpenCodeErrorMessage(properties?.error);
       if (sessionId && this.sessions.has(sessionId)) {
-        this.updateSessionState(sessionId, {
-          activity: "idle",
-          pendingInputType: undefined,
-          active: false,
-          lastErrorMessage: message ?? "OpenCode reported an error",
-          retryStatus: undefined,
-        });
+        this.updateSessionState(
+          sessionId,
+          {
+            activity: "idle",
+            pendingInputType: undefined,
+            active: false,
+            lastErrorMessage: message ?? "OpenCode reported an error",
+            retryStatus: undefined,
+          },
+          origin,
+        );
         this.pendingInputs.delete(sessionId);
       } else if (message) {
         this.lastError = message;
@@ -918,12 +1162,16 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     // Deprecated upstream in favor of session.status(type=idle); kept for
     // compatibility with older OpenCode servers.
     if (type === "session.idle") {
-      this.updateSessionState(sessionId, {
-        activity: "idle",
-        pendingInputType: undefined,
-        active: false,
-        retryStatus: undefined,
-      });
+      this.updateSessionState(
+        sessionId,
+        {
+          activity: "idle",
+          pendingInputType: undefined,
+          active: false,
+          retryStatus: undefined,
+        },
+        origin,
+      );
       return;
     }
 
@@ -934,25 +1182,33 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         // Retry keeps the turn alive; surface backoff metadata so the UI can
         // show "retrying" instead of a silent spinner.
         const action = asRecord(status?.action);
-        this.updateSessionState(sessionId, {
-          activity: "in-turn",
-          active: true,
-          retryStatus: {
-            attempt: readNumber(status, "attempt"),
-            message: readString(status, "message") ?? undefined,
-            next: readNumber(status, "next"),
-            actionLabel: readString(action, "label") ?? undefined,
-            actionLink: readString(action, "link") ?? undefined,
+        this.updateSessionState(
+          sessionId,
+          {
+            activity: "in-turn",
+            active: true,
+            retryStatus: {
+              attempt: readNumber(status, "attempt"),
+              message: readString(status, "message") ?? undefined,
+              next: readNumber(status, "next"),
+              actionLabel: readString(action, "label") ?? undefined,
+              actionLink: readString(action, "link") ?? undefined,
+            },
           },
-        });
+          origin,
+        );
         return;
       }
-      this.updateSessionState(sessionId, {
-        activity: statusType === "idle" ? "idle" : "in-turn",
-        active: statusType !== "idle",
-        retryStatus: undefined,
-        ...(statusType !== "idle" ? { lastErrorMessage: undefined } : {}),
-      });
+      this.updateSessionState(
+        sessionId,
+        {
+          activity: statusType === "idle" ? "idle" : "in-turn",
+          active: statusType !== "idle",
+          retryStatus: undefined,
+          ...(statusType !== "idle" ? { lastErrorMessage: undefined } : {}),
+        },
+        origin,
+      );
       return;
     }
 
@@ -961,9 +1217,12 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       // only assistant-side updates imply an active turn.
       const info = asRecord(properties?.info);
       const role = readString(info, "role");
-      this.recordOpenCodeSessionEvent(sessionId, properties, {
-        implyActive: role !== "user",
-      });
+      this.recordOpenCodeSessionEvent(
+        sessionId,
+        properties,
+        { implyActive: role !== "user" },
+        origin,
+      );
       return;
     }
 
@@ -973,26 +1232,31 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       type === "message.part.updated" ||
       type === "message.part.delta"
     ) {
-      this.recordOpenCodeSessionEvent(sessionId, properties, {
-        // Session metadata updates (e.g. title generation, archive) can occur
-        // while idle; only streaming part events imply an active turn.
-        implyActive: type.startsWith("message.part."),
-      });
+      this.recordOpenCodeSessionEvent(
+        sessionId,
+        properties,
+        {
+          // Session metadata updates (e.g. title generation, archive) can occur
+          // while idle; only streaming part events imply an active turn.
+          implyActive: type.startsWith("message.part."),
+        },
+        origin,
+      );
       return;
     }
 
     if (type === "permission.asked" || type === "permission.v2.asked") {
-      this.recordOpenCodePermissionRequest(sessionId, properties);
+      this.recordOpenCodePermissionRequest(sessionId, properties, origin);
       return;
     }
 
     if (type === "permission.replied" || type === "permission.v2.replied") {
-      this.clearOpenCodePendingInput(sessionId, properties);
+      this.clearOpenCodePendingInput(sessionId, properties, origin);
       return;
     }
 
     if (type === "question.asked" || type === "question.v2.asked") {
-      this.recordOpenCodeQuestionRequest(sessionId, properties);
+      this.recordOpenCodeQuestionRequest(sessionId, properties, origin);
       return;
     }
 
@@ -1002,7 +1266,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       type === "question.v2.replied" ||
       type === "question.v2.rejected"
     ) {
-      this.clearOpenCodePendingInput(sessionId, properties);
+      this.clearOpenCodePendingInput(sessionId, properties, origin);
     }
   }
 
@@ -1010,6 +1274,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     sessionId: string,
     properties: Record<string, unknown> | null,
     options: { implyActive?: boolean } = {},
+    origin?: { instanceId: string; directory?: string },
   ): void {
     const implyActive = options.implyActive ?? true;
     const info = asRecord(properties?.info);
@@ -1019,21 +1284,30 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       readString(info, "updatedAt") ??
       readString(properties, "updatedAt");
     const messageCount = readNumber(info, "messageCount");
-    this.updateSessionState(sessionId, {
-      // Message events do not include a session title. Avoid replacing the
-      // title recorded from session.created with undefined in that case.
-      ...(title ? { title } : {}),
-      ...(messageCount !== undefined ? { messageCount } : {}),
-      ...(updatedAt ? { updatedAt } : {}),
-      ...(implyActive
-        ? { activity: "in-turn" as const, active: true, retryStatus: undefined }
-        : {}),
-    });
+    this.updateSessionState(
+      sessionId,
+      {
+        // Message events do not include a session title. Avoid replacing the
+        // title recorded from session.created with undefined in that case.
+        ...(title ? { title } : {}),
+        ...(messageCount !== undefined ? { messageCount } : {}),
+        ...(updatedAt ? { updatedAt } : {}),
+        ...(implyActive
+          ? {
+              activity: "in-turn" as const,
+              active: true,
+              retryStatus: undefined,
+            }
+          : {}),
+      },
+      origin,
+    );
   }
 
   private recordOpenCodePermissionRequest(
     sessionId: string,
     properties: Record<string, unknown> | null,
+    origin?: { instanceId: string; directory?: string },
   ): void {
     const requestId =
       readString(properties, "id") ?? readString(properties, "requestID");
@@ -1047,6 +1321,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       kind: "permission",
       raw: properties,
       createdAt: timestamp,
+      instanceId: origin?.instanceId,
       request: {
         id: requestId,
         sessionId,
@@ -1065,16 +1340,21 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         source: "opencode-bridge",
       },
     });
-    this.updateSessionState(sessionId, {
-      activity: "waiting-input",
-      pendingInputType: "tool-approval",
-      active: true,
-    });
+    this.updateSessionState(
+      sessionId,
+      {
+        activity: "waiting-input",
+        pendingInputType: "tool-approval",
+        active: true,
+      },
+      origin,
+    );
   }
 
   private recordOpenCodeQuestionRequest(
     sessionId: string,
     properties: Record<string, unknown> | null,
+    origin?: { instanceId: string; directory?: string },
   ): void {
     const requestId =
       readString(properties, "id") ?? readString(properties, "requestID");
@@ -1086,6 +1366,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       kind: "question",
       raw: properties,
       createdAt: timestamp,
+      instanceId: origin?.instanceId,
       request: {
         id: requestId,
         sessionId,
@@ -1101,16 +1382,21 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         source: "opencode-bridge",
       },
     });
-    this.updateSessionState(sessionId, {
-      activity: "waiting-input",
-      pendingInputType: "user-question",
-      active: true,
-    });
+    this.updateSessionState(
+      sessionId,
+      {
+        activity: "waiting-input",
+        pendingInputType: "user-question",
+        active: true,
+      },
+      origin,
+    );
   }
 
   private clearOpenCodePendingInput(
     sessionId: string,
     properties: Record<string, unknown> | null,
+    origin?: { instanceId: string; directory?: string },
   ): void {
     const requestId =
       readString(properties, "requestID") ?? readString(properties, "id");
@@ -1120,11 +1406,15 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       if (pending.requestId !== requestId) return;
       this.pendingInputs.delete(sessionId);
     }
-    this.updateSessionState(sessionId, {
-      activity: "in-turn",
-      pendingInputType: undefined,
-      active: true,
-    });
+    this.updateSessionState(
+      sessionId,
+      {
+        activity: "in-turn",
+        pendingInputType: undefined,
+        active: true,
+      },
+      origin,
+    );
   }
 
   private async postOpenCodeJson(
@@ -1146,6 +1436,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   }
 
   private async syncOpenCodeRuntimeState(baseUrl?: string): Promise<void> {
+    this.sweepExternalInstances();
     try {
       const opencodeServerUrl =
         baseUrl ?? (await this.ensureOpenCodeServerUrl());
@@ -1200,6 +1491,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     for (const [sessionId, record] of this.sessions) {
       if (record.activity === "waiting-input") continue;
       if (activeSessionIds.has(sessionId)) continue;
+      // External-instance sessions are invisible to the managed server's
+      // status endpoint; their liveness comes from the plugin heartbeat.
+      if (record.instanceId) continue;
       this.updateSessionState(sessionId, {
         activity: "idle",
         pendingInputType: undefined,
@@ -1290,9 +1584,15 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const child = spawn(this.opencodePath, spawnArgs, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
-      env: buildManagedOpenCodeEnv(process.env, this.gatewayConfig, {
-        openAICompatibleBaseURL: this.getOpenAICompatibleGatewayUrl(),
-      }),
+      env: {
+        ...buildManagedOpenCodeEnv(process.env, this.gatewayConfig, {
+          openAICompatibleBaseURL: this.getOpenAICompatibleGatewayUrl(),
+        }),
+        // The Yep forwarder plugin (installed globally in
+        // ~/.config/opencode/plugin) must stay inert inside Yep-managed
+        // servers: their events already reach the bridge via /global/event.
+        YEP_MANAGED_OPENCODE: "1",
+      },
     });
     this.opencodeProcess = child;
     this.opencodeServerUrl = url;

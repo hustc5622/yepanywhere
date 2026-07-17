@@ -41,3 +41,14 @@
 ## Codex rewind（单刷）权威计数
 
 客户端编辑历史 prompt 时附带 `rollbackTarget: { timestamp, text }`；服务端在 resume 路由用 `computeCodexRollbackNumTurns`（`packages/server/src/sessions/codex-rollback.ts`）基于持久化 turn 树计算 `thread/rollback` 圈数，客户端渲染项计数仅作 fallback。日志事件：`codex_rollback_numturns_resolved` / `codex_rollback_numturns_resolution_failed`。
+
+## 外部 OpenCode 实例（默认 `opencode` TUI）的审批接入
+
+背景：新版 opencode（≥1.2.x）的默认 TUI **不监听任何端口**（server 跑在进程内 Bun Worker，TUI 走进程内 RPC），4520 bridge 的 `/global/event` SSE 只能看见 bridge 托管的 4521 server（即 `of` / `opencode attach` 的会话）。直接跑 `opencode` 的会话与审批对 bridge 完全不可见；上游也没有 server 注册表可发现（`permission.ask` 阻塞插件钩子已在 v1.2.27 被上游删除）。
+
+方案：**全局转发插件 + bridge 外部实例 API**。
+
+- 插件源：`packages/server/resources/opencode-plugin/yep-bridge.ts`；安装：`scripts/install-opencode-yep-plugin.sh`（复制到 `~/.config/opencode/plugin/yep-bridge.ts`，opencode 对所有实例自动加载）。
+- 插件行为：实例启动时 `POST /external/instances` 注册（instanceId + directory）；`event` 钩子把 permission/question/session.\* 事件 `POST /external/events` 转给 4520；同时对 `GET /external/instances/:id/decisions?waitMs=25000` 长轮询，取到决策后用**进程内 SDK client** 应用（permission → `postSessionIdPermissionsPermissionId`；question → 底层 hey-api client 直调 `/question/:id/reply|reject`）。TUI 弹窗与 Yep 前端谁先答都行，`permission.replied` 事件双向对账。
+- bridge 侧（`OpenCodeBridgeService`）：`SessionRecord.instanceId` 标记外部实例会话（cwd 用插件上报的真实 directory）；`respondToInput` 对带 instanceId 的 pending 走决策队列而非 HTTP 回复；外部会话不参与托管 server 的 status 对账，改用**长轮询心跳**判活（静默 90s 置 idle，10min 遗忘）。
+- 防重复上报：Yep 托管的 opencode 进程（bridge 4521 + provider per-session serve）注入 `YEP_MANAGED_OPENCODE=1`，插件在这些进程内保持沉默；`YEP_OPENCODE_PLUGIN_DISABLE=1` 为硬开关；`YEP_OPENCODE_BRIDGE_URL` 覆盖 bridge 地址。

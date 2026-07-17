@@ -41,6 +41,28 @@ export interface OpenCodeBridgePendingInput {
   kind: "permission" | "question";
   raw: unknown;
   createdAt: string;
+  /**
+   * Present when the request came from an external OpenCode instance (via the
+   * Yep forwarder plugin) instead of the bridge-managed server. Decisions for
+   * these requests are queued for the plugin to apply in-process.
+   */
+  instanceId?: string;
+}
+
+/**
+ * A user decision queued for an external OpenCode instance. The Yep forwarder
+ * plugin long-polls these and applies them through its in-process SDK client.
+ */
+export interface ExternalOpenCodeDecision {
+  kind: "permission" | "question";
+  requestId: string;
+  sessionId: string;
+  /** Permission decisions map to OpenCode's reply values. */
+  reply?: "once" | "always" | "reject";
+  /** Question decisions either reply with answers or reject. */
+  action?: "reply" | "reject";
+  /** Ordered answers (each an array of selected labels) for question replies. */
+  answers?: string[][];
 }
 
 export type OpenCodeBridgeInputResponse = BridgeInputResponse;
