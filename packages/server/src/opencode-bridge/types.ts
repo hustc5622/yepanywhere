@@ -10,6 +10,8 @@ import type {
 
 export type { MaybePromise };
 
+export type OpenCodeApprovalProtocol = "v1" | "v2";
+
 export interface OpenCodeBridgeStatus extends BridgeStatusBase {
   serverUrl: string;
   opencodeServerUrl: string;
@@ -39,6 +41,8 @@ export interface OpenCodeBridgePendingInput {
   request: InputRequest;
   requestId: string;
   kind: "permission" | "question";
+  /** OpenCode API generation that owns this request. */
+  protocol: OpenCodeApprovalProtocol;
   raw: unknown;
   createdAt: string;
   /**
@@ -47,6 +51,8 @@ export interface OpenCodeBridgePendingInput {
    * these requests are queued for the plugin to apply in-process.
    */
   instanceId?: string;
+  /** Stable while an external decision is retried and acknowledged. */
+  externalDecisionId?: string;
 }
 
 /**
@@ -54,7 +60,12 @@ export interface OpenCodeBridgePendingInput {
  * plugin long-polls these and applies them through its in-process SDK client.
  */
 export interface ExternalOpenCodeDecision {
+  /** Delivery/idempotency key used by the plugin and bridge ACK endpoint. */
+  id: string;
+  /** OpenCode already emitted the terminal event; skip application and ACK. */
+  confirmed?: boolean;
   kind: "permission" | "question";
+  protocol: OpenCodeApprovalProtocol;
   requestId: string;
   sessionId: string;
   /** Permission decisions map to OpenCode's reply values. */

@@ -46,14 +46,23 @@ const FORWARD_EVENTS = new Set([
 const DECISION_POLL_WAIT_MS = 25_000;
 const DECISION_POLL_TIMEOUT_MS = 30_000;
 const DECISION_RETRY_DELAY_MS = 5_000;
+const EVENT_RETRY_DELAY_MS = 1_000;
 
 interface YepDecision {
+  id: string;
+  confirmed?: boolean;
   kind: "permission" | "question";
+  protocol: "v1" | "v2";
   requestId: string;
   sessionId: string;
   reply?: "once" | "always" | "reject";
   action?: "reply" | "reject";
   answers?: string[][];
+}
+
+interface ForwardedEvent {
+  type?: string;
+  properties?: unknown;
 }
 
 async function postJson(path: string, body: unknown): Promise<boolean> {
@@ -90,50 +99,163 @@ export const YepBridge = async (input: {
   // The SDK client's fetch goes in-process, so replies work even when the
   // OpenCode instance has no TCP listener.
   const client = input.client as {
-    postSessionIdPermissionsPermissionId?: (options: {
-      path: { id: string; permissionID: string };
-      body: { response: "once" | "always" | "reject" };
-    }) => Promise<unknown>;
     _client?: {
       post: (options: {
         url: string;
         path?: Record<string, string>;
         body?: unknown;
         headers?: Record<string, string>;
+        throwOnError?: boolean;
       }) => Promise<unknown>;
     };
   };
 
-  async function applyDecision(decision: YepDecision): Promise<void> {
+  const queuedEvents: Array<{
+    event: ForwardedEvent;
+    resolve: () => void;
+  }> = [];
+  let pumpingEvents = false;
+
+  const delay = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  async function pumpEvents(): Promise<void> {
+    if (pumpingEvents) return;
+    pumpingEvents = true;
     try {
-      if (decision.kind === "permission") {
-        await client.postSessionIdPermissionsPermissionId?.({
-          path: { id: decision.sessionId, permissionID: decision.requestId },
-          body: { response: decision.reply ?? "once" },
-        });
-        return;
+      while (!disposed && queuedEvents.length > 0) {
+        const next = queuedEvents[0];
+        if (
+          await postJson("/external/events", {
+            instanceId,
+            directory,
+            event: next.event,
+          })
+        ) {
+          queuedEvents.shift();
+          next.resolve();
+          continue;
+        }
+        await delay(EVENT_RETRY_DELAY_MS);
       }
-      // Questions have no dedicated v1 SDK method; use the underlying
-      // hey-api client (its fetch is the same in-process transport).
-      const raw = client._client;
-      if (!raw) return;
-      if (decision.action === "reject") {
+    } finally {
+      pumpingEvents = false;
+      if (!disposed && queuedEvents.length > 0) void pumpEvents();
+    }
+  }
+
+  function enqueueEvent(event: ForwardedEvent): Promise<void> {
+    return new Promise<void>((resolve) => {
+      queuedEvents.push({ event, resolve });
+      void pumpEvents();
+    });
+  }
+
+  function confirmationEvent(decision: YepDecision): ForwardedEvent {
+    if (decision.kind === "permission") {
+      return {
+        type:
+          decision.protocol === "v2"
+            ? "permission.v2.replied"
+            : "permission.replied",
+        properties: {
+          sessionID: decision.sessionId,
+          requestID: decision.requestId,
+          reply: decision.reply ?? "once",
+        },
+      };
+    }
+    return {
+      type:
+        decision.action === "reject"
+          ? decision.protocol === "v2"
+            ? "question.v2.rejected"
+            : "question.rejected"
+          : decision.protocol === "v2"
+            ? "question.v2.replied"
+            : "question.replied",
+      properties: {
+        sessionID: decision.sessionId,
+        requestID: decision.requestId,
+        ...(decision.action === "reject"
+          ? {}
+          : { answers: decision.answers ?? [] }),
+      },
+    };
+  }
+
+  async function applyDecision(decision: YepDecision): Promise<void> {
+    const raw = client._client;
+    if (!raw) throw new Error("OpenCode SDK transport is unavailable");
+
+    if (decision.kind === "permission") {
+      if (decision.protocol === "v2") {
         await raw.post({
-          url: "/question/{requestID}/reject",
-          path: { requestID: decision.requestId },
+          url: "/api/session/{sessionID}/permission/{requestID}/reply",
+          path: {
+            sessionID: decision.sessionId,
+            requestID: decision.requestId,
+          },
+          body: { reply: decision.reply ?? "once" },
+          headers: { "content-type": "application/json" },
+          throwOnError: true,
         });
       } else {
         await raw.post({
-          url: "/question/{requestID}/reply",
+          url: "/permission/{requestID}/reply",
           path: { requestID: decision.requestId },
-          body: { answers: decision.answers ?? [] },
+          body: { reply: decision.reply ?? "once" },
           headers: { "content-type": "application/json" },
+          throwOnError: true,
         });
       }
-    } catch {
-      // The user can still answer in the TUI; the bridge pending state is
-      // reconciled by the permission.replied/question.* event either way.
+      return;
     }
+
+    const questionPath =
+      decision.protocol === "v2"
+        ? "/api/session/{sessionID}/question/{requestID}"
+        : "/question/{requestID}";
+    const path = {
+      ...(decision.protocol === "v2" ? { sessionID: decision.sessionId } : {}),
+      requestID: decision.requestId,
+    };
+    if (decision.action === "reject") {
+      await raw.post({
+        url: `${questionPath}/reject`,
+        path,
+        throwOnError: true,
+      });
+    } else {
+      await raw.post({
+        url: `${questionPath}/reply`,
+        path,
+        body: { answers: decision.answers ?? [] },
+        headers: { "content-type": "application/json" },
+        throwOnError: true,
+      });
+    }
+  }
+
+  async function acknowledgeDecision(decisionId: string): Promise<boolean> {
+    return postJson(
+      `/external/instances/${encodeURIComponent(
+        instanceId,
+      )}/decisions/${encodeURIComponent(decisionId)}/ack`,
+      {},
+    );
+  }
+
+  const appliedDecisionIds = new Set<string>();
+  const pendingDecisionAcks = new Set<string>();
+
+  async function flushDecisionAcks(): Promise<boolean> {
+    for (const decisionId of pendingDecisionAcks) {
+      if (!(await acknowledgeDecision(decisionId))) return false;
+      pendingDecisionAcks.delete(decisionId);
+      appliedDecisionIds.delete(decisionId);
+    }
+    return true;
   }
 
   // Decision long-poll loop. Doubles as the liveness heartbeat: the bridge
@@ -141,6 +263,13 @@ export const YepBridge = async (input: {
   void (async () => {
     while (!disposed) {
       try {
+        // Retry ACKs independently of redelivery. If an ACK reached the bridge
+        // but its response was lost, the idempotent retry still clears local
+        // state even though the decision no longer appears in the next poll.
+        if (!(await flushDecisionAcks())) {
+          await delay(DECISION_RETRY_DELAY_MS);
+          continue;
+        }
         const response = await fetch(
           `${BRIDGE_URL}/external/instances/${encodeURIComponent(
             instanceId,
@@ -151,17 +280,36 @@ export const YepBridge = async (input: {
           const data = (await response.json()) as {
             decisions?: YepDecision[];
           };
+          let retry = false;
           for (const decision of data.decisions ?? []) {
-            await applyDecision(decision);
+            try {
+              if (decision.confirmed) {
+                appliedDecisionIds.add(decision.id);
+              }
+              if (!appliedDecisionIds.has(decision.id)) {
+                await applyDecision(decision);
+                // OpenCode invokes plugin event hooks fire-and-forget. Enqueue
+                // an explicit confirmation behind any native reply event so
+                // the bridge always observes completion before ACK.
+                await enqueueEvent(confirmationEvent(decision));
+                appliedDecisionIds.add(decision.id);
+              }
+              pendingDecisionAcks.add(decision.id);
+              if (!(await flushDecisionAcks())) {
+                retry = true;
+                break;
+              }
+            } catch {
+              retry = true;
+              break;
+            }
           }
-          continue;
+          if (!retry) continue;
         }
       } catch {
         // Bridge unreachable - back off and retry.
       }
-      await new Promise((resolve) =>
-        setTimeout(resolve, DECISION_RETRY_DELAY_MS),
-      );
+      await delay(DECISION_RETRY_DELAY_MS);
     }
   })();
 
@@ -175,7 +323,7 @@ export const YepBridge = async (input: {
     }) => {
       if (disposed || !event || typeof event.type !== "string") return;
       if (!FORWARD_EVENTS.has(event.type)) return;
-      void postJson("/external/events", { instanceId, directory, event });
+      void enqueueEvent(event);
     },
     dispose: async () => {
       disposed = true;

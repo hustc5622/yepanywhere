@@ -2,7 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpenCodeBridgeService } from "../../src/opencode-bridge/OpenCodeBridgeService.js";
 
 const servers: Array<{ close: () => void }> = [];
@@ -215,6 +215,77 @@ describe("OpenCodeBridgeService", () => {
     ).resolves.toBe(true);
     expect(rejectBody).toBe("");
     expect(rejectContentType).toBeUndefined();
+  });
+
+  it("routes v2 permission and question replies to session-scoped APIs", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const opencodeServer = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      req.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf-8");
+        requests.push({
+          url: req.url ?? "",
+          body: text ? JSON.parse(text) : undefined,
+        });
+        res.writeHead(204);
+        res.end();
+      });
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "permission.v2.asked",
+      properties: {
+        id: "per_v2",
+        sessionID: "ses/v2",
+        action: "write",
+        resources: ["src/app.ts"],
+      },
+    });
+    expect(bridge.getPendingInputRequest("ses/v2")?.prompt).toContain(
+      "write src/app.ts",
+    );
+    await expect(
+      bridge.respondToInput("ses/v2", "per_v2", "approve_always"),
+    ).resolves.toBe(true);
+
+    handleEvent({
+      type: "question.v2.asked",
+      properties: {
+        id: "que_v2",
+        sessionID: "ses/v2",
+        questions: [{ question: "Continue?", options: [] }],
+      },
+    });
+    await expect(
+      bridge.respondToInput("ses/v2", "que_v2", "deny"),
+    ).resolves.toBe(true);
+
+    expect(requests).toEqual([
+      {
+        url: "/api/session/ses%2Fv2/permission/per_v2/reply",
+        body: { reply: "always" },
+      },
+      {
+        url: "/api/session/ses%2Fv2/question/que_v2/reject",
+        body: undefined,
+      },
+    ]);
   });
 
   it("does not consume a newer question or send duplicate replies", async () => {
@@ -1150,6 +1221,50 @@ describe("OpenCodeBridgeService", () => {
     expect(bridge.isSessionActive("ses_user_msg")).toBe(true);
   });
 
+  it("does not emit another change signal for identical retry status", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const internals = bridge as unknown as {
+      eventNotifier: { notify: () => void };
+      handleOpenCodeEvent: (event: unknown) => void;
+    };
+    const notify = vi.spyOn(internals.eventNotifier, "notify");
+    const event = {
+      type: "session.status",
+      properties: {
+        sessionID: "ses_retry_stable",
+        status: {
+          type: "retry",
+          attempt: 2,
+          message: "rate limited",
+          next: 1234,
+          action: { label: "Details", link: "https://example.test" },
+        },
+      },
+    };
+
+    internals.handleOpenCodeEvent(event);
+    expect(notify).toHaveBeenCalledTimes(1);
+    notify.mockClear();
+
+    internals.handleOpenCodeEvent(structuredClone(event));
+    expect(notify).not.toHaveBeenCalled();
+
+    internals.handleOpenCodeEvent({
+      ...event,
+      properties: {
+        ...event.properties,
+        status: { ...event.properties.status, attempt: 3 },
+      },
+    });
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
   it("supports external instances: events in, decisions out via long-poll", async () => {
     const bridgePort = await getFreePort();
     const bridge = new OpenCodeBridgeService({
@@ -1213,34 +1328,65 @@ describe("OpenCodeBridgeService", () => {
         `${base}/external/instances/inst-1/decisions?waitMs=5000`,
       );
       await new Promise((resolve) => setTimeout(resolve, 50));
-      const accepted = await bridge.respondToInput(
+      const acceptedPromise = bridge.respondToInput(
         "ses_ext",
         "perm_1",
         "approve_always",
       );
-      expect(accepted).toBe(true);
 
       const pollResponse = await pollPromise;
       expect(pollResponse.status).toBe(200);
       const payload = (await pollResponse.json()) as {
         decisions: unknown[];
       };
-      expect(payload.decisions).toEqual([
-        {
-          kind: "permission",
-          requestId: "perm_1",
-          sessionId: "ses_ext",
-          reply: "always",
-        },
-      ]);
+      expect(payload.decisions).toHaveLength(1);
+      expect(payload.decisions[0]).toMatchObject({
+        id: "v1:permission:ses_ext:perm_1",
+        kind: "permission",
+        protocol: "v1",
+        requestId: "perm_1",
+        sessionId: "ses_ext",
+        reply: "always",
+      });
 
-      // The pending input is consumed and the session returns to in-turn.
-      expect(bridge.getPendingInputRequest("ses_ext")).toBeNull();
+      // Polling is non-destructive: no ACK or reply event means the same
+      // decision is redelivered and the UI stays waiting-input.
+      const retryPoll = await fetch(
+        `${base}/external/instances/inst-1/decisions?waitMs=0`,
+      );
+      const retryPayload = (await retryPoll.json()) as {
+        decisions: unknown[];
+      };
+      expect(retryPayload.decisions).toEqual(payload.decisions);
+      expect(bridge.getPendingInputRequest("ses_ext")).toMatchObject({
+        id: "perm_1",
+      });
       expect(
         bridge.listSessions().find((item) => item.id === "ses_ext")?.activity,
-      ).toBe("in-turn");
+      ).toBe("waiting-input");
 
-      // The plugin's permission.replied echo is a no-op at this point.
+      // A retried asked event (for example after its HTTP response was lost)
+      // must not replace the decision identity or strand the response waiter.
+      await fetch(`${base}/external/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instanceId: "inst-1",
+          directory: "/tmp/project-ext",
+          event: {
+            type: "permission.asked",
+            properties: {
+              sessionID: "ses_ext",
+              id: "perm_1",
+              permission: "bash",
+              patterns: ["rm -rf node_modules"],
+            },
+          },
+        }),
+      });
+
+      // Only OpenCode's reply event confirms the decision and releases the
+      // original Yep response.
       await fetch(`${base}/external/events`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1253,7 +1399,37 @@ describe("OpenCodeBridgeService", () => {
           },
         }),
       });
+      await expect(acceptedPromise).resolves.toBe(true);
       expect(bridge.getPendingInputRequest("ses_ext")).toBeNull();
+
+      // The terminal event marks the decision confirmed. It remains queued
+      // until ACK, but the plugin can now skip applying a TUI-completed reply.
+      const confirmedPoll = await fetch(
+        `${base}/external/instances/inst-1/decisions?waitMs=0`,
+      );
+      await expect(confirmedPoll.json()).resolves.toMatchObject({
+        decisions: [
+          {
+            id: "v1:permission:ses_ext:perm_1",
+            confirmed: true,
+          },
+        ],
+      });
+
+      // The plugin ACKs explicitly; repeated or late ACKs are harmless.
+      for (let index = 0; index < 2; index += 1) {
+        const ack = await fetch(
+          `${base}/external/instances/inst-1/decisions/${encodeURIComponent(
+            "v1:permission:ses_ext:perm_1",
+          )}/ack`,
+          { method: "POST" },
+        );
+        expect(ack.status).toBe(200);
+      }
+      const emptyPoll = await fetch(
+        `${base}/external/instances/inst-1/decisions?waitMs=0`,
+      );
+      await expect(emptyPoll.json()).resolves.toEqual({ decisions: [] });
     } finally {
       await bridge.shutdown();
     }
@@ -1278,7 +1454,7 @@ describe("OpenCodeBridgeService", () => {
           instanceId: "inst-q",
           directory: "/tmp/project-q",
           event: {
-            type: "question.asked",
+            type: "question.v2.asked",
             properties: {
               sessionID: "ses_q",
               id: "q_1",
@@ -1296,10 +1472,9 @@ describe("OpenCodeBridgeService", () => {
       const request = bridge.getPendingInputRequest("ses_q");
       expect(request).toMatchObject({ id: "q_1", type: "question" });
 
-      const accepted = await bridge.respondToInput("ses_q", "q_1", "approve", {
+      const acceptedPromise = bridge.respondToInput("ses_q", "q_1", "approve", {
         answers: [["A"]],
       } as never);
-      expect(accepted).toBe(true);
 
       const poll = await fetch(
         `${base}/external/instances/inst-q/decisions?waitMs=0`,
@@ -1307,11 +1482,31 @@ describe("OpenCodeBridgeService", () => {
       const payload = (await poll.json()) as { decisions: unknown[] };
       expect(payload.decisions).toHaveLength(1);
       expect(payload.decisions[0]).toMatchObject({
+        id: "v2:question:ses_q:q_1",
         kind: "question",
+        protocol: "v2",
         requestId: "q_1",
         sessionId: "ses_q",
         action: "reply",
       });
+
+      await fetch(`${base}/external/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instanceId: "inst-q",
+          directory: "/tmp/project-q",
+          event: {
+            type: "question.v2.replied",
+            properties: {
+              sessionID: "ses_q",
+              requestID: "q_1",
+              answers: [["A"]],
+            },
+          },
+        }),
+      });
+      await expect(acceptedPromise).resolves.toBe(true);
     } finally {
       await bridge.shutdown();
     }
