@@ -14,5 +14,9 @@ export default defineConfig({
     passWithNoTests: true,
     maxWorkers: 3,
     minWorkers: 1,
+    // Deploy shells export NODE_ENV=production, which makes React/testing-
+    // library load prod bundles (React.act missing). Tests always run in
+    // test mode regardless of the invoking shell.
+    env: { NODE_ENV: "test" },
   },
 });
