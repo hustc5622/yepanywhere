@@ -8,9 +8,9 @@ import com.google.firebase.messaging.RemoteMessage
 class YepFirebaseMessagingService : FirebaseMessagingService() {
   override fun onMessageReceived(message: RemoteMessage) {
     val data = message.data
-    Log.i(
-      TAG,
-      "onMessageReceived: from=${message.from ?: "null"} messageId=${message.messageId ?: "null"} type=${data["type"] ?: "null"} keys=${data.keys.joinToString(",")}"
+    YepLog.i(
+      "fcm.onMessageReceived",
+      "from=${message.from ?: "null"} messageId=${message.messageId ?: "null"} type=${data["type"] ?: "null"} keys=${data.keys.joinToString(",")}",
     )
     when (data["type"]) {
       "dismiss" -> YepNativeNotifier.cancelSession(this, data["sessionId"])
@@ -21,13 +21,13 @@ class YepFirebaseMessagingService : FirebaseMessagingService() {
         message = data["message"] ?: "Test notification",
         urgency = data["urgency"],
       )
-      else -> Log.w(TAG, "onMessageReceived: unsupported type=${data["type"] ?: "null"}")
+      else -> YepLog.w("fcm.onMessageReceived", "unsupported type=${data["type"] ?: "null"}")
     }
   }
 
   override fun onNewToken(token: String) {
     super.onNewToken(token)
-    Log.i(TAG, "onNewToken: tokenLength=${token.length}")
+    YepLog.i("fcm.onNewToken", "tokenLength=${token.length}")
     getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
       .edit()
       .putString(PREF_FCM_TOKEN, token)
@@ -71,6 +71,7 @@ class YepFirebaseMessagingService : FirebaseMessagingService() {
       updatedAt = data["timestamp"],
       pendingInputType = data["inputType"] ?: data["pendingInputType"],
       summary = data["summary"],
+      pendingRequestId = data["requestId"]?.takeIf { it.isNotBlank() },
     )
   }
 

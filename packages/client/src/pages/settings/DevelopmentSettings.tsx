@@ -16,6 +16,10 @@ import { useSchemaValidation } from "../../hooks/useSchemaValidation";
 import { useServerSettings } from "../../hooks/useServerSettings";
 import { useVersion } from "../../hooks/useVersion";
 import { useI18n } from "../../i18n";
+import {
+  isMobileShellDocument,
+  uploadNativeLogs,
+} from "../../lib/nativePushBridge";
 
 const LAST_DEPLOY_JOB_KEY = "yepanywhere:lastDeployJobId";
 const DEFAULT_RESTART_TARGETS: Required<DeploymentRestartTargets> = {
@@ -70,6 +74,30 @@ export function DevelopmentSettings() {
   const activeAgentsCount = useGlobalActiveAgents();
   const { holdModeEnabled, setHoldModeEnabled } = useDeveloperMode();
   const { ignoredTools, clearIgnoredTools } = useSchemaValidationContext();
+  const [uploadingNativeLogs, setUploadingNativeLogs] = useState(false);
+  const [nativeLogUploadStatus, setNativeLogUploadStatus] = useState<
+    string | null
+  >(null);
+  const isMobileShell = isMobileShellDocument();
+
+  const handleUploadNativeLogs = useCallback(async () => {
+    setUploadingNativeLogs(true);
+    setNativeLogUploadStatus(null);
+    try {
+      const result = await uploadNativeLogs();
+      setNativeLogUploadStatus(
+        t("developmentNativeLogsUploaded", { count: result.uploaded }),
+      );
+    } catch (err) {
+      setNativeLogUploadStatus(
+        t("developmentNativeLogsUploadFailed", {
+          message: getErrorMessage(err),
+        }),
+      );
+    } finally {
+      setUploadingNativeLogs(false);
+    }
+  }, [t]);
   const { settings: serverSettings, updateSetting: updateServerSetting } =
     useServerSettings();
   const {
@@ -601,6 +629,30 @@ export function DevelopmentSettings() {
               </label>
             </div>
           </div>
+
+          {isMobileShell && (
+            <div className="settings-group">
+              <div className="settings-item">
+                <div className="settings-item-info">
+                  <strong>{t("developmentNativeLogsTitle")}</strong>
+                  <p>{t("developmentNativeLogsDescription")}</p>
+                  {nativeLogUploadStatus && (
+                    <p className="settings-pending">{nativeLogUploadStatus}</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="settings-button"
+                  onClick={handleUploadNativeLogs}
+                  disabled={uploadingNativeLogs}
+                >
+                  {uploadingNativeLogs
+                    ? t("developmentNativeLogsUploading")
+                    : t("developmentNativeLogsUpload")}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="settings-group">
             <div className="settings-item">

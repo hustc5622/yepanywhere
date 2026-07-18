@@ -31,7 +31,7 @@ class YepSessionWatcher(private val context: Context) {
   fun start(serverOrigin: String) {
     val normalizedOrigin = normalizeOrigin(serverOrigin)
     if (normalizedOrigin == null) {
-      Log.w(TAG, "start: ignored invalid origin=$serverOrigin")
+      YepLog.w("watcher.start", "ignored invalid origin=$serverOrigin")
       return
     }
 
@@ -42,7 +42,7 @@ class YepSessionWatcher(private val context: Context) {
 
     stopLocked(cancelNotifications = origin != null && origin != normalizedOrigin)
     origin = normalizedOrigin
-    Log.i(TAG, "start: origin=$normalizedOrigin intervalMs=$POLL_INTERVAL_MS")
+    YepLog.i("watcher.start", "origin=$normalizedOrigin intervalMs=$POLL_INTERVAL_MS")
     task = executor.scheduleWithFixedDelay(
       { pollSafely(normalizedOrigin) },
       0,
@@ -80,11 +80,7 @@ class YepSessionWatcher(private val context: Context) {
     } catch (error: InterruptedException) {
       Thread.currentThread().interrupt()
     } catch (error: Throwable) {
-      Log.w(
-        TAG,
-        "poll: failed ${error.javaClass.simpleName}: ${error.message}",
-        error,
-      )
+      YepLog.e("watcher.poll", "failed", error)
     }
   }
 
@@ -123,6 +119,15 @@ class YepSessionWatcher(private val context: Context) {
       TAG,
       "poll: origin=$serverOrigin needsAttention=${needsAttention.size} active=${active.size} unread=${unreadIds.size} badge=$badgeCount visibleNeedsAttention=${visibleNeedsAttentionIds.size} visibleActive=${visibleActiveIds.size}"
     )
+    // Ring-buffer only on transitions to keep uploads readable.
+    if (visibleNeedsAttentionIds != notifiedNeedsAttention ||
+      visibleActiveIds != notifiedRunning
+    ) {
+      YepLog.i(
+        "watcher.poll",
+        "needsAttention=${visibleNeedsAttentionIds.size} active=${visibleActiveIds.size} badge=$badgeCount",
+      )
+    }
 
     for (session in visibleNeedsAttention) {
       YepNativeNotifier.cancelRunning(appContext, session.sessionId)
@@ -240,6 +245,8 @@ class YepSessionWatcher(private val context: Context) {
           pendingInputType =
             item.optString("pendingInputType").takeIf { it.isNotBlank() },
           hasUnread = item.optBoolean("hasUnread", false),
+          pendingRequestId =
+            item.optString("pendingRequestId").takeIf { it.isNotBlank() },
         ),
       )
     }

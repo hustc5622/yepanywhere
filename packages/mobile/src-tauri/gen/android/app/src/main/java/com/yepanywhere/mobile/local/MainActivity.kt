@@ -271,12 +271,50 @@ class MainActivity : TauriActivity() {
   }
 
   private fun configureSessionWatcher(origin: String) {
+    // Persist for YepApprovalActionReceiver: notification Approve/Deny must
+    // reach the server even when the app process was since killed.
+    YepApprovalActionReceiver.rememberServerOrigin(applicationContext, origin)
     runOnUiThread {
       val watcher = sessionWatcher ?: YepSessionWatcher(applicationContext).also {
         sessionWatcher = it
       }
       watcher.start(origin)
     }
+  }
+
+  private fun uploadNativeLogs(callbackId: String) {
+    val origin = YepApprovalActionReceiver.serverOrigin(applicationContext)
+    if (origin == null) {
+      YepLog.w("uploadLogs", "no stored server origin")
+      nativePushBridge?.respond(
+        callbackId,
+        false,
+        null,
+        "Server origin unknown; open a server first",
+      )
+      return
+    }
+
+    Thread {
+      try {
+        val count = YepLog.upload(applicationContext, origin)
+        YepLog.i("uploadLogs", "uploaded=$count origin=$origin")
+        nativePushBridge?.respond(
+          callbackId,
+          true,
+          JSONObject().put("uploaded", count),
+          null,
+        )
+      } catch (error: Throwable) {
+        YepLog.e("uploadLogs", "failed", error)
+        nativePushBridge?.respond(
+          callbackId,
+          false,
+          null,
+          error.message ?: "Log upload failed",
+        )
+      }
+    }.apply { isDaemon = true }.start()
   }
 
   class NativePushBridge(
@@ -309,6 +347,12 @@ class MainActivity : TauriActivity() {
     fun configureSessionWatcher(origin: String) {
       Log.i(TAG, "bridge.configureSessionWatcher: origin=$origin")
       activity.configureSessionWatcher(origin)
+    }
+
+    @JavascriptInterface
+    fun uploadLogs(callbackId: String) {
+      Log.i(TAG, "bridge.uploadLogs: callbackId=$callbackId")
+      activity.uploadNativeLogs(callbackId)
     }
 
     @JavascriptInterface

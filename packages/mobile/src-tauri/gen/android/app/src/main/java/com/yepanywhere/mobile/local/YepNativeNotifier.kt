@@ -33,6 +33,8 @@ object YepNativeNotifier {
     val pendingInputType: String? = null,
     val summary: String? = null,
     val hasUnread: Boolean = false,
+    /** Pending request id; enables Approve/Deny actions on the notification. */
+    val pendingRequestId: String? = null,
   ) {
     val path: String
       get() =
@@ -81,6 +83,12 @@ object YepNativeNotifier {
     }
     val detail = session.summary?.takeIf { it.isNotBlank() }
     val body = if (detail == null) inputLabel else "$inputLabel · $detail"
+    // Approve/Deny only applies to tool approvals with a known request id;
+    // questions need the full option UI in the app.
+    val approvalRequestId =
+      session.pendingRequestId?.takeIf {
+        it.isNotBlank() && session.pendingInputType == "tool-approval"
+      }
     showNotification(
       context = context,
       tag = "session-${session.sessionId}",
@@ -96,8 +104,22 @@ object YepNativeNotifier {
       shortCriticalText = "Input",
       miuiBusiness = "agent_waiting",
       badgeCount = badgeCount,
+      approvalAction = approvalRequestId?.let {
+        ApprovalActionInfo(
+          sessionId = session.sessionId,
+          projectId = session.projectId,
+          requestId = it,
+        )
+      },
     )
   }
+
+  /** Everything needed to reply to a pending approval from a notification. */
+  data class ApprovalActionInfo(
+    val sessionId: String,
+    val projectId: String?,
+    val requestId: String,
+  )
 
   fun showRunning(context: Context, session: SessionNotification) {
     showNotification(
@@ -175,6 +197,34 @@ object YepNativeNotifier {
     )
   }
 
+  /**
+   * Replace a pending-input notification with a tap-to-open fallback after a
+   * failed or unsafe notification-action reply.
+   */
+  fun showApprovalFallback(
+    context: Context,
+    sessionId: String,
+    projectId: String?,
+    message: String,
+  ) {
+    showNotification(
+      context = context,
+      tag = "session-$sessionId",
+      notificationId = NOTIFICATION_ID,
+      channelId = CHANNEL_ID,
+      title = "Approval needs attention",
+      body = message,
+      subText = null,
+      path = sessionPath(projectId, sessionId),
+      autoCancel = true,
+      silent = false,
+      ongoing = false,
+      shortCriticalText = null,
+      miuiBusiness = "agent_waiting",
+      badgeCount = null,
+    )
+  }
+
   fun syncBadge(context: Context, count: Int) {
     YepLauncherBadge.sync(context, count)
   }
@@ -228,11 +278,12 @@ object YepNativeNotifier {
     shortCriticalText: String?,
     miuiBusiness: String,
     badgeCount: Int?,
+    approvalAction: ApprovalActionInfo? = null,
   ) {
     ensureNotificationChannel(context)
 
     if (!canPostNotifications(context)) {
-      Log.w(TAG, "showNotification: notification permission not granted tag=$tag")
+      YepLog.w("showNotification", "notification permission not granted tag=$tag")
       return
     }
 
@@ -288,6 +339,11 @@ object YepNativeNotifier {
       builder.setShortCriticalText(shortCriticalText.take(7))
     }
 
+    if (approvalAction != null) {
+      builder.addAction(approvalActionButton(context, approvalAction, true))
+      builder.addAction(approvalActionButton(context, approvalAction, false))
+    }
+
     val notification = builder.build()
     notification.extras.putString(
       "miui.focus.param",
@@ -306,14 +362,14 @@ object YepNativeNotifier {
 
     try {
       NotificationManagerCompat.from(context).notify(tag, notificationId, notification)
-      Log.i(
-        TAG,
-        "showNotification: posted tag=$tag id=$notificationId ongoing=$ongoing miuiBusiness=$miuiBusiness"
+      YepLog.i(
+        "showNotification",
+        "posted tag=$tag id=$notificationId ongoing=$ongoing miuiBusiness=$miuiBusiness",
       )
     } catch (error: SecurityException) {
-      Log.e(TAG, "showNotification: missing notification permission", error)
+      YepLog.e("showNotification", "missing notification permission", error)
     } catch (error: RuntimeException) {
-      Log.e(TAG, "showNotification: failed ${error.javaClass.simpleName}: ${error.message}", error)
+      YepLog.e("showNotification", "failed", error)
     }
   }
 
@@ -351,6 +407,37 @@ object YepNativeNotifier {
     return JSONObject()
       .put("param_v2", paramV2)
       .toString()
+  }
+
+  private fun approvalActionButton(
+    context: Context,
+    info: ApprovalActionInfo,
+    approve: Boolean,
+  ): Notification.Action {
+    val action = if (approve) {
+      YepApprovalActionReceiver.ACTION_APPROVE
+    } else {
+      YepApprovalActionReceiver.ACTION_DENY
+    }
+    val intent = Intent(context, YepApprovalActionReceiver::class.java).apply {
+      putExtra(YepApprovalActionReceiver.EXTRA_ACTION, action)
+      putExtra(YepApprovalActionReceiver.EXTRA_SESSION_ID, info.sessionId)
+      putExtra(YepApprovalActionReceiver.EXTRA_REQUEST_ID, info.requestId)
+      putExtra(YepApprovalActionReceiver.EXTRA_PROJECT_ID, info.projectId)
+    }
+    val pendingIntent = PendingIntent.getBroadcast(
+      context,
+      // Distinct request codes per session+request+button so approve/deny
+      // and concurrent sessions never collapse into one PendingIntent.
+      "$action:${info.sessionId}:${info.requestId}".hashCode(),
+      intent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+    return Notification.Action.Builder(
+      null,
+      if (approve) "Approve" else "Deny",
+      pendingIntent,
+    ).build()
   }
 
   private fun sessionPath(projectId: String?, sessionId: String): String {

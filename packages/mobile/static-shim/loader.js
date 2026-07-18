@@ -586,7 +586,9 @@
           ? "requestPermission"
           : method === "getToken"
             ? "getToken"
-            : null;
+            : method === "uploadLogs"
+              ? "uploadLogs"
+              : null;
 
     if (!bridgeMethod || typeof bridge[bridgeMethod] !== "function") {
       logNativePush(

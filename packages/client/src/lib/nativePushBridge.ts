@@ -5,6 +5,9 @@ const REQUEST_TIMEOUT_MS: Record<NativePushMethod, number> = {
   status: 8000,
   requestPermission: 30000,
   getToken: 15000,
+  // Uploading a full native ring buffer can take several batches on a slow
+  // link (up to ~1000 entries in 500-entry POSTs).
+  uploadLogs: 60000,
 };
 
 export type NativePushPermissionState =
@@ -22,7 +25,15 @@ export interface NativePushTokenResult {
   token: string;
 }
 
-type NativePushMethod = "status" | "requestPermission" | "getToken";
+export interface NativeLogUploadResult {
+  uploaded: number;
+}
+
+type NativePushMethod =
+  | "status"
+  | "requestPermission"
+  | "getToken"
+  | "uploadLogs";
 
 interface NativePushResponse<T> {
   id: string;
@@ -60,6 +71,11 @@ export async function requestNativePushPermission(): Promise<NativePushStatus> {
 
 export async function getNativePushToken(): Promise<NativePushTokenResult> {
   return invokeNativePush<NativePushTokenResult>("getToken");
+}
+
+/** Upload the Android shell's native diagnostic log buffer to the server. */
+export async function uploadNativeLogs(): Promise<NativeLogUploadResult> {
+  return invokeNativePush<NativeLogUploadResult>("uploadLogs");
 }
 
 function invokeNativePush<T>(method: NativePushMethod): Promise<T> {
