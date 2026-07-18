@@ -24,6 +24,7 @@ const rootDir = join(__dirname, "..");
 const DEFAULT_PORT = 8022;
 const DEFAULT_BASE_PATH = "/yep";
 const DEFAULT_CODEX_BRIDGE_PORT = 4510;
+const DEFAULT_OPENCODE_BRIDGE_PORT = 4520;
 
 exitIfUnsafeHome({ entrypoint: "pnpm dev:8022" });
 
@@ -145,7 +146,16 @@ function getDevSupervisorPidsForServerPids(serverPids) {
   return Array.from(supervisors);
 }
 
-function getRepoClientVitePids() {
+/**
+ * Vite processes serving this repo's client on OUR vite port only. An
+ * unrelated `pnpm dev` (e.g. the default 3402 instance) must survive an 8022
+ * hot-reload start, so ownership is decided by the listening port, not just
+ * the command line.
+ */
+function getRepoClientVitePids(vitePort) {
+  const listenPids = new Set(getListenPids(vitePort));
+  if (listenPids.size === 0) return [];
+
   const result = spawnSync("ps", ["-axo", "pid=,command="], {
     encoding: "utf8",
   });
@@ -158,6 +168,7 @@ function getRepoClientVitePids() {
 
     const [, pid, command] = match;
     if (
+      listenPids.has(pid) &&
       command.includes(`${rootDir}/packages/client`) &&
       command.includes("vite")
     ) {
@@ -520,11 +531,20 @@ async function main() {
     process.env.YEP_CODEX_BRIDGE_CONTROL_URL ??
     process.env.CODEX_BRIDGE_CONTROL_URL ??
     `http://127.0.0.1:${bridgePort}`;
+  const opencodeBridgePort = parsePort(
+    process.env.YEP_OPENCODE_BRIDGE_PORT ?? process.env.OPENCODE_BRIDGE_PORT,
+    DEFAULT_OPENCODE_BRIDGE_PORT,
+  );
+  const opencodeBridgeControlUrl =
+    process.env.YEP_OPENCODE_BRIDGE_CONTROL_URL ??
+    process.env.OPENCODE_BRIDGE_CONTROL_URL ??
+    `http://127.0.0.1:${opencodeBridgePort}`;
   const serverBaseUrl = `http://127.0.0.1:${port}${basePath}`;
   let releaseCutoverLock = null;
 
   let serverPids = getListenPids(port);
   const bridgePids = getListenPids(bridgePort);
+  const opencodeBridgePids = getListenPids(opencodeBridgePort);
 
   console.log("Yep Anywhere 8022 hot-reload preflight");
   console.log(`  server: ${serverBaseUrl}`);
@@ -533,10 +553,12 @@ async function main() {
     `  maint:  ${maintenancePort === 0 ? "disabled" : `http://127.0.0.1:${maintenancePort}`}`,
   );
   console.log(`  codex bridge: ${bridgeControlUrl}`);
+  console.log(`  opencode bridge: ${opencodeBridgeControlUrl}`);
   console.log(`  agent runtime: ${runtimeControlUrl}`);
   printPids(`  ${port} listener`, serverPids);
   printPids(`  ${runtimePort} listener`, getListenPids(runtimePort));
   printPids(`  ${bridgePort} listener`, bridgePids);
+  printPids(`  ${opencodeBridgePort} listener`, opencodeBridgePids);
 
   const runtimeStatus = await getRuntimeStatus(
     runtimeControlUrl,
@@ -553,6 +575,14 @@ async function main() {
       `${bridgePort} is owned by the ${port} web/API process. Refusing to start hot reload because replacing ${port} would interrupt existing codex --remote sessions.`,
     );
   }
+  if (
+    opencodeBridgePids.length > 0 &&
+    setsOverlap(serverPids, opencodeBridgePids)
+  ) {
+    throw new Error(
+      `${opencodeBridgePort} is owned by the ${port} web/API process. Refusing to start hot reload because replacing ${port} would interrupt existing OpenCode bridge sessions.`,
+    );
+  }
 
   const bridgeStatus = await getBridgeStatus(bridgeControlUrl);
   if (bridgeStatus) {
@@ -567,6 +597,25 @@ async function main() {
     console.warn(`  bridge status: ${bridgeControlUrl}/status did not answer`);
   } else {
     console.warn(`  bridge status: no listener on ${bridgePort}`);
+  }
+
+  const opencodeBridgeStatus = await getBridgeStatus(opencodeBridgeControlUrl);
+  if (opencodeBridgeStatus) {
+    console.log(
+      `  opencode bridge status: listening=${String(
+        opencodeBridgeStatus.listening,
+      )}, sessions=${opencodeBridgeStatus.sessionCount ?? "unknown"}, pending=${
+        opencodeBridgeStatus.pendingInputCount ?? "unknown"
+      }`,
+    );
+  } else if (opencodeBridgePids.length > 0) {
+    console.warn(
+      `  opencode bridge status: ${opencodeBridgeControlUrl}/status did not answer`,
+    );
+  } else {
+    console.warn(
+      `  opencode bridge status: no listener on ${opencodeBridgePort} (OpenCode sessions will be unavailable)`,
+    );
   }
 
   if (options.check) {
@@ -630,7 +679,7 @@ async function main() {
     }
   }
 
-  await stopRepoClientVitePids(vitePort, getRepoClientVitePids());
+  await stopRepoClientVitePids(vitePort, getRepoClientVitePids(vitePort));
 
   const env = {
     ...process.env,
@@ -643,6 +692,8 @@ async function main() {
     YEP_CODEX_BRIDGE_MODE: "external",
     YEP_CODEX_BRIDGE_CONTROL_URL: bridgeControlUrl,
     YEP_CODEX_BRIDGE_PORT: String(bridgePort),
+    YEP_OPENCODE_BRIDGE_CONTROL_URL: opencodeBridgeControlUrl,
+    YEP_OPENCODE_BRIDGE_PORT: String(opencodeBridgePort),
     YEP_RUNTIME_MODE: "external",
     YEP_RUNTIME_PORT: String(runtimePort),
     YEP_RUNTIME_CONTROL_URL: runtimeControlUrl,

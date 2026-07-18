@@ -267,6 +267,10 @@ export abstract class BridgeHttpClient<
         ...init,
         headers: {
           "content-type": "application/json",
+          // Marks main-server traffic so sidecars can avoid proxying failed
+          // calls back to the main server (which would loop through the
+          // bridge fallback in /api/sessions/:id/input).
+          "x-yep-anywhere": "true",
           ...init?.headers,
         },
       });

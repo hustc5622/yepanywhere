@@ -61,6 +61,7 @@ export class OpenCodeBridgeHttpClient
         activity: view.session.activity,
         pendingInputType: view.session.pendingInputType,
         active: isLiveOpenCodeBridgeSessionView(view),
+        lastTurnStatus: view.session.lastTurnStatus,
         lastErrorMessage: view.session.lastErrorMessage,
         retryStatus: view.session.retryStatus,
       },

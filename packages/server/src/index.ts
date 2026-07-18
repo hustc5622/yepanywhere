@@ -65,6 +65,7 @@ import { HttpRuntimeController } from "./runtime/HttpRuntimeController.js";
 import type { RuntimeController } from "./runtime/types.js";
 import { detectCodexCli } from "./sdk/cli-detection.js";
 import { initMessageLogger } from "./sdk/messageLogger.js";
+import { opencodeProvider } from "./sdk/providers/index.js";
 import {
   BrowserProfileService,
   ConnectedBrowsersService,
@@ -122,6 +123,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const config = loadConfig();
+opencodeProvider.configureBridgeControlUrl(config.opencodeBridgeControlUrl);
 
 // Track services for graceful shutdown (set after createApp)
 let runtimeControllerForShutdown: RuntimeController | null = null;

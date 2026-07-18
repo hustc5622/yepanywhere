@@ -60,10 +60,27 @@ export async function respondToAnyBridgeInput(
   answers?: UserQuestionAnswers,
 ): Promise<boolean> {
   for (const controller of controllers) {
-    if (
-      await controller?.respondToInput(sessionId, requestId, response, answers)
-    ) {
-      return true;
+    try {
+      if (
+        await controller?.respondToInput(
+          sessionId,
+          requestId,
+          response,
+          answers,
+        )
+      ) {
+        return true;
+      }
+    } catch (error) {
+      // One bridge failing (e.g. an external OpenCode decision whose
+      // confirmation timed out but remains queued for retry) must not 500
+      // the route or mask the other bridge. The caller treats false as
+      // "not accepted here"; clients re-check pending state.
+      console.warn(
+        `[bridge] respondToInput failed for session ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
   return false;

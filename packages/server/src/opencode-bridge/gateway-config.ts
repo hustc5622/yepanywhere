@@ -10,7 +10,7 @@ export interface OpenCodeGatewayConfig {
   subModule?: string;
 }
 
-interface ManagedOpenCodeGatewayOverlayOptions {
+export interface ManagedOpenCodeGatewayOverlayOptions {
   openAICompatibleBaseURL?: string;
   sessionConfig: OpenCodeSessionConfig;
 }
@@ -257,7 +257,7 @@ function buildManagedModelConfig(
 }
 
 /** Build the exact provider/model catalog entry consumed by one session. */
-function buildOpenCodeGatewayOverlay(
+export function buildManagedOpenCodeConfig(
   config: OpenCodeGatewayConfig,
   options: ManagedOpenCodeGatewayOverlayOptions,
 ): Record<string, unknown> {
@@ -337,7 +337,7 @@ export function buildManagedOpenCodeEnv(
   );
   managedEnv[OPENCODE_GATEWAY_API_KEY_ENV] = config.apiKey;
 
-  const overlay = buildOpenCodeGatewayOverlay(config, options);
+  const overlay = buildManagedOpenCodeConfig(config, options);
   if (!managedEnv.OPENCODE_CONFIG_CONTENT) {
     managedEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify(overlay);
     return managedEnv;

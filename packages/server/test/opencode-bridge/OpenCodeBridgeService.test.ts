@@ -33,6 +33,10 @@ function listen(server: ReturnType<typeof createServer>): Promise<string> {
   });
 }
 
+function requestUrl(req: { url?: string }): URL {
+  return new URL(req.url ?? "/", "http://127.0.0.1");
+}
+
 async function getFreePort(): Promise<number> {
   const server = createServer();
   return new Promise((resolve, reject) => {
@@ -98,7 +102,10 @@ describe("OpenCodeBridgeService", () => {
   it("normalizes OpenCode question events and replies with OpenCode answers", async () => {
     let replyBody: unknown = null;
     const opencodeServer = createServer((req, res) => {
-      if (req.method === "POST" && req.url === "/question/question-1/reply") {
+      if (
+        req.method === "POST" &&
+        requestUrl(req).pathname === "/question/question-1/reply"
+      ) {
         const chunks: Buffer[] = [];
         req.on("data", (chunk) => {
           chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -182,7 +189,7 @@ describe("OpenCodeBridgeService", () => {
     const opencodeServer = createServer((req, res) => {
       if (
         req.method === "POST" &&
-        req.url === "/question/question-deny/reject"
+        requestUrl(req).pathname === "/question/question-deny/reject"
       ) {
         const chunks: Buffer[] = [];
         req.on("data", (chunk) => {
@@ -231,6 +238,11 @@ describe("OpenCodeBridgeService", () => {
   it("routes v2 permission and question replies to session-scoped APIs", async () => {
     const requests: Array<{ url: string; body: unknown }> = [];
     const opencodeServer = createServer((req, res) => {
+      if (req.method === "GET") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+        return;
+      }
       const chunks: Buffer[] = [];
       req.on("data", (chunk) => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -238,7 +250,7 @@ describe("OpenCodeBridgeService", () => {
       req.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf-8");
         requests.push({
-          url: req.url ?? "",
+          url: requestUrl(req).pathname,
           body: text ? JSON.parse(text) : undefined,
         });
         res.writeHead(204);
@@ -310,11 +322,11 @@ describe("OpenCodeBridgeService", () => {
   it("keeps a permission request waiting while OpenCode still reports the turn as busy", async () => {
     const opencodeServer = createServer((req, res) => {
       res.setHeader("content-type", "application/json");
-      if (req.url === "/session/status") {
+      if (requestUrl(req).pathname === "/session/status") {
         res.end(JSON.stringify({ ses_pending: { type: "busy" } }));
         return;
       }
-      if (req.url === "/question") {
+      if (requestUrl(req).pathname === "/question") {
         res.end("[]");
         return;
       }
@@ -383,7 +395,10 @@ describe("OpenCodeBridgeService", () => {
       releaseResponse = resolve;
     });
     const opencodeServer = createServer(async (req, res) => {
-      if (req.method === "POST" && req.url === "/question/question-old/reply") {
+      if (
+        req.method === "POST" &&
+        requestUrl(req).pathname === "/question/question-old/reply"
+      ) {
         requestCount += 1;
         req.resume();
         markRequestStarted();
@@ -489,7 +504,7 @@ describe("OpenCodeBridgeService", () => {
     const opencodeServer = createServer((req, res) => {
       if (
         req.method === "POST" &&
-        req.url === "/question/question-retry/reply"
+        requestUrl(req).pathname === "/question/question-retry/reply"
       ) {
         requestCount += 1;
         req.resume();
@@ -587,11 +602,19 @@ describe("OpenCodeBridgeService", () => {
       sessionId: "ses_2",
       source: "opencode-bridge",
     });
+    expect(bridge.listSessions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "ses_2",
+          projectPath: "/tmp/project",
+        }),
+      ]),
+    );
   });
 
   it("syncs existing OpenCode questions from the live question endpoint", async () => {
     const opencodeServer = createServer((req, res) => {
-      if (req.method === "GET" && req.url === "/question") {
+      if (req.method === "GET" && requestUrl(req).pathname === "/question") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
           JSON.stringify([
@@ -650,7 +673,276 @@ describe("OpenCodeBridgeService", () => {
     });
   });
 
-  it("updates activity from OpenCode session status events", async () => {
+  it("reconciles pending questions independently for each OpenCode directory", async () => {
+    const requests: Array<{ directory: string | null; header?: string }> = [];
+    const opencodeServer = createServer((req, res) => {
+      const url = requestUrl(req);
+      if (req.method === "GET" && url.pathname === "/question") {
+        const directory = url.searchParams.get("directory");
+        requests.push({
+          directory,
+          header: req.headers["x-opencode-directory"] as string | undefined,
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify(
+            directory === "/repo/a"
+              ? [
+                  {
+                    id: "que_a",
+                    sessionID: "ses_a",
+                    questions: [{ question: "A?", options: [] }],
+                  },
+                ]
+              : [],
+          ),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (
+          event: unknown,
+          origin?: { directory?: string },
+        ) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent(
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_a",
+          sessionID: "ses_a",
+          questions: [{ question: "A?", options: [] }],
+        },
+      },
+      { directory: "/repo/a" },
+    );
+    handleEvent(
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_b",
+          sessionID: "ses_b",
+          questions: [{ question: "B?", options: [] }],
+        },
+      },
+      { directory: "/repo/b" },
+    );
+
+    await (
+      bridge as unknown as {
+        syncOpenCodePendingQuestions: () => Promise<void>;
+      }
+    ).syncOpenCodePendingQuestions();
+
+    expect(bridge.getPendingInputRequest("ses_a")?.id).toBe("que_a");
+    expect(bridge.getPendingInputRequest("ses_b")).toBeNull();
+    expect(requests).toEqual(
+      expect.arrayContaining([
+        { directory: "/repo/a", header: "/repo/a" },
+        { directory: "/repo/b", header: "/repo/b" },
+      ]),
+    );
+  });
+
+  it("reconciles stale permissions against the live permission endpoint", async () => {
+    const opencodeServer = createServer((req, res) => {
+      if (req.method === "GET" && requestUrl(req).pathname === "/permission") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify([
+            {
+              id: "perm_live",
+              sessionID: "ses_perm_live",
+              permission: "bash",
+              patterns: ["npm *"],
+            },
+          ]),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (
+          event: unknown,
+          origin?: { instanceId: string; directory?: string },
+        ) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    // Stale permission: answered in the TUI while our SSE stream was down.
+    handleEvent({
+      type: "permission.asked",
+      properties: {
+        sessionID: "ses_perm_stale",
+        id: "perm_stale",
+        permission: "edit",
+      },
+    });
+    // External-instance permission: invisible to the managed snapshot, must survive.
+    handleEvent(
+      {
+        type: "permission.asked",
+        properties: {
+          sessionID: "ses_perm_ext",
+          id: "perm_ext",
+          permission: "bash",
+        },
+      },
+      { instanceId: "ext_tui_1", directory: "/tmp/ext" },
+    );
+    expect(bridge.getPendingInputRequest("ses_perm_stale")).not.toBeNull();
+    expect(bridge.getPendingInputRequest("ses_perm_ext")).not.toBeNull();
+
+    await (
+      bridge as unknown as {
+        syncOpenCodePendingPermissions: () => Promise<void>;
+      }
+    ).syncOpenCodePendingPermissions();
+
+    // Live permission discovered from the snapshot.
+    expect(bridge.getPendingInputRequest("ses_perm_live")).toMatchObject({
+      id: "perm_live",
+      type: "tool-approval",
+    });
+    // Stale managed permission cleared; session no longer waiting.
+    expect(bridge.getPendingInputRequest("ses_perm_stale")).toBeNull();
+    // External-instance permission untouched.
+    expect(bridge.getPendingInputRequest("ses_perm_ext")).not.toBeNull();
+  });
+
+  it("treats a missing /permission route as nothing to reconcile", async () => {
+    const opencodeServer = createServer((_req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "permission.asked",
+      properties: {
+        sessionID: "ses_old_server",
+        id: "perm_1",
+        permission: "bash",
+      },
+    });
+
+    // Older OpenCode servers 404 on /permission; the pending must survive.
+    await (
+      bridge as unknown as {
+        syncOpenCodePendingPermissions: () => Promise<void>;
+      }
+    ).syncOpenCodePendingPermissions();
+    expect(bridge.getPendingInputRequest("ses_old_server")).not.toBeNull();
+  });
+
+  it("does not sweep external-instance questions absent from the managed snapshot", async () => {
+    // Managed server reports no pending questions.
+    const opencodeServer = createServer((req, res) => {
+      if (req.method === "GET" && requestUrl(req).pathname === "/question") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify([]));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (
+          event: unknown,
+          origin?: { instanceId: string; directory?: string },
+        ) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    // Question from an external TUI (forwarder plugin), invisible to the
+    // managed server's /question endpoint.
+    handleEvent(
+      {
+        type: "question.asked",
+        properties: {
+          sessionID: "ses_ext",
+          id: "que_ext",
+          questions: [
+            {
+              question: "External question?",
+              options: [{ label: "Yes" }, { label: "No" }],
+            },
+          ],
+        },
+      },
+      { instanceId: "ext_tui_1", directory: "/tmp/ext" },
+    );
+    expect(bridge.getPendingInputRequest("ses_ext")).not.toBeNull();
+
+    // Managed-server question that IS stale and must still be swept.
+    handleEvent({
+      type: "question.asked",
+      properties: {
+        sessionID: "ses_managed",
+        id: "que_stale",
+        questions: [{ question: "Stale?", options: [{ label: "Ok" }] }],
+      },
+    });
+    expect(bridge.getPendingInputRequest("ses_managed")).not.toBeNull();
+
+    await (
+      bridge as unknown as {
+        syncOpenCodePendingQuestions: () => Promise<void>;
+      }
+    ).syncOpenCodePendingQuestions();
+
+    // External question survives; managed stale question is cleared.
+    expect(bridge.getPendingInputRequest("ses_ext")).not.toBeNull();
+    expect(bridge.getPendingInputRequest("ses_managed")).toBeNull();
+  });
+
+  it("keeps an isolated idle status as an active completion candidate", () => {
     const bridge = new OpenCodeBridgeService({
       enabled: false,
       host: "127.0.0.1",
@@ -683,7 +975,105 @@ describe("OpenCodeBridgeService", () => {
         status: { type: "idle" },
       },
     });
-    expect(bridge.isSessionActive("ses_status")).toBe(false);
+    expect(bridge.isSessionActive("ses_status")).toBe(true);
+    expect(bridge.getSessionView("ses_status")).toMatchObject({
+      activity: "in-turn",
+      session: { activity: "in-turn" },
+    });
+  });
+
+  it("suppresses idle while directory-scoped status is busy, then confirms stable idle", async () => {
+    let busy = true;
+    const statusRequests: Array<{
+      directory: string | null;
+      header?: string;
+    }> = [];
+    const opencodeServer = createServer((req, res) => {
+      const url = requestUrl(req);
+      if (req.method === "GET" && url.pathname === "/session/status") {
+        statusRequests.push({
+          directory: url.searchParams.get("directory"),
+          header: req.headers["x-opencode-directory"] as string | undefined,
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(busy ? { ses_confirm: { type: "busy" } } : {}));
+        return;
+      }
+      if (
+        req.method === "GET" &&
+        url.pathname === "/session/ses_confirm/message"
+      ) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("[]");
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+      lifecycle: { quietWindowMs: 0 },
+    });
+    const internals = bridge as unknown as {
+      handleOpenCodeEvent: (
+        event: unknown,
+        origin?: { directory?: string },
+      ) => void;
+      reconcileOpenCodeLifecycle: (sessionId: string) => Promise<void>;
+    };
+    const origin = { directory: "/repo/confirm" };
+
+    internals.handleOpenCodeEvent(
+      {
+        type: "session.status",
+        properties: {
+          sessionID: "ses_confirm",
+          status: { type: "busy" },
+        },
+      },
+      origin,
+    );
+    internals.handleOpenCodeEvent(
+      {
+        type: "session.status",
+        properties: {
+          sessionID: "ses_confirm",
+          status: { type: "idle" },
+        },
+      },
+      origin,
+    );
+    await internals.reconcileOpenCodeLifecycle("ses_confirm");
+    expect(bridge.isSessionActive("ses_confirm")).toBe(true);
+
+    busy = false;
+    internals.handleOpenCodeEvent(
+      {
+        type: "session.status",
+        properties: {
+          sessionID: "ses_confirm",
+          status: { type: "idle" },
+        },
+      },
+      origin,
+    );
+    await internals.reconcileOpenCodeLifecycle("ses_confirm");
+
+    expect(bridge.isSessionActive("ses_confirm")).toBe(false);
+    expect(bridge.listSessions()[0]).toMatchObject({
+      id: "ses_confirm",
+      activity: "idle",
+      lastTurnStatus: "completed",
+    });
+    expect(statusRequests).toEqual([
+      { directory: "/repo/confirm", header: "/repo/confirm" },
+      { directory: "/repo/confirm", header: "/repo/confirm" },
+    ]);
   });
 
   it("preserves upstream timestamps across repeated runtime status updates", () => {
@@ -836,12 +1226,15 @@ describe("OpenCodeBridgeService", () => {
 
   it("reconciles cached sessions with the OpenCode active status endpoint", async () => {
     const opencodeServer = createServer((req, res) => {
-      if (req.method === "GET" && req.url === "/session/status") {
+      if (
+        req.method === "GET" &&
+        requestUrl(req).pathname === "/session/status"
+      ) {
         res.writeHead(200, { "content-type": "application/json" });
         res.end("{}");
         return;
       }
-      if (req.method === "GET" && req.url === "/question") {
+      if (req.method === "GET" && requestUrl(req).pathname === "/question") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end("[]");
         return;
@@ -856,6 +1249,7 @@ describe("OpenCodeBridgeService", () => {
       port: 0,
       serverUrl: "http://127.0.0.1:3400",
       opencodeServerUrl,
+      lifecycle: { quietWindowMs: 0 },
     });
 
     (
@@ -869,6 +1263,12 @@ describe("OpenCodeBridgeService", () => {
         status: { type: "running" },
       },
     });
+    expect(bridge.isSessionActive("ses_stale")).toBe(true);
+
+    const internals = bridge as unknown as {
+      syncOpenCodeRuntimeState: () => Promise<void>;
+    };
+    await internals.syncOpenCodeRuntimeState();
     expect(bridge.isSessionActive("ses_stale")).toBe(true);
 
     await (
@@ -1128,7 +1528,7 @@ describe("OpenCodeBridgeService", () => {
       llmApiKey: "bridge-key",
       llmApiBase: "https://api.ohmyrouter.com/v1",
       llmSubModule: "claude-code-internal",
-      managedApiKey: null,
+      managedApiKey: "bridge-key",
     });
 
     await bridge.shutdown();
@@ -1256,6 +1656,202 @@ describe("OpenCodeBridgeService", () => {
     expect(bridge.isSessionActive("ses_err")).toBe(false);
     const session = bridge.listSessions().find((item) => item.id === "ses_err");
     expect(session?.lastErrorMessage).toBe("model exploded");
+    expect(session?.lastTurnStatus).toBe("failed");
+  });
+
+  it("records interrupted instead of failed for user-initiated aborts", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_abort", status: { type: "busy" } },
+    });
+    handleEvent({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_abort",
+        error: { name: "MessageAbortedError", data: { message: "Stopped" } },
+      },
+    });
+
+    const session = bridge
+      .listSessions()
+      .find((item) => item.id === "ses_abort");
+    expect(session?.lastTurnStatus).toBe("interrupted");
+    // Aborts are not failures; the client renders lastErrorMessage as a
+    // failed badge, so it must stay clear.
+    expect(session?.lastErrorMessage).toBeUndefined();
+  });
+
+  it("records a completed turn only after idle reconciliation", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+      lifecycle: { quietWindowMs: 0 },
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_done", status: { type: "running" } },
+    });
+    const busy = bridge.listSessions().find((item) => item.id === "ses_done");
+    expect(busy?.lastTurnStatus).toBeUndefined();
+
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_done", status: { type: "idle" } },
+    });
+    expect(bridge.isSessionActive("ses_done")).toBe(true);
+    (
+      bridge as unknown as {
+        dispatchOpenCodeLifecycle: (
+          sessionId: string,
+          action: {
+            type: "status-reconciled";
+            now: number;
+            status: { type: "idle" };
+            quietWindowMs: number;
+          },
+        ) => void;
+      }
+    ).dispatchOpenCodeLifecycle("ses_done", {
+      type: "status-reconciled",
+      now: Date.now(),
+      status: { type: "idle" },
+      quietWindowMs: 0,
+    });
+    const idle = bridge.listSessions().find((item) => item.id === "ses_done");
+    expect(idle?.lastTurnStatus).toBe("completed");
+
+    // A new turn clears the previous terminal status.
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_done", status: { type: "running" } },
+    });
+    const again = bridge.listSessions().find((item) => item.id === "ses_done");
+    expect(again?.lastTurnStatus).toBeUndefined();
+  });
+
+  it("does not mark idle-to-idle status polls as completed turns", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.created",
+      properties: { sessionID: "ses_quiet", info: { title: "Quiet" } },
+    });
+    handleEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_quiet", status: { type: "idle" } },
+    });
+    const session = bridge
+      .listSessions()
+      .find((item) => item.id === "ses_quiet");
+    expect(session?.lastTurnStatus).toBeUndefined();
+  });
+
+  it("persists sessions across bridge restarts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yep-opencode-bridge-state-"));
+    tempDirs.push(dir);
+    const statePath = join(dir, "sessions.json");
+
+    const first = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+      statePath,
+    });
+    const handleEvent = (
+      first as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(first);
+
+    handleEvent({
+      type: "session.created",
+      properties: {
+        sessionID: "ses_persist",
+        info: { title: "Durable session" },
+      },
+    });
+    // Attribute a real cwd via an external-instance origin; guessed cwds
+    // (bridge process cwd) are intentionally not persisted.
+    (
+      first as unknown as {
+        updateSessionState: (
+          sessionId: string,
+          state: Record<string, unknown>,
+          origin?: { instanceId: string; directory?: string },
+        ) => void;
+      }
+    ).updateSessionState(
+      "ses_persist",
+      { activity: "idle", active: false },
+      { instanceId: "ext_1", directory: dir },
+    );
+    handleEvent({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_persist",
+        error: { name: "ProviderError", data: { message: "boom" } },
+      },
+    });
+    await first.shutdown();
+
+    const second = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: await getFreePort(),
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+      statePath,
+    });
+    await second.start();
+    try {
+      const restored = second
+        .listSessions()
+        .find((item) => item.id === "ses_persist");
+      expect(restored).toBeDefined();
+      expect(restored?.title).toBe("Durable session");
+      expect(restored?.lastErrorMessage).toBe("boom");
+      expect(restored?.lastTurnStatus).toBe("failed");
+      // Restored sessions come back idle with no live runtime state.
+      expect(restored?.active).toBe(false);
+      expect(second.isSessionActive("ses_persist")).toBe(false);
+    } finally {
+      await second.shutdown();
+    }
   });
 
   it("removes sessions on session.deleted", () => {

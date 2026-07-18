@@ -1,11 +1,14 @@
 /**
- * OpenCode Provider implementation using `opencode serve`.
+ * OpenCode Provider implementation using the 4520-managed OpenCode server,
+ * with a dedicated `opencode serve` fallback when the bridge is unavailable.
  *
  * This provider enables using OpenCode as an agent backend.
- * It spawns a per-session OpenCode server and communicates via HTTP/SSE.
+ * It communicates with OpenCode via HTTP/SSE.
  *
  * Architecture:
- * - Each session gets its own `opencode serve` process on a unique port
+ * - Yep-created sessions prefer the same shared server used by `of`
+ *   (`opencode attach` through the 4520 bridge)
+ * - A per-session `opencode serve` process remains the compatibility fallback
  * - Messages are started via HTTP POST to /session/:id/prompt_async
  * - Responses are streamed via SSE from /event
  * - Server is killed when session is aborted or times out
@@ -36,6 +39,7 @@ import {
 } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
 import {
+  buildManagedOpenCodeConfig,
   buildManagedOpenCodeEnv,
   buildUserConfiguredOpenCodeEnv,
   fetchOpenCodeGatewayModels,
@@ -43,6 +47,21 @@ import {
   resolveOpenCodeGatewayConfig,
   resolveOpenCodeOpenAICompatibleBaseURL,
 } from "../../opencode-bridge/gateway-config.js";
+import {
+  OPENCODE_ACTIVE_RECONCILE_INTERVAL_MS,
+  OPENCODE_IDLE_QUIET_WINDOW_MS,
+  OPENCODE_STATUS_FAILURE_GRACE_MS,
+  createOpenCodeLifecycleState,
+  isOpenCodeToolPartPending,
+  parseOpenCodeUpstreamStatus,
+  readOpenCodeAssistantTerminalEvidence,
+  readOpenCodeSessionStatus,
+  reduceOpenCodeLifecycle,
+} from "../../opencode-lifecycle/index.js";
+import type {
+  OpenCodeLifecycleAction,
+  OpenCodeLifecycleState,
+} from "../../opencode-lifecycle/index.js";
 import { getOpenCodeAttachmentLabel } from "../../opencode/attachments.js";
 import {
   type OpenCodeQuestion,
@@ -75,6 +94,14 @@ export interface OpenCodeProviderConfig {
   timeout?: number;
   /** Base port to start from (auto-selects if not specified) */
   basePort?: number;
+  /** 4520 bridge control URL. Null disables shared-server discovery. */
+  bridgeControlUrl?: string | null;
+  /** Injectable lifecycle timing knobs used by focused tests. */
+  lifecycle?: {
+    quietWindowMs?: number;
+    reconcileIntervalMs?: number;
+    statusFailureGraceMs?: number;
+  };
 }
 
 type OpenCodePermissionAction = "allow" | "ask" | "deny";
@@ -143,6 +170,9 @@ interface OpenCodeRuntimeRef {
   currentModel?: string | null;
   currentVariant?: string;
   cwd?: string;
+  sharedServer?: boolean;
+  alive?: boolean;
+  sessionId?: string;
 }
 
 interface OpenCodeConfigProvidersResponse {
@@ -159,6 +189,21 @@ interface OpenCodeConfigProvidersResponse {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function openCodeRuntimeEventSessionId(
+  event: OpenCodeRuntimeEvent,
+): string | undefined {
+  const rawProperties = (event as unknown as { properties?: unknown })
+    .properties;
+  const properties = isRecord(rawProperties) ? rawProperties : undefined;
+  if (typeof properties?.sessionID === "string") {
+    return properties.sessionID;
+  }
+  const info = isRecord(properties?.info) ? properties.info : undefined;
+  if (typeof info?.sessionID === "string") return info.sessionID;
+  const part = isRecord(properties?.part) ? properties.part : undefined;
+  return typeof part?.sessionID === "string" ? part.sessionID : undefined;
 }
 
 function buildOpenCodeQuestionAnswersFromUpdatedInput(
@@ -323,7 +368,6 @@ interface OpenCodeEmissionState {
   latestCost?: number;
   latestModel?: string;
   latestFinish?: string;
-  emittedUsageResult?: boolean;
 }
 
 type OpenCodeRuntimeEvent =
@@ -337,7 +381,9 @@ type OpenCodeRuntimeEvent =
 /**
  * OpenCode Provider implementation.
  *
- * Uses `opencode serve` to run a per-session server, communicating via HTTP/SSE.
+ * Prefers the 4520 bridge's shared server and falls back to a per-session
+ * `opencode serve` process, communicating with either via the same HTTP/SSE
+ * protocol.
  */
 export class OpenCodeProvider implements AgentProvider {
   readonly name = "opencode" as const;
@@ -348,6 +394,10 @@ export class OpenCodeProvider implements AgentProvider {
 
   private readonly opencodePath?: string;
   private readonly timeout: number;
+  private bridgeControlUrl?: string;
+  private readonly lifecycleQuietWindowMs: number;
+  private readonly lifecycleReconcileIntervalMs: number;
+  private readonly lifecycleStatusFailureGraceMs: number;
   private gatewayModelCache?: {
     cacheKey: string;
     expiresAt: number;
@@ -357,6 +407,20 @@ export class OpenCodeProvider implements AgentProvider {
   constructor(config: OpenCodeProviderConfig = {}) {
     this.opencodePath = config.opencodePath;
     this.timeout = config.timeout ?? 300000; // 5 minutes default
+    this.bridgeControlUrl = config.bridgeControlUrl?.replace(/\/+$/, "");
+    this.lifecycleQuietWindowMs =
+      config.lifecycle?.quietWindowMs ?? OPENCODE_IDLE_QUIET_WINDOW_MS;
+    this.lifecycleReconcileIntervalMs =
+      config.lifecycle?.reconcileIntervalMs ??
+      OPENCODE_ACTIVE_RECONCILE_INTERVAL_MS;
+    this.lifecycleStatusFailureGraceMs =
+      config.lifecycle?.statusFailureGraceMs ??
+      OPENCODE_STATUS_FAILURE_GRACE_MS;
+  }
+
+  /** Configure the production singleton after the server config is loaded. */
+  configureBridgeControlUrl(value: string | null | undefined): void {
+    this.bridgeControlUrl = value?.replace(/\/+$/, "");
   }
 
   /**
@@ -618,6 +682,7 @@ export class OpenCodeProvider implements AgentProvider {
         return pidRef.value;
       },
       isProcessAlive: () => {
+        if (runtimeRef.sharedServer) return runtimeRef.alive === true;
         const child = processRef.value;
         return child
           ? child.exitCode === null && child.signalCode === null
@@ -651,8 +716,8 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   /**
-   * Main session loop.
-   * Spawns an OpenCode server and manages HTTP/SSE communication.
+   * Main session loop. Resolves the bridge-managed shared server (the same
+   * server used by `of`) and falls back to a dedicated OpenCode server.
    */
   private async *runSession(
     cwd: string,
@@ -664,9 +729,10 @@ export class OpenCodeProvider implements AgentProvider {
     runtimeRef: OpenCodeRuntimeRef,
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
-    const opencodePath = await this.findOpenCodePath();
+    const sharedBaseUrl = await this.resolveBridgeManagedServer();
+    const opencodePath = sharedBaseUrl ? null : await this.findOpenCodePath();
 
-    if (!opencodePath) {
+    if (!sharedBaseUrl && !opencodePath) {
       yield {
         type: "error",
         error: "OpenCode CLI not found",
@@ -687,57 +753,72 @@ export class OpenCodeProvider implements AgentProvider {
       return;
     }
 
-    // Ask the OS for a free port instead of reusing a counter that resets when
-    // Yep restarts. A stale OpenCode server can otherwise impersonate the
-    // freshly spawned child on the old counter port.
-    let port: number;
-    try {
-      port = await this.getAvailablePort();
-    } catch (error) {
-      yield {
-        type: "error",
-        error: `Failed to allocate an OpenCode server port: ${error instanceof Error ? error.message : String(error)}`,
-      } as SDKMessage;
-      return;
+    let port: number | undefined;
+    let serverProcess: ChildProcess | undefined;
+    let baseUrl = sharedBaseUrl;
+    if (!baseUrl) {
+      // A stale dedicated server must not impersonate the freshly spawned
+      // child, so let the OS reserve a free port instead of reusing a counter.
+      try {
+        port = await this.getAvailablePort();
+      } catch (error) {
+        yield {
+          type: "error",
+          error: `Failed to allocate an OpenCode server port: ${error instanceof Error ? error.message : String(error)}`,
+        } as SDKMessage;
+        return;
+      }
+      baseUrl = `http://127.0.0.1:${port}`;
     }
-    const baseUrl = `http://127.0.0.1:${port}`;
     runtimeRef.baseUrl = baseUrl;
     runtimeRef.cwd = cwd;
+    runtimeRef.sharedServer = Boolean(sharedBaseUrl);
 
-    // Start the OpenCode server
-    let serverProcess: ChildProcess;
-    try {
-      serverProcess = spawn(
-        opencodePath,
-        [
-          "serve",
-          "--hostname",
-          "127.0.0.1",
-          "--port",
-          String(port),
-          "--print-logs",
-        ],
-        {
-          cwd,
-          stdio: ["pipe", "pipe", "pipe"],
-          env: this.getOpenCodeEnv(options.opencodeConfig),
-          shell: process.platform === "win32",
-        },
-      );
-      pidRef.value = serverProcess.pid;
-      processRef.value = serverProcess;
-    } catch (error) {
-      yield {
-        type: "error",
-        error: `Failed to spawn OpenCode server: ${error instanceof Error ? error.message : String(error)}`,
-      } as SDKMessage;
-      return;
+    if (!sharedBaseUrl && opencodePath && port !== undefined) {
+      try {
+        serverProcess = spawn(
+          opencodePath,
+          [
+            "serve",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            String(port),
+            "--print-logs",
+          ],
+          {
+            cwd,
+            stdio: ["pipe", "pipe", "pipe"],
+            env: this.getOpenCodeEnv(options.opencodeConfig),
+            shell: process.platform === "win32",
+          },
+        );
+        pidRef.value = serverProcess.pid;
+        processRef.value = serverProcess;
+      } catch (error) {
+        yield {
+          type: "error",
+          error: `Failed to spawn OpenCode server: ${error instanceof Error ? error.message : String(error)}`,
+        } as SDKMessage;
+        return;
+      }
     }
 
     // Handle abort
     const abortHandler = () => {
-      log.info({ port }, "Aborting OpenCode server");
-      serverProcess.kill("SIGTERM");
+      runtimeRef.alive = false;
+      if (serverProcess) {
+        log.info({ port }, "Aborting dedicated OpenCode server");
+        serverProcess.kill("SIGTERM");
+        return;
+      }
+      if (runtimeRef.sessionId) {
+        log.info(
+          { sessionId: runtimeRef.sessionId, baseUrl },
+          "Aborting shared OpenCode session",
+        );
+        void this.abortOpenCodeSession(baseUrl, runtimeRef.sessionId, cwd);
+      }
     };
     signal.addEventListener("abort", abortHandler);
 
@@ -749,16 +830,20 @@ export class OpenCodeProvider implements AgentProvider {
       serverProcess,
     );
     if (!serverReady) {
-      serverProcess.kill("SIGTERM");
+      serverProcess?.kill("SIGTERM");
       signal.removeEventListener("abort", abortHandler);
       yield {
         type: "error",
-        error: `OpenCode server failed to start${serverProcess.exitCode !== null ? ` (exit code ${serverProcess.exitCode})` : ""}`,
+        error: `OpenCode server failed to start${serverProcess?.exitCode !== null && serverProcess?.exitCode !== undefined ? ` (exit code ${serverProcess.exitCode})` : ""}`,
       } as SDKMessage;
       return;
     }
 
-    log.info({ port, cwd }, "OpenCode server ready");
+    runtimeRef.alive = true;
+    log.info(
+      { port, cwd, baseUrl, sharedServer: Boolean(sharedBaseUrl) },
+      "OpenCode server ready",
+    );
 
     const configApplied = await this.configureServer(
       baseUrl,
@@ -767,7 +852,8 @@ export class OpenCodeProvider implements AgentProvider {
       selectedModel,
     );
     if (!configApplied.ok) {
-      serverProcess.kill("SIGTERM");
+      serverProcess?.kill("SIGTERM");
+      runtimeRef.alive = false;
       signal.removeEventListener("abort", abortHandler);
       yield {
         type: "error",
@@ -801,6 +887,7 @@ export class OpenCodeProvider implements AgentProvider {
       // create-time metadata. Edit forks are patched synchronously inside
       // prepareOpenCodeSession because lineage is correctness data there.
       shouldTagSessionCreatedByYep = !options.resumeSessionId;
+      runtimeRef.sessionId = opencodeSessionId;
       log.info(
         {
           opencodeSessionId,
@@ -810,7 +897,8 @@ export class OpenCodeProvider implements AgentProvider {
         "OpenCode session prepared",
       );
     } catch (error) {
-      serverProcess.kill("SIGTERM");
+      serverProcess?.kill("SIGTERM");
+      runtimeRef.alive = false;
       signal.removeEventListener("abort", abortHandler);
       yield {
         type: "error",
@@ -886,15 +974,22 @@ export class OpenCodeProvider implements AgentProvider {
         );
       }
     } finally {
-      // Clean up server
-      log.info({ port, sessionId }, "Shutting down OpenCode server");
+      log.info(
+        { port, sessionId, sharedServer: Boolean(sharedBaseUrl) },
+        sharedBaseUrl
+          ? "Detaching from shared OpenCode server"
+          : "Shutting down dedicated OpenCode server",
+      );
       signal.removeEventListener("abort", abortHandler);
 
-      if (!serverProcess.killed) {
+      if (serverProcess && !serverProcess.killed) {
         serverProcess.kill("SIGTERM");
       }
+      runtimeRef.alive = false;
       runtimeRef.baseUrl = undefined;
       runtimeRef.cwd = undefined;
+      runtimeRef.sessionId = undefined;
+      runtimeRef.sharedServer = undefined;
     }
   }
 
@@ -1246,20 +1341,123 @@ export class OpenCodeProvider implements AgentProvider {
     const state = {
       eventBuffer: [] as SDKMessage[],
       sseError: null as Error | null,
-      sseComplete: false,
+      sseConnected: false,
       postComplete: false,
       postError: null as Error | null,
       responseError: null as string | null,
-      sawSessionIdle: false,
       resolveWaiting: null as (() => void) | null,
+    };
+    let lifecycle: OpenCodeLifecycleState = reduceOpenCodeLifecycle(
+      createOpenCodeLifecycleState(),
+      { type: "start-turn", now: Date.now() },
+    );
+    const unsettledToolParts = new Set<string>();
+    let resultReady = false;
+    let nextSafetyReconcileAt = Date.now() + this.lifecycleReconcileIntervalMs;
+    const transitionLifecycle = (action: OpenCodeLifecycleAction) => {
+      const previous = lifecycle;
+      const next = reduceOpenCodeLifecycle(previous, action);
+      if (
+        next === previous &&
+        action.type === "terminal" &&
+        previous.phase === "terminal"
+      ) {
+        log.debug(
+          {
+            event: "opencode_terminal_duplicate_ignored",
+            sessionId: opencodeSessionId,
+            turnGeneration: previous.generation,
+            eventSequence: previous.sequence,
+          },
+          "Ignored duplicate OpenCode terminal signal",
+        );
+      }
+      lifecycle = next;
+      if (
+        next.idleCandidate &&
+        next.idleCandidate.startedAt !== previous.idleCandidate?.startedAt
+      ) {
+        nextSafetyReconcileAt = Math.min(
+          nextSafetyReconcileAt,
+          next.idleCandidate.startedAt + this.lifecycleQuietWindowMs,
+        );
+      }
+      if (
+        next.phase !== previous.phase ||
+        next.waitingInput !== previous.waitingInput
+      ) {
+        log.info(
+          {
+            event: "opencode_lifecycle_transition",
+            sessionId: opencodeSessionId,
+            turnGeneration: next.generation,
+            previousPhase: previous.phase,
+            nextPhase: next.phase,
+            eventSequence: next.sequence,
+            source: action.type,
+          },
+          "OpenCode lifecycle transition",
+        );
+      }
+      if (!previous.idleCandidate && next.idleCandidate) {
+        log.debug(
+          {
+            event: "opencode_idle_candidate_created",
+            sessionId: opencodeSessionId,
+            turnGeneration: next.generation,
+            eventSequence: next.sequence,
+          },
+          "OpenCode idle candidate created",
+        );
+      } else if (
+        previous.idleCandidate &&
+        !next.idleCandidate &&
+        next.phase !== "terminal"
+      ) {
+        const upstreamStatus =
+          action.type === "status-event" || action.type === "status-reconciled"
+            ? action.status.type
+            : undefined;
+        log.debug(
+          {
+            event:
+              upstreamStatus === "busy" || upstreamStatus === "retry"
+                ? "opencode_idle_suppressed_by_busy"
+                : "opencode_idle_candidate_cancelled",
+            sessionId: opencodeSessionId,
+            turnGeneration: next.generation,
+            eventSequence: next.sequence,
+            upstreamStatus,
+            candidateAgeMs: action.now - previous.idleCandidate.startedAt,
+          },
+          "OpenCode idle candidate cancelled by newer activity",
+        );
+      }
+      state.resolveWaiting?.();
     };
     let resolveSseReady: () => void = () => undefined;
     const sseReady = new Promise<void>((resolve) => {
       resolveSseReady = resolve;
     });
+    const waitForSseReconnect = (): Promise<void> =>
+      new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          sseController.signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, 500);
+        sseController.signal.addEventListener("abort", finish, { once: true });
+        if (sseController.signal.aborted) finish();
+      });
 
-    // Start SSE connection immediately (runs in background)
-    const ssePromise = (async () => {
+    // Start SSE immediately and keep reconnecting while the turn is active.
+    // Status reconciliation preserves lifecycle truth during the gap; the
+    // reconnected stream resumes incremental content and input events.
+    const consumeSseConnection = async (): Promise<void> => {
       try {
         const response = await fetch(sseUrl, {
           headers: {
@@ -1279,6 +1477,7 @@ export class OpenCodeProvider implements AgentProvider {
         }
 
         log.debug({ sseUrl }, "SSE connected");
+        state.sseConnected = true;
         resolveSseReady();
 
         const reader = response.body.getReader();
@@ -1309,13 +1508,11 @@ export class OpenCodeProvider implements AgentProvider {
 
             log.trace({ event }, "SSE event received");
 
-            // Filter to only events for our session
-            if (
-              "properties" in event &&
-              event.properties &&
-              "sessionID" in event.properties
-            ) {
-              if (event.properties.sessionID !== opencodeSessionId) continue;
+            // A shared OpenCode instance can stream several sessions in the
+            // same directory. Nested info/part payloads must be filtered too.
+            const eventSessionId = openCodeRuntimeEventSessionId(event);
+            if (eventSessionId && eventSessionId !== opencodeSessionId) {
+              continue;
             }
 
             if (event.type === "session.error") {
@@ -1328,6 +1525,11 @@ export class OpenCodeProvider implements AgentProvider {
               );
               if (runtimeError) {
                 state.responseError = runtimeError;
+                transitionLifecycle({
+                  type: "terminal",
+                  now: Date.now(),
+                  kind: "failed",
+                });
                 state.resolveWaiting?.();
               }
               continue;
@@ -1337,6 +1539,79 @@ export class OpenCodeProvider implements AgentProvider {
               const info = (event as OpenCodeMessageUpdatedEvent).properties
                 .info;
               messageRoles.set(info.id, info.role);
+              const evidence = readOpenCodeAssistantTerminalEvidence({ info });
+              if (evidence) {
+                transitionLifecycle({
+                  type: "assistant-evidence",
+                  now: Date.now(),
+                  evidence,
+                });
+              }
+            }
+
+            if (
+              event.type === "message.part.updated" ||
+              event.type === "message.part.delta"
+            ) {
+              transitionLifecycle({ type: "activity", now: Date.now() });
+            }
+
+            if (event.type === "message.part.updated") {
+              const part = (event as OpenCodeMessagePartUpdatedEvent).properties
+                .part;
+              const pending = isOpenCodeToolPartPending(part);
+              if (pending !== null) {
+                if (pending) unsettledToolParts.add(part.id);
+                else unsettledToolParts.delete(part.id);
+                transitionLifecycle({
+                  type: "unsettled-tools",
+                  now: Date.now(),
+                  count: unsettledToolParts.size,
+                });
+              }
+            }
+
+            if (event.type === "session.idle") {
+              transitionLifecycle({
+                type: "status-event",
+                now: Date.now(),
+                status: { type: "idle" },
+              });
+            }
+            if (event.type === "session.status") {
+              const status = parseOpenCodeUpstreamStatus(
+                (event as { properties?: { status?: unknown } }).properties
+                  ?.status,
+              );
+              if (status) {
+                transitionLifecycle({
+                  type: "status-event",
+                  now: Date.now(),
+                  status,
+                });
+              }
+            }
+
+            const inputAsked =
+              event.type === "permission.asked" ||
+              event.type === "question.asked";
+            if (inputAsked) {
+              transitionLifecycle({
+                type: "pending-input",
+                now: Date.now(),
+                pending: true,
+              });
+            } else if (
+              event.type === "permission.replied" ||
+              event.type === "question.replied" ||
+              event.type === "question.rejected"
+            ) {
+              transitionLifecycle({
+                type: "pending-input",
+                now: Date.now(),
+                pending: false,
+              });
+              nextSafetyReconcileAt = Date.now();
             }
 
             // Convert to SDK message
@@ -1353,6 +1628,17 @@ export class OpenCodeProvider implements AgentProvider {
               cwd,
             );
 
+            // The converter waits for Yep's answer and posts it upstream. Do
+            // not depend on a replied event that may have raced the callback.
+            if (inputAsked) {
+              transitionLifecycle({
+                type: "pending-input",
+                now: Date.now(),
+                pending: false,
+              });
+              nextSafetyReconcileAt = Date.now();
+            }
+
             for (const sdkMessage of sdkMessages) {
               // Track assistant message ID for consistent streaming
               if (
@@ -1366,48 +1652,36 @@ export class OpenCodeProvider implements AgentProvider {
             }
             // Wake up consumer if waiting
             if (sdkMessages.length > 0) state.resolveWaiting?.();
-
-            // Terminal signal: session.status(type=idle) is the current
-            // upstream contract; session.idle is deprecated but still emitted
-            // by older servers.
-            if (event.type === "session.idle") {
-              state.sawSessionIdle = true;
-              log.debug({ opencodeSessionId }, "Session idle, stopping SSE");
-              return;
-            }
-            if (event.type === "session.status") {
-              const statusType = (
-                event as { properties?: { status?: { type?: string } } }
-              ).properties?.status?.type;
-              if (statusType === "idle") {
-                state.sawSessionIdle = true;
-                log.debug(
-                  { opencodeSessionId },
-                  "Session status idle, stopping SSE",
-                );
-                return;
-              }
-            }
           }
         }
       } catch (error) {
         if (!sseController.signal.aborted) {
-          log.error({ error }, "SSE connection error");
-          state.sseError =
+          const normalized =
             error instanceof Error ? error : new Error(String(error));
+          if (!state.sseConnected) {
+            log.error({ error }, "SSE connection error");
+            state.sseError = normalized;
+          } else {
+            log.warn(
+              { error },
+              "OpenCode SSE disconnected; lifecycle status polling remains active",
+            );
+            nextSafetyReconcileAt = Date.now();
+          }
         }
       } finally {
         resolveSseReady();
-        if (
-          !sseController.signal.aborted &&
-          !state.sawSessionIdle &&
-          !state.responseError &&
-          !state.sseError
-        ) {
-          state.sseError = new Error("OpenCode SSE ended before session.idle");
+        if (!sseController.signal.aborted && state.sseConnected) {
+          nextSafetyReconcileAt = Date.now();
         }
-        state.sseComplete = true;
         state.resolveWaiting?.();
+      }
+    };
+    const ssePromise = (async () => {
+      while (!sseController.signal.aborted && !state.sseError) {
+        await consumeSseConnection();
+        if (sseController.signal.aborted || state.sseError) break;
+        await waitForSseReconnect();
       }
     })();
 
@@ -1458,6 +1732,9 @@ export class OpenCodeProvider implements AgentProvider {
             );
           }
           log.debug({ opencodeSessionId }, "OpenCode prompt accepted");
+          // Bootstrap from the authoritative status map in case a very fast
+          // turn completed before its first incremental event was observed.
+          nextSafetyReconcileAt = Date.now();
         })()
           .catch((error) => {
             if (signal.aborted) return;
@@ -1469,6 +1746,99 @@ export class OpenCodeProvider implements AgentProvider {
             state.resolveWaiting?.();
           });
     if (state.sseError) state.postComplete = true;
+
+    const reconcileLifecycle = async (): Promise<void> => {
+      const expectedSequence = lifecycle.sequence;
+      try {
+        const response = await fetch(
+          this.openCodeUrl(baseUrl, "/session/status", cwd),
+          {
+            headers: {
+              Accept: "application/json",
+              ...this.openCodeDirectoryHeaders(cwd),
+            },
+            signal: AbortSignal.timeout(3_000),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`OpenCode status returned ${response.status}`);
+        }
+        const statusMap = await response.json();
+        if (lifecycle.sequence !== expectedSequence) return;
+        const status = readOpenCodeSessionStatus(statusMap, opencodeSessionId);
+
+        if (status.type === "idle") {
+          const evidence = await this.loadOpenCodeTerminalEvidence(
+            baseUrl,
+            opencodeSessionId,
+            cwd,
+          );
+          if (lifecycle.sequence !== expectedSequence) return;
+          if (evidence?.assistantEvidence) {
+            transitionLifecycle({
+              type: "assistant-evidence",
+              now: Date.now(),
+              evidence: evidence.assistantEvidence,
+            });
+          }
+          if (evidence) {
+            transitionLifecycle({
+              type: "unsettled-tools",
+              now: Date.now(),
+              count: evidence.unsettledTools,
+            });
+          }
+        }
+
+        transitionLifecycle({
+          type: "status-reconciled",
+          now: Date.now(),
+          status,
+          expectedSequence: lifecycle.sequence,
+          quietWindowMs: this.lifecycleQuietWindowMs,
+        });
+        if (
+          lifecycle.phase === "terminal" &&
+          lifecycle.terminalKind === "completed"
+        ) {
+          resultReady = true;
+          log.info(
+            {
+              event: "opencode_idle_confirmed",
+              sessionId: opencodeSessionId,
+              turnGeneration: lifecycle.generation,
+              eventSequence: lifecycle.sequence,
+            },
+            "OpenCode turn terminal idle confirmed",
+          );
+        }
+      } catch (error) {
+        if (signal.aborted || lifecycle.sequence !== expectedSequence) return;
+        transitionLifecycle({
+          type: "reconcile-failed",
+          now: Date.now(),
+          expectedSequence,
+          graceMs: this.lifecycleStatusFailureGraceMs,
+        });
+        log.warn(
+          {
+            event: "opencode_status_reconcile_failed",
+            sessionId: opencodeSessionId,
+            turnGeneration: lifecycle.generation,
+            eventSequence: lifecycle.sequence,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "OpenCode lifecycle status reconciliation failed",
+        );
+        if (
+          lifecycle.phase === "terminal" &&
+          lifecycle.terminalKind === "interrupted"
+        ) {
+          state.responseError =
+            "OpenCode lifecycle status remained unavailable after the active grace period";
+        }
+      }
+    };
 
     // Yield events from buffer as they arrive
     try {
@@ -1513,9 +1883,15 @@ export class OpenCodeProvider implements AgentProvider {
           break;
         }
 
-        // session.idle closes our SSE reader; also wait for prompt_async to be
-        // accepted so immediate HTTP failures are not lost at turn end.
-        if (state.sseComplete && state.postComplete) break;
+        if (resultReady) break;
+
+        const now = Date.now();
+        if (state.postComplete && now >= nextSafetyReconcileAt) {
+          await reconcileLifecycle();
+          nextSafetyReconcileAt =
+            Date.now() + this.lifecycleReconcileIntervalMs;
+          if (resultReady || state.responseError) continue;
+        }
 
         // Wait for more events
         await new Promise<void>((resolve) => {
@@ -1532,11 +1908,64 @@ export class OpenCodeProvider implements AgentProvider {
       await Promise.allSettled([ssePromise, messagePromise]);
     }
 
-    // Emit result message
-    yield this.createResultMessage(
-      sessionId,
-      emissionState.emittedUsageResult ? undefined : emissionState.latestUsage,
-    );
+    // Process transitions to idle on any result. Emit exactly once, and only
+    // after the projector confirmed stable terminal idle.
+    if (resultReady && !signal.aborted) {
+      yield this.createResultMessage(sessionId, emissionState.latestUsage);
+    }
+  }
+
+  private async loadOpenCodeTerminalEvidence(
+    baseUrl: string,
+    sessionId: string,
+    cwd?: string,
+  ): Promise<{
+    assistantEvidence?: "terminal" | "nonterminal" | "unknown";
+    unsettledTools: number;
+  } | null> {
+    try {
+      const url = this.openCodeUrl(
+        baseUrl,
+        `/session/${encodeURIComponent(sessionId)}/message`,
+        cwd,
+      );
+      const parsedUrl = new URL(url);
+      parsedUrl.searchParams.set("limit", "20");
+      const response = await fetch(parsedUrl, {
+        headers: {
+          Accept: "application/json",
+          ...this.openCodeDirectoryHeaders(cwd),
+        },
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (!response.ok) return null;
+      const payload = await response.json();
+      if (!Array.isArray(payload)) return null;
+
+      for (let index = payload.length - 1; index >= 0; index -= 1) {
+        const message = payload[index];
+        const assistantEvidence =
+          readOpenCodeAssistantTerminalEvidence(message);
+        if (!assistantEvidence) continue;
+        const record = isRecord(message) ? message : undefined;
+        const parts = Array.isArray(record?.parts) ? record.parts : [];
+        const unsettledTools = parts.reduce((count, part) => {
+          return count + (isOpenCodeToolPartPending(part) === true ? 1 : 0);
+        }, 0);
+        return { assistantEvidence, unsettledTools };
+      }
+      return { unsettledTools: 0 };
+    } catch (error) {
+      getLogger().debug(
+        {
+          event: "opencode_terminal_evidence_unavailable",
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "OpenCode terminal message evidence unavailable; using stable-idle fallback",
+      );
+      return null;
+    }
   }
 
   /**
@@ -1764,12 +2193,13 @@ export class OpenCodeProvider implements AgentProvider {
           sessionId,
         );
 
-        // End of processing step - emit usage info if available
+        // A step can end because OpenCode is about to execute tools and start
+        // another loop iteration. Preserve usage for the eventual turn result
+        // without emitting a provider-level result here: Process treats every
+        // result as the whole turn becoming idle and would drain its queue.
         const usage = this.createUsageSummary(part.tokens, part.cost);
         if (usage) {
           emissionState.latestUsage = usage;
-          emissionState.emittedUsageResult = true;
-          messages.push(this.createResultMessage(sessionId, usage));
         }
         return messages;
       }
@@ -2285,7 +2715,8 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   /**
-   * Apply per-session OpenCode config to the dedicated server process.
+   * Apply the session's OpenCode config to its directory-scoped server
+   * instance (shared bridge server or dedicated fallback).
    */
   private async configureServer(
     baseUrl: string,
@@ -2300,6 +2731,18 @@ export class OpenCodeProvider implements AgentProvider {
     };
     const model =
       resolvedModel ?? (await this.resolveOpenCodeModelOption(options.model));
+    const gatewayConfig = resolveOpenCodeGatewayConfig(process.env);
+    if (options.opencodeConfig && gatewayConfig) {
+      Object.assign(
+        config,
+        buildManagedOpenCodeConfig(gatewayConfig, {
+          openAICompatibleBaseURL: resolveOpenCodeOpenAICompatibleBaseURL(
+            process.env,
+          ),
+          sessionConfig: options.opencodeConfig,
+        }),
+      );
+    }
     if (model) {
       config.model = model;
     }
@@ -2708,7 +3151,12 @@ export class OpenCodeProvider implements AgentProvider {
       }
     }
 
-    const reply = result.behavior === "allow" ? "once" : "reject";
+    const reply =
+      result.behavior === "allow"
+        ? result.approvalScope === "always"
+          ? "always"
+          : "once"
+        : "reject";
     const response = await fetch(
       this.openCodeUrl(
         baseUrl,
@@ -2822,6 +3270,56 @@ export class OpenCodeProvider implements AgentProvider {
       return JSON.stringify(error);
     } catch {
       return "OpenCode message failed";
+    }
+  }
+
+  /**
+   * Resolve the bridge-managed OpenCode server. `GET /status` also asks the
+   * 4520 sidecar to ensure its paired server is ready, mirroring the health
+   * check performed by the local `of` shell wrapper before it attaches.
+   */
+  private async resolveBridgeManagedServer(): Promise<string | null> {
+    if (!this.bridgeControlUrl) return null;
+    try {
+      const response = await fetch(`${this.bridgeControlUrl}/status`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (!response.ok) {
+        throw new Error(`bridge returned ${response.status}`);
+      }
+      const payload = (await response.json()) as {
+        opencodeServerUrl?: unknown;
+      };
+      if (
+        typeof payload.opencodeServerUrl !== "string" ||
+        !payload.opencodeServerUrl.trim()
+      ) {
+        throw new Error("bridge status omitted opencodeServerUrl");
+      }
+      const url = new URL(payload.opencodeServerUrl);
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        throw new Error(`unsupported OpenCode server URL: ${url.protocol}`);
+      }
+      getLogger().info(
+        {
+          event: "opencode_shared_server_selected",
+          bridgeControlUrl: this.bridgeControlUrl,
+          opencodeServerUrl: url.toString(),
+        },
+        "Using 4520 bridge-managed OpenCode server",
+      );
+      return url.toString().replace(/\/+$/, "");
+    } catch (error) {
+      getLogger().warn(
+        {
+          event: "opencode_shared_server_unavailable",
+          bridgeControlUrl: this.bridgeControlUrl,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "OpenCode bridge unavailable; falling back to a dedicated server",
+      );
+      return null;
     }
   }
 

@@ -78,6 +78,7 @@ interface OpenCodeTestEmissionState {
   toolUseInputs: Map<string, string>;
   markerPartIds: Set<string>;
   streamingPartTypes: Map<string, "text" | "reasoning">;
+  latestUsage?: Record<string, unknown>;
 }
 
 type ConvertPartToSDKMessages = (
@@ -460,6 +461,122 @@ ohmyrouter/deepseek-v4-pro
     );
 
     expect(allocatedPort).not.toBe(occupiedPort);
+  });
+
+  it("selects the 4520 bridge-managed server used by of", async () => {
+    let sharedServerUrl = "";
+    let statusRequests = 0;
+
+    await withTestServer(
+      (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/status") {
+          statusRequests += 1;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ opencodeServerUrl: sharedServerUrl }));
+          return;
+        }
+        res.statusCode = 404;
+        res.end();
+      },
+      async (bridgeControlUrl) => {
+        sharedServerUrl = `${bridgeControlUrl}/shared-opencode`;
+        const provider = new OpenCodeProvider({ bridgeControlUrl });
+        const resolveBridgeManagedServer = (
+          provider as unknown as {
+            resolveBridgeManagedServer: () => Promise<string | null>;
+          }
+        ).resolveBridgeManagedServer.bind(provider);
+
+        await expect(resolveBridgeManagedServer()).resolves.toBe(
+          sharedServerUrl,
+        );
+      },
+    );
+
+    expect(statusRequests).toBe(1);
+  });
+
+  it("starts a Yep session on the shared server without spawning a dedicated CLI", async () => {
+    let serverUrl = "";
+    let abortRequests = 0;
+    const methods: string[] = [];
+
+    await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        methods.push(`${req.method} ${url.pathname}`);
+        res.setHeader("content-type", "application/json");
+
+        if (req.method === "GET" && url.pathname === "/status") {
+          res.end(JSON.stringify({ opencodeServerUrl: serverUrl }));
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session") {
+          res.end("[]");
+          return;
+        }
+        if (req.method === "PATCH" && url.pathname === "/config") {
+          await readJsonBody(req);
+          res.end("{}");
+          return;
+        }
+        if (req.method === "POST" && url.pathname === "/session") {
+          await readJsonBody(req);
+          res.end(JSON.stringify({ id: "ses_shared" }));
+          return;
+        }
+        if (req.method === "PATCH" && url.pathname === "/session/ses_shared") {
+          await readJsonBody(req);
+          res.end(JSON.stringify({ id: "ses_shared" }));
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_shared/abort"
+        ) {
+          abortRequests += 1;
+          res.end("true");
+          return;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+      },
+      async (bridgeControlUrl) => {
+        serverUrl = bridgeControlUrl;
+        const provider = new OpenCodeProvider({
+          bridgeControlUrl,
+          opencodePath: "/definitely/not/a/real/opencode",
+        });
+        const session = await provider.startSession({ cwd: "/repo" });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          done: false,
+          value: {
+            type: "system",
+            subtype: "init",
+            session_id: "ses_shared",
+          },
+        });
+        expect(session.pid).toBeUndefined();
+        expect(session.isProcessAlive?.()).toBe(true);
+
+        session.abort();
+        await session.iterator.return?.(undefined as never);
+        await vi.waitFor(() => expect(abortRequests).toBe(1));
+        expect(session.isProcessAlive?.()).toBe(false);
+      },
+    );
+
+    expect(methods).toEqual(
+      expect.arrayContaining([
+        "GET /status",
+        "GET /session",
+        "PATCH /config",
+        "POST /session",
+        "PATCH /session/ses_shared",
+      ]),
+    );
   });
 
   it("does not accept a stale OpenCode listener after its child exits", async () => {
@@ -1207,6 +1324,21 @@ ohmyrouter/deepseek-v4-pro
           return;
         }
 
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("Content-Type", "application/json");
+          res.end("{}");
+          return;
+        }
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_open/message"
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.end("[]");
+          return;
+        }
+
         if (
           req.method === "POST" &&
           url.pathname === "/session/ses_open/prompt_async"
@@ -1358,6 +1490,181 @@ ohmyrouter/deepseek-v4-pro
       type: "result",
       session_id: "yep_session",
     });
+  });
+
+  it("survives idle jitter and an SSE reconnect before emitting one result", async () => {
+    const provider = new OpenCodeProvider({
+      lifecycle: {
+        quietWindowMs: 30,
+        reconcileIntervalMs: 20,
+        statusFailureGraceMs: 500,
+      },
+    });
+    const sendMessageAndStream = (
+      provider as unknown as {
+        sendMessageAndStream: (
+          baseUrl: string,
+          opencodeSessionId: string,
+          sessionId: string,
+          text: string,
+          signal: AbortSignal,
+        ) => AsyncIterableIterator<Record<string, unknown>>;
+      }
+    ).sendMessageAndStream.bind(provider);
+
+    let eventConnections = 0;
+    let firstStream: ServerResponse | undefined;
+    let status: "busy" | "idle" = "busy";
+    let terminalAssistant = false;
+
+    const messages = await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          eventConnections += 1;
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+          });
+          res.flushHeaders();
+          if (eventConnections === 1) {
+            firstStream = res;
+          } else {
+            setTimeout(() => {
+              terminalAssistant = true;
+              status = "idle";
+              res.write(
+                `data: ${JSON.stringify({
+                  type: "message.updated",
+                  properties: {
+                    info: {
+                      id: "msg_terminal",
+                      sessionID: "ses_jitter",
+                      role: "assistant",
+                      finish: "stop",
+                      time: { completed: Date.now() },
+                    },
+                  },
+                })}\n\n`,
+              );
+              res.write(
+                `data: ${JSON.stringify({
+                  type: "session.status",
+                  properties: {
+                    sessionID: "ses_jitter",
+                    status: { type: "idle" },
+                  },
+                })}\n\n`,
+              );
+            }, 5);
+          }
+          return;
+        }
+
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_jitter/prompt_async"
+        ) {
+          req.resume();
+          res.statusCode = 204;
+          res.end();
+          firstStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.status",
+              properties: {
+                sessionID: "ses_jitter",
+                status: { type: "busy" },
+              },
+            })}\n\n`,
+          );
+          status = "idle";
+          firstStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.status",
+              properties: {
+                sessionID: "ses_jitter",
+                status: { type: "idle" },
+              },
+            })}\n\n`,
+          );
+          setTimeout(() => {
+            status = "busy";
+            firstStream?.write(
+              `data: ${JSON.stringify({
+                type: "session.status",
+                properties: {
+                  sessionID: "ses_jitter",
+                  status: { type: "busy" },
+                },
+              })}\n\n`,
+            );
+            firstStream?.end();
+          }, 5);
+          return;
+        }
+
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify(
+              status === "busy" ? { ses_jitter: { type: "busy" } } : {},
+            ),
+          );
+          return;
+        }
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_jitter/message"
+        ) {
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify(
+              terminalAssistant
+                ? [
+                    {
+                      info: {
+                        id: "msg_terminal",
+                        sessionID: "ses_jitter",
+                        role: "assistant",
+                        finish: "stop",
+                        time: { completed: Date.now() },
+                      },
+                      parts: [],
+                    },
+                  ]
+                : [],
+            ),
+          );
+          return;
+        }
+
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        const output: Array<Record<string, unknown>> = [];
+        for await (const message of sendMessageAndStream(
+          baseUrl,
+          "ses_jitter",
+          "yep_jitter",
+          "hello",
+          new AbortController().signal,
+        )) {
+          output.push(message);
+        }
+        return output;
+      },
+    );
+
+    expect(eventConnections).toBeGreaterThanOrEqual(2);
+    expect(messages.filter((message) => message.type === "result")).toEqual([
+      expect.objectContaining({
+        type: "result",
+        session_id: "yep_jitter",
+      }),
+    ]);
+    expect(messages.some((message) => message.type === "error")).toBe(false);
   });
 
   it("rejects denied OpenCode questions", async () => {
@@ -2126,7 +2433,7 @@ ohmyrouter/deepseek-v4-pro
     expect(JSON.stringify(messages)).not.toContain("data:image/png;base64");
   });
 
-  it("emits full OpenCode usage from step-finish parts", () => {
+  it("records step-finish usage without emitting a premature result", () => {
     const provider = new OpenCodeProvider();
     const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
     const emissionState = createEmissionState();
@@ -2152,19 +2459,15 @@ ohmyrouter/deepseek-v4-pro
       emissionState,
     );
 
-    expect(messages.at(-1)).toEqual(
-      expect.objectContaining({
-        type: "result",
-        usage: {
-          input_tokens: 10,
-          output_tokens: 5,
-          reasoning_tokens: 3,
-          cache_read_input_tokens: 7,
-          cache_creation_input_tokens: 2,
-          cost_usd: 0.0123,
-        },
-      }),
-    );
+    expect(messages).toEqual([]);
+    expect(emissionState.latestUsage).toEqual({
+      input_tokens: 10,
+      output_tokens: 5,
+      reasoning_tokens: 3,
+      cache_read_input_tokens: 7,
+      cache_creation_input_tokens: 2,
+      cost_usd: 0.0123,
+    });
   });
 
   it("preserves user-config credentials before a managed model is selected", () => {

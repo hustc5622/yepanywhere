@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { runBridgeSidecar } from "../bridge-common/standalone.js";
 import { OpenCodeBridgeService } from "./OpenCodeBridgeService.js";
 import { resolveOpenCodeGatewayConfig } from "./gateway-config.js";
@@ -15,6 +16,7 @@ export async function runOpenCodeBridgeOnly(): Promise<void> {
         opencodeStartPort: config.opencodeServerStartPort,
         desktopToken: config.desktopAuthToken,
         gatewayConfig: resolveOpenCodeGatewayConfig(process.env),
+        statePath: join(config.dataDir, "opencode-bridge", "sessions.json"),
       }),
     describe: (status) =>
       `${status.url}, server=${status.serverUrl}, opencode=${status.opencodeServerUrl} mode=${status.opencodeServerMode}`,

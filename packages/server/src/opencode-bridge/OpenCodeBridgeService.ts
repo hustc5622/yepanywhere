@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
 import * as path from "node:path";
@@ -7,6 +8,7 @@ import type {
   InputRequest,
   OpenCodeSessionConfig,
   PendingInputType,
+  SessionLastTurnStatus,
   UrlProjectId,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
@@ -19,6 +21,22 @@ import {
   terminateProcessGroup,
   writeJson,
 } from "../bridge-common/util.js";
+import {
+  OPENCODE_ACTIVE_RECONCILE_INTERVAL_MS,
+  OPENCODE_IDLE_QUIET_WINDOW_MS,
+  OPENCODE_STATUS_FAILURE_GRACE_MS,
+  createOpenCodeLifecycleState,
+  isOpenCodeToolPartPending,
+  parseOpenCodeUpstreamStatus,
+  projectOpenCodeLifecycle,
+  readOpenCodeAssistantTerminalEvidence,
+  readOpenCodeSessionStatus,
+  reduceOpenCodeLifecycle,
+} from "../opencode-lifecycle/index.js";
+import type {
+  OpenCodeLifecycleAction,
+  OpenCodeLifecycleState,
+} from "../opencode-lifecycle/index.js";
 import {
   buildOpenCodeQuestionAnswers,
   normalizeOpenCodeQuestions,
@@ -73,6 +91,16 @@ interface OpenCodeBridgeServiceOptions {
   startupTimeoutMs?: number;
   desktopToken?: string;
   gatewayConfig?: OpenCodeGatewayConfig | null;
+  lifecycle?: {
+    quietWindowMs?: number;
+    reconcileIntervalMs?: number;
+    statusFailureGraceMs?: number;
+  };
+  /**
+   * When set, session records survive bridge restarts by being persisted to
+   * this JSON file (metadata only; live runtime state is rebuilt).
+   */
+  statePath?: string;
 }
 
 interface SessionRecord {
@@ -92,6 +120,8 @@ interface SessionRecord {
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
   active?: boolean;
+  /** Terminal status of the most recent turn, aligned with codex-bridge. */
+  lastTurnStatus?: SessionLastTurnStatus;
   /** Most recent session.error message, cleared when a new turn starts. */
   lastErrorMessage?: string;
   /** Present while OpenCode is retrying a failed provider request. */
@@ -109,6 +139,27 @@ interface SessionRecord {
    * the bridge-managed server.
    */
   instanceId?: string;
+}
+
+/**
+ * JSON-serializable subset of SessionRecord persisted across bridge restarts.
+ * Live runtime fields (activity, pendingInputType, active, retryStatus,
+ * instanceId) are intentionally dropped: a restarted bridge has no live
+ * connection, so restored sessions always come back idle.
+ */
+interface PersistedSessionRecord {
+  id: string;
+  cwd: string;
+  serverUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  model?: string;
+  reasoningEffort?: string;
+  mode?: PermissionMode;
+  title?: string | null;
+  messageCount?: number;
+  lastTurnStatus?: SessionLastTurnStatus;
+  lastErrorMessage?: string;
 }
 
 function retryStatusEquals(
@@ -189,6 +240,18 @@ interface OpenCodeEvent {
   properties?: unknown;
 }
 
+interface OpenCodeEventOrigin {
+  instanceId?: string;
+  directory?: string;
+}
+
+interface OpenCodeBridgeLifecycle {
+  state: OpenCodeLifecycleState;
+  timer: ReturnType<typeof setTimeout> | null;
+  reconcilePromise: Promise<void> | null;
+  unsettledToolParts: Set<string>;
+}
+
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const OPENAI_GATEWAY_PATH_PREFIX = "/gateway/v1";
 const EXTERNAL_DECISION_CONFIRM_TIMEOUT_MS = 30_000;
@@ -204,6 +267,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private readonly startupTimeoutMs: number;
   private readonly defaultDesktopToken?: string;
   private readonly gatewayConfig?: OpenCodeGatewayConfig | null;
+  private readonly lifecycleQuietWindowMs: number;
+  private readonly lifecycleReconcileIntervalMs: number;
+  private readonly lifecycleStatusFailureGraceMs: number;
 
   private server: Server | null = null;
   private listening = false;
@@ -213,6 +279,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private opencodeStartPromise: Promise<string> | null = null;
   private lastError: string | null = null;
   private sessions = new Map<string, SessionRecord>();
+  private lifecycles = new Map<string, OpenCodeBridgeLifecycle>();
   private pendingInputs = new Map<string, OpenCodeBridgePendingInput>();
   private externalInstances = new Map<string, ExternalOpenCodeInstance>();
   private externalDecisionWaiters = new Map<string, ExternalDecisionWaiter>();
@@ -220,6 +287,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private inputResponses = new Map<string, Promise<boolean>>();
   private eventAbortController: AbortController | null = null;
   private eventReconnectTimer: NodeJS.Timeout | null = null;
+  private readonly statePath?: string;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Serializes atomic writes so concurrent state changes cannot race on .tmp. */
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(options: OpenCodeBridgeServiceOptions) {
     this.enabled = options.enabled;
@@ -235,10 +306,21 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.defaultDesktopToken = options.desktopToken;
     this.gatewayConfig = options.gatewayConfig;
+    this.statePath = options.statePath;
+    this.lifecycleQuietWindowMs =
+      options.lifecycle?.quietWindowMs ?? OPENCODE_IDLE_QUIET_WINDOW_MS;
+    this.lifecycleReconcileIntervalMs =
+      options.lifecycle?.reconcileIntervalMs ??
+      OPENCODE_ACTIVE_RECONCILE_INTERVAL_MS;
+    this.lifecycleStatusFailureGraceMs =
+      options.lifecycle?.statusFailureGraceMs ??
+      OPENCODE_STATUS_FAILURE_GRACE_MS;
   }
 
   async start(): Promise<void> {
     if (!this.enabled || this.server) return;
+
+    await this.restorePersistedSessions();
 
     const server = createServer((req, res) => {
       this.handleHttpRequest(req, res).catch((error: unknown) => {
@@ -291,6 +373,15 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
   async shutdown(): Promise<void> {
     this.eventNotifier.close();
+    for (const lifecycle of this.lifecycles.values()) {
+      if (lifecycle.timer) clearTimeout(lifecycle.timer);
+    }
+    this.lifecycles.clear();
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    await this.persistSessions();
     for (const instance of this.externalInstances.values()) {
       for (const waiter of instance.waiters.splice(0)) waiter();
     }
@@ -462,6 +553,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
             ? `/api/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}/reply`
             : `/permission/${encodeURIComponent(requestId)}/reply`,
           { reply },
+          this.sessions.get(sessionId)?.cwd,
         );
       } else {
         const questionPath =
@@ -469,14 +561,22 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
             ? `/api/session/${encodeURIComponent(sessionId)}/question/${encodeURIComponent(requestId)}`
             : `/question/${encodeURIComponent(requestId)}`;
         if (response === "deny") {
-          await this.postOpenCodeJson(`${questionPath}/reject`);
+          await this.postOpenCodeJson(
+            `${questionPath}/reject`,
+            undefined,
+            this.sessions.get(sessionId)?.cwd,
+          );
         } else {
-          await this.postOpenCodeJson(`${questionPath}/reply`, {
-            answers: buildOpenCodeQuestionAnswersFromRequest(
-              pending.request,
-              answers,
-            ),
-          });
+          await this.postOpenCodeJson(
+            `${questionPath}/reply`,
+            {
+              answers: buildOpenCodeQuestionAnswersFromRequest(
+                pending.request,
+                answers,
+              ),
+            },
+            this.sessions.get(sessionId)?.cwd,
+          );
         }
       }
 
@@ -485,11 +585,13 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       // we actually answered; never delete a newer request for the session.
       if (this.pendingInputs.get(sessionId) === pending) {
         this.pendingInputs.delete(sessionId);
-        this.updateSessionState(sessionId, {
-          activity: "in-turn",
-          pendingInputType: undefined,
-          active: true,
+        this.dispatchOpenCodeLifecycle(sessionId, {
+          type: "pending-input",
+          now: Date.now(),
+          pending: false,
         });
+        this.updateSessionState(sessionId, { pendingInputType: undefined });
+        if (this.enabled) void this.reconcileOpenCodeLifecycle(sessionId);
       }
       return true;
     })();
@@ -668,11 +770,16 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           );
         }
         if (record.activity !== "idle" || record.active) {
+          const wasMidTurn =
+            record.activity === "in-turn" ||
+            record.activity === "waiting-input";
           this.updateSessionState(sessionId, {
             activity: "idle",
             pendingInputType: undefined,
             active: false,
             retryStatus: undefined,
+            // The terminal vanished mid-turn; the turn did not complete.
+            ...(wasMidTurn ? { lastTurnStatus: "interrupted" as const } : {}),
           });
         }
       }
@@ -964,6 +1071,15 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           });
           return;
         }
+        // Loop guard: the main server proxies bridge approvals to this
+        // sidecar with the x-yep-anywhere marker (YepApiClient). Its own
+        // /input route falls back to bridges when no process owns the
+        // session, so bouncing an unknown requestId back would ping-pong
+        // between the two servers until one gave up.
+        if (readHeader(req, "x-yep-anywhere")) {
+          writeJson(res, 200, { accepted: false });
+          return;
+        }
         const client = this.createClient(req, body);
         writeJson(res, 200, {
           accepted: (
@@ -1066,6 +1182,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       pendingInputType: existing?.pendingInputType,
       active: existing?.active,
     });
+    this.schedulePersist();
   }
 
   private touchSession(
@@ -1091,11 +1208,12 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         | "pendingInputType"
         | "active"
         | "updatedAt"
+        | "lastTurnStatus"
         | "lastErrorMessage"
         | "retryStatus"
       >
     >,
-    origin?: { instanceId: string; directory?: string },
+    origin?: OpenCodeEventOrigin,
   ): void {
     // OpenCode continues to report the underlying turn as busy while a tool
     // permission or question is blocking it. Keep the more specific
@@ -1124,12 +1242,15 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (existing) {
       // A late origin can still improve attribution (e.g. the session was
       // first observed through a path that had to guess the cwd).
-      if (origin && !existing.instanceId) {
+      let attributionChanged = false;
+      if (origin?.instanceId && !existing.instanceId) {
         existing.instanceId = origin.instanceId;
-        if (origin.directory && existing.cwd !== origin.directory) {
-          existing.cwd = origin.directory;
-          existing.projectId = encodeProjectId(origin.directory);
-        }
+        attributionChanged = true;
+      }
+      if (origin?.directory && existing.cwd !== origin.directory) {
+        existing.cwd = origin.directory;
+        existing.projectId = encodeProjectId(origin.directory);
+        attributionChanged = true;
       }
       const stateChanged = Object.entries(effectiveState).some(
         ([key, value]) => {
@@ -1142,13 +1263,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           return existing[key as keyof SessionRecord] !== value;
         },
       );
-      if (!stateChanged) return;
+      if (!stateChanged && !attributionChanged) return;
 
       // Runtime status polling is not session content. Preserve the timestamp
       // supplied by OpenCode and do not manufacture a fresh updatedAt merely
       // because a repeated busy/idle poll arrived.
       Object.assign(existing, effectiveState);
       this.eventNotifier.notify();
+      this.schedulePersist();
       return;
     }
 
@@ -1168,11 +1290,428 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       activity: effectiveState.activity,
       pendingInputType: effectiveState.pendingInputType,
       active: effectiveState.active,
+      lastTurnStatus: effectiveState.lastTurnStatus,
       lastErrorMessage: effectiveState.lastErrorMessage,
       retryStatus: effectiveState.retryStatus,
       instanceId: origin?.instanceId,
     });
     this.eventNotifier.notify();
+    this.schedulePersist();
+  }
+
+  private getOpenCodeLifecycle(sessionId: string): OpenCodeBridgeLifecycle {
+    const existing = this.lifecycles.get(sessionId);
+    if (existing) return existing;
+
+    const record = this.sessions.get(sessionId);
+    let state = createOpenCodeLifecycleState();
+    if (
+      record?.active ||
+      record?.activity === "in-turn" ||
+      record?.activity === "waiting-input"
+    ) {
+      state = reduceOpenCodeLifecycle(state, {
+        type: "start-turn",
+        now: Date.now(),
+      });
+      if (record.activity === "waiting-input") {
+        state = reduceOpenCodeLifecycle(state, {
+          type: "pending-input",
+          now: Date.now(),
+          pending: true,
+        });
+      }
+    }
+    const lifecycle: OpenCodeBridgeLifecycle = {
+      state,
+      timer: null,
+      reconcilePromise: null,
+      unsettledToolParts: new Set(),
+    };
+    this.lifecycles.set(sessionId, lifecycle);
+    return lifecycle;
+  }
+
+  private dispatchOpenCodeLifecycle(
+    sessionId: string,
+    action: OpenCodeLifecycleAction,
+    origin?: OpenCodeEventOrigin,
+  ): OpenCodeLifecycleState {
+    const lifecycle = this.getOpenCodeLifecycle(sessionId);
+    const previous = lifecycle.state;
+    const next = reduceOpenCodeLifecycle(previous, action);
+    if (next === previous) {
+      if (action.type === "terminal" && previous.phase === "terminal") {
+        console.debug("[OpenCodeBridge] lifecycle", {
+          event: "opencode_terminal_duplicate_ignored",
+          sessionId,
+          turnGeneration: previous.generation,
+          eventSequence: previous.sequence,
+        });
+      }
+      return previous;
+    }
+    lifecycle.state = next;
+
+    const projection = projectOpenCodeLifecycle(next);
+    const becameActive =
+      !projectOpenCodeLifecycle(previous).active && projection.active;
+    this.updateSessionState(
+      sessionId,
+      {
+        activity: projection.activity,
+        active: projection.active,
+        retryStatus: projection.retryStatus,
+        ...(becameActive
+          ? { lastTurnStatus: undefined, lastErrorMessage: undefined }
+          : {}),
+        ...(projection.terminal && projection.terminalKind
+          ? {
+              lastTurnStatus:
+                projection.terminalKind === "completed"
+                  ? ("completed" as const)
+                  : projection.terminalKind,
+            }
+          : {}),
+      },
+      origin,
+    );
+
+    if (
+      next.phase !== previous.phase ||
+      next.waitingInput !== previous.waitingInput
+    ) {
+      console.debug("[OpenCodeBridge] lifecycle", {
+        event: "opencode_lifecycle_transition",
+        sessionId,
+        turnGeneration: next.generation,
+        previousPhase: previous.phase,
+        nextPhase: next.phase,
+        source: action.type,
+        eventSequence: next.sequence,
+      });
+    }
+    if (!previous.idleCandidate && next.idleCandidate) {
+      console.debug("[OpenCodeBridge] lifecycle", {
+        event: "opencode_idle_candidate_created",
+        sessionId,
+        turnGeneration: next.generation,
+        eventSequence: next.sequence,
+      });
+    } else if (
+      previous.idleCandidate &&
+      !next.idleCandidate &&
+      next.phase !== "terminal"
+    ) {
+      const upstreamStatus =
+        action.type === "status-event" || action.type === "status-reconciled"
+          ? action.status.type
+          : undefined;
+      console.debug("[OpenCodeBridge] lifecycle", {
+        event:
+          upstreamStatus === "busy" || upstreamStatus === "retry"
+            ? "opencode_idle_suppressed_by_busy"
+            : "opencode_idle_candidate_cancelled",
+        sessionId,
+        turnGeneration: next.generation,
+        eventSequence: next.sequence,
+        upstreamStatus,
+        candidateAgeMs: action.now - previous.idleCandidate.startedAt,
+      });
+    }
+
+    if (projection.active && this.enabled) {
+      this.scheduleOpenCodeLifecycleReconcile(sessionId);
+    } else if (lifecycle.timer) {
+      clearTimeout(lifecycle.timer);
+      lifecycle.timer = null;
+    }
+    return next;
+  }
+
+  private scheduleOpenCodeLifecycleReconcile(sessionId: string): void {
+    if (!this.enabled) return;
+    const lifecycle = this.getOpenCodeLifecycle(sessionId);
+    if (lifecycle.timer || !projectOpenCodeLifecycle(lifecycle.state).active) {
+      return;
+    }
+    const record = this.sessions.get(sessionId);
+    // External plugin instances cannot be queried through the managed HTTP
+    // server. Reconcile only an idle candidate produced by their own events;
+    // never manufacture idle merely because a heartbeat-only session exists.
+    if (record?.instanceId && !lifecycle.state.idleCandidate) return;
+
+    const candidate = lifecycle.state.idleCandidate;
+    const initialCandidateDelay = candidate
+      ? Math.max(
+          0,
+          candidate.startedAt + this.lifecycleQuietWindowMs - Date.now(),
+        )
+      : null;
+    const delay =
+      candidate && candidate.idleSamples === 1
+        ? initialCandidateDelay
+        : this.lifecycleReconcileIntervalMs;
+    lifecycle.timer = setTimeout(() => {
+      lifecycle.timer = null;
+      void this.reconcileOpenCodeLifecycle(sessionId);
+    }, delay ?? this.lifecycleReconcileIntervalMs);
+    lifecycle.timer.unref?.();
+  }
+
+  private async reconcileOpenCodeLifecycle(sessionId: string): Promise<void> {
+    const lifecycle = this.getOpenCodeLifecycle(sessionId);
+    if (lifecycle.reconcilePromise) return lifecycle.reconcilePromise;
+
+    const reconcile = this.performOpenCodeLifecycleReconcile(
+      sessionId,
+      lifecycle,
+    ).finally(() => {
+      lifecycle.reconcilePromise = null;
+      if (projectOpenCodeLifecycle(lifecycle.state).active) {
+        this.scheduleOpenCodeLifecycleReconcile(sessionId);
+      }
+    });
+    lifecycle.reconcilePromise = reconcile;
+    return reconcile;
+  }
+
+  private async performOpenCodeLifecycleReconcile(
+    sessionId: string,
+    lifecycle: OpenCodeBridgeLifecycle,
+  ): Promise<void> {
+    const expectedSequence = lifecycle.state.sequence;
+    const record = this.sessions.get(sessionId);
+    if (!record) return;
+
+    // An external instance has no queryable status endpoint. Its own idle
+    // event may still be confirmed after the quiet window, but an active turn
+    // must wait for plugin events instead of being projected idle here.
+    if (record.instanceId && !lifecycle.state.idleCandidate) return;
+
+    try {
+      const status = record.instanceId
+        ? ({ type: "idle" } as const)
+        : await this.fetchOpenCodeSessionStatus(sessionId, record.cwd);
+      if (lifecycle.state.sequence !== expectedSequence) return;
+
+      if (status.type === "idle" && !record.instanceId) {
+        const evidence = await this.loadOpenCodeTerminalEvidence(
+          sessionId,
+          record.cwd,
+        );
+        if (lifecycle.state.sequence !== expectedSequence) return;
+        if (evidence?.assistantEvidence) {
+          this.dispatchOpenCodeLifecycle(sessionId, {
+            type: "assistant-evidence",
+            now: Date.now(),
+            evidence: evidence.assistantEvidence,
+          });
+        }
+        if (evidence) {
+          this.dispatchOpenCodeLifecycle(sessionId, {
+            type: "unsettled-tools",
+            now: Date.now(),
+            count: evidence.unsettledTools,
+          });
+        }
+      }
+
+      const next = this.dispatchOpenCodeLifecycle(sessionId, {
+        type: "status-reconciled",
+        now: Date.now(),
+        status,
+        expectedSequence: lifecycle.state.sequence,
+        quietWindowMs: this.lifecycleQuietWindowMs,
+      });
+      if (next.phase === "terminal" && next.terminalKind === "completed") {
+        console.debug("[OpenCodeBridge] lifecycle", {
+          event: "opencode_idle_confirmed",
+          sessionId,
+          turnGeneration: next.generation,
+          eventSequence: next.sequence,
+        });
+      }
+    } catch (error) {
+      if (lifecycle.state.sequence !== expectedSequence) return;
+      const next = this.dispatchOpenCodeLifecycle(sessionId, {
+        type: "reconcile-failed",
+        now: Date.now(),
+        expectedSequence,
+        graceMs: this.lifecycleStatusFailureGraceMs,
+      });
+      this.lastError = error instanceof Error ? error.message : String(error);
+      console.warn("[OpenCodeBridge] lifecycle reconcile failed", {
+        event: "opencode_status_reconcile_failed",
+        sessionId,
+        turnGeneration: next.generation,
+        eventSequence: next.sequence,
+        error: this.lastError,
+      });
+      if (next.phase === "terminal" && next.terminalKind === "interrupted") {
+        this.updateSessionState(sessionId, {
+          activity: "idle",
+          active: false,
+          lastTurnStatus: "interrupted",
+          lastErrorMessage:
+            "OpenCode lifecycle status remained unavailable after the active grace period",
+          retryStatus: undefined,
+        });
+      }
+    }
+  }
+
+  private async fetchOpenCodeSessionStatus(
+    sessionId: string,
+    directory?: string,
+  ) {
+    const baseUrl = await this.ensureOpenCodeServerUrl();
+    const response = await fetch(
+      openCodeInstanceUrl(baseUrl, "/session/status", directory),
+      {
+        headers: openCodeDirectoryHeaders(directory),
+        signal: AbortSignal.timeout(3_000),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`OpenCode status returned ${response.status}`);
+    }
+    return readOpenCodeSessionStatus(await response.json(), sessionId);
+  }
+
+  private async loadOpenCodeTerminalEvidence(
+    sessionId: string,
+    directory?: string,
+  ): Promise<{
+    assistantEvidence?: "terminal" | "nonterminal" | "unknown";
+    unsettledTools: number;
+  } | null> {
+    try {
+      const baseUrl = await this.ensureOpenCodeServerUrl();
+      const url = new URL(
+        openCodeInstanceUrl(
+          baseUrl,
+          `/session/${encodeURIComponent(sessionId)}/message`,
+          directory,
+        ),
+      );
+      url.searchParams.set("limit", "20");
+      const response = await fetch(url, {
+        headers: openCodeDirectoryHeaders(directory),
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (!response.ok) return null;
+      const payload = await response.json();
+      if (!Array.isArray(payload)) return null;
+      for (let index = payload.length - 1; index >= 0; index -= 1) {
+        const message = payload[index];
+        const assistantEvidence =
+          readOpenCodeAssistantTerminalEvidence(message);
+        if (!assistantEvidence) continue;
+        const item = asRecord(message);
+        const parts = Array.isArray(item?.parts) ? item.parts : [];
+        return {
+          assistantEvidence,
+          unsettledTools: parts.filter(
+            (part) => isOpenCodeToolPartPending(part) === true,
+          ).length,
+        };
+      }
+      return { unsettledTools: 0 };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Debounced persistence of session metadata. The bridge previously kept all
+   * session state in memory only, so a 4520 restart forgot every observed
+   * session (and its title/model/error state) until OpenCode replayed events.
+   */
+  private schedulePersist(): void {
+    if (!this.statePath || this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.persistSessions();
+    }, 500);
+    this.persistTimer.unref?.();
+  }
+
+  private persistSessions(): Promise<void> {
+    const statePath = this.statePath;
+    if (!statePath) return Promise.resolve();
+    const records: PersistedSessionRecord[] = Array.from(this.sessions.values())
+      // Sessions attributed to the bridge process cwd were guessed, not
+      // observed; restoring them would file sessions under the wrong project.
+      .filter((record) => record.cwd !== process.cwd())
+      .map((record) => ({
+        id: record.id,
+        cwd: record.cwd,
+        serverUrl: record.serverUrl,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        model: record.model,
+        reasoningEffort: record.reasoningEffort,
+        mode: record.mode,
+        title: record.title,
+        messageCount: record.messageCount,
+        lastTurnStatus: record.lastTurnStatus,
+        lastErrorMessage: record.lastErrorMessage,
+      }));
+    const payload = JSON.stringify({ version: 1, sessions: records });
+    const writeSnapshot = async (): Promise<void> => {
+      try {
+        await mkdir(path.dirname(statePath), { recursive: true });
+        const tmpPath = `${statePath}.tmp`;
+        await writeFile(tmpPath, payload, "utf8");
+        await rename(tmpPath, statePath);
+      } catch (error) {
+        console.warn(
+          `[OpenCodeBridge] Failed to persist session state: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+    this.persistChain = this.persistChain.then(writeSnapshot, writeSnapshot);
+    return this.persistChain;
+  }
+
+  private async restorePersistedSessions(): Promise<void> {
+    if (!this.statePath) return;
+    let parsed: { version?: number; sessions?: PersistedSessionRecord[] };
+    try {
+      parsed = JSON.parse(await readFile(this.statePath, "utf8"));
+    } catch {
+      return; // No state file yet, or unreadable - start fresh.
+    }
+    if (!Array.isArray(parsed.sessions)) return;
+    for (const stored of parsed.sessions) {
+      if (!stored || typeof stored.id !== "string" || !stored.cwd) {
+        continue;
+      }
+      if (this.sessions.has(stored.id)) continue;
+      this.sessions.set(stored.id, {
+        id: stored.id,
+        projectId: encodeProjectId(stored.cwd),
+        cwd: stored.cwd,
+        serverUrl: stored.serverUrl || this.defaultServerUrl,
+        desktopToken: this.defaultDesktopToken,
+        createdAt: stored.createdAt,
+        updatedAt: stored.updatedAt,
+        model: stored.model,
+        reasoningEffort: stored.reasoningEffort,
+        mode: stored.mode,
+        title: stored.title,
+        messageCount: stored.messageCount,
+        // Restored sessions have no live runtime; they are idle until
+        // OpenCode reports fresh status.
+        activity: "idle",
+        active: false,
+        lastTurnStatus: stored.lastTurnStatus,
+        lastErrorMessage: stored.lastErrorMessage,
+      });
+    }
   }
 
   private toBridgeSession(record: SessionRecord): OpenCodeBridgeSession {
@@ -1192,6 +1731,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       reasoningEffort: record.reasoningEffort,
       activity: record.activity,
       pendingInputType: record.pendingInputType,
+      lastTurnStatus: record.lastTurnStatus,
       lastErrorMessage: record.lastErrorMessage,
       retryStatus: record.retryStatus,
       active:
@@ -1220,6 +1760,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         provider: "opencode",
         model: session.model,
         reasoningEffort: session.reasoningEffort,
+        lastTurnStatus: session.lastTurnStatus,
         lastErrorMessage: session.lastErrorMessage,
         retryStatus: session.retryStatus,
         source: "opencode-bridge",
@@ -1310,8 +1851,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const data = line.slice("data:".length).trim();
     if (!data || data === "[DONE]") return;
     try {
-      const event = unwrapOpenCodeEvent(JSON.parse(data));
-      if (event) this.handleOpenCodeEvent(event);
+      const envelope = unwrapOpenCodeEvent(JSON.parse(data));
+      if (envelope) {
+        this.handleOpenCodeEvent(envelope.event, envelope.origin);
+      }
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
     }
@@ -1319,13 +1862,18 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
   private handleOpenCodeEvent(
     event: OpenCodeEvent,
-    origin?: { instanceId: string; directory?: string },
+    origin?: OpenCodeEventOrigin,
   ): void {
     const type = typeof event.type === "string" ? event.type : "";
     const properties = asRecord(event.properties);
+    const info = asRecord(properties?.info);
+    const part = asRecord(properties?.part);
     const sessionId =
       readString(properties, "sessionID") ??
-      readString(properties, "sessionId");
+      readString(properties, "sessionId") ??
+      readString(info, "sessionID") ??
+      readString(part, "sessionID") ??
+      (type.startsWith("session.") ? readString(info, "id") : null);
 
     // session.error may arrive without a sessionID for server-level failures.
     if (type === "session.error") {
@@ -1333,13 +1881,30 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       if (sessionId && this.sessions.has(sessionId)) {
         const pending = this.pendingInputs.get(sessionId);
         this.pendingInputs.delete(sessionId);
+        // User-initiated aborts terminate the turn without a failure; align
+        // with codex-bridge's interrupted/failed distinction. The client
+        // renders any lastErrorMessage as "Failed", so aborts must not
+        // carry one.
+        const aborted = isOpenCodeAbortError(properties?.error);
+        this.dispatchOpenCodeLifecycle(
+          sessionId,
+          {
+            type: "terminal",
+            now: Date.now(),
+            kind: aborted ? "interrupted" : "failed",
+          },
+          origin,
+        );
         this.updateSessionState(
           sessionId,
           {
             activity: "idle",
             pendingInputType: undefined,
             active: false,
-            lastErrorMessage: message ?? "OpenCode reported an error",
+            lastTurnStatus: aborted ? "interrupted" : "failed",
+            lastErrorMessage: aborted
+              ? undefined
+              : (message ?? "OpenCode reported an error"),
             retryStatus: undefined,
           },
           origin,
@@ -1358,6 +1923,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
     if (type === "session.deleted") {
       const pending = this.pendingInputs.get(sessionId);
+      const lifecycle = this.lifecycles.get(sessionId);
+      if (lifecycle?.timer) clearTimeout(lifecycle.timer);
+      this.lifecycles.delete(sessionId);
       this.sessions.delete(sessionId);
       this.pendingInputs.delete(sessionId);
       this.discardExternalDecision(
@@ -1365,19 +1933,19 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         new Error(`OpenCode session ${sessionId} was deleted`),
       );
       this.eventNotifier.notify();
+      this.schedulePersist();
       return;
     }
 
     // Deprecated upstream in favor of session.status(type=idle); kept for
     // compatibility with older OpenCode servers.
     if (type === "session.idle") {
-      this.updateSessionState(
+      this.dispatchOpenCodeLifecycle(
         sessionId,
         {
-          activity: "idle",
-          pendingInputType: undefined,
-          active: false,
-          retryStatus: undefined,
+          type: "status-event",
+          now: Date.now(),
+          status: { type: "idle" },
         },
         origin,
       );
@@ -1385,36 +1953,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
 
     if (type === "session.status") {
-      const status = asRecord(properties?.status);
-      const statusType = readOpenCodeStatusType(properties?.status);
-      if (statusType === "retry") {
-        // Retry keeps the turn alive; surface backoff metadata so the UI can
-        // show "retrying" instead of a silent spinner.
-        const action = asRecord(status?.action);
-        this.updateSessionState(
-          sessionId,
-          {
-            activity: "in-turn",
-            active: true,
-            retryStatus: {
-              attempt: readNumber(status, "attempt"),
-              message: readString(status, "message") ?? undefined,
-              next: readNumber(status, "next"),
-              actionLabel: readString(action, "label") ?? undefined,
-              actionLink: readString(action, "link") ?? undefined,
-            },
-          },
-          origin,
-        );
-        return;
-      }
-      this.updateSessionState(
+      const status = parseOpenCodeUpstreamStatus(properties?.status);
+      if (!status) return;
+      this.dispatchOpenCodeLifecycle(
         sessionId,
         {
-          activity: statusType === "idle" ? "idle" : "in-turn",
-          active: statusType !== "idle",
-          retryStatus: undefined,
-          ...(statusType !== "idle" ? { lastErrorMessage: undefined } : {}),
+          type: "status-event",
+          now: Date.now(),
+          status,
         },
         origin,
       );
@@ -1422,35 +1968,70 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
 
     if (type === "message.updated") {
-      // A user message being persisted does not mean the agent is working;
-      // only assistant-side updates imply an active turn.
-      const info = asRecord(properties?.info);
-      const role = readString(info, "role");
       this.recordOpenCodeSessionEvent(
         sessionId,
         properties,
-        { implyActive: role !== "user" },
+        { implyActive: false },
+        origin,
+      );
+      const evidence = readOpenCodeAssistantTerminalEvidence({ info });
+      const lifecycle = this.getOpenCodeLifecycle(sessionId);
+      if (
+        evidence &&
+        (evidence === "nonterminal" ||
+          projectOpenCodeLifecycle(lifecycle.state).active)
+      ) {
+        this.dispatchOpenCodeLifecycle(
+          sessionId,
+          { type: "assistant-evidence", now: Date.now(), evidence },
+          origin,
+        );
+      }
+      return;
+    }
+
+    if (type === "session.created" || type === "session.updated") {
+      this.recordOpenCodeSessionEvent(
+        sessionId,
+        properties,
+        { implyActive: false },
         origin,
       );
       return;
     }
 
-    if (
-      type === "session.created" ||
-      type === "session.updated" ||
-      type === "message.part.updated" ||
-      type === "message.part.delta"
-    ) {
+    if (type === "message.part.updated" || type === "message.part.delta") {
       this.recordOpenCodeSessionEvent(
         sessionId,
         properties,
-        {
-          // Session metadata updates (e.g. title generation, archive) can occur
-          // while idle; only streaming part events imply an active turn.
-          implyActive: type.startsWith("message.part."),
-        },
+        { implyActive: false },
         origin,
       );
+      this.dispatchOpenCodeLifecycle(
+        sessionId,
+        { type: "activity", now: Date.now() },
+        origin,
+      );
+      if (type === "message.part.updated" && part) {
+        const pending = isOpenCodeToolPartPending(part);
+        if (pending !== null) {
+          const lifecycle = this.getOpenCodeLifecycle(sessionId);
+          const partId = readString(part, "id");
+          if (partId) {
+            if (pending) lifecycle.unsettledToolParts.add(partId);
+            else lifecycle.unsettledToolParts.delete(partId);
+          }
+          this.dispatchOpenCodeLifecycle(
+            sessionId,
+            {
+              type: "unsettled-tools",
+              now: Date.now(),
+              count: lifecycle.unsettledToolParts.size,
+            },
+            origin,
+          );
+        }
+      }
       return;
     }
 
@@ -1459,6 +2040,11 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         sessionId,
         properties,
         type === "permission.v2.asked" ? "v2" : "v1",
+        origin,
+      );
+      this.dispatchOpenCodeLifecycle(
+        sessionId,
+        { type: "pending-input", now: Date.now(), pending: true },
         origin,
       );
       return;
@@ -1474,6 +2060,11 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         sessionId,
         properties,
         type === "question.v2.asked" ? "v2" : "v1",
+        origin,
+      );
+      this.dispatchOpenCodeLifecycle(
+        sessionId,
+        { type: "pending-input", now: Date.now(), pending: true },
         origin,
       );
       return;
@@ -1493,7 +2084,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     sessionId: string,
     properties: Record<string, unknown> | null,
     options: { implyActive?: boolean } = {},
-    origin?: { instanceId: string; directory?: string },
+    origin?: OpenCodeEventOrigin,
   ): void {
     const implyActive = options.implyActive ?? true;
     const info = asRecord(properties?.info);
@@ -1516,6 +2107,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
               activity: "in-turn" as const,
               active: true,
               retryStatus: undefined,
+              lastTurnStatus: undefined,
             }
           : {}),
       },
@@ -1527,7 +2119,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     sessionId: string,
     properties: Record<string, unknown> | null,
     protocol: OpenCodeApprovalProtocol = "v1",
-    origin?: { instanceId: string; directory?: string },
+    origin?: OpenCodeEventOrigin,
   ): void {
     const requestId =
       readString(properties, "id") ?? readString(properties, "requestID");
@@ -1605,7 +2197,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     sessionId: string,
     properties: Record<string, unknown> | null,
     protocol: OpenCodeApprovalProtocol = "v1",
-    origin?: { instanceId: string; directory?: string },
+    origin?: OpenCodeEventOrigin,
   ): void {
     const requestId =
       readString(properties, "id") ?? readString(properties, "requestID");
@@ -1662,7 +2254,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private clearOpenCodePendingInput(
     sessionId: string,
     properties: Record<string, unknown> | null,
-    origin?: { instanceId: string; directory?: string },
+    origin?: OpenCodeEventOrigin,
   ): void {
     const requestId =
       readString(properties, "requestID") ??
@@ -1678,28 +2270,36 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       // confirmed until the plugin ACKs, but tell the plugin not to reapply it.
       this.confirmExternalDecision(pending);
     }
-    this.updateSessionState(
+    this.dispatchOpenCodeLifecycle(
       sessionId,
       {
-        activity: "in-turn",
-        pendingInputType: undefined,
-        active: true,
+        type: "pending-input",
+        now: Date.now(),
+        pending: false,
       },
       origin,
     );
+    this.updateSessionState(sessionId, { pendingInputType: undefined }, origin);
+    if (this.enabled) void this.reconcileOpenCodeLifecycle(sessionId);
   }
 
   private async postOpenCodeJson(
     pathname: string,
     body?: unknown,
+    directory?: string,
   ): Promise<void> {
     const opencodeServerUrl = await this.ensureOpenCodeServerUrl();
-    const response = await fetch(`${opencodeServerUrl}${pathname}`, {
-      method: "POST",
-      headers:
-        body === undefined ? undefined : { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const response = await fetch(
+      openCodeInstanceUrl(opencodeServerUrl, pathname, directory),
+      {
+        method: "POST",
+        headers: {
+          ...openCodeDirectoryHeaders(directory),
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      },
+    );
     if (!response.ok) {
       const body = await readResponseBody(response);
       const message = formatApiError(response.status, body);
@@ -1715,6 +2315,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       await Promise.all([
         this.syncOpenCodeSessionStatus(opencodeServerUrl),
         this.syncOpenCodePendingQuestions(opencodeServerUrl),
+        this.syncOpenCodePendingPermissions(opencodeServerUrl),
       ]);
       this.lastError = null;
     } catch (error) {
@@ -1724,9 +2325,39 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
   private async syncOpenCodeSessionStatus(baseUrl?: string): Promise<void> {
     const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
-    const response = await fetch(`${opencodeServerUrl}/session/status`, {
-      headers: { accept: "application/json" },
-    });
+    await Promise.all(
+      this.managedOpenCodeDirectories().map((directory) =>
+        this.syncOpenCodeDirectoryStatus(opencodeServerUrl, directory),
+      ),
+    );
+  }
+
+  private managedOpenCodeDirectories(): string[] {
+    const directories = new Set<string>([process.cwd()]);
+    for (const record of this.sessions.values()) {
+      if (!record.instanceId) directories.add(record.cwd);
+    }
+    return Array.from(directories);
+  }
+
+  private async syncOpenCodeDirectoryStatus(
+    opencodeServerUrl: string,
+    directory: string,
+  ): Promise<void> {
+    const expectedSequences = new Map<string, number>();
+    for (const [sessionId, record] of this.sessions) {
+      if (record.instanceId || record.cwd !== directory) continue;
+      expectedSequences.set(
+        sessionId,
+        this.getOpenCodeLifecycle(sessionId).state.sequence,
+      );
+    }
+    const response = await fetch(
+      openCodeInstanceUrl(opencodeServerUrl, "/session/status", directory),
+      {
+        headers: openCodeDirectoryHeaders(directory),
+      },
+    );
     if (!response.ok) {
       const body = await readResponseBody(response);
       throw new Error(formatApiError(response.status, body));
@@ -1736,50 +2367,61 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const activeStatus = asRecord(body) ?? {};
     const activeSessionIds = new Set(Object.keys(activeStatus));
     for (const sessionId of activeSessionIds) {
-      const status = asRecord(activeStatus[sessionId]);
-      const statusType = readOpenCodeStatusType(activeStatus[sessionId]);
-      if (statusType === "retry") {
-        const action = asRecord(status?.action);
-        this.updateSessionState(sessionId, {
-          activity: "in-turn",
-          active: true,
-          retryStatus: {
-            attempt: readNumber(status, "attempt"),
-            message: readString(status, "message") ?? undefined,
-            next: readNumber(status, "next"),
-            actionLabel: readString(action, "label") ?? undefined,
-            actionLink: readString(action, "link") ?? undefined,
-          },
-        });
-        continue;
-      }
-      this.updateSessionState(sessionId, {
-        activity: statusType === "idle" ? "idle" : "in-turn",
-        active: statusType !== "idle",
-        retryStatus: undefined,
-      });
+      const status = parseOpenCodeUpstreamStatus(activeStatus[sessionId]);
+      if (!status) continue;
+      this.dispatchOpenCodeLifecycle(
+        sessionId,
+        {
+          type: "status-reconciled",
+          now: Date.now(),
+          status,
+          expectedSequence: expectedSequences.get(sessionId),
+        },
+        { directory },
+      );
     }
 
     for (const [sessionId, record] of this.sessions) {
-      if (record.activity === "waiting-input") continue;
       if (activeSessionIds.has(sessionId)) continue;
       // External-instance sessions are invisible to the managed server's
       // status endpoint; their liveness comes from the plugin heartbeat.
-      if (record.instanceId) continue;
-      this.updateSessionState(sessionId, {
-        activity: "idle",
-        pendingInputType: undefined,
-        active: false,
-        retryStatus: undefined,
-      });
+      if (record.instanceId || record.cwd !== directory) continue;
+      this.dispatchOpenCodeLifecycle(
+        sessionId,
+        {
+          type: "status-reconciled",
+          now: Date.now(),
+          status: { type: "idle" },
+          expectedSequence: expectedSequences.get(sessionId),
+          quietWindowMs: this.lifecycleQuietWindowMs,
+        },
+        { directory },
+      );
     }
   }
 
   private async syncOpenCodePendingQuestions(baseUrl?: string): Promise<void> {
     const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
-    const response = await fetch(`${opencodeServerUrl}/question`, {
-      headers: { accept: "application/json" },
-    });
+    await Promise.all(
+      this.managedOpenCodeDirectories().map((directory) =>
+        this.syncOpenCodeDirectoryPendingQuestions(
+          opencodeServerUrl,
+          directory,
+        ),
+      ),
+    );
+  }
+
+  private async syncOpenCodeDirectoryPendingQuestions(
+    opencodeServerUrl: string,
+    directory: string,
+  ): Promise<void> {
+    const response = await fetch(
+      openCodeInstanceUrl(opencodeServerUrl, "/question", directory),
+      {
+        headers: openCodeDirectoryHeaders(directory),
+      },
+    );
     if (!response.ok) {
       const body = await readResponseBody(response);
       throw new Error(formatApiError(response.status, body));
@@ -1807,21 +2449,110 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           id: requestId,
         },
         "v1",
+        { directory },
       );
       seen.add(`${sessionId}:${requestId}`);
     }
 
     for (const [sessionId, pending] of this.pendingInputs) {
+      // The snapshot only covers the managed OpenCode server. Questions from
+      // external instances (forwarder plugin) are invisible to it and must
+      // not be swept here; their lifecycle is closed by plugin events or the
+      // external-instance staleness sweep.
+      if (pending.instanceId) continue;
+      if (this.sessions.get(sessionId)?.cwd !== directory) continue;
       if (
         pending.kind === "question" &&
         !seen.has(`${sessionId}:${pending.requestId}`)
       ) {
-        this.pendingInputs.delete(sessionId);
-        this.updateSessionState(sessionId, {
-          activity: "in-turn",
-          pendingInputType: undefined,
-          active: true,
-        });
+        this.clearOpenCodePendingInput(
+          sessionId,
+          { requestID: pending.requestId },
+          { directory },
+        );
+      }
+    }
+  }
+
+  /**
+   * Reconcile permission pendings against the managed server's live list
+   * (`GET /permission`, upstream `permission.list`). Without this, a
+   * permission answered in the TUI while the bridge's SSE stream was down
+   * stayed pending forever and the session stuck in waiting-input. Mirrors
+   * syncOpenCodePendingQuestions, including the external-instance exclusion.
+   */
+  private async syncOpenCodePendingPermissions(
+    baseUrl?: string,
+  ): Promise<void> {
+    const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
+    await Promise.all(
+      this.managedOpenCodeDirectories().map((directory) =>
+        this.syncOpenCodeDirectoryPendingPermissions(
+          opencodeServerUrl,
+          directory,
+        ),
+      ),
+    );
+  }
+
+  private async syncOpenCodeDirectoryPendingPermissions(
+    opencodeServerUrl: string,
+    directory: string,
+  ): Promise<void> {
+    const response = await fetch(
+      openCodeInstanceUrl(opencodeServerUrl, "/permission", directory),
+      {
+        headers: openCodeDirectoryHeaders(directory),
+      },
+    );
+    if (!response.ok) {
+      // Older OpenCode servers predate the experimental /permission list
+      // route; treat its absence as "nothing to reconcile" rather than an
+      // error that would mask the other sync results.
+      if (response.status === 404) return;
+      const body = await readResponseBody(response);
+      throw new Error(formatApiError(response.status, body));
+    }
+
+    const body = await response.json();
+    const bodyRecord = asRecord(body);
+    const requests: unknown[] = Array.isArray(body)
+      ? body
+      : Array.isArray(bodyRecord?.data)
+        ? bodyRecord.data
+        : [];
+    const seen = new Set<string>();
+    for (const item of requests) {
+      const record = asRecord(item);
+      const sessionId =
+        readString(record, "sessionID") ?? readString(record, "sessionId");
+      const requestId =
+        readString(record, "id") ?? readString(record, "requestID");
+      if (!sessionId || !requestId) continue;
+      this.recordOpenCodePermissionRequest(
+        sessionId,
+        {
+          ...record,
+          id: requestId,
+        },
+        "v1",
+        { directory },
+      );
+      seen.add(`${sessionId}:${requestId}`);
+    }
+
+    for (const [sessionId, pending] of this.pendingInputs) {
+      if (pending.instanceId) continue;
+      if (this.sessions.get(sessionId)?.cwd !== directory) continue;
+      if (
+        pending.kind === "permission" &&
+        !seen.has(`${sessionId}:${pending.requestId}`)
+      ) {
+        this.clearOpenCodePendingInput(
+          sessionId,
+          { requestID: pending.requestId },
+          { directory },
+        );
       }
     }
   }
@@ -1864,6 +2595,12 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         // Attached CLI sessions consume the user's normal opencode.json, so
         // keep its environment references available in this shared server.
         ...buildUserConfiguredOpenCodeEnv(process.env, this.gatewayConfig),
+        // Runtime config patches for Yep-created managed models reference this
+        // stable env name. The shared server must expose it just like the old
+        // per-session server did.
+        ...(this.gatewayConfig
+          ? { YEP_OPENCODE_LLM_API_KEY: this.gatewayConfig.apiKey }
+          : {}),
         // The Yep forwarder plugin (installed globally in
         // ~/.config/opencode/plugin) must stay inert inside Yep-managed
         // servers: their events already reach the bridge via /global/event.
@@ -2291,6 +3028,20 @@ function normalizeUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+function openCodeInstanceUrl(
+  baseUrl: string,
+  pathname: string,
+  directory?: string,
+): string {
+  const url = new URL(pathname, baseUrl);
+  if (directory) url.searchParams.set("directory", directory);
+  return url.toString();
+}
+
+function openCodeDirectoryHeaders(directory?: string): Record<string, string> {
+  return directory ? { "x-opencode-directory": directory } : {};
+}
+
 function readHeader(
   req: IncomingMessage | undefined,
   name: string,
@@ -2301,12 +3052,19 @@ function readHeader(
   return null;
 }
 
-function unwrapOpenCodeEvent(value: unknown): OpenCodeEvent | null {
+function unwrapOpenCodeEvent(
+  value: unknown,
+): { event: OpenCodeEvent; origin?: OpenCodeEventOrigin } | null {
   const record = asRecord(value);
   if (!record) return null;
   const payload = asRecord(record.payload);
   const event = payload ?? record;
-  return typeof event.type === "string" ? (event as OpenCodeEvent) : null;
+  if (typeof event.type !== "string") return null;
+  const directory = readString(record, "directory") ?? undefined;
+  return {
+    event: event as OpenCodeEvent,
+    origin: directory ? { directory } : undefined,
+  };
 }
 
 function readString(
@@ -2348,12 +3106,6 @@ function readStringArray(value: unknown): string[] {
     : [];
 }
 
-function readOpenCodeStatusType(value: unknown): string {
-  if (typeof value === "string") return value;
-  const record = asRecord(value);
-  return readString(record, "type") ?? "running";
-}
-
 /**
  * Extract a human-readable message from an OpenCode session.error payload.
  * Upstream shape is the assistant error union: `{ name, data: { message } }`.
@@ -2370,6 +3122,15 @@ function readOpenCodeErrorMessage(value: unknown): string | undefined {
     readString(record, "name") ??
     undefined
   );
+}
+
+/**
+ * OpenCode reports user-initiated aborts through the same session.error
+ * channel as real failures, tagged `MessageAbortedError` (see
+ * references/opencode/packages/core/src/v1/session.ts).
+ */
+function isOpenCodeAbortError(value: unknown): boolean {
+  return readString(asRecord(value), "name") === "MessageAbortedError";
 }
 
 function buildOpenCodeQuestionAnswersFromRequest(
