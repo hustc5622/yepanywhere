@@ -160,8 +160,25 @@ APK_NAME="app-universal-${BUILD_TYPE}.apk"
 APK_PATH="$MOBILE_DIR/src-tauri/gen/android/app/build/outputs/apk/universal/${BUILD_TYPE}/${APK_NAME}"
 
 if $DO_BUILD; then
+  # Version stamping:
+  # - versionName follows the monorepo version (tauri.conf.json points at the
+  #   root package.json), so installers show e.g. 0.4.29 instead of 0.1.0.
+  # - versionCode must increase for every build a device might see, or the
+  #   package installer shows "0.4.29 -> 0.4.29" style sidegrades for changed
+  #   binaries. Derive it from the commit count so every commit gets a fresh,
+  #   monotonic code (dirty rebuilds of one commit share a code, which Android
+  #   treats as a reinstall of the same version - fine for dev).
+  #   The 100000 offset keeps script builds strictly above tauri's default
+  #   versionCode math (major*1000000+minor*1000+patch, ~4029 for 0.4.29), so
+  #   an accidental direct `pnpm tauri android build` can never leapfrog the
+  #   script's numbering; it would fail as a downgrade instead.
+  APP_VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
+  GIT_COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
+  VERSION_CODE="$((100000 + GIT_COMMIT_COUNT))"
+
   log "Building Android APK (${BUILD_TYPE}) ..."
   dim "  cwd: $MOBILE_DIR"
+  dim "  versionName=$APP_VERSION versionCode=$VERSION_CODE"
   dim "  JAVA_HOME=$JAVA_HOME"
   dim "  ANDROID_HOME=$ANDROID_HOME"
   dim "  NDK_HOME=$NDK_HOME"
@@ -172,10 +189,11 @@ if $DO_BUILD; then
   # `pnpm prepare-frontend` → vite) so the in-app build stamp can show
   # debug vs release — they're otherwise byte-identical frontends.
   export YEP_BUILD_PROFILE="$BUILD_TYPE"
+  VERSION_CONFIG="{\"bundle\":{\"android\":{\"versionCode\":$VERSION_CODE}}}"
   if [[ "$BUILD_TYPE" == "debug" ]]; then
-    (cd "$MOBILE_DIR" && pnpm tauri android build --debug --apk)
+    (cd "$MOBILE_DIR" && pnpm tauri android build --debug --apk --config "$VERSION_CONFIG")
   else
-    (cd "$MOBILE_DIR" && pnpm tauri android build --apk)
+    (cd "$MOBILE_DIR" && pnpm tauri android build --apk --config "$VERSION_CONFIG")
   fi
 
   if [[ ! -f "$APK_PATH" ]]; then
