@@ -40,6 +40,64 @@ function getApprovalKind(request: InputRequest): string | undefined {
   return getString(asRecord(request.toolInput)?.approvalKind);
 }
 
+/**
+ * OpenCode permission approvals come in two shapes: bridge requests are
+ * tagged approvalKind "opencode_permission"; owned-session requests carry the
+ * raw event fields (permission + patterns) with no approvalKind. Both offer
+ * a persistent "always" grant when the upstream request advertised
+ * non-empty always/persistent patterns.
+ */
+function isOpenCodePermissionRequest(request: InputRequest): boolean {
+  const input = asRecord(request.toolInput);
+  if (!input) return false;
+  return (
+    input.approvalKind === "opencode_permission" ||
+    (input.approvalKind === undefined &&
+      typeof input.permission === "string" &&
+      Array.isArray(input.patterns))
+  );
+}
+
+function supportsOpenCodeAlwaysApproval(request: InputRequest): boolean {
+  const input = asRecord(request.toolInput);
+  if (!input) return false;
+  if (getAvailableApprovalDecisions(request).includes("always")) return true;
+  // Owned-session shape: the upstream event's `always` patterns signal that
+  // OpenCode can persist this grant.
+  return getStringArray(input.always).length > 0;
+}
+
+/**
+ * OpenCode permission requests carry the actual resource in `patterns`
+ * (e.g. the directory an external_directory approval is about). The generic
+ * first-string-field fallback used to surface the `permission` name instead,
+ * rendering "Allow external_directory external_directory?" with no path.
+ */
+function getOpenCodePermissionDetail(
+  request: InputRequest,
+): string | undefined {
+  if (!isOpenCodePermissionRequest(request)) return undefined;
+  const input = asRecord(request.toolInput);
+  if (!input) return undefined;
+
+  const patterns = getStringArray(input.patterns);
+  if (patterns.length > 0) return patterns.join(", ");
+
+  const metadata = asRecord(input.metadata);
+  return (
+    getString(metadata?.directory) ??
+    getString(metadata?.resource) ??
+    getString(metadata?.path) ??
+    getString(metadata?.filePath) ??
+    getString(metadata?.filepath) ??
+    getString(metadata?.command) ??
+    // No resource info at all: return empty rather than undefined so the
+    // caller does not fall back to the generic first-string-field summary,
+    // which would surface the permission name a second time.
+    ""
+  );
+}
+
 function getAvailableApprovalDecisions(request: InputRequest): string[] {
   return getStringArray(asRecord(request.toolInput)?.availableDecisions);
 }
@@ -149,10 +207,9 @@ export function ToolApprovalPanel({
   const mcpApprovalScopes = getMcpApprovalScopes(request);
   const isScopedMcpApproval = mcpApprovalScopes.length > 0;
   const isPermissionsApproval = approvalKind === "permissions";
-  const isOpenCodeApproval = approvalKind === "opencode_permission";
+  const isOpenCodeApproval = isOpenCodePermissionRequest(request);
   const canApproveOpenCodeAlways =
-    isOpenCodeApproval &&
-    getAvailableApprovalDecisions(request).includes("always");
+    isOpenCodeApproval && supportsOpenCodeAlwaysApproval(request);
   const usesProviderSessionApproval =
     approvalKind === "command_execution" || approvalKind === "file_change";
   const canApproveMcpForSession = mcpApprovalScopes.includes("session");
@@ -404,9 +461,23 @@ export function ToolApprovalPanel({
     request.toolName,
   ]);
 
-  const summary = request.toolName
-    ? getToolSummary(request.toolName, request.toolInput, undefined, "pending")
-    : request.prompt;
+  const openCodePermissionDetail = getOpenCodePermissionDetail(request);
+  // Bridge requests use toolName "OpenCode"; the permission name (bash,
+  // external_directory, ...) is what the user actually needs to see.
+  const displayToolName =
+    (isOpenCodeApproval
+      ? getString(asRecord(request.toolInput)?.permission)
+      : undefined) ?? request.toolName;
+  const summary =
+    openCodePermissionDetail ??
+    (request.toolName
+      ? getToolSummary(
+          request.toolName,
+          request.toolInput,
+          undefined,
+          "pending",
+        )
+      : request.prompt);
   const approvalPrompt = getApprovalPrompt(request);
   const approvalAction = getApprovalAction(request);
 
@@ -416,7 +487,7 @@ export function ToolApprovalPanel({
   // long to display inline. The full tool details (diffs, etc.) are already
   // visible in the session stream above.
   const summaryText =
-    approvalPrompt ?? `Allow ${request.toolName ?? ""} ${summary ?? ""}?`;
+    approvalPrompt ?? `Allow ${displayToolName ?? ""} ${summary ?? ""}?`;
   const showViewDetails = summaryText.length > 120;
 
   const renderContext: RenderContext = useMemo(
@@ -474,7 +545,7 @@ export function ToolApprovalPanel({
                   <span className="tool-approval-question">
                     {approvalPrompt ??
                       t("toolApprovalAllow", {
-                        tool: request.toolName ?? "",
+                        tool: displayToolName ?? "",
                         summary: summary ?? "",
                       })}
                   </span>

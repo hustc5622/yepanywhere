@@ -1466,7 +1466,7 @@ export class Process {
    */
   respondToInput(
     requestId: string,
-    response: "approve" | "deny",
+    response: "approve" | "approve_always" | "deny",
     answers?: UserQuestionAnswers,
     feedback?: string,
   ): boolean {
@@ -1492,14 +1492,18 @@ export class Process {
     // If user just clicked "No" without feedback, set interrupt: true to stop retrying.
     // If user provided feedback, set interrupt: false so Claude can incorporate the guidance.
     const shouldInterrupt = response === "deny" && !trimmedFeedback;
+    const approved = response !== "deny";
     const result: ToolApprovalResult = {
-      behavior: response === "approve" ? "allow" : "deny",
-      message: response === "deny" ? denyMessage : undefined,
-      interrupt: response === "deny" ? shouldInterrupt : undefined,
+      behavior: approved ? "allow" : "deny",
+      message: !approved ? denyMessage : undefined,
+      interrupt: !approved ? shouldInterrupt : undefined,
+      // Providers with persistent grants (OpenCode `always` reply) honor
+      // this; others ignore it and treat the approval as one-shot.
+      approvalScope: response === "approve_always" ? "always" : undefined,
     };
 
     // If answers provided (AskUserQuestion), pass them as updatedInput
-    if (answers && response === "approve") {
+    if (answers && approved) {
       const originalInput = pending.request.toolInput as {
         questions?: unknown[];
       };
@@ -1510,15 +1514,12 @@ export class Process {
     }
 
     // If EnterPlanMode is approved, switch to plan mode
-    if (
-      response === "approve" &&
-      pending.request.toolName === "EnterPlanMode"
-    ) {
+    if (approved && pending.request.toolName === "EnterPlanMode") {
       this.setPermissionMode("plan");
     }
 
     // If ExitPlanMode is approved, switch back to the app's default mode.
-    if (response === "approve" && pending.request.toolName === "ExitPlanMode") {
+    if (approved && pending.request.toolName === "ExitPlanMode") {
       this.setPermissionMode(DEFAULT_PERMISSION_MODE);
     }
 

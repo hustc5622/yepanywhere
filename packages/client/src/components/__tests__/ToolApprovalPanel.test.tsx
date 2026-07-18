@@ -141,6 +141,51 @@ describe("ToolApprovalPanel", () => {
     expect(onApproveAcceptEdits).not.toHaveBeenCalled();
   });
 
+  it("offers always approval for owned OpenCode sessions with always patterns", async () => {
+    const onApproveAlways = vi.fn(async () => undefined);
+    // Owned-session shape: raw permission event fields, no approvalKind.
+    const request: InputRequest = {
+      id: "approval-owned-oc",
+      sessionId: "session-owned-oc",
+      type: "tool-approval",
+      prompt: "Allow external_directory?",
+      toolName: "external_directory",
+      toolInput: {
+        permission: "external_directory",
+        patterns: ["/private/tmp/demo/*"],
+        metadata: { filepath: "/private/tmp/demo/file.txt" },
+        always: ["/private/tmp/demo/*"],
+        messageID: "msg_1",
+        callID: "call_1",
+      },
+      timestamp: "2026-07-18T00:00:00.000Z",
+    };
+    render(
+      <I18nProvider>
+        <ToolApprovalPanel
+          request={request}
+          sessionId="session-owned-oc"
+          onApprove={vi.fn(async () => undefined)}
+          onApproveAlways={onApproveAlways}
+          onDeny={vi.fn(async () => undefined)}
+        />
+      </I18nProvider>,
+    );
+
+    // The target resource must be visible, and the persistent grant offered.
+    expect(
+      screen.getByText(/Allow external_directory \/private\/tmp\/demo\/\*\?/),
+    ).toBeTruthy();
+    const alwaysApproval = screen.getByRole("button", {
+      name: /Always allow/i,
+    });
+    await waitFor(() =>
+      expect(alwaysApproval.hasAttribute("disabled")).toBe(false),
+    );
+    fireEvent.click(alwaysApproval);
+    await waitFor(() => expect(onApproveAlways).toHaveBeenCalledTimes(1));
+  });
+
   it("offers OpenCode's always approval when the bridge advertises it", async () => {
     const onApproveAlways = vi.fn(async () => undefined);
     const request: InputRequest = {
@@ -170,6 +215,11 @@ describe("ToolApprovalPanel", () => {
       </I18nProvider>,
     );
 
+    // The question must surface the permission's target resource, not the
+    // permission name twice ("Allow external_directory external_directory?").
+    expect(
+      screen.getByText(/Allow external_directory \/tmp\/\*\?/),
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: /^1\s*Allow$/i })).toBeTruthy();
     const alwaysApproval = screen.getByRole("button", {
       name: /Always allow/i,

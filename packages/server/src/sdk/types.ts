@@ -140,6 +140,12 @@ export interface ToolApprovalResult {
   message?: string;
   /** Whether denial should interrupt the current turn. */
   interrupt?: boolean;
+  /**
+   * Persistence scope of an approval. "always" asks the provider to remember
+   * the grant (OpenCode replies `always`, persisting the permission pattern).
+   * Absent/"once" applies to this request only.
+   */
+  approvalScope?: "once" | "always";
 }
 
 export type CanUseTool = (

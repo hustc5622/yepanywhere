@@ -2924,13 +2924,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // Handle approve_accept_edits: approve and switch permission mode
     const isApproveAcceptEdits = body.response === "approve_accept_edits";
 
-    // Normalize response to approve/deny
+    // Normalize response. approve_always survives as its own value so
+    // providers with persistent grants (OpenCode) can reply `always`;
+    // providers without simply treat it as approve.
     const normalizedResponse =
-      body.response === "approve" ||
-      body.response === "allow" ||
-      body.response === "approve_accept_edits"
-        ? "approve"
-        : "deny";
+      body.response === "approve_always"
+        ? "approve_always"
+        : body.response === "approve" ||
+            body.response === "allow" ||
+            body.response === "approve_accept_edits"
+          ? "approve"
+          : "deny";
 
     // Call respondToInput which resolves the SDK's canUseTool promise
     const { accepted } = await runtimeController.respondToInput({

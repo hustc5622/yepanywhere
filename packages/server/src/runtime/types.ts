@@ -149,7 +149,11 @@ export interface QueueRuntimeMessageRequest {
 export interface RuntimeInputResponseRequest {
   sessionId: string;
   requestId: string;
-  response: "approve" | "deny";
+  /**
+   * approve_always persists the grant with the provider (OpenCode `always`
+   * reply). Providers without persistent approvals treat it as approve.
+   */
+  response: "approve" | "approve_always" | "deny";
   answers?: UserQuestionAnswers;
   feedback?: string;
 }
