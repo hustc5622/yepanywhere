@@ -11,8 +11,8 @@ export interface SessionRuntimeProcess {
   state: AgentActivity | { type: AgentActivity };
   permissionMode?: PermissionMode;
   modeVersion?: number;
-  pendingInputRequest?: { type: string } | null;
-  getPendingInputRequest?: () => { type: string } | null;
+  pendingInputRequest?: { type: string; id?: string } | null;
+  getPendingInputRequest?: () => { type: string; id?: string } | null;
 }
 
 export function getProcessActivity(
@@ -137,4 +137,13 @@ export function pendingInputTypeFromProcess(
     process?.pendingInputRequest ?? process?.getPendingInputRequest?.() ?? null;
   if (!request) return undefined;
   return request.type === "tool-approval" ? "tool-approval" : "user-question";
+}
+
+/** Request id of the pending input, for notification action round-trips. */
+export function pendingInputRequestIdFromProcess(
+  process: SessionRuntimeProcess | undefined | null,
+): string | undefined {
+  const request =
+    process?.pendingInputRequest ?? process?.getPendingInputRequest?.() ?? null;
+  return request?.id || undefined;
 }

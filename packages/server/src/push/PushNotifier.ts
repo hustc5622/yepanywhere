@@ -13,6 +13,10 @@ import {
   type UrlProjectId,
   getSessionDisplayTitle,
 } from "@yep-anywhere/shared";
+import {
+  type BridgeControllers,
+  getAnyBridgePendingInputRequest,
+} from "../bridge-common/multi.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/NotificationService.js";
 import { decodeProjectId } from "../projects/paths.js";
@@ -48,6 +52,11 @@ export interface PushNotifierOptions {
   runtimeController?: Pick<RuntimeController, "getProcessSnapshotForSession">;
   /** Backwards-compatible embedded/test process source. */
   supervisor?: Supervisor;
+  /**
+   * Bridge controllers (codex/opencode sidecars). Bridge sessions have no
+   * managed process, so their pending input is fetched from here instead.
+   */
+  bridgeControllers?: BridgeControllers;
   /** Optional: skip push for connected browser profiles */
   connectedBrowsers?: ConnectedBrowsersService;
 }
@@ -86,6 +95,7 @@ export class PushNotifier {
   private sessionMetadataService?: PushNotifierOptions["sessionMetadataService"];
   private runtimeController?: PushNotifierOptions["runtimeController"];
   private supervisor?: Supervisor;
+  private bridgeControllers?: BridgeControllers;
   private connectedBrowsers?: ConnectedBrowsersService;
   private unsubscribe: (() => void) | null = null;
   /**
@@ -105,6 +115,7 @@ export class PushNotifier {
     this.sessionMetadataService = options.sessionMetadataService;
     this.runtimeController = options.runtimeController;
     this.supervisor = options.supervisor;
+    this.bridgeControllers = options.bridgeControllers;
     this.connectedBrowsers = options.connectedBrowsers;
 
     // Subscribe to EventBus for process state changes
@@ -197,12 +208,22 @@ export class PushNotifier {
       return;
     }
 
-    // Get the process to access the InputRequest details
-    if (!process || this.getProcessActivity(process) !== "waiting-input") {
-      return;
+    // Get the process to access the InputRequest details. Bridge sessions
+    // (codex/opencode TUIs) have no managed process; their pending input
+    // lives in the bridge sidecar instead. Without this fallback, external
+    // approvals never produced a push notification.
+    let request: InputRequest | null = null;
+    if (process) {
+      if (this.getProcessActivity(process) !== "waiting-input") {
+        return;
+      }
+      request = this.getPendingInputRequest(process);
+    } else if (this.bridgeControllers) {
+      request = await getAnyBridgePendingInputRequest(
+        this.bridgeControllers,
+        event.sessionId,
+      );
     }
-
-    const request = this.getPendingInputRequest(process);
     if (!request) return;
     const inputType =
       request.type === "tool-approval" ? "tool-approval" : "user-question";
@@ -224,7 +245,7 @@ export class PushNotifier {
       projectName,
       sessionTitle: this.getPreferredSessionTitle(
         event.sessionId,
-        this.getSessionTitle(process),
+        process ? this.getSessionTitle(process) : undefined,
       ),
       inputType,
       summary,
@@ -479,9 +500,24 @@ export class PushNotifier {
     if (request.type === "tool-approval") {
       const toolName = request.toolName ?? "Unknown tool";
 
-      // For file operations, try to extract the file path
       if (request.toolInput && typeof request.toolInput === "object") {
         const input = request.toolInput as Record<string, unknown>;
+
+        // OpenCode permission requests: the useful pair is the permission
+        // name (bash, external_directory, ...) plus its target resource.
+        // Falling through to the generic path would render "Run: OpenCode".
+        if (typeof input.permission === "string" && input.permission) {
+          const patterns = Array.isArray(input.patterns)
+            ? input.patterns.filter(
+                (item): item is string => typeof item === "string",
+              )
+            : [];
+          return patterns.length > 0
+            ? `${input.permission}: ${patterns.join(", ")}`
+            : input.permission;
+        }
+
+        // For file operations, try to extract the file path
         const filePath = input.file_path ?? input.filePath ?? input.path;
         if (typeof filePath === "string") {
           // Extract just the filename from the path

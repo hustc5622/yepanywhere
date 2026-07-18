@@ -15,6 +15,7 @@ import {
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import {
+  getAnyBridgePendingInputRequest,
   isAnyBridgeSessionActive,
   listAllBridgeSessionViews,
 } from "../bridge-common/multi.js";
@@ -38,6 +39,7 @@ import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js"
 import {
   type SessionRuntimeProcess,
   getProcessActivity,
+  pendingInputRequestIdFromProcess,
   pendingInputTypeFromProcess,
 } from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
@@ -90,6 +92,26 @@ async function isBridgeSessionActive(
   );
 }
 
+/**
+ * Request id of a bridge session's pending input. Only called for sessions
+ * that already report a pendingInputType, so the extra sidecar round-trip is
+ * bounded by the number of sessions actually waiting on the user.
+ */
+async function getBridgePendingRequestId(
+  deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
+  sessionId: string,
+): Promise<string | undefined> {
+  try {
+    const request = await getAnyBridgePendingInputRequest(
+      [deps.codexBridgeService, deps.opencodeBridgeService],
+      sessionId,
+    );
+    return request?.id;
+  } catch {
+    return undefined;
+  }
+}
+
 function isLiveAnyBridgeSessionView(view: BridgeSessionView): boolean {
   return isLiveBridgeSessionView(view);
 }
@@ -101,6 +123,8 @@ export interface InboxItem {
   sessionTitle: string;
   updatedAt: string;
   pendingInputType?: PendingInputType;
+  /** Pending request id, so notification actions can respond directly. */
+  pendingRequestId?: string;
   activity?: AgentActivity;
   hasUnread?: boolean;
   createdBy?: SessionCreatedBy;
@@ -187,6 +211,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       session: SessionSummary;
       projectName: string;
       pendingInputType?: PendingInputType;
+      pendingRequestId?: string;
       activity?: AgentActivity;
       hasUnread?: boolean;
       customTitle?: string;
@@ -256,6 +281,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
         if (isArchived) continue;
 
         let pendingInputType: PendingInputType | undefined;
+        let pendingRequestId: string | undefined;
         let activity: AgentActivity | undefined;
 
         const process =
@@ -263,6 +289,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
           deps.supervisor?.getProcessForSession?.(session.id);
         if (process) {
           pendingInputType = pendingInputTypeFromProcess(process);
+          pendingRequestId = pendingInputRequestIdFromProcess(process);
           const state = getProcessActivity(process);
           if (state === "in-turn" || state === "waiting-input") {
             activity = state;
@@ -275,6 +302,12 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
           ) {
             pendingInputType = bridgedSession.pendingInputType;
             activity = bridgedSession.activity;
+            if (pendingInputType) {
+              pendingRequestId = await getBridgePendingRequestId(
+                deps,
+                session.id,
+              );
+            }
           }
         }
 
@@ -286,6 +319,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
           session,
           projectName: project.name,
           pendingInputType,
+          pendingRequestId,
           activity,
           hasUnread,
           customTitle: metadata?.customTitle ?? session.customTitle,
@@ -318,15 +352,18 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
           )
         : undefined;
 
+      const bridgeOnlyActive = activeBridgeSessionIds.has(item.session.id);
+      const bridgeOnlyPendingType = bridgeOnlyActive
+        ? item.pendingInputType
+        : undefined;
       allSessions.push({
         session: item.session,
         projectName: item.projectName,
-        pendingInputType: activeBridgeSessionIds.has(item.session.id)
-          ? item.pendingInputType
+        pendingInputType: bridgeOnlyPendingType,
+        pendingRequestId: bridgeOnlyPendingType
+          ? await getBridgePendingRequestId(deps, item.session.id)
           : undefined,
-        activity: activeBridgeSessionIds.has(item.session.id)
-          ? item.activity
-          : undefined,
+        activity: bridgeOnlyActive ? item.activity : undefined,
         hasUnread,
         customTitle: metadata?.customTitle ?? item.session.customTitle,
         aiTitle: metadata?.aiTitle ?? item.session.aiTitle,
@@ -358,6 +395,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       }),
       updatedAt: item.session.updatedAt,
       pendingInputType: item.pendingInputType,
+      pendingRequestId: item.pendingRequestId,
       activity: item.activity,
       hasUnread: item.hasUnread,
       createdBy: item.createdBy,

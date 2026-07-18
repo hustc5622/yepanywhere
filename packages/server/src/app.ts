@@ -974,6 +974,10 @@ export function createApp(options: AppOptions): AppResult {
       sessionMetadataService: options.sessionMetadataService,
       runtimeController,
       supervisor,
+      bridgeControllers: [
+        options.codexBridgeService,
+        options.opencodeBridgeService,
+      ],
       connectedBrowsers: options.connectedBrowsers,
     });
   }

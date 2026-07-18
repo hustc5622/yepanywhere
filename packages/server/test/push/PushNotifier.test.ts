@@ -264,6 +264,106 @@ describe("PushNotifier", () => {
 
       expect(mockPushService.sendToAll).not.toHaveBeenCalled();
     });
+
+    it("falls back to bridge pending input when no process owns the session", async () => {
+      const request: InputRequest = {
+        id: "req-bridge",
+        sessionId: "thread-bridge",
+        type: "tool-approval",
+        prompt: "Allow bash?",
+        toolName: "Bash",
+        toolInput: { command: "ls" },
+        timestamp: new Date().toISOString(),
+        source: "codex-bridge",
+      };
+      vi.mocked(mockSupervisor.getProcessForSession).mockReturnValue(undefined);
+      const bridgeController = {
+        getPendingInputRequest: vi.fn(async (sessionId: string) =>
+          sessionId === "thread-bridge" ? request : null,
+        ),
+      };
+
+      new PushNotifier({
+        eventBus: mockEventBus,
+        pushService: mockPushService,
+        notificationService: mockNotificationService,
+        supervisor: mockSupervisor,
+        bridgeControllers: [bridgeController as never],
+      });
+
+      eventHandler?.({
+        type: "process-state-changed",
+        sessionId: "thread-bridge",
+        projectId: testProjectId,
+        activity: "waiting-input",
+        pendingInputType: "tool-approval",
+        timestamp: new Date().toISOString(),
+      });
+
+      await vi.waitFor(() => {
+        expect(mockPushService.sendToAll).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "pending-input",
+            sessionId: "thread-bridge",
+            requestId: "req-bridge",
+            inputType: "tool-approval",
+          }),
+          expect.any(Object),
+        );
+      });
+    });
+
+    it("skips absent bridge controllers and reads the next one", async () => {
+      const request: InputRequest = {
+        id: "req-oc",
+        sessionId: "ses_oc",
+        type: "question",
+        prompt: "Pick one",
+        toolName: "AskUserQuestion",
+        toolInput: {},
+        timestamp: new Date().toISOString(),
+        source: "opencode-bridge",
+      };
+      vi.mocked(mockSupervisor.getProcessForSession).mockReturnValue(undefined);
+      const emptyController = {
+        getPendingInputRequest: vi.fn(async () => null),
+      };
+      const opencodeController = {
+        getPendingInputRequest: vi.fn(async () => request),
+      };
+
+      new PushNotifier({
+        eventBus: mockEventBus,
+        pushService: mockPushService,
+        supervisor: mockSupervisor,
+        bridgeControllers: [
+          undefined,
+          emptyController as never,
+          opencodeController as never,
+        ],
+      });
+
+      eventHandler?.({
+        type: "process-state-changed",
+        sessionId: "ses_oc",
+        projectId: testProjectId,
+        activity: "waiting-input",
+        pendingInputType: "user-question",
+        timestamp: new Date().toISOString(),
+      });
+
+      await vi.waitFor(() => {
+        expect(mockPushService.sendToAll).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "pending-input",
+            sessionId: "ses_oc",
+            requestId: "req-oc",
+            inputType: "user-question",
+          }),
+          expect.any(Object),
+        );
+      });
+    });
   });
 
   describe("summary building", () => {

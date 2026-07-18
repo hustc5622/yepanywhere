@@ -16,7 +16,7 @@
 // Version constant for controlled updates
 // Increment this when making intentional SW changes
 // Browsers reinstall SW only when file content changes
-const SW_VERSION = "1.0.4";
+const SW_VERSION = "1.0.5";
 
 // Resolve asset URLs relative to SW scope (handles /remote/ deployment)
 function assetUrl(path) {
@@ -326,14 +326,26 @@ async function handlePush(data) {
 
 async function showPendingInputNotification(data) {
   const title = data.projectName || "Yep Anywhere";
+  // Approve/Deny actions only apply to tool approvals; questions need the
+  // full option UI, so they only offer opening the session.
+  const actions =
+    data.inputType === "tool-approval" && data.requestId
+      ? [
+          { action: "approve", title: "Approve" },
+          { action: "deny", title: "Deny" },
+        ]
+      : [];
   const options = {
     body: data.summary || "Waiting for input",
     tag: `session-${data.sessionId}`,
     icon: assetUrl("icon-192.png"),
     badge: assetUrl("badge-96.png"),
+    actions,
     data: {
       sessionId: data.sessionId,
       projectId: data.projectId,
+      requestId: data.requestId,
+      inputType: data.inputType,
     },
     requireInteraction: true,
   };
@@ -370,16 +382,73 @@ function showSessionHaltedNotification(data) {
 }
 
 /**
- * Handle notification clicks - always open the session
+ * Handle notification clicks - action buttons respond in place, body click
+ * opens the session
  */
 self.addEventListener("notificationclick", (event) => {
   const notification = event.notification;
   const data = notification.data || {};
 
+  if (event.action === "approve" || event.action === "deny") {
+    event.waitUntil(
+      handleApprovalAction(notification, data, event.action).catch(
+        async (e) => {
+          await swLog("error", "Approval action failed", { error: e.message });
+          // Fall back to opening the session so the user can respond in-app.
+          return openSession(data.sessionId, data.projectId);
+        },
+      ),
+    );
+    return;
+  }
+
   notification.close();
 
   event.waitUntil(handleNotificationClick(data));
 });
+
+/**
+ * Respond to a pending tool approval directly from the notification.
+ * The API base is the SW scope (handles /yep/ and /remote/ deployments);
+ * cookie auth rides along via credentials: include.
+ */
+async function handleApprovalAction(notification, data, action) {
+  const { sessionId, requestId } = data;
+  if (!sessionId || !requestId) {
+    throw new Error("Notification is missing sessionId/requestId");
+  }
+
+  await swLog("info", "Responding to approval from notification", {
+    sessionId,
+    requestId,
+    action,
+  });
+
+  const url = new URL(
+    `./api/sessions/${encodeURIComponent(sessionId)}/input`,
+    self.registration.scope,
+  ).href;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      requestId,
+      response: action === "approve" ? "approve" : "deny",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Approval request failed: HTTP ${response.status}`);
+  }
+  const result = await response.json().catch(() => ({}));
+  if (result && result.accepted === false) {
+    throw new Error("Approval was not accepted (request may have expired)");
+  }
+
+  await swLog("info", "Approval response delivered", { sessionId, action });
+  notification.close();
+}
 
 async function handleNotificationClick(data) {
   const { sessionId, projectId } = data;
