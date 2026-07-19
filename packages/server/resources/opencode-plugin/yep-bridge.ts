@@ -23,7 +23,11 @@ const BRIDGE_URL = (
   process.env.YEP_OPENCODE_BRIDGE_URL ?? "http://127.0.0.1:4520"
 ).replace(/\/+$/, "");
 
-/** Events worth forwarding; message.part.* streaming is deliberately excluded. */
+/**
+ * Events worth forwarding. `message.updated` is low-volume but essential: it
+ * distinguishes an intermediate `finish: tool-calls` message from the final
+ * assistant `finish: stop`. High-frequency part deltas remain excluded.
+ */
 const FORWARD_EVENTS = new Set([
   "permission.asked",
   "permission.replied",
@@ -41,6 +45,7 @@ const FORWARD_EVENTS = new Set([
   "session.status",
   "session.idle",
   "session.error",
+  "message.updated",
 ]);
 
 const DECISION_POLL_WAIT_MS = 25_000;
@@ -145,6 +150,7 @@ export const YepBridge = async (input: {
   }
 
   function enqueueEvent(event: ForwardedEvent): Promise<void> {
+    if (disposed) return Promise.resolve();
     return new Promise<void>((resolve) => {
       queuedEvents.push({ event, resolve });
       void pumpEvents();
@@ -323,10 +329,28 @@ export const YepBridge = async (input: {
     }) => {
       if (disposed || !event || typeof event.type !== "string") return;
       if (!FORWARD_EVENTS.has(event.type)) return;
+      // Enqueueing is synchronous and the pump preserves event order. Do not
+      // make OpenCode depend on bridge availability: some builds await plugin
+      // hooks, while the bridge may legitimately be stopped or restarting.
       void enqueueEvent(event);
     },
     dispose: async () => {
+      // OpenCode can dispose a short-lived `opencode run` instance
+      // immediately after publishing its terminal message/status events.
+      // Those hooks are fire-and-forget in some versions, so closing the pump
+      // here used to drop the queue tail and leave Yep stuck in-turn. Give the
+      // ordered pump a bounded chance to deliver every already-enqueued event.
+      const deadline = Date.now() + 5_000;
+      while (
+        (pumpingEvents || queuedEvents.length > 0) &&
+        Date.now() < deadline
+      ) {
+        await delay(25);
+      }
       disposed = true;
+      // Release confirmation waiters if the bridge stayed unavailable through
+      // the drain window. The events are intentionally dropped at disposal.
+      for (const pending of queuedEvents.splice(0)) pending.resolve();
     },
   };
 };

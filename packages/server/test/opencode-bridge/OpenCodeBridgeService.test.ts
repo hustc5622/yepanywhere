@@ -1751,6 +1751,152 @@ describe("OpenCodeBridgeService", () => {
     expect(again?.lastTurnStatus).toBeUndefined();
   });
 
+  it("keeps an external CLI turn active after tool-calls and completes only from final assistant evidence", async () => {
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+      lifecycle: { quietWindowMs: 5, reconcileIntervalMs: 5 },
+    });
+    await bridge.start();
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (
+          event: unknown,
+          origin: { instanceId: string; directory: string },
+        ) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+    const origin = { instanceId: "inst-cli", directory: "/tmp/cli" };
+
+    try {
+      handleEvent(
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_cli", status: { type: "busy" } },
+        },
+        origin,
+      );
+      handleEvent(
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: "ses_cli",
+            info: {
+              role: "assistant",
+              finish: "tool-calls",
+              time: { completed: Date.now() },
+            },
+          },
+        },
+        origin,
+      );
+      handleEvent(
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_cli", status: { type: "idle" } },
+        },
+        origin,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(bridge.isSessionActive("ses_cli")).toBe(true);
+      expect(
+        bridge.listSessions().find((item) => item.id === "ses_cli")
+          ?.lastTurnStatus,
+      ).toBeUndefined();
+
+      handleEvent(
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_cli", status: { type: "busy" } },
+        },
+        origin,
+      );
+      handleEvent(
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: "ses_cli",
+            info: {
+              role: "assistant",
+              finish: "stop",
+              time: { completed: Date.now() },
+            },
+          },
+        },
+        origin,
+      );
+      handleEvent(
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_cli", status: { type: "idle" } },
+        },
+        origin,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(bridge.isSessionActive("ses_cli")).toBe(false);
+      expect(
+        bridge.listSessions().find((item) => item.id === "ses_cli")
+          ?.lastTurnStatus,
+      ).toBe("completed");
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it("keeps the stable-idle fallback for an external CLI without finish metadata", async () => {
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+      lifecycle: { quietWindowMs: 5, reconcileIntervalMs: 5 },
+    });
+    await bridge.start();
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (
+          event: unknown,
+          origin: { instanceId: string; directory: string },
+        ) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+    const origin = { instanceId: "inst-legacy", directory: "/tmp/legacy" };
+
+    try {
+      handleEvent(
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_legacy", status: { type: "busy" } },
+        },
+        origin,
+      );
+      handleEvent(
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_legacy", status: { type: "idle" } },
+        },
+        origin,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(bridge.isSessionActive("ses_legacy")).toBe(false);
+      expect(
+        bridge.listSessions().find((item) => item.id === "ses_legacy")
+          ?.lastTurnStatus,
+      ).toBe("completed");
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it("does not mark idle-to-idle status polls as completed turns", () => {
     const bridge = new OpenCodeBridgeService({
       enabled: false,
