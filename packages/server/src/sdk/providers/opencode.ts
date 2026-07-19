@@ -420,6 +420,13 @@ export class OpenCodeProvider implements AgentProvider {
   readonly name = "opencode" as const;
   readonly displayName = "OpenCode";
   readonly supportsPermissionMode = true;
+  // auto and plan both resolve to the default session rules. OpenCode's real
+  // plan mode is an agent choice, not a permission preset.
+  readonly permissionModes = [
+    "default",
+    "acceptEdits",
+    "bypassPermissions",
+  ] as const;
   readonly supportsThinkingToggle = false;
   readonly supportsSlashCommands = false;
 

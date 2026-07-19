@@ -760,6 +760,10 @@ export class CodexProvider implements AgentProvider {
   readonly name = "codex" as const;
   readonly displayName = "Codex";
   readonly supportsPermissionMode = true;
+  // auto/default/acceptEdits currently share the same cf-style thread policy.
+  // Expose only one representative so clients do not promise a distinction
+  // that Codex app-server cannot enforce.
+  readonly permissionModes = ["auto", "plan", "bypassPermissions"] as const;
   readonly supportsThinkingToggle = true;
   readonly supportsSlashCommands = false;
 

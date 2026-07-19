@@ -220,6 +220,11 @@ export interface ProviderInfo {
   currentEffortLevel?: EffortLevel;
   /** Whether this provider supports permission modes (default: true for backward compat) */
   supportsPermissionMode?: boolean;
+  /**
+   * Non-empty permission modes with distinct behavior for this provider.
+   * Providers should omit aliases that resolve to the same underlying policy.
+   */
+  permissionModes?: readonly PermissionMode[];
   /** Whether this provider supports extended thinking toggle (default: true for backward compat) */
   supportsThinkingToggle?: boolean;
   /** Whether this provider supports slash commands (default: false) */
@@ -227,7 +232,9 @@ export interface ProviderInfo {
 }
 
 /**
- * Permission mode for tool approvals.
+ * Canonical permission mode values. Providers map these to their native
+ * approval/sandbox systems and advertise only distinct choices through
+ * `ProviderInfo.permissionModes`.
  * - "auto": Use Claude Code's classifier to approve/deny permission prompts
  * - "default": Auto-approve read-only tools (Read, Glob, Grep, etc.), ask for mutating tools
  * - "acceptEdits": Auto-approve file editing tools (Edit, Write, NotebookEdit), ask for others

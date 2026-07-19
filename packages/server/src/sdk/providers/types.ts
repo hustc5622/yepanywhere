@@ -163,6 +163,8 @@ export interface AgentProvider {
   readonly displayName: string;
   /** Whether this provider supports permission modes (default: true) */
   readonly supportsPermissionMode: boolean;
+  /** Non-empty permission modes with distinct provider behavior. */
+  readonly permissionModes?: readonly PermissionMode[];
   /** Whether this provider supports extended thinking toggle (default: true) */
   readonly supportsThinkingToggle: boolean;
   /** Whether this provider supports slash commands (default: false) */

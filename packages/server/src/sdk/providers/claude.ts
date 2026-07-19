@@ -11,6 +11,7 @@ import {
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
+  ALL_PERMISSION_MODES,
   type ContextStatusSdkPayload,
   DEFAULT_PERMISSION_MODE,
   type ModelInfo,
@@ -316,6 +317,7 @@ export class ClaudeProvider implements AgentProvider {
   readonly name: ProviderName = "claude";
   readonly displayName = "Claude Code (SSH)";
   readonly supportsPermissionMode = true;
+  readonly permissionModes = ALL_PERMISSION_MODES;
   readonly supportsThinkingToggle = true;
   readonly supportsSlashCommands = true;
 

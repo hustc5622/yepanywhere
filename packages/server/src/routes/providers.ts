@@ -35,6 +35,7 @@ async function buildProviderInfo(
     user: authStatus.user,
     models,
     supportsPermissionMode: provider.supportsPermissionMode,
+    permissionModes: provider.permissionModes,
     supportsThinkingToggle: provider.supportsThinkingToggle,
     supportsSlashCommands: provider.supportsSlashCommands,
   };

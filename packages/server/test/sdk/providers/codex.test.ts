@@ -1093,20 +1093,38 @@ describe("CodexProvider Event Normalization", () => {
 });
 
 describe("CodexProvider Configuration", () => {
-  it("maps the default permission mode to cf-style Codex policy", () => {
-    const provider = new CodexProvider() as unknown as {
+  it("exposes only distinct modes and maps aliases to cf-style policy", () => {
+    const codexProvider = new CodexProvider();
+    const provider = codexProvider as unknown as {
       mapPermissionModeToThreadPolicy: (permissionMode?: string) => {
         approvalPolicy: string;
         sandbox: string;
       };
     };
 
+    expect(codexProvider.permissionModes).toEqual([
+      "auto",
+      "plan",
+      "bypassPermissions",
+    ]);
     expect(provider.mapPermissionModeToThreadPolicy()).toEqual({
       approvalPolicy: "on-request",
       sandbox: "danger-full-access",
     });
-    expect(provider.mapPermissionModeToThreadPolicy("default")).toEqual({
+    for (const alias of ["auto", "default", "acceptEdits"]) {
+      expect(provider.mapPermissionModeToThreadPolicy(alias)).toEqual({
+        approvalPolicy: "on-request",
+        sandbox: "danger-full-access",
+      });
+    }
+    expect(provider.mapPermissionModeToThreadPolicy("plan")).toEqual({
       approvalPolicy: "on-request",
+      sandbox: "read-only",
+    });
+    expect(
+      provider.mapPermissionModeToThreadPolicy("bypassPermissions"),
+    ).toEqual({
+      approvalPolicy: "never",
       sandbox: "danger-full-access",
     });
   });

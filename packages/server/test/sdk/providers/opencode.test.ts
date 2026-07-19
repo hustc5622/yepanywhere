@@ -175,7 +175,13 @@ describe("OpenCodeProvider", () => {
       }
     ).mapPermissionModeToOpenCode.bind(provider);
 
-    expect(mapPermissionModeToOpenCode("default")).toMatchObject({
+    expect(provider.permissionModes).toEqual([
+      "default",
+      "acceptEdits",
+      "bypassPermissions",
+    ]);
+    const defaultPermissions = mapPermissionModeToOpenCode("default");
+    expect(defaultPermissions).toMatchObject({
       read: "allow",
       glob: "allow",
       grep: "allow",
@@ -184,6 +190,8 @@ describe("OpenCodeProvider", () => {
       bash: "ask",
       "*": "ask",
     });
+    expect(mapPermissionModeToOpenCode("auto")).toEqual(defaultPermissions);
+    expect(mapPermissionModeToOpenCode("plan")).toEqual(defaultPermissions);
 
     expect(mapPermissionModeToOpenCode("acceptEdits")).toMatchObject({
       edit: "allow",
