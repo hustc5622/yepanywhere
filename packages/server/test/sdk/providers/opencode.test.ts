@@ -78,6 +78,7 @@ interface OpenCodeTestEmissionState {
   toolUseInputs: Map<string, string>;
   markerPartIds: Set<string>;
   streamingPartTypes: Map<string, "text" | "reasoning">;
+  permissionAskedIds: Set<string>;
   latestUsage?: Record<string, unknown>;
 }
 
@@ -129,6 +130,7 @@ function createEmissionState(): OpenCodeTestEmissionState {
     toolUseInputs: new Map<string, string>(),
     markerPartIds: new Set<string>(),
     streamingPartTypes: new Map<string, "text" | "reasoning">(),
+    permissionAskedIds: new Set<string>(),
   };
 }
 
@@ -1262,6 +1264,102 @@ custom-openai/glm-5.2
         },
       },
     ]);
+    expect(replies).toEqual([{ reply: "once" }]);
+  });
+
+  it("ignores duplicate permission.asked events for the same permission id", async () => {
+    // OpenCode can re-emit permission.asked for the same id (SSE reconnect
+    // replay / repeated event). Without dedup each event queues a fresh
+    // pending approval through the Process canUseTool callback, so the popup
+    // re-appears after the user already approved and a second click hits a
+    // 400. convertSSEEventToSDKMessages must dispatch the approval only once
+    // per permission id.
+    const provider = new OpenCodeProvider();
+    const convertSSEEventToSDKMessages = (
+      provider as unknown as {
+        convertSSEEventToSDKMessages: (
+          event: { type: string; properties: Record<string, unknown> },
+          baseUrl: string,
+          sessionId: string,
+          currentMessageId: string | null,
+          signal: AbortSignal,
+          messageRoles: ReadonlyMap<string, "user" | "assistant">,
+          emissionState: OpenCodeTestEmissionState,
+          submittedText: string,
+          onToolApproval: (
+            toolName: string,
+            input: unknown,
+            options: { signal: AbortSignal },
+          ) => Promise<{ behavior: "allow" | "deny" }>,
+          cwd?: string,
+        ) => Promise<Array<Record<string, unknown>>>;
+      }
+    ).convertSSEEventToSDKMessages.bind(provider);
+
+    const emissionState = createEmissionState();
+    const approvals: Array<{ toolName: string }> = [];
+    const replies: unknown[] = [];
+    const event = {
+      type: "permission.asked",
+      properties: {
+        id: "per_dup",
+        sessionID: "ses_dup",
+        permission: "bash",
+        patterns: ["git status"],
+        always: ["git *"],
+        tool: { messageID: "msg_1", callID: "call_1" },
+      },
+    };
+
+    await withTestServer(
+      async (req, res) => {
+        if (req.method === "POST" && req.url === "/permission/per_dup/reply") {
+          replies.push(await readJsonBody(req));
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          return;
+        }
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        const onToolApproval = async (toolName: string) => {
+          approvals.push({ toolName });
+          return { behavior: "allow" as const };
+        };
+        const signal = new AbortController().signal;
+        const roles = new Map<string, "user" | "assistant">();
+
+        const first = await convertSSEEventToSDKMessages(
+          event,
+          baseUrl,
+          "ses_dup",
+          null,
+          signal,
+          roles,
+          emissionState,
+          "",
+          onToolApproval,
+        );
+        expect(first).toEqual([]);
+
+        // Replayed duplicate must be ignored: no second approval, no reply.
+        const second = await convertSSEEventToSDKMessages(
+          event,
+          baseUrl,
+          "ses_dup",
+          null,
+          signal,
+          roles,
+          emissionState,
+          "",
+          onToolApproval,
+        );
+        expect(second).toEqual([]);
+      },
+    );
+
+    expect(approvals).toEqual([{ toolName: "Bash" }]);
     expect(replies).toEqual([{ reply: "once" }]);
   });
 

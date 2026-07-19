@@ -55,6 +55,7 @@ import {
 } from "../lib/agentCommands";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
+import { isStalePendingInputError } from "../lib/pendingInputError";
 import { preprocessMessages } from "../lib/preprocessMessages";
 import {
   type PreprocessMessagesCache,
@@ -1077,7 +1078,7 @@ function SessionPageContent({
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
-        if (status === 404) {
+        if (isStalePendingInputError(err)) {
           handleStalePendingInput();
           return;
         }
@@ -1108,7 +1109,7 @@ function SessionPageContent({
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
-        if (status === 404) {
+        if (isStalePendingInputError(err)) {
           handleStalePendingInput();
           return;
         }
@@ -1137,7 +1138,7 @@ function SessionPageContent({
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
-        if (status === 404) {
+        if (isStalePendingInputError(err)) {
           handleStalePendingInput();
           return;
         }
@@ -1165,7 +1166,7 @@ function SessionPageContent({
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
-        if (status === 404) {
+        if (isStalePendingInputError(err)) {
           handleStalePendingInput();
           return;
         }
@@ -1193,7 +1194,7 @@ function SessionPageContent({
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
-        if (status === 404) {
+        if (isStalePendingInputError(err)) {
           handleStalePendingInput();
           return;
         }
@@ -1217,7 +1218,7 @@ function SessionPageContent({
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
-        if (status === 404) {
+        if (isStalePendingInputError(err)) {
           handleStalePendingInput();
           return;
         }
@@ -1248,7 +1249,7 @@ function SessionPageContent({
           markPendingInputResolved("in-turn");
         } catch (err) {
           const status = (err as { status?: number }).status;
-          if (status === 404) {
+          if (isStalePendingInputError(err)) {
             handleStalePendingInput();
             return;
           }
@@ -1280,7 +1281,7 @@ function SessionPageContent({
           markPendingInputResolved("in-turn");
         } catch (err) {
           const status = (err as { status?: number }).status;
-          if (status === 404) {
+          if (isStalePendingInputError(err)) {
             handleStalePendingInput();
             return;
           }

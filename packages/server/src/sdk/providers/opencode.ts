@@ -387,6 +387,13 @@ interface OpenCodeEmissionState {
   markerPartIds: Set<string>;
   /** Part kind learned from message.part.updated before standalone deltas. */
   streamingPartTypes: Map<string, "text" | "reasoning">;
+  /**
+   * Permission ids already dispatched to the approval handler this stream.
+   * OpenCode can re-emit `permission.asked` for the same id (replay / multiple
+   * approvals in one turn); without dedup each event queues a fresh pending
+   * approval, so the popup reappears after the user already approved.
+   */
+  permissionAskedIds: Set<string>;
   assistantStream?: OpenCodeAssistantStreamState;
   latestUsage?: Record<string, unknown>;
   latestCost?: number;
@@ -1397,6 +1404,7 @@ export class OpenCodeProvider implements AgentProvider {
       toolUseInputs: new Map(),
       markerPartIds: new Set(),
       streamingPartTypes: new Map(),
+      permissionAskedIds: new Set(),
     };
 
     // Event buffer and signaling for producer/consumer pattern
@@ -2067,9 +2075,25 @@ export class OpenCodeProvider implements AgentProvider {
   ): Promise<SDKMessage[]> {
     switch (event.type) {
       case "permission.asked": {
+        const permissionEvent = event as OpenCodePermissionAskedEvent;
+        const permissionId = permissionEvent.properties.id;
+        if (permissionId) {
+          if (emissionState.permissionAskedIds.has(permissionId)) {
+            getLogger().debug(
+              {
+                event: "opencode_permission_asked_duplicate",
+                sessionId,
+                permissionId,
+              },
+              "Ignoring duplicate OpenCode permission.asked event",
+            );
+            return [];
+          }
+          emissionState.permissionAskedIds.add(permissionId);
+        }
         await this.handlePermissionAsked(
           baseUrl,
-          event as OpenCodePermissionAskedEvent,
+          permissionEvent,
           signal,
           onToolApproval,
           cwd,
