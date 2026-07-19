@@ -87,11 +87,11 @@ Environment overrides:
   GOOGLE_APPLICATION_CREDENTIALS
                                Fallback Firebase service account JSON path
   SESSION_TITLE_LLM_API_KEY    OpenAI-compatible API key for AI session titles
-  LLM_API_KEY                  Fallback API key for AI session titles
+  LLM_API_KEY                  Shared fallback API key for session titles and OpenCode
   SESSION_TITLE_LLM_API_BASE   OpenAI-compatible API base for AI session titles
-  LLM_API_BASE                 Fallback API base for AI session titles
+  LLM_API_BASE                 Shared fallback API base for session titles and OpenCode
   SESSION_TITLE_SUB_MODULE     X-Sub-Module header for AI session titles
-  LLM_SUB_MODULE               Fallback X-Sub-Module header for AI session titles
+  LLM_SUB_MODULE               Shared fallback X-Sub-Module header for session titles and OpenCode
   OPENCODE_LLM_API_KEY         API key for managed OpenCode model requests
   OPENCODE_LLM_API_BASE        API base for managed OpenCode model requests
   OPENCODE_LLM_SUB_MODULE      X-Sub-Module header for managed OpenCode model requests
@@ -181,9 +181,9 @@ fi
 SESSION_TITLE_API_KEY="${SESSION_TITLE_LLM_API_KEY:-${LLM_API_KEY:-}}"
 SESSION_TITLE_API_BASE="${SESSION_TITLE_LLM_API_BASE:-${LLM_API_BASE:-}}"
 SESSION_TITLE_SUB_MODULE_VALUE="${SESSION_TITLE_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
-OPENCODE_API_KEY="${OPENCODE_LLM_API_KEY:-$SESSION_TITLE_API_KEY}"
-OPENCODE_API_BASE="${OPENCODE_LLM_API_BASE:-$SESSION_TITLE_API_BASE}"
-OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-}"
+OPENCODE_API_KEY="${OPENCODE_LLM_API_KEY:-${LLM_API_KEY:-}}"
+OPENCODE_API_BASE="${OPENCODE_LLM_API_BASE:-${LLM_API_BASE:-}}"
+OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
 
 chmod +x "$CLI_JS" 2>/dev/null || true
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
@@ -352,6 +352,12 @@ write_server_plist() {
   fi
   if [[ -n "$SESSION_TITLE_SUB_MODULE_VALUE" ]]; then
     env_args+=("SESSION_TITLE_SUB_MODULE" "$SESSION_TITLE_SUB_MODULE_VALUE")
+  fi
+  if [[ -n "$OPENCODE_API_KEY" ]]; then
+    env_args+=("OPENCODE_LLM_API_KEY" "$OPENCODE_API_KEY")
+  fi
+  if [[ -n "$OPENCODE_API_BASE" ]]; then
+    env_args+=("OPENCODE_LLM_API_BASE" "$OPENCODE_API_BASE")
   fi
   if [[ -n "$OPENCODE_LLM_SUB_MODULE_VALUE" ]]; then
     env_args+=("OPENCODE_LLM_SUB_MODULE" "$OPENCODE_LLM_SUB_MODULE_VALUE")

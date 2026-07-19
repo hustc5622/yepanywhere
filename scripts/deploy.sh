@@ -168,11 +168,11 @@ Native push deploy config:
 
 AI session title deploy config:
   SESSION_TITLE_LLM_API_KEY        OpenAI-compatible API key for title generation
-  LLM_API_KEY                      Fallback API key for title generation
+  LLM_API_KEY                      Shared fallback API key for titles and OpenCode
   SESSION_TITLE_LLM_API_BASE       OpenAI-compatible API base for title generation
-  LLM_API_BASE                     Fallback API base for title generation
+  LLM_API_BASE                     Shared fallback API base for titles and OpenCode
   SESSION_TITLE_SUB_MODULE         X-Sub-Module header for title generation
-  LLM_SUB_MODULE                   Fallback X-Sub-Module header for title generation
+  LLM_SUB_MODULE                   Shared fallback X-Sub-Module header for titles and OpenCode
   OPENCODE_LLM_API_KEY             API key for managed OpenCode model requests
   OPENCODE_LLM_API_BASE            API base for managed OpenCode model requests
   OPENCODE_LLM_SUB_MODULE          X-Sub-Module header for managed OpenCode model requests

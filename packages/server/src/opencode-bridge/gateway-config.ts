@@ -82,20 +82,18 @@ function defaultSubModule(apiBase: string): string | undefined {
 export function resolveOpenCodeGatewayConfig(
   env: Env,
 ): OpenCodeGatewayConfig | null {
-  const apiKey =
-    clean(env.OPENCODE_LLM_API_KEY) ??
-    clean(env.SESSION_TITLE_LLM_API_KEY) ??
-    clean(env.LLM_API_KEY);
+  const apiKey = clean(env.OPENCODE_LLM_API_KEY) ?? clean(env.LLM_API_KEY);
   if (!apiKey) return null;
 
   const apiBase = withV1Path(
     clean(env.OPENCODE_LLM_API_BASE) ??
-      clean(env.SESSION_TITLE_LLM_API_BASE) ??
       clean(env.LLM_API_BASE) ??
       DEFAULT_API_BASE,
   );
   const subModule =
-    clean(env.OPENCODE_LLM_SUB_MODULE) ?? defaultSubModule(apiBase);
+    clean(env.OPENCODE_LLM_SUB_MODULE) ??
+    clean(env.LLM_SUB_MODULE) ??
+    defaultSubModule(apiBase);
 
   return { apiKey, apiBase, subModule };
 }

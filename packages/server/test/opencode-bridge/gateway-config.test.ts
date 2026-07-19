@@ -9,19 +9,38 @@ import {
 } from "../../src/opencode-bridge/gateway-config.js";
 
 describe("OpenCode gateway configuration", () => {
-  it("uses dedicated OpenCode credentials ahead of title and legacy settings", () => {
+  it("uses dedicated OpenCode credentials ahead of global and title settings", () => {
     expect(
       resolveOpenCodeGatewayConfig({
         OPENCODE_LLM_API_KEY: "opencode-key",
         OPENCODE_LLM_API_BASE: "https://gateway.example/v1/",
         OPENCODE_LLM_SUB_MODULE: "coding",
         SESSION_TITLE_LLM_API_KEY: "title-key",
-        LLM_API_KEY: "legacy-key",
+        SESSION_TITLE_LLM_API_BASE: "https://title.example/v1",
+        LLM_API_KEY: "global-key",
+        LLM_API_BASE: "https://global.example/v1",
+        LLM_SUB_MODULE: "global-module",
       }),
     ).toEqual({
       apiKey: "opencode-key",
       apiBase: "https://gateway.example/v1",
       subModule: "coding",
+    });
+  });
+
+  it("shares global LLM settings without borrowing session-title credentials", () => {
+    expect(
+      resolveOpenCodeGatewayConfig({
+        SESSION_TITLE_LLM_API_KEY: "stale-title-key",
+        SESSION_TITLE_LLM_API_BASE: "https://title.example/v1",
+        LLM_API_KEY: "global-key",
+        LLM_API_BASE: "https://global.example/v1/",
+        LLM_SUB_MODULE: "global-module",
+      }),
+    ).toEqual({
+      apiKey: "global-key",
+      apiBase: "https://global.example/v1",
+      subModule: "global-module",
     });
   });
 
