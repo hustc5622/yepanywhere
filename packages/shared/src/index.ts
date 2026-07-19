@@ -172,6 +172,7 @@ export type {
   SessionCreatedBy,
   SessionOwnership,
   SessionSandboxPolicy,
+  OpenCodeModelDefaultLimits,
   SessionBranchOption,
   SessionBranchState,
   SessionBranchMetadata,
@@ -207,6 +208,7 @@ export {
   CODEX_DEFAULT_CONTEXT_WINDOW,
   escalateContextWindow,
   getModelContextWindow,
+  getOpenCodeModelDefaultLimits,
 } from "./app-types.js";
 
 // Session utilities

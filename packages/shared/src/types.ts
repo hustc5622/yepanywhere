@@ -118,6 +118,8 @@ export interface ModelInfo {
   size?: number;
   /** Context window size in tokens (for local models) */
   contextWindow?: number;
+  /** Maximum output tokens the model can generate in one response, when known. */
+  maxOutputTokens?: number;
   /** Parameter count string, e.g. "30.5B" (for local models) */
   parameterSize?: string;
   /** Base model this preset was derived from, e.g. "qwen3-coder:30b" */

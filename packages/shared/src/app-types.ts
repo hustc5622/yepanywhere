@@ -280,6 +280,98 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "gpt-4-turbo": 128_000,
 };
 
+/** Max context window / output caps for an OpenCode gateway model. */
+export interface OpenCodeModelDefaultLimits {
+  /** Maximum context window in tokens. */
+  context: number;
+  /** Maximum output tokens per response. */
+  output: number;
+}
+
+/**
+ * Curated context/output limits for models served through the OpenCode
+ * ohmyrouter gateway.
+ *
+ * This is a LAST-RESORT fallback only. The authoritative windows come from the
+ * live catalog: `opencode models --verbose` reports each model's
+ * `limit.context`/`limit.output`, and the gateway `/v1/models` catalog reports
+ * `context_window`. The OpenCode provider surfaces those real values on
+ * `ModelInfo` (see `enrichWithGatewayContextWindows`), and the new-session form
+ * prefers them. This table is consulted only when neither live source reports a
+ * window (e.g. a custom provider that advertises a zero/blank limit and a model
+ * id the gateway doesn't list), so the meter avoids the misleading 200K default.
+ *
+ * Values sourced from public provider docs / model cards (2026-07). Matched by
+ * longest prefix so specific variants win over the family default (e.g.
+ * `glm-5.2` → 1M beats `glm-5.1` → 200K). Keep entries lowercase.
+ */
+const OPENCODE_MODEL_LIMIT_RULES: ReadonlyArray<
+  readonly [prefix: string, limits: OpenCodeModelDefaultLimits]
+> = [
+  // Anthropic Claude — Opus 4.6/4.7/4.8, Sonnet 4.6/5, Fable 5 ship 1M; Haiku 4.5 is 200K.
+  ["claude-haiku", { context: 200_000, output: 64_000 }],
+  ["claude-opus", { context: 1_000_000, output: 128_000 }],
+  ["claude-sonnet-4", { context: 1_000_000, output: 64_000 }],
+  ["claude-sonnet-5", { context: 1_000_000, output: 64_000 }],
+  ["claude-sonnet", { context: 200_000, output: 64_000 }],
+  ["claude-fable", { context: 1_000_000, output: 128_000 }],
+  ["claude", { context: 200_000, output: 64_000 }],
+  // Google Gemini 2.5 / 3.x — 1,048,576 context, 65,536 output.
+  ["gemini", { context: 1_048_576, output: 65_536 }],
+  // OpenAI GPT-5.x / Codex.
+  ["gpt-5.4-mini", { context: 400_000, output: 128_000 }],
+  ["gpt-5.2-codex", { context: 400_000, output: 128_000 }],
+  ["gpt-5.3-codex", { context: 400_000, output: 128_000 }],
+  ["gpt-5", { context: 1_000_000, output: 128_000 }],
+  // ByteDance Doubao Seed 2.x — 256K context, 128K output (all variants).
+  ["doubao-seed", { context: 256_000, output: 128_000 }],
+  // DeepSeek V4 Pro/Flash — 1M context, 384K output.
+  ["deepseek-v4", { context: 1_000_000, output: 384_000 }],
+  ["deepseek", { context: 128_000, output: 64_000 }],
+  // Zhipu GLM — 5.2 is 1M, 5.1 and earlier are 200K; 131K output.
+  ["glm-5.2", { context: 1_000_000, output: 131_072 }],
+  ["glm", { context: 200_000, output: 131_072 }],
+  // Moonshot Kimi K2.x — 262,144 context.
+  ["kimi", { context: 262_144, output: 65_536 }],
+  // Alibaba Qwen 3.x — 1M context.
+  ["qwen", { context: 1_000_000, output: 65_536 }],
+  // MiniMax — M3 is 1M; M2.x approximated at 512K (best-effort).
+  ["MiniMax-m3", { context: 1_000_000, output: 131_072 }],
+  ["MiniMax-m2", { context: 524_288, output: 65_536 }],
+  ["MiniMax", { context: 1_000_000, output: 131_072 }],
+  // Xiaomi MiMo v2.5 (best-effort).
+  ["mimo", { context: 256_000, output: 65_536 }],
+  // MiniMax M2 family (best-effort).
+  ["m2-her", { context: 256_000, output: 65_536 }],
+  ["m2", { context: 256_000, output: 65_536 }],
+];
+
+/**
+ * Resolve curated context/output limits for an OpenCode gateway model id.
+ * Accepts bare ids ("claude-opus-4-8") or namespaced refs
+ * ("yep-anthropic/claude-opus-4-8"); strips any provider prefix and `[..]`
+ * suffix before matching. Returns undefined when the model family is unknown.
+ */
+export function getOpenCodeModelDefaultLimits(
+  model: string | undefined,
+): OpenCodeModelDefaultLimits | undefined {
+  if (!model) return undefined;
+  const slash = model.lastIndexOf("/");
+  const raw = (slash >= 0 ? model.slice(slash + 1) : model)
+    .toLowerCase()
+    .replace(/\[.*?\]/g, "");
+  let best: OpenCodeModelDefaultLimits | undefined;
+  let bestLen = -1;
+  for (const [prefix, limits] of OPENCODE_MODEL_LIMIT_RULES) {
+    const normalizedPrefix = prefix.toLowerCase();
+    if (raw.startsWith(normalizedPrefix) && normalizedPrefix.length > bestLen) {
+      best = limits;
+      bestLen = normalizedPrefix.length;
+    }
+  }
+  return best;
+}
+
 /**
  * Get the context window size for a given model.
  *
@@ -304,6 +396,16 @@ export function getModelContextWindow(
     return provider === "codex"
       ? CODEX_DEFAULT_CONTEXT_WINDOW
       : DEFAULT_CONTEXT_WINDOW;
+  }
+
+  // OpenCode models resolve their window from the live catalog first (see
+  // ModelInfoService, which caches the real `limit.context` reported by
+  // `opencode models --verbose` and the gateway `/v1/models` catalog). This
+  // curated table is only the offline/last-resort fallback for callers that
+  // resolve straight from a model id without a cached window.
+  if (provider === "opencode") {
+    const limits = getOpenCodeModelDefaultLimits(model);
+    if (limits) return limits.context;
   }
 
   const lowerModel = model.toLowerCase();

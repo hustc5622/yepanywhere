@@ -102,6 +102,39 @@ describe("OpenCode gateway configuration", () => {
     );
   });
 
+  it("falls back to curated per-model limits when the session omits them", () => {
+    const env = buildManagedOpenCodeEnv(
+      {},
+      {
+        apiKey: "opencode-key",
+        apiBase: "https://api.ohmyrouter.com/v1",
+        subModule: "claude-code-internal",
+      },
+      {
+        sessionConfig: {
+          model: "claude-opus-4-8",
+          requestProtocol: "anthropic",
+          capabilities: {
+            reasoning: false,
+            toolCall: true,
+            temperature: true,
+          },
+        },
+      },
+    );
+    const content = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      provider?: Record<
+        string,
+        { models?: Record<string, Record<string, unknown>> }
+      >;
+    };
+    // ohmyrouter's /v1/models catalog exposes no context window, so without the
+    // curated fallback this model would resolve to OpenCode's 200K default.
+    expect(
+      content.provider?.["yep-anthropic"]?.models?.["claude-opus-4-8"]?.limit,
+    ).toEqual({ context: 1_000_000, output: 128_000 });
+  });
+
   it("builds an isolated OpenAI-compatible provider for the selected model", () => {
     const env = buildManagedOpenCodeEnv(
       {

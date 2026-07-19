@@ -37,6 +37,7 @@ import { getLogger } from "../../logging/logger.js";
 import {
   buildManagedOpenCodeEnv,
   buildUserConfiguredOpenCodeEnv,
+  fetchOpenCodeGatewayModels,
   getManagedOpenCodeModelRef,
   resolveOpenCodeGatewayConfig,
   resolveOpenCodeOpenAICompatibleBaseURL,
@@ -77,6 +78,13 @@ import type {
 } from "./types.js";
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+
+/**
+ * How long a fetched gateway model catalog (used to backfill context windows)
+ * stays fresh. `getAvailableModels` is called on every provider listing, so a
+ * short TTL keeps the picker responsive without hammering the gateway.
+ */
+const GATEWAY_MODEL_WINDOWS_TTL_MS = 60_000;
 
 /**
  * Configuration for OpenCode provider.
@@ -282,6 +290,36 @@ function requestProtocolForOpenCodeNpm(
   return null;
 }
 
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.trunc(value)
+    : undefined;
+}
+
+/**
+ * Read a model's real context/output limits from `opencode models --verbose`.
+ *
+ * OpenCode resolves every model's `limit` from models.dev or the user's
+ * provider config, so these values are the authoritative window for the
+ * catalog entry. Surfacing them lets Yep display and meter the correct window
+ * instead of falling back to the Claude-centric 200K heuristic.
+ */
+function extractOpenCodeModelLimits(metadata: Record<string, unknown> | null): {
+  contextWindow?: number;
+  maxOutputTokens?: number;
+} {
+  const limit = isRecord(metadata?.limit) ? metadata.limit : undefined;
+  if (!limit) return {};
+  return {
+    ...(positiveInteger(limit.context) !== undefined
+      ? { contextWindow: positiveInteger(limit.context) }
+      : {}),
+    ...(positiveInteger(limit.output) !== undefined
+      ? { maxOutputTokens: positiveInteger(limit.output) }
+      : {}),
+  };
+}
+
 interface OpenCodeSessionCreatePayload {
   title: string;
   location?: {
@@ -384,6 +422,11 @@ export class OpenCodeProvider implements AgentProvider {
   private readonly lifecycleQuietWindowMs: number;
   private readonly lifecycleReconcileIntervalMs: number;
   private readonly lifecycleStatusFailureGraceMs: number;
+  /** Cached gateway `context_window` values, keyed by gateway model id. */
+  private gatewayModelWindowsCache?: {
+    fetchedAt: number;
+    byModelId: Map<string, number>;
+  };
   constructor(config: OpenCodeProviderConfig = {}) {
     this.opencodePath = config.opencodePath;
     this.timeout = config.timeout ?? 300000; // 5 minutes default
@@ -461,9 +504,10 @@ export class OpenCodeProvider implements AgentProvider {
     };
     const cliModels = await this.loadOpenCodeCliModels(opencodePath);
     if (cliModels.length > 0) {
+      const enriched = await this.enrichWithGatewayContextWindows(cliModels);
       return [
         configuredDefault,
-        ...cliModels.filter((model) => model.id !== "default"),
+        ...enriched.filter((model) => model.id !== "default"),
       ];
     }
 
@@ -472,6 +516,64 @@ export class OpenCodeProvider implements AgentProvider {
       configuredDefault,
       { id: "opencode/big-pickle", name: "Big Pickle (Free)" },
     ];
+  }
+
+  /**
+   * Backfill each model's context window from the LLM gateway's `/v1/models`
+   * catalog when `opencode models --verbose` did not report one. Custom
+   * providers frequently expose a blank/zero `limit`, so this recovers the
+   * gateway's real `context_window` (matched by gateway model id, then by the
+   * bare id after any `provider/` prefix). Best-effort: the CLI-reported window
+   * always wins, and any failure leaves the catalog untouched.
+   */
+  private async enrichWithGatewayContextWindows(
+    models: ModelInfo[],
+  ): Promise<ModelInfo[]> {
+    if (models.every((model) => model.contextWindow !== undefined)) {
+      return models;
+    }
+    const gatewayWindows = await this.getGatewayModelWindows();
+    if (gatewayWindows.size === 0) return models;
+
+    return models.map((model) => {
+      if (model.contextWindow !== undefined) return model;
+      const bareId = model.id.slice(model.id.lastIndexOf("/") + 1);
+      const contextWindow =
+        gatewayWindows.get(model.id) ?? gatewayWindows.get(bareId);
+      return contextWindow ? { ...model, contextWindow } : model;
+    });
+  }
+
+  private async getGatewayModelWindows(): Promise<Map<string, number>> {
+    const now = Date.now();
+    if (
+      this.gatewayModelWindowsCache &&
+      now - this.gatewayModelWindowsCache.fetchedAt <
+        GATEWAY_MODEL_WINDOWS_TTL_MS
+    ) {
+      return this.gatewayModelWindowsCache.byModelId;
+    }
+
+    const byModelId = new Map<string, number>();
+    const config = resolveOpenCodeGatewayConfig(process.env);
+    if (config) {
+      try {
+        const gatewayModels = await fetchOpenCodeGatewayModels(config);
+        for (const model of gatewayModels) {
+          if (model.contextWindow && model.contextWindow > 0) {
+            byModelId.set(model.id, model.contextWindow);
+          }
+        }
+      } catch (error) {
+        getLogger().debug(
+          { error },
+          "Failed to fetch OpenCode gateway catalog for context windows",
+        );
+      }
+    }
+
+    this.gatewayModelWindowsCache = { fetchedAt: now, byModelId };
+    return byModelId;
   }
 
   private async loadOpenCodeCliModels(
@@ -533,9 +635,17 @@ export class OpenCodeProvider implements AgentProvider {
       const byProtocol: ReasoningEffortsByProtocol = {};
       if (protocol && variants.length > 0) byProtocol[protocol] = variants;
 
+      const limits = extractOpenCodeModelLimits(metadata);
+
       models.push({
         id: header.catalogId,
         name: this.formatModelName(header.catalogId),
+        ...(limits.contextWindow !== undefined
+          ? { contextWindow: limits.contextWindow }
+          : {}),
+        ...(limits.maxOutputTokens !== undefined
+          ? { maxOutputTokens: limits.maxOutputTokens }
+          : {}),
         ...(variants.length > 0
           ? {
               supportedReasoningEfforts: variants,

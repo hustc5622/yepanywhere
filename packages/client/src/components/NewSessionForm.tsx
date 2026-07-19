@@ -9,6 +9,7 @@ import {
   type OpenCodeSessionConfig,
   type ProviderInfo,
   type ProviderName,
+  getOpenCodeModelDefaultLimits,
   resolveModel,
 } from "@yep-anywhere/shared";
 import {
@@ -256,6 +257,26 @@ function formatOpenCodeLimitInput(tokens: number | undefined): string {
     : String(Number(valueInK.toFixed(3)));
 }
 
+/**
+ * Resolve a managed OpenCode model's context/output window.
+ *
+ * Prefers the real limits the model advertises (populated from
+ * `opencode models --verbose` and the gateway `/v1/models` catalog, carried on
+ * ModelInfo). Only backfills per-field from the curated catalog when the live
+ * catalog omits a value. Returns limits only when both context and output are
+ * known, since the session config requires both.
+ */
+function resolveOpenCodeModelLimits(
+  model: ModelInfo | undefined,
+): OpenCodeModelLimits | undefined {
+  if (!model) return undefined;
+  const curated = getOpenCodeModelDefaultLimits(model.id);
+  const context = model.contextWindow ?? curated?.context;
+  const output = model.maxOutputTokens ?? curated?.output;
+  if (!context || !output) return undefined;
+  return { context, output };
+}
+
 export function getOpenCodeModelLimits(
   contextInput: string,
   outputInput: string,
@@ -371,6 +392,10 @@ export function NewSessionForm({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const voiceButtonRef = useRef<VoiceInputButtonRef>(null);
   const hasInitializedDefaultsRef = useRef(false);
+  // Tracks whether the user manually edited the OpenCode context/output limit
+  // inputs. While false, the inputs auto-populate from the selected model's
+  // curated defaults; a manual edit pins the values until the model changes.
+  const opencodeLimitsTouchedRef = useRef(false);
 
   // Thinking toggle state
   const {
@@ -773,10 +798,17 @@ export function NewSessionForm({
       let description = model.description;
       const parts: string[] = description ? [description] : [];
       if (model.parameterSize) parts.push(model.parameterSize);
-      if (model.contextWindow) {
+      // Prefer the model's advertised window; fall back to the curated
+      // catalog only when the live catalog omits one.
+      const effectiveContextWindow =
+        model.contextWindow ??
+        (selectedProvider === "opencode"
+          ? getOpenCodeModelDefaultLimits(model.id)?.context
+          : undefined);
+      if (effectiveContextWindow) {
         parts.push(
           t("newSessionModelContextWindow", {
-            size: formatContextWindow(model.contextWindow),
+            size: formatContextWindow(effectiveContextWindow),
           }),
         );
       }
@@ -807,9 +839,16 @@ export function NewSessionForm({
     }
 
     return options;
-  }, [availableModels, getEffortLabel, t]);
+  }, [availableModels, getEffortLabel, selectedProvider, t]);
 
   const selectedModelCapabilitySummary = useMemo(() => {
+    if (selectedProvider === "opencode") {
+      const limits = resolveOpenCodeModelLimits(selectedModelInfo);
+      if (!limits) return null;
+      return t("newSessionModelContextWindow", {
+        size: formatContextWindow(limits.context),
+      });
+    }
     if (selectedProvider !== "claude" || !selectedModelInfo) return null;
     const parts: string[] = [];
     if (selectedModelInfo.contextWindow) {
@@ -859,6 +898,8 @@ export function NewSessionForm({
         setOpencodeCapabilities(
           getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
         );
+        // Re-apply curated default limits for the newly selected model.
+        opencodeLimitsTouchedRef.current = false;
         setSelectedModel(nextModel);
         return;
       }
@@ -881,6 +922,24 @@ export function NewSessionForm({
     },
     [selectedModelInfo, selectedOpenCodeProtocols],
   );
+
+  // Auto-populate OpenCode context/output limits from the selected model's
+  // advertised window (`opencode models --verbose` / gateway catalog, with the
+  // curated catalog only as a per-field fallback). Without this the form falls
+  // back to 200K; filling the inputs both shows the real values and sends them
+  // to the session config. A manual edit (opencodeLimitsTouchedRef) pins the
+  // values until the model changes.
+  useEffect(() => {
+    if (selectedProvider !== "opencode" || !isManagedOpenCodeModel) return;
+    if (opencodeLimitsTouchedRef.current) return;
+    const limits = resolveOpenCodeModelLimits(selectedModelInfo);
+    setOpencodeContextLimit(
+      limits ? formatOpenCodeLimitInput(limits.context) : "",
+    );
+    setOpencodeOutputLimit(
+      limits ? formatOpenCodeLimitInput(limits.output) : "",
+    );
+  }, [selectedProvider, isManagedOpenCodeModel, selectedModelInfo]);
 
   // Combined display text: committed text + interim transcript
   const displayText = interimTranscript
@@ -977,6 +1036,17 @@ export function NewSessionForm({
     () => getOpenCodeModelLimits(opencodeContextLimit, opencodeOutputLimit),
     [opencodeContextLimit, opencodeOutputLimit],
   );
+  // Real context/output window advertised by the selected OpenCode model, as
+  // resolved by `opencode models --verbose` / the gateway catalog. Used both to
+  // prefill the limit placeholders and to seed the session config so the
+  // context meter reflects the true window instead of the generic 200K
+  // fallback.
+  const opencodeModelDefaultLimits = useMemo(():
+    | OpenCodeModelLimits
+    | undefined => {
+    if (selectedProvider !== "opencode") return undefined;
+    return resolveOpenCodeModelLimits(selectedModelInfo);
+  }, [selectedProvider, selectedModelInfo]);
   const opencodeProviderPatchResult = useMemo(
     () => parseOpenCodeAdvancedInput(opencodeProviderPatch),
     [opencodeProviderPatch],
@@ -1015,15 +1085,17 @@ export function NewSessionForm({
     }
     const providerPatch = opencodeProviderPatchResult.value;
     const modelPatch = opencodeModelPatchResult.value;
+    // User-entered limits win; otherwise fall back to the model's advertised
+    // window so the generated OpenCode config and Yep's context meter agree.
+    const effectiveLimits =
+      opencodeModelLimitResult.limits ?? opencodeModelDefaultLimits;
     return {
       model: selectedModel,
       requestProtocol: selectedOpenCodeProtocol,
       ...(selectedModelInfo?.name && selectedModelInfo.name !== selectedModel
         ? { name: selectedModelInfo.name }
         : {}),
-      ...(opencodeModelLimitResult.limits
-        ? { limits: opencodeModelLimitResult.limits }
-        : {}),
+      ...(effectiveLimits ? { limits: effectiveLimits } : {}),
       capabilities: opencodeCapabilities,
       ...(providerPatch || modelPatch
         ? { advanced: { provider: providerPatch, model: modelPatch } }
@@ -1034,6 +1106,7 @@ export function NewSessionForm({
     isManagedOpenCodeModel,
     opencodeCapabilities,
     opencodeModelLimitResult.limits,
+    opencodeModelDefaultLimits,
     opencodeModelPatchResult.value,
     opencodeProviderPatchResult.value,
     selectedModel,
@@ -1908,9 +1981,10 @@ export function NewSessionForm({
                   inputMode="decimal"
                   className="new-session-limit-input"
                   value={opencodeContextLimit}
-                  onChange={(event) =>
-                    setOpencodeContextLimit(event.target.value)
-                  }
+                  onChange={(event) => {
+                    opencodeLimitsTouchedRef.current = true;
+                    setOpencodeContextLimit(event.target.value);
+                  }}
                   placeholder={t("newSessionOpenCodeContextPlaceholder")}
                   disabled={isStarting}
                 />
@@ -1925,9 +1999,10 @@ export function NewSessionForm({
                   inputMode="decimal"
                   className="new-session-limit-input"
                   value={opencodeOutputLimit}
-                  onChange={(event) =>
-                    setOpencodeOutputLimit(event.target.value)
-                  }
+                  onChange={(event) => {
+                    opencodeLimitsTouchedRef.current = true;
+                    setOpencodeOutputLimit(event.target.value);
+                  }}
                   placeholder={t("newSessionOpenCodeOutputPlaceholder")}
                   disabled={isStarting}
                 />

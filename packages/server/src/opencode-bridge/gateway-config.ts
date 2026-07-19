@@ -3,6 +3,7 @@ import type {
   OpenCodeRequestProtocol,
   OpenCodeSessionConfig,
 } from "@yep-anywhere/shared";
+import { getOpenCodeModelDefaultLimits } from "@yep-anywhere/shared";
 
 export interface OpenCodeGatewayConfig {
   apiKey: string;
@@ -238,7 +239,12 @@ function buildManagedModelConfig(
     name: sessionConfig.name ?? sessionConfig.model,
     headers,
   };
-  if (sessionConfig.limits) managed.limit = sessionConfig.limits;
+  // Prefer the user-supplied limits; otherwise fall back to the curated
+  // per-model defaults so the ohmyrouter gateway model reports its real
+  // context window instead of OpenCode's 200K default.
+  const limits =
+    sessionConfig.limits ?? getOpenCodeModelDefaultLimits(sessionConfig.model);
+  if (limits) managed.limit = limits;
   if (capabilities?.attachment !== undefined) {
     managed.attachment = capabilities.attachment;
   }

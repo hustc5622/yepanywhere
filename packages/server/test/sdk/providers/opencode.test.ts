@@ -257,11 +257,13 @@ describe("OpenCodeProvider", () => {
     const methods = provider as unknown as {
       findOpenCodePath: () => Promise<string | null>;
       loadOpenCodeCliModels: (path: string) => Promise<ModelInfo[]>;
+      getGatewayModelWindows: () => Promise<Map<string, number>>;
     };
     vi.spyOn(methods, "findOpenCodePath").mockResolvedValue("/bin/opencode");
     vi.spyOn(methods, "loadOpenCodeCliModels").mockResolvedValue([
       { id: "anthropic/glm-5.2", name: "anthropic / glm-5.2" },
     ]);
+    vi.spyOn(methods, "getGatewayModelWindows").mockResolvedValue(new Map());
 
     await expect(provider.getAvailableModels()).resolves.toEqual([
       { id: "default", name: "Default (OpenCode config)" },
@@ -344,6 +346,80 @@ custom-openai/glm-5.2
     expect(model).not.toHaveProperty("supportedRequestProtocols");
     expect(model).not.toHaveProperty("supportedReasoningEfforts");
     expect(model).not.toHaveProperty("supportedReasoningEffortsByProtocol");
+  });
+
+  it("parses real context/output limits from verbose model output", () => {
+    const provider = new OpenCodeProvider();
+    const parseOpenCodeVerboseModels = (
+      provider as unknown as {
+        parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      }
+    ).parseOpenCodeVerboseModels.bind(provider);
+
+    const [model] = parseOpenCodeVerboseModels(`ohmyrouter/claude-opus-4-8
+{
+  "id": "claude-opus-4-8",
+  "api": { "npm": "@ai-sdk/anthropic" },
+  "limit": { "context": 1000000, "input": 900000, "output": 128000 }
+}`);
+
+    expect(model).toMatchObject({
+      id: "ohmyrouter/claude-opus-4-8",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 128_000,
+    });
+  });
+
+  it("ignores non-positive limit values in verbose model output", () => {
+    const provider = new OpenCodeProvider();
+    const parseOpenCodeVerboseModels = (
+      provider as unknown as {
+        parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      }
+    ).parseOpenCodeVerboseModels.bind(provider);
+
+    const [model] = parseOpenCodeVerboseModels(`custom/foo
+{ "limit": { "context": 0, "output": 0 } }`);
+
+    expect(model).toMatchObject({ id: "custom/foo" });
+    expect(model).not.toHaveProperty("contextWindow");
+    expect(model).not.toHaveProperty("maxOutputTokens");
+  });
+
+  it("backfills missing context windows from the gateway catalog", async () => {
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      findOpenCodePath: () => Promise<string | null>;
+      loadOpenCodeCliModels: (path: string) => Promise<ModelInfo[]>;
+      getGatewayModelWindows: () => Promise<Map<string, number>>;
+    };
+    vi.spyOn(methods, "findOpenCodePath").mockResolvedValue("/bin/opencode");
+    vi.spyOn(methods, "loadOpenCodeCliModels").mockResolvedValue([
+      { id: "ohmyrouter/glm-5.2", name: "glm" },
+      {
+        id: "ohmyrouter/claude-opus-4-8",
+        name: "opus",
+        contextWindow: 1_000_000,
+      },
+    ]);
+    // Gateway reports a window for the model that lacks one, and a different
+    // value for the model the CLI already resolved (which must win).
+    vi.spyOn(methods, "getGatewayModelWindows").mockResolvedValue(
+      new Map([
+        ["glm-5.2", 200_000],
+        ["claude-opus-4-8", 999],
+      ]),
+    );
+
+    await expect(provider.getAvailableModels()).resolves.toEqual([
+      { id: "default", name: "Default (OpenCode config)" },
+      { id: "ohmyrouter/glm-5.2", name: "glm", contextWindow: 200_000 },
+      {
+        id: "ohmyrouter/claude-opus-4-8",
+        name: "opus",
+        contextWindow: 1_000_000,
+      },
+    ]);
   });
 
   it("keeps plain model-list output compatible with older OpenCode versions", () => {
