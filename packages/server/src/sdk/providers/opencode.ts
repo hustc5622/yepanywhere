@@ -30,19 +30,13 @@ import type {
   OpenCodeSSEEvent,
   OpenCodeSessionConfig,
   PermissionMode,
-  ReasoningEffortInfo,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
-import {
-  ALL_OPENCODE_REQUEST_PROTOCOLS,
-  parseOpenCodeSSEEvent,
-} from "@yep-anywhere/shared";
+import { parseOpenCodeSSEEvent } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
 import {
-  buildManagedOpenCodeConfig,
   buildManagedOpenCodeEnv,
   buildUserConfiguredOpenCodeEnv,
-  fetchOpenCodeGatewayModels,
   getManagedOpenCodeModelRef,
   resolveOpenCodeGatewayConfig,
   resolveOpenCodeOpenAICompatibleBaseURL,
@@ -288,21 +282,6 @@ function requestProtocolForOpenCodeNpm(
   return null;
 }
 
-function mergeReasoningEfforts(
-  ...lists: Array<ReasoningEffortInfo[] | undefined>
-): ReasoningEffortInfo[] {
-  const merged: ReasoningEffortInfo[] = [];
-  const seen = new Set<string>();
-  for (const list of lists) {
-    for (const effort of list ?? []) {
-      if (!effort.reasoningEffort || seen.has(effort.reasoningEffort)) continue;
-      seen.add(effort.reasoningEffort);
-      merged.push(effort);
-    }
-  }
-  return merged;
-}
-
 interface OpenCodeSessionCreatePayload {
   title: string;
   location?: {
@@ -313,6 +292,13 @@ interface OpenCodeSessionCreatePayload {
     id: string;
   };
   metadata?: Record<string, unknown>;
+  permission?: OpenCodePermissionRule[];
+}
+
+interface OpenCodePermissionRule {
+  permission: string;
+  pattern: "*";
+  action: OpenCodePermissionAction;
 }
 
 interface OpenCodeMessagePayload {
@@ -398,12 +384,6 @@ export class OpenCodeProvider implements AgentProvider {
   private readonly lifecycleQuietWindowMs: number;
   private readonly lifecycleReconcileIntervalMs: number;
   private readonly lifecycleStatusFailureGraceMs: number;
-  private gatewayModelCache?: {
-    cacheKey: string;
-    expiresAt: number;
-    models: ModelInfo[];
-  };
-
   constructor(config: OpenCodeProviderConfig = {}) {
     this.opencodePath = config.opencodePath;
     this.timeout = config.timeout ?? 300000; // 5 minutes default
@@ -471,52 +451,26 @@ export class OpenCodeProvider implements AgentProvider {
       return [];
     }
 
-    const gatewayConfig = resolveOpenCodeGatewayConfig(process.env);
-    if (gatewayConfig) {
-      const cacheKey = `${gatewayConfig.apiBase}:${gatewayConfig.apiKey}`;
-      if (
-        this.gatewayModelCache?.cacheKey === cacheKey &&
-        this.gatewayModelCache.expiresAt > Date.now()
-      ) {
-        return this.gatewayModelCache.models;
-      }
+    // Yep and terminal clients must see the same catalog resolved by the
+    // user's OpenCode configuration. A synthetic default entry deliberately
+    // omits a model override so new Yep sessions inherit config.model exactly
+    // like `opencode` / `opencode attach`.
+    const configuredDefault: ModelInfo = {
+      id: "default",
+      name: "Default (OpenCode config)",
+    };
+    const cliModels = await this.loadOpenCodeCliModels(opencodePath);
+    if (cliModels.length > 0) {
+      return [
+        configuredDefault,
+        ...cliModels.filter((model) => model.id !== "default"),
+      ];
     }
-
-    const cliModelsPromise = this.loadOpenCodeCliModels(opencodePath);
-    if (gatewayConfig) {
-      const cacheKey = `${gatewayConfig.apiBase}:${gatewayConfig.apiKey}`;
-      try {
-        const models = await fetchOpenCodeGatewayModels(gatewayConfig);
-        if (models.length > 0) {
-          const mergedModels = this.mergeGatewayModelReasoningMetadata(
-            models,
-            await cliModelsPromise,
-          );
-          this.gatewayModelCache = {
-            cacheKey,
-            expiresAt: Date.now() + 60_000,
-            models: mergedModels,
-          };
-          return mergedModels;
-        }
-      } catch (error) {
-        getLogger().warn(
-          {
-            apiBase: gatewayConfig.apiBase,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "Failed to load OpenCode gateway model catalog; falling back to CLI models",
-        );
-      }
-    }
-
-    const cliModels = await cliModelsPromise;
-    if (cliModels.length > 0) return cliModels;
 
     // Return default models if both CLI catalog commands fail.
     return [
+      configuredDefault,
       { id: "opencode/big-pickle", name: "Big Pickle (Free)" },
-      { id: "auto", name: "Auto (recommended)" },
     ];
   }
 
@@ -597,58 +551,6 @@ export class OpenCodeProvider implements AgentProvider {
     return models;
   }
 
-  private mergeGatewayModelReasoningMetadata(
-    gatewayModels: ModelInfo[],
-    cliModels: ModelInfo[],
-  ): ModelInfo[] {
-    const discoveredByModel = new Map<string, ReasoningEffortsByProtocol>();
-    for (const cliModel of cliModels) {
-      const modelId = parseOpenCodeModelHeader(cliModel.id)?.modelId;
-      if (!modelId || !cliModel.supportedReasoningEffortsByProtocol) continue;
-
-      const discovered = discoveredByModel.get(modelId) ?? {};
-      for (const protocol of ALL_OPENCODE_REQUEST_PROTOCOLS) {
-        discovered[protocol] = mergeReasoningEfforts(
-          discovered[protocol],
-          cliModel.supportedReasoningEffortsByProtocol[protocol],
-        );
-        if (discovered[protocol]?.length === 0) {
-          delete discovered[protocol];
-        }
-      }
-      discoveredByModel.set(modelId, discovered);
-    }
-
-    return gatewayModels.map((model) => {
-      const protocols = model.supportedRequestProtocols?.length
-        ? model.supportedRequestProtocols
-        : [...ALL_OPENCODE_REQUEST_PROTOCOLS];
-      const discovered = discoveredByModel.get(model.id);
-      const byProtocol: ReasoningEffortsByProtocol = {};
-
-      for (const protocol of protocols) {
-        const efforts = mergeReasoningEfforts(
-          model.supportedReasoningEffortsByProtocol?.[protocol],
-          discovered?.[protocol],
-        );
-        if (efforts.length > 0) byProtocol[protocol] = efforts;
-      }
-
-      const protocolEfforts = protocols.map((protocol) => byProtocol[protocol]);
-      const supportedReasoningEfforts = mergeReasoningEfforts(
-        ...protocolEfforts,
-        model.supportedReasoningEfforts,
-      );
-      if (supportedReasoningEfforts.length === 0) return model;
-
-      return {
-        ...model,
-        supportedReasoningEfforts,
-        supportedReasoningEffortsByProtocol: byProtocol,
-      };
-    });
-  }
-
   /**
    * Start a new OpenCode session.
    */
@@ -696,13 +598,9 @@ export class OpenCodeProvider implements AgentProvider {
               if (!runtimeRef.baseUrl) return;
               const normalizedModel =
                 await this.resolveOpenCodeModelOption(model);
-              await this.patchServerConfig(
-                runtimeRef.baseUrl,
-                {
-                  model: normalizedModel ?? undefined,
-                },
-                runtimeRef.cwd,
-              );
+              // Model selection is carried by each prompt. Updating /config
+              // would persist a Yep-only override into the project and also
+              // change the model observed by attached `of` clients.
               runtimeRef.currentModel = normalizedModel;
               runtimeRef.currentVariant = await this.resolveOpenCodeVariant(
                 runtimeRef.baseUrl,
@@ -729,7 +627,12 @@ export class OpenCodeProvider implements AgentProvider {
     runtimeRef: OpenCodeRuntimeRef,
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
-    const sharedBaseUrl = await this.resolveBridgeManagedServer();
+    // Explicit legacy managed configs require an isolated env overlay. Normal
+    // Yep sessions use the 4520-managed server and the user's global config,
+    // exactly like `of`.
+    const sharedBaseUrl = options.opencodeConfig
+      ? null
+      : await this.resolveBridgeManagedServer();
     const opencodePath = sharedBaseUrl ? null : await this.findOpenCodePath();
 
     if (!sharedBaseUrl && !opencodePath) {
@@ -868,6 +771,9 @@ export class OpenCodeProvider implements AgentProvider {
       configApplied.model,
       options.reasoningEffort,
     );
+    const sessionPermission = this.buildOpenCodeSessionPermission(
+      options.permissionMode,
+    );
 
     // Create, resume, or fork a session on the server.
     let opencodeSessionId: string;
@@ -879,6 +785,7 @@ export class OpenCodeProvider implements AgentProvider {
         options,
         cwd,
         configApplied.model,
+        sessionPermission,
       );
       opencodeSessionId = sessionData.id;
       preparedSessionMetadata = sessionData.metadata;
@@ -998,9 +905,10 @@ export class OpenCodeProvider implements AgentProvider {
     options: StartSessionOptions,
     cwd: string,
     model: string | null,
+    permission: OpenCodePermissionRule[],
   ): Promise<OpenCodeSessionResponse> {
     if (!options.resumeSessionId) {
-      return this.createOpenCodeSession(baseUrl, cwd, model);
+      return this.createOpenCodeSession(baseUrl, cwd, model, permission);
     }
 
     if (options.resumeSessionAt) {
@@ -1022,10 +930,22 @@ export class OpenCodeProvider implements AgentProvider {
         },
         cwd,
       );
+      await this.patchOpenCodeSessionPermission(
+        baseUrl,
+        forked.id,
+        cwd,
+        permission,
+      );
       return { ...forked, metadata };
     }
 
     await this.getOpenCodeSession(baseUrl, options.resumeSessionId, cwd);
+    await this.patchOpenCodeSessionPermission(
+      baseUrl,
+      options.resumeSessionId,
+      cwd,
+      permission,
+    );
     return { id: options.resumeSessionId };
   }
 
@@ -1033,6 +953,7 @@ export class OpenCodeProvider implements AgentProvider {
     baseUrl: string,
     cwd: string,
     model: string | null,
+    permission: OpenCodePermissionRule[],
   ): Promise<OpenCodeSessionResponse> {
     const response = await fetch(this.openCodeUrl(baseUrl, "/session", cwd), {
       method: "POST",
@@ -1041,7 +962,9 @@ export class OpenCodeProvider implements AgentProvider {
         "Content-Type": "application/json",
         ...this.openCodeDirectoryHeaders(cwd),
       },
-      body: JSON.stringify(this.buildOpenCodeSessionCreatePayload(cwd, model)),
+      body: JSON.stringify(
+        this.buildOpenCodeSessionCreatePayload(cwd, model, permission),
+      ),
     });
 
     if (!response.ok) {
@@ -1049,6 +972,36 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     return (await response.json()) as OpenCodeSessionResponse;
+  }
+
+  private async patchOpenCodeSessionPermission(
+    baseUrl: string,
+    sessionId: string,
+    cwd: string,
+    permission: OpenCodePermissionRule[],
+  ): Promise<void> {
+    const response = await fetch(
+      this.openCodeUrl(
+        baseUrl,
+        `/session/${encodeURIComponent(sessionId)}`,
+        cwd,
+      ),
+      {
+        method: "PATCH",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          ...this.openCodeDirectoryHeaders(cwd),
+        },
+        body: JSON.stringify({ permission }),
+      },
+    );
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(
+        `Failed to configure session permissions: ${response.status}${errorText ? ` ${errorText}` : ""}`,
+      );
+    }
   }
 
   private async markOpenCodeSessionCreatedByYep(
@@ -1904,8 +1857,27 @@ export class OpenCodeProvider implements AgentProvider {
     } finally {
       abortSse();
       signal.removeEventListener("abort", abortSse);
-      await sseReaderCancellation;
-      await Promise.allSettled([ssePromise, messagePromise]);
+      const shutdownPromises = [ssePromise, messagePromise];
+      if (sseReaderCancellation) {
+        shutdownPromises.push(sseReaderCancellation);
+      }
+      let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+      const shutdownResult = await Promise.race([
+        Promise.allSettled(shutdownPromises).then(() => "settled" as const),
+        new Promise<"timeout">((resolve) => {
+          shutdownTimer = setTimeout(() => resolve("timeout"), 2_000);
+        }),
+      ]);
+      if (shutdownTimer) clearTimeout(shutdownTimer);
+      if (shutdownResult === "timeout") {
+        log.warn(
+          {
+            event: "opencode_sse_shutdown_timeout",
+            sessionId: opencodeSessionId,
+          },
+          "OpenCode SSE shutdown exceeded the bounded drain window",
+        );
+      }
     }
 
     // Process transitions to idle on any result. Emit exactly once, and only
@@ -2714,86 +2686,36 @@ export class OpenCodeProvider implements AgentProvider {
     } as SDKMessage;
   }
 
-  /**
-   * Apply the session's OpenCode config to its directory-scoped server
-   * instance (shared bridge server or dedicated fallback).
-   */
+  /** Resolve session settings without mutating OpenCode's project config. */
   private async configureServer(
-    baseUrl: string,
+    _baseUrl: string,
     options: StartSessionOptions,
-    cwd?: string,
+    _cwd?: string,
     resolvedModel?: string | null,
   ): Promise<
     { ok: true; model: string | null } | { ok: false; error: string }
   > {
-    const config: Record<string, unknown> = {
-      permission: this.mapPermissionModeToOpenCode(options.permissionMode),
-    };
     const model =
       resolvedModel ?? (await this.resolveOpenCodeModelOption(options.model));
-    const gatewayConfig = resolveOpenCodeGatewayConfig(process.env);
-    if (options.opencodeConfig && gatewayConfig) {
-      Object.assign(
-        config,
-        buildManagedOpenCodeConfig(gatewayConfig, {
-          openAICompatibleBaseURL: resolveOpenCodeOpenAICompatibleBaseURL(
-            process.env,
-          ),
-          sessionConfig: options.opencodeConfig,
-        }),
-      );
-    }
-    if (model) {
-      config.model = model;
-    }
-    try {
-      await this.patchServerConfig(baseUrl, config, cwd);
-
-      getLogger().info(
-        {
-          permissionMode: options.permissionMode ?? "default",
-          model,
-          managedOpenCode: options.opencodeConfig
-            ? {
-                model: options.opencodeConfig.model,
-                requestProtocol: options.opencodeConfig.requestProtocol,
-                limits: options.opencodeConfig.limits,
-              }
-            : undefined,
-        },
-        "Configured OpenCode server",
-      );
-      return { ok: true, model };
-    } catch (error) {
-      return {
-        ok: false,
-        error: `Failed to configure OpenCode server: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-  }
-
-  private async patchServerConfig(
-    baseUrl: string,
-    config: Record<string, unknown>,
-    cwd?: string,
-  ): Promise<void> {
-    const response = await fetch(this.openCodeUrl(baseUrl, "/config", cwd), {
-      method: "PATCH",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...this.openCodeDirectoryHeaders(cwd),
+    // PATCH /config writes <cwd>/config.json in OpenCode. Model selection is
+    // carried by session/message payloads and permission by the session record;
+    // legacy managed provider definitions live only in OPENCODE_CONFIG_CONTENT
+    // on their isolated process.
+    getLogger().info(
+      {
+        permissionMode: options.permissionMode ?? "default",
+        model,
+        managedOpenCode: options.opencodeConfig
+          ? {
+              model: options.opencodeConfig.model,
+              requestProtocol: options.opencodeConfig.requestProtocol,
+              limits: options.opencodeConfig.limits,
+            }
+          : undefined,
       },
-      body: JSON.stringify(config),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      throw new Error(
-        `Failed to configure OpenCode server: ${response.status}${errorText ? ` ${errorText}` : ""}`,
-      );
-    }
+      "Configured OpenCode session without mutating project config",
+    );
+    return { ok: true, model };
   }
 
   private async resolveOpenCodeVariant(
@@ -2861,6 +2783,7 @@ export class OpenCodeProvider implements AgentProvider {
 
       case "acceptEdits":
         return {
+          "*": "ask",
           read: "allow",
           glob: "allow",
           grep: "allow",
@@ -2870,11 +2793,11 @@ export class OpenCodeProvider implements AgentProvider {
           webfetch: "allow",
           websearch: "allow",
           bash: "ask",
-          "*": "ask",
         };
 
       case "plan":
         return {
+          "*": "ask",
           read: "allow",
           glob: "allow",
           grep: "allow",
@@ -2884,11 +2807,11 @@ export class OpenCodeProvider implements AgentProvider {
           edit: "ask",
           write: "ask",
           bash: "ask",
-          "*": "ask",
         };
 
       default:
         return {
+          "*": "ask",
           read: "allow",
           glob: "allow",
           grep: "allow",
@@ -2898,9 +2821,19 @@ export class OpenCodeProvider implements AgentProvider {
           edit: "ask",
           write: "ask",
           bash: "ask",
-          "*": "ask",
         };
     }
+  }
+
+  private buildOpenCodeSessionPermission(
+    mode: PermissionMode | undefined,
+  ): OpenCodePermissionRule[] {
+    // OpenCode applies the last matching permission rule. Keep the wildcard
+    // fallback first so later tool-specific rules retain their intended
+    // precedence.
+    return Object.entries(this.mapPermissionModeToOpenCode(mode)).map(
+      ([permission, action]) => ({ permission, pattern: "*", action }),
+    );
   }
 
   private normalizeOpenCodeModelOption(
@@ -2953,11 +2886,13 @@ export class OpenCodeProvider implements AgentProvider {
   private buildOpenCodeSessionCreatePayload(
     cwd: string,
     model: string | null | undefined,
+    permission: OpenCodePermissionRule[] = [],
   ): OpenCodeSessionCreatePayload {
     const payload: OpenCodeSessionCreatePayload = {
       title: "Yep Anywhere Session",
       location: { directory: cwd },
       metadata: this.buildYepOpenCodeSessionMetadata(),
+      ...(permission.length > 0 ? { permission } : {}),
     };
     const parsed = this.parseOpenCodeModelOption(model);
     if (parsed) {

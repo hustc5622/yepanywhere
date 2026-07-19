@@ -195,6 +195,34 @@ describe("OpenCodeProvider", () => {
     });
   });
 
+  it("orders OpenCode session permissions with the wildcard fallback first", () => {
+    const provider = new OpenCodeProvider();
+    const buildOpenCodeSessionPermission = (
+      provider as unknown as {
+        buildOpenCodeSessionPermission: (mode?: string) => Array<{
+          permission: string;
+          pattern: "*";
+          action: "allow" | "ask" | "deny";
+        }>;
+      }
+    ).buildOpenCodeSessionPermission.bind(provider);
+    const rules = buildOpenCodeSessionPermission("acceptEdits");
+    const evaluate = (permission: string) =>
+      rules.findLast(
+        (rule) => rule.permission === "*" || rule.permission === permission,
+      )?.action;
+
+    expect(rules[0]).toEqual({
+      permission: "*",
+      pattern: "*",
+      action: "ask",
+    });
+    expect(evaluate("read")).toBe("allow");
+    expect(evaluate("edit")).toBe("allow");
+    expect(evaluate("bash")).toBe("ask");
+    expect(evaluate("unknown-tool")).toBe("ask");
+  });
+
   it("normalizes OpenCode model options", () => {
     const provider = new OpenCodeProvider();
     const normalizeOpenCodeModelOption = (
@@ -222,6 +250,23 @@ describe("OpenCodeProvider", () => {
     await expect(
       methods.resolveOpenCodeModelOption("anthropic/claude-sonnet-4"),
     ).resolves.toBe("anthropic/claude-sonnet-4");
+  });
+
+  it("uses the global OpenCode catalog and offers config inheritance first", async () => {
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      findOpenCodePath: () => Promise<string | null>;
+      loadOpenCodeCliModels: (path: string) => Promise<ModelInfo[]>;
+    };
+    vi.spyOn(methods, "findOpenCodePath").mockResolvedValue("/bin/opencode");
+    vi.spyOn(methods, "loadOpenCodeCliModels").mockResolvedValue([
+      { id: "anthropic/glm-5.2", name: "anthropic / glm-5.2" },
+    ]);
+
+    await expect(provider.getAvailableModels()).resolves.toEqual([
+      { id: "default", name: "Default (OpenCode config)" },
+      { id: "anthropic/glm-5.2", name: "anthropic / glm-5.2" },
+    ]);
   });
 
   it("parses protocol-specific reasoning variants from verbose model output", () => {
@@ -317,133 +362,6 @@ custom-openai/glm-5.2
     ]);
   });
 
-  it("merges gateway reasoning variants by model id and protocol order", () => {
-    const provider = new OpenCodeProvider();
-    const methods = provider as unknown as {
-      parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
-      mergeGatewayModelReasoningMetadata: (
-        gatewayModels: ModelInfo[],
-        cliModels: ModelInfo[],
-      ) => ModelInfo[];
-    };
-    const cliModels = methods.parseOpenCodeVerboseModels(`
-yep-openai-compatible/model-next
-{
-  "api": { "npm": "@ai-sdk/openai-compatible" },
-  "variants": {
-    "medium": {},
-    "future-ultra": {}
-  }
-}
-yep-anthropic/model-next
-{
-  "api": { "npm": "@ai-sdk/anthropic" },
-  "variants": {
-    "medium": {},
-    "max": {}
-  }
-}`);
-
-    const [model] = methods.mergeGatewayModelReasoningMetadata(
-      [
-        {
-          id: "model-next",
-          name: "Model Next",
-          supportedRequestProtocols: ["openai-compatible", "anthropic"],
-        },
-      ],
-      cliModels,
-    );
-
-    expect(model?.supportedReasoningEffortsByProtocol).toEqual({
-      "openai-compatible": [
-        { reasoningEffort: "medium" },
-        { reasoningEffort: "future-ultra" },
-      ],
-      anthropic: [{ reasoningEffort: "medium" }, { reasoningEffort: "max" }],
-    });
-    expect(model?.supportedReasoningEfforts).toEqual([
-      { reasoningEffort: "medium" },
-      { reasoningEffort: "future-ultra" },
-      { reasoningEffort: "max" },
-    ]);
-  });
-
-  it("uses OpenCode-advertised Claude variants without model-name fallbacks", () => {
-    const provider = new OpenCodeProvider();
-    const methods = provider as unknown as {
-      parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
-      mergeGatewayModelReasoningMetadata: (
-        gatewayModels: ModelInfo[],
-        cliModels: ModelInfo[],
-      ) => ModelInfo[];
-    };
-    const cliModels = methods.parseOpenCodeVerboseModels(`
-anthropic/claude-opus-4-7
-{
-  "api": { "npm": "@ai-sdk/anthropic" },
-  "capabilities": { "reasoning": true },
-  "variants": {
-    "low": {},
-    "medium": {},
-    "high": {},
-    "xhigh": {},
-    "max": {}
-  }
-}
-ohmyrouter/deepseek-v4-pro
-{
-  "api": { "npm": "@ai-sdk/openai-compatible" },
-  "capabilities": { "reasoning": false },
-  "variants": {}
-}`);
-
-    const [claude, deepseek, kimi] = methods.mergeGatewayModelReasoningMetadata(
-      [
-        {
-          id: "claude-opus-4-7",
-          name: "Claude Opus 4.7",
-          supportedRequestProtocols: ["openai-compatible", "anthropic"],
-        },
-        {
-          id: "deepseek-v4-pro",
-          name: "DeepSeek V4 Pro",
-          supportedRequestProtocols: ["openai-compatible", "anthropic"],
-        },
-        {
-          id: "kimi-k2.6",
-          name: "Kimi K2.6",
-          supportedRequestProtocols: ["openai-compatible", "anthropic"],
-        },
-      ],
-      cliModels,
-    );
-
-    expect(claude?.supportedReasoningEfforts).toEqual([
-      { reasoningEffort: "low" },
-      { reasoningEffort: "medium" },
-      { reasoningEffort: "high" },
-      { reasoningEffort: "xhigh" },
-      { reasoningEffort: "max" },
-    ]);
-    expect(claude?.supportedReasoningEffortsByProtocol).toEqual({
-      anthropic: [
-        { reasoningEffort: "low" },
-        { reasoningEffort: "medium" },
-        { reasoningEffort: "high" },
-        { reasoningEffort: "xhigh" },
-        { reasoningEffort: "max" },
-      ],
-    });
-    expect(deepseek).not.toHaveProperty("supportedReasoningEfforts");
-    expect(deepseek).not.toHaveProperty("supportedReasoningEffortsByProtocol");
-    expect(kimi).toEqual({
-      id: "kimi-k2.6",
-      name: "Kimi K2.6",
-      supportedRequestProtocols: ["openai-compatible", "anthropic"],
-    });
-  });
-
   it("allocates an OpenCode port that is not already listening", async () => {
     const provider = new OpenCodeProvider();
     const getAvailablePort = (
@@ -501,6 +419,7 @@ ohmyrouter/deepseek-v4-pro
     let serverUrl = "";
     let abortRequests = 0;
     const methods: string[] = [];
+    let createBody: Record<string, unknown> | null = null;
 
     await withTestServer(
       async (req, res) => {
@@ -516,13 +435,8 @@ ohmyrouter/deepseek-v4-pro
           res.end("[]");
           return;
         }
-        if (req.method === "PATCH" && url.pathname === "/config") {
-          await readJsonBody(req);
-          res.end("{}");
-          return;
-        }
         if (req.method === "POST" && url.pathname === "/session") {
-          await readJsonBody(req);
+          createBody = (await readJsonBody(req)) as Record<string, unknown>;
           res.end(JSON.stringify({ id: "ses_shared" }));
           return;
         }
@@ -572,11 +486,17 @@ ohmyrouter/deepseek-v4-pro
       expect.arrayContaining([
         "GET /status",
         "GET /session",
-        "PATCH /config",
         "POST /session",
         "PATCH /session/ses_shared",
       ]),
     );
+    expect(methods).not.toContain("PATCH /config");
+    expect(createBody).toMatchObject({
+      permission: expect.arrayContaining([
+        { permission: "read", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: "*", action: "ask" },
+      ]),
+    });
   });
 
   it("does not accept a stale OpenCode listener after its child exits", async () => {
@@ -623,6 +543,11 @@ ohmyrouter/deepseek-v4-pro
       buildOpenCodeSessionCreatePayload: (
         cwd: string,
         model?: string | null,
+        permission?: Array<{
+          permission: string;
+          pattern: "*";
+          action: "allow" | "ask" | "deny";
+        }>,
       ) => unknown;
       buildOpenCodeMessagePayload: (
         text: string,
@@ -635,6 +560,7 @@ ohmyrouter/deepseek-v4-pro
       methods.buildOpenCodeSessionCreatePayload(
         "/repo",
         "anthropic/claude-fable-5",
+        [{ permission: "bash", pattern: "*", action: "ask" }],
       ),
     ).toEqual({
       title: "Yep Anywhere Session",
@@ -647,6 +573,7 @@ ohmyrouter/deepseek-v4-pro
         providerID: "anthropic",
         id: "claude-fable-5",
       },
+      permission: [{ permission: "bash", pattern: "*", action: "ask" }],
     });
 
     expect(
@@ -822,6 +749,7 @@ ohmyrouter/deepseek-v4-pro
           options: { resumeSessionId?: string; resumeSessionAt?: string },
           cwd: string,
           model: string | null,
+          permission: never[],
         ) => Promise<{ id: string }>;
       }
     ).prepareOpenCodeSession.bind(provider);
@@ -844,7 +772,13 @@ ohmyrouter/deepseek-v4-pro
         res.end(JSON.stringify({ id: "ses_created" }));
       },
       (baseUrl) =>
-        prepareOpenCodeSession(baseUrl, {}, cwd, "anthropic/claude-fable-5"),
+        prepareOpenCodeSession(
+          baseUrl,
+          {},
+          cwd,
+          "anthropic/claude-fable-5",
+          [],
+        ),
     );
 
     const url = new URL(requests[0]?.url ?? "", "http://127.0.0.1");
@@ -866,7 +800,7 @@ ohmyrouter/deepseek-v4-pro
     });
   });
 
-  it("patches OpenCode config with permission mode and selected model", async () => {
+  it("does not persist permission mode or selected model into OpenCode config", async () => {
     const provider = new OpenCodeProvider();
     const configureServer = (
       provider as unknown as {
@@ -904,24 +838,10 @@ ohmyrouter/deepseek-v4-pro
       ok: true,
       model: "yep-anthropic/claude-sonnet-4",
     });
-    expect(requests).toEqual([
-      {
-        url: "/config",
-        method: "PATCH",
-        body: {
-          permission: expect.objectContaining({
-            edit: "allow",
-            write: "allow",
-            bash: "ask",
-            "*": "ask",
-          }),
-          model: "yep-anthropic/claude-sonnet-4",
-        },
-      },
-    ]);
+    expect(requests).toEqual([]);
   });
 
-  it("keeps provider creation out of the post-start config patch", async () => {
+  it("keeps legacy provider config out of the project config", async () => {
     const provider = new OpenCodeProvider();
     const methods = provider as unknown as {
       configureServer: (
@@ -965,15 +885,7 @@ ohmyrouter/deepseek-v4-pro
       ok: true,
       model: "yep-anthropic/deepseek-v4-pro",
     });
-    expect(requests).toEqual([
-      {
-        url: "/config",
-        method: "PATCH",
-        body: expect.objectContaining({
-          model: "yep-anthropic/deepseek-v4-pro",
-        }),
-      },
-    ]);
+    expect(requests).toEqual([]);
   });
 
   it("forks at the edited native user message and persists merged lineage", async () => {
@@ -985,6 +897,7 @@ ohmyrouter/deepseek-v4-pro
           options: { resumeSessionId?: string; resumeSessionAt?: string },
           cwd: string,
           model: string | null,
+          permission: never[],
         ) => Promise<{ id: string }>;
       }
     ).prepareOpenCodeSession.bind(provider);
@@ -1030,6 +943,7 @@ ohmyrouter/deepseek-v4-pro
           },
           "/repo",
           null,
+          [],
         ),
     );
 
@@ -1112,6 +1026,7 @@ ohmyrouter/deepseek-v4-pro
           options: { resumeSessionId?: string; resumeSessionAt?: string },
           cwd: string,
           model: string | null,
+          permission: never[],
         ) => Promise<{ id: string }>;
       }
     ).prepareOpenCodeSession.bind(provider);
@@ -1136,6 +1051,7 @@ ohmyrouter/deepseek-v4-pro
           { resumeSessionId: "ses_parent", resumeSessionAt: "msg_first" },
           "/repo",
           null,
+          [],
         ),
     );
 
@@ -1156,6 +1072,7 @@ ohmyrouter/deepseek-v4-pro
           options: { resumeSessionId?: string; resumeSessionAt?: string },
           cwd: string,
           model: string | null,
+          permission: never[],
         ) => Promise<{ id: string }>;
       }
     ).prepareOpenCodeSession.bind(provider);
@@ -1184,6 +1101,7 @@ ohmyrouter/deepseek-v4-pro
             },
             "/repo",
             null,
+            [],
           ),
         ).rejects.toThrow(
           /ses_orphan.*lineage metadata could not be persisted.*500/i,
@@ -1866,7 +1784,10 @@ ohmyrouter/deepseek-v4-pro
           await readJsonBody(req);
           res.statusCode = 204;
           res.end();
-          eventStream?.end(
+          // OpenCode keeps its SSE connection alive after session.error. The
+          // provider must still finish the turn instead of waiting forever for
+          // the response body to close.
+          eventStream?.write(
             `data: ${JSON.stringify({
               type: "session.error",
               properties: {
@@ -2471,15 +2392,15 @@ ohmyrouter/deepseek-v4-pro
   });
 
   it("preserves user-config credentials before a managed model is selected", () => {
-    Reflect.deleteProperty(process.env, "LLM_API_KEY");
-    Reflect.deleteProperty(process.env, "LLM_API_BASE");
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_API_BASE = "https://example.test/v1";
     Reflect.deleteProperty(process.env, "LLM_SUB_MODULE");
     Reflect.deleteProperty(process.env, "OPENCODE_LLM_API_KEY");
     Reflect.deleteProperty(process.env, "OPENCODE_LLM_API_BASE");
     Reflect.deleteProperty(process.env, "OPENCODE_LLM_SUB_MODULE");
     Reflect.deleteProperty(process.env, "OPENCODE_CONFIG_CONTENT");
-    process.env.SESSION_TITLE_LLM_API_KEY = "test-key";
-    process.env.SESSION_TITLE_LLM_API_BASE = "https://example.test/v1";
+    process.env.SESSION_TITLE_LLM_API_KEY = "stale-title-key";
+    process.env.SESSION_TITLE_LLM_API_BASE = "https://title.example/v1";
     process.env.SESSION_TITLE_SUB_MODULE = "test-module";
     Reflect.deleteProperty(process.env, "YEP_OPENCODE_BRIDGE_CONTROL_URL");
     Reflect.deleteProperty(process.env, "OPENCODE_BRIDGE_CONTROL_URL");
@@ -2507,8 +2428,10 @@ ohmyrouter/deepseek-v4-pro
 
   it("uses an explicit OpenCode submodule in provider headers", () => {
     Reflect.deleteProperty(process.env, "LLM_SUB_MODULE");
-    process.env.SESSION_TITLE_LLM_API_KEY = "test-key";
-    process.env.SESSION_TITLE_LLM_API_BASE = "https://example.test/v1";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_API_BASE = "https://example.test/v1";
+    process.env.SESSION_TITLE_LLM_API_KEY = "stale-title-key";
+    process.env.SESSION_TITLE_LLM_API_BASE = "https://title.example/v1";
     process.env.SESSION_TITLE_SUB_MODULE = "title-module";
     process.env.OPENCODE_LLM_SUB_MODULE = "opencode-module";
     Reflect.deleteProperty(process.env, "OPENCODE_CONFIG_CONTENT");
@@ -2537,9 +2460,11 @@ ohmyrouter/deepseek-v4-pro
     expect(env).not.toHaveProperty("LLM_SUB_MODULE");
   });
 
-  it("does not allow a generic submodule to override OpenCode headers", () => {
-    process.env.SESSION_TITLE_LLM_API_KEY = "test-key";
-    process.env.SESSION_TITLE_LLM_API_BASE = "https://example.test/v1";
+  it("uses an explicit OpenCode submodule ahead of the global fallback", () => {
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_API_BASE = "https://example.test/v1";
+    process.env.SESSION_TITLE_LLM_API_KEY = "stale-title-key";
+    process.env.SESSION_TITLE_LLM_API_BASE = "https://title.example/v1";
     process.env.LLM_SUB_MODULE = "generic-module";
     process.env.OPENCODE_LLM_SUB_MODULE = "opencode-module";
     Reflect.deleteProperty(process.env, "OPENCODE_CONFIG_CONTENT");
@@ -2569,8 +2494,10 @@ ohmyrouter/deepseek-v4-pro
   });
 
   it("registers the selected model for its OpenCode protocol provider", () => {
-    process.env.SESSION_TITLE_LLM_API_KEY = "test-key";
-    process.env.SESSION_TITLE_LLM_API_BASE = "https://example.test/v1";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_API_BASE = "https://example.test/v1";
+    process.env.SESSION_TITLE_LLM_API_KEY = "stale-title-key";
+    process.env.SESSION_TITLE_LLM_API_BASE = "https://title.example/v1";
     Reflect.deleteProperty(process.env, "OPENCODE_CONFIG_CONTENT");
 
     const provider = new OpenCodeProvider();
