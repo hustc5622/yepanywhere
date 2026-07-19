@@ -53,6 +53,10 @@ import {
 } from "../lib/codexReasoning";
 import { hasCoarsePointer } from "../lib/deviceDetection";
 import {
+  getProviderPermissionModes,
+  normalizeProviderPermissionMode,
+} from "../lib/providerPermissionModes";
+import {
   HistoricalEditQueueError,
   requireStartedHistoricalEdit,
   shouldRestoreHistoricalEditAfterFailure,
@@ -70,13 +74,6 @@ interface PendingFile {
   previewUrl?: string;
 }
 
-const MODE_ORDER: PermissionMode[] = [
-  "auto",
-  "default",
-  "acceptEdits",
-  "plan",
-  "bypassPermissions",
-];
 const CODEX_MCP_MODE_ORDER: CodexMcpMode[] = ["clear", "standard", "full"];
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 
@@ -424,20 +421,89 @@ export function NewSessionForm({
 
   const availableProviders = getAvailableProviders(providers);
   const resolvedPlaceholder = placeholder ?? t("newSessionPlaceholder");
-  const modeLabels: Record<PermissionMode, string> = {
+  const selectedProviderInfo = providers.find(
+    (provider) => provider.name === selectedProvider,
+  );
+  const genericModeLabels: Record<PermissionMode, string> = {
     auto: t("modeAutoLabel"),
     default: t("modeDefaultLabel"),
     acceptEdits: t("modeAcceptEditsLabel"),
     plan: t("modePlanLabel"),
     bypassPermissions: t("modeBypassPermissionsLabel"),
   };
-  const modeDescriptions: Record<PermissionMode, string> = {
+  const genericModeDescriptions: Record<PermissionMode, string> = {
     auto: t("modeAutoDescription"),
     default: t("modeDefaultDescription"),
     acceptEdits: t("modeAcceptEditsDescription"),
     plan: t("modePlanDescription"),
     bypassPermissions: t("modeBypassPermissionsDescription"),
   };
+  const modeLabels: Record<PermissionMode, string> = {
+    ...genericModeLabels,
+    ...(selectedProvider === "codex"
+      ? {
+          auto: t("modeCodexCfLabel"),
+          plan: t("modeCodexReadOnlyLabel"),
+          bypassPermissions: t("modeCodexFullAccessLabel"),
+        }
+      : selectedProvider === "opencode"
+        ? {
+            default: t("modeOpenCodeAskLabel"),
+            acceptEdits: t("modeOpenCodeEditLabel"),
+            bypassPermissions: t("modeOpenCodeAllowAllLabel"),
+          }
+        : selectedProvider === "gemini-acp"
+          ? {
+              default: t("modeGeminiAskLabel"),
+              acceptEdits: t("modeGeminiEditLabel"),
+              bypassPermissions: t("modeGeminiAllowAllLabel"),
+            }
+          : {}),
+  };
+  const modeDescriptions: Record<PermissionMode, string> = {
+    ...genericModeDescriptions,
+    ...(selectedProvider === "codex"
+      ? {
+          auto: t("modeCodexCfDescription"),
+          plan: t("modeCodexReadOnlyDescription"),
+          bypassPermissions: t("modeCodexFullAccessDescription"),
+        }
+      : selectedProvider === "opencode"
+        ? {
+            default: t("modeOpenCodeAskDescription"),
+            acceptEdits: t("modeOpenCodeEditDescription"),
+            bypassPermissions: t("modeOpenCodeAllowAllDescription"),
+          }
+        : selectedProvider === "gemini-acp"
+          ? {
+              default: t("modeGeminiAskDescription"),
+              acceptEdits: t("modeGeminiEditDescription"),
+              bypassPermissions: t("modeGeminiAllowAllDescription"),
+            }
+          : {}),
+  };
+  const permissionModeTitle =
+    selectedProvider === "codex"
+      ? t("newSessionCodexPermissionTitle")
+      : selectedProvider === "opencode"
+        ? t("newSessionOpenCodePermissionTitle")
+        : selectedProvider === "gemini-acp"
+          ? t("newSessionGeminiPermissionTitle")
+          : selectedProvider === "claude" ||
+              selectedProvider === "claude-ollama"
+            ? t("newSessionClaudePermissionTitle")
+            : t("newSessionModeTitle");
+  const permissionModeDescription =
+    selectedProvider === "codex"
+      ? t("newSessionCodexPermissionDescription")
+      : selectedProvider === "opencode"
+        ? t("newSessionOpenCodePermissionDescription")
+        : selectedProvider === "gemini-acp"
+          ? t("newSessionGeminiPermissionDescription")
+          : selectedProvider === "claude" ||
+              selectedProvider === "claude-ollama"
+            ? t("newSessionClaudePermissionDescription")
+            : null;
   const codexMcpModeLabels: Record<CodexMcpMode, string> = {
     clear: t("newSessionCodexMcpClearLabel"),
     standard: t("newSessionCodexMcpStandardLabel"),
@@ -449,9 +515,6 @@ export function NewSessionForm({
     full: t("newSessionCodexMcpFullDescription"),
   };
   // Get models and capabilities for the currently selected provider.
-  const selectedProviderInfo = providers.find(
-    (p) => p.name === selectedProvider,
-  );
   const availableModels: ModelInfo[] = selectedProviderInfo?.models ?? [];
   const selectedModelInfo = availableModels.find(
     (model) => model.id === selectedModel,
@@ -610,8 +673,13 @@ export function NewSessionForm({
   const showOpenCodeReasoningSelector = selectedProvider === "opencode";
 
   // Default to true for backwards compatibility with providers that don't set these flags
+  const permissionModes = getProviderPermissionModes(
+    selectedProvider,
+    selectedProviderInfo?.permissionModes,
+  );
   const supportsPermissionMode =
-    selectedProviderInfo?.supportsPermissionMode ?? true;
+    (selectedProviderInfo?.supportsPermissionMode ?? true) &&
+    permissionModes.length > 0;
   const providerSupportsThinkingToggle =
     selectedProviderInfo?.supportsThinkingToggle ?? true;
   const supportsThinkingToggle =
@@ -706,7 +774,13 @@ export function NewSessionForm({
         savedDefaults?.opencodeConfig?.advanced?.model,
       ),
     );
-    setMode(savedDefaults?.permissionMode ?? DEFAULT_PERMISSION_MODE);
+    setMode(
+      normalizeProviderPermissionMode(
+        initialProvider.name,
+        savedDefaults?.permissionMode,
+        initialProvider.permissionModes,
+      ),
+    );
     const savedThinkingPreset = normalizeThinkingOption(
       savedDefaults?.thinking,
     );
@@ -746,6 +820,13 @@ export function NewSessionForm({
   const handleProviderSelect = (providerName: ProviderName) => {
     setSelectedProvider(providerName);
     const provider = providers.find((p) => p.name === providerName);
+    setMode((currentMode) =>
+      normalizeProviderPermissionMode(
+        providerName,
+        currentMode,
+        provider?.permissionModes,
+      ),
+    );
     if (provider?.models && provider.models.length > 0) {
       const preferredModel =
         providerName === "opencode"
@@ -2083,6 +2164,9 @@ export function NewSessionForm({
       {selectedProvider === "codex" && (
         <div className="new-session-codex-mcp-section">
           <h3>{t("newSessionCodexMcpTitle")}</h3>
+          <p className="new-session-section-hint">
+            {t("newSessionCodexMcpDescription")}
+          </p>
           <div className="codex-mcp-options">
             {CODEX_MCP_MODE_ORDER.map((mcpMode) => (
               <button
@@ -2150,11 +2234,16 @@ export function NewSessionForm({
       )}
 
       {/* Permission Mode Selection - only for providers that support it */}
-      {supportsPermissionMode && (
+      {selectedProvider && supportsPermissionMode && (
         <div className="new-session-mode-section">
-          <h3>{t("newSessionModeTitle")}</h3>
+          <h3>{permissionModeTitle}</h3>
+          {permissionModeDescription && (
+            <p className="new-session-section-hint">
+              {permissionModeDescription}
+            </p>
+          )}
           <div className="mode-options">
-            {MODE_ORDER.map((m) => (
+            {permissionModes.map((m) => (
               <button
                 key={m}
                 type="button"

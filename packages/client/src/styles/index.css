@@ -9004,7 +9004,7 @@ button.context-usage-indicator--button:focus-visible {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin: 0 0 var(--space-3);
+  margin: 0 0 var(--space-1);
 }
 
 .codex-mcp-options {
@@ -9036,7 +9036,14 @@ button.context-usage-indicator--button:focus-visible {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  margin: 0 0 var(--space-1);
+}
+
+.new-session-section-hint {
   margin: 0 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
 }
 
 .mode-options {
