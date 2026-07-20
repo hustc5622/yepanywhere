@@ -20,6 +20,7 @@ import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
 import { writeClipboardText } from "../lib/clipboard";
 import { formatSmartTime } from "../lib/datetime";
+import { UI_KEYS } from "../lib/storageKeys";
 
 interface HeadingItem {
   id: string;
@@ -28,6 +29,50 @@ interface HeadingItem {
 }
 
 const HEADING_PATTERN = /^(#{1,4})\s+(.+?)\s*#*$/;
+
+function loadDocumentPanelExpanded(): boolean {
+  if (typeof window === "undefined") return true;
+
+  try {
+    const stored = window.localStorage.getItem(
+      UI_KEYS.reportsDocumentPanelExpanded,
+    );
+    return stored === null ? true : stored === "true";
+  } catch {
+    return true;
+  }
+}
+
+function saveDocumentPanelExpanded(expanded: boolean): void {
+  try {
+    window.localStorage.setItem(
+      UI_KEYS.reportsDocumentPanelExpanded,
+      String(expanded),
+    );
+  } catch {
+    // Keep the in-memory preference when storage is unavailable.
+  }
+}
+
+function DocumentPanelToggleIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="9" y1="3" x2="9" y2="21" />
+      <polyline points={expanded ? "16 9 13 12 16 15" : "13 9 16 12 13 15"} />
+    </svg>
+  );
+}
 
 function parseHeadings(markdown: string): HeadingItem[] {
   const seen = new Map<string, number>();
@@ -275,6 +320,9 @@ export function ReportsPage() {
   const [documentError, setDocumentError] = useState<string | null>(null);
   const [uploadingReport, setUploadingReport] = useState(false);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
+  const [isDocumentPanelExpanded, setIsDocumentPanelExpanded] = useState(
+    loadDocumentPanelExpanded,
+  );
   const articleRef = useRef<HTMLElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -459,6 +507,14 @@ export function ReportsPage() {
     [handleUploadFiles],
   );
 
+  const toggleDocumentPanel = useCallback(() => {
+    setIsDocumentPanelExpanded((expanded) => {
+      const next = !expanded;
+      saveDocumentPanelExpanded(next);
+      return next;
+    });
+  }, []);
+
   const scrollToHeading = useCallback((heading: HeadingItem) => {
     const article = articleRef.current;
     if (!article) return;
@@ -506,60 +562,94 @@ export function ReportsPage() {
     </button>
   );
 
+  const renderDocumentPanelToggle = () => {
+    const label = isDocumentPanelExpanded
+      ? t("reportsCollapseDocuments")
+      : t("reportsExpandDocuments");
+
+    return (
+      <button
+        type="button"
+        className="reports-document-panel-toggle"
+        onClick={toggleDocumentPanel}
+        title={label}
+        aria-label={label}
+        aria-controls="reports-document-panel"
+        aria-expanded={isDocumentPanelExpanded}
+      >
+        <DocumentPanelToggleIcon expanded={isDocumentPanelExpanded} />
+      </button>
+    );
+  };
+
   const renderDocumentList = () => (
     <aside
-      className="reports-document-panel"
+      id="reports-document-panel"
+      className={`reports-document-panel ${
+        isDocumentPanelExpanded ? "" : "is-collapsed"
+      }`}
       aria-label={t("reportsDocuments")}
     >
       <div className="reports-document-panel-header">
-        <div>
-          <h2>{t("reportsDocuments")}</h2>
-          {rootPath && <p title={rootPath}>{rootPath}</p>}
+        {isDocumentPanelExpanded && (
+          <div className="reports-document-panel-heading">
+            <h2>{t("reportsDocuments")}</h2>
+            {rootPath && <p title={rootPath}>{rootPath}</p>}
+          </div>
+        )}
+        <div className="reports-document-panel-actions">
+          {renderDocumentPanelToggle()}
+          {isDocumentPanelExpanded && renderUploadButton()}
         </div>
-        {renderUploadButton()}
       </div>
-      <input
-        className="reports-filter-input"
-        type="search"
-        placeholder={t("reportsSearchPlaceholder")}
-        value={filter}
-        onChange={(event) => setFilter(event.target.value)}
-      />
-      <div className="reports-document-list">
-        {loadingList && (
-          <div className="reports-state-inline">{t("reportsLoading")}</div>
-        )}
-        {!loadingList && listError && (
-          <div className="reports-state-inline reports-state-error">
-            {listError}
+      {isDocumentPanelExpanded && (
+        <>
+          <input
+            className="reports-filter-input"
+            type="search"
+            placeholder={t("reportsSearchPlaceholder")}
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+          />
+          <div className="reports-document-list">
+            {loadingList && (
+              <div className="reports-state-inline">{t("reportsLoading")}</div>
+            )}
+            {!loadingList && listError && (
+              <div className="reports-state-inline reports-state-error">
+                {listError}
+              </div>
+            )}
+            {!loadingList && !listError && filteredDocuments.length === 0 && (
+              <div className="reports-state-inline">
+                {t("reportsNoMatches")}
+              </div>
+            )}
+            {filteredDocuments.map((doc) => (
+              <div
+                key={doc.path}
+                className={`reports-document-item ${
+                  doc.path === selectedPath ? "active" : ""
+                }`}
+              >
+                <button
+                  type="button"
+                  className="reports-document-item-main"
+                  onClick={() => handleSelectDocument(doc.path)}
+                  title={getDisplayPath(doc)}
+                >
+                  <span className="reports-document-title">{doc.title}</span>
+                  <span className="reports-document-meta">
+                    {formatSmartTime(doc.modifiedAt, locale)} ·{" "}
+                    {formatBytes(doc.size)}
+                  </span>
+                </button>
+                <ReportsDocumentMenu report={doc} />
+              </div>
+            ))}
           </div>
-        )}
-        {!loadingList && !listError && filteredDocuments.length === 0 && (
-          <div className="reports-state-inline">{t("reportsNoMatches")}</div>
-        )}
-        {filteredDocuments.map((doc) => (
-          <div
-            key={doc.path}
-            className={`reports-document-item ${
-              doc.path === selectedPath ? "active" : ""
-            }`}
-          >
-            <button
-              type="button"
-              className="reports-document-item-main"
-              onClick={() => handleSelectDocument(doc.path)}
-              title={getDisplayPath(doc)}
-            >
-              <span className="reports-document-title">{doc.title}</span>
-              <span className="reports-document-meta">
-                {formatSmartTime(doc.modifiedAt, locale)} ·{" "}
-                {formatBytes(doc.size)}
-              </span>
-            </button>
-            <ReportsDocumentMenu report={doc} />
-          </div>
-        ))}
-      </div>
+        </>
+      )}
     </aside>
   );
 
@@ -637,7 +727,13 @@ export function ReportsPage() {
             className="reports-upload-input"
             onChange={handleUploadInputChange}
           />
-          <div className="reports-content-inner">
+          <div
+            className={`reports-content-inner ${
+              isWideScreen && !isDocumentPanelExpanded
+                ? "documents-collapsed"
+                : ""
+            }`}
+          >
             {isWideScreen && renderDocumentList()}
 
             <section className="reports-reader-column">

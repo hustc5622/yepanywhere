@@ -567,6 +567,8 @@
   "searchRoleAssistant": "Assistant",
   "reportsTitle": "Reports",
   "reportsDocuments": "Documents",
+  "reportsCollapseDocuments": "Collapse document list",
+  "reportsExpandDocuments": "Expand document list",
   "reportsSelectDocument": "Document",
   "reportsSearchPlaceholder": "Filter reports...",
   "reportsLoading": "Loading reports...",

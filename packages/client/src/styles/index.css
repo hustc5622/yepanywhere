@@ -6997,8 +6997,15 @@ a.sidebar-nav-item {
   gap: var(--space-2);
 }
 
-.reports-document-panel-header > div {
+.reports-document-panel-heading {
   min-width: 0;
+}
+
+.reports-document-panel-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 .reports-document-panel-header h2,
@@ -7038,9 +7045,31 @@ a.sidebar-nav-item {
   cursor: pointer;
 }
 
-.reports-upload-button:hover:not(:disabled) {
+.reports-document-panel-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.reports-upload-button:hover:not(:disabled),
+.reports-document-panel-toggle:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.reports-upload-button:focus-visible,
+.reports-document-panel-toggle:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
 }
 
 .reports-upload-button:disabled {
@@ -7084,6 +7113,7 @@ a.sidebar-nav-item {
 .reports-document-item {
   position: relative;
   display: flex;
+  flex: 0 0 auto;
   align-items: stretch;
   width: 100%;
   min-height: 62px;
@@ -7492,12 +7522,27 @@ a.sidebar-nav-item {
   border: none;
 }
 
-@media (min-width: 1024px) {
+@media (min-width: 1100px) {
   .reports-content-inner {
     grid-template-columns:
       minmax(260px, 340px) minmax(0, 900px)
       minmax(190px, 240px);
     align-items: start;
+  }
+
+  .reports-content-inner.documents-collapsed {
+    grid-template-columns: 40px minmax(0, 1fr) minmax(190px, 240px);
+  }
+
+  .reports-document-panel.is-collapsed {
+    align-items: center;
+    gap: 0;
+  }
+
+  .reports-document-panel.is-collapsed .reports-document-panel-header,
+  .reports-document-panel.is-collapsed .reports-document-panel-actions {
+    width: 100%;
+    justify-content: center;
   }
 
   .reports-document-panel,

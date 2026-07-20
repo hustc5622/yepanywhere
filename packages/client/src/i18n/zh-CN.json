@@ -567,6 +567,8 @@
   "searchRoleAssistant": "助手",
   "reportsTitle": "报告",
   "reportsDocuments": "文档",
+  "reportsCollapseDocuments": "收起文档列表",
+  "reportsExpandDocuments": "展开文档列表",
   "reportsSelectDocument": "文档",
   "reportsSearchPlaceholder": "筛选报告...",
   "reportsLoading": "正在加载报告...",
