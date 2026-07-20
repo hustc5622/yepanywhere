@@ -556,6 +556,30 @@ export function DevelopmentSettings() {
         </div>
       )}
 
+      {isMobileShell && (
+        <div className="settings-group">
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <strong>{t("developmentNativeLogsTitle")}</strong>
+              <p>{t("developmentNativeLogsDescription")}</p>
+              {nativeLogUploadStatus && (
+                <p className="settings-pending">{nativeLogUploadStatus}</p>
+              )}
+            </div>
+            <button
+              type="button"
+              className="settings-button"
+              onClick={handleUploadNativeLogs}
+              disabled={uploadingNativeLogs}
+            >
+              {uploadingNativeLogs
+                ? t("developmentNativeLogsUploading")
+                : t("developmentNativeLogsUpload")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {isManualReloadMode && (
         <>
           <div className="settings-group">
@@ -629,30 +653,6 @@ export function DevelopmentSettings() {
               </label>
             </div>
           </div>
-
-          {isMobileShell && (
-            <div className="settings-group">
-              <div className="settings-item">
-                <div className="settings-item-info">
-                  <strong>{t("developmentNativeLogsTitle")}</strong>
-                  <p>{t("developmentNativeLogsDescription")}</p>
-                  {nativeLogUploadStatus && (
-                    <p className="settings-pending">{nativeLogUploadStatus}</p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  className="settings-button"
-                  onClick={handleUploadNativeLogs}
-                  disabled={uploadingNativeLogs}
-                >
-                  {uploadingNativeLogs
-                    ? t("developmentNativeLogsUploading")
-                    : t("developmentNativeLogsUpload")}
-                </button>
-              </div>
-            </div>
-          )}
 
           <div className="settings-group">
             <div className="settings-item">
