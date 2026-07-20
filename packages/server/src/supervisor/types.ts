@@ -120,6 +120,13 @@ export interface SessionSummary {
   compactEvents?: ContextCompactEvent[];
   /** AI provider used for this session */
   provider: ProviderName;
+  /**
+   * For provider-native subagent sessions (e.g. OpenCode task/subagent
+   * children), the id of the session that spawned this one. Populated on the
+   * session detail but not on list summaries — subagent children are excluded
+   * from session lists and surfaced inline under their parent instead.
+   */
+  parentSessionId?: string;
   /** Model used for this session (extracted from JSONL, e.g. "claude-opus-4-5-20251101") */
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */

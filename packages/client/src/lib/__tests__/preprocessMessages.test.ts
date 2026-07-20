@@ -186,6 +186,70 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it.each([
+    [undefined, "pending"],
+    ["completed", "complete"],
+    ["error", "error"],
+  ] as const)(
+    "tracks an OpenCode background task until its %s notification",
+    (terminalState, expectedStatus) => {
+      const messages: Message[] = [
+        {
+          id: "msg-task",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call_task",
+              name: "task",
+              input: {
+                description: "Analyze swing middleware",
+                subagent_type: "explore",
+                background: true,
+              },
+              opencodeMetadata: {
+                sessionId: "ses_child",
+                parentSessionId: "ses_parent",
+                background: true,
+              },
+              opencodeStatus: "completed",
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "call_task",
+              content: '<task id="ses_child" state="running"></task>',
+              opencodeStatus: "completed",
+            },
+          ],
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+      ];
+      if (terminalState) {
+        messages.push({
+          id: "msg-task-notification",
+          role: "user",
+          content: `<task state="${terminalState}" id="ses_child"><task_result>done</task_result></task>`,
+          timestamp: "2024-01-01T00:00:01Z",
+        });
+      }
+
+      const task = preprocessMessages(messages).find(
+        (item) => item.type === "tool_call" && item.id === "call_task",
+      );
+
+      expect(task).toMatchObject({
+        type: "tool_call",
+        status: expectedStatus,
+        toolInput: {
+          opencodeMetadata: {
+            sessionId: "ses_child",
+            background: true,
+          },
+        },
+      });
+    },
+  );
+
   it("normalizes OpenCode tool input and string output for expandable rows", () => {
     const messages: Message[] = [
       {

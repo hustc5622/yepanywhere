@@ -1407,7 +1407,10 @@ function SessionPageContent({
   const hasPendingToolCalls = useMemo(() => {
     if (status.owner !== "none") return false;
     return renderItems.some(
-      (item) => item.type === "tool_call" && item.status === "pending",
+      (item) =>
+        item.type === "tool_call" &&
+        item.status === "pending" &&
+        item.toolResult === undefined,
     );
   }, [renderItems, status.owner]);
 
@@ -1828,6 +1831,23 @@ function SessionPageContent({
             </div>
           </div>
         </header>
+
+        {session?.parentSessionId && (
+          <Link
+            className="subagent-parent-banner"
+            to={`${basePath}/projects/${projectId}/sessions/${session.parentSessionId}`}
+          >
+            <span className="subagent-parent-banner-icon" aria-hidden="true">
+              ↖
+            </span>
+            <span className="subagent-parent-banner-text">
+              {t("sessionSubagentBanner")}
+            </span>
+            <span className="subagent-parent-banner-link">
+              {t("sessionSubagentBannerLink")}
+            </span>
+          </Link>
+        )}
 
         {/* Process Info Modal */}
         {showProcessInfoModal && session && (

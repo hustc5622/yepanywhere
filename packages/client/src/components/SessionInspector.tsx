@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { useGitStatus } from "../hooks/useGitStatus";
 import { useI18n } from "../i18n";
 import { formatSmartTime } from "../lib/datetime";
+import { getOpenCodeSubagentSessionId } from "../lib/openCodeSubagents";
 import {
   type ActiveToolApproval,
   isPlanProgressItem,
@@ -83,6 +84,15 @@ interface PlanProgress {
   note?: string;
 }
 
+/** A provider-native subagent session spawned from this session's task tool. */
+interface SubagentItem {
+  /** Child session id (target of the navigation link). */
+  sessionId: string;
+  description: string;
+  agent?: string;
+  status: ToolCallItem["status"];
+}
+
 interface CodexChannelSummary {
   phase: CodexMessagePhase;
   count: number;
@@ -154,6 +164,10 @@ export function SessionInspector({
     [renderItems],
   );
   const checks = useMemo(() => buildCheckItems(renderItems), [renderItems]);
+  const subagents = useMemo(
+    () => buildSubagentItems(renderItems),
+    [renderItems],
+  );
   const planProgress = useMemo(
     () => buildPlanProgress(renderItems, t),
     [renderItems, t],
@@ -282,6 +296,38 @@ export function SessionInspector({
       </div>
 
       {planProgress && <InspectorPlanProgress progress={planProgress} t={t} />}
+
+      {subagents.length > 0 && (
+        <InspectorSection
+          title={t("sessionInspectorSubagents")}
+          count={subagents.length}
+        >
+          <ul className="session-inspector-list">
+            {subagents.map((subagent) => (
+              <li key={subagent.sessionId}>
+                <Link
+                  className="session-inspector-row"
+                  to={`${basePath}/projects/${projectId}/sessions/${subagent.sessionId}`}
+                  title={subagent.description || subagent.sessionId}
+                >
+                  <span
+                    className={`session-inspector-check-dot status-${getSubagentDotStatus(subagent.status)}`}
+                  />
+                  <span className="session-inspector-row-main">
+                    <span className="session-inspector-row-title">
+                      {subagent.description || subagent.sessionId}
+                    </span>
+                    <span className="session-inspector-row-meta">
+                      {subagent.agent ? `${subagent.agent} · ` : ""}
+                      {getSubagentStatusLabel(t, subagent.status)}
+                    </span>
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </InspectorSection>
+      )}
 
       {presentation === "drawer" && (
         <div className="session-inspector-tabs" role="tablist">
@@ -844,6 +890,85 @@ function buildCheckItems(items: RenderItem[]): CheckItem[] {
 
 function getMessageIdLike(message: Message): string {
   return message.uuid ?? message.id ?? "";
+}
+
+/**
+ * Collect OpenCode subagent sessions launched from this session's `task` tool
+ * calls. Each carries the child session id in its lifted `opencodeMetadata`, so
+ * we can link to the subagent's own session page.
+ */
+function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
+  const result: SubagentItem[] = [];
+  const resultIndexBySessionId = new Map<string, number>();
+
+  for (const item of items) {
+    if (item.type !== "tool_call") continue;
+    if (item.toolName.toLowerCase() !== "task") continue;
+    if (!isRecord(item.toolInput)) continue;
+
+    const sessionId = getOpenCodeSubagentSessionId(item.toolInput);
+    if (!sessionId) continue;
+
+    const description =
+      (typeof item.toolInput.description === "string" &&
+        item.toolInput.description.trim()) ||
+      (typeof item.toolInput.opencodeTitle === "string" &&
+        item.toolInput.opencodeTitle.trim()) ||
+      "";
+    const agent =
+      typeof item.toolInput.subagent_type === "string"
+        ? item.toolInput.subagent_type.trim()
+        : undefined;
+
+    const next = { sessionId, description, agent, status: item.status };
+    const existingIndex = resultIndexBySessionId.get(sessionId);
+    if (existingIndex === undefined) {
+      resultIndexBySessionId.set(sessionId, result.length);
+      result.push(next);
+      continue;
+    }
+
+    const existing = result[existingIndex];
+    if (existing) {
+      // `task_id` can resume the same child. Keep its original list position
+      // while reflecting the latest description, agent, and lifecycle state.
+      result[existingIndex] = {
+        ...next,
+        description: description || existing.description,
+        agent: agent || existing.agent,
+      };
+    }
+  }
+
+  return result;
+}
+
+function getSubagentStatusLabel(
+  t: TFunction,
+  status: ToolCallItem["status"],
+): string {
+  switch (status) {
+    case "pending":
+      return t("subagentStatusRunning");
+    case "error":
+      return t("subagentStatusFailed");
+    case "aborted":
+      return t("subagentStatusInterrupted");
+    default:
+      return t("subagentStatusCompleted");
+  }
+}
+
+function getSubagentDotStatus(status: ToolCallItem["status"]): CheckStatus {
+  switch (status) {
+    case "pending":
+      return "running";
+    case "error":
+    case "aborted":
+      return "failed";
+    default:
+      return "passed";
+  }
 }
 
 function contentToText(content: string | ContentBlock[]): string {

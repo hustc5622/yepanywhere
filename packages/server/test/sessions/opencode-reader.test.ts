@@ -352,6 +352,73 @@ describe("OpenCode sqlite session support", () => {
     );
   });
 
+  it("hides subagent children from lists but links them on detail", async () => {
+    const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
+    tempDirs.push(dir);
+    await mkdir(dir, { recursive: true });
+
+    const dbPath = join(dir, "opencode.db");
+    const projectPath = join(dir, "research_tasks");
+    const sqliteAvailable = await createOpenCodeDb(dbPath, projectPath);
+    if (!sqliteAvailable) return;
+    const sqlite = await loadSqliteModule();
+    if (!sqlite) return;
+
+    const db = new sqlite.DatabaseSync(dbPath);
+    try {
+      const base = Date.UTC(2026, 6, 8);
+      insertSession(db, {
+        id: "ses_subagent",
+        projectPath,
+        createdAt: base,
+        parentId: "ses_test",
+      });
+      insertMessage(db, {
+        id: "msg_sub_user",
+        sessionId: "ses_subagent",
+        role: "user",
+        text: "analyze the swing middleware",
+        createdAt: base + 10,
+      });
+    } finally {
+      db.close();
+    }
+
+    const reader = new OpenCodeSessionReader({ dbPath, projectPath });
+    const encoded = encodeProjectId(projectPath);
+
+    // The subagent child shares the parent's directory but must not surface as
+    // a standalone session in the list.
+    const sessions = await reader.listSessions(encoded);
+    expect(sessions.map((session) => session.id)).toEqual(["ses_test"]);
+
+    // The session index enumerates via listSessionFiles(); it must also exclude
+    // children so they never get indexed/listed through the cached path.
+    const enumerated = await reader.listSessionFiles(dbPath);
+    expect(enumerated.map((entry) => entry.sessionId)).toEqual(["ses_test"]);
+
+    // Project counts use the same top-level-session semantics as list views.
+    const scanner = new OpenCodeSessionScanner({ dbPath });
+    const projects = await scanner.listProjects();
+    expect(projects[0]?.sessionCount).toBe(1);
+    expect(projects[0]?.lastActivity).toBe(new Date(base).toISOString());
+
+    // The parent (top-level) session carries no parent link.
+    const parentSummary = await reader.getSessionSummary("ses_test", encoded);
+    expect(parentSummary?.parentSessionId).toBeUndefined();
+
+    // The child remains directly fetchable (for navigation) and exposes the
+    // parent link on both its summary and loaded detail.
+    const childSummary = await reader.getSessionSummary(
+      "ses_subagent",
+      encoded,
+    );
+    expect(childSummary?.parentSessionId).toBe("ses_test");
+
+    const loadedChild = await reader.getSession("ses_subagent", encoded);
+    expect(loadedChild?.summary.parentSessionId).toBe("ses_test");
+  });
+
   it("reads Yep creation source from OpenCode session metadata", async () => {
     const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
     tempDirs.push(dir);

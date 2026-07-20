@@ -4969,6 +4969,44 @@ a.sidebar-nav-item {
   color: var(--status-badge-input-text);
 }
 
+/* Subagent → parent session banner (shown on OpenCode subagent session pages) */
+.subagent-parent-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  text-decoration: none;
+  transition: background 0.15s;
+}
+
+.subagent-parent-banner:hover {
+  background: var(--bg-hover);
+}
+
+.subagent-parent-banner-icon {
+  flex-shrink: 0;
+  color: var(--link-color);
+  font-size: 1rem;
+}
+
+.subagent-parent-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-parent-banner-link {
+  flex-shrink: 0;
+  color: var(--link-color);
+  font-weight: 500;
+}
+
 /* Status badges for session list */
 .status-badge {
   display: inline-block;

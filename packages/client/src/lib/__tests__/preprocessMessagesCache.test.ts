@@ -36,6 +36,58 @@ describe("preprocessMessagesCached", () => {
     expect(second.renderItems[0]).toBe(first.renderItems[0]);
   });
 
+  it("reconciles a cached background task when a terminal marker streams in", () => {
+    const taskMessage: Message = {
+      id: "msg-task",
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "call-task",
+          name: "task",
+          input: {
+            description: "Analyze middleware",
+            subagent_type: "explore",
+          },
+          opencodeMetadata: {
+            sessionId: "ses_child",
+            parentSessionId: "ses_parent",
+            background: true,
+          },
+          opencodeStatus: "completed",
+        },
+        {
+          type: "tool_result",
+          tool_use_id: "call-task",
+          content: '<task id="ses_child" state="running"></task>',
+          opencodeStatus: "completed",
+        },
+      ],
+      timestamp: "2024-01-01T00:00:00Z",
+    };
+    const completionMessage: Message = {
+      id: "msg-completion",
+      type: "assistant",
+      role: "assistant",
+      _isStreaming: true,
+      content: '<task id="ses_child" state="completed"></task>',
+      timestamp: "2024-01-01T00:00:01Z",
+    };
+
+    const first = preprocessMessagesCached([taskMessage]);
+    const second = preprocessMessagesCached(
+      [taskMessage, completionMessage],
+      undefined,
+      first.cache,
+    );
+
+    expect(first.renderItems[0]).toMatchObject({ status: "pending" });
+    expect(second.renderItems).toEqual(
+      preprocessMessages([taskMessage, completionMessage]),
+    );
+    expect(second.renderItems[0]).toMatchObject({ status: "complete" });
+  });
+
   it("collapses plan progress snapshots when a streaming tail is appended", () => {
     const userMessage: Message = {
       id: "msg-user",

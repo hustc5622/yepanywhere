@@ -390,7 +390,9 @@ class OpenCodeJsonSessionReader implements ISessionReader {
       for (const file of jsonFiles) {
         const sessionId = file.replace(".json", "");
         const summary = await this.getSessionSummary(sessionId, projectId);
-        if (summary) {
+        // Exclude subagent/task children so they don't appear as standalone
+        // sessions; they are surfaced inline under their parent instead.
+        if (summary && !summary.parentSessionId) {
           summaries.push(summary);
         }
       }
@@ -528,6 +530,7 @@ class OpenCodeJsonSessionReader implements ISessionReader {
         provider: "opencode",
         model,
         reasoningEffort,
+        ...(session.parentID ? { parentSessionId: session.parentID } : {}),
       };
     } catch {
       return null;
@@ -1297,12 +1300,19 @@ export class OpenCodeSessionReader implements ISessionReader {
       this.dbPath,
       undefined,
       (db) => {
+        // Exclude subagent/task children (parent_id IS NOT NULL). OpenCode
+        // spawns each subagent as its own session sharing the parent's
+        // directory, so without this filter they surface as independent
+        // sessions in every list. They remain directly fetchable by id (for
+        // navigation) and are surfaced inline under their parent instead.
         const rows = db
           .prepare(
             `
               SELECT id
               FROM session
-              WHERE directory = ? AND time_archived IS NULL
+              WHERE directory = ?
+                AND time_archived IS NULL
+                AND parent_id IS NULL
               ORDER BY time_updated DESC
             `,
           )
@@ -1440,6 +1450,7 @@ export class OpenCodeSessionReader implements ISessionReader {
       model,
       reasoningEffort,
       createdBy,
+      ...(row.parentId ? { parentSessionId: row.parentId } : {}),
     };
   }
 
@@ -1751,11 +1762,17 @@ export class OpenCodeSessionReader implements ISessionReader {
       this.dbPath,
       undefined,
       (db) => {
+        // Exclude subagent/task children (parent_id IS NOT NULL). This is the
+        // enumeration the session index builds its list from, so filtering here
+        // keeps subagent children out of every session list while leaving them
+        // directly fetchable by id (getSqliteSessionStats stays unfiltered).
         const rows = db
           .prepare(
             `
               ${SESSION_STATS_SQL}
-              WHERE s.directory = ? AND s.time_archived IS NULL
+              WHERE s.directory = ?
+                AND s.time_archived IS NULL
+                AND s.parent_id IS NULL
               ORDER BY mtime DESC
             `,
           )

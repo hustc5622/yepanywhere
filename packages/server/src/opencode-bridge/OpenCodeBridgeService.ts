@@ -105,6 +105,7 @@ interface OpenCodeBridgeServiceOptions {
 
 interface SessionRecord {
   id: string;
+  parentSessionId?: string;
   projectId: UrlProjectId;
   cwd: string;
   serverUrl: string;
@@ -149,6 +150,7 @@ interface SessionRecord {
  */
 interface PersistedSessionRecord {
   id: string;
+  parentSessionId?: string;
   cwd: string;
   serverUrl: string;
   createdAt: string;
@@ -427,7 +429,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         ? null
         : (this.opencodeProcess?.pid ?? null),
       opencodeConnected: this.opencodeConnected,
-      sessionCount: this.sessions.size,
+      sessionCount: Array.from(this.sessions.values()).filter(
+        (session) => !session.parentSessionId,
+      ).length,
       pendingInputCount: this.pendingInputs.size,
       lastError: this.lastError,
     };
@@ -435,6 +439,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
   listSessions(): OpenCodeBridgeSession[] {
     return Array.from(this.sessions.values())
+      .filter((session) => !session.parentSessionId)
       .sort(
         (a, b) =>
           new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
@@ -1166,6 +1171,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       id: sessionId,
+      parentSessionId: existing?.parentSessionId,
       projectId,
       cwd,
       serverUrl: clientConfig.serverUrl,
@@ -1203,6 +1209,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       Pick<
         SessionRecord,
         | "title"
+        | "parentSessionId"
         | "messageCount"
         | "activity"
         | "pendingInputType"
@@ -1279,6 +1286,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const cwd = origin?.directory ?? process.cwd();
     this.sessions.set(sessionId, {
       id: sessionId,
+      parentSessionId: effectiveState.parentSessionId,
       projectId: encodeProjectId(cwd),
       cwd,
       serverUrl: this.defaultServerUrl,
@@ -1646,6 +1654,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       .filter((record) => record.cwd !== process.cwd())
       .map((record) => ({
         id: record.id,
+        parentSessionId: record.parentSessionId,
         cwd: record.cwd,
         serverUrl: record.serverUrl,
         createdAt: record.createdAt,
@@ -1693,6 +1702,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       if (this.sessions.has(stored.id)) continue;
       this.sessions.set(stored.id, {
         id: stored.id,
+        parentSessionId: stored.parentSessionId,
         projectId: encodeProjectId(stored.cwd),
         cwd: stored.cwd,
         serverUrl: stored.serverUrl || this.defaultServerUrl,
@@ -1718,6 +1728,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const projectName = path.basename(record.cwd) || record.cwd;
     return {
       id: record.id,
+      parentSessionId: record.parentSessionId,
       projectId: record.projectId,
       projectPath: record.cwd,
       projectName,
@@ -1746,6 +1757,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const view: OpenCodeBridgeSessionView = {
       session: {
         id: session.id,
+        parentSessionId: session.parentSessionId,
         projectId: session.projectId,
         title: session.title,
         fullTitle: session.fullTitle,
@@ -2089,6 +2101,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const implyActive = options.implyActive ?? true;
     const info = asRecord(properties?.info);
     const title = normalizeProviderGeneratedTitle(readString(info, "title"));
+    const parentSessionId = readString(info, "parentID");
     const updatedAt =
       readOpenCodeUpdatedAt(info) ??
       readString(info, "updatedAt") ??
@@ -2100,6 +2113,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         // Message events do not include a session title. Avoid replacing the
         // title recorded from session.created with undefined in that case.
         ...(title ? { title } : {}),
+        ...(parentSessionId ? { parentSessionId } : {}),
         ...(messageCount !== undefined ? { messageCount } : {}),
         ...(updatedAt ? { updatedAt } : {}),
         ...(implyActive

@@ -351,6 +351,7 @@ describe("Sessions metadata route", () => {
     const persistedSummary: SessionSummary = {
       ...createSummary(),
       provider: "opencode",
+      parentSessionId: "ses_parent",
       lastTurnStatus: "failed",
       lastErrorMessage: "stale persisted error",
     };
@@ -407,6 +408,7 @@ describe("Sessions metadata route", () => {
       expect(response.status).toBe(200);
       const json = await response.json();
       expect(json.session).toMatchObject({
+        parentSessionId: "ses_parent",
         retryStatus: {
           attempt: 4,
           message: "provider rate limited",

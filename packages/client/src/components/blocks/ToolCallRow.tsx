@@ -3,6 +3,7 @@ import {
   getDisplayBashCommandFromInput,
   isCodexLikeBashInput,
 } from "../../lib/bashCommand";
+import { getOpenCodeSubagentSessionId } from "../../lib/openCodeSubagents";
 import type { ToolResultData } from "../../types/renderItems";
 import { toolRegistry } from "../renderers/tools";
 import type { RenderContext } from "../renderers/types";
@@ -84,7 +85,28 @@ export const ToolCallRow = memo(function ToolCallRow({
   const structuredResult = toolResult?.structured ?? toolResult?.content;
 
   // Check if this tool renders inline (bypasses entire tool-row structure)
-  const preferExpandableRow = sessionProvider === "opencode";
+  // OpenCode tools normally prefer the expandable row, but its `task` tool is a
+  // subagent launcher we render as a dedicated inline card (linking to the
+  // child session), so it opts back into inline rendering.
+  const isOpenCodeSubagentTool =
+    sessionProvider === "opencode" && toolName.toLowerCase() === "task";
+  const canLinkOpenCodeSubagent = Boolean(
+    getOpenCodeSubagentSessionId(toolInput),
+  );
+  // Message preprocessing has already reconciled background launcher output
+  // with later task lifecycle markers. Trust that normalized status here so
+  // the launcher's initial `running` result cannot overwrite a later terminal
+  // state.
+  const openCodeSubagentStatus = status;
+  const openCodeSubagentNeedsDetails =
+    isOpenCodeSubagentTool &&
+    (!canLinkOpenCodeSubagent ||
+      openCodeSubagentStatus === "error" ||
+      openCodeSubagentStatus === "aborted" ||
+      toolResult?.isError === true);
+  const preferExpandableRow =
+    sessionProvider === "opencode" &&
+    (!isOpenCodeSubagentTool || openCodeSubagentNeedsDetails);
   const hasInlineRenderer =
     !preferExpandableRow && toolRegistry.hasInlineRenderer(toolName);
   const suppressCollapsedPreview = shouldSuppressBashCollapsedPreview(

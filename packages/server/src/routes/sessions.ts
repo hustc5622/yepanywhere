@@ -1287,6 +1287,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           metadataProvider ??
           process?.provider ??
           project.provider,
+        parentSessionId: sessionSummary?.parentSessionId,
         model: sessionSummary?.model,
         reasoningEffort:
           sessionSummary?.reasoningEffort ?? process?.reasoningEffort,

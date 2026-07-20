@@ -85,6 +85,90 @@ describe("SessionInspector", () => {
     expect(screen.queryByText("Done.")).toBeNull();
   });
 
+  it("lists OpenCode subagents with links to their child sessions", () => {
+    renderInspector("opencode", [
+      {
+        uuid: "msg-task",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_task",
+              name: "task",
+              input: {
+                description: "Analyze swing middleware",
+                subagent_type: "explore",
+              },
+              opencodeMetadata: {
+                sessionId: "ses_child",
+                parentSessionId: "ses_parent",
+              },
+              opencodeStatus: "completed",
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_task",
+              content: '<task id="ses_child" state="completed"></task>',
+            },
+          ],
+        },
+      },
+    ]);
+
+    const link = screen.getByRole("link", {
+      name: /Analyze swing middleware/i,
+    });
+    expect(link.getAttribute("href")).toBe(
+      "/projects/project-1/sessions/ses_child",
+    );
+    expect(screen.getByText("explore", { exact: false })).not.toBeNull();
+  });
+
+  it("uses the latest persisted state for an OpenCode background subagent", () => {
+    renderInspector("opencode", [
+      {
+        uuid: "msg-task",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_task",
+              name: "task",
+              input: {
+                description: "Analyze in background",
+                subagent_type: "explore",
+              },
+              opencodeMetadata: {
+                sessionId: "ses_child",
+                parentSessionId: "session-1",
+                background: true,
+              },
+              opencodeStatus: "completed",
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_task",
+              content: '<task id="ses_child" state="running"></task>',
+            },
+          ],
+        },
+      },
+      {
+        uuid: "msg-complete",
+        type: "user",
+        content: '<task id="ses_child" state="completed"></task>',
+      },
+    ]);
+
+    const link = screen.getByRole("link", { name: /Analyze in background/i });
+    expect(link.textContent).toContain("completed");
+    expect(link.textContent).not.toContain("running");
+  });
+
   it("does not show Codex channel metadata for Claude sessions", () => {
     renderInspector("claude", [
       {

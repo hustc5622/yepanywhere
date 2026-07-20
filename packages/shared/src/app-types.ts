@@ -587,6 +587,13 @@ export interface AppSessionSummary {
   ownership: SessionOwnership;
   // Provider field - which AI provider is running this session
   provider: ProviderName;
+  /**
+   * For provider-native subagent sessions (e.g. OpenCode task/subagent
+   * children), the id of the session that spawned this one. Set on the session
+   * detail so the UI can link back to the parent. Subagent children are hidden
+   * from session lists and shown inline under their parent instead.
+   */
+  parentSessionId?: string;
   // Model used for this session (resolved, not "default")
   model?: string;
   // Provider-specific reasoning effort for this session (e.g. "max", "xhigh")

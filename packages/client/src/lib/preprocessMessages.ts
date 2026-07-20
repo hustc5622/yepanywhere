@@ -10,6 +10,12 @@ import type {
 } from "../types/renderItems";
 import { getCodexExecResultOverview } from "./codexExec";
 import { getMessageId } from "./mergeMessages";
+import {
+  extractOpenCodeTaskStateUpdates,
+  getOpenCodeSubagentSessionId,
+  isOpenCodeBackgroundTask,
+  resolveOpenCodeTaskStatus,
+} from "./openCodeSubagents";
 
 const CODEX_TURN_ABORTED_DISPLAY_TEXT = "Conversation stopped by user";
 
@@ -88,7 +94,68 @@ export function preprocessMessages(
 
   const enrichedItems = enrichWriteStdinWithCommand(items);
   const compactWaits = collapseCodexWaitPolls(enrichedItems);
-  return collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits));
+  return reconcileOpenCodeBackgroundTaskStatuses(
+    collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits)),
+  );
+}
+
+function getOpenCodeTaskStateText(item: RenderItem): string[] {
+  switch (item.type) {
+    case "tool_call":
+      return item.toolResult?.content ? [item.toolResult.content] : [];
+    case "text":
+      return [item.text];
+    case "user_prompt":
+      return [getPromptText(item.content)];
+    case "session_setup":
+      return item.prompts.map(getPromptText);
+    case "system":
+      return [item.content];
+    case "thinking":
+      return [];
+  }
+}
+
+/**
+ * OpenCode background task tools finish after launching the child, then emit a
+ * later synthetic `<task state="completed|error">` notification. Reconcile the
+ * launcher card with the latest persisted child lifecycle marker so refreshes
+ * and resumed task sessions retain the real status.
+ */
+export function reconcileOpenCodeBackgroundTaskStatuses(
+  items: RenderItem[],
+): RenderItem[] {
+  const latestStates = new Map<
+    string,
+    ReturnType<typeof extractOpenCodeTaskStateUpdates>[number]["state"]
+  >();
+
+  for (const item of items) {
+    for (const text of getOpenCodeTaskStateText(item)) {
+      for (const update of extractOpenCodeTaskStateUpdates(text)) {
+        latestStates.set(update.sessionId, update.state);
+      }
+    }
+  }
+
+  return items.map((item) => {
+    if (
+      item.type !== "tool_call" ||
+      item.toolName.toLowerCase() !== "task" ||
+      !isOpenCodeBackgroundTask(item.toolInput)
+    ) {
+      return item;
+    }
+
+    const sessionId = getOpenCodeSubagentSessionId(item.toolInput);
+    const status = resolveOpenCodeTaskStatus(
+      item.toolInput,
+      item.toolResult?.content,
+      item.status,
+      sessionId ? latestStates.get(sessionId) : undefined,
+    );
+    return status === item.status ? item : { ...item, status };
+  });
 }
 
 const SESSION_SETUP_PREFIXES = [

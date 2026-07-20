@@ -23,6 +23,8 @@ export interface OpenCodeBridgeStatus extends BridgeStatusBase {
 
 export interface OpenCodeBridgeSession extends BridgeSessionBase {
   provider: "opencode";
+  /** OpenCode task/subagent parent; child sessions stay out of list views. */
+  parentSessionId?: string;
   active: boolean;
   /** Present while OpenCode is retrying a failed provider request. */
   retryStatus?: {

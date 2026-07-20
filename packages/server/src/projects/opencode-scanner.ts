@@ -524,7 +524,10 @@ export class OpenCodeSessionScanner {
       const rows = db
         .prepare(
           `
-            SELECT directory, COUNT(*) AS session_count, MAX(time_updated) AS last_updated
+            SELECT
+              directory,
+              COUNT(CASE WHEN parent_id IS NULL THEN 1 END) AS session_count,
+              MAX(time_updated) AS last_updated
             FROM session
             WHERE directory IS NOT NULL
               AND directory != ''

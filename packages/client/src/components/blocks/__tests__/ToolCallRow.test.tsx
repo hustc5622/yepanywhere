@@ -1,7 +1,10 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import { SchemaValidationProvider } from "../../../contexts/SchemaValidationContext";
+import { SessionMetadataProvider } from "../../../contexts/SessionMetadataContext";
 import { ToastProvider } from "../../../contexts/ToastContext";
+import { I18nProvider } from "../../../i18n";
 import { ToolCallRow } from "../ToolCallRow";
 
 function renderWithToolProviders(ui: React.ReactNode) {
@@ -321,6 +324,157 @@ describe("ToolCallRow", () => {
     expect(container.textContent).not.toContain("<skill_content");
     fireEvent.click(screen.getByText("Instructions"));
     expect(container.textContent).toContain("# Skill: git-commit-push");
+  });
+
+  it("renders the OpenCode task tool as a clickable subagent card", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionMetadataProvider
+            projectId="proj-1"
+            projectPath={null}
+            sessionId="ses_parent"
+          >
+            <ToolCallRow
+              id="toolu_task"
+              toolName="task"
+              toolInput={{
+                description: "Analyze swing middleware",
+                prompt: "investigate the swing middleware",
+                subagent_type: "explore",
+                opencodeMetadata: {
+                  sessionId: "ses_child",
+                  parentSessionId: "ses_parent",
+                },
+              }}
+              toolResult={{
+                content: '<task id="ses_child" state="completed"></task>',
+                isError: false,
+              }}
+              status="complete"
+              sessionProvider="opencode"
+            />
+          </SessionMetadataProvider>
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    // Links to the subagent's own session page instead of expanding a tool row.
+    const link = screen.getByRole("link");
+    expect(link.getAttribute("href")).toBe(
+      "/projects/proj-1/sessions/ses_child",
+    );
+    expect(container.textContent).toContain("Analyze swing middleware");
+    expect(container.textContent).toContain("explore");
+    expect(container.querySelector(".tool-row-header")).toBeNull();
+  });
+
+  it("keeps a launched OpenCode background task in the running state", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionMetadataProvider
+            projectId="proj-1"
+            projectPath={null}
+            sessionId="ses_parent"
+          >
+            <ToolCallRow
+              id="toolu_background_task"
+              toolName="task"
+              toolInput={{
+                description: "Analyze in background",
+                subagent_type: "explore",
+                opencodeMetadata: {
+                  sessionId: "ses_child",
+                  parentSessionId: "ses_parent",
+                  background: true,
+                },
+              }}
+              toolResult={{
+                content: '<task id="ses_child" state="running"></task>',
+                isError: false,
+              }}
+              status="pending"
+              sessionProvider="opencode"
+            />
+          </SessionMetadataProvider>
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    expect(container.textContent).toContain("running");
+    expect(container.textContent).not.toContain("completed");
+    expect(container.querySelector(".tool-row-header")).toBeNull();
+  });
+
+  it("keeps a reconciled terminal task state over the launcher output", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionMetadataProvider
+            projectId="proj-1"
+            projectPath={null}
+            sessionId="ses_parent"
+          >
+            <ToolCallRow
+              id="toolu_completed_background_task"
+              toolName="task"
+              toolInput={{
+                description: "Analyze in background",
+                opencodeMetadata: {
+                  sessionId: "ses_child",
+                  parentSessionId: "ses_parent",
+                  background: true,
+                },
+              }}
+              toolResult={{
+                content: '<task id="ses_child" state="running"></task>',
+                isError: false,
+              }}
+              status="complete"
+              sessionProvider="opencode"
+            />
+          </SessionMetadataProvider>
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    expect(container.textContent).toContain("completed");
+    expect(container.textContent).not.toContain("running");
+  });
+
+  it("keeps failed OpenCode task details expandable without a child link", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <I18nProvider>
+          <ToolCallRow
+            id="toolu_failed_task"
+            toolName="task"
+            toolInput={{
+              description: "Launch missing agent",
+              subagent_type: "missing-agent",
+            }}
+            toolResult={{
+              content: "Unknown agent type: missing-agent is not valid",
+              isError: true,
+            }}
+            status="error"
+            sessionProvider="opencode"
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    expect(container.querySelector(".tool-row-header")).not.toBeNull();
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(container.textContent).not.toContain("Unknown agent type");
+
+    fireEvent.click(container.querySelector(".tool-row-header") as HTMLElement);
+
+    expect(container.textContent).toContain(
+      "Unknown agent type: missing-agent is not valid",
+    );
+    expect(container.querySelector(".tool-fallback-error")).not.toBeNull();
   });
 
   it("renders failed OpenCode skills as errors, not loaded instructions", () => {

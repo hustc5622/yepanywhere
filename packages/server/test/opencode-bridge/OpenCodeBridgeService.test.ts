@@ -1925,6 +1925,48 @@ describe("OpenCodeBridgeService", () => {
     expect(session?.lastTurnStatus).toBeUndefined();
   });
 
+  it("keeps OpenCode task children out of bridge lists but directly addressable", () => {
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    const handleEvent = (
+      bridge as unknown as {
+        handleOpenCodeEvent: (event: unknown) => void;
+      }
+    ).handleOpenCodeEvent.bind(bridge);
+
+    handleEvent({
+      type: "session.created",
+      properties: {
+        sessionID: "ses_parent",
+        info: { title: "Parent" },
+      },
+    });
+    handleEvent({
+      type: "session.created",
+      properties: {
+        sessionID: "ses_child",
+        info: { title: "Child", parentID: "ses_parent" },
+      },
+    });
+
+    expect(bridge.listSessions().map((session) => session.id)).toEqual([
+      "ses_parent",
+    ]);
+    expect(bridge.listSessionViews().map((view) => view.session.id)).toEqual([
+      "ses_parent",
+    ]);
+    expect(bridge.getStatus().sessionCount).toBe(1);
+    expect(bridge.getSessionView("ses_child")?.session).toMatchObject({
+      id: "ses_child",
+      parentSessionId: "ses_parent",
+    });
+  });
+
   it("persists sessions across bridge restarts", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yep-opencode-bridge-state-"));
     tempDirs.push(dir);
@@ -1943,6 +1985,15 @@ describe("OpenCodeBridgeService", () => {
         handleOpenCodeEvent: (event: unknown) => void;
       }
     ).handleOpenCodeEvent.bind(first);
+    const updateSessionState = (
+      first as unknown as {
+        updateSessionState: (
+          sessionId: string,
+          state: Record<string, unknown>,
+          origin?: { instanceId: string; directory?: string },
+        ) => void;
+      }
+    ).updateSessionState.bind(first);
 
     handleEvent({
       type: "session.created",
@@ -1953,16 +2004,20 @@ describe("OpenCodeBridgeService", () => {
     });
     // Attribute a real cwd via an external-instance origin; guessed cwds
     // (bridge process cwd) are intentionally not persisted.
-    (
-      first as unknown as {
-        updateSessionState: (
-          sessionId: string,
-          state: Record<string, unknown>,
-          origin?: { instanceId: string; directory?: string },
-        ) => void;
-      }
-    ).updateSessionState(
+    updateSessionState(
       "ses_persist",
+      { activity: "idle", active: false },
+      { instanceId: "ext_1", directory: dir },
+    );
+    handleEvent({
+      type: "session.created",
+      properties: {
+        sessionID: "ses_persist_child",
+        info: { title: "Durable child", parentID: "ses_persist" },
+      },
+    });
+    updateSessionState(
+      "ses_persist_child",
       { activity: "idle", active: false },
       { instanceId: "ext_1", directory: dir },
     );
@@ -1995,6 +2050,12 @@ describe("OpenCodeBridgeService", () => {
       // Restored sessions come back idle with no live runtime state.
       expect(restored?.active).toBe(false);
       expect(second.isSessionActive("ses_persist")).toBe(false);
+      expect(second.listSessions().map((session) => session.id)).toEqual([
+        "ses_persist",
+      ]);
+      expect(
+        second.getSessionView("ses_persist_child")?.session.parentSessionId,
+      ).toBe("ses_persist");
     } finally {
       await second.shutdown();
     }
