@@ -1215,14 +1215,18 @@ custom-openai/glm-5.2
           onToolApproval: (
             toolName: string,
             input: unknown,
-            options: { signal: AbortSignal },
+            options: { signal: AbortSignal; requestId?: string },
           ) => Promise<{ behavior: "allow" | "deny" }>,
         ) => Promise<void>;
       }
     ).handlePermissionAsked.bind(provider);
 
     const replies: unknown[] = [];
-    const approvals: Array<{ toolName: string; input: unknown }> = [];
+    const approvals: Array<{
+      toolName: string;
+      input: unknown;
+      requestId?: string;
+    }> = [];
 
     await withTestServer(
       async (req, res) => {
@@ -1251,8 +1255,8 @@ custom-openai/glm-5.2
             },
           },
           new AbortController().signal,
-          async (toolName, input) => {
-            approvals.push({ toolName, input });
+          async (toolName, input, options) => {
+            approvals.push({ toolName, input, requestId: options.requestId });
             return { behavior: "allow" };
           },
         );
@@ -1270,6 +1274,7 @@ custom-openai/glm-5.2
           messageID: "msg_1",
           callID: "call_1",
         },
+        requestId: "per_1",
       },
     ]);
     expect(replies).toEqual([{ reply: "once" }]);

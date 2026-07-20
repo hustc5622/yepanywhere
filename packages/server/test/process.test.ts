@@ -878,6 +878,30 @@ describe("Process", () => {
       expect(result.behavior).toBe("allow");
     });
 
+    it("preserves a provider-native approval request id", async () => {
+      const process = new Process(createMockIterator([]), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-opencode",
+        provider: "opencode",
+        idleTimeoutMs: 100,
+        permissionMode: "default",
+      });
+      const abortController = new AbortController();
+
+      const approvalPromise = process.handleToolApproval(
+        "Bash",
+        { command: "git status" },
+        { signal: abortController.signal, requestId: "per_native_1" },
+      );
+
+      expect(process.getPendingInputRequest()?.id).toBe("per_native_1");
+      expect(process.respondToInput("per_native_1", "approve")).toBe(true);
+      await expect(approvalPromise).resolves.toMatchObject({
+        behavior: "allow",
+      });
+    });
+
     it("handles concurrent tool approvals (queues them)", async () => {
       const iterator = createMockIterator([]);
       const process = new Process(iterator, {

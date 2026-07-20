@@ -151,5 +151,9 @@ export interface ToolApprovalResult {
 export type CanUseTool = (
   toolName: string,
   input: unknown,
-  options: { signal: AbortSignal },
+  options: {
+    signal: AbortSignal;
+    /** Provider-native request id, when the provider exposes one. */
+    requestId?: string;
+  },
 ) => Promise<ToolApprovalResult>;

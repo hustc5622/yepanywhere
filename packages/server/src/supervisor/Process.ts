@@ -1273,7 +1273,7 @@ export class Process {
   async handleToolApproval(
     toolName: string,
     input: unknown,
-    options: { signal: AbortSignal },
+    options: { signal: AbortSignal; requestId?: string },
   ): Promise<ToolApprovalResult> {
     console.log(
       `[handleToolApproval] toolName=${toolName}, permissionMode=${this._permissionMode}`,
@@ -1394,7 +1394,11 @@ export class Process {
 
     // Default behavior: ask user for approval
     const request: InputRequest = {
-      id: randomUUID(),
+      // Preserve a provider-native id when available. OpenCode's bridge sees
+      // the same approval independently, so inventing a second UUID here can
+      // make notification actions look stale even though both ids represent
+      // the same request.
+      id: options.requestId?.trim() || randomUUID(),
       sessionId: this._sessionId,
       type: "tool-approval",
       prompt: `Allow ${toolName}?`,

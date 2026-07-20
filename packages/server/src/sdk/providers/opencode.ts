@@ -3106,7 +3106,7 @@ export class OpenCodeProvider implements AgentProvider {
             messageID: event.properties.tool?.messageID,
             callID: event.properties.tool?.callID,
           },
-          { signal },
+          { signal, requestId: event.properties.id },
         );
       } catch (error) {
         getLogger().warn(
@@ -3218,7 +3218,10 @@ export class OpenCodeProvider implements AgentProvider {
 
     if (onToolApproval) {
       try {
-        result = await onToolApproval(toolName, toolInput, { signal });
+        result = await onToolApproval(toolName, toolInput, {
+          signal,
+          requestId: event.properties.id,
+        });
       } catch (error) {
         getLogger().warn(
           { permissionId: event.properties.id, toolName, error },
