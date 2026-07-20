@@ -135,6 +135,12 @@ export const OpenCodeStoredPartSchema = z.object({
   messageID: z.string(),
   type: z.string(), // "text", "step-start", "step-finish", "tool", etc.
   text: z.string().optional(),
+  // file-specific fields
+  mime: z.string().optional(),
+  filename: z.string().optional(),
+  url: z.string().optional(),
+  source: z.unknown().optional(),
+  synthetic: z.boolean().optional(),
   time: z
     .object({
       start: z.number().optional(),

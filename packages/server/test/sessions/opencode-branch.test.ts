@@ -124,6 +124,29 @@ describe("OpenCode edit-fork branch builder", () => {
     ).toMatchObject({ sessionId: "ses_parent", isActive: false });
   });
 
+  it("ignores synthetic OpenCode context when deriving branch prompts", () => {
+    const family = baseFamily();
+    const original = family[0]?.messages.find(
+      (message) => message.message.id === "u2",
+    );
+    original?.parts.unshift({
+      id: "part_u2_synthetic",
+      sessionID: "ses_parent",
+      messageID: "u2",
+      type: "text",
+      synthetic: true,
+      text: 'Called the Read tool with the following input: {"filePath":"/uploads/screenshot.png"}',
+    });
+
+    const view = buildOpenCodeBranchView(family, "ses_parent");
+    expect(
+      view.branchState?.branches.find((branch) => branch.id === "u2"),
+    ).toMatchObject({
+      prompt: "original",
+      title: "original",
+    });
+  });
+
   it("keeps copied history canonical when a grandchild edits a later prompt", () => {
     const family = baseFamily();
     const child = family[1] as OpenCodeBranchSession;

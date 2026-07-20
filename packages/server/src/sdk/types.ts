@@ -105,6 +105,12 @@ export interface UserMessage {
 export interface QueuedUserMessage {
   type: "user";
   uuid?: string;
+  /**
+   * Structured uploads retained for providers with native file-part support.
+   * MessageQueue only includes this field when explicitly configured so SDKs
+   * that validate their input shape do not receive provider-specific metadata.
+   */
+  attachments?: UploadedFile[];
   message: {
     role: "user";
     content:

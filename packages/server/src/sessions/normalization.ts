@@ -46,7 +46,10 @@ import {
   normalizeCodexToolOutputWithContext,
   parseCodexToolArguments,
 } from "../codex/normalization.js";
-import { getOpenCodeAttachmentLabel } from "../opencode/attachments.js";
+import {
+  getOpenCodeAttachmentLabel,
+  hasYepUploadMetadataForFile,
+} from "../opencode/attachments.js";
 import type { ContentBlock, Message, Session } from "../supervisor/types.js";
 import { collectVisibleClaudeEntries } from "./claude-messages.js";
 import { applyCodexRollbackMarkers } from "./codex-rollback.js";
@@ -1757,7 +1760,7 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
       ? new Date(message.time.created).toISOString()
       : undefined;
 
-    const content = convertOpenCodeParts(parts);
+    const content = convertOpenCodeParts(parts, message.role);
     const usage = createOpenCodeUsage(message.tokens, message.cost, parts);
     const openCodeHasToolPart =
       message.role === "assistant" &&
@@ -1826,13 +1829,28 @@ function createOpenCodeUsage(
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
-function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
+function convertOpenCodeParts(
+  parts: OpenCodeStoredPart[],
+  role?: "user" | "assistant",
+): ContentBlock[] {
   const blocks: ContentBlock[] = [];
+  const userText =
+    role === "user"
+      ? parts
+          .filter(
+            (part) => part.type === "text" && !part.synthetic && part.text,
+          )
+          .map((part) => part.text)
+          .join("\n")
+      : undefined;
 
   for (const part of parts) {
     switch (part.type) {
       case "text":
-        if (part.text) {
+        // OpenCode inserts synthetic user text while resolving attachments
+        // (for example, "Called the Read tool..."). It is model context, not
+        // user-authored transcript content, and OpenCode's own UI hides it.
+        if (!part.synthetic && part.text) {
           blocks.push({
             type: "text",
             text: part.text,
@@ -1922,6 +1940,7 @@ function convertOpenCodeParts(parts: OpenCodeStoredPart[]): ContentBlock[] {
           mime?: string;
           url?: string;
         };
+        if (hasYepUploadMetadataForFile(userText, file.filename)) break;
         const label = getOpenCodeAttachmentLabel(file);
         blocks.push({
           type: "text",

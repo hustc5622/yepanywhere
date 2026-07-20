@@ -78,6 +78,12 @@ export const OpenCodePartSchema = z.object({
   messageID: z.string(),
   type: z.string(), // "text", "step-start", "step-finish", "tool-use", "tool-result", etc.
   text: z.string().optional(),
+  // file-specific fields
+  mime: z.string().optional(),
+  filename: z.string().optional(),
+  url: z.string().optional(),
+  source: z.unknown().optional(),
+  synthetic: z.boolean().optional(),
   time: OpenCodeTimeSchema.optional(),
   // step-finish specific fields
   reason: z.string().optional(),

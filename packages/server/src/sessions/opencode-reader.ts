@@ -718,7 +718,7 @@ class OpenCodeJsonSessionReader implements ISessionReader {
     const parts = await this.loadMessageParts(messageId);
 
     for (const part of parts) {
-      if (part.type === "text" && part.text) {
+      if (part.type === "text" && !part.synthetic && part.text) {
         return part.text;
       }
     }
@@ -1035,7 +1035,7 @@ function partFromSqliteRow(
 
 function extractMessageText(parts: OpenCodeStoredPart[]): string | null {
   const text = parts
-    .filter((part) => part.type === "text" && part.text)
+    .filter((part) => part.type === "text" && !part.synthetic && part.text)
     .map((part) => part.text)
     .join("");
   return text.trim() ? text : null;

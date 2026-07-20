@@ -246,6 +246,69 @@ describe("normalizeSession", () => {
     expect(text).not.toContain("data:application/pdf;base64");
   });
 
+  it("does not duplicate native file markers for persisted Yep uploads", () => {
+    const prompt =
+      "Review this screenshot\n\nUser uploaded files:\n- screenshot.png (1.0 KB, image/png): /uploads/screenshot.png";
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "opencode-yep-file-session",
+        projectId: "test-project" as UrlProjectId,
+        title: "OpenCode Yep File",
+        fullTitle: "OpenCode Yep File",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 1,
+        provider: "opencode",
+      },
+      data: {
+        provider: "opencode",
+        session: {
+          messages: [
+            {
+              message: {
+                id: "msg-yep-file",
+                sessionID: "opencode-yep-file-session",
+                role: "user",
+                time: { created: Date.now() },
+              },
+              parts: [
+                {
+                  id: "part-synthetic-read",
+                  sessionID: "opencode-yep-file-session",
+                  messageID: "msg-yep-file",
+                  type: "text",
+                  synthetic: true,
+                  text: 'Called the Read tool with the following input: {"filePath":"/uploads/screenshot.png"}',
+                },
+                {
+                  id: "part-text",
+                  sessionID: "opencode-yep-file-session",
+                  messageID: "msg-yep-file",
+                  type: "text",
+                  text: prompt,
+                },
+                {
+                  id: "part-file",
+                  sessionID: "opencode-yep-file-session",
+                  messageID: "msg-yep-file",
+                  type: "file",
+                  mime: "image/png",
+                  filename: "screenshot.png",
+                  url: "data:image/png;base64,AQID",
+                },
+              ],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    expect(normalized.messages[0]?.message?.content).toEqual([
+      { type: "text", text: prompt },
+    ]);
+  });
+
   it("marks a persisted legacy OpenCode text response as completed", () => {
     const mockSession: LoadedSession = {
       summary: {

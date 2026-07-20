@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type {
   ModelInfo,
@@ -57,7 +58,10 @@ import type {
   OpenCodeLifecycleAction,
   OpenCodeLifecycleState,
 } from "../../opencode-lifecycle/index.js";
-import { getOpenCodeAttachmentLabel } from "../../opencode/attachments.js";
+import {
+  getOpenCodeAttachmentLabel,
+  hasYepUploadMetadataForFile,
+} from "../../opencode/attachments.js";
 import {
   type OpenCodeQuestion,
   buildOpenCodeQuestionAnswers,
@@ -339,8 +343,20 @@ interface OpenCodePermissionRule {
   action: OpenCodePermissionAction;
 }
 
+interface OpenCodeTextPartInput {
+  type: "text";
+  text: string;
+}
+
+interface OpenCodeFilePartInput {
+  type: "file";
+  mime: string;
+  filename?: string;
+  url: string;
+}
+
 interface OpenCodeMessagePayload {
-  parts: Array<{ type: "text"; text: string }>;
+  parts: Array<OpenCodeTextPartInput | OpenCodeFilePartInput>;
   model?: OpenCodeModelRef;
   /** OpenCode-native model variant (for example high or max). */
   variant?: string;
@@ -679,7 +695,7 @@ export class OpenCodeProvider implements AgentProvider {
    * Start a new OpenCode session.
    */
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
-    const queue = new MessageQueue();
+    const queue = new MessageQueue({ preserveAttachments: true });
     const abortController = new AbortController();
     const pidRef: { value?: number } = {};
     const processRef: { value?: ChildProcess } = {};
@@ -973,6 +989,7 @@ export class OpenCodeProvider implements AgentProvider {
 
         // Extract text from the user message
         let userPrompt = this.extractTextFromMessage(message);
+        const fileParts = this.buildOpenCodeFileParts(message);
 
         // Prepend global instructions to the first message of new sessions
         if (isFirstNewMessage && options.globalInstructions) {
@@ -1002,6 +1019,7 @@ export class OpenCodeProvider implements AgentProvider {
           runtimeRef.currentModel,
           runtimeRef.currentVariant,
           cwd,
+          fileParts,
         );
       }
     } finally {
@@ -1387,6 +1405,7 @@ export class OpenCodeProvider implements AgentProvider {
     model?: string | null,
     variant?: string,
     cwd?: string,
+    fileParts: readonly OpenCodeFilePartInput[] = [],
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
 
@@ -1780,7 +1799,11 @@ export class OpenCodeProvider implements AgentProvider {
       ? Promise.resolve()
       : (async () => {
           log.debug(
-            { opencodeSessionId, textLength: text.length },
+            {
+              opencodeSessionId,
+              textLength: text.length,
+              filePartCount: fileParts.length,
+            },
             "Sending message to OpenCode",
           );
           const response = await fetch(
@@ -1797,7 +1820,12 @@ export class OpenCodeProvider implements AgentProvider {
                 ...this.openCodeDirectoryHeaders(cwd),
               },
               body: JSON.stringify(
-                this.buildOpenCodeMessagePayload(text, model, variant),
+                this.buildOpenCodeMessagePayload(
+                  text,
+                  model,
+                  variant,
+                  fileParts,
+                ),
               ),
               signal,
             },
@@ -2266,6 +2294,10 @@ export class OpenCodeProvider implements AgentProvider {
   ): SDKMessage[] {
     switch (part.type) {
       case "text": {
+        // Synthetic text is internal model context added by OpenCode while it
+        // resolves files and other prompt parts. Match the native OpenCode UI
+        // by keeping it out of the user-visible transcript.
+        if (part.synthetic) return [];
         if (role === "user") return [];
         if (
           !role &&
@@ -2492,6 +2524,15 @@ export class OpenCodeProvider implements AgentProvider {
           mime?: string;
           url?: string;
         };
+        // Process already emitted the Yep user message with structured upload
+        // metadata. Do not add a second standalone attachment bubble when
+        // OpenCode echoes that same native file part back over SSE.
+        if (
+          role === "user" &&
+          hasYepUploadMetadataForFile(submittedText, file.filename)
+        ) {
+          return [];
+        }
         const label = getOpenCodeAttachmentLabel(file);
         const roleForFile = role === "user" ? "user" : "assistant";
         return [
@@ -3066,14 +3107,47 @@ export class OpenCodeProvider implements AgentProvider {
     text: string,
     model: string | null | undefined,
     variant?: string,
+    fileParts: readonly OpenCodeFilePartInput[] = [],
   ): OpenCodeMessagePayload {
     const payload: OpenCodeMessagePayload = {
-      parts: [{ type: "text", text }],
+      parts: [...fileParts, { type: "text", text }],
     };
     const parsed = this.parseOpenCodeModelOption(model);
     if (parsed) payload.model = parsed;
     if (variant && variant !== "default") payload.variant = variant;
     return payload;
+  }
+
+  /**
+   * Convert Yep uploads and legacy inline image blocks into OpenCode-native
+   * file parts. OpenCode resolves local file URLs and forwards their bytes to
+   * multimodal models; a path embedded in prompt text does not do that.
+   */
+  private buildOpenCodeFileParts(
+    message: QueuedUserMessage,
+  ): OpenCodeFilePartInput[] {
+    const parts: OpenCodeFilePartInput[] = (message.attachments ?? []).map(
+      (attachment) => ({
+        type: "file",
+        mime: attachment.mimeType || "application/octet-stream",
+        filename: attachment.originalName || attachment.name,
+        url: pathToFileURL(attachment.path).href,
+      }),
+    );
+
+    const content = message.message.content;
+    if (!Array.isArray(content)) return parts;
+
+    for (const block of content) {
+      if (block.type !== "image" || block.source.type !== "base64") continue;
+      parts.push({
+        type: "file",
+        mime: block.source.media_type || "image/png",
+        url: `data:${block.source.media_type || "image/png"};base64,${block.source.data}`,
+      });
+    }
+
+    return parts;
   }
 
   private async handleQuestionAsked(

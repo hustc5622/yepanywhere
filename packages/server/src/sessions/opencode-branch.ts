@@ -169,7 +169,12 @@ function branchTitle(prompt: string): string {
 
 function messageText(entry: OpenCodeSessionEntry): string {
   return entry.parts
-    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .filter(
+      (part) =>
+        part.type === "text" &&
+        !part.synthetic &&
+        typeof part.text === "string",
+    )
     .map((part) => part.text ?? "")
     .join("");
 }

@@ -1,5 +1,10 @@
 import type { QueuedUserMessage, UserMessage } from "./types.js";
 
+export interface MessageQueueOptions {
+  /** Preserve structured uploads for providers that support native file parts. */
+  preserveAttachments?: boolean;
+}
+
 /**
  * Detect the media type from base64 image data.
  * Supports data URLs (data:image/png;base64,...) and raw base64 with magic byte detection.
@@ -79,6 +84,8 @@ export class MessageQueue {
   private queue: UserMessage[] = [];
   private waiting: ((msg: UserMessage) => void) | null = null;
 
+  constructor(private readonly options: MessageQueueOptions = {}) {}
+
   /**
    * Push a message onto the queue.
    * If the generator is waiting for a message, resolves immediately.
@@ -136,6 +143,10 @@ export class MessageQueue {
    */
   private toSDKMessage(msg: UserMessage): QueuedUserMessage {
     let text = msg.text;
+    const attachments =
+      this.options.preserveAttachments && msg.attachments?.length
+        ? [...msg.attachments]
+        : undefined;
 
     // Append attachment paths for agent to access via Read tool
     if (msg.attachments?.length) {
@@ -184,6 +195,7 @@ export class MessageQueue {
       return {
         type: "user",
         uuid: msg.uuid, // Pass UUID so SDK uses the same one we emitted via SSE
+        ...(attachments && { attachments }),
         message: {
           role: "user",
           content,
@@ -195,6 +207,7 @@ export class MessageQueue {
     return {
       type: "user",
       uuid: msg.uuid, // Pass UUID so SDK uses the same one we emitted via SSE
+      ...(attachments && { attachments }),
       message: {
         role: "user",
         content: text,

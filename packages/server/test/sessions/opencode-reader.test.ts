@@ -48,6 +48,7 @@ async function createOpenCodeDb(
     /** null simulates an older session row that did not persist variant. */
     sessionVariant?: string | null;
     messageVariants?: Array<string | undefined>;
+    syntheticUserText?: string;
   } = {},
 ): Promise<boolean> {
   const sqlite = await loadSqliteModule();
@@ -168,6 +169,22 @@ async function createOpenCodeDb(
             modelID: "glm-5.2",
             ...(variant ? { variant } : {}),
           },
+        }),
+      );
+    }
+    if (options.syntheticUserText) {
+      db.prepare(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(
+        "prt_synthetic_user",
+        "msg_user",
+        "ses_test",
+        createdAt + 19,
+        createdAt + 19,
+        JSON.stringify({
+          type: "text",
+          text: options.syntheticUserText,
+          synthetic: true,
         }),
       );
     }
@@ -348,6 +365,29 @@ describe("OpenCode sqlite session support", () => {
     expect(loaded?.data.provider).toBe("opencode");
     expect(loaded?.data.session.messages).toHaveLength(2);
     expect(loaded?.data.session.messages[0]?.parts[0]?.text).toBe(
+      "搜一下腾讯新发布的 hy3系列模型",
+    );
+  });
+
+  it("ignores synthetic attachment context in session titles and questions", async () => {
+    const dir = join(tmpdir(), `opencode-reader-${randomUUID()}`);
+    tempDirs.push(dir);
+    await mkdir(dir, { recursive: true });
+
+    const dbPath = join(dir, "opencode.db");
+    const projectPath = join(dir, "attachment_project");
+    const sqliteAvailable = await createOpenCodeDb(dbPath, projectPath, {
+      syntheticUserText:
+        'Called the Read tool with the following input: {"filePath":"/uploads/screenshot.png"}',
+    });
+    if (!sqliteAvailable) return;
+
+    const reader = new OpenCodeSessionReader({ dbPath, projectPath });
+    const sessions = await reader.listSessions(encodeProjectId(projectPath));
+
+    expect(sessions[0]?.title).toBe("搜一下腾讯新发布的 hy3系列模型");
+    expect(sessions[0]?.fullTitle).toBe("搜一下腾讯新发布的 hy3系列模型");
+    expect(sessions[0]?.userQuestions?.[0]?.text).toBe(
       "搜一下腾讯新发布的 hy3系列模型",
     );
   });

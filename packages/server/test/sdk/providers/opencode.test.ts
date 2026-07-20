@@ -5,10 +5,13 @@ import {
   createServer,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { ModelInfo } from "@yep-anywhere/shared";
+import { pathToFileURL } from "node:url";
+import { type ModelInfo, parseOpenCodeSSEEvent } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getLogger } from "../../../src/logging/logger.js";
+import { MessageQueue } from "../../../src/sdk/messageQueue.js";
 import { OpenCodeProvider } from "../../../src/sdk/providers/opencode.js";
+import type { QueuedUserMessage } from "../../../src/sdk/types.js";
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -49,6 +52,9 @@ interface OpenCodeTestPart {
   messageID: string;
   type: string;
   text?: string;
+  mime?: string;
+  filename?: string;
+  url?: string;
   callID?: string;
   tool?: string;
   input?: unknown;
@@ -639,6 +645,12 @@ custom-openai/glm-5.2
         text: string,
         model?: string | null,
         variant?: string,
+        fileParts?: Array<{
+          type: "file";
+          mime: string;
+          filename?: string;
+          url: string;
+        }>,
       ) => unknown;
     };
 
@@ -778,6 +790,77 @@ custom-openai/glm-5.2
         ).resolves.toBeUndefined();
       },
     );
+  });
+
+  it("preserves uploads and builds OpenCode-native file parts", async () => {
+    const attachment = {
+      id: "file-1",
+      originalName: "screen shot.png",
+      name: "file-1_screen shot.png",
+      size: 1_024,
+      mimeType: "image/png",
+      path: "/uploads/screen shot.png",
+    };
+    const queue = new MessageQueue({ preserveAttachments: true });
+    queue.push({
+      text: "describe these images",
+      attachments: [attachment],
+      images: ["data:image/jpeg;base64,AQID"],
+    });
+
+    const queued = (await queue.generator().next()).value;
+    expect(queued?.attachments).toEqual([attachment]);
+    if (!queued) throw new Error("Expected the queued OpenCode message");
+
+    const provider = new OpenCodeProvider();
+    const methods = provider as unknown as {
+      buildOpenCodeFileParts: (message: QueuedUserMessage) => Array<{
+        type: "file";
+        mime: string;
+        filename?: string;
+        url: string;
+      }>;
+      buildOpenCodeMessagePayload: (
+        text: string,
+        model?: string | null,
+        variant?: string,
+        fileParts?: Array<{
+          type: "file";
+          mime: string;
+          filename?: string;
+          url: string;
+        }>,
+      ) => unknown;
+    };
+    const fileParts = methods.buildOpenCodeFileParts(queued);
+
+    expect(fileParts).toEqual([
+      {
+        type: "file",
+        mime: "image/png",
+        filename: "screen shot.png",
+        url: pathToFileURL(attachment.path).href,
+      },
+      {
+        type: "file",
+        mime: "image/jpeg",
+        url: "data:image/jpeg;base64,AQID",
+      },
+    ]);
+    expect(
+      methods.buildOpenCodeMessagePayload(
+        "describe these images",
+        "anthropic/claude-sonnet-5",
+        undefined,
+        fileParts,
+      ),
+    ).toEqual({
+      parts: [...fileParts, { type: "text", text: "describe these images" }],
+      model: {
+        providerID: "anthropic",
+        modelID: "claude-sonnet-5",
+      },
+    });
   });
 
   it("marks newly created OpenCode sessions with Yep metadata", async () => {
@@ -1397,6 +1480,12 @@ custom-openai/glm-5.2
           model?: string,
           variant?: string,
           cwd?: string,
+          fileParts?: Array<{
+            type: "file";
+            mime: string;
+            filename?: string;
+            url: string;
+          }>,
         ) => AsyncIterableIterator<Record<string, unknown>>;
       }
     ).sendMessageAndStream.bind(provider);
@@ -1537,6 +1626,14 @@ custom-openai/glm-5.2
           "yep-anthropic/glm-5.2",
           "max",
           "/repo",
+          [
+            {
+              type: "file",
+              mime: "image/png",
+              filename: "screenshot.png",
+              url: "file:///repo/screenshot.png",
+            },
+          ],
         )) {
           output.push(message);
         }
@@ -1579,7 +1676,15 @@ custom-openai/glm-5.2
         directory: "/repo",
         directoryHeader: "/repo",
         body: {
-          parts: [{ type: "text", text: "hello" }],
+          parts: [
+            {
+              type: "file",
+              mime: "image/png",
+              filename: "screenshot.png",
+              url: "file:///repo/screenshot.png",
+            },
+            { type: "text", text: "hello" },
+          ],
           model: { providerID: "yep-anthropic", modelID: "glm-5.2" },
           variant: "max",
         },
@@ -2076,6 +2181,24 @@ custom-openai/glm-5.2
     expect(
       convertPartToSDKMessages(
         {
+          id: "part_synthetic_read",
+          sessionID: "ses_1",
+          messageID: "msg_unknown",
+          type: "text",
+          text: 'Called the Read tool with the following input: {"filePath":"/uploads/screenshot.png"}',
+          synthetic: true,
+        },
+        "yep_session",
+        undefined,
+        null,
+        undefined,
+        emissionState,
+      ),
+    ).toEqual([]);
+
+    expect(
+      convertPartToSDKMessages(
+        {
           id: "part_unknown_echo",
           sessionID: "ses_1",
           messageID: "msg_unknown",
@@ -2539,6 +2662,88 @@ custom-openai/glm-5.2
       },
     ]);
     expect(JSON.stringify(messages)).not.toContain("data:image/png;base64");
+  });
+
+  it("retains native file metadata while parsing OpenCode SSE events", () => {
+    const event = parseOpenCodeSSEEvent(
+      JSON.stringify({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "prt_file",
+            sessionID: "ses_1",
+            messageID: "msg_user",
+            type: "file",
+            mime: "image/png",
+            filename: "screenshot.png",
+            url: "data:image/png;base64,AQID",
+          },
+        },
+      }),
+    );
+
+    expect(event).toMatchObject({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "file",
+          mime: "image/png",
+          filename: "screenshot.png",
+          url: "data:image/png;base64,AQID",
+        },
+      },
+    });
+  });
+
+  it("does not emit a duplicate file marker for Yep-uploaded user files", () => {
+    const provider = new OpenCodeProvider();
+    const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
+    const submittedText =
+      "review this\n\nUser uploaded files:\n- screenshot.png (1 KB, image/png): /uploads/screenshot.png";
+
+    expect(
+      convertPartToSDKMessages(
+        {
+          id: "prt_yep_upload",
+          sessionID: "ses_1",
+          messageID: "msg_user",
+          type: "file",
+          filename: "screenshot.png",
+        },
+        "yep_session",
+        undefined,
+        null,
+        "user",
+        createEmissionState(),
+        submittedText,
+      ),
+    ).toEqual([]);
+
+    expect(
+      convertPartToSDKMessages(
+        {
+          id: "prt_inline_image",
+          sessionID: "ses_1",
+          messageID: "msg_user",
+          type: "file",
+          mime: "image/jpeg",
+          url: "data:image/jpeg;base64,AQID",
+        },
+        "yep_session",
+        undefined,
+        null,
+        "user",
+        createEmissionState(),
+        submittedText,
+      ),
+    ).toMatchObject([
+      {
+        type: "user",
+        message: {
+          content: [{ type: "text", text: "📎 attachment (image/jpeg)" }],
+        },
+      },
+    ]);
   });
 
   it("records step-finish usage without emitting a premature result", () => {
