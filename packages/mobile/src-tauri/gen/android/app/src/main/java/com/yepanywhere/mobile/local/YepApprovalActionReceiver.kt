@@ -143,14 +143,12 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
       requestMethod = method
       connectTimeout = CONNECT_TIMEOUT_MS
       readTimeout = readTimeoutMs
-      setRequestProperty("Accept", "application/json")
-      CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }
-        ?.let { setRequestProperty("Cookie", it) }
-      if (body != null) {
-        doOutput = true
-        setRequestProperty("Content-Type", "application/json")
-      }
     }
+    configureApiRequest(
+      connection,
+      hasBody = body != null,
+      cookie = CookieManager.getInstance().getCookie(url),
+    )
 
     try {
       if (body != null) {
@@ -192,6 +190,21 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
 
     /** Broadcast budget: finish() before the ~10s system ANR limit. */
     private const val BROADCAST_FINISH_MS = 8_000L
+
+    internal fun configureApiRequest(
+      connection: HttpURLConnection,
+      hasBody: Boolean,
+      cookie: String?,
+    ) {
+      connection.setRequestProperty("Accept", "application/json")
+      cookie?.takeIf { it.isNotBlank() }
+        ?.let { connection.setRequestProperty("Cookie", it) }
+      if (hasBody) {
+        connection.doOutput = true
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.setRequestProperty("X-Yep-Anywhere", "true")
+      }
+    }
 
     fun rememberServerOrigin(context: Context, origin: String) {
       context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
