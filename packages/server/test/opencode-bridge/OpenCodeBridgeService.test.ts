@@ -174,6 +174,12 @@ describe("OpenCodeBridgeService", () => {
     });
 
     await expect(
+      bridge.respondToInput("ses_1", "question-1", "approve"),
+    ).resolves.toBe(false);
+    expect(bridge.getPendingInputRequest("ses_1")?.id).toBe("question-1");
+    expect(replyBody).toBeNull();
+
+    await expect(
       bridge.respondToInput("ses_1", "question-1", "approve", {
         "question-0": ["放宽列表规则", "补充测试"],
       }),
@@ -2442,8 +2448,8 @@ describe("OpenCodeBridgeService", () => {
       expect(request).toMatchObject({ id: "q_1", type: "question" });
 
       const acceptedPromise = bridge.respondToInput("ses_q", "q_1", "approve", {
-        answers: [["A"]],
-      } as never);
+        "question-0": ["A"],
+      });
 
       const poll = await fetch(
         `${base}/external/instances/inst-q/decisions?waitMs=0`,

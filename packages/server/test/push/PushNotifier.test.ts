@@ -357,8 +357,9 @@ describe("PushNotifier", () => {
           expect.objectContaining({
             type: "pending-input",
             sessionId: "ses_oc",
-            requestId: "req-oc",
+            requestId: undefined,
             inputType: "user-question",
+            summary: "Question waiting — open Yep to answer",
           }),
           expect.any(Object),
         );
@@ -462,7 +463,7 @@ describe("PushNotifier", () => {
       expect(payload.summary).toBe("Run: Bash");
     });
 
-    it("should truncate long question prompts", async () => {
+    it("uses a generic summary for long question prompts", async () => {
       const longPrompt =
         "This is a very long question that exceeds the maximum length we want to show in a push notification summary";
 
@@ -506,12 +507,12 @@ describe("PushNotifier", () => {
       });
 
       const payload = vi.mocked(mockPushService.sendToAll).mock.calls[0][0];
-      expect(payload.summary.length).toBeLessThanOrEqual(60);
-      expect(payload.summary.endsWith("...")).toBe(true);
+      expect(payload.summary).toBe("Question waiting — open Yep to answer");
       expect(payload.inputType).toBe("user-question");
+      expect(payload.requestId).toBeUndefined();
     });
 
-    it("should not truncate short prompts", async () => {
+    it("does not expose short question prompts", async () => {
       const shortPrompt = "What database should we use?";
 
       const mockProcess = {
@@ -554,7 +555,8 @@ describe("PushNotifier", () => {
       });
 
       const payload = vi.mocked(mockPushService.sendToAll).mock.calls[0][0];
-      expect(payload.summary).toBe(shortPrompt);
+      expect(payload.summary).toBe("Question waiting — open Yep to answer");
+      expect(payload.requestId).toBeUndefined();
     });
   });
 

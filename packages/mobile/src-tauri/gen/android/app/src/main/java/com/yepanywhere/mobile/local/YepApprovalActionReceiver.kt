@@ -75,14 +75,21 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
       // The pending request may have been answered elsewhere or replaced by a
       // different (possibly more dangerous) one since the notification was
       // posted. Never blind-fire an approval at a stale id.
-      val current = currentPendingRequestId(origin, sessionId)
+      val current = currentPendingRequest(origin, sessionId)
       if (current == null) {
         YepLog.i("applyDecision", "no pending input anymore; dismissing notification")
         YepNativeNotifier.cancelSession(context, sessionId)
         return
       }
-      if (current != requestId) {
-        YepLog.w("applyDecision", "pending request changed ($requestId -> $current)")
+      if (current.type != null && current.type != "tool-approval") {
+        YepLog.w("applyDecision", "pending input is ${current.type}; opening app instead")
+        YepNativeNotifier.showApprovalFallback(
+          context, sessionId, projectId, "Question waiting — open Yep to answer",
+        )
+        return
+      }
+      if (current.id != requestId) {
+        YepLog.w("applyDecision", "pending request changed ($requestId -> ${current.id})")
         YepNativeNotifier.showApprovalFallback(
           context, sessionId, projectId, "Request changed — open to review",
         )
@@ -104,8 +111,8 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
       // the web UI / TUI, or an approval that was applied but whose confirming
       // event timed out server-side, both surface here as errors. Re-check the
       // live pending state before alarming the user.
-      val still = runCatching { currentPendingRequestId(origin, sessionId) }
-      if (still.isSuccess && still.getOrNull() != requestId) {
+      val still = runCatching { currentPendingRequest(origin, sessionId) }
+      if (still.isSuccess && still.getOrNull()?.id != requestId) {
         YepLog.i("applyDecision", "request no longer pending after failure; treating as resolved")
         YepNativeNotifier.cancelSession(context, sessionId)
         return
@@ -116,12 +123,18 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
     }
   }
 
-  private fun currentPendingRequestId(origin: String, sessionId: String): String? {
+  private data class PendingRequest(val id: String, val type: String?)
+
+  private fun currentPendingRequest(origin: String, sessionId: String): PendingRequest? {
     val url =
       "$origin/yep/api/sessions/${android.net.Uri.encode(sessionId)}/pending-input"
     val response = request(url, "GET", null, READ_TIMEOUT_MS)
     val request = response.optJSONObject("request") ?: return null
-    return request.optString("id").takeIf { it.isNotBlank() }
+    val id = request.optString("id").takeIf { it.isNotBlank() } ?: return null
+    return PendingRequest(
+      id = id,
+      type = request.optString("type").takeIf { it.isNotBlank() },
+    )
   }
 
   private fun postJson(url: String, body: String) {

@@ -93,6 +93,28 @@ function AskUserQuestionToolUse({ input }: { input: AskUserQuestionInput }) {
   );
 }
 
+export function getQuestionErrorMessage(result: unknown): string {
+  if (typeof result === "string" && result.trim()) return result;
+  if (!result || typeof result !== "object") return "Question failed";
+
+  const record = result as Record<string, unknown>;
+  for (const key of ["content", "message", "error"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+    if (value && typeof value === "object") {
+      const nested = getQuestionErrorMessage(value);
+      if (nested !== "Question failed") return nested;
+    }
+  }
+
+  const state = record.state;
+  if (state && typeof state === "object") {
+    const nested = getQuestionErrorMessage(state);
+    if (nested !== "Question failed") return nested;
+  }
+  return "Question failed";
+}
+
 /**
  * AskUserQuestion tool result - shows questions with selected answers
  */
@@ -125,15 +147,12 @@ function AskUserQuestionToolResult({
     enabled && validationErrors && !isToolIgnored("AskUserQuestion");
 
   if (isError) {
-    const errorResult = result as unknown as { content?: unknown } | undefined;
     return (
       <div className="question-error">
         {showValidationWarning && validationErrors && (
           <SchemaWarning toolName="AskUserQuestion" errors={validationErrors} />
         )}
-        {typeof result === "object" && errorResult?.content
-          ? String(errorResult.content)
-          : "Question failed"}
+        {getQuestionErrorMessage(result)}
       </div>
     );
   }

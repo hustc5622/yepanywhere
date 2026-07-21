@@ -641,6 +641,7 @@ describe("Process", () => {
       const pendingRequest = process.getPendingInputRequest();
       expect(pendingRequest).not.toBeNull();
       expect(pendingRequest?.toolName).toBe("AskUserQuestion");
+      expect(pendingRequest?.type).toBe("question");
       process.respondToInput(pendingRequest?.id, "approve", {
         "test?": ["Yes", "Definitely"],
       });
@@ -654,6 +655,50 @@ describe("Process", () => {
       });
       // Should still be in plan mode (AskUserQuestion doesn't exit plan mode)
       expect(process.permissionMode).toBe("plan");
+    });
+
+    it("keeps AskUserQuestion pending when an approval omits required answers", async () => {
+      const iterator = createMockIterator([]);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-question",
+        idleTimeoutMs: 100,
+        permissionMode: "auto",
+      });
+      const abortController = new AbortController();
+      const approvalPromise = process.handleToolApproval(
+        "AskUserQuestion",
+        {
+          questions: [
+            { id: "question-0", question: "First?" },
+            { id: "question-1", question: "Second?" },
+          ],
+        },
+        { signal: abortController.signal, requestId: "question-request" },
+      );
+
+      expect(process.respondToInput("question-request", "approve")).toBe(false);
+      expect(
+        process.respondToInput("question-request", "approve", {
+          "question-0": "One answer",
+        }),
+      ).toBe(false);
+      expect(process.getPendingInputRequest()).toMatchObject({
+        id: "question-request",
+        type: "question",
+        toolName: "AskUserQuestion",
+      });
+
+      expect(
+        process.respondToInput("question-request", "approve", {
+          "question-0": "One answer",
+          "question-1": "Another answer",
+        }),
+      ).toBe(true);
+      await expect(approvalPromise).resolves.toMatchObject({
+        behavior: "allow",
+      });
     });
 
     it("handleToolApproval auto-approves Edit tools in acceptEdits mode", async () => {
@@ -824,7 +869,13 @@ describe("Process", () => {
           // but we need to resolve the pending promise for default
           const pendingRequest = defaultProcess.getPendingInputRequest();
           if (pendingRequest) {
-            defaultProcess.respondToInput(pendingRequest.id, "approve");
+            defaultProcess.respondToInput(
+              pendingRequest.id,
+              "approve",
+              tool === "AskUserQuestion"
+                ? { question: "Test answer" }
+                : undefined,
+            );
           }
 
           // Also resolve acceptEdits if it's waiting
@@ -835,6 +886,9 @@ describe("Process", () => {
               acceptEditsProcess.respondToInput(
                 acceptEditsPendingRequest.id,
                 "approve",
+                tool === "AskUserQuestion"
+                  ? { question: "Test answer" }
+                  : undefined,
               );
             }
           }

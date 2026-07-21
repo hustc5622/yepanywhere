@@ -17,6 +17,7 @@ import {
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
+import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
 import { readCodexUsage } from "./CodexUsageService.js";
@@ -467,6 +468,14 @@ export class CodexBridgeService implements CodexBridgeController {
       pending.connection.upstream.readyState !== WebSocket.OPEN
     ) {
       return false;
+    }
+
+    if (response !== "deny") {
+      const request = this.getPendingInputRequest(sessionId);
+      if (request?.id === requestId) {
+        const validation = validateQuestionAnswers(request, answers);
+        if (!validation.valid) return false;
+      }
     }
 
     const result = buildCodexInteractiveResponse(

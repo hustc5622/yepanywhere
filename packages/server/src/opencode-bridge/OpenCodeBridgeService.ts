@@ -43,6 +43,7 @@ import {
 } from "../opencode/questions.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { normalizeProviderGeneratedTitle } from "../sessions/provider-title-quality.js";
+import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import {
   type OpenCodeGatewayConfig,
@@ -479,6 +480,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
     const pending = this.pendingInputs.get(sessionId);
     if (!pending || pending.request.id !== requestId) return false;
+    if (response !== "deny") {
+      const validation = validateQuestionAnswers(pending.request, answers);
+      if (!validation.valid) return false;
+    }
 
     // Requests from external OpenCode instances (default TUI etc.) have no
     // reachable HTTP server. Queue the decision for the forwarder plugin,

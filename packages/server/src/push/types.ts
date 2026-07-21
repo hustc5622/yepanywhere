@@ -96,9 +96,9 @@ export interface PendingInputPayload extends BasePushPayload {
   /** Optional session display title for native notification surfaces. */
   sessionTitle?: string;
   inputType: "tool-approval" | "user-question";
-  /** Brief summary of what needs approval */
+  /** Brief generic summary of the pending input. */
   summary: string;
-  /** ID of the input request (legacy, no longer used by client) */
+  /** Present only for tool approvals that support notification actions. */
   requestId?: string;
 }
 

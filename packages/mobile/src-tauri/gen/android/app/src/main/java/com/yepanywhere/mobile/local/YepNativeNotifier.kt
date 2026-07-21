@@ -76,19 +76,13 @@ object YepNativeNotifier {
     session: SessionNotification,
     badgeCount: Int? = null,
   ) {
-    val inputLabel = when (session.pendingInputType) {
-      "tool-approval" -> "Approval needed"
-      "user-question" -> "Waiting for your answer"
-      else -> "Waiting for input"
-    }
-    val detail = session.summary?.takeIf { it.isNotBlank() }
-    val body = if (detail == null) inputLabel else "$inputLabel · $detail"
+    val body = pendingInputBody(session.pendingInputType, session.summary)
     // Approve/Deny only applies to tool approvals with a known request id;
     // questions need the full option UI in the app.
-    val approvalRequestId =
-      session.pendingRequestId?.takeIf {
-        it.isNotBlank() && session.pendingInputType == "tool-approval"
-      }
+    val approvalRequestId = pendingApprovalRequestId(
+      session.pendingInputType,
+      session.pendingRequestId,
+    )
     showNotification(
       context = context,
       tag = "session-${session.sessionId}",
@@ -112,6 +106,25 @@ object YepNativeNotifier {
         )
       },
     )
+  }
+
+  internal fun pendingInputBody(inputType: String?, summary: String?): String {
+    if (inputType == "user-question") {
+      return "Question waiting — open Yep to answer"
+    }
+    val inputLabel = when (inputType) {
+      "tool-approval" -> "Approval needed"
+      else -> "Waiting for input"
+    }
+    val detail = summary?.takeIf { it.isNotBlank() }
+    return if (detail == null) inputLabel else "$inputLabel · $detail"
+  }
+
+  internal fun pendingApprovalRequestId(
+    inputType: String?,
+    requestId: String?,
+  ): String? = requestId?.takeIf {
+    it.isNotBlank() && inputType == "tool-approval"
   }
 
   /** Everything needed to reply to a pending approval from a notification. */

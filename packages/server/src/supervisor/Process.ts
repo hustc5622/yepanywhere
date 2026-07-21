@@ -21,6 +21,7 @@ import type {
   ToolApprovalResult,
   UserMessage,
 } from "../sdk/types.js";
+import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type {
   AgentActivity,
   InputRequest,
@@ -1393,6 +1394,14 @@ export class Process {
     }
 
     // Default behavior: ask user for approval
+    const isQuestion = toolName === "AskUserQuestion";
+    const questionInput =
+      isQuestion && input && typeof input === "object"
+        ? (input as { questions?: Array<{ question?: unknown }> })
+        : undefined;
+    const firstQuestion = questionInput?.questions?.find(
+      (question) => typeof question?.question === "string",
+    )?.question;
     const request: InputRequest = {
       // Preserve a provider-native id when available. OpenCode's bridge sees
       // the same approval independently, so inventing a second UUID here can
@@ -1400,8 +1409,13 @@ export class Process {
       // the same request.
       id: options.requestId?.trim() || randomUUID(),
       sessionId: this._sessionId,
-      type: "tool-approval",
-      prompt: `Allow ${toolName}?`,
+      type: isQuestion ? "question" : "tool-approval",
+      prompt:
+        typeof firstQuestion === "string" && firstQuestion.trim()
+          ? firstQuestion
+          : isQuestion
+            ? "Question requires your answer"
+            : `Allow ${toolName}?`,
       toolName,
       toolInput: input,
       timestamp: new Date().toISOString(),
@@ -1489,6 +1503,22 @@ export class Process {
       return false;
     }
 
+    const approved = response !== "deny";
+    if (approved) {
+      const validation = validateQuestionAnswers(pending.request, answers);
+      if (!validation.valid) {
+        getLogger().warn(
+          {
+            sessionId: this._sessionId,
+            requestId,
+            missingAnswerCount: validation.missingAnswerCount,
+          },
+          "Question approval rejected because required answers were missing",
+        );
+        return false;
+      }
+    }
+
     // Build the result with optional updated input for AskUserQuestion.
     // If deny has feedback, use that as the message.
     const trimmedFeedback = feedback?.trim();
@@ -1496,7 +1526,6 @@ export class Process {
     // If user just clicked "No" without feedback, set interrupt: true to stop retrying.
     // If user provided feedback, set interrupt: false so Claude can incorporate the guidance.
     const shouldInterrupt = response === "deny" && !trimmedFeedback;
-    const approved = response !== "deny";
     const result: ToolApprovalResult = {
       behavior: approved ? "allow" : "deny",
       message: !approved ? denyMessage : undefined,

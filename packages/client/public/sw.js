@@ -326,17 +326,20 @@ async function handlePush(data) {
 
 async function showPendingInputNotification(data) {
   const title = data.projectName || "Yep Anywhere";
+  const isQuestion = data.inputType === "user-question";
   // Approve/Deny actions only apply to tool approvals; questions need the
   // full option UI, so they only offer opening the session.
   const actions =
-    data.inputType === "tool-approval" && data.requestId
+    !isQuestion && data.inputType === "tool-approval" && data.requestId
       ? [
           { action: "approve", title: "Approve" },
           { action: "deny", title: "Deny" },
         ]
       : [];
   const options = {
-    body: data.summary || "Waiting for input",
+    body: isQuestion
+      ? "Question waiting — open Yep to answer"
+      : data.summary || "Waiting for input",
     tag: `session-${data.sessionId}`,
     icon: assetUrl("icon-192.png"),
     badge: assetUrl("badge-96.png"),
@@ -344,7 +347,7 @@ async function showPendingInputNotification(data) {
     data: {
       sessionId: data.sessionId,
       projectId: data.projectId,
-      requestId: data.requestId,
+      requestId: isQuestion ? undefined : data.requestId,
       inputType: data.inputType,
     },
     requireInteraction: true,

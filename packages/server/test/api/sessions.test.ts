@@ -806,6 +806,59 @@ describe("Sessions API", () => {
       expect(json.error).toBe("Invalid request ID or no pending request");
     });
 
+    it("rejects an unanswered question without consuming the pending request", async () => {
+      const requestId = `question-${Date.now()}`;
+      mockSdk.addScenario({
+        messages: [
+          { type: "system", subtype: "init", session_id: "sess-question" },
+          {
+            type: "system",
+            subtype: "input_request",
+            input_request: {
+              id: requestId,
+              type: "question",
+              prompt: "Choose an option",
+            },
+          },
+        ],
+        delayMs: 5,
+      });
+      const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
+      const startRes = await app.request(
+        `/api/projects/${projectId}/sessions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Yep-Anywhere": "true",
+          },
+          body: JSON.stringify({ message: "hello" }),
+        },
+      );
+      const { sessionId } = await startRes.json();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const unanswered = await app.request(`/api/sessions/${sessionId}/input`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Yep-Anywhere": "true",
+        },
+        body: JSON.stringify({ requestId, response: "approve" }),
+      });
+      expect(unanswered.status).toBe(400);
+      await expect(unanswered.json()).resolves.toEqual({
+        error: "Question response is missing 1 required answer",
+      });
+
+      const pending = await app.request(
+        `/api/sessions/${sessionId}/pending-input`,
+      );
+      await expect(pending.json()).resolves.toMatchObject({
+        request: { id: requestId, type: "question" },
+      });
+    });
+
     it("accepts approve response with correct requestId", async () => {
       const requestId = `req-${Date.now()}`;
       // Create a session with tool approval

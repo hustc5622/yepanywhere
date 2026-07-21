@@ -82,6 +82,7 @@ import {
   findSessionSummaryAcrossProviders,
   resolveSessionSources,
 } from "../sessions/provider-resolution.js";
+import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import {
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
@@ -2885,6 +2886,33 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       if (!bridgeBody.requestId || !bridgeBody.response) {
         return c.json({ error: "requestId and response are required" }, 400);
       }
+      const bridgePendingRequest = await getBridgePendingInputRequest(
+        deps,
+        sessionId,
+      );
+      const bridgeApproving =
+        bridgeBody.response === "approve" ||
+        bridgeBody.response === "approve_accept_edits" ||
+        bridgeBody.response === "approve_for_session" ||
+        bridgeBody.response === "approve_strict_auto_review" ||
+        bridgeBody.response === "approve_always";
+      if (
+        bridgeApproving &&
+        bridgePendingRequest?.id === bridgeBody.requestId
+      ) {
+        const validation = validateQuestionAnswers(
+          bridgePendingRequest,
+          bridgeBody.answers,
+        );
+        if (!validation.valid) {
+          return c.json(
+            {
+              error: `Question response is missing ${validation.missingAnswerCount} required answer${validation.missingAnswerCount === 1 ? "" : "s"}`,
+            },
+            400,
+          );
+        }
+      }
       const bridgeResponse =
         bridgeBody.response === "approve" ||
         bridgeBody.response === "approve_accept_edits" ||
@@ -2936,6 +2964,24 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             body.response === "approve_accept_edits"
           ? "approve"
           : "deny";
+
+    if (
+      normalizedResponse !== "deny" &&
+      process.pendingInputRequest.id === body.requestId
+    ) {
+      const validation = validateQuestionAnswers(
+        process.pendingInputRequest,
+        body.answers,
+      );
+      if (!validation.valid) {
+        return c.json(
+          {
+            error: `Question response is missing ${validation.missingAnswerCount} required answer${validation.missingAnswerCount === 1 ? "" : "s"}`,
+          },
+          400,
+        );
+      }
+    }
 
     // Call respondToInput which resolves the SDK's canUseTool promise
     const { accepted } = await runtimeController.respondToInput({

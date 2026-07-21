@@ -249,7 +249,10 @@ export class PushNotifier {
       ),
       inputType,
       summary,
-      requestId: request.id,
+      // Question notifications must route into the session UI. Omitting the
+      // request id prevents old notification clients from treating them as a
+      // one-tap approval that would submit no answers.
+      requestId: inputType === "tool-approval" ? request.id : undefined,
       timestamp: event.timestamp,
     };
 
@@ -529,12 +532,9 @@ export class PushNotifier {
       return `Run: ${toolName}`;
     }
 
-    // For questions/choices, use the prompt text (truncated)
-    const prompt = request.prompt ?? "Waiting for input";
-    if (prompt.length > 60) {
-      return `${prompt.slice(0, 57)}...`;
-    }
-    return prompt;
+    // Questions require the full Yep UI. Keep the notification generic so it
+    // cannot be mistaken for an actionable approval or expose answer details.
+    return "Question waiting — open Yep to answer";
   }
 
   private getSessionTitle(
