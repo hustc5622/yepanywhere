@@ -1087,6 +1087,7 @@
   "actionCancel": "取消",
   "messageActionEdit": "编辑消息",
   "sessionEditingFromHere": "正在编辑此消息 — 发送将从这里新建分支",
+  "sessionSyncingBranch": "正在同步编辑分支…",
   "sessionInspectorOpen": "打开会话索引",
   "sessionInspectorClose": "关闭会话索引",
   "sessionInspectorTitle": "会话索引",

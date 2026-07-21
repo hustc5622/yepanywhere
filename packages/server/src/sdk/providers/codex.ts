@@ -22,6 +22,7 @@ import { getCodexMcpAppServerArgs } from "../../codex/mcp-profile.js";
 import {
   type CodexToolCallContext,
   canonicalizeCodexToolName,
+  extractCodexExecUpdatePlan,
   normalizeCodexCommandExecutionOutput,
   normalizeCodexToolInvocation,
   normalizeCodexToolOutputWithContext,
@@ -253,6 +254,16 @@ interface JsonRpcResponse {
 interface JsonRpcNotification {
   method: string;
   params?: unknown;
+}
+
+interface TurnPlanUpdatedNotificationParams {
+  threadId: string;
+  turnId: string;
+  explanation: string | null;
+  plan: Array<{
+    step: string;
+    status: string;
+  }>;
 }
 
 interface JsonRpcServerRequest extends JsonRpcNotification {
@@ -1342,6 +1353,7 @@ export class CodexProvider implements AgentProvider {
       const rollbackNumTurns = this.normalizeRollbackNumTurns(
         options.rollbackNumTurns,
       );
+      let historyRewritePending = rollbackNumTurns !== null;
       if (rollbackNumTurns !== null) {
         const beforeRollbackThreadId = sessionId;
         const rollbackParams: ThreadRollbackParams = {
@@ -1457,6 +1469,19 @@ export class CodexProvider implements AgentProvider {
 
         const activeTurnId = turnResult.turn.id;
         runtimeState.activeTurnId = activeTurnId;
+        if (historyRewritePending) {
+          historyRewritePending = false;
+          yield logMessage(
+            withCodexTimestamp({
+              type: "system",
+              subtype: "history_rewrite_complete",
+              uuid: `codex-history-rewrite-${activeTurnId}`,
+              session_id: sessionId,
+              turnId: activeTurnId,
+              messageUuid: message.uuid,
+            } as SDKMessage),
+          );
+        }
         log.info(
           {
             sessionId,
@@ -1941,6 +1966,42 @@ export class CodexProvider implements AgentProvider {
           customToolContexts,
         );
 
+      case "turn/plan/updated": {
+        const params = this.asTurnPlanUpdatedNotification(notification.params);
+        if (!params || params.threadId !== sessionId) return [];
+        const toolUseId = `codex-plan-${params.turnId}`;
+        return [
+          withCodexTimestamp({
+            type: "assistant",
+            session_id: sessionId,
+            uuid: toolUseId,
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: toolUseId,
+                  name: "UpdatePlan",
+                  input: {
+                    ...(params.explanation
+                      ? { explanation: params.explanation }
+                      : {}),
+                    plan: params.plan.map((item) => ({
+                      step: item.step,
+                      status:
+                        item.status === "inProgress"
+                          ? "in_progress"
+                          : item.status,
+                    })),
+                  },
+                  status: "completed",
+                },
+              ],
+            },
+          } as unknown as SDKMessage),
+        ];
+      }
+
       case "item/commandExecution/outputDelta": {
         // Live command output streaming - mirror the Codex TUI's scrolling
         // exec cell. The delta merges into the pending tool_use block via the
@@ -2066,6 +2127,34 @@ export class CodexProvider implements AgentProvider {
         writeShellInfo: normalized.writeShellInfo,
       });
 
+      const content: Array<{
+        type: "tool_use";
+        id: string;
+        name: string;
+        input: unknown;
+        status?: "completed";
+      }> = [
+        {
+          type: "tool_use",
+          id: callId,
+          name: normalized.toolName,
+          input: normalized.input,
+        },
+      ];
+      const nestedPlan =
+        normalized.toolName === "CodexExec"
+          ? extractCodexExecUpdatePlan(normalized.input)
+          : null;
+      if (nestedPlan) {
+        content.push({
+          type: "tool_use",
+          id: `${callId}-update-plan`,
+          name: "UpdatePlan",
+          input: nestedPlan,
+          status: "completed",
+        });
+      }
+
       const message = withCodexTimestamp(
         {
           type: "assistant",
@@ -2073,14 +2162,7 @@ export class CodexProvider implements AgentProvider {
           uuid: `${itemId}-${turnId}-custom-call`,
           message: {
             role: "assistant",
-            content: [
-              {
-                type: "tool_use",
-                id: callId,
-                name: normalized.toolName,
-                input: normalized.input,
-              },
-            ],
+            content,
           },
           codexToolName: rawToolName,
           ...(namespace ? { codexToolNamespace: namespace } : {}),
@@ -2376,6 +2458,37 @@ export class CodexProvider implements AgentProvider {
       return null;
     }
     return params as TurnCompletedNotification;
+  }
+
+  private asTurnPlanUpdatedNotification(
+    params: unknown,
+  ): TurnPlanUpdatedNotificationParams | null {
+    if (!params || typeof params !== "object") return null;
+    const record = params as Record<string, unknown>;
+    if (
+      typeof record.threadId !== "string" ||
+      typeof record.turnId !== "string" ||
+      !Array.isArray(record.plan)
+    ) {
+      return null;
+    }
+
+    const plan: TurnPlanUpdatedNotificationParams["plan"] = [];
+    for (const item of record.plan) {
+      if (!item || typeof item !== "object") return null;
+      const step = (item as Record<string, unknown>).step;
+      const status = (item as Record<string, unknown>).status;
+      if (typeof step !== "string" || typeof status !== "string") return null;
+      plan.push({ step, status });
+    }
+
+    return {
+      threadId: record.threadId,
+      turnId: record.turnId,
+      explanation:
+        typeof record.explanation === "string" ? record.explanation : null,
+      plan,
+    };
   }
 
   private asErrorNotification(params: unknown): CodexErrorNotification | null {

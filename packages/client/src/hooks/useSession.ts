@@ -112,6 +112,50 @@ function keepPersistedPendingInputForSession(
 export type { AgentContent, AgentContentMap } from "./useSessionMessages";
 
 const THROTTLE_MS = 500;
+const HISTORY_REWRITE_RETRY_DELAYS_MS = [
+  120, 300, 600, 1_000, 1_500, 2_500, 4_000,
+] as const;
+// Cap the conditional backoff so a dropped rollback/turn event can't leave the
+// edit spinner spinning indefinitely. Once elapsed crosses this budget we do a
+// single unconditional refresh and clear the pending state.
+const HISTORY_REWRITE_MAX_WAIT_MS = 12_000;
+
+export interface HistoryRewriteSyncTarget {
+  expectedPrompt: string;
+  previousActiveBranchId: string | null;
+}
+
+interface HistoryRewriteSyncRequest extends HistoryRewriteSyncTarget {
+  id: number;
+  startedAt: number;
+}
+
+export function isCodexHistoryRewriteSnapshotReady(
+  session: Session,
+  target: HistoryRewriteSyncTarget,
+): boolean {
+  const branchState = session.codexBranchState ?? session.branchState;
+  const activeBranchId = branchState?.activeBranchId;
+  if (
+    !branchState ||
+    !activeBranchId ||
+    activeBranchId === target.previousActiveBranchId
+  ) {
+    return false;
+  }
+
+  const activeBranch = branchState.branches.find(
+    (branch) => branch.id === activeBranchId,
+  );
+  if (!activeBranch || activeBranch.siblingCount < 2) return false;
+
+  const expectedPrompt = target.expectedPrompt.trim();
+  const persistedPrompt = activeBranch.prompt.trim();
+  return (
+    persistedPrompt === expectedPrompt ||
+    persistedPrompt.startsWith(`${expectedPrompt}\n`)
+  );
+}
 
 // Re-export StreamingMarkdownCallbacks for consumers
 export type { StreamingMarkdownCallbacks } from "./useStreamingContent";
@@ -223,6 +267,37 @@ export function useSession(
     useState<InputRequest | null>(null);
   const [turnHealth, setTurnHealth] = useState<SessionTurnHealth | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const [historyRewriteRequest, setHistoryRewriteRequest] =
+    useState<HistoryRewriteSyncRequest | null>(null);
+  const [historyRewriteSignal, setHistoryRewriteSignal] = useState(0);
+  const historyRewriteSequenceRef = useRef(0);
+  const historyRewriteAttemptRef = useRef(0);
+  const historyRewriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const handledHistoryRewriteSignalRef = useRef(0);
+
+  const signalHistoryRewriteSync = useCallback(() => {
+    setHistoryRewriteSignal((value) => value + 1);
+  }, []);
+
+  const beginHistoryRewriteSync = useCallback(
+    (target: HistoryRewriteSyncTarget) => {
+      historyRewriteSequenceRef.current += 1;
+      historyRewriteAttemptRef.current = 0;
+      handledHistoryRewriteSignalRef.current = historyRewriteSignal;
+      if (historyRewriteTimerRef.current) {
+        clearTimeout(historyRewriteTimerRef.current);
+        historyRewriteTimerRef.current = null;
+      }
+      setHistoryRewriteRequest({
+        ...target,
+        id: historyRewriteSequenceRef.current,
+        startedAt: Date.now(),
+      });
+    },
+    [historyRewriteSignal],
+  );
 
   // Actual session ID from server (may differ from URL sessionId during temp→real ID transition)
   // This happens when createSession returns before the SDK sends the real session ID
@@ -266,6 +341,11 @@ export function useSession(
   useEffect(() => {
     hasHandledConnectedEventRef.current = false;
     setTurnHealth(null);
+    setHistoryRewriteRequest(null);
+    if (historyRewriteTimerRef.current) {
+      clearTimeout(historyRewriteTimerRef.current);
+      historyRewriteTimerRef.current = null;
+    }
   }, [sessionId]);
 
   // Slash commands available for this session (from init message)
@@ -375,6 +455,75 @@ export function useSession(
     onLoadComplete: handleLoadComplete,
     onLoadError: handleLoadError,
   });
+
+  useEffect(() => {
+    if (!historyRewriteRequest) return;
+
+    let cancelled = false;
+    const requestId = historyRewriteRequest.id;
+    const attemptRefresh = async () => {
+      historyRewriteTimerRef.current = null;
+      const refreshed = await refreshSessionMessages({
+        branchId: null,
+        acceptSnapshot: ({ session: snapshotSession }) =>
+          isCodexHistoryRewriteSnapshotReady(
+            snapshotSession,
+            historyRewriteRequest,
+          ),
+      });
+      if (cancelled) return;
+
+      if (refreshed) {
+        setHistoryRewriteRequest((current) =>
+          current?.id === requestId ? null : current,
+        );
+        return;
+      }
+
+      if (
+        Date.now() - historyRewriteRequest.startedAt >=
+        HISTORY_REWRITE_MAX_WAIT_MS
+      ) {
+        await refreshSessionMessages({ branchId: null });
+        if (!cancelled) {
+          setHistoryRewriteRequest((current) =>
+            current?.id === requestId ? null : current,
+          );
+        }
+        return;
+      }
+
+      const attempt = historyRewriteAttemptRef.current;
+      historyRewriteAttemptRef.current = attempt + 1;
+      const baseDelay =
+        HISTORY_REWRITE_RETRY_DELAYS_MS[
+          Math.min(attempt, HISTORY_REWRITE_RETRY_DELAYS_MS.length - 1)
+        ] ?? 4_000;
+      // Never schedule past the wait budget: clamp so the final attempt fires
+      // right at the cap and takes the unconditional-refresh branch above.
+      const remaining =
+        HISTORY_REWRITE_MAX_WAIT_MS -
+        (Date.now() - historyRewriteRequest.startedAt);
+      const delay = Math.max(0, Math.min(baseDelay, remaining));
+      historyRewriteTimerRef.current = setTimeout(attemptRefresh, delay);
+    };
+
+    const hasFreshSignal =
+      historyRewriteSignal !== handledHistoryRewriteSignalRef.current;
+    handledHistoryRewriteSignalRef.current = historyRewriteSignal;
+    historyRewriteTimerRef.current = setTimeout(
+      attemptRefresh,
+      hasFreshSignal ? 25 : HISTORY_REWRITE_RETRY_DELAYS_MS[0],
+    );
+
+    return () => {
+      cancelled = true;
+      if (historyRewriteTimerRef.current) {
+        clearTimeout(historyRewriteTimerRef.current);
+        historyRewriteTimerRef.current = null;
+      }
+    };
+  }, [historyRewriteRequest, historyRewriteSignal, refreshSessionMessages]);
 
   // Optimistic pending-message queue, reconciled against `messages` inside the hook.
   const {
@@ -594,13 +743,22 @@ export function useSession(
       // For owned sessions: messages come via stream stream, metadata via session-updated event
       // No API call needed - skip file change processing entirely
       if (status.owner === "self") {
+        if (historyRewriteRequest) {
+          signalHistoryRewriteSync();
+        }
         return;
       }
 
       // For external/idle sessions: fetch both messages and metadata via API
       throttledFetch();
     },
-    [sessionId, status.owner, throttledFetch],
+    [
+      historyRewriteRequest,
+      sessionId,
+      signalHistoryRewriteSync,
+      status.owner,
+      throttledFetch,
+    ],
   );
 
   // Handle session content updates via stream (title, messageCount, updatedAt, contextUsage)
@@ -634,6 +792,20 @@ export function useSession(
       });
 
       if (
+        historyRewriteRequest &&
+        (session?.provider === "codex" || session?.provider === "codex-oss")
+      ) {
+        signalHistoryRewriteSync();
+      }
+
+      if (
+        status.owner === "external" &&
+        event.trigger === "codex-plan-updated"
+      ) {
+        throttledFetch();
+      }
+
+      if (
         shouldRefreshOpenCodeAuthoritativeSnapshot(
           session?.provider,
           status.owner,
@@ -647,11 +819,14 @@ export function useSession(
     },
     [
       processState,
+      historyRewriteRequest,
       scheduleOpenCodeAuthoritativeRefresh,
       session?.provider,
       sessionId,
       setSession,
+      signalHistoryRewriteSync,
       status.owner,
+      throttledFetch,
     ],
   );
 
@@ -683,6 +858,9 @@ export function useSession(
       const nextProcessState = processStateFromProcessEvent(event);
       if (nextProcessState) {
         setProcessState(nextProcessState);
+      }
+      if (historyRewriteRequest) {
+        signalHistoryRewriteSync();
       }
       // Mirror bridge-reported turn health (retry/failure). Events always
       // carry the server's latest truth, so absence clears stale state.
@@ -729,9 +907,11 @@ export function useSession(
     },
     [
       processState,
+      historyRewriteRequest,
       scheduleOpenCodeAuthoritativeRefresh,
       session?.provider,
       sessionId,
+      signalHistoryRewriteSync,
       status.owner,
     ],
   );
@@ -742,7 +922,11 @@ export function useSession(
   // data because the session stream unsubscribes when ownership becomes "none" and
   // nobody triggers a persisted-session refresh.
   const handleActivityReconnect = useCallback(async () => {
-    fetchPersistedSessionChanges();
+    if (historyRewriteRequest) {
+      signalHistoryRewriteSync();
+    } else {
+      fetchPersistedSessionChanges();
+    }
     try {
       const data = await api.getSessionMetadata(projectId, sessionId);
       setStatus(data.ownership);
@@ -759,7 +943,13 @@ export function useSession(
     } catch {
       // Silent fail - non-critical
     }
-  }, [projectId, sessionId, fetchPersistedSessionChanges]);
+  }, [
+    projectId,
+    sessionId,
+    fetchPersistedSessionChanges,
+    historyRewriteRequest,
+    signalHistoryRewriteSync,
+  ]);
 
   useFileActivity({
     onSessionStatusChange: handleSessionStatusChange,
@@ -774,20 +964,34 @@ export function useSession(
   // This is a targeted server-side watch of the currently viewed session file,
   // independent from broad global activity-tree watch behavior.
   const handleSessionWatchChange = useCallback(() => {
-    if (status.owner === "self") return;
+    if (status.owner === "self") {
+      if (historyRewriteRequest) signalHistoryRewriteSync();
+      return;
+    }
     throttledFetch();
-  }, [status.owner, throttledFetch]);
+  }, [
+    historyRewriteRequest,
+    signalHistoryRewriteSync,
+    status.owner,
+    throttledFetch,
+  ]);
 
   const sessionWatchTarget = useMemo(
     () =>
-      status.owner === "self"
+      status.owner === "self" && !historyRewriteRequest
         ? null
         : {
             sessionId,
             projectId,
             provider: session?.provider,
           },
-    [projectId, session?.provider, sessionId, status.owner],
+    [
+      historyRewriteRequest,
+      projectId,
+      session?.provider,
+      sessionId,
+      status.owner,
+    ],
   );
 
   const { connected: sessionWatchConnected } = useSessionWatchStream(
@@ -907,6 +1111,14 @@ export function useSession(
         const msgType =
           typeof sdkMessage.type === "string" ? sdkMessage.type : undefined;
         const msgRole = sdkMessage.role as Message["role"] | undefined;
+
+        if (
+          msgType === "system" &&
+          sdkMessage.subtype === "history_rewrite_complete"
+        ) {
+          signalHistoryRewriteSync();
+          return;
+        }
 
         // Handle stream_event messages (partial content from streaming API)
         // Delegate to useStreamingContent hook
@@ -1032,6 +1244,9 @@ export function useSession(
           statusData.state === "hold"
         ) {
           setProcessState(statusData.state as ProcessState);
+        }
+        if (historyRewriteRequest) {
+          signalHistoryRewriteSync();
         }
         if (statusData.state === "idle") {
           scheduleOpenCodeAuthoritativeRefresh();
@@ -1160,7 +1375,9 @@ export function useSession(
         const isFirstConnectedEvent = !hasHandledConnectedEventRef.current;
         hasHandledConnectedEventRef.current = true;
 
-        if (!(isFirstConnectedEvent && isCodexProvider)) {
+        if (historyRewriteRequest) {
+          signalHistoryRewriteSync();
+        } else if (!(isFirstConnectedEvent && isCodexProvider)) {
           fetchNewMessages();
         }
       } else if (data.eventType === "mode-change") {
@@ -1250,6 +1467,8 @@ export function useSession(
       handleStreamSubagentMessage,
       registerToolUseAgent,
       scheduleOpenCodeAuthoritativeRefresh,
+      historyRewriteRequest,
+      signalHistoryRewriteSync,
       setSession,
       fetchNewMessages,
       session?.provider,
@@ -1381,6 +1600,8 @@ export function useSession(
     reconnectStream, // Force session stream reconnection (e.g., after process restart)
     truncateMessagesBefore, // Rewind/edit: drop a uuid and everything after it
     refreshSessionMessages, // Reload authoritative JSONL/session snapshot
+    beginHistoryRewriteSync, // Codex edit: wait for the rewritten active branch before applying REST
+    historyRewritePending: historyRewriteRequest !== null,
     markPendingInputResolved, // Clear a resolved approval/question immediately
   };
 }

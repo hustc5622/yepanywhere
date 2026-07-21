@@ -161,6 +161,71 @@ describe("CodexBridgeService", () => {
     }
   });
 
+  it("emits a targeted refresh event for external plan updates", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      client.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "thread/read",
+          params: { threadId: "thread-plan" },
+        }),
+      );
+      await waitFor(() => upstreamMessages.length === 1);
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            cwd: "/tmp/project-plan",
+            thread: {
+              id: "thread-plan",
+              preview: "Plan test",
+              createdAt: 1_780_000_000,
+              updatedAt: 1_780_000_001,
+              cwd: "/tmp/project-plan",
+              status: { type: "working" },
+              turns: [],
+            },
+          },
+        }),
+      );
+      await waitFor(() => bridge.listSessions().length === 1);
+      emittedEvents.length = 0;
+
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "turn/plan/updated",
+          params: {
+            threadId: "thread-plan",
+            turnId: "turn-plan",
+            explanation: null,
+            plan: [{ step: "Inspect", status: "inProgress" }],
+          },
+        }),
+      );
+
+      await waitFor(() =>
+        emittedEvents.some(
+          (event) =>
+            (event as { type?: string }).type === "session-updated" &&
+            (event as { trigger?: string }).trigger === "codex-plan-updated",
+        ),
+      );
+      expect(emittedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "session-updated",
+          sessionId: "thread-plan",
+          trigger: "codex-plan-updated",
+        }),
+      );
+    } finally {
+      client.close();
+    }
+  });
+
   it("records and transparently forwards MCP startup notifications", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {

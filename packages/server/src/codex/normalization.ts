@@ -46,7 +46,360 @@ interface NormalizedCodexToolOutputWithExitCode
   exitCode?: number;
 }
 
+export interface CodexUpdatePlanStep {
+  step: string;
+  status: string;
+}
+
+export interface CodexUpdatePlanInput {
+  explanation?: string;
+  plan: CodexUpdatePlanStep[];
+}
+
 const SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash"]);
+
+/**
+ * Parse the data-only JavaScript literal subset emitted by Codex code mode.
+ * Session content is untrusted, so this deliberately never evaluates code.
+ */
+class CodexJavaScriptLiteralParser {
+  private index = 0;
+
+  constructor(private readonly source: string) {}
+
+  parse(): unknown {
+    const value = this.parseValue();
+    this.skipWhitespace();
+    if (this.index !== this.source.length) {
+      throw new Error("Unsupported trailing JavaScript expression");
+    }
+    return value;
+  }
+
+  private parseValue(): unknown {
+    this.skipWhitespace();
+    const char = this.source[this.index];
+    if (char === "{") return this.parseObject();
+    if (char === "[") return this.parseArray();
+    if (char === '"' || char === "'" || char === "`") {
+      return this.parseString();
+    }
+    if (char === "-" || /\d/.test(char ?? "")) return this.parseNumber();
+
+    const identifier = this.parseIdentifier();
+    if (identifier === "true") return true;
+    if (identifier === "false") return false;
+    if (identifier === "null") return null;
+    if (identifier === "undefined") return undefined;
+    throw new Error("Unsupported JavaScript expression");
+  }
+
+  private parseObject(): Record<string, unknown> {
+    const value: Record<string, unknown> = {};
+    this.index += 1;
+    this.skipWhitespace();
+
+    while (this.index < this.source.length && this.source[this.index] !== "}") {
+      const char = this.source[this.index];
+      const key =
+        char === '"' || char === "'" || char === "`"
+          ? this.parseString()
+          : this.parseIdentifier();
+      if (!key) throw new Error("Missing object key");
+
+      this.skipWhitespace();
+      if (this.source[this.index] !== ":") {
+        throw new Error("Missing object separator");
+      }
+      this.index += 1;
+      value[key] = this.parseValue();
+      this.skipWhitespace();
+
+      if (this.source[this.index] === ",") {
+        this.index += 1;
+        this.skipWhitespace();
+        continue;
+      }
+      break;
+    }
+
+    if (this.source[this.index] !== "}") {
+      throw new Error("Unterminated object literal");
+    }
+    this.index += 1;
+    return value;
+  }
+
+  private parseArray(): unknown[] {
+    const value: unknown[] = [];
+    this.index += 1;
+    this.skipWhitespace();
+
+    while (this.index < this.source.length && this.source[this.index] !== "]") {
+      value.push(this.parseValue());
+      this.skipWhitespace();
+      if (this.source[this.index] === ",") {
+        this.index += 1;
+        this.skipWhitespace();
+        continue;
+      }
+      break;
+    }
+
+    if (this.source[this.index] !== "]") {
+      throw new Error("Unterminated array literal");
+    }
+    this.index += 1;
+    return value;
+  }
+
+  private parseString(): string {
+    const quote = this.source[this.index];
+    if (quote !== '"' && quote !== "'" && quote !== "`") {
+      throw new Error("Expected string literal");
+    }
+    this.index += 1;
+    let value = "";
+
+    while (this.index < this.source.length) {
+      const char = this.source[this.index];
+      this.index += 1;
+      if (char === quote) return value;
+      if (quote === "`" && char === "$" && this.source[this.index] === "{") {
+        throw new Error("Template expressions are not data literals");
+      }
+      if (char !== "\\") {
+        value += char;
+        continue;
+      }
+
+      const escaped = this.source[this.index];
+      this.index += 1;
+      switch (escaped) {
+        case "n":
+          value += "\n";
+          break;
+        case "r":
+          value += "\r";
+          break;
+        case "t":
+          value += "\t";
+          break;
+        case "b":
+          value += "\b";
+          break;
+        case "f":
+          value += "\f";
+          break;
+        case "v":
+          value += "\v";
+          break;
+        case "u": {
+          const hex = this.source.slice(this.index, this.index + 4);
+          if (!/^[0-9a-f]{4}$/i.test(hex)) {
+            throw new Error("Invalid unicode escape");
+          }
+          value += String.fromCharCode(Number.parseInt(hex, 16));
+          this.index += 4;
+          break;
+        }
+        case "x": {
+          const hex = this.source.slice(this.index, this.index + 2);
+          if (!/^[0-9a-f]{2}$/i.test(hex)) {
+            throw new Error("Invalid hex escape");
+          }
+          value += String.fromCharCode(Number.parseInt(hex, 16));
+          this.index += 2;
+          break;
+        }
+        default:
+          value += escaped ?? "";
+      }
+    }
+
+    throw new Error("Unterminated string literal");
+  }
+
+  private parseNumber(): number {
+    const match = this.source
+      .slice(this.index)
+      .match(/^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/i);
+    if (!match?.[0]) throw new Error("Invalid number literal");
+    this.index += match[0].length;
+    return Number(match[0]);
+  }
+
+  private parseIdentifier(): string {
+    const match = this.source
+      .slice(this.index)
+      .match(/^[A-Za-z_$][A-Za-z0-9_$-]*/);
+    if (!match?.[0]) return "";
+    this.index += match[0].length;
+    return match[0];
+  }
+
+  private skipWhitespace(): void {
+    while (/\s/.test(this.source[this.index] ?? "")) this.index += 1;
+  }
+}
+
+function extractCodexExecScript(input: unknown): string {
+  if (typeof input === "string") return input;
+  if (!isRecord(input)) return "";
+  for (const key of ["script", "code", "input", "raw"]) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
+function isJavaScriptCodePosition(
+  source: string,
+  targetIndex: number,
+): boolean {
+  let state:
+    | "code"
+    | "single-quote"
+    | "double-quote"
+    | "template"
+    | "line-comment"
+    | "block-comment" = "code";
+
+  for (let index = 0; index < targetIndex; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+
+    if (state === "code") {
+      if (char === "'") state = "single-quote";
+      else if (char === '"') state = "double-quote";
+      else if (char === "`") state = "template";
+      else if (char === "/" && next === "/") {
+        state = "line-comment";
+        index += 1;
+      } else if (char === "/" && next === "*") {
+        state = "block-comment";
+        index += 1;
+      }
+      continue;
+    }
+
+    if (state === "line-comment") {
+      if (char === "\n" || char === "\r") state = "code";
+      continue;
+    }
+    if (state === "block-comment") {
+      if (char === "*" && next === "/") {
+        state = "code";
+        index += 1;
+      }
+      continue;
+    }
+
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (
+      (state === "single-quote" && char === "'") ||
+      (state === "double-quote" && char === '"') ||
+      (state === "template" && char === "`")
+    ) {
+      state = "code";
+    }
+  }
+
+  return state === "code";
+}
+
+function extractToolCallArguments(script: string, toolName: string): string[] {
+  const escapedName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`\\btools\\.${escapedName}\\s*\\(`, "g");
+  const argumentsList: string[] = [];
+
+  for (const match of script.matchAll(pattern)) {
+    if (!isJavaScriptCodePosition(script, match.index ?? 0)) continue;
+    const openIndex = script.indexOf("(", match.index ?? 0);
+    if (openIndex < 0) continue;
+
+    let depth = 1;
+    let quote: '"' | "'" | "`" | null = null;
+    let escaping = false;
+    for (let index = openIndex + 1; index < script.length; index += 1) {
+      const char = script[index];
+      if (quote) {
+        if (escaping) {
+          escaping = false;
+        } else if (char === "\\") {
+          escaping = true;
+        } else if (char === quote) {
+          quote = null;
+        }
+        continue;
+      }
+      if (char === '"' || char === "'" || char === "`") {
+        quote = char;
+      } else if (char === "(") {
+        depth += 1;
+      } else if (char === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          argumentsList.push(script.slice(openIndex + 1, index).trim());
+          break;
+        }
+      }
+    }
+  }
+
+  return argumentsList;
+}
+
+function normalizeUpdatePlanInput(value: unknown): CodexUpdatePlanInput | null {
+  if (!isRecord(value) || !Array.isArray(value.plan)) return null;
+
+  const plan: CodexUpdatePlanStep[] = [];
+  for (const item of value.plan) {
+    if (
+      !isRecord(item) ||
+      typeof item.step !== "string" ||
+      typeof item.status !== "string"
+    ) {
+      return null;
+    }
+    const step = item.step.trim();
+    const status = item.status.trim();
+    if (!step || !status) return null;
+    plan.push({
+      step,
+      status: status === "inProgress" ? "in_progress" : status,
+    });
+  }
+
+  const explanation =
+    typeof value.explanation === "string" ? value.explanation.trim() : "";
+  return {
+    ...(explanation ? { explanation } : {}),
+    plan,
+  };
+}
+
+/** Extract the latest literal `tools.update_plan(...)` snapshot from exec. */
+export function extractCodexExecUpdatePlan(
+  input: unknown,
+): CodexUpdatePlanInput | null {
+  const script = extractCodexExecScript(input);
+  if (!script) return null;
+
+  let latest: CodexUpdatePlanInput | null = null;
+  for (const argument of extractToolCallArguments(script, "update_plan")) {
+    try {
+      const parsed = new CodexJavaScriptLiteralParser(argument).parse();
+      latest = normalizeUpdatePlanInput(parsed) ?? latest;
+    } catch {
+      // Dynamic JavaScript must remain a normal CodexExec operation.
+    }
+  }
+  return latest;
+}
 
 export function parseCodexToolArguments(argumentsText?: string): unknown {
   if (!argumentsText) {

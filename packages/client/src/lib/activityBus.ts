@@ -96,6 +96,8 @@ export interface SessionUpdatedEvent {
   type: "session-updated";
   sessionId: string;
   projectId: UrlProjectId;
+  /** Optional producer identity for targeted refresh behavior. */
+  trigger?: "opencode-db-reconcile" | "codex-plan-updated";
   /** New title (derived from first user message) */
   title?: string | null;
   /** New message count */

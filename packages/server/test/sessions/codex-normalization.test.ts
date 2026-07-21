@@ -940,6 +940,114 @@ describe("Codex Normalization", () => {
     ]);
   });
 
+  it("surfaces a literal code-mode update_plan alongside the outer exec", () => {
+    const script = `
+      const plan = await tools.update_plan({
+        explanation: "Starting verification",
+        plan: [
+          { step: "Inspect changes", status: "completed" },
+          { step: "Run tests", status: "inProgress" }
+        ]
+      });
+      const result = await tools.exec_command({ cmd: "pnpm test" });
+      text(JSON.stringify({ plan, result }));
+    `;
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-code-plan",
+          name: "exec",
+          input: script,
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+    const content = result.messages[0]?.message?.content;
+
+    expect(content).toEqual([
+      {
+        type: "tool_use",
+        id: "call-code-plan",
+        name: "CodexExec",
+        input: { script },
+      },
+      {
+        type: "tool_use",
+        id: "call-code-plan-update-plan",
+        name: "UpdatePlan",
+        input: {
+          explanation: "Starting verification",
+          plan: [
+            { step: "Inspect changes", status: "completed" },
+            { step: "Run tests", status: "in_progress" },
+          ],
+        },
+        status: "completed",
+      },
+    ]);
+  });
+
+  it("does not evaluate dynamic code-mode update_plan arguments", () => {
+    const script = "await tools.update_plan(planInput);";
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-dynamic-plan",
+          name: "exec",
+          input: script,
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+    expect(result.messages[0]?.message?.content).toEqual([
+      {
+        type: "tool_use",
+        id: "call-dynamic-plan",
+        name: "CodexExec",
+        input: { script },
+      },
+    ]);
+  });
+
+  it("ignores update_plan examples inside strings and comments", () => {
+    const script = `
+      const example = 'tools.update_plan({plan: [{step: "Fake", status: "completed"}]})';
+      // tools.update_plan({plan: [{step: "Comment", status: "completed"}]});
+      /* tools.update_plan({plan: [{step: "Block", status: "completed"}]}); */
+      await tools.exec_command({cmd: "pnpm test"});
+    `;
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-plan-example",
+          name: "exec",
+          input: script,
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+    expect(result.messages[0]?.message?.content).toEqual([
+      {
+        type: "tool_use",
+        id: "call-plan-example",
+        name: "CodexExec",
+        input: { script },
+      },
+    ]);
+  });
+
   it("marks failed Codex code-mode exec output as an error", () => {
     const entries: CodexSessionEntry[] = [
       {

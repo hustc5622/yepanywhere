@@ -92,12 +92,16 @@ export interface UseSessionMessagesResult {
   /** Direct messages setter (for clearing streaming placeholders) */
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   /** Rewind/edit: drop the given uuid and everything after it */
-  truncateMessagesBefore: (uuid: string) => void;
+  truncateMessagesBefore: (uuid: string, preserveTempId?: string) => void;
   /** Fetch new messages incrementally (for file change events) */
   fetchNewMessages: () => Promise<void>;
   /** Reload the authoritative session snapshot from REST */
   refreshSessionMessages: (options?: {
     branchId?: string | null;
+    acceptSnapshot?: (snapshot: {
+      session: Session;
+      messages: Message[];
+    }) => boolean;
   }) => Promise<Session | null>;
   /** Fetch session metadata only */
   fetchSessionMetadata: () => Promise<void>;
@@ -222,6 +226,25 @@ function upsertMessageById(messages: Message[], message: Message): Message[] {
   }
 
   return [...messages, message];
+}
+
+export function truncateMessagesForEdit(
+  messages: Message[],
+  editedMessageId: string,
+  preserveTempId?: string,
+): Message[] {
+  const index = messages.findIndex(
+    (message) => getMessageId(message) === editedMessageId,
+  );
+  if (index === -1) return messages;
+
+  const prefix = messages.slice(0, index);
+  if (!preserveTempId) return prefix;
+
+  const optimisticEdit = messages
+    .slice(index + 1)
+    .find((message) => message.tempId === preserveTempId);
+  return optimisticEdit ? [...prefix, optimisticEdit] : prefix;
 }
 
 /**
@@ -654,7 +677,13 @@ export function useSessionMessages(
   ]);
 
   const refreshSessionMessages = useCallback(
-    async (options?: { branchId?: string | null }) => {
+    async (options?: {
+      branchId?: string | null;
+      acceptSnapshot?: (snapshot: {
+        session: Session;
+        messages: Message[];
+      }) => boolean;
+    }) => {
       const resolvedBranchId =
         options?.branchId === undefined
           ? branchId
@@ -668,6 +697,15 @@ export function useSessionMessages(
           ),
           branchId: resolvedBranchId,
         });
+        if (
+          options?.acceptSnapshot &&
+          !options.acceptSnapshot({
+            session: data.session,
+            messages: data.messages,
+          })
+        ) {
+          return null;
+        }
         const refreshedSession = applySessionSnapshot(data);
         onLoadComplete?.({
           session: data.session,
@@ -818,13 +856,14 @@ export function useSessionMessages(
    * uuid (always present in the list) rather than its parent, which may be a
    * non-rendered entry like a system message. No-op if the uuid isn't found.
    */
-  const truncateMessagesBefore = useCallback((uuid: string) => {
-    setMessages((prev) => {
-      const idx = prev.findIndex((m) => getMessageId(m) === uuid);
-      if (idx === -1) return prev;
-      return prev.slice(0, idx);
-    });
-  }, []);
+  const truncateMessagesBefore = useCallback(
+    (uuid: string, preserveTempId?: string) => {
+      setMessages((prev) =>
+        truncateMessagesForEdit(prev, uuid, preserveTempId),
+      );
+    },
+    [],
+  );
 
   return {
     messages,

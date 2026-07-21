@@ -498,6 +498,45 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("keeps a synthetic code-mode plan complete without a tool result", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-code-mode",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "exec-1",
+            name: "CodexExec",
+            input: { script: "await tools.update_plan({...});" },
+          },
+          {
+            type: "tool_use",
+            id: "exec-1-update-plan",
+            name: "UpdatePlan",
+            input: {
+              plan: [{ step: "Inspect code", status: "completed" }],
+            },
+            status: "completed",
+          },
+        ],
+      },
+    ];
+
+    const planItem = preprocessMessages(messages).find(
+      (item) => item.type === "tool_call" && item.toolName === "UpdatePlan",
+    );
+
+    expect(planItem).toMatchObject({
+      type: "tool_call",
+      id: "exec-1-update-plan",
+      status: "complete",
+      toolInput: {
+        plan: [{ step: "Inspect code", status: "completed" }],
+      },
+    });
+  });
+
   it("keeps plan progress snapshots separate across user turns", () => {
     const messages: Message[] = [
       {

@@ -42,6 +42,7 @@ import {
 import {
   type CodexToolCallContext,
   canonicalizeCodexToolName,
+  extractCodexExecUpdatePlan,
   normalizeCodexToolInvocation,
   normalizeCodexToolOutputWithContext,
   parseCodexToolArguments,
@@ -69,6 +70,24 @@ interface CodexToolUseConversion {
 interface PendingExternalCodexToolCall {
   callId: string;
   context: CodexToolCallContext;
+}
+
+function appendNestedCodexPlanBlock(
+  content: ContentBlock[],
+  callId: string,
+  context: CodexToolCallContext,
+): void {
+  if (context.toolName !== "CodexExec") return;
+  const nestedPlan = extractCodexExecUpdatePlan(context.input);
+  if (!nestedPlan) return;
+
+  content.push({
+    type: "tool_use",
+    id: `${callId}-update-plan`,
+    name: "UpdatePlan",
+    input: nestedPlan,
+    status: "completed",
+  });
 }
 
 function normalizeClaudeQueueOperationContent(content: unknown): string {
@@ -1275,6 +1294,10 @@ function convertExternalAgentToolCall(
       input: normalizedInvocation.input,
     },
   ];
+  appendNestedCodexPlanBlock(content, callId, {
+    toolName: normalizedInvocation.toolName,
+    input: normalizedInvocation.input,
+  });
 
   const message: Message = {
     uuid,
@@ -1320,6 +1343,10 @@ function convertCodexFunctionCallPayload(
       input: normalizedInvocation.input,
     },
   ];
+  appendNestedCodexPlanBlock(content, payload.call_id, {
+    toolName: normalizedInvocation.toolName,
+    input: normalizedInvocation.input,
+  });
 
   const message: Message = {
     uuid,
@@ -1372,6 +1399,10 @@ function convertCodexCustomToolCallPayload(
       input: normalizedInvocation.input,
     },
   ];
+  appendNestedCodexPlanBlock(content, callId, {
+    toolName: normalizedInvocation.toolName,
+    input: normalizedInvocation.input,
+  });
 
   const message: Message = {
     uuid,

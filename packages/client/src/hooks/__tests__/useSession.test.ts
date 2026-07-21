@@ -4,6 +4,7 @@ import type { SessionMetadataChangedEvent } from "../../lib/activityBus";
 import type { Message, Session } from "../../types";
 import {
   type PendingMessage,
+  isCodexHistoryRewriteSnapshotReady,
   mergeSessionMetadataChange,
   processStateFromProcessEvent,
   reconcilePendingMessagesWithConfirmedMessages,
@@ -116,6 +117,71 @@ describe("reconcilePendingMessagesWithConfirmedMessages", () => {
     );
 
     expect(result).toEqual([]);
+  });
+});
+
+describe("isCodexHistoryRewriteSnapshotReady", () => {
+  const codexSession = session({
+    provider: "codex",
+    codexBranchState: {
+      sessionId: "ses-current",
+      activeBranchId: "branch-new",
+      selectedBranchId: "branch-new",
+      branches: [
+        {
+          id: "branch-old",
+          sessionId: "ses-current",
+          parentId: null,
+          prompt: "Original prompt",
+          title: "Original prompt",
+          depth: 1,
+          index: 1,
+          siblingIndex: 1,
+          siblingCount: 2,
+          isActive: false,
+        },
+        {
+          id: "branch-new",
+          sessionId: "ses-current",
+          parentId: null,
+          prompt:
+            "Edited prompt\n\nUser uploaded files:\n- image.png: /tmp/image.png",
+          title: "Edited prompt",
+          depth: 1,
+          index: 2,
+          siblingIndex: 2,
+          siblingCount: 2,
+          isActive: true,
+        },
+      ],
+    },
+  });
+
+  it("accepts only the new active sibling containing the edited prompt", () => {
+    expect(
+      isCodexHistoryRewriteSnapshotReady(codexSession, {
+        expectedPrompt: "Edited prompt",
+        previousActiveBranchId: "branch-old",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a snapshot whose active branch has not changed", () => {
+    expect(
+      isCodexHistoryRewriteSnapshotReady(codexSession, {
+        expectedPrompt: "Edited prompt",
+        previousActiveBranchId: "branch-new",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a changed branch with a different prompt", () => {
+    expect(
+      isCodexHistoryRewriteSnapshotReady(codexSession, {
+        expectedPrompt: "Another edit",
+        previousActiveBranchId: "branch-old",
+      }),
+    ).toBe(false);
   });
 });
 

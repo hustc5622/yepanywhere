@@ -102,6 +102,23 @@ function handle(message) {
     send(message.id, { userAgent: "fake-codex" });
     return;
   }
+  if (message.method === "thread/rollback") {
+    send(message.id, {
+      thread: { id: message.params.threadId, status: { type: "idle" } },
+    });
+    return;
+  }
+  if (message.method === "turn/start") {
+    send(message.id, {
+      turn: {
+        id: "turn-rewrite",
+        status: "completed",
+        items: [],
+        error: null,
+      },
+    });
+    return;
+  }
   if (message.method !== "thread/start" && message.method !== "thread/resume") {
     return;
   }
@@ -289,6 +306,54 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
+    it("emits history_rewrite_complete after rollback and turn/start", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "edited prompt", uuid: "message-edit" },
+          rollbackNumTurns: 1,
+        });
+
+        const messages: Array<Record<string, unknown>> = [];
+        for await (const item of session.iterator) {
+          messages.push(item as unknown as Record<string, unknown>);
+          if (item.subtype === "history_rewrite_complete") break;
+        }
+
+        expect(messages).toContainEqual(
+          expect.objectContaining({
+            type: "system",
+            subtype: "history_rewrite_complete",
+            uuid: "codex-history-rewrite-turn-rewrite",
+            session_id: "thread-existing",
+            turnId: "turn-rewrite",
+            messageUuid: "message-edit",
+          }),
+        );
+      } finally {
+        session?.abort();
+        if (previousCapturePath === undefined) {
+          process.env.CODEX_FAKE_CAPTURE = undefined;
+        } else {
+          process.env.CODEX_FAKE_CAPTURE = previousCapturePath;
+        }
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("uses clear Codex MCP profile with default MCP servers disabled", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-"),
@@ -459,7 +524,7 @@ describe("CodexProvider Event Normalization", () => {
         exit_code: 0,
         status: "completed",
       },
-      "session-1",
+      "thread-1",
       "turn-1",
       "item/completed",
     );
@@ -937,6 +1002,134 @@ describe("CodexProvider Event Normalization", () => {
           type: "tool_result",
           tool_use_id: "call-exec",
           content: '{"ok":true}',
+        },
+      ],
+    });
+  });
+
+  it("streams turn plan updates as completed UpdatePlan snapshots", () => {
+    const testProvider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = testProvider.convertNotificationToSDKMessages(
+      {
+        method: "turn/plan/updated",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          explanation: "Running checks",
+          plan: [
+            { step: "Inspect", status: "completed" },
+            { step: "Test", status: "inProgress" },
+          ],
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      type: "assistant",
+      session_id: "thread-1",
+      uuid: "codex-plan-turn-1",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "codex-plan-turn-1",
+            name: "UpdatePlan",
+            input: {
+              explanation: "Running checks",
+              plan: [
+                { step: "Inspect", status: "completed" },
+                { step: "Test", status: "in_progress" },
+              ],
+            },
+            status: "completed",
+          },
+        ],
+      },
+    });
+  });
+
+  it("ignores turn plan updates for another thread", () => {
+    const testProvider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    expect(
+      testProvider.convertNotificationToSDKMessages(
+        {
+          method: "turn/plan/updated",
+          params: {
+            threadId: "thread-other",
+            turnId: "turn-1",
+            explanation: null,
+            plan: [{ step: "Inspect", status: "pending" }],
+          },
+        },
+        "thread-current",
+        new Map(),
+      ),
+    ).toEqual([]);
+  });
+
+  it("adds a completed UpdatePlan block to code-mode exec snapshots", () => {
+    const testProvider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+        customToolContexts: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = testProvider.convertNotificationToSDKMessages(
+      {
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "custom_tool_call",
+            call_id: "call-plan",
+            name: "exec",
+            input:
+              'await tools.update_plan({plan: [{step: "Inspect", status: "pending"}]});',
+          },
+        },
+      },
+      "session-1",
+      new Map(),
+      new Map(),
+    );
+
+    expect(messages[0]?.message).toMatchObject({
+      content: [
+        {
+          type: "tool_use",
+          id: "call-plan",
+          name: "CodexExec",
+        },
+        {
+          type: "tool_use",
+          id: "call-plan-update-plan",
+          name: "UpdatePlan",
+          input: {
+            plan: [{ step: "Inspect", status: "pending" }],
+          },
+          status: "completed",
         },
       ],
     });

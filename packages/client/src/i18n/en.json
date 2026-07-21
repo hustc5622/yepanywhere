@@ -1087,6 +1087,7 @@
   "actionCancel": "Cancel",
   "messageActionEdit": "Edit message",
   "sessionEditingFromHere": "Editing this message — sending will branch the conversation from here",
+  "sessionSyncingBranch": "Syncing edited branch…",
   "sessionInspectorOpen": "Open session outline",
   "sessionInspectorClose": "Close session outline",
   "sessionInspectorTitle": "Session Outline",

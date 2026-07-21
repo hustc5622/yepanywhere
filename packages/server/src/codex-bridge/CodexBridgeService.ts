@@ -1014,6 +1014,18 @@ export class CodexBridgeService implements CodexBridgeController {
         this.schedulePersist();
         break;
       }
+      case "turn/plan/updated": {
+        const threadId = getString(p?.threadId);
+        if (!threadId) break;
+        const record = this.sessions.get(threadId);
+        if (!record) break;
+        // The code-mode exec call is persisted before update_plan runs. Tell
+        // Yep clients to reload that durable message so the nested plan card
+        // appears while an external Codex turn is still active.
+        record.updatedAt = new Date().toISOString();
+        this.emitSessionUpdated(record, "codex-plan-updated");
+        break;
+      }
       case "turn/completed": {
         const threadId = getString(p?.threadId);
         if (!threadId) break;
@@ -1867,13 +1879,17 @@ export class CodexBridgeService implements CodexBridgeController {
     });
   }
 
-  private emitSessionUpdated(record: SessionRecord): void {
+  private emitSessionUpdated(
+    record: SessionRecord,
+    trigger?: "codex-plan-updated",
+  ): void {
     if (!this.isTopLevelSessionRecord(record)) return;
     this.eventNotifier.notify();
     this.eventBus?.emit({
       type: "session-updated",
       sessionId: record.id,
       projectId: record.projectId,
+      ...(trigger ? { trigger } : {}),
       title: record.title,
       messageCount: record.messageCount,
       updatedAt: record.updatedAt,

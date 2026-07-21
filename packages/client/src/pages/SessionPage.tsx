@@ -255,6 +255,8 @@ function SessionPageContent({
     reconnectStream,
     truncateMessagesBefore,
     refreshSessionMessages,
+    beginHistoryRewriteSync,
+    historyRewritePending,
     markPendingInputResolved,
   } = useSession(
     projectId,
@@ -438,11 +440,27 @@ function SessionPageContent({
     }
   }, []);
 
-  const queueEditBranchRefresh = useCallback(() => {
-    editBranchRefreshAttemptsRef.current = 0;
-    clearEditBranchRefreshTimer();
-    setPendingEditBranchRefresh(true);
-  }, [clearEditBranchRefreshTimer]);
+  const queueEditBranchRefresh = useCallback(
+    (expectedPrompt: string) => {
+      if (isCodexAppServerProvider(effectiveProvider)) {
+        beginHistoryRewriteSync({
+          expectedPrompt,
+          previousActiveBranchId: sessionBranchState?.activeBranchId ?? null,
+        });
+        setPendingEditBranchRefresh(false);
+        return;
+      }
+      editBranchRefreshAttemptsRef.current = 0;
+      clearEditBranchRefreshTimer();
+      setPendingEditBranchRefresh(true);
+    },
+    [
+      beginHistoryRewriteSync,
+      clearEditBranchRefreshTimer,
+      effectiveProvider,
+      sessionBranchState?.activeBranchId,
+    ],
+  );
 
   const clearSelectedBranchAfterEdit = useCallback(() => {
     setPendingBranchFocusId(null);
@@ -738,11 +756,12 @@ function SessionPageContent({
             api.cancelQueuedRequest,
           );
           historicalEditRequestStarted = true;
-          truncateMessagesBefore(editRewind.uuid);
+          truncateMessagesBefore(editRewind.uuid, tempId);
           setEditRewind(null);
           draftControlsRef.current?.clearDraft();
           setStatus({ owner: "self", processId: result.processId });
-          queueEditBranchRefresh();
+          clearSelectedBranchAfterEdit();
+          queueEditBranchRefresh(text);
           if (result.sessionId !== sessionId) {
             navigate(
               `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
@@ -765,11 +784,12 @@ function SessionPageContent({
             api.cancelQueuedRequest,
           );
           historicalEditRequestStarted = true;
-          truncateMessagesBefore(editRewind.uuid);
+          truncateMessagesBefore(editRewind.uuid, tempId);
           setEditRewind(null);
           draftControlsRef.current?.clearDraft();
           setStatus({ owner: "self", processId: result.processId });
-          queueEditBranchRefresh();
+          clearSelectedBranchAfterEdit();
+          queueEditBranchRefresh(text);
           if (result.sessionId !== sessionId) {
             navigate(
               `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
@@ -2072,6 +2092,24 @@ function SessionPageContent({
                 >
                   {t("actionCancel")}
                 </button>
+              </div>
+            )}
+
+            {/* Codex edit: waiting for the rewritten branch snapshot to land */}
+            {historyRewritePending && !editRewind && (
+              <div
+                className="session-branch-sync-banner"
+                data-testid="branch-sync-banner"
+                role="status"
+                aria-live="polite"
+              >
+                <span
+                  className="session-branch-sync-spinner"
+                  aria-hidden="true"
+                />
+                <span className="session-branch-sync-text">
+                  {t("sessionSyncingBranch")}
+                </span>
               </div>
             )}
 
