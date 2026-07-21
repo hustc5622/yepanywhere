@@ -2507,6 +2507,76 @@ custom-openai/glm-5.2
     ]);
   });
 
+  it("flushes accumulated assistant text before emitting a tool_use", () => {
+    const provider = new OpenCodeProvider();
+    const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
+    const emissionState = createEmissionState();
+
+    // Model streams reasoning/text ahead of a tool call within the same turn.
+    convertPartToSDKMessages(
+      {
+        id: "part_text",
+        sessionID: "ses_1",
+        messageID: "msg_assistant",
+        type: "text",
+        text: "Deciding to improve the design",
+      },
+      "yep_session",
+      undefined,
+      null,
+      "assistant",
+      emissionState,
+    );
+
+    const messages = convertPartToSDKMessages(
+      {
+        id: "prt_tool",
+        sessionID: "ses_1",
+        messageID: "msg_assistant",
+        type: "tool",
+        callID: "call_1",
+        tool: "bash",
+        state: { status: "running", input: { command: "ls -la" } },
+      },
+      "yep_session",
+      undefined,
+      null,
+      "assistant",
+      emissionState,
+    );
+
+    // The streamed text must land as a permanent assistant message (preceded by
+    // message_stop) BEFORE the tool_use, otherwise the client clears the
+    // `_isStreaming` placeholder on the tool_use and the text vanishes until the
+    // eventual step-finish re-emits it.
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "stream_event",
+        event: expect.objectContaining({ type: "message_stop" }),
+      }),
+      expect.objectContaining({
+        type: "assistant",
+        uuid: "msg_assistant",
+        message: expect.objectContaining({
+          role: "assistant",
+          content: "Deciding to improve the design",
+        }),
+      }),
+      expect.objectContaining({
+        type: "assistant",
+        message: expect.objectContaining({
+          content: [
+            expect.objectContaining({
+              type: "tool_use",
+              id: "call_1",
+              name: "Bash",
+            }),
+          ],
+        }),
+      }),
+    ]);
+  });
+
   it("re-emits tool_use when running-stage input materializes", () => {
     const provider = new OpenCodeProvider();
     const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);

@@ -219,6 +219,29 @@ export function shouldRefreshFullPersistedSession(
   );
 }
 
+/**
+ * A "tool_use-only" assistant message carries no streamed text/thinking of its
+ * own — its content is exclusively tool_use blocks. Such messages must not
+ * clear active streaming placeholders: a provider can emit a tool call before
+ * flushing the reasoning/text that preceded it, and clearing here would make
+ * that streamed text vanish until a later message re-emits it. Text-bearing
+ * assistant messages still clear placeholders as before, and the `complete`
+ * event force-clears any leftovers.
+ */
+export function isToolUseOnlyAssistantMessage(
+  sdkMessage: Record<string, unknown>,
+): boolean {
+  const message = sdkMessage.message as { content?: unknown } | undefined;
+  const content = message?.content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every(
+    (block) =>
+      typeof block === "object" &&
+      block !== null &&
+      (block as { type?: unknown }).type === "tool_use",
+  );
+}
+
 function extractUserMessageText(
   sdkMessage: Record<string, unknown>,
 ): string | null {
@@ -1129,7 +1152,13 @@ export function useSession(
         }
 
         // For assistant messages, clear the matching streaming placeholder.
-        if (msgType === "assistant") {
+        // Skip pure tool_use messages: they don't represent the final form of
+        // any streamed text/thinking, so clearing here would erase still-shown
+        // streamed content before its real message arrives.
+        if (
+          msgType === "assistant" &&
+          !isToolUseOnlyAssistantMessage(sdkMessage)
+        ) {
           // Check if this is a subagent message
           // Use parentToolUseId as the routing key (it's the Task tool_use id)
           const isSubagentMsg =

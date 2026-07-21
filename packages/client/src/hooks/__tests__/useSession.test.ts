@@ -5,6 +5,7 @@ import type { Message, Session } from "../../types";
 import {
   type PendingMessage,
   isCodexHistoryRewriteSnapshotReady,
+  isToolUseOnlyAssistantMessage,
   mergeSessionMetadataChange,
   processStateFromProcessEvent,
   reconcilePendingMessagesWithConfirmedMessages,
@@ -343,5 +344,58 @@ describe("sessionTurnHealthFromSession", () => {
       lastErrorMessage: "provider unavailable",
     });
     expect(sessionTurnHealthFromSession(session())).toBeNull();
+  });
+});
+
+describe("isToolUseOnlyAssistantMessage", () => {
+  it("is true when every content block is a tool_use", () => {
+    expect(
+      isToolUseOnlyAssistantMessage({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "call_1", name: "Bash" }],
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("is false when the message also carries text", () => {
+    expect(
+      isToolUseOnlyAssistantMessage({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Deciding to improve the design" },
+            { type: "tool_use", id: "call_1", name: "Bash" },
+          ],
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for string content, empty content, and flushed text messages", () => {
+    expect(
+      isToolUseOnlyAssistantMessage({
+        type: "assistant",
+        message: { role: "assistant", content: "just text" },
+      }),
+    ).toBe(false);
+    expect(
+      isToolUseOnlyAssistantMessage({
+        type: "assistant",
+        message: { role: "assistant", content: [] },
+      }),
+    ).toBe(false);
+    expect(
+      isToolUseOnlyAssistantMessage({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "hmm" }],
+        },
+      }),
+    ).toBe(false);
   });
 });

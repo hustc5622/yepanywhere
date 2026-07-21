@@ -2351,7 +2351,16 @@ export class OpenCodeProvider implements AgentProvider {
 
       case "tool": {
         const toolUseId = part.callID ?? part.id;
-        const messages: SDKMessage[] = [];
+        // Flush any accumulated reasoning/text stream before emitting the
+        // tool_use. The client clears every `_isStreaming` placeholder when any
+        // assistant message (tool_use included) arrives, so without flushing
+        // here the streamed reasoning/text disappears until the eventual
+        // step-finish re-emits it. Landing it as a permanent message first
+        // keeps the intermediate content visible across the tool boundary.
+        const messages: SDKMessage[] = this.flushAssistantStreamMessages(
+          emissionState,
+          sessionId,
+        );
         const toolName = this.canonicalizeOpenCodeToolName(
           part.tool ?? "unknown",
         );
