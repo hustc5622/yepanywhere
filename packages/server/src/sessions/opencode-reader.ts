@@ -32,6 +32,7 @@ import {
   OPENCODE_DB_PATH,
   type OpenCodeDatabase,
   withOpenCodeDb,
+  withOpenCodeDbResult,
 } from "./opencode-db.js";
 import { normalizeProviderGeneratedTitle } from "./provider-title-quality.js";
 import type {
@@ -1136,6 +1137,7 @@ const SESSION_STATS_SQL = `
   )
   SELECT
     s.id,
+    s.directory AS directory,
     MAX(
       s.time_updated,
       COALESCE(message_stats.message_updated, 0),
@@ -1151,6 +1153,128 @@ const SESSION_STATS_SQL = `
   LEFT JOIN message_stats ON message_stats.session_id = s.id
   LEFT JOIN part_stats ON part_stats.session_id = s.id
 `;
+
+function mapOpenCodeStatsRow(
+  row: Record<string, unknown> | undefined,
+): OpenCodeSqliteSessionStats | null {
+  if (!row) return null;
+  const sessionId = asString(row.id);
+  const mtime = asNumber(row.mtime);
+  const size = asNumber(row.indexed_size);
+  const messageCount = asNumber(row.message_count) ?? 0;
+  if (!sessionId || mtime === undefined || size === undefined) return null;
+  return {
+    sessionId,
+    mtime,
+    size,
+    messageCount,
+  };
+}
+
+/**
+ * Shared, per-database snapshot of session stats grouped by project directory.
+ *
+ * OpenCode keeps every project's sessions in one shared `opencode.db`, yet the
+ * session index scopes each project separately (`opencode::<db>::<projectPath>`).
+ * A hard refresh (or any `opencode.db` write, which marks all OpenCode scopes
+ * dirty) therefore used to run `SESSION_STATS_SQL` — a full-table `GROUP BY`
+ * over `message`/`part` — once per project, i.e. N passes over the whole DB.
+ *
+ * This cache runs that aggregation exactly once per refresh burst and partitions
+ * the result by `directory`, so each per-project reader is served from the same
+ * snapshot. A short TTL plus in-flight de-duplication collapses the concurrent
+ * per-project reads a hard refresh fans out into a single DB scan.
+ */
+const OPENCODE_SESSION_STATS_CACHE_TTL_MS = 3_000;
+
+interface OpenCodeSessionStatsSnapshot {
+  byDirectory: Map<string, OpenCodeSqliteSessionStats[]>;
+  timestamp: number;
+}
+
+const openCodeSessionStatsCache = new Map<
+  string,
+  OpenCodeSessionStatsSnapshot
+>();
+const openCodeSessionStatsInFlight = new Map<
+  string,
+  Promise<Map<string, OpenCodeSqliteSessionStats[]>>
+>();
+
+async function loadOpenCodeSessionStatsByDirectory(
+  dbPath: string,
+): Promise<Map<string, OpenCodeSqliteSessionStats[]>> {
+  const cached = openCodeSessionStatsCache.get(dbPath);
+  if (
+    cached &&
+    Date.now() - cached.timestamp < OPENCODE_SESSION_STATS_CACHE_TTL_MS
+  ) {
+    return cached.byDirectory;
+  }
+
+  const inFlight = openCodeSessionStatsInFlight.get(dbPath);
+  if (inFlight) return inFlight;
+
+  const promise = (async () => {
+    // Exclude subagent/task children (parent_id IS NOT NULL) and archived rows,
+    // matching the per-project enumeration semantics. This runs a single pass
+    // over the whole DB and buckets the rows by directory.
+    const result = await withOpenCodeDbResult(dbPath, (db) =>
+      db
+        .prepare(
+          `
+            ${SESSION_STATS_SQL}
+            WHERE s.time_archived IS NULL
+              AND s.parent_id IS NULL
+            ORDER BY mtime DESC
+          `,
+        )
+        .all(),
+    );
+
+    if (!result.ok) {
+      // Preserve the historical "treat an unavailable/busy DB as empty and
+      // retry next time" behaviour: don't cache failures.
+      return new Map<string, OpenCodeSqliteSessionStats[]>();
+    }
+
+    const byDirectory = new Map<string, OpenCodeSqliteSessionStats[]>();
+    for (const row of result.value) {
+      const directory = asString(row.directory);
+      const stats = mapOpenCodeStatsRow(row);
+      if (!directory || !stats) continue;
+      const existing = byDirectory.get(directory);
+      if (existing) existing.push(stats);
+      else byDirectory.set(directory, [stats]);
+    }
+
+    openCodeSessionStatsCache.set(dbPath, {
+      byDirectory,
+      timestamp: Date.now(),
+    });
+    return byDirectory;
+  })().finally(() => {
+    if (openCodeSessionStatsInFlight.get(dbPath) === promise) {
+      openCodeSessionStatsInFlight.delete(dbPath);
+    }
+  });
+
+  openCodeSessionStatsInFlight.set(dbPath, promise);
+  return promise;
+}
+
+/**
+ * Drop the cached OpenCode session-stats snapshot(s). Wired into the same
+ * invalidation path as the project-list cache so a known DB change refreshes
+ * the snapshot promptly instead of waiting out the TTL.
+ */
+export function invalidateOpenCodeSessionStatsCache(dbPath?: string): void {
+  if (dbPath) {
+    openCodeSessionStatsCache.delete(dbPath);
+    return;
+  }
+  openCodeSessionStatsCache.clear();
+}
 
 export class OpenCodeSessionReader implements ISessionReader {
   private readonly dbPath: string;
@@ -1758,33 +1882,13 @@ export class OpenCodeSessionReader implements ISessionReader {
   private async listSqliteSessionStats(): Promise<
     OpenCodeSqliteSessionStats[] | undefined
   > {
-    return withOpenCodeDb<OpenCodeSqliteSessionStats[] | undefined>(
-      this.dbPath,
-      undefined,
-      (db) => {
-        // Exclude subagent/task children (parent_id IS NOT NULL). This is the
-        // enumeration the session index builds its list from, so filtering here
-        // keeps subagent children out of every session list while leaving them
-        // directly fetchable by id (getSqliteSessionStats stays unfiltered).
-        const rows = db
-          .prepare(
-            `
-              ${SESSION_STATS_SQL}
-              WHERE s.directory = ?
-                AND s.time_archived IS NULL
-                AND s.parent_id IS NULL
-              ORDER BY mtime DESC
-            `,
-          )
-          .all(this.projectPath);
-
-        return rows
-          .map((row) => this.mapStatsRow(row))
-          .filter(
-            (stats): stats is OpenCodeSqliteSessionStats => stats !== null,
-          );
-      },
-    );
+    // Served from a shared, per-database snapshot so N projects sharing one
+    // opencode.db collapse into a single full-table aggregation per refresh
+    // burst instead of one scan each. Subagent/archived filtering happens once
+    // inside the snapshot loader, so the per-directory slice already matches the
+    // previous WHERE s.directory = ? AND parent_id IS NULL semantics.
+    const byDirectory = await loadOpenCodeSessionStatsByDirectory(this.dbPath);
+    return byDirectory.get(this.projectPath) ?? [];
   }
 
   private async getSqliteSessionStats(
@@ -1794,7 +1898,7 @@ export class OpenCodeSessionReader implements ISessionReader {
       this.dbPath,
       undefined,
       (db) =>
-        this.mapStatsRow(
+        mapOpenCodeStatsRow(
           db
             .prepare(
               `
@@ -1805,22 +1909,5 @@ export class OpenCodeSessionReader implements ISessionReader {
             .get(sessionId, this.projectPath),
         ),
     );
-  }
-
-  private mapStatsRow(
-    row: Record<string, unknown> | undefined,
-  ): OpenCodeSqliteSessionStats | null {
-    if (!row) return null;
-    const sessionId = asString(row.id);
-    const mtime = asNumber(row.mtime);
-    const size = asNumber(row.indexed_size);
-    const messageCount = asNumber(row.message_count) ?? 0;
-    if (!sessionId || mtime === undefined || size === undefined) return null;
-    return {
-      sessionId,
-      mtime,
-      size,
-      messageCount,
-    };
   }
 }

@@ -6,6 +6,7 @@ import {
   withOpenCodeDb,
   withOpenCodeDbResult,
 } from "../sessions/opencode-db.js";
+import { invalidateOpenCodeSessionStatsCache } from "../sessions/opencode-reader.js";
 import { isGenericProviderTitle } from "../sessions/provider-title-quality.js";
 import type { Project } from "../supervisor/types.js";
 import { canonicalizeProjectPath, encodeProjectId } from "./paths.js";
@@ -126,6 +127,9 @@ export class OpenCodeSessionScanner {
 
   invalidateCache(): void {
     this.cachedProjects = null;
+    // The per-project session-stats snapshot reads the same shared DB, so a
+    // change that invalidates the project list must also drop the snapshot.
+    invalidateOpenCodeSessionStatsCache(this.dbPath);
   }
 
   async listProjects(): Promise<Project[]> {
