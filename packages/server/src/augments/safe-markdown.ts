@@ -26,6 +26,11 @@ const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "avi", "mkv", "ogv"]);
 
 const MEDIA_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS]);
 
+export interface SafeMarkdownOptions {
+  /** Resolve a non-HTTP image reference in a trusted, caller-specific scope. */
+  resolveImageUrl?: (href: string) => string | null;
+}
+
 /**
  * Check if a string looks like an absolute local file path.
  * Must start with / (but not //) and contain a file extension.
@@ -201,71 +206,96 @@ const MARKDOWN_SANITIZE_OPTIONS = {
 const DETAILS_PLACEHOLDER_PREFIX = "YEP_MARKDOWN_DETAILS_BLOCK_";
 const MAX_DETAILS_DEPTH = 8;
 
-const renderer: RendererObject<string, string> = {
-  html({ text }) {
-    // Disable raw HTML passthrough from markdown by escaping it.
-    return escapeHtml(text);
-  },
-  text({ text }: Tokens.Text | Tokens.Escape) {
-    return renderTextWithLocalMediaLinks(text);
-  },
-  link(
-    this: RendererThis<string, string>,
-    { href, title, tokens }: Tokens.Link,
+function sanitizeResolvedImageUrl(url: string): string | null {
+  const trimmed = url.trim();
+  if (
+    !trimmed ||
+    /\p{C}/u.test(trimmed) ||
+    !trimmed.startsWith("/") ||
+    trimmed.startsWith("//")
   ) {
-    // Check for local file paths first — rewrite to clickable media placeholder
-    if (isLocalFilePath(href)) {
-      const ext = getExtension(href);
+    return null;
+  }
+  return trimmed;
+}
+
+function createRenderer(
+  options: SafeMarkdownOptions = {},
+): RendererObject<string, string> {
+  return {
+    html({ text }) {
+      // Disable raw HTML passthrough from markdown by escaping it.
+      return escapeHtml(text);
+    },
+    text({ text }: Tokens.Text | Tokens.Escape) {
+      return renderTextWithLocalMediaLinks(text);
+    },
+    link(
+      this: RendererThis<string, string>,
+      { href, title, tokens }: Tokens.Link,
+    ) {
+      // Check for local file paths first — rewrite to clickable media placeholder
+      if (isLocalFilePath(href)) {
+        const ext = getExtension(href);
+        const renderedText = this.parser.parseInline(tokens);
+
+        if (MEDIA_EXTENSIONS.has(ext)) {
+          return renderLocalMediaLink(href, renderedText, ext);
+        }
+        return renderLocalTextFileLink(href, renderedText, title);
+      }
+
+      const safeHref = sanitizeUrl(href);
       const renderedText = this.parser.parseInline(tokens);
 
-      if (MEDIA_EXTENSIONS.has(ext)) {
-        return renderLocalMediaLink(href, renderedText, ext);
+      if (!safeHref) {
+        // Keep readable text when URL protocol is unsafe.
+        return renderedText;
       }
-      return renderLocalTextFileLink(href, renderedText, title);
-    }
 
-    const safeHref = sanitizeUrl(href);
-    const renderedText = this.parser.parseInline(tokens);
+      const escapedHref = escapeHtml(safeHref);
+      const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<a href="${escapedHref}"${titleAttr}>${renderedText}</a>`;
+    },
+    image({ href, title, text }: Tokens.Image) {
+      // Check for local file paths first — rewrite to clickable media placeholder
+      if (isLocalFilePath(href)) {
+        const ext = getExtension(href);
 
-    if (!safeHref) {
-      // Keep readable text when URL protocol is unsafe.
-      return renderedText;
-    }
-
-    const escapedHref = escapeHtml(safeHref);
-    const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
-    return `<a href="${escapedHref}"${titleAttr}>${renderedText}</a>`;
-  },
-  image({ href, title, text }: Tokens.Image) {
-    // Check for local file paths first — rewrite to clickable media placeholder
-    if (isLocalFilePath(href)) {
-      const ext = getExtension(href);
-
-      if (MEDIA_EXTENSIONS.has(ext)) {
-        return renderLocalMediaLink(href, text, ext);
+        if (MEDIA_EXTENSIONS.has(ext)) {
+          return renderLocalMediaLink(href, text, ext);
+        }
+        // Unrecognized extension — just show text
+        return escapeHtml(text || getFileName(href));
       }
-      // Unrecognized extension — just show text
-      return escapeHtml(text || getFileName(href));
-    }
 
-    const safeSrc = sanitizeUrl(href, ALLOWED_IMAGE_PROTOCOLS);
-    if (!safeSrc) {
-      return escapeHtml(text);
-    }
+      const safeSrc =
+        sanitizeUrl(href, ALLOWED_IMAGE_PROTOCOLS) ??
+        (options.resolveImageUrl
+          ? sanitizeResolvedImageUrl(options.resolveImageUrl(href) ?? "")
+          : null);
+      if (!safeSrc) {
+        return escapeHtml(text);
+      }
 
-    const escapedSrc = escapeHtml(safeSrc);
-    const altAttr = text ? ` alt="${escapeHtml(text)}"` : ' alt=""';
-    const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
-    return `<img src="${escapedSrc}"${altAttr}${titleAttr}>`;
-  },
-};
+      const escapedSrc = escapeHtml(safeSrc);
+      const altAttr = text ? ` alt="${escapeHtml(text)}"` : ' alt=""';
+      const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<img src="${escapedSrc}"${altAttr}${titleAttr}>`;
+    },
+  };
+}
 
-const markdownRenderer = new Marked({
-  async: false,
-  gfm: true,
-});
+function createMarkdownRenderer(options: SafeMarkdownOptions = {}): Marked {
+  const instance = new Marked({
+    async: false,
+    gfm: true,
+  });
+  instance.use({ renderer: createRenderer(options) });
+  return instance;
+}
 
-markdownRenderer.use({ renderer });
+const markdownRenderer = createMarkdownRenderer();
 
 /**
  * Return a safe absolute URL for markdown links, or null for unsupported schemes.
@@ -299,10 +329,16 @@ export function sanitizeUrl(
 /**
  * Render markdown to sanitized HTML with raw HTML disabled.
  */
-export function renderSafeMarkdown(markdown: string): string {
+export function renderSafeMarkdown(
+  markdown: string,
+  options: SafeMarkdownOptions = {},
+): string {
+  const renderer = options.resolveImageUrl
+    ? createMarkdownRenderer(options)
+    : markdownRenderer;
   const { markdown: markdownWithPlaceholders, replacements } =
-    extractDetailsBlocks(markdown);
-  const rendered = markdownRenderer.parse(markdownWithPlaceholders, {
+    extractDetailsBlocks(markdown, 0, options);
+  const rendered = renderer.parse(markdownWithPlaceholders, {
     async: false,
   });
   const html = typeof rendered === "string" ? rendered : "";
@@ -310,14 +346,21 @@ export function renderSafeMarkdown(markdown: string): string {
   return restoreDetailsBlocks(sanitized, replacements).trim();
 }
 
-function renderSafeMarkdownNested(markdown: string, depth: number): string {
+function renderSafeMarkdownNested(
+  markdown: string,
+  depth: number,
+  options: SafeMarkdownOptions,
+): string {
   if (depth > MAX_DETAILS_DEPTH) {
-    return renderSafeMarkdownWithoutDetails(markdown);
+    return renderSafeMarkdownWithoutDetails(markdown, options);
   }
 
+  const renderer = options.resolveImageUrl
+    ? createMarkdownRenderer(options)
+    : markdownRenderer;
   const { markdown: markdownWithPlaceholders, replacements } =
-    extractDetailsBlocks(markdown, depth);
-  const rendered = markdownRenderer.parse(markdownWithPlaceholders, {
+    extractDetailsBlocks(markdown, depth, options);
+  const rendered = renderer.parse(markdownWithPlaceholders, {
     async: false,
   });
   const html = typeof rendered === "string" ? rendered : "";
@@ -325,8 +368,14 @@ function renderSafeMarkdownNested(markdown: string, depth: number): string {
   return restoreDetailsBlocks(sanitized, replacements).trim();
 }
 
-function renderSafeMarkdownWithoutDetails(markdown: string): string {
-  const rendered = markdownRenderer.parse(markdown, { async: false });
+function renderSafeMarkdownWithoutDetails(
+  markdown: string,
+  options: SafeMarkdownOptions,
+): string {
+  const renderer = options.resolveImageUrl
+    ? createMarkdownRenderer(options)
+    : markdownRenderer;
+  const rendered = renderer.parse(markdown, { async: false });
   const html = typeof rendered === "string" ? rendered : "";
   return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS).trim();
 }
@@ -340,6 +389,7 @@ function renderSafeInlineMarkdown(markdown: string): string {
 function extractDetailsBlocks(
   markdown: string,
   depth = 0,
+  options: SafeMarkdownOptions = {},
 ): {
   markdown: string;
   replacements: Map<string, string>;
@@ -383,7 +433,7 @@ function extractDetailsBlocks(
         const blockStart = lineStart;
         const blockEnd = lineStart + closeMatch.index + closeMatch[0].length;
         const block = markdown.slice(blockStart, blockEnd);
-        const renderedDetails = renderDetailsBlock(block, depth);
+        const renderedDetails = renderDetailsBlock(block, depth, options);
         if (renderedDetails) {
           const placeholder = `${DETAILS_PLACEHOLDER_PREFIX}${replacements.size}__`;
           result += markdown.slice(lastIndex, blockStart);
@@ -407,7 +457,11 @@ function extractDetailsBlocks(
   return { markdown: result, replacements };
 }
 
-function renderDetailsBlock(block: string, depth: number): string | null {
+function renderDetailsBlock(
+  block: string,
+  depth: number,
+  options: SafeMarkdownOptions,
+): string | null {
   const match = /^\s*<details([^>]*)>([\s\S]*?)<\/details\s*>\s*$/i.exec(block);
   if (!match) return null;
 
@@ -422,7 +476,7 @@ function renderDetailsBlock(block: string, depth: number): string | null {
     : inner.trim();
   const summaryHtml = renderSafeInlineMarkdown(summaryMarkdown);
   const bodyHtml = bodyMarkdown
-    ? renderSafeMarkdownNested(bodyMarkdown, depth + 1)
+    ? renderSafeMarkdownNested(bodyMarkdown, depth + 1, options)
     : "";
   const openAttr = /\sopen(?:\s*=\s*(?:"open"|'open'|open))?(?=\s|$)/i.test(
     attrs,

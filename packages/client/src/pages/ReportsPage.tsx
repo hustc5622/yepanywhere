@@ -1,9 +1,14 @@
 import type {
+  ReportComment,
+  ReportCommentAnchor,
   ReportDocument,
   ReportDocumentResponse,
 } from "@yep-anywhere/shared";
 import {
   type ChangeEvent,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -12,20 +17,39 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
-import { api } from "../api/client";
+import { api, getDesktopAuthToken } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
+import { Modal } from "../components/ui/Modal";
 import { useToastContext } from "../contexts/ToastContext";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
 import { writeClipboardText } from "../lib/clipboard";
 import { formatSmartTime } from "../lib/datetime";
+import {
+  applyReportCommentHighlights,
+  createReportCommentAnchor,
+  resolveReportCommentAnchor,
+} from "../lib/reportComments";
 import { UI_KEYS } from "../lib/storageKeys";
 
 interface HeadingItem {
   id: string;
   depth: number;
   text: string;
+}
+
+interface ReportSelectionDraft {
+  anchor: ReportCommentAnchor;
+  top: number;
+  left: number;
+}
+
+interface ReportCommentEditorState {
+  reportPath: string;
+  anchor: ReportCommentAnchor;
+  commentId?: string;
+  body: string;
 }
 
 const HEADING_PATTERN = /^(#{1,4})\s+(.+?)\s*#*$/;
@@ -138,6 +162,93 @@ function countMarkdownLines(markdown: string): number {
 
 function getDisplayPath(document: ReportDocument): string {
   return document.absolutePath || document.path;
+}
+
+function readReportSelection(
+  article: HTMLElement,
+): ReportSelectionDraft | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  const anchor = createReportCommentAnchor(article, range);
+  if (!anchor || anchor.exact.length > 4_000) return null;
+
+  const rect = range.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return null;
+
+  const horizontalMargin = 72;
+  const left = Math.min(
+    Math.max(horizontalMargin, rect.left + rect.width / 2),
+    Math.max(horizontalMargin, window.innerWidth - horizontalMargin),
+  );
+  const top =
+    rect.bottom + 52 <= window.innerHeight
+      ? rect.bottom + 8
+      : Math.max(8, rect.top - 44);
+
+  return { anchor, top, left };
+}
+
+function ReportCommentEditor({
+  editor,
+  saving,
+  onBodyChange,
+  onClose,
+  onSubmit,
+}: {
+  editor: ReportCommentEditorState;
+  saving: boolean;
+  onBodyChange: (body: string) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const { t } = useI18n();
+  const editing = Boolean(editor.commentId);
+
+  return (
+    <Modal
+      title={editing ? t("reportsEditComment") : t("reportsAddComment")}
+      onClose={onClose}
+    >
+      <form className="report-comment-editor" onSubmit={onSubmit}>
+        <blockquote className="report-comment-quote">
+          {editor.anchor.exact}
+        </blockquote>
+        <label className="report-comment-label" htmlFor="report-comment-body">
+          {t("reportsCommentLabel")}
+        </label>
+        <textarea
+          id="report-comment-body"
+          value={editor.body}
+          onChange={(event) => onBodyChange(event.target.value)}
+          placeholder={t("reportsCommentPlaceholder")}
+          maxLength={10_000}
+          rows={6}
+          required
+        />
+        <div className="report-comment-editor-actions">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onClose}
+            disabled={saving}
+          >
+            {t("reportsCommentCancel")}
+          </button>
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={saving || !editor.body.trim()}
+          >
+            {saving ? t("reportsCommentSaving") : t("reportsCommentSave")}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
 
 function ReportsDocumentMenu({ report }: { report: ReportDocument }) {
@@ -319,12 +430,19 @@ export function ReportsPage() {
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [documentError, setDocumentError] = useState<string | null>(null);
   const [uploadingReport, setUploadingReport] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [selectionDraft, setSelectionDraft] =
+    useState<ReportSelectionDraft | null>(null);
+  const [commentEditor, setCommentEditor] =
+    useState<ReportCommentEditorState | null>(null);
+  const [savingComment, setSavingComment] = useState(false);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
   const [isDocumentPanelExpanded, setIsDocumentPanelExpanded] = useState(
     loadDocumentPanelExpanded,
   );
   const articleRef = useRef<HTMLElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   useHideSplashOnReady(!loadingList || listError !== null);
 
@@ -368,6 +486,8 @@ export function ReportsPage() {
     }
 
     let cancelled = false;
+    setSelectionDraft(null);
+    setCommentEditor(null);
     setLoadingDocument(true);
     setDocumentError(null);
 
@@ -401,6 +521,10 @@ export function ReportsPage() {
     () => ({ __html: renderedHtml }),
     [renderedHtml],
   );
+  const comments = useMemo(
+    () => documentData?.comments ?? [],
+    [documentData?.comments],
+  );
 
   useEffect(() => {
     if (!renderedHtml) return;
@@ -425,6 +549,62 @@ export function ReportsPage() {
     }
   }, [headings, renderedHtml]);
 
+  useEffect(() => {
+    if (!renderedHtml) return;
+    const article = articleRef.current;
+    if (!article) return;
+
+    const controller = new AbortController();
+    const blobUrls: string[] = [];
+    const needsAuthenticatedFetch = Boolean(getDesktopAuthToken());
+    const images = article.querySelectorAll<HTMLImageElement>("img");
+    for (const image of images) {
+      image.loading = "lazy";
+      image.decoding = "async";
+      const source = image.getAttribute("src") ?? "";
+      if (!needsAuthenticatedFetch || !source.includes("/api/reports/image?")) {
+        continue;
+      }
+
+      void api
+        .loadReportImage(source, controller.signal)
+        .then((blob) => {
+          if (controller.signal.aborted) return;
+          const blobUrl = URL.createObjectURL(blob);
+          blobUrls.push(blobUrl);
+          image.src = blobUrl;
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) return;
+          console.error("Failed to load report image:", error);
+          image.classList.add("report-image-load-failed");
+        });
+    }
+
+    return () => {
+      controller.abort();
+      for (const blobUrl of blobUrls) URL.revokeObjectURL(blobUrl);
+    };
+  }, [renderedHtml]);
+
+  useEffect(() => {
+    if (!renderedHtml) return;
+    const article = articleRef.current;
+    if (!article) return;
+    applyReportCommentHighlights(article, comments, t("reportsOpenComment"));
+  }, [comments, renderedHtml, t]);
+
+  useEffect(() => {
+    if (!selectionDraft) return;
+    const hideSelectionAction = () => setSelectionDraft(null);
+    window.addEventListener("scroll", hideSelectionAction, true);
+    window.addEventListener("resize", hideSelectionAction);
+    return () => {
+      window.removeEventListener("scroll", hideSelectionAction, true);
+      window.removeEventListener("resize", hideSelectionAction);
+    };
+  }, [selectionDraft]);
+
   const filteredDocuments = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return documents;
@@ -442,6 +622,151 @@ export function ReportsPage() {
         t("reportsLineCount", { count: lineCount }),
       ].join(" · ")
     : "";
+
+  const openComment = useCallback((comment: ReportComment) => {
+    setSelectionDraft(null);
+    window.getSelection()?.removeAllRanges();
+    setCommentEditor({
+      reportPath: comment.reportPath,
+      anchor: comment.anchor,
+      commentId: comment.id,
+      body: comment.body,
+    });
+  }, []);
+
+  const openCommentFromHighlight = useCallback(
+    (target: EventTarget | null): boolean => {
+      if (!(target instanceof Element)) return false;
+      const highlight = target.closest<HTMLElement>(
+        ".report-comment-highlight",
+      );
+      if (!highlight || !articleRef.current?.contains(highlight)) return false;
+
+      const ids = (highlight.dataset.reportCommentIds ?? "").split(",");
+      const comment = comments.find((candidate) => ids.includes(candidate.id));
+      if (!comment) return false;
+      openComment(comment);
+      return true;
+    },
+    [comments, openComment],
+  );
+
+  const handleArticleClick = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      if (!openCommentFromHighlight(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [openCommentFromHighlight],
+  );
+
+  const handleArticleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if (!openCommentFromHighlight(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [openCommentFromHighlight],
+  );
+
+  const updateSelectionDraft = useCallback(() => {
+    if (commentEditor) return;
+    const article = articleRef.current;
+    setSelectionDraft(article ? readReportSelection(article) : null);
+  }, [commentEditor]);
+
+  const handleOpenSelectionComment = useCallback(() => {
+    if (!selectionDraft || !documentData) return;
+
+    const articleText = articleRef.current?.textContent ?? "";
+    const overlappingComment = comments.find((comment) => {
+      const resolved = resolveReportCommentAnchor(articleText, comment.anchor);
+      return (
+        resolved !== null &&
+        resolved.start < selectionDraft.anchor.end &&
+        resolved.end > selectionDraft.anchor.start
+      );
+    });
+
+    if (overlappingComment) {
+      openComment(overlappingComment);
+      return;
+    }
+
+    window.getSelection()?.removeAllRanges();
+    setSelectionDraft(null);
+    setCommentEditor({
+      reportPath: documentData.metadata.path,
+      anchor: selectionDraft.anchor,
+      body: "",
+    });
+  }, [comments, documentData, openComment, selectionDraft]);
+
+  const closeCommentEditor = useCallback(() => {
+    if (!savingComment) setCommentEditor(null);
+  }, [savingComment]);
+
+  const handleSaveComment = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!commentEditor || savingComment) return;
+      const body = commentEditor.body.trim();
+      if (!body) return;
+
+      const editorSnapshot = commentEditor;
+      setSavingComment(true);
+      try {
+        const response = editorSnapshot.commentId
+          ? await api.updateReportComment(
+              editorSnapshot.reportPath,
+              editorSnapshot.commentId,
+              body,
+            )
+          : await api.createReportComment(
+              editorSnapshot.reportPath,
+              editorSnapshot.anchor,
+              body,
+            );
+
+        setDocumentData((current) => {
+          if (!current || current.metadata.path !== editorSnapshot.reportPath) {
+            return current;
+          }
+          const currentComments = current.comments ?? [];
+          const index = currentComments.findIndex(
+            (comment) => comment.id === response.comment.id,
+          );
+          const nextComments = [...currentComments];
+          if (index >= 0) nextComments[index] = response.comment;
+          else nextComments.push(response.comment);
+          return { ...current, comments: nextComments };
+        });
+        setCommentEditor(null);
+        showToast(
+          t(
+            editorSnapshot.commentId
+              ? "reportsCommentUpdated"
+              : "reportsCommentCreated",
+          ),
+          "success",
+        );
+      } catch (error) {
+        showToast(
+          t("reportsCommentSaveFailed", {
+            message:
+              error instanceof Error
+                ? error.message
+                : t("reportsCommentUnknownError"),
+          }),
+          "error",
+        );
+      } finally {
+        setSavingComment(false);
+      }
+    },
+    [commentEditor, savingComment, showToast, t],
+  );
 
   const handleSelectDocument = useCallback(
     (path: string) => {
@@ -505,6 +830,41 @@ export function ReportsPage() {
       void handleUploadFiles(files);
     },
     [handleUploadFiles],
+  );
+
+  const handleImageInputChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file || !selectedDocument || uploadingImage) return;
+
+      setUploadingImage(true);
+      try {
+        const result = await api.uploadReportImage(selectedDocument.path, file);
+        try {
+          await writeClipboardText(result.markdown);
+          showToast(t("reportsImageUploadedAndCopied"), "success");
+        } catch {
+          showToast(
+            t("reportsImageUploadedCopyFailed", { markdown: result.markdown }),
+            "error",
+          );
+        }
+      } catch (error) {
+        showToast(
+          t("reportsImageUploadFailed", {
+            message:
+              error instanceof Error
+                ? error.message
+                : t("reportsCommentUnknownError"),
+          }),
+          "error",
+        );
+      } finally {
+        setUploadingImage(false);
+      }
+    },
+    [selectedDocument, showToast, t, uploadingImage],
   );
 
   const toggleDocumentPanel = useCallback(() => {
@@ -718,6 +1078,34 @@ export function ReportsPage() {
           isSidebarCollapsed={isSidebarCollapsed}
         />
 
+        {selectionDraft &&
+          createPortal(
+            <button
+              type="button"
+              className="report-comment-selection-action"
+              style={{ top: selectionDraft.top, left: selectionDraft.left }}
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={handleOpenSelectionComment}
+            >
+              {t("reportsAddComment")}
+            </button>,
+            document.body,
+          )}
+
+        {commentEditor && (
+          <ReportCommentEditor
+            editor={commentEditor}
+            saving={savingComment}
+            onBodyChange={(body) =>
+              setCommentEditor((current) =>
+                current ? { ...current, body } : current,
+              )
+            }
+            onClose={closeCommentEditor}
+            onSubmit={handleSaveComment}
+          />
+        )}
+
         <main className="page-scroll-container reports-scroll-container">
           <input
             ref={uploadInputRef}
@@ -726,6 +1114,13 @@ export function ReportsPage() {
             accept=".md,.markdown,.txt,text/markdown,text/plain"
             className="reports-upload-input"
             onChange={handleUploadInputChange}
+          />
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept=".png,.jpg,.jpeg,.gif,.webp,.avif,.bmp,.tiff,.tif,.svg,image/*"
+            className="reports-upload-input"
+            onChange={handleImageInputChange}
           />
           <div
             className={`reports-content-inner ${
@@ -765,8 +1160,41 @@ export function ReportsPage() {
                 <header className="reports-reader-header">
                   <div>
                     <p className="reports-reader-meta">{metaText}</p>
+                    <p className="reports-comment-hint">
+                      {comments.length > 0
+                        ? t("reportsCommentCount", { count: comments.length })
+                        : t("reportsCommentHint")}
+                    </p>
                   </div>
-                  <ReportsDocumentMenu report={selectedDocument} />
+                  <div className="reports-reader-actions">
+                    <button
+                      type="button"
+                      className="reports-upload-button"
+                      onClick={() => imageInputRef.current?.click()}
+                      disabled={uploadingImage}
+                      title={t("reportsUploadImage")}
+                      aria-label={t("reportsUploadImage")}
+                    >
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <rect x="3" y="3" width="18" height="18" rx="2" />
+                        <circle cx="8.5" cy="8.5" r="1.5" />
+                        <polyline points="21 15 16 10 5 21" />
+                        <line x1="12" y1="5" x2="12" y2="11" />
+                        <line x1="9" y1="8" x2="15" y2="8" />
+                      </svg>
+                    </button>
+                    <ReportsDocumentMenu report={selectedDocument} />
+                  </div>
                 </header>
               )}
 
@@ -797,6 +1225,13 @@ export function ReportsPage() {
                 <article
                   ref={articleRef}
                   className="reports-markdown"
+                  onClick={handleArticleClick}
+                  onKeyDown={handleArticleKeyDown}
+                  onKeyUp={updateSelectionDraft}
+                  onMouseUp={updateSelectionDraft}
+                  onTouchEnd={() => {
+                    window.setTimeout(updateSelectionDraft, 0);
+                  }}
                   // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered sanitized markdown HTML
                   dangerouslySetInnerHTML={renderedMarkup}
                 />

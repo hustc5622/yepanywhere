@@ -471,6 +471,36 @@ export interface ReportsListResponse {
   documents: ReportDocument[];
 }
 
+/** Stable text selector used to relocate a comment after a report changes. */
+export interface ReportCommentAnchor {
+  /** Selected plain text in the rendered report. */
+  exact: string;
+  /** Plain text immediately before the selection. */
+  prefix: string;
+  /** Plain text immediately after the selection. */
+  suffix: string;
+  /** UTF-16 offset in the rendered report text when the comment was created. */
+  start: number;
+  /** Exclusive UTF-16 offset in the rendered report text. */
+  end: number;
+}
+
+/** A persisted inline comment attached to rendered report text. */
+export interface ReportComment {
+  id: string;
+  /** Report path relative to the configured reports directory. */
+  reportPath: string;
+  anchor: ReportCommentAnchor;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Response returned after creating or editing a report comment. */
+export interface ReportCommentMutationResponse {
+  comment: ReportComment;
+}
+
 /**
  * Rendered Markdown report returned by the report document API.
  */
@@ -480,6 +510,8 @@ export interface ReportDocumentResponse {
   content: string;
   /** Server-rendered safe HTML */
   renderedHtml: string;
+  /** Inline comments attached to rendered text in this report. */
+  comments: ReportComment[];
 }
 
 /**
@@ -487,6 +519,16 @@ export interface ReportDocumentResponse {
  */
 export interface ReportUploadResponse {
   document: ReportDocument;
+}
+
+/** Response from uploading an image asset for a report document. */
+export interface ReportImageUploadResponse {
+  /** Image path relative to the report document's directory. */
+  path: string;
+  /** Ready-to-paste Markdown image reference. */
+  markdown: string;
+  /** Browser URL served by the report image endpoint. */
+  url: string;
 }
 
 /**

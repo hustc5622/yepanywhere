@@ -21,6 +21,7 @@ import type {
 } from "./block-detector.js";
 import {
   MEDIA_EXTENSIONS,
+  type SafeMarkdownOptions,
   VIDEO_EXTENSIONS,
   isLocalFilePath,
   localMediaApiUrl,
@@ -47,7 +48,11 @@ export interface AugmentGeneratorConfig {
 }
 
 export interface AugmentGenerator {
-  processBlock(block: CompletedBlock, blockIndex: number): Promise<Augment>;
+  processBlock(
+    block: CompletedBlock,
+    blockIndex: number,
+    markdownOptions?: SafeMarkdownOptions,
+  ): Promise<Augment>;
   renderPending(pending: string): string; // Lightweight inline formatting for trailing text
   renderStreamingCodeBlock(
     block: StreamingCodeBlock,
@@ -84,13 +89,14 @@ export async function createAugmentGenerator(
     async processBlock(
       block: CompletedBlock,
       blockIndex: number,
+      markdownOptions?: SafeMarkdownOptions,
     ): Promise<Augment> {
       if (block.type === "code") {
         const html = await renderCodeBlock(block, highlighter, loadedLanguages);
         return { blockIndex, html, type: block.type };
       }
 
-      const html = renderMarkdownBlock(block);
+      const html = renderMarkdownBlock(block, markdownOptions);
       return { blockIndex, html, type: block.type };
     },
 
@@ -219,8 +225,11 @@ function renderPlainCodeBlock(code: string, lang: string): string {
 /**
  * Render a non-code markdown block with raw HTML disabled and sanitization.
  */
-function renderMarkdownBlock(block: CompletedBlock): string {
-  return renderSafeMarkdown(block.content);
+function renderMarkdownBlock(
+  block: CompletedBlock,
+  options?: SafeMarkdownOptions,
+): string {
+  return renderSafeMarkdown(block.content, options);
 }
 
 /**

@@ -1323,6 +1323,8 @@ export function createApp(options: AppOptions): AppResult {
     "/api/reports",
     createReportsRoutes({
       reportsDir: options.reportsDir,
+      dataDir: options.dataDir,
+      basePath: options.basePath,
       maxUploadSizeBytes: options.maxUploadSizeBytes,
     }),
   );

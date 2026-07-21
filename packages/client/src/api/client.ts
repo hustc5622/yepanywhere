@@ -17,7 +17,10 @@ import type {
   ProviderInfo,
   ProviderName,
   RemoteExecutorConfig,
+  ReportCommentAnchor,
+  ReportCommentMutationResponse,
   ReportDocumentResponse,
+  ReportImageUploadResponse,
   ReportUploadResponse,
   ReportsListResponse,
   SessionCreatedBy,
@@ -709,7 +712,11 @@ async function fetchBlob(
   };
 }
 
-async function uploadReportFile(file: File): Promise<ReportUploadResponse> {
+async function uploadReportForm<T>(
+  endpoint: string,
+  file: File,
+  fields: Record<string, string> = {},
+): Promise<T> {
   const headers: Record<string, string> = {
     "X-Yep-Anywhere": "true",
   };
@@ -719,8 +726,11 @@ async function uploadReportFile(file: File): Promise<ReportUploadResponse> {
 
   const formData = new FormData();
   formData.append("file", file);
+  for (const [key, value] of Object.entries(fields)) {
+    formData.append(key, value);
+  }
 
-  const res = await fetch(`${API_BASE}/reports/upload`, {
+  const res = await fetch(`${API_BASE}${endpoint}`, {
     method: "POST",
     credentials: "include",
     headers,
@@ -751,6 +761,38 @@ async function uploadReportFile(file: File): Promise<ReportUploadResponse> {
   }
 
   return res.json();
+}
+
+function uploadReportFile(file: File): Promise<ReportUploadResponse> {
+  return uploadReportForm("/reports/upload", file);
+}
+
+function uploadReportImageFile(
+  path: string,
+  file: File,
+): Promise<ReportImageUploadResponse> {
+  return uploadReportForm("/reports/images/upload", file, { path });
+}
+
+async function loadReportImageFile(
+  url: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const headers: Record<string, string> = {
+    "X-Yep-Anywhere": "true",
+  };
+  if (desktopAuthToken) {
+    headers["X-Desktop-Token"] = desktopAuthToken;
+  }
+  const response = await fetch(url, {
+    credentials: "include",
+    headers,
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load report image: HTTP ${response.status}`);
+  }
+  return response.blob();
 }
 
 export const api = {
@@ -1341,7 +1383,30 @@ export const api = {
     );
   },
 
+  createReportComment: (
+    path: string,
+    anchor: ReportCommentAnchor,
+    body: string,
+  ) =>
+    fetchJSON<ReportCommentMutationResponse>("/reports/comments", {
+      method: "POST",
+      body: JSON.stringify({ path, anchor, body }),
+    }),
+
+  updateReportComment: (path: string, id: string, body: string) =>
+    fetchJSON<ReportCommentMutationResponse>(
+      `/reports/comments/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ path, body }),
+      },
+    ),
+
   uploadReport: uploadReportFile,
+
+  uploadReportImage: uploadReportImageFile,
+
+  loadReportImage: loadReportImageFile,
 
   /**
    * Expand diff context to show full file.

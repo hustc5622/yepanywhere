@@ -13,6 +13,7 @@ import {
   createAugmentGenerator,
 } from "./augment-generator.js";
 import { BlockDetector } from "./block-detector.js";
+import type { SafeMarkdownOptions } from "./safe-markdown.js";
 
 /**
  * Default configuration for the AugmentGenerator.
@@ -65,11 +66,17 @@ async function getGenerator(): Promise<AugmentGenerator> {
  * @param markdown - The markdown text to render
  * @returns The rendered HTML string
  */
-export async function renderMarkdownToHtml(markdown: string): Promise<string> {
+export async function renderMarkdownToHtml(
+  markdown: string,
+  options?: SafeMarkdownOptions,
+): Promise<string> {
   if (!markdown.trim()) {
     return "";
   }
-  return cachedRenderMarkdownToHtml(normalizeWrappingTextFence(markdown));
+  const normalized = normalizeWrappingTextFence(markdown);
+  return options?.resolveImageUrl
+    ? renderMarkdownToHtmlUncached(normalized, options)
+    : cachedRenderMarkdownToHtml(normalized);
 }
 
 /**
@@ -203,11 +210,14 @@ function decodeXmlEntities(text: string): string {
 const CACHE_MAX_CHARS = 8_000_000;
 
 const cachedRenderMarkdownToHtml = memoizeAsyncByString(
-  renderMarkdownToHtmlUncached,
+  (markdown) => renderMarkdownToHtmlUncached(markdown),
   { maxChars: CACHE_MAX_CHARS },
 );
 
-async function renderMarkdownToHtmlUncached(markdown: string): Promise<string> {
+async function renderMarkdownToHtmlUncached(
+  markdown: string,
+  options?: SafeMarkdownOptions,
+): Promise<string> {
   const generator = await getGenerator();
   const detector = new BlockDetector();
 
@@ -225,7 +235,7 @@ async function renderMarkdownToHtmlUncached(markdown: string): Promise<string> {
   for (let i = 0; i < allBlocks.length; i++) {
     const block = allBlocks[i];
     if (!block) continue;
-    const augment = await generator.processBlock(block, i);
+    const augment = await generator.processBlock(block, i, options);
     htmlParts.push(augment.html);
   }
 

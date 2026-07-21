@@ -7226,6 +7226,51 @@ a.sidebar-nav-item {
   font-size: var(--font-size-sm);
 }
 
+.reports-reader-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.reports-reader-actions .reports-document-menu {
+  position: relative;
+  top: auto;
+  right: auto;
+}
+
+.reports-comment-hint {
+  margin: 4px 0 0;
+  color: var(--text-dimmed);
+  font-size: var(--font-size-xs);
+}
+
+.report-comment-selection-action {
+  position: fixed;
+  z-index: 1000;
+  transform: translateX(-50%);
+  padding: 7px 12px;
+  background: var(--app-yep-green-dark);
+  border: 1px solid color-mix(in srgb, var(--app-yep-green) 65%, white);
+  border-radius: 999px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+  color: white;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.report-comment-selection-action:hover {
+  background: var(--app-yep-green);
+}
+
+.report-comment-selection-action:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
+
 .reports-mobile-selector {
   display: flex;
   flex-direction: column;
@@ -7510,9 +7555,22 @@ a.sidebar-nav-item {
 }
 
 .reports-markdown img {
+  display: block;
   max-width: 100%;
+  max-height: min(72vh, 960px);
   height: auto;
+  margin: 1.25rem auto;
+  object-fit: contain;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+}
+
+.reports-markdown img.report-image-load-failed {
+  min-height: 80px;
+  padding: var(--space-3);
+  border-color: var(--error-color);
+  color: var(--error-color);
 }
 
 .reports-markdown hr {
@@ -7520,6 +7578,84 @@ a.sidebar-nav-item {
   margin: 1.6rem 0;
   background: var(--border-subtle);
   border: none;
+}
+
+.reports-markdown .report-comment-highlight {
+  padding: 0;
+  background: color-mix(in srgb, var(--app-yep-green) 12%, transparent);
+  color: inherit;
+  cursor: pointer;
+  text-decoration-line: underline;
+  text-decoration-color: var(--app-yep-green);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  border-radius: 2px;
+}
+
+.reports-markdown .report-comment-highlight:hover,
+.reports-markdown .report-comment-highlight:focus-visible {
+  background: color-mix(in srgb, var(--app-yep-green) 22%, transparent);
+}
+
+.reports-markdown .report-comment-highlight:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
+
+.modal:has(.report-comment-editor) {
+  max-width: 560px;
+}
+
+.report-comment-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2);
+}
+
+.report-comment-quote {
+  max-height: 150px;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--app-yep-green);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.report-comment-label {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.report-comment-editor textarea {
+  width: 100%;
+  min-height: 132px;
+  padding: var(--space-3);
+  resize: vertical;
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.report-comment-editor textarea:focus {
+  outline: none;
+  border-color: var(--focus-border);
+}
+
+.report-comment-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 
 @media (min-width: 1100px) {
