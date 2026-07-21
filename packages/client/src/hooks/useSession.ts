@@ -1,6 +1,5 @@
 import {
   type AgentActivity,
-  DEFAULT_PERMISSION_MODE,
   type MarkdownAugment,
   type ProviderName,
   getModelContextWindow,
@@ -20,6 +19,16 @@ import type {
   SessionRetryStatus,
   SessionStatus,
 } from "../types";
+import { usePendingMessages } from "./usePendingMessages";
+import { useSessionPermissionMode } from "./useSessionPermissionMode";
+
+// Re-exported for backward compatibility with existing consumers/tests that
+// import these from useSession; the implementation now lives in
+// usePendingMessages.
+export {
+  type PendingMessage,
+  reconcilePendingMessagesWithConfirmedMessages,
+} from "./usePendingMessages";
 
 /** Bridge-reported health of the most recent turn (retry/failure surface). */
 export interface SessionTurnHealth {
@@ -107,92 +116,11 @@ const THROTTLE_MS = 500;
 // Re-export StreamingMarkdownCallbacks for consumers
 export type { StreamingMarkdownCallbacks } from "./useStreamingContent";
 
-/** Pending message waiting for server confirmation */
-export interface PendingMessage {
-  tempId: string;
-  content: string;
-  timestamp: string;
-  /** Display status text (e.g. "Uploading...", "Sending..."). Defaults to "Sending..." */
-  status?: string;
-}
-
 /** Deferred message queued server-side, waiting for agent's turn to end */
 export interface DeferredMessage {
   tempId?: string;
   content: string;
   timestamp: string;
-}
-
-function getUserMessageText(message: Message): string | null {
-  const role =
-    (message.message as { role?: unknown } | undefined)?.role ?? message.role;
-  const isUserMessage = message.type === "user" || role === "user";
-  if (!isUserMessage) return null;
-
-  const content = message.message?.content ?? message.content;
-  if (typeof content === "string") {
-    const trimmed = content.trim();
-    return trimmed.length > 0 ? content : null;
-  }
-
-  if (!Array.isArray(content)) return null;
-
-  const text = content
-    .map((block) => {
-      if (!block || typeof block !== "object") return "";
-      return typeof block.text === "string" ? block.text : "";
-    })
-    .join("");
-  return text.trim().length > 0 ? text : null;
-}
-
-function isPendingMessageConfirmed(
-  pending: PendingMessage,
-  message: Message,
-): boolean {
-  const tempId = (message as { tempId?: unknown }).tempId;
-  if (typeof tempId === "string" && tempId === pending.tempId) {
-    return true;
-  }
-
-  const messageTimestampMs =
-    typeof message.timestamp === "string"
-      ? Date.parse(message.timestamp)
-      : Number.NaN;
-  const pendingTimestampMs = Date.parse(pending.timestamp);
-  if (
-    Number.isFinite(messageTimestampMs) &&
-    Number.isFinite(pendingTimestampMs) &&
-    messageTimestampMs < pendingTimestampMs - 5000
-  ) {
-    return false;
-  }
-
-  const pendingText = pending.content.trim();
-  if (!pendingText) return false;
-
-  const messageText = getUserMessageText(message)?.trim();
-  if (!messageText) return false;
-
-  return (
-    messageText === pendingText ||
-    messageText.startsWith(`${pendingText}\n\nUser uploaded files:`)
-  );
-}
-
-export function reconcilePendingMessagesWithConfirmedMessages(
-  pendingMessages: PendingMessage[],
-  messages: Message[],
-): PendingMessage[] {
-  if (pendingMessages.length === 0 || messages.length === 0) {
-    return pendingMessages;
-  }
-
-  const next = pendingMessages.filter(
-    (pending) =>
-      !messages.some((message) => isPendingMessageConfirmed(pending, message)),
-  );
-  return next.length === pendingMessages.length ? pendingMessages : next;
 }
 
 function normalizeMetadataTitle(title: string): string | undefined {
@@ -308,10 +236,6 @@ export function useSession(
     string | null
   >(null);
 
-  // Pending messages queue - messages waiting for server confirmation
-  // These are displayed separately from the main message list
-  const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
-
   // Deferred messages queue - messages queued server-side waiting for agent's turn to end
   const [deferredMessages, setDeferredMessages] = useState<DeferredMessage[]>(
     [],
@@ -325,14 +249,13 @@ export function useSession(
     Record<string, MarkdownAugment>
   >({});
 
-  // Permission mode state: localMode is UI-selected, serverMode is confirmed by server
-  const [localMode, setLocalMode] = useState<PermissionMode>(
-    DEFAULT_PERMISSION_MODE,
-  );
-  const [serverMode, setServerMode] = useState<PermissionMode>(
-    DEFAULT_PERMISSION_MODE,
-  );
-  const [modeVersion, setModeVersion] = useState<number>(0);
+  // Permission mode (UI-selected + server-confirmed) is owned by a dedicated hook.
+  const {
+    permissionMode,
+    modeVersion,
+    applyServerModeUpdate,
+    setPermissionMode,
+  } = useSessionPermissionMode(sessionId, status.owner);
   // Track whether we've already processed a stream "connected" event in this mount.
   // For Codex providers, the first connected-event catch-up fetch can duplicate
   // freshly streamed messages because JSONL and stream IDs are not yet aligned.
@@ -351,21 +274,6 @@ export function useSession(
   const [sessionTools, setSessionTools] = useState<string[]>([]);
   // MCP servers available for this session (from init message)
   const [mcpServers, setMcpServers] = useState<string[]>([]);
-  const lastKnownModeVersionRef = useRef<number>(0);
-
-  // Apply server mode update only if version is >= our last known version
-  // This syncs both local and server mode to the confirmed value
-  const applyServerModeUpdate = useCallback(
-    (mode: PermissionMode, version: number) => {
-      if (version >= lastKnownModeVersionRef.current) {
-        lastKnownModeVersionRef.current = version;
-        setServerMode(mode);
-        setLocalMode(mode); // Sync local to server-confirmed mode
-        setModeVersion(version);
-      }
-    },
-    [],
-  );
 
   // Handle initial load completion from useSessionMessages
   const handleLoadComplete = useCallback(
@@ -468,6 +376,15 @@ export function useSession(
     onLoadError: handleLoadError,
   });
 
+  // Optimistic pending-message queue, reconciled against `messages` inside the hook.
+  const {
+    pendingMessages,
+    setPendingMessages,
+    addPendingMessage,
+    removePendingMessage,
+    updatePendingMessage,
+  } = usePendingMessages(messages);
+
   // OpenCode's live user echo carries Yep's temporary UUID while persisted
   // history uses the provider-native message ID required for edit forks. Once
   // a turn settles, replace the whole visible snapshot so an incremental
@@ -494,36 +411,6 @@ export function useSession(
       }
     };
   }, []);
-
-  useEffect(() => {
-    setPendingMessages((prev) =>
-      reconcilePendingMessagesWithConfirmedMessages(prev, messages),
-    );
-  }, [messages]);
-
-  // Update local mode (UI selection) and sync to server if process is active
-  const setPermissionMode = useCallback(
-    async (mode: PermissionMode) => {
-      setLocalMode(mode);
-
-      // If there's an active process, immediately sync to server
-      if (status.owner === "self" || status.owner === "external") {
-        try {
-          const result = await api.setPermissionMode(sessionId, mode);
-          // Update server-confirmed mode
-          if (result.modeVersion >= lastKnownModeVersionRef.current) {
-            lastKnownModeVersionRef.current = result.modeVersion;
-            setServerMode(result.permissionMode);
-            setModeVersion(result.modeVersion);
-          }
-        } catch (err) {
-          // If API fails (e.g., no active process), mode will be sent on next message
-          console.warn("Failed to sync permission mode:", err);
-        }
-      }
-    },
-    [sessionId, status.owner],
-  );
 
   // Set hold state (soft pause) for the session
   const setHold = useCallback(
@@ -555,32 +442,6 @@ export function useSession(
     timer: ReturnType<typeof setTimeout> | null;
     pending: boolean;
   }>({ timer: null, pending: false });
-
-  // Add a message to the pending queue
-  // Generates a tempId that will be sent to the server and echoed back in stream
-  const addPendingMessage = useCallback((content: string): string => {
-    const tempId = `temp-${generateUUID()}`;
-    setPendingMessages((prev) => [
-      ...prev,
-      { tempId, content, timestamp: new Date().toISOString() },
-    ]);
-    return tempId;
-  }, []);
-
-  // Remove a pending message by tempId (used when server confirms or send fails)
-  const removePendingMessage = useCallback((tempId: string) => {
-    setPendingMessages((prev) => prev.filter((p) => p.tempId !== tempId));
-  }, []);
-
-  // Update a pending message's fields (e.g. status text)
-  const updatePendingMessage = useCallback(
-    (tempId: string, updates: Partial<PendingMessage>) => {
-      setPendingMessages((prev) =>
-        prev.map((p) => (p.tempId === tempId ? { ...p, ...updates } : p)),
-      );
-    },
-    [],
-  );
 
   // Track if we've loaded pending agents for this session
   const pendingAgentsLoadedRef = useRef<string | null>(null);
@@ -1383,6 +1244,7 @@ export function useSession(
       handleStreamEvent,
       clearStreamingPlaceholders,
       removePendingMessage,
+      setPendingMessages,
       streamingMarkdownCallbacks,
       handleStreamMessageEvent,
       handleStreamSubagentMessage,
@@ -1489,7 +1351,7 @@ export function useSession(
     isHeld: processState === "hold", // Derived from process state
     pendingInputRequest,
     actualSessionId, // Real session ID from server (may differ from URL during temp→real transition)
-    permissionMode: localMode, // UI-selected mode (sent with next message)
+    permissionMode, // UI-selected mode (sent with next message)
     modeVersion,
     loading,
     error,
