@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "../../types";
 import type { RenderItem } from "../../types/renderItems";
@@ -160,5 +160,51 @@ describe("MessageList target loading", () => {
 
     await waitFor(() => expect(onBranchFocused).toHaveBeenCalledTimes(1));
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+});
+
+describe("MessageList virtualization", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("mounts every row for short sessions (non-virtualized path)", () => {
+    const items = Array.from({ length: 5 }, (_, i) => userPromptItem(`u${i}`));
+    render(<MessageList messages={[]} preprocessedItems={items} />);
+    expect(screen.queryAllByTestId(/^render-item-/)).toHaveLength(5);
+  });
+
+  it("mounts only a windowed subset for long sessions", () => {
+    const items = Array.from({ length: 150 }, (_, i) =>
+      userPromptItem(`u${i}`),
+    );
+    const { container } = render(
+      <MessageList messages={[]} preprocessedItems={items} />,
+    );
+    // The list container still mounts (component didn't bail/crash)...
+    expect(container.querySelector(".message-list")).not.toBeNull();
+    // ...but only a windowed subset of the 150 rows is in the DOM.
+    // (jsdom reports a 0px viewport, so the exact window size isn't asserted;
+    // the guard is that virtualization engaged and did NOT render all 150.)
+    expect(screen.queryAllByTestId(/^render-item-/).length).toBeLessThan(150);
   });
 });

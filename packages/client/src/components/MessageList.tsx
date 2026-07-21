@@ -1,5 +1,14 @@
+import { useVirtualizer } from "@tanstack/react-virtual";
 import type { MarkdownAugment } from "@yep-anywhere/shared";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   type ActiveToolApproval,
   isPlanProgressItem,
@@ -11,60 +20,23 @@ import { getMessageId } from "../utils";
 import { MessageActions } from "./MessageActions";
 import { ProcessingIndicator } from "./ProcessingIndicator";
 import { RenderItemComponent } from "./RenderItemComponent";
+import {
+  type DeferredMessage,
+  type MessageRow,
+  type PendingMessage,
+  buildMessageRows,
+  getBranchId,
+  getRowKey,
+} from "./messageRows";
 
 /**
- * Groups consecutive assistant items (text, thinking, tool_call) into turns.
- * User prompts break the grouping and are returned as separate groups.
+ * Above this many rows, mount only a windowed slice of the list.
+ * Short sessions (the overwhelming majority) stay on the plain, fully-rendered
+ * path so their scroll/anchor behavior is byte-for-byte identical to before.
  */
-function groupItemsIntoTurns(
-  items: RenderItem[],
-): Array<{ isUserPrompt: boolean; items: RenderItem[] }> {
-  const groups: Array<{ isUserPrompt: boolean; items: RenderItem[] }> = [];
-  let currentAssistantGroup: RenderItem[] = [];
-
-  for (const item of items) {
-    if (item.type === "user_prompt" || item.type === "session_setup") {
-      // Flush any pending assistant items
-      if (currentAssistantGroup.length > 0) {
-        groups.push({ isUserPrompt: false, items: currentAssistantGroup });
-        currentAssistantGroup = [];
-      }
-      // User prompt is its own group
-      groups.push({ isUserPrompt: true, items: [item] });
-    } else {
-      // Accumulate assistant items
-      currentAssistantGroup.push(item);
-    }
-  }
-
-  // Flush remaining assistant items
-  if (currentAssistantGroup.length > 0) {
-    groups.push({ isUserPrompt: false, items: currentAssistantGroup });
-  }
-
-  return groups;
-}
-
-function getBranchId(item: RenderItem): string | undefined {
-  if (item.type !== "user_prompt") return undefined;
-  const source = item.sourceMessages[0];
-  return source?.branch?.branchId ?? source?.codexBranch?.branchId;
-}
-
-/** Pending message waiting for server confirmation */
-interface PendingMessage {
-  tempId: string;
-  content: string;
-  timestamp: string;
-  status?: string;
-}
-
-/** Deferred message queued server-side */
-interface DeferredMessage {
-  tempId?: string;
-  content: string;
-  timestamp: string;
-}
+const VIRTUALIZE_ROW_THRESHOLD = 80;
+/** Rough per-row height guess used before a row has been measured. */
+const ESTIMATED_ROW_HEIGHT = 320;
 
 interface Props {
   messages: Message[];
@@ -158,12 +130,35 @@ export const MessageList = memo(function MessageList({
   const isProgrammaticScrollRef = useRef(false);
   const lastHeightRef = useRef(0);
   const followUpScrollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Virtualization plumbing. scrollToBottom binds once (deps []) so it reads the
+  // live virtualizer + row count through refs instead of closing over them.
+  const virtualizerRef = useRef<ReturnType<
+    typeof useVirtualizer<HTMLElement, Element>
+  > | null>(null);
+  const virtualizeEnabledRef = useRef(false);
+  const rowCountRef = useRef(0);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
 
   // Scroll to bottom, marking it as programmatic so scroll handler ignores it
   const scrollToBottom = useCallback((container: HTMLElement) => {
+    // In virtualized mode the true bottom may not be measured yet, so defer to
+    // the virtualizer which re-measures and converges on the last row.
+    const scrollToLastRow = () => {
+      const virtualizer = virtualizerRef.current;
+      const lastIndex = rowCountRef.current - 1;
+      if (virtualizer && lastIndex >= 0) {
+        virtualizer.scrollToIndex(lastIndex, { align: "end" });
+      } else {
+        container.scrollTop = container.scrollHeight - container.clientHeight;
+      }
+    };
+
     isProgrammaticScrollRef.current = true;
-    container.scrollTop = container.scrollHeight - container.clientHeight;
+    if (virtualizeEnabledRef.current) {
+      scrollToLastRow();
+    } else {
+      container.scrollTop = container.scrollHeight - container.clientHeight;
+    }
     lastHeightRef.current = container.scrollHeight;
 
     // Clear programmatic flag after scroll events have fired
@@ -179,7 +174,11 @@ export const MessageList = memo(function MessageList({
       followUpScrollRef.current = null;
       if (shouldAutoScrollRef.current) {
         isProgrammaticScrollRef.current = true;
-        container.scrollTop = container.scrollHeight - container.clientHeight;
+        if (virtualizeEnabledRef.current) {
+          scrollToLastRow();
+        } else {
+          container.scrollTop = container.scrollHeight - container.clientHeight;
+        }
         lastHeightRef.current = container.scrollHeight;
         requestAnimationFrame(() => {
           isProgrammaticScrollRef.current = false;
@@ -202,10 +201,6 @@ export const MessageList = memo(function MessageList({
     () => renderItems.filter((item) => !isPlanProgressItem(item)),
     [renderItems],
   );
-  const turnGroups = useMemo(
-    () => groupItemsIntoTurns(visibleRenderItems),
-    [visibleRenderItems],
-  );
   const focusedBranchItemId = useMemo(() => {
     if (!focusBranchId) return null;
     return (
@@ -223,6 +218,55 @@ export const MessageList = memo(function MessageList({
       )?.id ?? null
     );
   }, [targetMessageId, visibleRenderItems]);
+
+  // Flatten everything (turns + header/footer blocks) into one row model so the
+  // list can be rendered — and later virtualized — as a single sequence.
+  const rows = useMemo(
+    () =>
+      buildMessageRows({
+        items: visibleRenderItems,
+        hasOlderMessages,
+        hasNewerMessages,
+        pendingMessages,
+        deferredMessages,
+        isCompacting,
+        focusedBranchItemId,
+        targetItemId,
+      }),
+    [
+      visibleRenderItems,
+      hasOlderMessages,
+      hasNewerMessages,
+      pendingMessages,
+      deferredMessages,
+      isCompacting,
+      focusedBranchItemId,
+      targetItemId,
+    ],
+  );
+
+  // Only window long lists, and never while a branch/target focus is pending —
+  // those flows scroll to and highlight a specific DOM node, which must be
+  // mounted. Both flags are transient (cleared by onBranchFocused /
+  // onTargetFocused), so virtualization re-engages right after.
+  const shouldVirtualize =
+    rows.length > VIRTUALIZE_ROW_THRESHOLD &&
+    !focusBranchId &&
+    !targetMessageId;
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => containerRef.current?.parentElement ?? null,
+    estimateSize: () => ESTIMATED_ROW_HEIGHT,
+    overscan: 6,
+    // Stable per-row keys keep measured heights when rows are prepended
+    // (load-older), so the scroll-anchor delta stays accurate.
+    getItemKey: (index) => getRowKey(rows[index] as MessageRow),
+    enabled: shouldVirtualize,
+  });
+  virtualizerRef.current = virtualizer;
+  virtualizeEnabledRef.current = shouldVirtualize;
+  rowCountRef.current = rows.length;
 
   const toggleThinkingExpanded = useCallback(() => {
     setThinkingExpanded((prev) => !prev);
@@ -477,88 +521,65 @@ export const MessageList = memo(function MessageList({
     onTargetFocused,
   ]);
 
-  return (
-    <div className="message-list" ref={containerRef}>
-      {hasOlderMessages && (
-        <div className="load-older-messages">
-          <button
-            type="button"
-            className="load-older-button"
-            onClick={handleLoadOlder}
-            disabled={loadingOlder}
-          >
-            {loadingOlder ? (
-              <>
-                <span className="spinning">&#x21BB;</span> Loading...
-              </>
-            ) : (
-              "Load older messages"
-            )}
-          </button>
-        </div>
-      )}
-      {turnGroups.map((group) => {
-        if (group.isUserPrompt) {
-          // User prompts render directly without timeline wrapper
-          const item = group.items[0];
-          if (!item) return null;
-          const shouldFocusBranch = item.id === focusedBranchItemId;
-          const isTarget = item.id === targetItemId;
-          const renderedItem = (
-            <RenderItemComponent
-              key={item.id}
-              item={item}
-              isStreaming={isStreaming}
-              thinkingExpanded={thinkingExpanded}
-              toggleThinkingExpanded={toggleThinkingExpanded}
-              sessionProvider={provider}
-              onEditUserPrompt={onEditUserPrompt}
-              onSelectBranch={onSelectBranch}
-            />
-          );
-          if (!shouldFocusBranch && !isTarget) return renderedItem;
-          return (
-            <div
-              key={item.id}
-              ref={(node) => {
-                if (shouldFocusBranch) focusedBranchRef.current = node;
-                if (isTarget) targetMessageRef.current = node;
-              }}
-              className={
-                shouldFocusBranch ? "codex-branch-focus-target" : undefined
-              }
-              tabIndex={shouldFocusBranch ? -1 : undefined}
+  const renderRow = (row: MessageRow) => {
+    switch (row.kind) {
+      case "load-older":
+        return (
+          <div className="load-older-messages">
+            <button
+              type="button"
+              className="load-older-button"
+              onClick={handleLoadOlder}
+              disabled={loadingOlder}
             >
-              {renderedItem}
-            </div>
-          );
-        }
-        // Assistant items wrapped in timeline container - key based on first item
-        const firstItem = group.items[0];
-        if (!firstItem) return null;
-        const turnTimestamp = firstItem.sourceMessages[0]?.timestamp;
-        // Concatenate text-block content for the copy button; tool calls and
-        // thinking blocks are skipped because copying their structured form
-        // as plain text isn't useful.
-        const turnCopyText = group.items
-          .filter(
-            (item): item is RenderItem & { type: "text"; text: string } =>
-              item.type === "text" &&
-              typeof (item as { text?: unknown }).text === "string",
-          )
-          .map((item) => item.text)
-          .join("\n\n")
-          .trim();
-        const turnHasTarget = group.items.some(
-          (item) => item.id === targetItemId,
+              {loadingOlder ? (
+                <>
+                  <span className="spinning">&#x21BB;</span> Loading...
+                </>
+              ) : (
+                "Load older messages"
+              )}
+            </button>
+          </div>
         );
+      case "user-prompt": {
+        // User prompts render directly without timeline wrapper
+        const { item, shouldFocusBranch, isTarget } = row;
+        const renderedItem = (
+          <RenderItemComponent
+            item={item}
+            isStreaming={isStreaming}
+            thinkingExpanded={thinkingExpanded}
+            toggleThinkingExpanded={toggleThinkingExpanded}
+            sessionProvider={provider}
+            onEditUserPrompt={onEditUserPrompt}
+            onSelectBranch={onSelectBranch}
+          />
+        );
+        if (!shouldFocusBranch && !isTarget) return renderedItem;
         return (
           <div
-            key={`turn-${firstItem.id}`}
-            className="assistant-turn"
-            ref={turnHasTarget ? targetMessageRef : undefined}
+            ref={(node) => {
+              if (shouldFocusBranch) focusedBranchRef.current = node;
+              if (isTarget) targetMessageRef.current = node;
+            }}
+            className={
+              shouldFocusBranch ? "codex-branch-focus-target" : undefined
+            }
+            tabIndex={shouldFocusBranch ? -1 : undefined}
           >
-            {group.items.map((item) => (
+            {renderedItem}
+          </div>
+        );
+      }
+      case "assistant-turn":
+        // Assistant items wrapped in timeline container
+        return (
+          <div
+            className="assistant-turn"
+            ref={row.turnHasTarget ? targetMessageRef : undefined}
+          >
+            {row.items.map((item) => (
               <RenderItemComponent
                 key={item.id}
                 item={item}
@@ -570,75 +591,118 @@ export const MessageList = memo(function MessageList({
               />
             ))}
             <MessageActions
-              timestamp={turnTimestamp}
-              copyText={turnCopyText || undefined}
+              timestamp={row.turnTimestamp}
+              copyText={row.turnCopyText}
             />
           </div>
         );
-      })}
-      {hasNewerMessages && (
-        <div className="load-older-messages">
-          <button
-            type="button"
-            className="load-older-button"
-            onClick={handleLoadNewer}
-            disabled={loadingNewer}
-          >
-            {loadingNewer ? (
-              <>
-                <span className="spinning">&#x21BB;</span> Loading...
-              </>
-            ) : (
-              "Load newer messages"
-            )}
-          </button>
-        </div>
-      )}
-      {/* Pending messages - shown as "Uploading..." or "Sending..." until server confirms */}
-      {pendingMessages.map((pending) => (
-        <div key={pending.tempId} className="pending-message">
-          <div className="message-user-prompt pending-message-bubble">
-            {pending.content}
+      case "load-newer":
+        return (
+          <div className="load-older-messages">
+            <button
+              type="button"
+              className="load-older-button"
+              onClick={handleLoadNewer}
+              disabled={loadingNewer}
+            >
+              {loadingNewer ? (
+                <>
+                  <span className="spinning">&#x21BB;</span> Loading...
+                </>
+              ) : (
+                "Load newer messages"
+              )}
+            </button>
           </div>
-          <div className="pending-message-status">
-            {pending.status || "Sending..."}
+        );
+      case "pending":
+        // Shown as "Uploading..." or "Sending..." until server confirms
+        return (
+          <div className="pending-message">
+            <div className="message-user-prompt pending-message-bubble">
+              {row.pending.content}
+            </div>
+            <div className="pending-message-status">
+              {row.pending.status || "Sending..."}
+            </div>
           </div>
-        </div>
+        );
+      case "deferred":
+        // Queued server-side, waiting for agent turn to end
+        return (
+          <div className="deferred-message">
+            <div className="message-user-prompt deferred-message-bubble">
+              {row.deferred.content}
+            </div>
+            <div className="deferred-message-footer">
+              <span className="deferred-message-status">
+                {row.index === 0
+                  ? "Queued (next)"
+                  : `Queued (#${row.index + 1})`}
+              </span>
+              {row.deferred.tempId && onCancelDeferred && (
+                <button
+                  type="button"
+                  className="deferred-message-cancel"
+                  onClick={() =>
+                    onCancelDeferred(row.deferred.tempId as string)
+                  }
+                  aria-label="Cancel queued message"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      case "compacting":
+        // Shown when context is being compressed
+        return (
+          <div className="system-message system-message-compacting">
+            <span className="system-message-icon spinning">⟳</span>
+            <span className="system-message-text">Compacting context...</span>
+          </div>
+        );
+      case "processing":
+        return <ProcessingIndicator isProcessing={isProcessing} />;
+    }
+  };
+
+  if (shouldVirtualize) {
+    const virtualItems = virtualizer.getVirtualItems();
+    const totalSize = virtualizer.getTotalSize();
+    const firstItem = virtualItems[0];
+    const lastItem = virtualItems[virtualItems.length - 1];
+    const paddingTop = firstItem ? firstItem.start : 0;
+    const paddingBottom = lastItem ? totalSize - lastItem.end : 0;
+    return (
+      <div className="message-list" ref={containerRef}>
+        {paddingTop > 0 && <div style={{ height: paddingTop }} aria-hidden />}
+        {virtualItems.map((vItem) => {
+          const row = rows[vItem.index];
+          if (!row) return null;
+          return (
+            <div
+              key={vItem.key}
+              data-index={vItem.index}
+              ref={virtualizer.measureElement}
+            >
+              {renderRow(row)}
+            </div>
+          );
+        })}
+        {paddingBottom > 0 && (
+          <div style={{ height: paddingBottom }} aria-hidden />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="message-list" ref={containerRef}>
+      {rows.map((row) => (
+        <Fragment key={getRowKey(row)}>{renderRow(row)}</Fragment>
       ))}
-      {/* Deferred messages - queued server-side, waiting for agent turn to end */}
-      {deferredMessages.map((deferred, index) => (
-        <div
-          key={deferred.tempId ?? `deferred-${index}`}
-          className="deferred-message"
-        >
-          <div className="message-user-prompt deferred-message-bubble">
-            {deferred.content}
-          </div>
-          <div className="deferred-message-footer">
-            <span className="deferred-message-status">
-              {index === 0 ? "Queued (next)" : `Queued (#${index + 1})`}
-            </span>
-            {deferred.tempId && onCancelDeferred && (
-              <button
-                type="button"
-                className="deferred-message-cancel"
-                onClick={() => onCancelDeferred(deferred.tempId as string)}
-                aria-label="Cancel queued message"
-              >
-                ×
-              </button>
-            )}
-          </div>
-        </div>
-      ))}
-      {/* Compacting indicator - shown when context is being compressed */}
-      {isCompacting && (
-        <div className="system-message system-message-compacting">
-          <span className="system-message-icon spinning">⟳</span>
-          <span className="system-message-text">Compacting context...</span>
-        </div>
-      )}
-      <ProcessingIndicator isProcessing={isProcessing} />
     </div>
   );
 });
