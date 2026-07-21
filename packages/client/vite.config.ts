@@ -61,7 +61,11 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes("node_modules")) return;
           if (id.includes("/@xterm/")) return "vendor-xterm";
-          if (id.includes("/react/") || id.includes("/react-dom/")) {
+          if (
+            id.includes("/react/") ||
+            id.includes("/react-dom/") ||
+            id.includes("/scheduler/")
+          ) {
             return "vendor-react";
           }
           if (
