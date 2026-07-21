@@ -1672,11 +1672,18 @@ h2 {
 }
 
 .session-inspector-file-dot,
-.session-inspector-check-dot,
+.session-inspector-check-dot {
+  width: 8px;
+  height: 8px;
+  margin: 5px 5px 0;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dimmed);
+}
+
 .session-inspector-channel-dot {
   width: 8px;
   height: 8px;
-  margin-top: 5px;
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--text-dimmed);

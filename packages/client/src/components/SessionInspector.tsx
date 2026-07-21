@@ -297,38 +297,6 @@ export function SessionInspector({
 
       {planProgress && <InspectorPlanProgress progress={planProgress} t={t} />}
 
-      {subagents.length > 0 && (
-        <InspectorSection
-          title={t("sessionInspectorSubagents")}
-          count={subagents.length}
-        >
-          <ul className="session-inspector-list">
-            {subagents.map((subagent) => (
-              <li key={subagent.sessionId}>
-                <Link
-                  className="session-inspector-row"
-                  to={`${basePath}/projects/${projectId}/sessions/${subagent.sessionId}`}
-                  title={subagent.description || subagent.sessionId}
-                >
-                  <span
-                    className={`session-inspector-check-dot status-${getSubagentDotStatus(subagent.status)}`}
-                  />
-                  <span className="session-inspector-row-main">
-                    <span className="session-inspector-row-title">
-                      {subagent.description || subagent.sessionId}
-                    </span>
-                    <span className="session-inspector-row-meta">
-                      {subagent.agent ? `${subagent.agent} · ` : ""}
-                      {getSubagentStatusLabel(t, subagent.status)}
-                    </span>
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </InspectorSection>
-      )}
-
       {presentation === "drawer" && (
         <div className="session-inspector-tabs" role="tablist">
           {BASE_TAB_KEYS.map((tab) => (
@@ -347,6 +315,39 @@ export function SessionInspector({
       )}
 
       <div className="session-inspector-content">
+        {subagents.length > 0 && (
+          <InspectorSection
+            title={t("sessionInspectorSubagents")}
+            count={subagents.length}
+          >
+            <ul className="session-inspector-list">
+              {subagents.map((subagent) => (
+                <li key={subagent.sessionId}>
+                  <Link
+                    className="session-inspector-row"
+                    to={`${basePath}/projects/${projectId}/sessions/${subagent.sessionId}`}
+                    title={subagent.description || subagent.sessionId}
+                  >
+                    <span
+                      className={`session-inspector-check-dot status-${getSubagentDotStatus(subagent.status)}`}
+                      aria-hidden="true"
+                    />
+                    <span className="session-inspector-row-main">
+                      <span className="session-inspector-row-title">
+                        {subagent.description || subagent.sessionId}
+                      </span>
+                      <span className="session-inspector-row-meta">
+                        {subagent.agent ? `${subagent.agent} · ` : ""}
+                        {getSubagentStatusLabel(t, subagent.status)}
+                      </span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </InspectorSection>
+        )}
+
         {presentation === "sidebar" || activeTab === "questions" ? (
           <InspectorSection
             title={t("sessionInspectorQuestions")}

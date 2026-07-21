@@ -123,6 +123,7 @@ describe("SessionInspector", () => {
     expect(link.getAttribute("href")).toBe(
       "/projects/project-1/sessions/ses_child",
     );
+    expect(link.closest(".session-inspector-content")).not.toBeNull();
     expect(screen.getByText("explore", { exact: false })).not.toBeNull();
   });
 
