@@ -95,6 +95,7 @@ Environment overrides:
   OPENCODE_LLM_API_KEY         API key for managed OpenCode model requests
   OPENCODE_LLM_API_BASE        API base for managed OpenCode model requests
   OPENCODE_LLM_SUB_MODULE      X-Sub-Module header for managed OpenCode model requests
+  NEW_LLM_API_KEY              Secondary API key exposed to custom OpenCode providers
   SESSION_TITLE_MODEL          Model for AI session titles (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION     Set false to disable AI session titles
   SESSION_TITLE_TIMEOUT_MS     Request timeout for AI session title generation
@@ -312,6 +313,9 @@ write_opencode_bridge_plist() {
   if [[ -n "$OPENCODE_LLM_SUB_MODULE_VALUE" ]]; then
     env_args+=("OPENCODE_LLM_SUB_MODULE" "$OPENCODE_LLM_SUB_MODULE_VALUE")
   fi
+  if [[ -n "${NEW_LLM_API_KEY:-}" ]]; then
+    env_args+=("NEW_LLM_API_KEY" "$NEW_LLM_API_KEY")
+  fi
 
   write_header "$plist" "$OPENCODE_BRIDGE_LABEL" "$LOG_DIR/opencode-bridge-launchd.out.log" "$LOG_DIR/opencode-bridge-launchd.err.log"
   append_env "$plist" "${env_args[@]}"
@@ -361,6 +365,9 @@ write_server_plist() {
   fi
   if [[ -n "$OPENCODE_LLM_SUB_MODULE_VALUE" ]]; then
     env_args+=("OPENCODE_LLM_SUB_MODULE" "$OPENCODE_LLM_SUB_MODULE_VALUE")
+  fi
+  if [[ -n "${NEW_LLM_API_KEY:-}" ]]; then
+    env_args+=("NEW_LLM_API_KEY" "$NEW_LLM_API_KEY")
   fi
   if [[ -n "${SESSION_TITLE_MODEL:-}" ]]; then
     env_args+=("SESSION_TITLE_MODEL" "$SESSION_TITLE_MODEL")
