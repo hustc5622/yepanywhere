@@ -281,10 +281,9 @@ export const ALL_CODEX_MCP_MODES: readonly CodexMcpMode[] = [
 ] as const;
 
 /**
- * Saved defaults for the new session form.
+ * Saved new-session options for one provider.
  */
-export interface NewSessionDefaults {
-  provider?: ProviderName;
+export interface NewSessionProviderDefaults {
   model?: string;
   thinking?: ThinkingOption;
   /** Exact provider reasoning effort / OpenCode model variant. */
@@ -293,6 +292,19 @@ export interface NewSessionDefaults {
   codexMcpMode?: CodexMcpMode;
   /** OpenCode-only managed provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
+}
+
+/**
+ * Saved defaults for the new session form.
+ *
+ * `provider` controls which provider is selected when the form opens, while
+ * `byProvider` keeps each provider's options independent. The inherited
+ * provider-option fields mirror the active provider for compatibility with
+ * older clients and servers.
+ */
+export interface NewSessionDefaults extends NewSessionProviderDefaults {
+  provider?: ProviderName;
+  byProvider?: Partial<Record<ProviderName, NewSessionProviderDefaults>>;
 }
 
 /**
@@ -356,6 +368,99 @@ export type ThinkingMode = "off" | "auto" | "on";
  * - EffortLevel (plain): Adaptive thinking with effort (backward compat with old clients)
  */
 export type ThinkingOption = "off" | "auto" | `on:${EffortLevel}` | EffortLevel;
+
+function getLegacyNewSessionProviderDefaults(
+  defaults: NewSessionDefaults,
+): NewSessionProviderDefaults | undefined {
+  const providerDefaults: NewSessionProviderDefaults = {};
+
+  if (defaults.model !== undefined) providerDefaults.model = defaults.model;
+  if (defaults.thinking !== undefined) {
+    providerDefaults.thinking = defaults.thinking;
+  }
+  if (defaults.reasoningEffort !== undefined) {
+    providerDefaults.reasoningEffort = defaults.reasoningEffort;
+  }
+  if (defaults.permissionMode !== undefined) {
+    providerDefaults.permissionMode = defaults.permissionMode;
+  }
+  if (defaults.codexMcpMode !== undefined) {
+    providerDefaults.codexMcpMode = defaults.codexMcpMode;
+  }
+  if (defaults.opencodeConfig !== undefined) {
+    providerDefaults.opencodeConfig = defaults.opencodeConfig;
+  }
+
+  return Object.keys(providerDefaults).length > 0
+    ? providerDefaults
+    : undefined;
+}
+
+/**
+ * Read one provider's saved options, falling back to the legacy active-provider
+ * mirror when loading settings written before per-provider defaults existed.
+ */
+export function getNewSessionProviderDefaults(
+  defaults: NewSessionDefaults | undefined,
+  provider: ProviderName,
+): NewSessionProviderDefaults | undefined {
+  const mappedDefaults = defaults?.byProvider?.[provider];
+  if (mappedDefaults) return mappedDefaults;
+  if (!defaults || defaults.provider !== provider) return undefined;
+  return getLegacyNewSessionProviderDefaults(defaults);
+}
+
+/**
+ * Canonicalize new-session defaults and refresh the legacy active-provider
+ * mirror. Existing per-provider entries take precedence over legacy fields.
+ */
+export function normalizeNewSessionDefaults(
+  defaults: NewSessionDefaults | undefined,
+): NewSessionDefaults | undefined {
+  if (!defaults) return undefined;
+
+  const byProvider = { ...defaults.byProvider };
+  if (defaults.provider) {
+    const legacyDefaults = getLegacyNewSessionProviderDefaults(defaults);
+    const mappedDefaults = byProvider[defaults.provider];
+    if (!mappedDefaults && legacyDefaults) {
+      byProvider[defaults.provider] = legacyDefaults;
+    }
+  }
+
+  const activeDefaults = defaults.provider
+    ? byProvider[defaults.provider]
+    : undefined;
+  const normalized: NewSessionDefaults = {
+    ...(defaults.provider ? { provider: defaults.provider } : {}),
+    ...activeDefaults,
+    ...(Object.keys(byProvider).length > 0 ? { byProvider } : {}),
+  };
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+/**
+ * Merge a partial new-session-defaults update without replacing other
+ * providers' saved options.
+ */
+export function mergeNewSessionDefaults(
+  current: NewSessionDefaults | undefined,
+  update: NewSessionDefaults,
+): NewSessionDefaults | undefined {
+  const normalizedCurrent = normalizeNewSessionDefaults(current);
+  const normalizedUpdate = normalizeNewSessionDefaults(update);
+  const provider = normalizedUpdate?.provider ?? normalizedCurrent?.provider;
+  const byProvider = {
+    ...normalizedCurrent?.byProvider,
+    ...normalizedUpdate?.byProvider,
+  };
+
+  return normalizeNewSessionDefaults({
+    ...(provider ? { provider } : {}),
+    ...(Object.keys(byProvider).length > 0 ? { byProvider } : {}),
+  });
+}
 
 /**
  * Thinking configuration for the SDK.

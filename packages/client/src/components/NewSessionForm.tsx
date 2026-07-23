@@ -2,6 +2,7 @@ import {
   type CodexMcpMode,
   DEFAULT_PERMISSION_MODE,
   type ModelInfo,
+  type NewSessionProviderDefaults,
   type OpenCodeJsonObject,
   type OpenCodeModelCapabilities,
   type OpenCodeModelLimits,
@@ -9,6 +10,7 @@ import {
   type OpenCodeSessionConfig,
   type ProviderInfo,
   type ProviderName,
+  getNewSessionProviderDefaults,
   getOpenCodeModelDefaultLimits,
   resolveModel,
 } from "@yep-anywhere/shared";
@@ -690,6 +692,104 @@ export function NewSessionForm({
       selectedModelInfo.supportsEffort === true);
   const commandButtons = useMemo(() => getStaticAgentCommandConfigs(), []);
 
+  const applyProviderSelection = useCallback(
+    (provider: ProviderInfo, savedDefaults?: NewSessionProviderDefaults) => {
+      const providerName = provider.name;
+      const models = provider.models ?? [];
+      const savedOpenCodeConfig = savedDefaults?.opencodeConfig;
+      const preferredModel =
+        providerName === "opencode"
+          ? getPreferredOpenCodeModelId(
+              models,
+              savedOpenCodeConfig?.model ??
+                savedDefaults?.model ??
+                provider.currentModel,
+            )
+          : getPreferredModelId(
+              models,
+              savedDefaults?.model ?? provider.currentModel,
+              providerName === "codex" ? DEFAULT_CODEX_MODEL : undefined,
+            );
+
+      setSelectedProvider(providerName);
+      setMode(
+        normalizeProviderPermissionMode(
+          providerName,
+          savedDefaults?.permissionMode,
+          provider.permissionModes,
+        ),
+      );
+      setSelectedCodexMcpMode(
+        providerName === "codex"
+          ? (savedDefaults?.codexMcpMode ?? "standard")
+          : "standard",
+      );
+
+      if (providerName === "opencode") {
+        const modelInfo = models.find((model) => model.id === preferredModel);
+        const supportedProtocols = modelInfo?.supportedRequestProtocols ?? [];
+        const savedProtocol = savedOpenCodeConfig?.requestProtocol;
+        const protocol =
+          savedProtocol && supportedProtocols.includes(savedProtocol)
+            ? savedProtocol
+            : (supportedProtocols[0] ?? "openai-compatible");
+        const reasoningEfforts = getModelReasoningEfforts(
+          modelInfo,
+          supportedProtocols.length > 0 ? protocol : undefined,
+        );
+
+        setSelectedOpenCodeProtocol(protocol);
+        setOpencodeCapabilities({
+          ...getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
+          ...savedOpenCodeConfig?.capabilities,
+        });
+        setOpenCodeReasoningEffort(savedDefaults?.reasoningEffort ?? null);
+        opencodeLimitsTouchedRef.current = Boolean(savedOpenCodeConfig?.limits);
+        setOpencodeContextLimit(
+          formatOpenCodeLimitInput(savedOpenCodeConfig?.limits?.context),
+        );
+        setOpencodeOutputLimit(
+          formatOpenCodeLimitInput(savedOpenCodeConfig?.limits?.output),
+        );
+        setOpencodeProviderPatch(
+          formatOpenCodeAdvancedInput(savedOpenCodeConfig?.advanced?.provider),
+        );
+        setOpencodeModelPatch(
+          formatOpenCodeAdvancedInput(savedOpenCodeConfig?.advanced?.model),
+        );
+      }
+
+      setSelectedModel(preferredModel);
+
+      const savedThinkingPreset = normalizeThinkingOption(
+        savedDefaults?.thinking,
+      );
+      const savedCodexReasoningEffort =
+        providerName === "codex"
+          ? (savedDefaults?.reasoningEffort ??
+            (savedThinkingPreset?.startsWith("on:")
+              ? savedThinkingPreset.slice(3) === "max"
+                ? "xhigh"
+                : savedThinkingPreset.slice(3)
+              : null))
+          : null;
+      setCodexReasoningEffort(savedCodexReasoningEffort);
+
+      if (savedThinkingPreset === "off" || savedThinkingPreset === "auto") {
+        setThinkingMode(savedThinkingPreset);
+      } else if (savedThinkingPreset?.startsWith("on:")) {
+        const effort = savedThinkingPreset.slice(3);
+        if (isEffortLevel(effort)) setEffortLevel(effort);
+        setThinkingMode("on");
+      } else if (savedCodexReasoningEffort) {
+        setThinkingMode("on");
+      } else if (provider.currentEffortLevel) {
+        setEffortLevel(provider.currentEffortLevel);
+      }
+    },
+    [setEffortLevel, setThinkingMode],
+  );
+
   // Initialize provider/model/mode from saved defaults once settings and providers load.
   useEffect(() => {
     if (
@@ -719,152 +819,27 @@ export function NewSessionForm({
 
     if (!initialProvider) return;
 
-    setSelectedProvider(initialProvider.name);
-    const preferredModel =
-      initialProvider.name === "opencode"
-        ? getPreferredOpenCodeModelId(
-            initialProvider.models ?? [],
-            savedDefaults?.opencodeConfig?.model ??
-              savedDefaults?.model ??
-              initialProvider.currentModel,
-          )
-        : getPreferredModelId(
-            initialProvider.models ?? [],
-            savedDefaults?.model ?? initialProvider.currentModel,
-            initialProvider.name === "codex" ? DEFAULT_CODEX_MODEL : undefined,
-          );
-    if (initialProvider.name === "opencode") {
-      const modelInfo = initialProvider.models?.find(
-        (model) => model.id === preferredModel,
-      );
-      const supportedProtocols = modelInfo?.supportedRequestProtocols ?? [];
-      const savedProtocol = savedDefaults?.opencodeConfig?.requestProtocol;
-      const initialProtocol =
-        savedProtocol && supportedProtocols.includes(savedProtocol)
-          ? savedProtocol
-          : (supportedProtocols[0] ?? "openai-compatible");
-      const initialReasoningEfforts = getModelReasoningEfforts(
-        modelInfo,
-        supportedProtocols.length > 0 ? initialProtocol : undefined,
-      );
-      setSelectedOpenCodeProtocol(initialProtocol);
-      setOpencodeCapabilities({
-        ...getDefaultOpenCodeCapabilities(initialReasoningEfforts.length > 0),
-        ...savedDefaults?.opencodeConfig?.capabilities,
-      });
-      setOpenCodeReasoningEffort(savedDefaults?.reasoningEffort ?? null);
-      setSelectedModel(preferredModel);
-    } else {
-      setSelectedModel(preferredModel);
-    }
-    setSelectedCodexMcpMode(savedDefaults?.codexMcpMode ?? "standard");
-    setOpencodeContextLimit(
-      formatOpenCodeLimitInput(savedDefaults?.opencodeConfig?.limits?.context),
+    applyProviderSelection(
+      initialProvider,
+      getNewSessionProviderDefaults(savedDefaults, initialProvider.name),
     );
-    setOpencodeOutputLimit(
-      formatOpenCodeLimitInput(savedDefaults?.opencodeConfig?.limits?.output),
-    );
-    setOpencodeProviderPatch(
-      formatOpenCodeAdvancedInput(
-        savedDefaults?.opencodeConfig?.advanced?.provider,
-      ),
-    );
-    setOpencodeModelPatch(
-      formatOpenCodeAdvancedInput(
-        savedDefaults?.opencodeConfig?.advanced?.model,
-      ),
-    );
-    setMode(
-      normalizeProviderPermissionMode(
-        initialProvider.name,
-        savedDefaults?.permissionMode,
-        initialProvider.permissionModes,
-      ),
-    );
-    const savedThinkingPreset = normalizeThinkingOption(
-      savedDefaults?.thinking,
-    );
-    if (initialProvider.name === "codex" && savedDefaults?.reasoningEffort) {
-      setCodexReasoningEffort(savedDefaults.reasoningEffort);
-      if (savedThinkingPreset) {
-        applyThinkingPreset(savedThinkingPreset);
-      } else {
-        setThinkingMode("on");
-      }
-    } else if (savedThinkingPreset) {
-      if (
-        initialProvider.name === "codex" &&
-        savedThinkingPreset.startsWith("on:")
-      ) {
-        const legacyEffort = savedThinkingPreset.slice(3);
-        setCodexReasoningEffort(
-          legacyEffort === "max" ? "xhigh" : legacyEffort,
-        );
-      }
-      applyThinkingPreset(savedThinkingPreset);
-    } else if (initialProvider.currentEffortLevel) {
-      setEffortLevel(initialProvider.currentEffortLevel);
-    }
   }, [
-    applyThinkingPreset,
+    applyProviderSelection,
     availableProviders,
     providers,
     providersLoading,
-    setEffortLevel,
-    setThinkingMode,
     settings,
     settingsLoading,
   ]);
 
-  // When provider changes, reset model based on user settings
+  // Restore each provider's own saved options when switching providers.
   const handleProviderSelect = (providerName: ProviderName) => {
-    setSelectedProvider(providerName);
     const provider = providers.find((p) => p.name === providerName);
-    setMode((currentMode) =>
-      normalizeProviderPermissionMode(
-        providerName,
-        currentMode,
-        provider?.permissionModes,
-      ),
+    if (!provider) return;
+    applyProviderSelection(
+      provider,
+      getNewSessionProviderDefaults(settings?.newSessionDefaults, providerName),
     );
-    if (provider?.models && provider.models.length > 0) {
-      const preferredModel =
-        providerName === "opencode"
-          ? getPreferredOpenCodeModelId(provider.models, provider.currentModel)
-          : getPreferredModelId(provider.models, provider.currentModel);
-      const resolvedPreferredModel =
-        providerName === "codex"
-          ? getPreferredModelId(
-              provider.models,
-              provider.currentModel,
-              DEFAULT_CODEX_MODEL,
-            )
-          : preferredModel;
-      if (providerName === "opencode") {
-        const modelInfo = provider.models.find(
-          (model) => model.id === preferredModel,
-        );
-        const protocol =
-          modelInfo?.supportedRequestProtocols?.[0] ?? "openai-compatible";
-        const reasoningEfforts = getModelReasoningEfforts(
-          modelInfo,
-          modelInfo?.supportedRequestProtocols?.length ? protocol : undefined,
-        );
-        setSelectedOpenCodeProtocol(protocol);
-        setOpencodeCapabilities(
-          getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
-        );
-        setOpenCodeReasoningEffort(null);
-        setSelectedModel(preferredModel);
-      } else {
-        setSelectedModel(resolvedPreferredModel);
-      }
-    } else {
-      setSelectedModel(null);
-    }
-    if (provider?.currentEffortLevel) {
-      setEffortLevel(provider.currentEffortLevel);
-    }
   };
 
   // Build model options for FilterDropdown
@@ -1205,19 +1180,41 @@ export function NewSessionForm({
   const claudeExecutorUnavailable =
     selectedProvider === "claude" &&
     (executorsLoading || selectedExecutor === null);
+  const currentProviderDefaults = useMemo(
+    (): NewSessionProviderDefaults => ({
+      model: selectedModelForRequest,
+      thinking: thinkingForRequest,
+      reasoningEffort: selectedReasoningEffort,
+      permissionMode: mode,
+      codexMcpMode:
+        selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
+      opencodeConfig: opencodeConfigForRequest,
+    }),
+    [
+      mode,
+      opencodeConfigForRequest,
+      selectedCodexMcpMode,
+      selectedModelForRequest,
+      selectedProvider,
+      selectedReasoningEffort,
+      thinkingForRequest,
+    ],
+  );
 
   const handleSaveDefaults = useCallback(async () => {
+    if (!selectedProvider) return;
+
     setIsSavingDefaults(true);
     try {
+      const byProvider: Partial<
+        Record<ProviderName, NewSessionProviderDefaults>
+      > = {
+        [selectedProvider]: currentProviderDefaults,
+      };
       await updateServerSetting("newSessionDefaults", {
-        provider: selectedProvider ?? undefined,
-        model: selectedModelForRequest,
-        thinking: thinkingForRequest,
-        reasoningEffort: selectedReasoningEffort,
-        permissionMode: mode,
-        codexMcpMode:
-          selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
-        opencodeConfig: opencodeConfigForRequest,
+        provider: selectedProvider,
+        ...currentProviderDefaults,
+        byProvider,
       });
       showToast(t("newSessionDefaultsSaved"), "success");
     } catch (err) {
@@ -1230,15 +1227,10 @@ export function NewSessionForm({
       setIsSavingDefaults(false);
     }
   }, [
-    mode,
-    opencodeConfigForRequest,
-    selectedCodexMcpMode,
-    selectedReasoningEffort,
-    selectedModelForRequest,
+    currentProviderDefaults,
     selectedProvider,
     showToast,
     t,
-    thinkingForRequest,
     updateServerSetting,
   ]);
 
@@ -1553,30 +1545,39 @@ export function NewSessionForm({
 
   const hasContent = message.trim() || pendingFiles.length > 0;
   const savedDefaults = settings?.newSessionDefaults;
+  const savedProviderDefaults = selectedProvider
+    ? getNewSessionProviderDefaults(savedDefaults, selectedProvider)
+    : undefined;
   const codexMcpDefaultsMatch =
     selectedProvider === "codex"
-      ? (savedDefaults?.codexMcpMode ?? "standard") === selectedCodexMcpMode
+      ? (savedProviderDefaults?.codexMcpMode ?? "standard") ===
+        selectedCodexMcpMode
       : true;
   const thinkingDefaultsMatch = supportsThinkingToggle
-    ? (savedDefaults?.thinking ?? undefined) === thinkingForRequest
+    ? (savedProviderDefaults?.thinking ?? undefined) === thinkingForRequest
     : true;
   const reasoningEffortDefaultsMatch =
     selectedProvider === "codex" || selectedProvider === "opencode"
-      ? (savedDefaults?.reasoningEffort ?? undefined) ===
+      ? (savedProviderDefaults?.reasoningEffort ?? undefined) ===
         selectedReasoningEffort
       : true;
   const opencodeDefaultsMatch =
     selectedProvider === "opencode"
       ? sameOpenCodeConfig(
-          savedDefaults?.opencodeConfig,
+          savedProviderDefaults?.opencodeConfig,
           opencodeConfigForRequest,
         )
       : true;
+  const savedPermissionMode = normalizeProviderPermissionMode(
+    selectedProvider,
+    savedProviderDefaults?.permissionMode,
+    selectedProviderInfo?.permissionModes,
+  );
   const defaultsMatchCurrent =
     (savedDefaults?.provider ?? undefined) ===
       (selectedProvider ?? undefined) &&
-    (savedDefaults?.model ?? undefined) === selectedModelForRequest &&
-    (savedDefaults?.permissionMode ?? DEFAULT_PERMISSION_MODE) === mode &&
+    (savedProviderDefaults?.model ?? undefined) === selectedModelForRequest &&
+    savedPermissionMode === mode &&
     thinkingDefaultsMatch &&
     reasoningEffortDefaultsMatch &&
     codexMcpDefaultsMatch &&

@@ -9,6 +9,7 @@ import {
   type CodexMcpMode,
   type EffortLevel,
   type NewSessionDefaults,
+  type NewSessionProviderDefaults,
   type OpenCodeJsonObject,
   type OpenCodeModelLimits,
   type OpenCodeSessionConfig,
@@ -16,6 +17,7 @@ import {
   type ProviderName,
   type RemoteExecutorConfig,
   type ThinkingOption,
+  mergeNewSessionDefaults,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import {
@@ -260,6 +262,104 @@ function parseOpenCodeSessionConfig(
   };
 }
 
+function parseNewSessionProviderDefaults(
+  raw: Record<string, unknown>,
+  provider?: ProviderName,
+): NewSessionProviderDefaults | undefined | null {
+  const parsed: NewSessionProviderDefaults = {};
+
+  if ("model" in raw) {
+    if (
+      raw.model !== undefined &&
+      raw.model !== null &&
+      raw.model !== "" &&
+      typeof raw.model !== "string"
+    ) {
+      return null;
+    }
+    if (typeof raw.model === "string" && raw.model.length > 0) {
+      parsed.model = raw.model;
+    }
+  }
+
+  if ("thinking" in raw) {
+    if (
+      raw.thinking !== undefined &&
+      raw.thinking !== null &&
+      raw.thinking !== "" &&
+      !isThinkingOption(raw.thinking)
+    ) {
+      return null;
+    }
+    if (isThinkingOption(raw.thinking)) {
+      parsed.thinking = raw.thinking;
+    }
+  }
+
+  if ("reasoningEffort" in raw) {
+    if (
+      raw.reasoningEffort !== undefined &&
+      raw.reasoningEffort !== null &&
+      raw.reasoningEffort !== "" &&
+      !isReasoningEffort(raw.reasoningEffort)
+    ) {
+      return null;
+    }
+    if (isReasoningEffort(raw.reasoningEffort)) {
+      parsed.reasoningEffort = raw.reasoningEffort;
+    }
+  }
+
+  if ("permissionMode" in raw) {
+    if (
+      raw.permissionMode !== undefined &&
+      raw.permissionMode !== null &&
+      raw.permissionMode !== "" &&
+      !ALL_PERMISSION_MODES.includes(raw.permissionMode as PermissionMode)
+    ) {
+      return null;
+    }
+    if (
+      typeof raw.permissionMode === "string" &&
+      raw.permissionMode.length > 0
+    ) {
+      parsed.permissionMode = raw.permissionMode as PermissionMode;
+    }
+  }
+
+  if ("codexMcpMode" in raw) {
+    if (
+      raw.codexMcpMode !== undefined &&
+      raw.codexMcpMode !== null &&
+      raw.codexMcpMode !== "" &&
+      (!ALL_CODEX_MCP_MODES.includes(raw.codexMcpMode as CodexMcpMode) ||
+        (provider !== undefined && provider !== "codex"))
+    ) {
+      return null;
+    }
+    if (typeof raw.codexMcpMode === "string" && raw.codexMcpMode.length > 0) {
+      parsed.codexMcpMode = raw.codexMcpMode as CodexMcpMode;
+    }
+  }
+
+  if ("opencodeConfig" in raw) {
+    const config = parseOpenCodeSessionConfig(raw.opencodeConfig);
+    if (config === null) return null;
+    if (config) {
+      if (provider !== undefined && provider !== "opencode") return null;
+      parsed.opencodeConfig = config;
+    }
+  }
+
+  return Object.keys(parsed).length > 0 ? parsed : undefined;
+}
+
+function isSavedNewSessionProvider(value: string): value is ProviderName {
+  return (
+    value !== "claude-ollama" && ALL_PROVIDERS.includes(value as ProviderName)
+  );
+}
+
 /**
  * Returns:
  * - `null` when the payload is invalid
@@ -271,110 +371,67 @@ function parseNewSessionDefaults(
 ): NewSessionDefaults | undefined | null {
   if (raw === undefined) return null;
   if (raw === null || raw === "") return undefined;
-  if (typeof raw !== "object") return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
 
   const input = raw as Record<string, unknown>;
-  const parsed: NewSessionDefaults = {};
-
-  if ("provider" in input) {
+  let provider: ProviderName | undefined;
+  if (
+    input.provider !== undefined &&
+    input.provider !== null &&
+    input.provider !== ""
+  ) {
     if (
-      input.provider !== undefined &&
-      input.provider !== null &&
-      input.provider !== "" &&
-      !ALL_PROVIDERS.includes(input.provider as ProviderName)
+      typeof input.provider !== "string" ||
+      !isSavedNewSessionProvider(input.provider)
     ) {
       return null;
     }
-    if (typeof input.provider === "string" && input.provider.length > 0) {
-      if (input.provider === "claude-ollama") {
+    provider = input.provider;
+  }
+
+  const flatDefaults = parseNewSessionProviderDefaults(input, provider);
+  if (flatDefaults === null) return null;
+
+  const byProvider: Partial<Record<ProviderName, NewSessionProviderDefaults>> =
+    {};
+  if (
+    input.byProvider !== undefined &&
+    input.byProvider !== null &&
+    input.byProvider !== ""
+  ) {
+    if (
+      typeof input.byProvider !== "object" ||
+      Array.isArray(input.byProvider)
+    ) {
+      return null;
+    }
+    for (const [providerName, rawProviderDefaults] of Object.entries(
+      input.byProvider,
+    )) {
+      if (
+        !isSavedNewSessionProvider(providerName) ||
+        typeof rawProviderDefaults !== "object" ||
+        rawProviderDefaults === null ||
+        Array.isArray(rawProviderDefaults)
+      ) {
         return null;
       }
-      parsed.provider = input.provider as ProviderName;
+      const parsedProviderDefaults = parseNewSessionProviderDefaults(
+        rawProviderDefaults as Record<string, unknown>,
+        providerName,
+      );
+      if (parsedProviderDefaults === null) return null;
+      if (parsedProviderDefaults) {
+        byProvider[providerName] = parsedProviderDefaults;
+      }
     }
   }
 
-  if ("model" in input) {
-    if (
-      input.model !== undefined &&
-      input.model !== null &&
-      input.model !== "" &&
-      typeof input.model !== "string"
-    ) {
-      return null;
-    }
-    if (typeof input.model === "string" && input.model.length > 0) {
-      parsed.model = input.model;
-    }
-  }
-
-  if ("thinking" in input) {
-    if (
-      input.thinking !== undefined &&
-      input.thinking !== null &&
-      input.thinking !== "" &&
-      !isThinkingOption(input.thinking)
-    ) {
-      return null;
-    }
-    if (isThinkingOption(input.thinking)) {
-      parsed.thinking = input.thinking;
-    }
-  }
-
-  if ("reasoningEffort" in input) {
-    if (
-      input.reasoningEffort !== undefined &&
-      input.reasoningEffort !== null &&
-      input.reasoningEffort !== "" &&
-      !isReasoningEffort(input.reasoningEffort)
-    ) {
-      return null;
-    }
-    if (isReasoningEffort(input.reasoningEffort)) {
-      parsed.reasoningEffort = input.reasoningEffort;
-    }
-  }
-
-  if ("permissionMode" in input) {
-    if (
-      input.permissionMode !== undefined &&
-      input.permissionMode !== null &&
-      input.permissionMode !== "" &&
-      !ALL_PERMISSION_MODES.includes(input.permissionMode as PermissionMode)
-    ) {
-      return null;
-    }
-    if (
-      typeof input.permissionMode === "string" &&
-      input.permissionMode.length > 0
-    ) {
-      parsed.permissionMode = input.permissionMode as PermissionMode;
-    }
-  }
-
-  if ("codexMcpMode" in input) {
-    if (
-      input.codexMcpMode !== undefined &&
-      input.codexMcpMode !== null &&
-      input.codexMcpMode !== "" &&
-      !ALL_CODEX_MCP_MODES.includes(input.codexMcpMode as CodexMcpMode)
-    ) {
-      return null;
-    }
-    if (
-      typeof input.codexMcpMode === "string" &&
-      input.codexMcpMode.length > 0
-    ) {
-      parsed.codexMcpMode = input.codexMcpMode as CodexMcpMode;
-    }
-  }
-
-  if ("opencodeConfig" in input) {
-    const config = parseOpenCodeSessionConfig(input.opencodeConfig);
-    if (config === null) return null;
-    if (config) parsed.opencodeConfig = config;
-  }
-
+  const parsed: NewSessionDefaults = {
+    ...(provider ? { provider } : {}),
+    ...flatDefaults,
+    ...(Object.keys(byProvider).length > 0 ? { byProvider } : {}),
+  };
   return Object.keys(parsed).length > 0 ? parsed : undefined;
 }
 
@@ -482,7 +539,21 @@ export function createSettingsRoutes(deps: SettingsRoutesDeps): Hono {
       if (parsedDefaults === null) {
         return c.json({ error: "Invalid newSessionDefaults setting" }, 400);
       }
-      updates.newSessionDefaults = parsedDefaults;
+      if (parsedDefaults === undefined) {
+        updates.newSessionDefaults = undefined;
+      } else {
+        const currentDefaults =
+          serverSettingsService.getSetting("newSessionDefaults");
+        const scopedDefaults =
+          parsedDefaults.provider !== undefined ||
+          currentDefaults?.provider === undefined
+            ? parsedDefaults
+            : { ...parsedDefaults, provider: currentDefaults.provider };
+        updates.newSessionDefaults = mergeNewSessionDefaults(
+          currentDefaults,
+          scopedDefaults,
+        );
+      }
     }
 
     if (typeof body.lifecycleWebhooksEnabled === "boolean") {

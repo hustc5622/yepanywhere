@@ -46,7 +46,7 @@ describe("ServerSettingsService", () => {
       version: number;
       settings: Record<string, unknown>;
     };
-    expect(persisted.version).toBe(4);
+    expect(persisted.version).toBe(5);
     expect(persisted.settings).not.toHaveProperty("ollamaUrl");
     expect(persisted.settings).not.toHaveProperty("remoteExecutors");
   });
@@ -101,6 +101,55 @@ describe("ServerSettingsService", () => {
     const persisted = JSON.parse(await readFile(settingsPath, "utf-8")) as {
       version: number;
     };
-    expect(persisted.version).toBe(4);
+    expect(persisted.version).toBe(5);
+  });
+
+  it("migrates legacy new-session defaults into a provider-specific entry", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "yep-settings-"));
+    dataDirs.push(dataDir);
+    const settingsPath = join(dataDir, "server-settings.json");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        version: 4,
+        settings: {
+          serviceWorkerEnabled: true,
+          newSessionDefaults: {
+            provider: "codex",
+            model: "gpt-5.6-sol",
+            thinking: "on:max",
+            reasoningEffort: "max",
+            permissionMode: "bypassPermissions",
+            codexMcpMode: "clear",
+          },
+        },
+      }),
+    );
+
+    const service = new ServerSettingsService({ dataDir });
+    await service.initialize();
+
+    expect(service.getSetting("newSessionDefaults")).toEqual({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      thinking: "on:max",
+      reasoningEffort: "max",
+      permissionMode: "bypassPermissions",
+      codexMcpMode: "clear",
+      byProvider: {
+        codex: {
+          model: "gpt-5.6-sol",
+          thinking: "on:max",
+          reasoningEffort: "max",
+          permissionMode: "bypassPermissions",
+          codexMcpMode: "clear",
+        },
+      },
+    });
+
+    const persisted = JSON.parse(await readFile(settingsPath, "utf-8")) as {
+      version: number;
+    };
+    expect(persisted.version).toBe(5);
   });
 });

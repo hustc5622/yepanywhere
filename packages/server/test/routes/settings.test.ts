@@ -138,8 +138,101 @@ describe("Settings Routes", () => {
         newSessionDefaults: {
           provider: "claude",
           model: "sonnet",
+          byProvider: {
+            claude: {
+              model: "sonnet",
+            },
+          },
         },
       });
+    });
+
+    it("preserves Codex defaults when OpenCode becomes the default provider", async () => {
+      settings = {
+        ...settings,
+        newSessionDefaults: {
+          provider: "codex",
+          model: "gpt-5.6-sol",
+          permissionMode: "bypassPermissions",
+          codexMcpMode: "clear",
+          byProvider: {
+            codex: {
+              model: "gpt-5.6-sol",
+              permissionMode: "bypassPermissions",
+              codexMcpMode: "clear",
+            },
+          },
+        },
+      };
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+      });
+      const opencodeConfig = {
+        model: "claude-opus-4-8",
+        requestProtocol: "anthropic",
+      };
+
+      const response = await routes.request("/", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          newSessionDefaults: {
+            provider: "opencode",
+            permissionMode: "acceptEdits",
+            opencodeConfig,
+            byProvider: {
+              opencode: {
+                permissionMode: "acceptEdits",
+                opencodeConfig,
+              },
+            },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(mockServerSettingsService.updateSettings).toHaveBeenCalledWith({
+        newSessionDefaults: {
+          provider: "opencode",
+          permissionMode: "acceptEdits",
+          opencodeConfig,
+          byProvider: {
+            codex: {
+              model: "gpt-5.6-sol",
+              permissionMode: "bypassPermissions",
+              codexMcpMode: "clear",
+            },
+            opencode: {
+              permissionMode: "acceptEdits",
+              opencodeConfig,
+            },
+          },
+        },
+      });
+    });
+
+    it("rejects provider-specific options stored under the wrong provider", async () => {
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+      });
+
+      const response = await routes.request("/", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          newSessionDefaults: {
+            provider: "opencode",
+            byProvider: {
+              opencode: {
+                codexMcpMode: "full",
+              },
+            },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(mockServerSettingsService.updateSettings).not.toHaveBeenCalled();
     });
 
     it("accepts clearing globalInstructions with null", async () => {

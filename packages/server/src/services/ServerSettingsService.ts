@@ -7,14 +7,15 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type {
-  NewSessionDefaults,
-  RemoteExecutorConfig,
+import {
+  type NewSessionDefaults,
+  type RemoteExecutorConfig,
+  normalizeNewSessionDefaults,
 } from "@yep-anywhere/shared";
 import { parseRemoteExecutorConfigs } from "../sdk/remote-executor-config.js";
 import type { OhMyRouterThroughputBenchmark } from "./OhMyRouterBenchmarkService.js";
 
-const CURRENT_VERSION = 4;
+const CURRENT_VERSION = 5;
 
 const LEGACY_CLAUDE_SETTING_KEYS = [
   "ollamaUrl",
@@ -63,7 +64,7 @@ interface SettingsState {
   settings: ServerSettings;
 }
 
-function removeLegacyClaudeSettings(settings: unknown): {
+function migrateSettings(settings: unknown): {
   settings: ServerSettings;
   changed: boolean;
 } {
@@ -95,6 +96,30 @@ function removeLegacyClaudeSettings(settings: unknown): {
     } else {
       Reflect.deleteProperty(cleaned, "remoteExecutors");
       changed = true;
+    }
+  }
+
+  if ("newSessionDefaults" in cleaned) {
+    const rawDefaults = cleaned.newSessionDefaults;
+    if (
+      typeof rawDefaults !== "object" ||
+      rawDefaults === null ||
+      Array.isArray(rawDefaults)
+    ) {
+      Reflect.deleteProperty(cleaned, "newSessionDefaults");
+      changed = true;
+    } else {
+      const normalizedDefaults = normalizeNewSessionDefaults(
+        rawDefaults as NewSessionDefaults,
+      );
+      if (JSON.stringify(rawDefaults) !== JSON.stringify(normalizedDefaults)) {
+        changed = true;
+      }
+      if (normalizedDefaults) {
+        cleaned.newSessionDefaults = normalizedDefaults;
+      } else {
+        Reflect.deleteProperty(cleaned, "newSessionDefaults");
+      }
     }
   }
 
@@ -134,7 +159,7 @@ export class ServerSettingsService {
       const content = await fs.readFile(this.filePath, "utf-8");
       const parsed = JSON.parse(content) as SettingsState;
 
-      const { settings, changed } = removeLegacyClaudeSettings(parsed.settings);
+      const { settings, changed } = migrateSettings(parsed.settings);
       this.state = {
         version: CURRENT_VERSION,
         settings: { ...DEFAULT_SERVER_SETTINGS, ...settings },
