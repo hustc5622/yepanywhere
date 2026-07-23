@@ -133,6 +133,9 @@ const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
 const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
 const CODEX_CLOUD_MODEL_PROVIDER = "openai";
 const CODEX_MODEL_PROVIDER_NAMES = new Set(["openai", "azure"]);
+const CODEX_THREAD_ROLLBACK_DEPRECATION_NOTICE =
+  "thread/rollback is deprecated and will be removed soon";
+let hasLoggedThreadRollbackDeprecation = false;
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 
 /**
@@ -2053,8 +2056,9 @@ export class CodexProvider implements AgentProvider {
       case "guardianWarning":
       case "deprecationNotice":
       case "configWarning": {
-        // The Codex TUI renders these as notice cells; without them the web
-        // transcript silently drops safety and deprecation context.
+        // Keep user-actionable safety/configuration notices in the transcript.
+        // The rollback deprecation is different: it describes Yep's internal
+        // app-server request, not a failed turn, and users cannot act on it.
         const params = notification.params as
           | {
               message?: string;
@@ -2067,6 +2071,26 @@ export class CodexProvider implements AgentProvider {
           this.getOptionalString(params?.summary);
         if (!summary) return [];
         const details = this.getOptionalString(params?.details ?? undefined);
+        if (
+          notification.method === "deprecationNotice" &&
+          summary === CODEX_THREAD_ROLLBACK_DEPRECATION_NOTICE
+        ) {
+          // Upstream's replacement is a bounded thread/fork. Adopting it
+          // requires cross-thread branch lineage; until then, keep this
+          // maintainer-facing signal out of the user's successful turn.
+          if (!hasLoggedThreadRollbackDeprecation) {
+            hasLoggedThreadRollbackDeprecation = true;
+            log.warn(
+              {
+                event: "codex_thread_rollback_deprecated",
+                sessionId,
+                details: details ?? null,
+              },
+              "Codex app-server thread/rollback is deprecated; retaining compatibility for same-session edit branches",
+            );
+          }
+          return [];
+        }
         return [
           withCodexTimestamp({
             type: "system",

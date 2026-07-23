@@ -1276,6 +1276,19 @@ describe("CodexProvider Event Normalization", () => {
       content: "Old flag\nUse --new-flag instead",
     });
 
+    const rollbackDeprecation = provider.convertNotificationToSDKMessages(
+      {
+        method: "deprecationNotice",
+        params: {
+          summary: "thread/rollback is deprecated and will be removed soon",
+          details: null,
+        },
+      },
+      "session-1",
+      new Map(),
+    );
+    expect(rollbackDeprecation).toEqual([]);
+
     const empty = provider.convertNotificationToSDKMessages(
       { method: "configWarning", params: {} },
       "session-1",
