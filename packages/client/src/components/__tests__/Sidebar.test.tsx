@@ -199,6 +199,39 @@ describe("Sidebar recent session browsing", () => {
     expect(projectNameOrder(container)).toEqual(["Project B", "Project A"]);
   });
 
+  it("orders sessions within a project group by most recent activity", () => {
+    // Input order puts the older session first, mirroring the hook's stable
+    // order where an existing row was updated in place after a newer sibling.
+    const olderSession = createSession({
+      id: "session-older",
+      title: "Older Session",
+      projectId: "project-x",
+      projectName: "Project X",
+      updatedAt: "2026-01-01T09:34:00.000Z",
+    });
+    const newerSession = createSession({
+      id: "session-newer",
+      title: "Newer Session",
+      projectId: "project-x",
+      projectName: "Project X",
+      updatedAt: "2026-01-01T11:10:00.000Z",
+    });
+
+    const { container } = renderSidebar([olderSession, newerSession], {
+      currentSessionId: "session-older",
+    });
+
+    const selectLabels = Array.from(
+      container.querySelectorAll('[aria-label^="Select "]'),
+      (node) => node.getAttribute("aria-label"),
+    );
+
+    expect(selectLabels).toEqual([
+      "Select Newer Session",
+      "Select Older Session",
+    ]);
+  });
+
   it("does not reopen the current session group after the user collapses it", async () => {
     const currentSession = createSession({
       id: "session-a",

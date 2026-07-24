@@ -50,6 +50,17 @@ function canArchiveSession(session: GlobalSessionItem): boolean {
   return !session.isArchived && session.runtime?.canArchive !== false;
 }
 
+function compareSessionsByUpdatedAtDesc(
+  a: GlobalSessionItem,
+  b: GlobalSessionItem,
+): number {
+  const diff =
+    new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+  if (diff !== 0) return diff;
+  // Stable, deterministic tiebreaker when timestamps match.
+  return a.id.localeCompare(b.id);
+}
+
 function groupSessionsByProject(
   sectionKey: string,
   sessions: GlobalSessionItem[],
@@ -84,7 +95,16 @@ function groupSessionsByProject(
     });
   }
 
-  return Array.from(groupsByProject.values());
+  const groups = Array.from(groupsByProject.values());
+
+  // Surface the freshest session at the top of each collapsed group. Group
+  // order itself stays in hook (insertion) order so an active session's project
+  // does not jump under the pointer during high-frequency live updates.
+  for (const group of groups) {
+    group.sessions.sort(compareSessionsByUpdatedAtDesc);
+  }
+
+  return groups;
 }
 
 interface SidebarProps {
