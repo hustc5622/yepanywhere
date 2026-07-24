@@ -592,6 +592,80 @@ describe("Codex Normalization", () => {
     });
   });
 
+  it("normalizes a Codex web.run function_call into a WebSearch row with a derived action", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "function_call",
+          name: "run",
+          namespace: "web",
+          call_id: "call-web-run",
+          arguments: JSON.stringify({
+            search_query: [{ q: "bilibili video downloader" }],
+            response_length: "long",
+          }),
+        },
+      },
+    ];
+
+    const normalized = normalizeSession(buildLoadedSession(entries));
+
+    const renderItems = preprocessMessages(normalized.messages);
+    const webSearchItem = renderItems.find(
+      (item) => item.type === "tool_call" && item.toolName === "WebSearch",
+    );
+
+    expect(webSearchItem?.type).toBe("tool_call");
+    if (webSearchItem?.type !== "tool_call") {
+      throw new Error("Expected WebSearch render item");
+    }
+
+    expect(webSearchItem.toolName).toBe("WebSearch");
+    expect(webSearchItem.toolInput).toMatchObject({
+      query: "bilibili video downloader",
+      action: {
+        type: "search",
+        query: "bilibili video downloader",
+      },
+    });
+  });
+
+  it("derives find_in_page action for a Codex web.run function_call", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "function_call",
+          name: "run",
+          namespace: "web",
+          call_id: "call-web-find",
+          arguments: JSON.stringify({
+            find: [{ ref_id: "turn2view2", pattern: "--cookies-from-browser" }],
+          }),
+        },
+      },
+    ];
+
+    const normalized = normalizeSession(buildLoadedSession(entries));
+    const renderItems = preprocessMessages(normalized.messages);
+    const webSearchItem = renderItems.find(
+      (item) => item.type === "tool_call" && item.toolName === "WebSearch",
+    );
+
+    if (webSearchItem?.type !== "tool_call") {
+      throw new Error("Expected WebSearch render item");
+    }
+    expect(webSearchItem.toolInput).toMatchObject({
+      action: {
+        type: "find_in_page",
+        pattern: "--cookies-from-browser",
+      },
+    });
+  });
+
   it("normalizes persisted Codex imageGeneration into a completed ViewImage row", () => {
     const entries: CodexSessionEntry[] = [
       {

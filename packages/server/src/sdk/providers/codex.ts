@@ -22,6 +22,7 @@ import { getCodexMcpAppServerArgs } from "../../codex/mcp-profile.js";
 import {
   type CodexToolCallContext,
   canonicalizeCodexToolName,
+  deriveCodexWebRunInvocation,
   extractCodexExecUpdatePlan,
   normalizeCodexCommandExecutionOutput,
   normalizeCodexToolInvocation,
@@ -2143,7 +2144,9 @@ export class CodexProvider implements AgentProvider {
           : parseCodexToolArguments(
               this.getOptionalString(item.arguments) ?? undefined,
             );
-      const normalized = normalizeCodexToolInvocation(toolName, rawInput);
+      const normalized =
+        deriveCodexWebRunInvocation(rawToolName, namespace, rawInput) ??
+        normalizeCodexToolInvocation(toolName, rawInput);
       customToolContexts.set(contextKey, {
         toolName: normalized.toolName,
         input: normalized.input,

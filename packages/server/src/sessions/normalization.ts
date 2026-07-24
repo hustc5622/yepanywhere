@@ -42,6 +42,7 @@ import {
 import {
   type CodexToolCallContext,
   canonicalizeCodexToolName,
+  deriveCodexWebRunInvocation,
   extractCodexExecUpdatePlan,
   normalizeCodexToolInvocation,
   normalizeCodexToolOutputWithContext,
@@ -1328,12 +1329,17 @@ function convertCodexFunctionCallPayload(
   timestamp: string,
 ): CodexToolUseConversion {
   const rawToolName = payload.name;
-  const canonicalToolName = canonicalizeCodexToolName(rawToolName);
   const parsedInput = parseCodexToolArguments(payload.arguments);
-  const normalizedInvocation = normalizeCodexToolInvocation(
-    canonicalToolName,
-    parsedInput,
-  );
+  const normalizedInvocation =
+    deriveCodexWebRunInvocation(
+      rawToolName,
+      payload.namespace ?? undefined,
+      parsedInput,
+    ) ??
+    normalizeCodexToolInvocation(
+      canonicalizeCodexToolName(rawToolName),
+      parsedInput,
+    );
 
   const content: ContentBlock[] = [
     {

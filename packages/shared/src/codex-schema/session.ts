@@ -143,6 +143,8 @@ export const CodexFunctionCallPayloadSchema = z.object({
   name: z.string(),
   arguments: z.string(), // JSON string
   call_id: z.string(),
+  // Namespaced tools (e.g. web.run) carry a namespace; used to detect web.run.
+  namespace: z.string().nullish(),
 });
 
 export type CodexFunctionCallPayload = z.infer<

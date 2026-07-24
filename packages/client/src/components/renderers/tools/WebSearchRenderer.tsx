@@ -70,6 +70,14 @@ function getCodexWebSearchActionLabel(action: unknown): string | undefined {
     return target ? `Find in page: ${target}` : "Find in page";
   }
 
+  if (actionType === "click") {
+    const url =
+      typeof record.url === "string" && record.url.trim()
+        ? record.url.trim()
+        : undefined;
+    return url ? `Click: ${url}` : "Click";
+  }
+
   return actionType;
 }
 

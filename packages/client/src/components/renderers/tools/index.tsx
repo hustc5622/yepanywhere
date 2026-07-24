@@ -22,6 +22,8 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   web_search_call: "WebSearch",
   search_query: "WebSearch",
   websearch: "WebSearch",
+  webrun: "WebSearch", // codex web.run (namespace "web" + name "run")
+  web__run: "WebSearch", // codex code-mode nested web.run
   webfetch: "WebFetch",
   Agent: "Task", // SDK 0.2.76+ renamed Task → Agent
   view_image: "ViewImage",

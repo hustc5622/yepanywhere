@@ -426,6 +426,108 @@ export function canonicalizeCodexToolName(
   );
 }
 
+interface CodexWebRunAction {
+  type: string;
+  query?: string;
+  queries?: string[];
+  url?: string;
+  pattern?: string;
+}
+
+/**
+ * Codex browses the web through the `web.run` tool (function name "run",
+ * namespace "web"). Unlike the hosted `web_search_call`, its concrete action
+ * (search / open page / find in page / click) is encoded by the argument
+ * shape rather than an explicit `action.type`. Translate it into the
+ * `WebSearch` action shape the UI already understands so these calls stop
+ * rendering as a bare "run" / "webrun".
+ *
+ * Returns null when the call is not recognizable as web.run, letting the
+ * caller fall back to the default canonicalization.
+ */
+export function deriveCodexWebRunInvocation(
+  name: string,
+  namespace: string | undefined,
+  input: unknown,
+): NormalizedCodexToolInvocation | null {
+  const isWebNamespace = namespace === "web";
+  if (!isWebNamespace && name !== "run") {
+    return null;
+  }
+
+  const inputRecord = isRecord(input) ? input : undefined;
+  const action = inputRecord ? deriveCodexWebRunAction(inputRecord) : null;
+
+  // A bare `run` outside the web namespace and without a recognizable web
+  // action is almost certainly a different tool; leave it to default handling.
+  if (!action && !isWebNamespace) {
+    return null;
+  }
+
+  const normalizedInput: Record<string, unknown> = { ...(inputRecord ?? {}) };
+  if (action) {
+    normalizedInput.action = action;
+    if (typeof normalizedInput.query !== "string") {
+      const query =
+        action.query ?? action.queries?.[0] ?? action.url ?? action.pattern;
+      if (query) {
+        normalizedInput.query = query;
+      }
+    }
+  }
+
+  return { toolName: "WebSearch", input: normalizedInput };
+}
+
+function firstCodexRefEntry(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return Array.isArray(value) ? value.find(isRecord) : undefined;
+}
+
+function deriveCodexWebRunAction(
+  input: Record<string, unknown>,
+): CodexWebRunAction | null {
+  if (Array.isArray(input.search_query)) {
+    const queries = input.search_query
+      .map((item) =>
+        isRecord(item) && typeof item.q === "string"
+          ? item.q.trim()
+          : undefined,
+      )
+      .filter((q): q is string => !!q);
+    return {
+      type: "search",
+      ...(queries.length > 0 ? { queries, query: queries[0] } : {}),
+    };
+  }
+
+  const open = firstCodexRefEntry(input.open);
+  if (open) {
+    const url = typeof open.ref_id === "string" ? open.ref_id : undefined;
+    return { type: "open_page", ...(url ? { url } : {}) };
+  }
+
+  const find = firstCodexRefEntry(input.find);
+  if (find) {
+    const pattern = typeof find.pattern === "string" ? find.pattern : undefined;
+    const url = typeof find.ref_id === "string" ? find.ref_id : undefined;
+    return {
+      type: "find_in_page",
+      ...(pattern ? { pattern } : {}),
+      ...(url ? { url } : {}),
+    };
+  }
+
+  const click = firstCodexRefEntry(input.click);
+  if (click) {
+    const url = typeof click.ref_id === "string" ? click.ref_id : undefined;
+    return { type: "click", ...(url ? { url } : {}) };
+  }
+
+  return null;
+}
+
 export function normalizeCodexToolInvocation(
   toolName: string,
   input: unknown,
