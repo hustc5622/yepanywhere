@@ -136,6 +136,11 @@ export interface AgentSession {
    */
   setModel?: (model?: string) => Promise<void>;
   /**
+   * Change the provider-native permission/session mode without restarting.
+   * Providers that do not expose a native mode API may omit this.
+   */
+  setPermissionMode?: (mode: PermissionMode) => Promise<void>;
+  /**
    * Live context-window breakdown: how many tokens system prompt, tools,
    * skills, MCP servers, memory files, etc. each consume.
    * Returns null if the provider/SDK does not support it.

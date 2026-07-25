@@ -95,6 +95,8 @@ export interface ProcessConstructorOptions extends ProcessOptions {
   supportedCommandsFn?: () => Promise<SlashCommand[]>;
   /** Function to change model mid-session (SDK 0.2.7+) */
   setModelFn?: (model?: string) => Promise<void>;
+  /** Function to change the provider-native permission/session mode */
+  setPermissionModeFn?: (mode: PermissionMode) => Promise<void>;
   /**
    * Function returning a structured breakdown of current context-window usage
    * (system prompt, tools, skills, MCP servers, memory files...). SDK 0.2.7+.
@@ -191,6 +193,9 @@ export class Process {
   /** Function to change model mid-session (SDK 0.2.7+) */
   private setModelFn: ((model?: string) => Promise<void>) | null;
 
+  /** Function to change the provider-native permission/session mode */
+  private setPermissionModeFn: ((mode: PermissionMode) => Promise<void>) | null;
+
   /** Function returning structured live context-window breakdown (SDK 0.2.7+) */
   private getContextUsageFn:
     | (() => Promise<ContextStatusSdkPayload | null>)
@@ -275,6 +280,7 @@ export class Process {
     this.supportedCommandsFn = options.supportedCommandsFn ?? null;
     this._pidResolver = options.pid;
     this.setModelFn = options.setModelFn ?? null;
+    this.setPermissionModeFn = options.setPermissionModeFn ?? null;
     this.getContextUsageFn = options.getContextUsageFn ?? null;
     this.initializationResultFn = options.initializationResultFn ?? null;
     this._isProcessAlive = options.isProcessAlive ?? null;
@@ -699,6 +705,15 @@ export class Process {
     this._permissionMode = mode;
     this._modeVersion++;
     this.emit({ type: "mode-change", mode, version: this._modeVersion });
+  }
+
+  /**
+   * Apply a mode to the provider first, then publish the confirmed local state.
+   * Providers without a native mode API keep the existing Yep-only behavior.
+   */
+  async syncPermissionMode(mode: PermissionMode): Promise<void> {
+    await this.setPermissionModeFn?.(mode);
+    this.setPermissionMode(mode);
   }
 
   /**
@@ -1274,7 +1289,11 @@ export class Process {
   async handleToolApproval(
     toolName: string,
     input: unknown,
-    options: { signal: AbortSignal; requestId?: string },
+    options: {
+      signal: AbortSignal;
+      requestId?: string;
+      respectProviderDecision?: boolean;
+    },
   ): Promise<ToolApprovalResult> {
     console.log(
       `[handleToolApproval] toolName=${toolName}, permissionMode=${this._permissionMode}`,
@@ -1295,8 +1314,14 @@ export class Process {
       return permissionResult;
     }
 
-    // Handle based on permission mode
-    switch (this._permissionMode) {
+    // Skip Yep's mode policy when the provider already applied its native
+    // policy and explicitly decided this request still needs a human.
+    const localPermissionMode = options.respectProviderDecision
+      ? undefined
+      : this._permissionMode;
+    switch (localPermissionMode) {
+      case undefined:
+        break;
       case "bypassPermissions": {
         // Always prompt for user questions and plan approval, even in bypass mode
         // These are inherently interactive and shouldn't be auto-answered

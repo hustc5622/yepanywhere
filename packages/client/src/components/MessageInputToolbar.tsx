@@ -1,4 +1,4 @@
-import type { UploadedFile } from "@yep-anywhere/shared";
+import type { ProviderName, UploadedFile } from "@yep-anywhere/shared";
 import { type RefObject, useState } from "react";
 import { useModelSettings } from "../hooks/useModelSettings";
 import { useI18n } from "../i18n";
@@ -20,6 +20,8 @@ export interface MessageInputToolbarProps {
   // Provider capability flags (default to true for backwards compatibility)
   supportsPermissionMode?: boolean;
   supportsThinkingToggle?: boolean;
+  provider?: ProviderName;
+  permissionModes?: readonly PermissionMode[];
 
   // Attachments
   canAttach?: boolean;
@@ -72,6 +74,8 @@ export function MessageInputToolbar({
   onHoldChange,
   supportsPermissionMode = true,
   supportsThinkingToggle = true,
+  provider,
+  permissionModes,
   canAttach,
   attachmentCount = 0,
   onAttachClick,
@@ -123,6 +127,8 @@ export function MessageInputToolbar({
             onModeChange={onModeChange}
             isHeld={isHeld}
             onHoldChange={onHoldChange}
+            provider={provider}
+            permissionModes={permissionModes}
           />
         )}
         <button

@@ -369,6 +369,23 @@ describe("Process", () => {
       expect(process.permissionMode).toBe("plan");
     });
 
+    it("syncs a provider-native mode before publishing local state", async () => {
+      const setProviderMode = vi.fn(async () => {});
+      const process = new Process(createMockIterator([]), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        setPermissionModeFn: setProviderMode,
+      });
+
+      await process.syncPermissionMode("plan");
+
+      expect(setProviderMode).toHaveBeenCalledWith("plan");
+      expect(process.permissionMode).toBe("plan");
+      expect(process.modeVersion).toBe(1);
+    });
+
     it("initializes modeVersion to 0", async () => {
       const iterator = createMockIterator([]);
       const process = new Process(iterator, {
@@ -452,6 +469,33 @@ describe("Process", () => {
       );
 
       expect(result.behavior).toBe("allow");
+    });
+
+    it("prompts when a provider-native policy still requests approval", async () => {
+      const process = new Process(createMockIterator([]), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        permissionMode: "bypassPermissions",
+      });
+
+      const approvalPromise = process.handleToolApproval(
+        "Bash",
+        { command: "security-sensitive-command" },
+        {
+          signal: new AbortController().signal,
+          respectProviderDecision: true,
+        },
+      );
+
+      expect(process.state.type).toBe("waiting-input");
+      const pendingRequest = process.getPendingInputRequest();
+      expect(pendingRequest?.toolName).toBe("Bash");
+      process.respondToInput(pendingRequest?.id ?? "", "deny");
+      await expect(approvalPromise).resolves.toMatchObject({
+        behavior: "deny",
+      });
     });
 
     it("handleToolApproval auto-allows read-only tools in plan mode", async () => {

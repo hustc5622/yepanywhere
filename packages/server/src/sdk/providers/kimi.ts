@@ -62,6 +62,34 @@ const KIMI_CONFIG_PATH = join(KIMI_HOME, "config.toml");
  */
 const KIMI_FALLBACK_MODELS: ModelInfo[] = [{ id: "kimi-k3", name: "Kimi K3" }];
 
+export type KimiAcpMode = "default" | "plan" | "auto" | "yolo";
+
+/**
+ * Map Yep's shared permission values onto Kimi's native ACP mode taxonomy.
+ *
+ * `bypassPermissions` remains the shared wire value for compatibility, but
+ * Kimi presents and executes it as YOLO. `acceptEdits` is an older Yep-managed
+ * extension with no native Kimi equivalent, so old saved values safely fall
+ * back to manual/default and let Yep approve edits selectively.
+ */
+export function toKimiAcpMode(mode: PermissionMode): KimiAcpMode {
+  switch (mode) {
+    case "plan":
+      return "plan";
+    case "auto":
+      return "auto";
+    case "bypassPermissions":
+      return "yolo";
+    default:
+      return "default";
+  }
+}
+
+interface KimiSessionState {
+  sessionId: string | null;
+  permissionMode: PermissionMode;
+}
+
 /**
  * Configuration for the Kimi ACP provider.
  */
@@ -85,7 +113,7 @@ export class KimiProvider implements AgentProvider {
   readonly permissionModes = [
     "default",
     "plan",
-    "acceptEdits",
+    "auto",
     "bypassPermissions",
   ] as const;
   // Kimi exposes thinking effort levels via config; a simple toggle is not
@@ -184,6 +212,10 @@ export class KimiProvider implements AgentProvider {
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
     const queue = new MessageQueue();
     const abortController = new AbortController();
+    const sessionState: KimiSessionState = {
+      sessionId: null,
+      permissionMode: options.permissionMode ?? "default",
+    };
 
     if (options.initialMessage) {
       queue.push(options.initialMessage);
@@ -194,6 +226,7 @@ export class KimiProvider implements AgentProvider {
       client,
       options,
       queue,
+      sessionState,
       abortController.signal,
     );
 
@@ -207,6 +240,16 @@ export class KimiProvider implements AgentProvider {
       get pid() {
         return client.pid;
       },
+      setPermissionMode: async (mode) => {
+        if (!sessionState.sessionId) {
+          throw new Error("Kimi ACP session is not initialized yet");
+        }
+        await client.setSessionMode(
+          sessionState.sessionId,
+          toKimiAcpMode(mode),
+        );
+        sessionState.permissionMode = mode;
+      },
     };
   }
 
@@ -217,6 +260,7 @@ export class KimiProvider implements AgentProvider {
     client: ACPClient,
     options: StartSessionOptions,
     queue: MessageQueue,
+    sessionState: KimiSessionState,
     signal: AbortSignal,
   ): AsyncIterableIterator<SDKMessage> {
     const kimiPath = await this.findKimiPath();
@@ -257,7 +301,12 @@ export class KimiProvider implements AgentProvider {
     );
     if (options.onToolApproval) {
       client.setPermissionRequestCallback(async (request) =>
-        this.handlePermissionRequest(request, options, signal),
+        this.handlePermissionRequest(
+          request,
+          options,
+          sessionState.permissionMode,
+          signal,
+        ),
       );
     } else {
       this.log.warn(
@@ -304,6 +353,14 @@ export class KimiProvider implements AgentProvider {
         sessionId = await client.newSession(options.cwd);
         this.log.debug({ sessionId }, "Kimi ACP session created");
       }
+
+      sessionState.sessionId = sessionId;
+      const kimiMode = toKimiAcpMode(sessionState.permissionMode);
+      await client.setSessionMode(sessionId, kimiMode);
+      this.log.debug(
+        { sessionId, permissionMode: sessionState.permissionMode, kimiMode },
+        "Kimi ACP native mode applied",
+      );
 
       yield {
         type: "system",
@@ -373,31 +430,16 @@ export class KimiProvider implements AgentProvider {
   private async handlePermissionRequest(
     request: RequestPermissionRequest,
     options: StartSessionOptions,
+    permissionMode: PermissionMode,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
-    const { onToolApproval, permissionMode } = options;
+    const { onToolApproval } = options;
     if (!onToolApproval) {
       return { outcome: { outcome: "cancelled" } };
     }
 
     const toolCall = request.toolCall;
     const kind = toolCall.kind ?? "other";
-
-    if (this.shouldAutoApprove(kind, permissionMode)) {
-      this.log.debug(
-        { kind, permissionMode },
-        "Auto-approving Kimi ACP permission request",
-      );
-      const allowOnceOption = request.options.find(
-        (o) => o.kind === "allow_once",
-      );
-      return {
-        outcome: {
-          outcome: "selected",
-          optionId: allowOnceOption?.optionId ?? "approve_once",
-        },
-      };
-    }
 
     const toolName = this.mapKindToToolName(kind, toolCall.title ?? undefined);
     const toolInput = {
@@ -417,32 +459,15 @@ export class KimiProvider implements AgentProvider {
       "Requesting user approval for Kimi ACP permission",
     );
 
-    const result = await onToolApproval(toolName, toolInput, { signal });
+    const result = await onToolApproval(toolName, toolInput, {
+      signal,
+      // Except for the legacy acceptEdits extension, Kimi has already applied
+      // its native mode before emitting this request. In particular, YOLO
+      // still emits sensitive actions, questions, and plan review; those must
+      // reach the user instead of being auto-approved a second time by Yep.
+      respectProviderDecision: permissionMode !== "acceptEdits",
+    });
     return this.convertApprovalResultToACPResponse(result, request);
-  }
-
-  /**
-   * Auto-approve policy based on permission mode and tool kind.
-   *
-   * Kimi is always run in its default (manual) ACP mode so every sensitive
-   * operation surfaces to us; the auto-approve decision is made here rather
-   * than by switching Kimi's own mode. `bypassPermissions` approves all;
-   * `acceptEdits` approves edits/reads but still prompts for shell commands.
-   */
-  private shouldAutoApprove(
-    kind: ToolKind | null | undefined,
-    permissionMode?: PermissionMode,
-  ): boolean {
-    switch (permissionMode) {
-      case "bypassPermissions":
-        return true;
-      case "acceptEdits":
-        return kind === "edit" || kind === "read" || kind === "search";
-      case "plan":
-        return kind === "read" || kind === "search" || kind === "fetch";
-      default:
-        return false;
-    }
   }
 
   /**
@@ -470,7 +495,7 @@ export class KimiProvider implements AgentProvider {
       case "think":
         return "Think";
       case "switch_mode":
-        return "SwitchMode";
+        return title ?? "SwitchMode";
       default:
         return title ?? "KimiTool";
     }

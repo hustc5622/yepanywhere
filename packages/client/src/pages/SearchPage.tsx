@@ -331,6 +331,7 @@ const PROVIDER_COLORS: Partial<Record<ProviderName, string>> = {
   gemini: "#4285f4",
   "gemini-acp": "#4285f4",
   opencode: "#9333ea",
+  kimi: "var(--provider-kimi)",
 };
 
 function ProviderTag({ provider }: { provider: ProviderName }) {

@@ -52,6 +52,20 @@ describe("provider permission modes", () => {
     );
   });
 
+  it("uses Kimi's native modes and defaults to manual approval", () => {
+    expect(getProviderPermissionModes("kimi")).toEqual([
+      "default",
+      "plan",
+      "auto",
+      "bypassPermissions",
+    ]);
+    expect(normalizeProviderPermissionMode("kimi", undefined)).toBe("default");
+    expect(normalizeProviderPermissionMode("kimi", "acceptEdits")).toBe(
+      "default",
+    );
+    expect(normalizeProviderPermissionMode("kimi", "auto")).toBe("auto");
+  });
+
   it("prefers modes advertised by the server", () => {
     expect(
       getProviderPermissionModes("codex", ["plan", "bypassPermissions"]),

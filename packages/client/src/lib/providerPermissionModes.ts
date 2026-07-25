@@ -17,6 +17,16 @@ const FALLBACK_PERMISSION_MODES: Partial<
   codex: ["auto", "plan", "bypassPermissions"],
   opencode: ["default", "acceptEdits", "bypassPermissions"],
   "gemini-acp": ["default", "acceptEdits", "bypassPermissions"],
+  // Kimi's ACP modes are default/manual, plan, auto, and yolo. The shared
+  // bypassPermissions value is presented as YOLO by Kimi-specific UI.
+  kimi: ["default", "plan", "auto", "bypassPermissions"],
+};
+
+const PROVIDER_DEFAULT_PERMISSION_MODES: Partial<
+  Record<ProviderName, PermissionMode>
+> = {
+  // Never make Kimi's fully autonomous `auto` mode the implicit default.
+  kimi: "default",
 };
 
 export function getProviderPermissionModes(
@@ -34,7 +44,10 @@ export function normalizeProviderPermissionMode(
   advertisedModes?: readonly PermissionMode[],
 ): PermissionMode {
   const modes = getProviderPermissionModes(provider, advertisedModes);
-  const requestedMode = mode ?? DEFAULT_PERMISSION_MODE;
+  const requestedMode =
+    mode ??
+    (provider ? PROVIDER_DEFAULT_PERMISSION_MODES[provider] : undefined) ??
+    DEFAULT_PERMISSION_MODE;
   if (modes.includes(requestedMode)) return requestedMode;
   return modes[0] ?? requestedMode;
 }

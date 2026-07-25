@@ -171,14 +171,15 @@ Kimi 对"修改 session 内容"用 **fork（copy-on-write 分支）**：
 
 ACP 下工具由 Kimi 自己执行，**只有敏感操作才发审批，且受 Kimi mode 支配**：
 
-| Yep `PermissionMode` | Kimi mode | Yep 是否接管审批 | 实现 |
-| --- | --- | --- | --- |
-| `default` | `default`(manual) | ✅ 每次敏感操作都接管 | 直接透传 |
-| `plan` | `plan` | ✅ 只读，plan_review 审批 | 直接透传 |
-| `acceptEdits` | `default`(manual) | ⚠️ 部分 | provider 层 `shouldAutoApprove`：`edit`/`read`/`search` 自动 allow，`execute` 仍转 `onToolApproval` |
-| `bypassPermissions` | `yolo` / `auto` | ❌ Kimi 自动放行 | 符合预期，Yep 不介入 |
+| Yep `PermissionMode` | Kimi ACP mode | 行为 |
+| --- | --- | --- |
+| `default` | `default`（manual） | Kimi 自动允许安全读取，其余原生审批请求交给 Yep |
+| `plan` | `plan` | Kimi 进入只读计划模式，`plan_review` 交给 Yep |
+| `auto` | `auto` | 完全自主运行，不向用户提问 |
+| `bypassPermissions` | `yolo` | 自动允许常规工具；Kimi 仍会把敏感操作、问题和计划审核交给 Yep |
+| `acceptEdits`（旧数据兼容） | `default`（manual） | 不再对新 Kimi 会话展示；旧保存值仍由 Yep 按编辑自动允许、其他操作询问的规则处理 |
 
-**结论**：想让 Yep 接管审批，会话必须跑在 Kimi 的 `default/manual`。`acceptEdits` 因 Kimi 无精确对应 mode，需在 provider 层按 `toolCall.kind` 自行实现（gemini-acp `shouldAutoApprove` 现成参考）。
+启动和恢复会话后通过 ACP `session/set_mode` 应用上述原生模式；活动会话切换模式时也调用同一接口。`bypassPermissions` 继续作为 Yep 的共享 wire value，对 Kimi 界面显示为 **YOLO**，从而不需要扩大跨 provider 的公共类型。
 
 ### 4.2 plan_review 多选审批
 
@@ -239,7 +240,7 @@ KIMI_SESSIONS_DIR=/tmp/kimi-sessions
 | --- | --- | --- |
 | `@agentclientprotocol/sdk` 版本 | Yep 现有版本需与 Kimi 的 `0.23.0` 兼容 | 实现时先跑握手，必要时对齐 SDK 版本 |
 | wire.jsonl 格式演进 | Kimi 升级可能改事件结构 | schema 用 zod 宽松解析 + 未知事件忽略；`protocol_version` 打点 |
-| `acceptEdits` 语义 | Kimi 无精确对应 mode | provider 层按 `toolCall.kind` 自实现 |
+| 旧 `acceptEdits` 数据 | Kimi 无精确对应 mode | 映射到 Kimi `default`，由 Yep 保留旧的局部自动批准语义；新会话不再展示 |
 | 模型/thinking 档位来源 | 需从 `config.toml` 或 `configOptions` 读取 | P0 先读 config.toml，P3 接 ACP configOptions |
 | resume 可靠性 | ACP `session/resume` 失败需回退 | 对齐 gemini-acp：resume 失败则 `session/new` |
 

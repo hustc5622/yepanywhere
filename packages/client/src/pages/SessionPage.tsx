@@ -61,6 +61,7 @@ import {
   type PreprocessMessagesCache,
   preprocessMessagesCached,
 } from "../lib/preprocessMessagesCache";
+import { getProviderPermissionModes } from "../lib/providerPermissionModes";
 import {
   requireStartedHistoricalEdit,
   resolveBranchNavigationFocus,
@@ -120,6 +121,8 @@ function getApprovalAgentName(
       return "Gemini";
     case "opencode":
       return "OpenCode";
+    case "kimi":
+      return "Kimi";
     default:
       return "Claude";
   }
@@ -546,6 +549,14 @@ function SessionPageContent({
   // Default to true for backwards compatibility (except slash commands)
   const supportsPermissionMode =
     currentProviderInfo?.supportsPermissionMode ?? true;
+  const permissionModes = useMemo(
+    () =>
+      getProviderPermissionModes(
+        effectiveProvider,
+        currentProviderInfo?.permissionModes,
+      ),
+    [currentProviderInfo?.permissionModes, effectiveProvider],
+  );
   const supportsThinkingToggle =
     currentProviderInfo?.supportsThinkingToggle ?? true;
   const supportsSlashCommands = currentProviderInfo?.supportsSlashCommands;
@@ -2015,6 +2026,8 @@ function SessionPageContent({
                     isHeld={holdModeEnabled ? isHeld : undefined}
                     onHoldChange={holdModeEnabled ? setHold : undefined}
                     supportsPermissionMode={supportsPermissionMode}
+                    provider={effectiveProvider}
+                    permissionModes={permissionModes}
                     supportsThinkingToggle={supportsThinkingToggle}
                     contextUsage={session?.contextUsage}
                     projectId={projectId}
@@ -2138,6 +2151,8 @@ function SessionPageContent({
                 isHeld={holdModeEnabled ? isHeld : undefined}
                 onHoldChange={holdModeEnabled ? setHold : undefined}
                 supportsPermissionMode={supportsPermissionMode}
+                provider={effectiveProvider}
+                permissionModes={permissionModes}
                 supportsThinkingToggle={supportsThinkingToggle}
                 isRunning={status.owner === "self"}
                 isThinking={processState === "in-turn"}

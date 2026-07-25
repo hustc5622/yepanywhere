@@ -1,4 +1,4 @@
-import type { UploadedFile } from "@yep-anywhere/shared";
+import type { ProviderName, UploadedFile } from "@yep-anywhere/shared";
 import {
   type ClipboardEvent,
   type KeyboardEvent,
@@ -122,6 +122,9 @@ interface Props {
   uploadProgress?: UploadProgress[];
   /** Whether the provider supports permission modes (default: true) */
   supportsPermissionMode?: boolean;
+  /** Provider-native permission modes and labels. */
+  provider?: ProviderName;
+  permissionModes?: readonly PermissionMode[];
   /** Whether the provider supports thinking toggle (default: true) */
   supportsThinkingToggle?: boolean;
   /** Active command prefix for this provider */
@@ -161,6 +164,8 @@ export function MessageInput({
   onRemoveAttachment,
   uploadProgress = [],
   supportsPermissionMode = true,
+  provider,
+  permissionModes,
   supportsThinkingToggle = true,
   commandPrefix = "/",
   commands = [],
@@ -651,6 +656,8 @@ export function MessageInput({
             isHeld={isHeld}
             onHoldChange={onHoldChange}
             supportsPermissionMode={supportsPermissionMode}
+            provider={provider}
+            permissionModes={permissionModes}
             supportsThinkingToggle={supportsThinkingToggle}
             canAttach={canAttach}
             attachmentCount={attachments.length}

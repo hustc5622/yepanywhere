@@ -442,70 +442,88 @@ export function NewSessionForm({
   };
   const modeLabels: Record<PermissionMode, string> = {
     ...genericModeLabels,
-    ...(selectedProvider === "codex"
+    ...(selectedProvider === "kimi"
       ? {
-          auto: t("modeCodexCfLabel"),
-          plan: t("modeCodexReadOnlyLabel"),
-          bypassPermissions: t("modeCodexFullAccessLabel"),
+          default: t("modeKimiDefaultLabel"),
+          plan: t("modeKimiPlanLabel"),
+          auto: t("modeKimiAutoLabel"),
+          bypassPermissions: t("modeKimiYoloLabel"),
         }
-      : selectedProvider === "opencode"
+      : selectedProvider === "codex"
         ? {
-            default: t("modeOpenCodeAskLabel"),
-            acceptEdits: t("modeOpenCodeEditLabel"),
-            bypassPermissions: t("modeOpenCodeAllowAllLabel"),
+            auto: t("modeCodexCfLabel"),
+            plan: t("modeCodexReadOnlyLabel"),
+            bypassPermissions: t("modeCodexFullAccessLabel"),
           }
-        : selectedProvider === "gemini-acp"
+        : selectedProvider === "opencode"
           ? {
-              default: t("modeGeminiAskLabel"),
-              acceptEdits: t("modeGeminiEditLabel"),
-              bypassPermissions: t("modeGeminiAllowAllLabel"),
+              default: t("modeOpenCodeAskLabel"),
+              acceptEdits: t("modeOpenCodeEditLabel"),
+              bypassPermissions: t("modeOpenCodeAllowAllLabel"),
             }
-          : {}),
+          : selectedProvider === "gemini-acp"
+            ? {
+                default: t("modeGeminiAskLabel"),
+                acceptEdits: t("modeGeminiEditLabel"),
+                bypassPermissions: t("modeGeminiAllowAllLabel"),
+              }
+            : {}),
   };
   const modeDescriptions: Record<PermissionMode, string> = {
     ...genericModeDescriptions,
-    ...(selectedProvider === "codex"
+    ...(selectedProvider === "kimi"
       ? {
-          auto: t("modeCodexCfDescription"),
-          plan: t("modeCodexReadOnlyDescription"),
-          bypassPermissions: t("modeCodexFullAccessDescription"),
+          default: t("modeKimiDefaultDescription"),
+          plan: t("modeKimiPlanDescription"),
+          auto: t("modeKimiAutoDescription"),
+          bypassPermissions: t("modeKimiYoloDescription"),
         }
-      : selectedProvider === "opencode"
+      : selectedProvider === "codex"
         ? {
-            default: t("modeOpenCodeAskDescription"),
-            acceptEdits: t("modeOpenCodeEditDescription"),
-            bypassPermissions: t("modeOpenCodeAllowAllDescription"),
+            auto: t("modeCodexCfDescription"),
+            plan: t("modeCodexReadOnlyDescription"),
+            bypassPermissions: t("modeCodexFullAccessDescription"),
           }
-        : selectedProvider === "gemini-acp"
+        : selectedProvider === "opencode"
           ? {
-              default: t("modeGeminiAskDescription"),
-              acceptEdits: t("modeGeminiEditDescription"),
-              bypassPermissions: t("modeGeminiAllowAllDescription"),
+              default: t("modeOpenCodeAskDescription"),
+              acceptEdits: t("modeOpenCodeEditDescription"),
+              bypassPermissions: t("modeOpenCodeAllowAllDescription"),
             }
-          : {}),
+          : selectedProvider === "gemini-acp"
+            ? {
+                default: t("modeGeminiAskDescription"),
+                acceptEdits: t("modeGeminiEditDescription"),
+                bypassPermissions: t("modeGeminiAllowAllDescription"),
+              }
+            : {}),
   };
   const permissionModeTitle =
-    selectedProvider === "codex"
-      ? t("newSessionCodexPermissionTitle")
-      : selectedProvider === "opencode"
-        ? t("newSessionOpenCodePermissionTitle")
-        : selectedProvider === "gemini-acp"
-          ? t("newSessionGeminiPermissionTitle")
-          : selectedProvider === "claude" ||
-              selectedProvider === "claude-ollama"
-            ? t("newSessionClaudePermissionTitle")
-            : t("newSessionModeTitle");
+    selectedProvider === "kimi"
+      ? t("newSessionKimiPermissionTitle")
+      : selectedProvider === "codex"
+        ? t("newSessionCodexPermissionTitle")
+        : selectedProvider === "opencode"
+          ? t("newSessionOpenCodePermissionTitle")
+          : selectedProvider === "gemini-acp"
+            ? t("newSessionGeminiPermissionTitle")
+            : selectedProvider === "claude" ||
+                selectedProvider === "claude-ollama"
+              ? t("newSessionClaudePermissionTitle")
+              : t("newSessionModeTitle");
   const permissionModeDescription =
-    selectedProvider === "codex"
-      ? t("newSessionCodexPermissionDescription")
-      : selectedProvider === "opencode"
-        ? t("newSessionOpenCodePermissionDescription")
-        : selectedProvider === "gemini-acp"
-          ? t("newSessionGeminiPermissionDescription")
-          : selectedProvider === "claude" ||
-              selectedProvider === "claude-ollama"
-            ? t("newSessionClaudePermissionDescription")
-            : null;
+    selectedProvider === "kimi"
+      ? t("newSessionKimiPermissionDescription")
+      : selectedProvider === "codex"
+        ? t("newSessionCodexPermissionDescription")
+        : selectedProvider === "opencode"
+          ? t("newSessionOpenCodePermissionDescription")
+          : selectedProvider === "gemini-acp"
+            ? t("newSessionGeminiPermissionDescription")
+            : selectedProvider === "claude" ||
+                selectedProvider === "claude-ollama"
+              ? t("newSessionClaudePermissionDescription")
+              : null;
   const codexMcpModeLabels: Record<CodexMcpMode, string> = {
     clear: t("newSessionCodexMcpClearLabel"),
     standard: t("newSessionCodexMcpStandardLabel"),

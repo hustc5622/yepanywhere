@@ -258,6 +258,21 @@ export class ACPClient {
   }
 
   /**
+   * Change the agent-native mode for an active ACP session.
+   *
+   * Kimi advertises `default`, `plan`, `auto`, and `yolo` while retaining the
+   * standard `session/set_mode` endpoint for ACP clients.
+   */
+  async setSessionMode(sessionId: string, modeId: string): Promise<void> {
+    if (!this.connection) {
+      throw new Error("ACPClient not connected. Call connect() first.");
+    }
+
+    this.log.debug({ sessionId, modeId }, "Setting ACP session mode");
+    await this.connection.setSessionMode({ sessionId, modeId });
+  }
+
+  /**
    * Send a prompt to the agent and get a response.
    *
    * Note: In Phase 1, this is a simple request/response pattern.

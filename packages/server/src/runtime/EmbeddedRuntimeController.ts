@@ -334,7 +334,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
     const process = this.supervisor.getProcessForSession(input.sessionId);
     if (!process) return { ok: false };
 
-    process.setPermissionMode(input.mode);
+    await process.syncPermissionMode(input.mode);
     return {
       ok: true,
       permissionMode: process.permissionMode,

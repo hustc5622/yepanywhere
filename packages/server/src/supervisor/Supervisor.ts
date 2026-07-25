@@ -471,6 +471,7 @@ export class Supervisor {
       supportedModels,
       supportedCommands,
       setModel,
+      setPermissionMode: setProviderPermissionMode,
       getContextUsage,
       initializationResult,
     } = result;
@@ -495,6 +496,7 @@ export class Supervisor {
       supportedModelsFn: supportedModels,
       supportedCommandsFn: supportedCommands,
       setModelFn: setModel,
+      setPermissionModeFn: setProviderPermissionMode,
       getContextUsageFn: getContextUsage,
       initializationResultFn: initializationResult,
       permissionMode: effectiveMode,
@@ -619,6 +621,7 @@ export class Supervisor {
       supportedModels,
       supportedCommands,
       setModel,
+      setPermissionMode: setProviderPermissionMode,
       getContextUsage,
       initializationResult,
     } = result;
@@ -643,6 +646,7 @@ export class Supervisor {
       supportedModelsFn: supportedModels,
       supportedCommandsFn: supportedCommands,
       setModelFn: setModel,
+      setPermissionModeFn: setProviderPermissionMode,
       getContextUsageFn: getContextUsage,
       initializationResultFn: initializationResult,
       permissionMode: effectiveMode,
@@ -833,7 +837,7 @@ export class Supervisor {
           }
           // Update permission mode if specified
           if (permissionMode) {
-            existingProcess.setPermissionMode(permissionMode);
+            await existingProcess.syncPermissionMode(permissionMode);
           }
           // Queue message to existing process (if we didn't fall through to restart)
           if (!existingProcess.isTerminated) {
@@ -1044,7 +1048,7 @@ export class Supervisor {
 
     // Queue to existing process (dynamic thinking change already applied if needed)
     if (permissionMode) {
-      process.setPermissionMode(permissionMode);
+      await process.syncPermissionMode(permissionMode);
     }
 
     const result = process.queueMessage(message);

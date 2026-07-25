@@ -42,7 +42,7 @@ const PROVIDER_COLORS: Record<ProviderName, string> = {
   gemini: "#4285f4",
   "gemini-acp": "#4285f4", // Same as gemini
   opencode: "#9333ea", // Purple for OpenCode
-  kimi: "#6b5bd6", // Kimi (Moonshot) purple
+  kimi: "var(--provider-kimi)", // Kimi KMBlue
 };
 
 const getSessionListTitle = (session: GlobalSessionItem): string | null =>

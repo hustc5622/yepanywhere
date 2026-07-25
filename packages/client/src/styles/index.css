@@ -19,6 +19,7 @@
   --provider-codex: #10a37f;
   --provider-gemini: #4285f4;
   --provider-opencode: #9333ea;
+  --provider-kimi: #1783ff;
 
   /* Semantic Colors */
   --thinking-color: var(--app-claude-orange);
@@ -8835,6 +8836,10 @@ button.context-usage-indicator--button:focus-visible {
 
 .provider-option-dot.provider-opencode {
   background: var(--provider-opencode);
+}
+
+.provider-option-dot.provider-kimi {
+  background: var(--provider-kimi);
 }
 
 .provider-option-dot.provider-local {

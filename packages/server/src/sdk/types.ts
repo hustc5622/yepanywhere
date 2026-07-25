@@ -161,5 +161,11 @@ export type CanUseTool = (
     signal: AbortSignal;
     /** Provider-native request id, when the provider exposes one. */
     requestId?: string;
+    /**
+     * The provider already applied its native permission policy and still
+     * decided this request needs a human. Skip Yep's mode-based auto-approval
+     * while continuing to honor explicit allow/deny rules.
+     */
+    respectProviderDecision?: boolean;
   },
 ) => Promise<ToolApprovalResult>;
