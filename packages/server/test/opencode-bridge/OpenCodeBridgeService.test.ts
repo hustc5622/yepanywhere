@@ -2486,4 +2486,302 @@ describe("OpenCodeBridgeService", () => {
       await bridge.shutdown();
     }
   });
+
+  describe("subagent parent/child session handling", () => {
+    function makeBridge(opencodeServerUrl?: string): OpenCodeBridgeService {
+      return new OpenCodeBridgeService({
+        enabled: false,
+        host: "127.0.0.1",
+        port: 0,
+        serverUrl: "http://127.0.0.1:3400",
+        opencodeServerUrl: opencodeServerUrl ?? "http://127.0.0.1:3400",
+      });
+    }
+
+    function feed(bridge: OpenCodeBridgeService, event: unknown): void {
+      (
+        bridge as unknown as { handleOpenCodeEvent: (event: unknown) => void }
+      ).handleOpenCodeEvent(event);
+    }
+
+    it("does not treat a message parentID (msg_*) as a session parent", () => {
+      const bridge = makeBridge();
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_root", title: "Root" } },
+      });
+      feed(bridge, {
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "msg_1",
+            sessionID: "ses_root",
+            role: "assistant",
+            parentID: "msg_0",
+          },
+        },
+      });
+
+      const ids = bridge.listSessions().map((session) => session.id);
+      expect(ids).toContain("ses_root");
+      expect(bridge.getSessionView("ses_root")?.session.parentSessionId).toBe(
+        undefined,
+      );
+    });
+
+    it("establishes a parent/child relationship from session.created parentID", () => {
+      const bridge = makeBridge();
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_root", title: "Root" } },
+      });
+      feed(bridge, {
+        type: "session.created",
+        properties: {
+          info: { id: "ses_child", parentID: "ses_root", title: "Child" },
+        },
+      });
+
+      const ids = bridge.listSessions().map((session) => session.id);
+      expect(ids).toEqual(["ses_root"]);
+      // The child is hidden from the top-level list but directly addressable.
+      expect(bridge.getSessionView("ses_child")?.session.parentSessionId).toBe(
+        "ses_root",
+      );
+    });
+
+    it("clears a previously mis-recorded msg_* parent on an authoritative session event", () => {
+      const bridge = makeBridge();
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_root", title: "Root" } },
+      });
+      // Simulate legacy corruption where a message id leaked into the parent.
+      const sessions = (
+        bridge as unknown as {
+          sessions: Map<string, { parentSessionId?: string }>;
+        }
+      ).sessions;
+      const record = sessions.get("ses_root");
+      if (record) record.parentSessionId = "msg_bad";
+      expect(bridge.listSessions().map((s) => s.id)).not.toContain("ses_root");
+
+      feed(bridge, {
+        type: "session.updated",
+        properties: { info: { id: "ses_root", title: "Root" } },
+      });
+      expect(bridge.listSessions().map((s) => s.id)).toContain("ses_root");
+      expect(bridge.getSessionView("ses_root")?.session.parentSessionId).toBe(
+        undefined,
+      );
+    });
+
+    it("drops persisted msg_* parents when restoring sessions", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "yep-opencode-restore-"));
+      tempDirs.push(dir);
+      const statePath = join(dir, "sessions.json");
+      await writeFile(
+        statePath,
+        JSON.stringify({
+          version: 1,
+          sessions: [
+            {
+              id: "ses_root",
+              parentSessionId: "msg_leak",
+              cwd: "/repo",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "ses_child",
+              parentSessionId: "ses_root",
+              cwd: "/repo",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        }),
+      );
+      const bridge = new OpenCodeBridgeService({
+        enabled: false,
+        host: "127.0.0.1",
+        port: 0,
+        serverUrl: "http://127.0.0.1:3400",
+        opencodeServerUrl: "http://127.0.0.1:3400",
+        statePath,
+      });
+      await (
+        bridge as unknown as {
+          restorePersistedSessions: () => Promise<void>;
+        }
+      ).restorePersistedSessions();
+
+      const ids = bridge.listSessions().map((session) => session.id);
+      expect(ids).toContain("ses_root");
+      expect(ids).not.toContain("ses_child");
+      expect(bridge.getSessionView("ses_root")?.session.parentSessionId).toBe(
+        undefined,
+      );
+    });
+
+    it("projects a child permission onto the root session and replies to the child", async () => {
+      const replies: Array<{ url: string; body: unknown }> = [];
+      const opencodeServer = createServer((req, res) => {
+        if (req.method === "GET") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("{}");
+          return;
+        }
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) =>
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
+        );
+        req.on("end", () => {
+          replies.push({
+            url: requestUrl(req).pathname,
+            body: JSON.parse(Buffer.concat(chunks).toString("utf-8") || "null"),
+          });
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("true");
+        });
+      });
+      const opencodeServerUrl = await listen(opencodeServer);
+      const bridge = makeBridge(opencodeServerUrl);
+
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_root", title: "Root" } },
+      });
+      feed(bridge, {
+        type: "session.created",
+        properties: {
+          info: { id: "ses_child", parentID: "ses_root", title: "Explore" },
+        },
+      });
+      feed(bridge, {
+        type: "permission.asked",
+        properties: {
+          id: "per_1",
+          sessionID: "ses_child",
+          permission: "external_directory",
+          patterns: ["/tmp/x"],
+        },
+      });
+
+      // Child stays out of the list; root now needs attention.
+      expect(bridge.listSessions().map((s) => s.id)).toEqual(["ses_root"]);
+      expect(bridge.getSessionView("ses_root")?.session.activity).toBe(
+        "waiting-input",
+      );
+      expect(bridge.getSessionView("ses_root")?.session.pendingInputType).toBe(
+        "tool-approval",
+      );
+
+      const projected = bridge.getPendingInputRequest("ses_root");
+      expect(projected).toMatchObject({
+        id: "per_1",
+        sessionId: "ses_root",
+        toolInput: {
+          originSessionId: "ses_child",
+          parentSessionId: "ses_root",
+          originSessionTitle: "Explore",
+        },
+      });
+
+      // Responding through the root resolves the real child request.
+      await expect(
+        bridge.respondToInput("ses_root", "per_1", "approve"),
+      ).resolves.toBe(true);
+      expect(replies).toEqual([
+        { url: "/permission/per_1/reply", body: { reply: "once" } },
+      ]);
+      expect(bridge.getPendingInputRequest("ses_root")).toBeNull();
+    });
+
+    it("projects a child question onto the root session", () => {
+      const bridge = makeBridge();
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_root", title: "Root" } },
+      });
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_child", parentID: "ses_root" } },
+      });
+      feed(bridge, {
+        type: "question.asked",
+        properties: {
+          id: "q_1",
+          sessionID: "ses_child",
+          questions: [{ question: "Proceed?", options: [] }],
+        },
+      });
+
+      expect(bridge.getSessionView("ses_root")?.session.pendingInputType).toBe(
+        "user-question",
+      );
+      expect(bridge.getPendingInputRequest("ses_root")).toMatchObject({
+        id: "q_1",
+        sessionId: "ses_root",
+        type: "question",
+        toolInput: { originSessionId: "ses_child" },
+      });
+      // The child is still directly retrievable by id.
+      expect(bridge.getSessionView("ses_child")).not.toBeNull();
+    });
+
+    it("keeps the root waiting-input while another child request is still pending", async () => {
+      const opencodeServer = createServer((req, res) => {
+        if (req.method === "GET") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("{}");
+          return;
+        }
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) =>
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
+        );
+        req.on("end", () => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("true");
+        });
+      });
+      const opencodeServerUrl = await listen(opencodeServer);
+      const bridge = makeBridge(opencodeServerUrl);
+
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_root", title: "Root" } },
+      });
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_a", parentID: "ses_root" } },
+      });
+      feed(bridge, {
+        type: "session.created",
+        properties: { info: { id: "ses_b", parentID: "ses_root" } },
+      });
+      feed(bridge, {
+        type: "permission.asked",
+        properties: { id: "per_a", sessionID: "ses_a", permission: "bash" },
+      });
+      feed(bridge, {
+        type: "permission.asked",
+        properties: { id: "per_b", sessionID: "ses_b", permission: "edit" },
+      });
+
+      // Queue head is the oldest request.
+      expect(bridge.getPendingInputRequest("ses_root")?.id).toBe("per_a");
+
+      await expect(
+        bridge.respondToInput("ses_root", "per_a", "approve"),
+      ).resolves.toBe(true);
+
+      // The second child is still blocked, so the root stays in needs-attention.
+      expect(bridge.getSessionView("ses_root")?.session.activity).toBe(
+        "waiting-input",
+      );
+      expect(bridge.getPendingInputRequest("ses_root")?.id).toBe("per_b");
+    });
+  });
 });

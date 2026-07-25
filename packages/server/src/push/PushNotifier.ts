@@ -500,6 +500,7 @@ export class PushNotifier {
    * Build a human-readable summary from the InputRequest.
    */
   private buildSummary(request: InputRequest): string {
+    const subagentPrefix = this.subagentSummaryPrefix(request);
     if (request.type === "tool-approval") {
       const toolName = request.toolName ?? "Unknown tool";
 
@@ -515,9 +516,11 @@ export class PushNotifier {
                 (item): item is string => typeof item === "string",
               )
             : [];
-          return patterns.length > 0
-            ? `${input.permission}: ${patterns.join(", ")}`
-            : input.permission;
+          const detail =
+            patterns.length > 0
+              ? `${input.permission}: ${patterns.join(", ")}`
+              : input.permission;
+          return `${subagentPrefix}${detail}`;
         }
 
         // For file operations, try to extract the file path
@@ -525,16 +528,34 @@ export class PushNotifier {
         if (typeof filePath === "string") {
           // Extract just the filename from the path
           const fileName = basename(filePath);
-          return `${toolName}: ${fileName}`;
+          return `${subagentPrefix}${toolName}: ${fileName}`;
         }
       }
 
-      return `Run: ${toolName}`;
+      return `${subagentPrefix}Run: ${toolName}`;
     }
 
     // Questions require the full Yep UI. Keep the notification generic so it
     // cannot be mistaken for an actionable approval or expose answer details.
-    return "Question waiting — open Yep to answer";
+    return `${subagentPrefix}Question waiting — open Yep to answer`;
+  }
+
+  /**
+   * When a request was routed up from a subagent (child session), prefix the
+   * summary so the operator knows which subagent needs input. The request
+   * itself still targets the parent session for navigation.
+   */
+  private subagentSummaryPrefix(request: InputRequest): string {
+    if (!request.toolInput || typeof request.toolInput !== "object") return "";
+    const input = request.toolInput as Record<string, unknown>;
+    if (typeof input.originSessionId !== "string") return "";
+    const title =
+      typeof input.originSessionTitle === "string" && input.originSessionTitle
+        ? input.originSessionTitle
+        : typeof input.originAgent === "string" && input.originAgent
+          ? input.originAgent
+          : undefined;
+    return title ? `Subagent ${title} — ` : "Subagent — ";
   }
 
   private getSessionTitle(

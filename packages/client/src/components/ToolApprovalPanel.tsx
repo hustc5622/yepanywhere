@@ -41,6 +41,22 @@ function getApprovalKind(request: InputRequest): string | undefined {
 }
 
 /**
+ * A subagent (child session) permission request is routed into the parent
+ * session but carries the origin child's identity so the panel can explain
+ * which subagent is asking. Prefer a human title, then the agent type.
+ */
+function getSubagentOriginTitle(request: InputRequest): string | undefined {
+  const input = asRecord(request.toolInput);
+  if (!input) return undefined;
+  if (!getString(input.originSessionId)) return undefined;
+  return (
+    getString(input.originSessionTitle) ??
+    getString(input.originAgent) ??
+    undefined
+  );
+}
+
+/**
  * OpenCode permission approvals come in two shapes: bridge requests are
  * tagged approvalKind "opencode_permission"; owned-session requests carry the
  * raw event fields (permission + patterns) with no approvalKind. Both offer
@@ -204,6 +220,7 @@ export function ToolApprovalPanel({
 
   const isEditTool = request.toolName && EDIT_TOOLS.includes(request.toolName);
   const approvalKind = getApprovalKind(request);
+  const subagentOriginTitle = getSubagentOriginTitle(request);
   const mcpApprovalScopes = getMcpApprovalScopes(request);
   const isScopedMcpApproval = mcpApprovalScopes.length > 0;
   const isPermissionsApproval = approvalKind === "permissions";
@@ -530,6 +547,11 @@ export function ToolApprovalPanel({
       {!collapsed && (
         <div className="tool-approval-panel">
           <div className="tool-approval-header">
+            {subagentOriginTitle && (
+              <span className="tool-approval-subagent-origin">
+                {t("subagentApprovalOrigin", { title: subagentOriginTitle })}
+              </span>
+            )}
             {isExitPlanMode(request.toolName) ? (
               <>
                 <span className="tool-approval-title">

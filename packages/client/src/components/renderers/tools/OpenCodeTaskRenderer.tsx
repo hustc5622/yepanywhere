@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataContext";
+import { useGlobalSessions } from "../../../hooks/useGlobalSessions";
 import { useRemoteBasePath } from "../../../hooks/useRemoteBasePath";
 import { useI18n } from "../../../i18n";
 import {
@@ -61,7 +62,26 @@ function OpenCodeSubagentCard({
   const description = getDescription(input);
   const agent = input.subagent_type?.trim();
 
+  // A running subagent may block on its own permission/question request. That
+  // request is projected onto this (parent) session so the parent enters
+  // needs-attention, but the child session itself reports "waiting-input" in
+  // the global session list. Surface it on the card so the operator sees the
+  // subagent needs approval without opening the child.
+  const { sessions } = useGlobalSessions();
+  const approvalNeeded =
+    !!childSessionId &&
+    (status === "pending" || status === "complete"
+      ? sessions.find((session) => session.id === childSessionId)?.activity ===
+        "waiting-input"
+      : false);
+
   const statusBadge = ((): { className: string; label: string } => {
+    if (approvalNeeded) {
+      return {
+        className: "badge-warning",
+        label: t("subagentStatusApprovalNeeded"),
+      };
+    }
     switch (status) {
       case "pending":
         return {

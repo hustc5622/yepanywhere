@@ -465,20 +465,161 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   }
 
   getPendingInputRequest(sessionId: string): InputRequest | null {
-    return this.pendingInputs.get(sessionId)?.request ?? null;
+    const direct = this.pendingInputs.get(sessionId);
+    if (direct) return direct.request;
+    // A subagent (child session) request is projected onto its root session so
+    // the parent enters needs-attention; the child never appears in the top
+    // level list but its blocker surfaces on the root.
+    const record = this.sessions.get(sessionId);
+    if (record && !record.parentSessionId) {
+      const projected = this.projectedPendingForRoot(sessionId);
+      if (projected) return this.projectPendingRequest(projected, sessionId);
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the top-most ancestor session id by walking parentSessionId. A
+   * missing/unknown parent stops the walk, so an orphaned child resolves to
+   * itself. Guarded against cycles/deep chains.
+   */
+  private resolveRootSessionId(sessionId: string): string {
+    let current = sessionId;
+    const seen = new Set<string>();
+    for (let depth = 0; depth < 16; depth += 1) {
+      if (seen.has(current)) break;
+      seen.add(current);
+      const record = this.sessions.get(current);
+      const parent = record?.parentSessionId;
+      if (!parent || parent === current) break;
+      current = parent;
+    }
+    return current;
+  }
+
+  /**
+   * Oldest pending input among a root session and all of its descendants,
+   * forming a stable FIFO queue head. Returns null when nothing is pending in
+   * that tree.
+   */
+  private projectedPendingForRoot(
+    rootSessionId: string,
+  ): OpenCodeBridgePendingInput | null {
+    let head: OpenCodeBridgePendingInput | null = null;
+    for (const pending of this.pendingInputs.values()) {
+      if (
+        this.resolveRootSessionId(pending.request.sessionId) !== rootSessionId
+      ) {
+        continue;
+      }
+      if (!head || pending.createdAt < head.createdAt) {
+        head = pending;
+      }
+    }
+    return head;
+  }
+
+  /**
+   * Clone a descendant's request so it points at the root session while
+   * preserving the child provenance (origin session id/title/agent) and the
+   * original OpenCode request id used for the reply.
+   */
+  private projectPendingRequest(
+    pending: OpenCodeBridgePendingInput,
+    rootSessionId: string,
+  ): InputRequest {
+    const request = pending.request;
+    if (request.sessionId === rootSessionId) return request;
+    const origin = this.sessions.get(request.sessionId);
+    const baseInput =
+      request.toolInput && typeof request.toolInput === "object"
+        ? (request.toolInput as Record<string, unknown>)
+        : {};
+    return {
+      ...request,
+      sessionId: rootSessionId,
+      toolInput: {
+        ...baseInput,
+        originSessionId: request.sessionId,
+        parentSessionId: origin?.parentSessionId,
+        ...(origin?.title ? { originSessionTitle: origin.title } : {}),
+      },
+    };
+  }
+
+  /**
+   * Find a pending input by its OpenCode request id anywhere in a root
+   * session's descendant tree. Used to route a root-targeted response back to
+   * the child session that actually owns the request.
+   */
+  private findPendingByRequestIdForRoot(
+    rootSessionId: string,
+    requestId: string,
+  ): OpenCodeBridgePendingInput | null {
+    for (const pending of this.pendingInputs.values()) {
+      if (pending.request.id !== requestId) continue;
+      if (
+        this.resolveRootSessionId(pending.request.sessionId) === rootSessionId
+      ) {
+        return pending;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Recompute a root session's blocker state after a descendant's pending
+   * input changed. Keeps the root in needs-attention while any descendant is
+   * waiting, and returns it to an active turn once the tree is clear.
+   */
+  private refreshRootPendingProjection(sessionId: string): void {
+    const root = this.resolveRootSessionId(sessionId);
+    if (root === sessionId) return; // direct-session path handles itself.
+    if (this.pendingInputs.has(root)) return; // root's own pending wins.
+    const projected = this.projectedPendingForRoot(root);
+    if (projected) {
+      this.updateSessionState(root, {
+        activity: "waiting-input",
+        pendingInputType:
+          projected.request.type === "tool-approval"
+            ? "tool-approval"
+            : "user-question",
+        active: true,
+      });
+      return;
+    }
+    // No descendant remains blocked. The parent turn is still running while its
+    // subagent continues; its own idle status reconciliation settles it later.
+    this.updateSessionState(root, {
+      activity: "in-turn",
+      pendingInputType: undefined,
+      active: true,
+    });
   }
 
   async respondToInput(
-    sessionId: string,
+    requestedSessionId: string,
     requestId: string,
     response: OpenCodeBridgeInputResponse,
     answers?: UserQuestionAnswers,
   ): Promise<boolean> {
+    // A response may target a root session for a projected subagent request.
+    // Resolve it to the real child session that owns the pending input so the
+    // reply reaches the correct OpenCode request.
+    let sessionId = requestedSessionId;
+    let pending = this.pendingInputs.get(sessionId);
+    if (!pending || pending.request.id !== requestId) {
+      const origin = this.findPendingByRequestIdForRoot(sessionId, requestId);
+      if (origin) {
+        sessionId = origin.request.sessionId;
+        pending = origin;
+      }
+    }
+
     const responseKey = `${sessionId}\0${requestId}`;
     const existingResponse = this.inputResponses.get(responseKey);
     if (existingResponse) return existingResponse;
 
-    const pending = this.pendingInputs.get(sessionId);
     if (!pending || pending.request.id !== requestId) return false;
     if (response !== "deny") {
       const validation = validateQuestionAnswers(pending.request, answers);
@@ -601,6 +742,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           pending: false,
         });
         this.updateSessionState(sessionId, { pendingInputType: undefined });
+        this.refreshRootPendingProjection(sessionId);
         if (this.enabled) void this.reconcileOpenCodeLifecycle(sessionId);
       }
       return true;
@@ -1705,9 +1847,17 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         continue;
       }
       if (this.sessions.has(stored.id)) continue;
+      // A prior regression persisted message parentIDs (msg_*) as the session
+      // parent, which incorrectly hid root sessions from listSessions(). Only
+      // restore a parent that is a real session id.
+      const restoredParent =
+        typeof stored.parentSessionId === "string" &&
+        stored.parentSessionId.startsWith("ses_")
+          ? stored.parentSessionId
+          : undefined;
       this.sessions.set(stored.id, {
         id: stored.id,
-        parentSessionId: stored.parentSessionId,
+        parentSessionId: restoredParent,
         projectId: encodeProjectId(stored.cwd),
         cwd: stored.cwd,
         serverUrl: stored.serverUrl || this.defaultServerUrl,
@@ -1930,6 +2080,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
           pending,
           new Error(message ?? "OpenCode reported an error"),
         );
+        this.refreshRootPendingProjection(sessionId);
       } else if (message) {
         this.lastError = message;
       }
@@ -1949,6 +2100,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         pending,
         new Error(`OpenCode session ${sessionId} was deleted`),
       );
+      this.refreshRootPendingProjection(sessionId);
       this.eventNotifier.notify();
       this.schedulePersist();
       return;
@@ -2011,7 +2163,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       this.recordOpenCodeSessionEvent(
         sessionId,
         properties,
-        { implyActive: false },
+        { implyActive: false, sessionEvent: true },
         origin,
       );
       return;
@@ -2100,13 +2252,24 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private recordOpenCodeSessionEvent(
     sessionId: string,
     properties: Record<string, unknown> | null,
-    options: { implyActive?: boolean } = {},
+    options: { implyActive?: boolean; sessionEvent?: boolean } = {},
     origin?: OpenCodeEventOrigin,
   ): void {
     const implyActive = options.implyActive ?? true;
     const info = asRecord(properties?.info);
     const title = normalizeProviderGeneratedTitle(readString(info, "title"));
-    const parentSessionId = readString(info, "parentID");
+    // Only authoritative session lifecycle events (session.created /
+    // session.updated) carry a real session parent. message.updated.info
+    // .parentID is a *message* id (msg_*), never a session parent, so it must
+    // never be written to SessionRecord.parentSessionId. On a session event we
+    // also clear any previously mis-recorded msg_* parent by projecting the
+    // authoritative (possibly undefined) value.
+    const rawParent = options.sessionEvent
+      ? readString(info, "parentID")
+      : undefined;
+    const parentSessionId = rawParent?.startsWith("ses_")
+      ? rawParent
+      : undefined;
     const updatedAt =
       readOpenCodeUpdatedAt(info) ??
       readString(info, "updatedAt") ??
@@ -2118,7 +2281,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         // Message events do not include a session title. Avoid replacing the
         // title recorded from session.created with undefined in that case.
         ...(title ? { title } : {}),
-        ...(parentSessionId ? { parentSessionId } : {}),
+        ...(options.sessionEvent ? { parentSessionId } : {}),
         ...(messageCount !== undefined ? { messageCount } : {}),
         ...(updatedAt ? { updatedAt } : {}),
         ...(implyActive
@@ -2210,6 +2373,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       },
       origin,
     );
+    this.refreshRootPendingProjection(sessionId);
   }
 
   private recordOpenCodeQuestionRequest(
@@ -2268,6 +2432,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       },
       origin,
     );
+    this.refreshRootPendingProjection(sessionId);
   }
 
   private clearOpenCodePendingInput(
@@ -2299,6 +2464,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       origin,
     );
     this.updateSessionState(sessionId, { pendingInputType: undefined }, origin);
+    this.refreshRootPendingProjection(sessionId);
     if (this.enabled) void this.reconcileOpenCodeLifecycle(sessionId);
   }
 

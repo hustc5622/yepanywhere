@@ -1459,6 +1459,663 @@ custom-openai/glm-5.2
     expect(replies).toEqual([{ reply: "once" }]);
   });
 
+  type SendMessageAndStream = (
+    baseUrl: string,
+    opencodeSessionId: string,
+    sessionId: string,
+    text: string,
+    signal: AbortSignal,
+    onToolApproval: (
+      toolName: string,
+      input: unknown,
+      options: { signal: AbortSignal; requestId?: string },
+    ) => Promise<{ behavior: "allow" | "deny"; updatedInput?: unknown }>,
+    model?: string,
+    variant?: string,
+    cwd?: string,
+  ) => AsyncIterableIterator<Record<string, unknown>>;
+
+  function getSendMessageAndStream(
+    provider: OpenCodeProvider,
+  ): SendMessageAndStream {
+    return (
+      provider as unknown as { sendMessageAndStream: SendMessageAndStream }
+    ).sendMessageAndStream.bind(provider);
+  }
+
+  const fastLifecycle = {
+    quietWindowMs: 30,
+    reconcileIntervalMs: 20,
+    statusFailureGraceMs: 500,
+  } as const;
+
+  it("routes a descendant subagent permission to the parent turn and replies to the child", async () => {
+    const provider = new OpenCodeProvider({ lifecycle: fastLifecycle });
+    const sendMessageAndStream = getSendMessageAndStream(provider);
+
+    let eventStream: ServerResponse | undefined;
+    let resolveEventStream: () => void = () => undefined;
+    const eventStreamReady = new Promise<void>((resolve) => {
+      resolveEventStream = resolve;
+    });
+    const replies: Array<{ path: string; body: unknown }> = [];
+    const approvals: Array<{
+      toolName: string;
+      input: unknown;
+      requestId?: string;
+    }> = [];
+
+    const messages = await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+          });
+          res.flushHeaders();
+          eventStream = res;
+          resolveEventStream();
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("Content-Type", "application/json");
+          res.end("{}");
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_parent/message"
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.end("[]");
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_parent/prompt_async"
+        ) {
+          await readJsonBody(req);
+          res.statusCode = 204;
+          res.end();
+          await eventStreamReady;
+          // The subagent's child session is announced via session.created.
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.created",
+              properties: {
+                info: {
+                  id: "ses_child",
+                  parentID: "ses_parent",
+                  title: "Explore repo",
+                  agent: "explore",
+                },
+              },
+            })}\n\n`,
+          );
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "permission.asked",
+              properties: {
+                id: "per_child",
+                sessionID: "ses_child",
+                permission: "external_directory",
+                patterns: ["/tmp/outside"],
+                always: ["/tmp/*"],
+                tool: { messageID: "msg_c", callID: "call_c" },
+              },
+            })}\n\n`,
+          );
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/permission/per_child/reply"
+        ) {
+          replies.push({ path: url.pathname, body: await readJsonBody(req) });
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.idle",
+              properties: { sessionID: "ses_parent" },
+            })}\n\n`,
+          );
+          eventStream?.end();
+          return;
+        }
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        const output: Array<Record<string, unknown>> = [];
+        for await (const message of sendMessageAndStream(
+          baseUrl,
+          "ses_parent",
+          "yep_parent",
+          "hello",
+          new AbortController().signal,
+          async (toolName, input, options) => {
+            approvals.push({ toolName, input, requestId: options.requestId });
+            return { behavior: "allow" };
+          },
+          undefined,
+          undefined,
+          "/repo",
+        )) {
+          output.push(message);
+        }
+        return output;
+      },
+    );
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.requestId).toBe("per_child");
+    expect(approvals[0]?.toolName).toBe("external_directory");
+    expect(approvals[0]?.input).toMatchObject({
+      permission: "external_directory",
+      originSessionId: "ses_child",
+      parentSessionId: "ses_parent",
+      originSessionTitle: "Explore repo",
+      originAgent: "explore",
+    });
+    // The reply targets the child's own OpenCode request id.
+    expect(replies).toEqual([
+      { path: "/permission/per_child/reply", body: { reply: "once" } },
+    ]);
+    expect(messages.at(-1)).toMatchObject({
+      type: "result",
+      session_id: "yep_parent",
+    });
+  });
+
+  it("routes a descendant subagent question to the parent turn", async () => {
+    const provider = new OpenCodeProvider({ lifecycle: fastLifecycle });
+    const sendMessageAndStream = getSendMessageAndStream(provider);
+
+    let eventStream: ServerResponse | undefined;
+    let resolveEventStream: () => void = () => undefined;
+    const eventStreamReady = new Promise<void>((resolve) => {
+      resolveEventStream = resolve;
+    });
+    const approvals: Array<{ toolName: string; input: unknown }> = [];
+    const replies: string[] = [];
+
+    await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.flushHeaders();
+          eventStream = res;
+          resolveEventStream();
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("Content-Type", "application/json");
+          res.end("{}");
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_parent/message"
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.end("[]");
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_parent/prompt_async"
+        ) {
+          await readJsonBody(req);
+          res.statusCode = 204;
+          res.end();
+          await eventStreamReady;
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.updated",
+              properties: {
+                info: {
+                  id: "ses_child",
+                  parentID: "ses_parent",
+                  agent: "explore",
+                },
+              },
+            })}\n\n`,
+          );
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "question.asked",
+              properties: {
+                id: "que_child",
+                sessionID: "ses_child",
+                questions: [
+                  {
+                    question: "Proceed?",
+                    header: "Confirm",
+                    custom: false,
+                    options: [{ label: "Yes", description: "go" }],
+                  },
+                ],
+                tool: { messageID: "msg_q", callID: "call_q" },
+              },
+            })}\n\n`,
+          );
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/question/que_child/reply"
+        ) {
+          replies.push(url.pathname);
+          await readJsonBody(req);
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.idle",
+              properties: { sessionID: "ses_parent" },
+            })}\n\n`,
+          );
+          eventStream?.end();
+          return;
+        }
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        for await (const _message of sendMessageAndStream(
+          baseUrl,
+          "ses_parent",
+          "yep_parent",
+          "hello",
+          new AbortController().signal,
+          async (toolName, input) => {
+            approvals.push({ toolName, input });
+            return {
+              behavior: "allow",
+              updatedInput: {
+                ...(input as Record<string, unknown>),
+                answers: { "question-0": "Yes" },
+              },
+            };
+          },
+          undefined,
+          undefined,
+          "/repo",
+        )) {
+          // drain
+        }
+      },
+    );
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.toolName).toBe("AskUserQuestion");
+    expect(approvals[0]?.input).toMatchObject({
+      originSessionId: "ses_child",
+      parentSessionId: "ses_parent",
+      originAgent: "explore",
+    });
+    expect(replies).toEqual(["/question/que_child/reply"]);
+  });
+
+  it("ignores permission requests from unrelated sibling sessions in the same directory", async () => {
+    const provider = new OpenCodeProvider({ lifecycle: fastLifecycle });
+    const sendMessageAndStream = getSendMessageAndStream(provider);
+
+    let eventStream: ServerResponse | undefined;
+    let resolveEventStream: () => void = () => undefined;
+    const eventStreamReady = new Promise<void>((resolve) => {
+      resolveEventStream = resolve;
+    });
+    const approvals: string[] = [];
+    const sessionRecordFetches: string[] = [];
+
+    await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.flushHeaders();
+          eventStream = res;
+          resolveEventStream();
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("Content-Type", "application/json");
+          res.end("{}");
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_parent/message"
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.end("[]");
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/ses_stranger") {
+          // A sibling session with no relation to the active parent.
+          sessionRecordFetches.push(url.pathname);
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ id: "ses_stranger" }));
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_parent/prompt_async"
+        ) {
+          await readJsonBody(req);
+          res.statusCode = 204;
+          res.end();
+          await eventStreamReady;
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "permission.asked",
+              properties: {
+                id: "per_stranger",
+                sessionID: "ses_stranger",
+                permission: "bash",
+              },
+            })}\n\n`,
+          );
+          // The parent's own turn then completes normally.
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.idle",
+              properties: { sessionID: "ses_parent" },
+            })}\n\n`,
+          );
+          eventStream?.end();
+          return;
+        }
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        for await (const _message of sendMessageAndStream(
+          baseUrl,
+          "ses_parent",
+          "yep_parent",
+          "hello",
+          new AbortController().signal,
+          async (toolName) => {
+            approvals.push(toolName);
+            return { behavior: "allow" };
+          },
+          undefined,
+          undefined,
+          "/repo",
+        )) {
+          // drain
+        }
+      },
+    );
+
+    expect(approvals).toEqual([]);
+    // The stranger was checked once for ancestry and then remembered as
+    // unrelated (no relation to ses_parent), never routed to approval.
+    expect(sessionRecordFetches).toEqual(["/session/ses_stranger"]);
+  });
+
+  it("recovers descendant ancestry over HTTP for a nested subagent", async () => {
+    const provider = new OpenCodeProvider({ lifecycle: fastLifecycle });
+    const sendMessageAndStream = getSendMessageAndStream(provider);
+
+    let eventStream: ServerResponse | undefined;
+    let resolveEventStream: () => void = () => undefined;
+    const eventStreamReady = new Promise<void>((resolve) => {
+      resolveEventStream = resolve;
+    });
+    const approvals: Array<{ input: unknown; requestId?: string }> = [];
+    const replies: string[] = [];
+
+    await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.flushHeaders();
+          eventStream = res;
+          resolveEventStream();
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("Content-Type", "application/json");
+          res.end("{}");
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_parent/message"
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.end("[]");
+          return;
+        }
+        // Ancestry recovery: grandchild -> child -> parent, resolved via HTTP
+        // because the intermediate session.created events were missed.
+        if (req.method === "GET" && url.pathname === "/session/ses_grand") {
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              id: "ses_grand",
+              parentID: "ses_mid",
+              title: "Nested worker",
+              agent: "explore",
+            }),
+          );
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/ses_mid") {
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ id: "ses_mid", parentID: "ses_parent" }));
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_parent/prompt_async"
+        ) {
+          await readJsonBody(req);
+          res.statusCode = 204;
+          res.end();
+          await eventStreamReady;
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "permission.asked",
+              properties: {
+                id: "per_grand",
+                sessionID: "ses_grand",
+                permission: "bash",
+              },
+            })}\n\n`,
+          );
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/permission/per_grand/reply"
+        ) {
+          replies.push(url.pathname);
+          await readJsonBody(req);
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.idle",
+              properties: { sessionID: "ses_parent" },
+            })}\n\n`,
+          );
+          eventStream?.end();
+          return;
+        }
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        for await (const _message of sendMessageAndStream(
+          baseUrl,
+          "ses_parent",
+          "yep_parent",
+          "hello",
+          new AbortController().signal,
+          async (_toolName, input, options) => {
+            approvals.push({ input, requestId: options.requestId });
+            return { behavior: "allow" };
+          },
+          undefined,
+          undefined,
+          "/repo",
+        )) {
+          // drain
+        }
+      },
+    );
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.requestId).toBe("per_grand");
+    expect(approvals[0]?.input).toMatchObject({
+      originSessionId: "ses_grand",
+      parentSessionId: "ses_parent",
+      originSessionTitle: "Nested worker",
+    });
+    expect(replies).toEqual(["/permission/per_grand/reply"]);
+  });
+
+  it("processes two concurrent descendant permissions in order without overwriting", async () => {
+    const provider = new OpenCodeProvider({ lifecycle: fastLifecycle });
+    const sendMessageAndStream = getSendMessageAndStream(provider);
+
+    let eventStream: ServerResponse | undefined;
+    let resolveEventStream: () => void = () => undefined;
+    const eventStreamReady = new Promise<void>((resolve) => {
+      resolveEventStream = resolve;
+    });
+    const approvals: string[] = [];
+    const replies: string[] = [];
+
+    await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.flushHeaders();
+          eventStream = res;
+          resolveEventStream();
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("Content-Type", "application/json");
+          res.end("{}");
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_parent/message"
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.end("[]");
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_parent/prompt_async"
+        ) {
+          await readJsonBody(req);
+          res.statusCode = 204;
+          res.end();
+          await eventStreamReady;
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.created",
+              properties: {
+                info: { id: "ses_child_a", parentID: "ses_parent" },
+              },
+            })}\n\n`,
+          );
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "session.created",
+              properties: {
+                info: { id: "ses_child_b", parentID: "ses_parent" },
+              },
+            })}\n\n`,
+          );
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "permission.asked",
+              properties: {
+                id: "per_a",
+                sessionID: "ses_child_a",
+                permission: "bash",
+              },
+            })}\n\n`,
+          );
+          eventStream?.write(
+            `data: ${JSON.stringify({
+              type: "permission.asked",
+              properties: {
+                id: "per_b",
+                sessionID: "ses_child_b",
+                permission: "edit",
+              },
+            })}\n\n`,
+          );
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          (url.pathname === "/permission/per_a/reply" ||
+            url.pathname === "/permission/per_b/reply")
+        ) {
+          replies.push(url.pathname);
+          await readJsonBody(req);
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          if (url.pathname === "/permission/per_b/reply") {
+            eventStream?.write(
+              `data: ${JSON.stringify({
+                type: "session.idle",
+                properties: { sessionID: "ses_parent" },
+              })}\n\n`,
+            );
+            eventStream?.end();
+          }
+          return;
+        }
+        res.statusCode = 404;
+        res.end("not found");
+      },
+      async (baseUrl) => {
+        for await (const _message of sendMessageAndStream(
+          baseUrl,
+          "ses_parent",
+          "yep_parent",
+          "hello",
+          new AbortController().signal,
+          async (toolName) => {
+            approvals.push(toolName);
+            return { behavior: "allow" };
+          },
+          undefined,
+          undefined,
+          "/repo",
+        )) {
+          // drain
+        }
+      },
+    );
+
+    // Both children were handled, in arrival order, each replying to its own
+    // request id — neither overwrote the other.
+    expect(approvals).toEqual(["Bash", "Edit"]);
+    expect(replies).toEqual([
+      "/permission/per_a/reply",
+      "/permission/per_b/reply",
+    ]);
+  });
+
   it("uses prompt_async and bridges OpenCode questions through Yep", async () => {
     const provider = new OpenCodeProvider();
     const sendMessageAndStream = (

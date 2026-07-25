@@ -40,6 +40,41 @@ function renderPanel(actionUrl: string) {
 describe("ToolApprovalPanel", () => {
   afterEach(() => cleanup());
 
+  it("names the requesting subagent for a projected child permission", () => {
+    const request: InputRequest = {
+      id: "per_child",
+      sessionId: "ses_parent",
+      type: "tool-approval",
+      prompt: "Allow external_directory?",
+      toolName: "external_directory",
+      toolInput: {
+        approvalKind: "opencode_permission",
+        permission: "external_directory",
+        patterns: ["/tmp/outside"],
+        originSessionId: "ses_child",
+        parentSessionId: "ses_parent",
+        originSessionTitle: "Explore open_platform_api_case project",
+        originAgent: "explore",
+      },
+      timestamp: "2026-07-24T00:00:00.000Z",
+    };
+    render(
+      <I18nProvider>
+        <ToolApprovalPanel
+          request={request}
+          sessionId="ses_parent"
+          onApprove={vi.fn(async () => undefined)}
+          onDeny={vi.fn(async () => undefined)}
+        />
+      </I18nProvider>,
+    );
+    expect(
+      screen.getByText(
+        'Subagent "Explore open_platform_api_case project" is requesting permission',
+      ),
+    ).toBeDefined();
+  });
+
   it("renders safe MCP URL actions as external links", () => {
     renderPanel("https://example.com/sign-in");
     const link = screen.getByRole("link", {

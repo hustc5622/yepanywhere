@@ -171,6 +171,31 @@ interface OpenCodeModelRef {
   modelID: string;
 }
 
+/**
+ * Provenance for a subagent (child session) input request routed into the
+ * parent turn. The parent Process surfaces the request under its own session
+ * id so existing pages/Inbox/PushNotifier keep working, while these fields let
+ * the UI explain which subagent asked and keep the reply targeting the child.
+ */
+interface OpenCodeInputOrigin {
+  originSessionId: string;
+  parentSessionId: string;
+  originSessionTitle?: string;
+  originAgent?: string;
+}
+
+/**
+ * Tracks the parent -> descendant OpenCode session graph for a single turn so
+ * subagent input requests (permission/question) can be routed to the parent
+ * Process. A shared 4520 server streams sibling sessions in the same
+ * directory; only genuine descendants of the active session are adopted.
+ */
+interface OpenCodeSessionTree {
+  descendants: Set<string>;
+  notDescendants: Set<string>;
+  info: Map<string, { title?: string; agent?: string }>;
+}
+
 interface OpenCodeRuntimeRef {
   baseUrl?: string;
   currentModel?: string | null;
@@ -1340,6 +1365,47 @@ export class OpenCodeProvider implements AgentProvider {
     return (await response.json()) as OpenCodeSessionResponse;
   }
 
+  /**
+   * Load a session's raw record (including `parentID`, `title`, `agent`) for
+   * descendant-ancestry resolution. Returns null on any failure so the caller
+   * can fall back to treating the session as unrelated.
+   */
+  private async getOpenCodeSessionRecord(
+    baseUrl: string,
+    sessionId: string,
+    cwd?: string,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      const response = await fetch(
+        this.openCodeUrl(
+          baseUrl,
+          `/session/${encodeURIComponent(sessionId)}`,
+          cwd,
+        ),
+        {
+          headers: {
+            Accept: "application/json",
+            ...this.openCodeDirectoryHeaders(cwd),
+          },
+          signal: AbortSignal.timeout(3_000),
+        },
+      );
+      if (!response.ok) return null;
+      const payload = (await response.json()) as unknown;
+      return isRecord(payload) ? payload : null;
+    } catch (error) {
+      getLogger().debug(
+        {
+          event: "opencode_session_record_unavailable",
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to load OpenCode session record for descendant resolution",
+      );
+      return null;
+    }
+  }
+
   private async forkOpenCodeSession(
     baseUrl: string,
     sessionId: string,
@@ -1431,6 +1497,85 @@ export class OpenCodeProvider implements AgentProvider {
       markerPartIds: new Set(),
       streamingPartTypes: new Map(),
       permissionAskedIds: new Set(),
+    };
+
+    // Parent -> descendant session graph, kept for the whole turn (and across
+    // SSE reconnects) so subagent input requests reach this parent Process.
+    const sessionTree: OpenCodeSessionTree = {
+      descendants: new Set<string>(),
+      notDescendants: new Set<string>(),
+      info: new Map<string, { title?: string; agent?: string }>(),
+    };
+    const recordSessionInfo = (info: unknown): void => {
+      if (!isRecord(info)) return;
+      const id = typeof info.id === "string" ? info.id : undefined;
+      if (!id) return;
+      const title = typeof info.title === "string" ? info.title : undefined;
+      const agent = typeof info.agent === "string" ? info.agent : undefined;
+      if (title || agent) {
+        const previous = sessionTree.info.get(id);
+        sessionTree.info.set(id, {
+          title: title ?? previous?.title,
+          agent: agent ?? previous?.agent,
+        });
+      }
+      const parentId =
+        typeof info.parentID === "string" ? info.parentID : undefined;
+      if (
+        parentId &&
+        (parentId === opencodeSessionId ||
+          sessionTree.descendants.has(parentId))
+      ) {
+        sessionTree.descendants.add(id);
+        sessionTree.notDescendants.delete(id);
+      }
+    };
+    // Resolve whether an unknown session belongs to this session's descendant
+    // tree, walking parentID upward over HTTP. This recovers ancestry lost
+    // across an SSE reconnect instead of trusting every same-directory event.
+    const resolveDescendant = async (sessionId: string): Promise<boolean> => {
+      if (sessionId === opencodeSessionId) return false;
+      if (sessionTree.descendants.has(sessionId)) return true;
+      if (sessionTree.notDescendants.has(sessionId)) return false;
+
+      const chain: string[] = [];
+      let current: string | undefined = sessionId;
+      for (let depth = 0; depth < 8 && current; depth += 1) {
+        if (chain.includes(current)) break;
+        chain.push(current);
+        const record = await this.getOpenCodeSessionRecord(
+          baseUrl,
+          current,
+          cwd,
+        );
+        if (!record) break;
+        recordSessionInfo(record);
+        const parentId =
+          typeof record.parentID === "string" ? record.parentID : undefined;
+        if (!parentId) break;
+        if (
+          parentId === opencodeSessionId ||
+          sessionTree.descendants.has(parentId)
+        ) {
+          for (const id of chain) {
+            sessionTree.descendants.add(id);
+            sessionTree.notDescendants.delete(id);
+          }
+          return true;
+        }
+        current = parentId;
+      }
+      sessionTree.notDescendants.add(sessionId);
+      return false;
+    };
+    const buildInputOrigin = (sessionId: string): OpenCodeInputOrigin => {
+      const info = sessionTree.info.get(sessionId);
+      return {
+        originSessionId: sessionId,
+        parentSessionId: opencodeSessionId,
+        ...(info?.title ? { originSessionTitle: info.title } : {}),
+        ...(info?.agent ? { originAgent: info.agent } : {}),
+      };
     };
 
     // Event buffer and signaling for producer/consumer pattern
@@ -1605,11 +1750,39 @@ export class OpenCodeProvider implements AgentProvider {
 
             log.trace({ event }, "SSE event received");
 
+            // Maintain the parent -> descendant session graph from
+            // authoritative session lifecycle events before filtering.
+            if (
+              event.type === "session.created" ||
+              event.type === "session.updated"
+            ) {
+              recordSessionInfo(
+                (event as unknown as { properties?: { info?: unknown } })
+                  .properties?.info,
+              );
+            }
+
             // A shared OpenCode instance can stream several sessions in the
             // same directory. Nested info/part payloads must be filtered too.
             const eventSessionId = openCodeRuntimeEventSessionId(event);
+            let inputOrigin: OpenCodeInputOrigin | undefined;
             if (eventSessionId && eventSessionId !== opencodeSessionId) {
-              continue;
+              // Only a descendant subagent's input-routing events are adopted
+              // into this parent turn; its transcript stays in its own child
+              // session and all other cross-session traffic is ignored.
+              const descendantInputEvent =
+                event.type === "permission.asked" ||
+                event.type === "question.asked" ||
+                event.type === "permission.replied" ||
+                event.type === "question.replied" ||
+                event.type === "question.rejected";
+              if (!descendantInputEvent) {
+                continue;
+              }
+              if (!(await resolveDescendant(eventSessionId))) {
+                continue;
+              }
+              inputOrigin = buildInputOrigin(eventSessionId);
             }
 
             if (event.type === "session.error") {
@@ -1723,6 +1896,7 @@ export class OpenCodeProvider implements AgentProvider {
               text,
               onToolApproval,
               cwd,
+              inputOrigin,
             );
 
             // The converter waits for Yep's answer and posts it upstream. Do
@@ -2107,6 +2281,7 @@ export class OpenCodeProvider implements AgentProvider {
     submittedText: string,
     onToolApproval?: StartSessionOptions["onToolApproval"],
     cwd?: string,
+    inputOrigin?: OpenCodeInputOrigin,
   ): Promise<SDKMessage[]> {
     switch (event.type) {
       case "permission.asked": {
@@ -2132,6 +2307,7 @@ export class OpenCodeProvider implements AgentProvider {
           signal,
           onToolApproval,
           cwd,
+          inputOrigin,
         );
         return [];
       }
@@ -2143,6 +2319,7 @@ export class OpenCodeProvider implements AgentProvider {
           signal,
           onToolApproval,
           cwd,
+          inputOrigin,
         );
         return [];
       }
@@ -3165,6 +3342,7 @@ export class OpenCodeProvider implements AgentProvider {
     signal: AbortSignal,
     onToolApproval?: StartSessionOptions["onToolApproval"],
     cwd?: string,
+    inputOrigin?: OpenCodeInputOrigin,
   ): Promise<void> {
     const questions = normalizeOpenCodeQuestions(event.properties.questions);
     if (questions.length === 0) {
@@ -3188,6 +3366,7 @@ export class OpenCodeProvider implements AgentProvider {
             questions,
             messageID: event.properties.tool?.messageID,
             callID: event.properties.tool?.callID,
+            ...(inputOrigin ?? {}),
           },
           { signal, requestId: event.properties.id },
         );
@@ -3281,6 +3460,7 @@ export class OpenCodeProvider implements AgentProvider {
     signal: AbortSignal,
     onToolApproval?: StartSessionOptions["onToolApproval"],
     cwd?: string,
+    inputOrigin?: OpenCodeInputOrigin,
   ): Promise<void> {
     const permission = event.properties.permission;
     const toolName = this.mapOpenCodePermissionToToolName(permission);
@@ -3291,6 +3471,7 @@ export class OpenCodeProvider implements AgentProvider {
       always: event.properties.always ?? [],
       messageID: event.properties.tool?.messageID,
       callID: event.properties.tool?.callID,
+      ...(inputOrigin ?? {}),
     };
 
     let result: ToolApprovalResult = {

@@ -78,6 +78,18 @@ export function QuestionAnswerPanel({
   const { t } = useI18n();
   const input = request.toolInput as AskUserQuestionInput;
   const questions = input?.questions || [];
+  const originRecord =
+    input && typeof input === "object"
+      ? (input as unknown as Record<string, unknown>)
+      : undefined;
+  const subagentOriginTitle =
+    originRecord && typeof originRecord.originSessionId === "string"
+      ? typeof originRecord.originSessionTitle === "string"
+        ? originRecord.originSessionTitle
+        : typeof originRecord.originAgent === "string"
+          ? originRecord.originAgent
+          : undefined
+      : undefined;
 
   const [currentTab, setCurrentTab] = useState(0);
   const [answers, setAnswers] = useState<UserQuestionAnswers>(() =>
@@ -369,6 +381,11 @@ export function QuestionAnswerPanel({
 
       {!collapsed && (
         <div className="question-panel">
+          {subagentOriginTitle && (
+            <div className="question-panel-subagent-origin">
+              {t("subagentQuestionOrigin", { title: subagentOriginTitle })}
+            </div>
+          )}
           {/* Tab bar */}
           <div className="question-tabs">
             {questions.map((q, idx) => {

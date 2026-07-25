@@ -463,6 +463,62 @@ describe("PushNotifier", () => {
       expect(payload.summary).toBe("Run: Bash");
     });
 
+    it("names the subagent for a permission routed up from a child session", async () => {
+      const mockProcess = {
+        state: {
+          type: "waiting-input",
+          request: {
+            id: "per_child",
+            sessionId: "session-parent",
+            type: "tool-approval",
+            prompt: "Allow external_directory?",
+            toolName: "external_directory",
+            toolInput: {
+              permission: "external_directory",
+              patterns: ["/tmp/outside"],
+              originSessionId: "ses_child",
+              parentSessionId: "session-parent",
+              originSessionTitle: "Explore open_platform_api_case project",
+            },
+            timestamp: new Date().toISOString(),
+          } as InputRequest,
+        } as ProcessState,
+      };
+
+      vi.mocked(mockSupervisor.getProcessForSession).mockReturnValue(
+        mockProcess as unknown as ReturnType<
+          Supervisor["getProcessForSession"]
+        >,
+      );
+
+      new PushNotifier({
+        eventBus: mockEventBus,
+        pushService: mockPushService,
+        supervisor: mockSupervisor,
+      });
+
+      const event: ProcessStateEvent = {
+        type: "process-state-changed",
+        sessionId: "session-parent",
+        projectId: testProjectId,
+        activity: "waiting-input",
+        timestamp: new Date().toISOString(),
+      };
+
+      eventHandler?.(event);
+
+      await vi.waitFor(() => {
+        expect(mockPushService.sendToAll).toHaveBeenCalled();
+      });
+
+      const payload = vi.mocked(mockPushService.sendToAll).mock.calls[0][0];
+      // Push targets the parent session but names the requesting subagent.
+      expect(payload.sessionId).toBe("session-parent");
+      expect(payload.summary).toBe(
+        "Subagent Explore open_platform_api_case project — external_directory: /tmp/outside",
+      );
+    });
+
     it("uses a generic summary for long question prompts", async () => {
       const longPrompt =
         "This is a very long question that exceeds the maximum length we want to show in a push notification summary";
