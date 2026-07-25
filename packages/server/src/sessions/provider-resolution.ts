@@ -5,6 +5,7 @@ import type { Project, SessionSummary } from "../supervisor/types.js";
 import { CodexSessionReader } from "./codex-reader.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
 import { KimiSessionReader } from "./kimi-reader.js";
+import { collapseOpenCodeForkFamilies } from "./opencode-branch.js";
 import { OPENCODE_DB_PATH } from "./opencode-db.js";
 import { OpenCodeSessionReader } from "./opencode-reader.js";
 import {
@@ -280,7 +281,9 @@ async function listSessionsForSource(
   deps: ProviderResolutionDeps,
 ): Promise<SessionSummary[]> {
   if (!deps.sessionIndexService) {
-    return source.reader.listSessions(project.id);
+    return collapseOpenCodeForkFamilies(
+      await source.reader.listSessions(project.id),
+    );
   }
 
   let sessions = await deps.sessionIndexService.getSessionsWithCache(
@@ -306,7 +309,11 @@ async function listSessionsForSource(
     }
   }
 
-  return sessions;
+  // Collapse OpenCode edit-fork families (parent + per-edit child sessions) into
+  // a single list entry so editing a message behaves like Codex's in-session
+  // branch switcher instead of spawning independent sessions. No-ops for
+  // providers that never set forkParentSessionId.
+  return collapseOpenCodeForkFamilies(sessions);
 }
 
 export async function listSessionsAcrossProviders(

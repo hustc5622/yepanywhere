@@ -128,6 +128,13 @@ export interface SessionSummary {
    * from session lists and surfaced inline under their parent instead.
    */
   parentSessionId?: string;
+  /**
+   * For OpenCode edit-fork children, the id of the session this one was forked
+   * from (from Yep's `yepFork` metadata, not OpenCode's native subagent
+   * `parent_id`). Used server-side to collapse an edit-fork family into a single
+   * list entry with a branch switcher; not sent to the client.
+   */
+  forkParentSessionId?: string;
   /** Model used for this session (extracted from JSONL, e.g. "claude-opus-4-5-20251101") */
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */

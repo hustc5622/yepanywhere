@@ -27,6 +27,7 @@ import {
   type OpenCodeBranchSessionMetadata,
   buildOpenCodeBranchView,
   findOpenCodeBranchFamilySessionIds,
+  readOpenCodeForkParentSessionId,
 } from "./opencode-branch.js";
 import {
   OPENCODE_DB_PATH,
@@ -117,6 +118,7 @@ interface OpenCodeSessionJson {
     deletions?: number;
     files?: number;
   };
+  metadata?: Record<string, unknown>;
 }
 
 // Use OpenCodeMessage and OpenCodeStoredPart types from shared
@@ -513,6 +515,10 @@ class OpenCodeJsonSessionReader implements ISessionReader {
         firstUserMessageText?.trim() ||
         null;
 
+      const forkParentSessionId = readOpenCodeForkParentSessionId(
+        session.metadata,
+      );
+
       return {
         id: sessionId,
         projectId,
@@ -532,6 +538,7 @@ class OpenCodeJsonSessionReader implements ISessionReader {
         model,
         reasoningEffort,
         ...(session.parentID ? { parentSessionId: session.parentID } : {}),
+        ...(forkParentSessionId ? { forkParentSessionId } : {}),
       };
     } catch {
       return null;
@@ -1557,6 +1564,7 @@ export class OpenCodeSessionReader implements ISessionReader {
     const createdBy =
       deriveOpenCodeCreatedByFromMetadata(row.metadata) ??
       this.getParentSqliteCreatedByFromDb(db, row.parentId);
+    const forkParentSessionId = readOpenCodeForkParentSessionId(row.metadata);
 
     return {
       id: sessionId,
@@ -1575,6 +1583,7 @@ export class OpenCodeSessionReader implements ISessionReader {
       reasoningEffort,
       createdBy,
       ...(row.parentId ? { parentSessionId: row.parentId } : {}),
+      ...(forkParentSessionId ? { forkParentSessionId } : {}),
     };
   }
 

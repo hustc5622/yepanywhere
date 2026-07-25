@@ -65,6 +65,12 @@ export interface CachedSessionSummary {
   /** Explicit creation owner recorded in summary metadata when available. */
   createdBy?: SessionSummary["createdBy"];
   /**
+   * For OpenCode edit-fork children, the id of the session this one was forked
+   * from. Cached so the session list can collapse an edit-fork family into a
+   * single entry without re-reading provider metadata.
+   */
+  forkParentSessionId?: string;
+  /**
    * True when the active branch ends on an unanswered user message or a
    * mid-stream assistant message — the last turn was interrupted (e.g. by a
    * server restart) and the session can be resumed.
@@ -73,12 +79,12 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
-  version: 9;
+  version: 10;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 9;
+const CURRENT_VERSION = 10;
 
 interface SessionFileStat {
   mtimeMs: number;
@@ -501,6 +507,9 @@ export class SessionIndexService implements ISessionIndexService {
         source: cached.source,
         createdBy: cached.createdBy,
         interrupted: cached.interrupted,
+        ...(cached.forkParentSessionId
+          ? { forkParentSessionId: cached.forkParentSessionId }
+          : {}),
       });
     }
 
@@ -538,6 +547,7 @@ export class SessionIndexService implements ISessionIndexService {
       source: summary.source,
       createdBy: summary.createdBy,
       interrupted: summary.interrupted,
+      forkParentSessionId: summary.forkParentSessionId,
     };
   }
 

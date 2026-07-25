@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import {
   type OpenCodeBranchSession,
   buildOpenCodeBranchView,
+  collapseOpenCodeForkFamilies,
   findOpenCodeBranchFamilySessionIds,
+  readOpenCodeForkParentSessionId,
 } from "../../src/sessions/opencode-branch.js";
 
 function entry(
@@ -319,5 +321,92 @@ describe("OpenCode edit-fork branch builder", () => {
 
     const view = buildOpenCodeBranchView([parent, emptyChild], "ses_parent");
     expect(view.branchState).toBeUndefined();
+  });
+});
+
+describe("readOpenCodeForkParentSessionId", () => {
+  it("extracts the parent from valid edit-fork metadata", () => {
+    expect(
+      readOpenCodeForkParentSessionId({
+        yepFork: {
+          schemaVersion: 1,
+          kind: "edit-fork",
+          parentSessionId: "ses_parent",
+          forkMessageId: "u2",
+        },
+      }),
+    ).toBe("ses_parent");
+  });
+
+  it("returns undefined for missing or malformed metadata", () => {
+    expect(readOpenCodeForkParentSessionId(undefined)).toBeUndefined();
+    expect(readOpenCodeForkParentSessionId({})).toBeUndefined();
+    expect(
+      readOpenCodeForkParentSessionId({
+        yepFork: { schemaVersion: 1, kind: "edit-fork", parentSessionId: "" },
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("collapseOpenCodeForkFamilies", () => {
+  const summary = (
+    id: string,
+    updatedAt: string,
+    forkParentSessionId?: string,
+  ) => ({
+    id,
+    updatedAt,
+    ...(forkParentSessionId ? { forkParentSessionId } : {}),
+  });
+
+  it("keeps only the most recently updated member of a fork family", () => {
+    const summaries = [
+      summary("ses_parent", "2026-07-15T00:00:00.000Z"),
+      summary("ses_child", "2026-07-15T01:00:00.000Z", "ses_parent"),
+      summary("ses_grandchild", "2026-07-15T02:00:00.000Z", "ses_child"),
+    ];
+
+    const collapsed = collapseOpenCodeForkFamilies(summaries);
+
+    expect(collapsed.map((s) => s.id)).toEqual(["ses_grandchild"]);
+  });
+
+  it("collapses a family regardless of which member was most recently active", () => {
+    // The user switched back to the root branch and continued there, so the
+    // root is now the newest member and should be the surviving entry.
+    const summaries = [
+      summary("ses_parent", "2026-07-15T05:00:00.000Z"),
+      summary("ses_child", "2026-07-15T01:00:00.000Z", "ses_parent"),
+    ];
+
+    expect(collapseOpenCodeForkFamilies(summaries).map((s) => s.id)).toEqual([
+      "ses_parent",
+    ]);
+  });
+
+  it("keeps unrelated sessions and sessions with dangling parents", () => {
+    const summaries = [
+      summary("ses_solo", "2026-07-15T00:00:00.000Z"),
+      summary("ses_parent", "2026-07-15T00:00:00.000Z"),
+      summary("ses_child", "2026-07-15T01:00:00.000Z", "ses_parent"),
+      // Parent not present in the list -> treated as its own root, kept.
+      summary("ses_orphan", "2026-07-15T00:00:00.000Z", "ses_missing"),
+    ];
+
+    const kept = collapseOpenCodeForkFamilies(summaries)
+      .map((s) => s.id)
+      .sort();
+
+    expect(kept).toEqual(["ses_child", "ses_orphan", "ses_solo"]);
+  });
+
+  it("returns the input untouched when there are no fork edges", () => {
+    const summaries = [
+      summary("ses_a", "2026-07-15T00:00:00.000Z"),
+      summary("ses_b", "2026-07-15T01:00:00.000Z"),
+    ];
+
+    expect(collapseOpenCodeForkFamilies(summaries)).toBe(summaries);
   });
 });

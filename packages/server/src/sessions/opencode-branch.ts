@@ -158,6 +158,103 @@ export function findOpenCodeBranchFamilySessionIds(
   return family;
 }
 
+/**
+ * Extract the fork parent session id from a session's raw metadata, if the
+ * session was created by a Yep edit-fork. Used by the session list to collapse
+ * an edit-fork family into a single entry.
+ */
+export function readOpenCodeForkParentSessionId(
+  metadata: Record<string, unknown> | null | undefined,
+): string | undefined {
+  if (!metadata) return undefined;
+  return parseForkLineage({ id: "", metadata })?.parentSessionId;
+}
+
+export interface CollapsibleForkFamilyMember {
+  id: string;
+  /** Set when this session is an edit-fork child of another session. */
+  forkParentSessionId?: string;
+  /** ISO timestamp used to pick the most recent member as the representative. */
+  updatedAt: string;
+}
+
+/**
+ * Collapse OpenCode edit-fork families down to a single representative per
+ * family, mirroring Codex's single-session-with-branch-switcher UX. Because
+ * OpenCode's native fork creates a brand new session per edit, a family would
+ * otherwise surface as several independent list entries (plus a stray "Cont"
+ * badge on the interrupted parent).
+ *
+ * The representative is the most recently updated member (the tip of the latest
+ * edit / the branch currently being worked on). Hidden members remain directly
+ * fetchable by id, so the branch switcher can still navigate to them.
+ *
+ * Sessions without fork lineage are singleton families and always kept. Order
+ * of the input is preserved for the surviving entries.
+ */
+export function collapseOpenCodeForkFamilies<
+  T extends CollapsibleForkFamilyMember,
+>(summaries: T[]): T[] {
+  const byId = new Map(summaries.map((summary) => [summary.id, summary]));
+
+  // Union-find over the family graph. Each surviving edge points a child at its
+  // fork parent; members without a resolvable parent stay their own root.
+  const parentOf = new Map<string, string>();
+  for (const summary of summaries) parentOf.set(summary.id, summary.id);
+  const find = (id: string): string => {
+    let root = id;
+    while (parentOf.get(root) !== undefined && parentOf.get(root) !== root) {
+      root = parentOf.get(root) as string;
+    }
+    let cursor = id;
+    while (
+      parentOf.get(cursor) !== undefined &&
+      parentOf.get(cursor) !== root
+    ) {
+      const next = parentOf.get(cursor) as string;
+      parentOf.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  };
+
+  let hasEdge = false;
+  for (const summary of summaries) {
+    const parentId = summary.forkParentSessionId;
+    if (!parentId || !byId.has(parentId)) continue;
+    const childRoot = find(summary.id);
+    const parentRoot = find(parentId);
+    if (childRoot !== parentRoot) parentOf.set(childRoot, parentRoot);
+    hasEdge = true;
+  }
+  if (!hasEdge) return summaries;
+
+  const representativeByRoot = new Map<string, T>();
+  for (const summary of summaries) {
+    const root = find(summary.id);
+    const current = representativeByRoot.get(root);
+    if (!current || isMoreRecentMember(summary, current)) {
+      representativeByRoot.set(root, summary);
+    }
+  }
+
+  const keep = new Set(
+    [...representativeByRoot.values()].map((summary) => summary.id),
+  );
+  return summaries.filter((summary) => keep.has(summary.id));
+}
+
+function isMoreRecentMember(
+  candidate: CollapsibleForkFamilyMember,
+  current: CollapsibleForkFamilyMember,
+): boolean {
+  const candidateAt = new Date(candidate.updatedAt).getTime();
+  const currentAt = new Date(current.updatedAt).getTime();
+  if (candidateAt !== currentAt) return candidateAt > currentAt;
+  // Stable, deterministic tiebreak when timestamps match.
+  return candidate.id > current.id;
+}
+
 function branchTitle(prompt: string): string {
   const firstLine = prompt
     .split("\n")
