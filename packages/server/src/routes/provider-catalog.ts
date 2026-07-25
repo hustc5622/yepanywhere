@@ -1,5 +1,6 @@
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { Project } from "../supervisor/types.js";
@@ -8,6 +9,7 @@ export interface ProviderCatalogDeps {
   codexScanner?: CodexSessionScanner;
   geminiScanner?: GeminiSessionScanner;
   opencodeScanner?: OpenCodeSessionScanner;
+  kimiScanner?: KimiSessionScanner;
   projects?: Project[];
 }
 
@@ -15,12 +17,14 @@ export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
   opencodePaths: Set<string>;
+  kimiPaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
 }
 
 /**
- * Build a per-request catalog of project paths that have Codex/Gemini sessions.
- * This avoids re-running scanner filters for each project in route loops.
+ * Build a per-request catalog of project paths that have Codex/Gemini/OpenCode/
+ * Kimi sessions. This avoids re-running scanner filters for each project in
+ * route loops.
  */
 export async function buildProviderProjectCatalog(
   deps: ProviderCatalogDeps,
@@ -56,6 +60,14 @@ export async function buildProviderProjectCatalog(
         )
         .map((project) => canonicalizeProjectPath(project.path)),
     );
+    const kimiPaths = new Set(
+      deps.projects
+        .filter(
+          (project) =>
+            project.hasKimiSessions === true || project.provider === "kimi",
+        )
+        .map((project) => canonicalizeProjectPath(project.path)),
+    );
 
     const needsCodexScan = deps.projects.some(
       (project) =>
@@ -74,18 +86,28 @@ export async function buildProviderProjectCatalog(
         project.provider !== "opencode" &&
         project.hasOpenCodeSessions === undefined,
     );
+    const needsKimiScan = deps.projects.some(
+      (project) =>
+        project.provider !== "kimi" && project.hasKimiSessions === undefined,
+    );
 
-    if (!needsCodexScan && !needsGeminiScan && !needsOpenCodeScan) {
+    if (
+      !needsCodexScan &&
+      !needsGeminiScan &&
+      !needsOpenCodeScan &&
+      !needsKimiScan
+    ) {
       return {
         codexPaths,
         geminiPaths,
         opencodePaths,
+        kimiPaths,
         geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
       };
     }
 
-    const [codexProjects, geminiProjects, openCodeProjects] = await Promise.all(
-      [
+    const [codexProjects, geminiProjects, openCodeProjects, kimiProjects] =
+      await Promise.all([
         needsCodexScan
           ? (deps.codexScanner?.listProjects() ?? Promise.resolve([]))
           : Promise.resolve([]),
@@ -95,8 +117,10 @@ export async function buildProviderProjectCatalog(
         needsOpenCodeScan
           ? (deps.opencodeScanner?.listProjects() ?? Promise.resolve([]))
           : Promise.resolve([]),
-      ],
-    );
+        needsKimiScan
+          ? (deps.kimiScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+      ]);
 
     for (const project of codexProjects) {
       codexPaths.add(canonicalizeProjectPath(project.path));
@@ -110,20 +134,26 @@ export async function buildProviderProjectCatalog(
     for (const project of openCodeProjects) {
       opencodePaths.add(canonicalizeProjectPath(project.path));
     }
+    for (const project of kimiProjects) {
+      kimiPaths.add(canonicalizeProjectPath(project.path));
+    }
 
     return {
       codexPaths,
       geminiPaths,
       opencodePaths,
+      kimiPaths,
       geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     };
   }
 
-  const [codexProjects, geminiProjects, openCodeProjects] = await Promise.all([
-    deps.codexScanner?.listProjects() ?? Promise.resolve([]),
-    deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
-    deps.opencodeScanner?.listProjects() ?? Promise.resolve([]),
-  ]);
+  const [codexProjects, geminiProjects, openCodeProjects, kimiProjects] =
+    await Promise.all([
+      deps.codexScanner?.listProjects() ?? Promise.resolve([]),
+      deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
+      deps.opencodeScanner?.listProjects() ?? Promise.resolve([]),
+      deps.kimiScanner?.listProjects() ?? Promise.resolve([]),
+    ]);
 
   return {
     codexPaths: new Set(
@@ -136,6 +166,9 @@ export async function buildProviderProjectCatalog(
     ),
     opencodePaths: new Set(
       openCodeProjects.map((project) => canonicalizeProjectPath(project.path)),
+    ),
+    kimiPaths: new Set(
+      kimiProjects.map((project) => canonicalizeProjectPath(project.path)),
     ),
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
   };

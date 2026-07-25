@@ -17,6 +17,7 @@ import type { Project } from "../supervisor/types.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
 import { CODEX_SESSIONS_DIR, CodexSessionScanner } from "./codex-scanner.js";
 import { GEMINI_TMP_DIR, GeminiSessionScanner } from "./gemini-scanner.js";
+import { KIMI_SESSIONS_DIR, KimiSessionScanner } from "./kimi-scanner.js";
 import {
   OPENCODE_DB_PATH,
   OpenCodeSessionScanner,
@@ -35,12 +36,15 @@ export interface ScannerOptions {
   projectsDir?: string; // override for testing
   codexSessionsDir?: string; // override for testing
   geminiSessionsDir?: string; // override for testing
+  kimiSessionsDir?: string; // override for testing
   codexScanner?: CodexSessionScanner | null; // shared provider scanner
   geminiScanner?: GeminiSessionScanner | null; // shared provider scanner
   opencodeScanner?: OpenCodeSessionScanner | null; // shared provider scanner
+  kimiScanner?: KimiSessionScanner | null; // shared provider scanner
   enableCodex?: boolean; // whether to include Codex projects (default: true)
   enableGemini?: boolean; // whether to include Gemini projects (default: true)
   enableOpenCode?: boolean; // whether to include OpenCode projects (default: true)
+  enableKimi?: boolean; // whether to include Kimi projects (default: true)
   projectMetadataService?: ProjectMetadataService; // for persisting added projects
   /** Remote Claude executors whose shared stores should also be scanned. */
   remoteExecutors?: RemoteExecutorConfig[];
@@ -68,9 +72,11 @@ export class ProjectScanner {
   private codexScanner: CodexSessionScanner | null;
   private geminiScanner: GeminiSessionScanner | null;
   private opencodeScanner: OpenCodeSessionScanner | null;
+  private kimiScanner: KimiSessionScanner | null;
   private enableCodex: boolean;
   private enableGemini: boolean;
   private enableOpenCode: boolean;
+  private enableKimi: boolean;
   private projectMetadataService: ProjectMetadataService | null;
   private cacheTtlMs: number;
   private cacheDirty = true;
@@ -86,6 +92,7 @@ export class ProjectScanner {
     this.enableCodex = options.enableCodex ?? true;
     this.enableGemini = options.enableGemini ?? true;
     this.enableOpenCode = options.enableOpenCode ?? true;
+    this.enableKimi = options.enableKimi ?? true;
     this.codexScanner = this.enableCodex
       ? (options.codexScanner ??
         new CodexSessionScanner({
@@ -100,6 +107,12 @@ export class ProjectScanner {
       : null;
     this.opencodeScanner = this.enableOpenCode
       ? (options.opencodeScanner ?? new OpenCodeSessionScanner())
+      : null;
+    this.kimiScanner = this.enableKimi
+      ? (options.kimiScanner ??
+        new KimiSessionScanner({
+          sessionsDir: options.kimiSessionsDir ?? KIMI_SESSIONS_DIR,
+        }))
       : null;
     this.projectMetadataService = options.projectMetadataService ?? null;
     this.cacheTtlMs = Math.max(0, options.cacheTtlMs ?? 5000);
@@ -352,6 +365,8 @@ export class ProjectScanner {
       this.geminiScanner?.invalidateCache();
     } else if (event.provider === "opencode") {
       this.opencodeScanner?.invalidateCache();
+    } else if (event.provider === "kimi") {
+      this.kimiScanner?.invalidateCache();
     }
   }
 
@@ -588,6 +603,40 @@ export class ProjectScanner {
       }
     }
 
+    // Merge Kimi projects if enabled
+    if (this.kimiScanner) {
+      const kimiProjects = await this.kimiScanner.listProjects();
+      for (const kimiProject of kimiProjects) {
+        const projectPath = canonicalizeProjectPath(kimiProject.path);
+        const existing = projects.find(
+          (project) => canonicalizeProjectPath(project.path) === projectPath,
+        );
+        if (existing) {
+          existing.hasKimiSessions = true;
+          existing.sessionCount += kimiProject.sessionCount;
+          if (
+            kimiProject.lastActivity &&
+            (!existing.lastActivity ||
+              kimiProject.lastActivity > existing.lastActivity)
+          ) {
+            existing.lastActivity = kimiProject.lastActivity;
+          }
+          continue;
+        }
+        seenPaths.add(projectPath);
+        projects.push({
+          ...kimiProject,
+          id: encodeProjectId(projectPath),
+          path: projectPath,
+          name: basename(projectPath),
+          hasCodexSessions: false,
+          hasGeminiSessions: false,
+          hasOpenCodeSessions: false,
+          hasKimiSessions: true,
+        });
+      }
+    }
+
     // Merge manually added projects (from ProjectMetadataService)
     if (this.projectMetadataService) {
       const addedProjects = this.projectMetadataService.getAllProjects();
@@ -731,6 +780,15 @@ export class ProjectScanner {
           provider = "opencode";
         }
       }
+
+      // Check if Kimi sessions exist (only if no Codex/Gemini/OpenCode sessions)
+      if (provider === "claude" && this.kimiScanner) {
+        const kimiSessions =
+          await this.kimiScanner.getSessionsForProject(projectPath);
+        if (kimiSessions.length > 0) {
+          provider = "kimi";
+        }
+      }
     }
 
     // Create a virtual project entry
@@ -743,6 +801,8 @@ export class ProjectScanner {
       sessionDir = GEMINI_TMP_DIR;
     } else if (provider === "opencode") {
       sessionDir = OPENCODE_DB_PATH;
+    } else if (provider === "kimi") {
+      sessionDir = KIMI_SESSIONS_DIR;
     } else {
       sessionDir = this.getClaudeSessionDirForProject(projectPath);
     }
@@ -756,6 +816,7 @@ export class ProjectScanner {
       hasCodexSessions: provider === "codex",
       hasGeminiSessions: provider === "gemini",
       hasOpenCodeSessions: provider === "opencode",
+      hasKimiSessions: provider === "kimi",
       activeOwnedCount: 0,
       activeExternalCount: 0,
       lastActivity: null,

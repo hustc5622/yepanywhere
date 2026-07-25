@@ -16,6 +16,10 @@ import type {
   GeminiAssistantMessage,
   GeminiSessionMessage,
   GeminiUserMessage,
+  KimiContentPartEvent,
+  KimiSessionContent,
+  KimiToolCallEvent,
+  KimiToolResultEvent,
   OpenCodeSessionEntry,
   OpenCodeStoredPart,
   SessionBranchOption,
@@ -24,9 +28,12 @@ import type {
 } from "@yep-anywhere/shared";
 import {
   getGeminiUserMessageText,
+  getKimiPromptText,
   getMessageContent,
   getModelContextWindow,
   isConversationEntry,
+  isKimiLoopEventRecord,
+  isKimiTurnPromptRecord,
 } from "@yep-anywhere/shared";
 import {
   isCodexCorrelationDebugEnabled,
@@ -192,6 +199,11 @@ export function normalizeSession(loaded: LoadedSession): Session {
           : messages,
       };
     }
+    case "kimi":
+      return {
+        ...summary,
+        messages: convertKimiMessages(data.session),
+      };
   }
 }
 
@@ -1782,6 +1794,104 @@ function convertGeminiMessages(
       }
     }
   }
+  return messages;
+}
+
+// --- Kimi Conversion Logic ---
+
+/**
+ * Convert a parsed Kimi session (wire.jsonl records) into normalized messages.
+ *
+ * Reconstruction uses `turn.prompt` for user turns and `context.append_loop_event`
+ * for the assistant stream (content.part think/text, tool.call, tool.result).
+ * `context.append_message` records are ignored — they are the post-compaction
+ * context-memory projection and would double-count tool results as user turns.
+ */
+function convertKimiMessages(session: KimiSessionContent): Message[] {
+  const messages: Message[] = [];
+  const sid = session.sessionId;
+
+  let assistantBlocks: ContentBlock[] = [];
+  let assistantTs: number | undefined;
+  let assistantSeq = 0;
+  let userSeq = 0;
+
+  const toIso = (ms: number | undefined): string | undefined =>
+    typeof ms === "number" ? new Date(ms).toISOString() : session.createdAt;
+
+  const flushAssistant = () => {
+    if (assistantBlocks.length === 0) return;
+    messages.push({
+      uuid: `${sid}-assistant-${assistantSeq++}`,
+      type: "assistant",
+      message: { role: "assistant", content: assistantBlocks },
+      timestamp: toIso(assistantTs),
+    });
+    assistantBlocks = [];
+    assistantTs = undefined;
+  };
+
+  for (const record of session.records) {
+    if (isKimiTurnPromptRecord(record)) {
+      flushAssistant();
+      messages.push({
+        uuid: `${sid}-user-${userSeq++}`,
+        type: "user",
+        message: { role: "user", content: getKimiPromptText(record.input) },
+        timestamp: toIso(record.time),
+      });
+      continue;
+    }
+
+    if (!isKimiLoopEventRecord(record)) continue;
+
+    const event = record.event;
+    switch (event.type) {
+      case "content.part": {
+        const part = (event as KimiContentPartEvent).part;
+        if (part.type === "think") {
+          assistantBlocks.push({ type: "thinking", thinking: part.think });
+        } else if (part.type === "text") {
+          assistantBlocks.push({ type: "text", text: part.text });
+        }
+        assistantTs ??= record.time;
+        break;
+      }
+      case "tool.call": {
+        const toolCall = event as KimiToolCallEvent;
+        assistantBlocks.push({
+          type: "tool_use",
+          id: toolCall.toolCallId,
+          name: toolCall.name,
+          input: toolCall.args ?? {},
+        });
+        assistantTs ??= record.time;
+        break;
+      }
+      case "tool.result": {
+        // Flush the assistant message (carrying the tool_use blocks) before
+        // emitting the corresponding tool results.
+        flushAssistant();
+        const toolResult = event as KimiToolResultEvent;
+        const output =
+          toolResult.result?.output ?? toolResult.result?.note ?? "";
+        messages.push({
+          uuid: `${sid}-result-${toolResult.toolCallId ?? `${assistantSeq}-${messages.length}`}`,
+          type: "tool_result",
+          toolUseResult: {
+            tool_use_id: toolResult.toolCallId ?? "",
+            content: output,
+          },
+          timestamp: toIso(record.time),
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  flushAssistant();
   return messages;
 }
 

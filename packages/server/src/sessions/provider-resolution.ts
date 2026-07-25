@@ -4,6 +4,7 @@ import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 import { CodexSessionReader } from "./codex-reader.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
+import { KimiSessionReader } from "./kimi-reader.js";
 import { OPENCODE_DB_PATH } from "./opencode-db.js";
 import { OpenCodeSessionReader } from "./opencode-reader.js";
 import {
@@ -17,6 +18,7 @@ export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
   opencodePaths: Set<string>;
+  kimiPaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
 }
 
@@ -30,6 +32,8 @@ export interface ProviderResolutionDeps {
   geminiHashToCwd?: Promise<Map<string, string>>;
   opencodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  kimiSessionsDir?: string;
+  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   allowStaleSessionCache?: boolean;
 }
 
@@ -37,7 +41,7 @@ export interface SessionSource {
   provider: ProviderName;
   reader: ISessionReader;
   sessionDir: string;
-  kind: "primary" | "codex" | "gemini" | "opencode";
+  kind: "primary" | "codex" | "gemini" | "opencode" | "kimi";
 }
 
 export interface ResolvedSessionSummary {
@@ -75,6 +79,22 @@ function mayHaveOpenCodeSessions(
   }
   const provider = normalizeProviderGroup(project.provider);
   return provider === "claude" || provider === "codex" || provider === "gemini";
+}
+
+function mayHaveKimiSessions(
+  project: Project,
+  catalog?: ProviderProjectCatalog,
+): boolean {
+  if (catalog) {
+    return catalog.kimiPaths.has(canonicalizeProjectPath(project.path));
+  }
+  const provider = normalizeProviderGroup(project.provider);
+  return (
+    provider === "claude" ||
+    provider === "codex" ||
+    provider === "gemini" ||
+    provider === "opencode"
+  );
 }
 
 function createClaudeSource(
@@ -152,6 +172,27 @@ function createOpenCodeSource(
   };
 }
 
+function createKimiSource(
+  project: Project,
+  deps: ProviderResolutionDeps,
+): SessionSource | null {
+  const reader =
+    deps.kimiReaderFactory?.(project.path) ??
+    (deps.kimiSessionsDir
+      ? new KimiSessionReader({
+          sessionsDir: deps.kimiSessionsDir,
+          projectPath: project.path,
+        })
+      : null);
+  if (!reader) return null;
+  return {
+    provider: "kimi",
+    reader,
+    sessionDir: deps.kimiSessionsDir ?? project.sessionDir,
+    kind: "kimi",
+  };
+}
+
 function buildCandidateGroups(
   project: Project,
   preferredProvider: ProviderName | string | undefined,
@@ -178,6 +219,9 @@ function buildCandidateGroups(
   if (mayHaveOpenCodeSessions(project, catalog)) {
     pushGroup("opencode");
   }
+  if (mayHaveKimiSessions(project, catalog)) {
+    pushGroup("kimi");
+  }
 
   return groups;
 }
@@ -197,6 +241,8 @@ function getSourceForGroup(
       return createCodexSource(project, deps);
     case "gemini":
       return createGeminiSource(project, deps, catalog);
+    case "kimi":
+      return createKimiSource(project, deps);
   }
 }
 

@@ -46,6 +46,7 @@ import type { NotificationService } from "../notifications/index.js";
 import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import {
   encodeProjectId,
@@ -66,6 +67,7 @@ import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import { normalizeSession } from "../sessions/normalization.js";
 import { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import {
@@ -503,6 +505,10 @@ export interface SessionsDeps {
   opencodeDbPath?: string;
   /** Optional shared OpenCode reader factory for cross-provider session lookups */
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  kimiScanner?: KimiSessionScanner;
+  kimiSessionsDir?: string;
+  /** Optional shared Kimi reader factory for cross-provider session lookups */
+  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   /** ServerSettingsService for reading global instructions */
   serverSettingsService?: ServerSettingsService;
   /** ModelInfoService for context window lookups */
@@ -914,6 +920,8 @@ function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     opencodeDbPath: deps.opencodeDbPath,
     opencodeReaderFactory: deps.opencodeReaderFactory,
+    kimiSessionsDir: deps.kimiSessionsDir,
+    kimiReaderFactory: deps.kimiReaderFactory,
   };
 }
 

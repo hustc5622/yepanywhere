@@ -50,6 +50,8 @@ export interface Config {
   geminiSessionsDir: string;
   /** Codex sessions directory (~/.codex/sessions) */
   codexSessionsDir: string;
+  /** Kimi sessions directory (~/.kimi-code/sessions) */
+  kimiSessionsDir: string;
   /** AI title generation for completed first-turn sessions. */
   sessionTitleGeneration: SessionTitleGenerationConfig;
   /** Whether to run the local Codex CLI bridge for `codex --remote ws://...`. */
@@ -246,6 +248,12 @@ export function loadConfig(): Config {
     path.join(os.homedir(), ".gemini", "tmp");
   const codexSessionsDir =
     process.env.CODEX_SESSIONS_DIR ?? getDefaultCodexSessionsDir();
+  const kimiSessionsDir =
+    process.env.KIMI_SESSIONS_DIR ??
+    path.join(
+      process.env.KIMI_CODE_HOME ?? path.join(os.homedir(), ".kimi-code"),
+      "sessions",
+    );
   const codexBridgePort = parseIntOrDefault(
     process.env.YEP_CODEX_BRIDGE_PORT ?? process.env.CODEX_BRIDGE_PORT,
     4510,
@@ -370,6 +378,7 @@ export function loadConfig(): Config {
     claudeSessionsDir,
     geminiSessionsDir,
     codexSessionsDir,
+    kimiSessionsDir,
     sessionTitleGeneration,
     codexBridgeEnabled: codexBridgeMode !== "disabled",
     codexBridgeMode,

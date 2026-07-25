@@ -299,7 +299,18 @@ export class FileWatcher {
         return this.parseCodexFileType(relativePath);
       case "opencode":
         return this.parseOpenCodeFileType(relativePath);
+      case "kimi":
+        return this.parseKimiFileType(relativePath);
     }
+  }
+
+  private parseKimiFileType(relativePath: string): FileChangeEvent["fileType"] {
+    // Watching ~/.kimi-code/sessions - session logs are
+    // {workspace}/session_{uuid}/agents/{agentId}/wire.jsonl
+    if (relativePath.endsWith("wire.jsonl")) {
+      return "session";
+    }
+    return "other";
   }
 
   private parseClaudeFileType(

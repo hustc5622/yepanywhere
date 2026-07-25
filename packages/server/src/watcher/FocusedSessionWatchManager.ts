@@ -5,7 +5,7 @@ import type { UrlProjectId } from "@yep-anywhere/shared";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project } from "../supervisor/types.js";
 
-type WatchProvider = "claude" | "codex" | "gemini" | "opencode";
+type WatchProvider = "claude" | "codex" | "gemini" | "opencode" | "kimi";
 type ChangeSource = "fs-watch" | "poll";
 
 interface CodexSessionInfo {

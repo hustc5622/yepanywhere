@@ -18,10 +18,12 @@ import type {
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import { normalizeSession } from "../sessions/normalization.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { resolveSessionSources } from "../sessions/provider-resolution.js";
@@ -43,6 +45,9 @@ export interface SearchDeps {
   opencodeScanner?: OpenCodeSessionScanner;
   opencodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  kimiScanner?: KimiSessionScanner;
+  kimiSessionsDir?: string;
+  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
 }
 
 export interface SearchMatch {
@@ -140,6 +145,7 @@ export function createSearchRoutes(deps: SearchDeps): Hono {
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
       opencodeScanner: deps.opencodeScanner,
+      kimiScanner: deps.kimiScanner,
     });
 
     const resolutionDeps = {
@@ -151,6 +157,8 @@ export function createSearchRoutes(deps: SearchDeps): Hono {
       geminiHashToCwd: providerCatalog.geminiHashToCwd,
       opencodeDbPath: deps.opencodeDbPath,
       opencodeReaderFactory: deps.opencodeReaderFactory,
+      kimiSessionsDir: deps.kimiSessionsDir,
+      kimiReaderFactory: deps.kimiReaderFactory,
     };
 
     // sessionId -> result (dedupe across sources/projects; first wins)

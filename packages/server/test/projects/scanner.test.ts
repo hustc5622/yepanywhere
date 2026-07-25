@@ -62,6 +62,7 @@ describe("ProjectScanner missing projectsDir", () => {
       enableCodex: true,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
     });
 
     const projects = await scanner.listProjects();
@@ -98,6 +99,7 @@ describe("ProjectScanner cache", () => {
       enableCodex: false,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
       cacheTtlMs: 60000,
     });
 
@@ -135,6 +137,7 @@ describe("ProjectScanner cache", () => {
       enableCodex: false,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
       cacheTtlMs: 0,
     });
 
@@ -171,6 +174,7 @@ describe("ProjectScanner cache", () => {
       enableCodex: false,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
       cacheTtlMs: 60000,
       eventBus,
     });
@@ -232,6 +236,7 @@ describe("ProjectScanner cache", () => {
       enableCodex: true,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
       cacheTtlMs: 60000,
     });
 
@@ -286,6 +291,7 @@ describe("ProjectScanner cache", () => {
       enableCodex: true,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
       cacheTtlMs: 60000,
       eventBus,
     });
@@ -425,6 +431,7 @@ describe("ProjectScanner stale-cwd recovery", () => {
       enableCodex: false,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
     });
     const projects = await scanner.listProjects();
 
@@ -482,6 +489,7 @@ describe("ProjectScanner shared Claude storage", () => {
       enableCodex: false,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
     });
 
     await expect(scanner.listProjects()).resolves.toEqual([
@@ -525,6 +533,7 @@ describe("ProjectScanner shared Claude storage", () => {
       enableCodex: false,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
     });
 
     await expect(
@@ -558,6 +567,7 @@ describe("ProjectScanner shared Claude storage", () => {
       enableCodex: false,
       enableGemini: false,
       enableOpenCode: false,
+      enableKimi: false,
     });
 
     await expect(

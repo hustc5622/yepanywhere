@@ -32,11 +32,13 @@ import type { NotificationService } from "../notifications/index.js";
 import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
+import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RuntimeController } from "../runtime/types.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import {
@@ -86,6 +88,12 @@ export interface GlobalSessionsDeps {
   opencodeDbPath?: string;
   /** Optional shared OpenCode reader factory for cross-provider session lookups */
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  /** Kimi scanner for checking if a project has Kimi sessions */
+  kimiScanner?: KimiSessionScanner;
+  /** Kimi sessions directory */
+  kimiSessionsDir?: string;
+  /** Optional shared Kimi reader factory for cross-provider session lookups */
+  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   /** Event bus for cache invalidation */
   eventBus?: EventBus;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
@@ -416,6 +424,8 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         geminiHashToCwd: providerCatalog.geminiHashToCwd,
         opencodeDbPath: deps.opencodeDbPath,
         opencodeReaderFactory: deps.opencodeReaderFactory,
+        kimiSessionsDir: deps.kimiSessionsDir,
+        kimiReaderFactory: deps.kimiReaderFactory,
         allowStaleSessionCache: true,
       },
       providerCatalog,
@@ -430,6 +440,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
       opencodeScanner: deps.opencodeScanner,
+      kimiScanner: deps.kimiScanner,
     });
     const seenSessionIds = new Set<string>();
 
@@ -592,6 +603,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
       opencodeScanner: deps.opencodeScanner,
+      kimiScanner: deps.kimiScanner,
     });
 
     const projectsForSessionScan = shouldCollectStats

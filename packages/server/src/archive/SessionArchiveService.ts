@@ -14,7 +14,7 @@ import { withWritableOpenCodeDb } from "../sessions/opencode-db.js";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 
-export type ArchiveProvider = "claude" | "codex" | "opencode";
+export type ArchiveProvider = "claude" | "codex" | "opencode" | "kimi";
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {

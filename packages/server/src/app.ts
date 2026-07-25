@@ -47,6 +47,10 @@ import {
   GeminiSessionScanner,
 } from "./projects/gemini-scanner.js";
 import {
+  KIMI_SESSIONS_DIR,
+  KimiSessionScanner,
+} from "./projects/kimi-scanner.js";
+import {
   OPENCODE_DB_PATH,
   OpenCodeSessionScanner,
 } from "./projects/opencode-scanner.js";
@@ -117,6 +121,7 @@ import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
 import { CodexSessionReader } from "./sessions/codex-reader.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
+import { KimiSessionReader } from "./sessions/kimi-reader.js";
 import { normalizeSession } from "./sessions/normalization.js";
 import { OpenCodeSessionReader } from "./sessions/opencode-reader.js";
 import { normalizeProviderGroup } from "./sessions/provider-groups.js";
@@ -380,6 +385,7 @@ export function createApp(options: AppOptions): AppResult {
   const codexScanner = new CodexSessionScanner();
   const geminiScanner = new GeminiSessionScanner();
   const opencodeScanner = new OpenCodeSessionScanner();
+  const kimiScanner = new KimiSessionScanner();
   const scanner = new ProjectScanner({
     projectsDir: options.projectsDir,
     remoteExecutors:
@@ -387,6 +393,7 @@ export function createApp(options: AppOptions): AppResult {
     codexScanner,
     geminiScanner,
     opencodeScanner,
+    kimiScanner,
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
     cacheTtlMs: options.projectScanCacheTtlMs,
@@ -487,6 +494,32 @@ export function createApp(options: AppOptions): AppResult {
             }),
         );
       }
+      case "kimi":
+        return getOrCreateReader(
+          `kimi::${KIMI_SESSIONS_DIR}::${project.path}`,
+          () =>
+            new KimiSessionReader({
+              sessionsDir: KIMI_SESSIONS_DIR,
+              projectPath: project.path,
+            }),
+        );
+      // Fallback keeps the switch exhaustive over ProviderName; unknown
+      // providers read as Claude (matches the client's GenericProvider).
+      default: {
+        const mis = options.modelInfoService;
+        return getOrCreateReader(
+          `claude::${project.sessionDir}${mergedKey}`,
+          () =>
+            new ClaudeSessionReader({
+              sessionDir: project.sessionDir,
+              additionalDirs: project.mergedSessionDirs,
+              getContextWindow: mis
+                ? (model, provider, sessionId) =>
+                    mis.getContextWindow(model, provider, sessionId)
+                : undefined,
+            }),
+        );
+      }
     }
   };
   const codexReaderFactory = (projectPath: string): CodexSessionReader =>
@@ -523,6 +556,15 @@ export function createApp(options: AppOptions): AppResult {
         });
       },
     );
+  const kimiReaderFactory = (projectPath: string): KimiSessionReader =>
+    getOrCreateReader(
+      `kimi-extra::${KIMI_SESSIONS_DIR}::${projectPath}`,
+      () =>
+        new KimiSessionReader({
+          sessionsDir: KIMI_SESSIONS_DIR,
+          projectPath,
+        }),
+    );
   const getSessionSummary = async (sessionId: string, projectId: string) => {
     const project = await scanner.getProject(projectId);
     if (!project) return null;
@@ -539,6 +581,8 @@ export function createApp(options: AppOptions): AppResult {
         geminiHashToCwd: geminiScanner.getHashToCwd(),
         opencodeDbPath: OPENCODE_DB_PATH,
         opencodeReaderFactory,
+        kimiSessionsDir: KIMI_SESSIONS_DIR,
+        kimiReaderFactory,
       },
       options.sessionMetadataService?.getProvider(sessionId),
     );
@@ -663,6 +707,7 @@ export function createApp(options: AppOptions): AppResult {
           codexScanner,
           geminiScanner,
           opencodeScanner,
+          kimiScanner,
         });
         const candidates: Array<{
           sessionId: string;
@@ -690,6 +735,8 @@ export function createApp(options: AppOptions): AppResult {
                 geminiHashToCwd: providerCatalog.geminiHashToCwd,
                 opencodeDbPath: OPENCODE_DB_PATH,
                 opencodeReaderFactory,
+                kimiSessionsDir: KIMI_SESSIONS_DIR,
+                kimiReaderFactory,
                 // Recovery must observe files written while the server was down.
                 // A stale persisted index can show the pre-crash message count.
                 allowStaleSessionCache: false,
@@ -769,6 +816,8 @@ export function createApp(options: AppOptions): AppResult {
             geminiHashToCwd: geminiScanner.getHashToCwd(),
             opencodeDbPath: OPENCODE_DB_PATH,
             opencodeReaderFactory,
+            kimiSessionsDir: KIMI_SESSIONS_DIR,
+            kimiReaderFactory,
           },
           options.sessionMetadataService?.getProvider(sessionId),
         );
@@ -819,6 +868,7 @@ export function createApp(options: AppOptions): AppResult {
         codexScanner,
         geminiScanner,
         opencodeScanner,
+        kimiScanner,
       });
       const roots = {
         claudeProjectsDir: options.projectsDir ?? CLAUDE_PROJECTS_DIR,
@@ -833,6 +883,8 @@ export function createApp(options: AppOptions): AppResult {
         geminiHashToCwd: geminiScanner.getHashToCwd(),
         opencodeDbPath: OPENCODE_DB_PATH,
         opencodeReaderFactory,
+        kimiSessionsDir: KIMI_SESSIONS_DIR,
+        kimiReaderFactory,
       };
       const seenSessionIds = new Set<string>();
       let archivedCount = 0;
@@ -1137,8 +1189,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
       opencodeReaderFactory,
+      kimiSessionsDir: KIMI_SESSIONS_DIR,
+      kimiReaderFactory,
       codexBridgeService: options.codexBridgeService,
       opencodeBridgeService: options.opencodeBridgeService,
     }),
@@ -1161,8 +1216,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
       opencodeReaderFactory,
+      kimiSessionsDir: KIMI_SESSIONS_DIR,
+      kimiReaderFactory,
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
       codexBridgeService: options.codexBridgeService,
@@ -1202,6 +1260,11 @@ export function createApp(options: AppOptions): AppResult {
               reader: opencodeReaderFactory(project.path),
               sessionDir: OPENCODE_DB_PATH,
             };
+          case "kimi":
+            return {
+              reader: kimiReaderFactory(project.path),
+              sessionDir: KIMI_SESSIONS_DIR,
+            };
           default:
             return {
               reader: readerFactory(project),
@@ -1232,8 +1295,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
       opencodeReaderFactory,
+      kimiSessionsDir: KIMI_SESSIONS_DIR,
+      kimiReaderFactory,
       codexBridgeService: options.codexBridgeService,
       opencodeBridgeService: options.opencodeBridgeService,
     }),
@@ -1258,8 +1324,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
       opencodeReaderFactory,
+      kimiSessionsDir: KIMI_SESSIONS_DIR,
+      kimiReaderFactory,
       eventBus: options.eventBus,
       codexBridgeService: options.codexBridgeService,
       opencodeBridgeService: options.opencodeBridgeService,
@@ -1282,8 +1351,11 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         opencodeScanner,
+        kimiScanner,
         opencodeDbPath: OPENCODE_DB_PATH,
         opencodeReaderFactory,
+        kimiSessionsDir: KIMI_SESSIONS_DIR,
+        kimiReaderFactory,
       }),
     );
   }
@@ -1312,8 +1384,11 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         opencodeScanner,
+        kimiScanner,
         opencodeDbPath: OPENCODE_DB_PATH,
         opencodeReaderFactory,
+        kimiSessionsDir: KIMI_SESSIONS_DIR,
+        kimiReaderFactory,
       }),
     );
   }

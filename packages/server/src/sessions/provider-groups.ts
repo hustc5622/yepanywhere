@@ -7,7 +7,7 @@
  * claude projects dir. Call sites that only support a subset of groups
  * (e.g. archiving) filter the result rather than redefining the mapping.
  */
-export type ProviderGroup = "claude" | "codex" | "gemini" | "opencode";
+export type ProviderGroup = "claude" | "codex" | "gemini" | "opencode" | "kimi";
 
 export function normalizeProviderGroup(
   provider: string | null | undefined,
@@ -16,6 +16,7 @@ export function normalizeProviderGroup(
   if (provider === "codex" || provider === "codex-oss") return "codex";
   if (provider === "gemini" || provider === "gemini-acp") return "gemini";
   if (provider === "opencode") return "opencode";
+  if (provider === "kimi") return "kimi";
   if (provider === "claude" || provider === "claude-ollama") return "claude";
   return null;
 }
