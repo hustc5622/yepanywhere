@@ -217,6 +217,12 @@ function getOpenCodeInputSummary(toolName: string, input: unknown): string {
         return `${i.todos.length} todos`;
       }
       break;
+    case "question":
+      if (Array.isArray(i.questions)) {
+        const count = i.questions.length;
+        return `${count} question${count === 1 ? "" : "s"}`;
+      }
+      break;
   }
 
   if (typeof i.opencodeTitle === "string" && i.opencodeTitle.trim()) {

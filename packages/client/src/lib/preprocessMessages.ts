@@ -937,7 +937,59 @@ function normalizeOpenCodeToolInput(block: ContentBlock): unknown {
     input.glob = input.include;
   }
 
+  if (name === "question" && Array.isArray(input.questions)) {
+    input.questions = normalizeOpenCodeQuestions(input.questions);
+  }
+
   return input;
+}
+
+/**
+ * Normalize opencode's `question` tool prompts into the shape the shared
+ * AskUserQuestion renderer expects: stable ids, `multiSelect` (opencode uses
+ * `multiple`), and `{ label, description }` options.
+ */
+function normalizeOpenCodeQuestions(raw: unknown[]): unknown[] {
+  return raw
+    .map((item, index) => {
+      if (!isRecord(item)) return null;
+      const question = typeof item.question === "string" ? item.question : "";
+      if (!question) return null;
+
+      const options = Array.isArray(item.options)
+        ? item.options
+            .map((option) => {
+              if (!isRecord(option)) return null;
+              const label =
+                typeof option.label === "string" ? option.label : "";
+              if (!label) return null;
+              return {
+                label,
+                description:
+                  typeof option.description === "string"
+                    ? option.description
+                    : "",
+              };
+            })
+            .filter(
+              (option): option is { label: string; description: string } =>
+                option !== null,
+            )
+        : [];
+
+      return {
+        id: `question-${index}`,
+        question,
+        header:
+          typeof item.header === "string" && item.header.trim()
+            ? item.header
+            : "Question",
+        options,
+        multiSelect: Boolean(item.multiSelect ?? item.multiple),
+        ...(typeof item.custom === "boolean" ? { custom: item.custom } : {}),
+      };
+    })
+    .filter((question) => question !== null);
 }
 
 function getStringField(value: unknown, field: string): string | undefined {
@@ -1437,7 +1489,53 @@ function normalizeOpenCodeToolResult(
     }
   }
 
+  if (normalized === "question") {
+    return normalizeOpenCodeQuestionResult(input);
+  }
+
   return undefined;
+}
+
+/**
+ * Build an AskUserQuestion-shaped result for opencode's `question` tool by
+ * pairing the (already normalized) prompts with the selected answers. opencode
+ * reports answers as `metadata.answers`: an array of selected-label arrays,
+ * ordered to match the questions.
+ */
+function normalizeOpenCodeQuestionResult(input: unknown): unknown {
+  if (!isRecord(input) || !Array.isArray(input.questions)) {
+    return undefined;
+  }
+  const questions = input.questions;
+  if (questions.length === 0) {
+    return undefined;
+  }
+
+  const metadata = isRecord(input.opencodeMetadata)
+    ? input.opencodeMetadata
+    : undefined;
+  const rawAnswers = Array.isArray(metadata?.answers) ? metadata.answers : [];
+
+  const answers: Record<string, string[]> = {};
+  questions.forEach((question, index) => {
+    if (!isRecord(question) || typeof question.id !== "string") return;
+    const rawAnswer = rawAnswers[index];
+    const values = Array.isArray(rawAnswer)
+      ? rawAnswer.filter(
+          (value): value is string =>
+            typeof value === "string" && value.length > 0,
+        )
+      : typeof rawAnswer === "string" && rawAnswer
+        ? [rawAnswer]
+        : [];
+    // Only record questions the user actually answered so the summary and
+    // per-question selection reflect unanswered prompts correctly.
+    if (values.length > 0) {
+      answers[question.id] = values;
+    }
+  });
+
+  return { questions, answers };
 }
 
 function normalizeOpenCodeEditResult(input: unknown): unknown {

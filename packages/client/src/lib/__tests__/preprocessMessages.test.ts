@@ -434,6 +434,99 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("normalizes OpenCode question prompts and answers into a structured result", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_question",
+            name: "question",
+            input: {
+              questions: [
+                {
+                  header: "Materializer",
+                  question: "How far should MySQL-as-source go?",
+                  multiple: false,
+                  options: [
+                    { label: "Full", description: "Everything from MySQL" },
+                    { label: "Partial", description: "Only pytest scripts" },
+                  ],
+                },
+                {
+                  header: "Framework",
+                  question: "Which frameworks to support?",
+                  multiple: true,
+                  options: [
+                    { label: "pytest", description: "" },
+                    { label: "unittest", description: "" },
+                  ],
+                },
+              ],
+            },
+            opencodeStatus: "completed",
+            opencodeTitle: "Asked 2 questions",
+            opencodeMetadata: {
+              answers: [["Full"], ["pytest", "unittest"]],
+            },
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "call_question",
+            content:
+              'User has answered your questions: "How far should MySQL-as-source go?"="Full", "Which frameworks to support?"="pytest, unittest".',
+            is_error: false,
+            opencodeStatus: "completed",
+            opencodeMetadata: {
+              answers: [["Full"], ["pytest", "unittest"]],
+            },
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    const item = items[0];
+    if (!item || item.type !== "tool_call") {
+      throw new Error("expected a tool_call item");
+    }
+    expect(item).toMatchObject({
+      id: "call_question",
+      toolName: "question",
+      status: "complete",
+    });
+
+    // Prompts normalized to the AskUserQuestion shape (id + multiSelect).
+    expect(item.toolInput).toMatchObject({
+      questions: [
+        {
+          id: "question-0",
+          header: "Materializer",
+          multiSelect: false,
+          options: [
+            { label: "Full", description: "Everything from MySQL" },
+            { label: "Partial", description: "Only pytest scripts" },
+          ],
+        },
+        { id: "question-1", header: "Framework", multiSelect: true },
+      ],
+    });
+
+    // Structured result carries the selected answers keyed by question id.
+    expect(item.toolResult?.structured).toEqual({
+      questions: (item.toolInput as { questions: unknown }).questions,
+      answers: {
+        "question-0": ["Full"],
+        "question-1": ["pytest", "unittest"],
+      },
+    });
+  });
+
   it("collapses repeated plan progress snapshots within one user turn", () => {
     const messages: Message[] = [
       {

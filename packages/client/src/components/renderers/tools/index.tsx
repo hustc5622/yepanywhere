@@ -31,6 +31,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   image_generation: "ViewImage",
   imageGeneration: "ViewImage",
   skill: "Skill",
+  question: "AskUserQuestion", // opencode's `question` tool
 };
 
 function canonicalizeToolName(toolName: string): string {

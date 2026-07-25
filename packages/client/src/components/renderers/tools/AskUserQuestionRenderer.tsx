@@ -194,6 +194,7 @@ export const askUserQuestionRenderer: ToolRenderer<
   AskUserQuestionResult
 > = {
   tool: "AskUserQuestion",
+  displayName: "Ask User Question",
 
   renderToolUse(input, _context) {
     return <AskUserQuestionToolUse input={input as AskUserQuestionInput} />;
