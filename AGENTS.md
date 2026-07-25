@@ -61,7 +61,7 @@ PORT=4000 YEP_ANYWHERE_PROFILE=dev pnpm dev
 - `YEP_ANYWHERE_PROFILE`：创建 `~/.yep-anywhere-{profile}/`。
 - `YEP_ANYWHERE_DATA_DIR`：显式覆盖数据目录。
 - `CLAUDE_CONFIG_DIR`：Claude Code 配置/session 根目录，默认 `~/.claude`。
-- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`opencode`。
+- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`opencode`、`kimi`。
 - `VOICE_INPUT=false`：在服务端禁用语音输入按钮。
 
 ## 验证
