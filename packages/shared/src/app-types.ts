@@ -247,6 +247,8 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 /** Default context window size for Codex cloud sessions when metadata is missing */
 export const CODEX_DEFAULT_CONTEXT_WINDOW = 258_000;
 export const CLAUDE_EXTENDED_CONTEXT_WINDOW = 1_000_000;
+/** Default context window for Kimi Code (kimi-k3 ships a 1M window). */
+export const KIMI_DEFAULT_CONTEXT_WINDOW = 1_048_576;
 
 /**
  * Known context window sizes for different models.
@@ -395,7 +397,9 @@ export function getModelContextWindow(
   if (!model) {
     return provider === "codex"
       ? CODEX_DEFAULT_CONTEXT_WINDOW
-      : DEFAULT_CONTEXT_WINDOW;
+      : provider === "kimi"
+        ? KIMI_DEFAULT_CONTEXT_WINDOW
+        : DEFAULT_CONTEXT_WINDOW;
   }
 
   // OpenCode models resolve their window from the live catalog first (see
@@ -441,6 +445,11 @@ export function getModelContextWindow(
     return MODEL_CONTEXT_WINDOWS.gemini ?? DEFAULT_CONTEXT_WINDOW;
   }
 
+  // Kimi models (kimi-k3 and friends ship a ~1M window).
+  if (provider === "kimi" || lowerModel.includes("kimi")) {
+    return KIMI_DEFAULT_CONTEXT_WINDOW;
+  }
+
   // Provider-level fallback when we don't recognize the model string.
   if (provider === "codex") {
     return CODEX_DEFAULT_CONTEXT_WINDOW;
@@ -473,6 +482,7 @@ export function escalateContextWindow(
   if (inputTokens <= contextWindow) return contextWindow;
   if (provider === "codex" || provider === "codex-oss") return contextWindow;
   if (provider === "gemini" || provider === "gemini-acp") return contextWindow;
+  if (provider === "kimi") return contextWindow;
   if (provider === "opencode") return contextWindow;
   // Default to Claude's 1M tier for Claude and unknown providers.
   return Math.max(contextWindow, CLAUDE_EXTENDED_CONTEXT_WINDOW);

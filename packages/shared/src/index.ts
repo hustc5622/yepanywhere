@@ -365,6 +365,28 @@ export type {
 } from "./opencode-schema/types.js";
 export { parseOpenCodeSSEEvent } from "./opencode-schema/events.js";
 
+// Kimi Code CLI session schema (for reading ~/.kimi-code/sessions wire.jsonl)
+export type {
+  KimiContentPartValue,
+  KimiLoopEvent,
+  KimiContentPartEvent,
+  KimiToolCallEvent,
+  KimiToolResultEvent,
+  KimiStepEndEvent,
+  KimiStepUsage,
+  KimiWireRecord,
+  KimiSessionContent,
+  KimiSessionState,
+} from "./kimi-schema/types.js";
+export {
+  parseKimiWireJsonl,
+  parseKimiSessionState,
+  getKimiPromptText,
+  isKimiTurnPromptRecord,
+  isKimiLoopEventRecord,
+  isKimiModelConfigRecord,
+} from "./kimi-schema/types.js";
+
 // Device bridge streaming types (for device bridge remote control)
 export type {
   DeviceAction,

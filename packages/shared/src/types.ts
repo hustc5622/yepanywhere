@@ -5,6 +5,7 @@
  * - "codex-oss": Codex via CLI with --oss (local models via Ollama)
  * - "gemini": Google Gemini via CLI
  * - "opencode": OpenCode via HTTP server (multi-provider agent)
+ * - "kimi": Kimi Code CLI via Agent Client Protocol (`kimi acp`)
  */
 export type ProviderName =
   | "claude"
@@ -13,7 +14,8 @@ export type ProviderName =
   | "codex-oss"
   | "gemini"
   | "gemini-acp"
-  | "opencode";
+  | "opencode"
+  | "kimi";
 
 /**
  * All provider names in display order.
@@ -28,6 +30,7 @@ export const ALL_PROVIDERS: readonly ProviderName[] = [
   "gemini",
   "gemini-acp",
   "opencode",
+  "kimi",
 ] as const;
 
 /**
