@@ -20,7 +20,8 @@ export type ProviderName =
   | "codex-oss"
   | "gemini"
   | "gemini-acp"
-  | "opencode";
+  | "opencode"
+  | "kimi";
 
 /**
  * Authentication status for a provider.

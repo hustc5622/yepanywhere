@@ -65,6 +65,14 @@ export {
   type OpenCodeProviderConfig,
 } from "./opencode.js";
 
+// Kimi provider (uses `kimi acp` for ACP-based agent execution)
+import { kimiProvider } from "./kimi.js";
+export {
+  KimiProvider,
+  kimiProvider,
+  type KimiProviderConfig,
+} from "./kimi.js";
+
 /**
  * Get all available provider instances.
  * Useful for provider detection UI.
@@ -77,6 +85,7 @@ export function getAllProviders(): AgentProvider[] {
     geminiProvider,
     geminiACPProvider,
     opencodeProvider,
+    kimiProvider,
   ];
 }
 
@@ -101,6 +110,8 @@ export function getProvider(name: ProviderName): AgentProvider | null {
       return geminiACPProvider;
     case "opencode":
       return opencodeProvider;
+    case "kimi":
+      return kimiProvider;
     default:
       return null;
   }
