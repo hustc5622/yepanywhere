@@ -55,6 +55,7 @@ import {
   normalizeCodexToolOutputWithContext,
   parseCodexToolArguments,
 } from "../codex/normalization.js";
+import { normalizeKimiToolInput } from "../kimi/tool-input.js";
 import {
   getOpenCodeAttachmentLabel,
   hasYepUploadMetadataForFile,
@@ -1816,6 +1817,31 @@ function convertKimiMessages(session: KimiSessionContent): Message[] {
   let assistantSeq = 0;
   let userSeq = 0;
 
+  const appendAssistantPart = (
+    part:
+      | { type: "thinking"; thinking: string }
+      | { type: "text"; text: string },
+  ) => {
+    const previous = assistantBlocks[assistantBlocks.length - 1];
+    if (
+      part.type === "thinking" &&
+      previous?.type === "thinking" &&
+      typeof previous.thinking === "string"
+    ) {
+      previous.thinking += part.thinking;
+      return;
+    }
+    if (
+      part.type === "text" &&
+      previous?.type === "text" &&
+      typeof previous.text === "string"
+    ) {
+      previous.text += part.text;
+      return;
+    }
+    assistantBlocks.push(part);
+  };
+
   const toIso = (ms: number | undefined): string | undefined =>
     typeof ms === "number" ? new Date(ms).toISOString() : session.createdAt;
 
@@ -1850,9 +1876,9 @@ function convertKimiMessages(session: KimiSessionContent): Message[] {
       case "content.part": {
         const part = (event as KimiContentPartEvent).part;
         if (part.type === "think") {
-          assistantBlocks.push({ type: "thinking", thinking: part.think });
+          appendAssistantPart({ type: "thinking", thinking: part.think });
         } else if (part.type === "text") {
-          assistantBlocks.push({ type: "text", text: part.text });
+          appendAssistantPart({ type: "text", text: part.text });
         }
         assistantTs ??= record.time;
         break;
@@ -1863,7 +1889,7 @@ function convertKimiMessages(session: KimiSessionContent): Message[] {
           type: "tool_use",
           id: toolCall.toolCallId,
           name: toolCall.name,
-          input: toolCall.args ?? {},
+          input: normalizeKimiToolInput(toolCall.name, toolCall.args),
         });
         assistantTs ??= record.time;
         break;
@@ -1875,12 +1901,20 @@ function convertKimiMessages(session: KimiSessionContent): Message[] {
         const toolResult = event as KimiToolResultEvent;
         const output =
           toolResult.result?.output ?? toolResult.result?.note ?? "";
+        const toolUseId = toolResult.toolCallId ?? "";
         messages.push({
           uuid: `${sid}-result-${toolResult.toolCallId ?? `${assistantSeq}-${messages.length}`}`,
-          type: "tool_result",
-          toolUseResult: {
-            tool_use_id: toolResult.toolCallId ?? "",
-            content: output,
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: toolUseId,
+                content: output,
+                ...(toolResult.result?.isError === true && { is_error: true }),
+              },
+            ],
           },
           timestamp: toIso(record.time),
         });

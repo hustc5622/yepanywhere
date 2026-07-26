@@ -784,7 +784,7 @@ function processMessage(
               block,
               orphanedToolIds.has(block.id),
             );
-            const incomingInput = normalizeOpenCodeToolInput(block);
+            const incomingInput = normalizeToolInput(block);
             const incomingHasInput =
               incomingInput !== undefined &&
               incomingInput !== null &&
@@ -827,7 +827,7 @@ function processMessage(
 
         // Check if this tool call is orphaned (process killed before result)
         const isOrphaned = orphanedToolIds.has(block.id);
-        const toolInput = normalizeOpenCodeToolInput(block);
+        const toolInput = normalizeToolInput(block);
         const toolCall: ToolCallItem = {
           type: "tool_call",
           id: block.id,
@@ -884,7 +884,7 @@ function getInitialToolStatus(
   }
 }
 
-function normalizeOpenCodeToolInput(block: ContentBlock): unknown {
+function normalizeToolInput(block: ContentBlock): unknown {
   const input = isRecord(block.input) ? { ...block.input } : block.input;
   if (!isRecord(input)) {
     return input;
@@ -901,10 +901,33 @@ function normalizeOpenCodeToolInput(block: ContentBlock): unknown {
   const name = typeof block.name === "string" ? block.name.toLowerCase() : "";
   if (
     (name === "read" || name === "write" || name === "edit") &&
-    typeof input.filePath === "string" &&
     typeof input.file_path !== "string"
   ) {
-    input.file_path = input.filePath;
+    const filePath =
+      typeof input.filePath === "string"
+        ? input.filePath
+        : typeof input.path === "string"
+          ? input.path
+          : undefined;
+    if (filePath) {
+      input.file_path = filePath;
+    }
+  }
+
+  if (
+    name === "read" &&
+    typeof input.line_offset === "number" &&
+    typeof input.offset !== "number"
+  ) {
+    input.offset = input.line_offset;
+  }
+
+  if (
+    name === "read" &&
+    typeof input.n_lines === "number" &&
+    typeof input.limit !== "number"
+  ) {
+    input.limit = input.n_lines;
   }
 
   if (
@@ -1642,9 +1665,11 @@ function normalizeOpenCodeReadResult(content: string, input: unknown): unknown {
   }
 
   const type = getXmlTag(content, "type");
-  const rawContent =
+  const taggedContent =
     getXmlTag(content, "content") ?? getXmlTag(content, "entries");
-  if (!rawContent) {
+  const isKimiNumberedText =
+    taggedContent === undefined && /^\d+\t/m.test(content);
+  if (!taggedContent && !isKimiNumberedText) {
     return {
       type: "text",
       file: {
@@ -1656,6 +1681,7 @@ function normalizeOpenCodeReadResult(content: string, input: unknown): unknown {
       },
     };
   }
+  const rawContent = taggedContent ?? content;
 
   const startLine = parseOpenCodeReadStartLine(rawContent);
   const text =
@@ -1691,13 +1717,13 @@ function stripOpenCodeReadLineNumbers(text: string): string {
       (line) =>
         !line.startsWith("(End of file") && !line.startsWith("(Showing lines"),
     )
-    .map((line) => line.replace(/^\d+:\s?/, ""))
+    .map((line) => line.replace(/^\d+(?::\s?|\t)/, ""))
     .join("\n")
     .trimEnd();
 }
 
 function parseOpenCodeReadStartLine(text: string): number {
-  const firstNumberedLine = text.match(/^(\d+):/m);
+  const firstNumberedLine = text.match(/^(\d+)(?::|\t)/m);
   return firstNumberedLine?.[1] ? Number.parseInt(firstNumberedLine[1], 10) : 1;
 }
 

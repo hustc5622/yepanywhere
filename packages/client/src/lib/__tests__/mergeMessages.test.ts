@@ -415,6 +415,35 @@ describe("mergeStreamMessage", () => {
       expect(result.index).toBe(0);
     });
 
+    it("updates one thinking block from cumulative snapshots with the same ID", () => {
+      const existing: Message[] = [
+        {
+          uuid: "thinking-1",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "User" }],
+          },
+          _source: "sdk",
+        },
+      ];
+      const incoming: Message = {
+        uuid: "thinking-1",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "User wants help" }],
+        },
+      };
+
+      const result = mergeStreamMessage(existing, incoming);
+
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0]?.message?.content).toEqual([
+        { type: "thinking", thinking: "User wants help" },
+      ]);
+    });
+
     it("preserves existing thinking blocks when a later SDK snapshot adds a tool call", () => {
       const existing: Message[] = [
         {

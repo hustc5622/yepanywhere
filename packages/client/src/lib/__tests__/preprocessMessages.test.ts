@@ -372,6 +372,120 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("normalizes Kimi native file-tool fields and string results", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-kimi-write",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "kimi-write",
+            name: "Write",
+            input: {
+              path: "src/app.ts",
+              content: "export const value = 2;\n",
+            },
+          },
+        ],
+        timestamp: "2026-07-25T00:00:00Z",
+      },
+      {
+        id: "result-kimi-write",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "kimi-write",
+            content: "Wrote 24 bytes to src/app.ts",
+          },
+        ],
+        timestamp: "2026-07-25T00:00:01Z",
+      },
+      {
+        id: "msg-kimi-read",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "kimi-read",
+            name: "Read",
+            input: {
+              path: "src/app.ts",
+              line_offset: 3,
+              n_lines: 2,
+            },
+          },
+        ],
+        timestamp: "2026-07-25T00:00:02Z",
+      },
+      {
+        id: "result-kimi-read",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "kimi-read",
+            content: "3\texport const value = 2;\n4\treturn value;",
+          },
+        ],
+        timestamp: "2026-07-25T00:00:03Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "kimi-write",
+      toolName: "Write",
+      status: "complete",
+      toolInput: {
+        path: "src/app.ts",
+        file_path: "src/app.ts",
+        content: "export const value = 2;\n",
+      },
+      toolResult: {
+        isError: false,
+        structured: {
+          type: "text",
+          file: {
+            filePath: "src/app.ts",
+            content: "export const value = 2;\n",
+            numLines: 2,
+          },
+        },
+      },
+    });
+    expect(items[1]).toMatchObject({
+      type: "tool_call",
+      id: "kimi-read",
+      toolName: "Read",
+      status: "complete",
+      toolInput: {
+        path: "src/app.ts",
+        file_path: "src/app.ts",
+        line_offset: 3,
+        offset: 3,
+        n_lines: 2,
+        limit: 2,
+      },
+      toolResult: {
+        isError: false,
+        structured: {
+          type: "text",
+          file: {
+            filePath: "src/app.ts",
+            content: "export const value = 2;\nreturn value;",
+            startLine: 3,
+            totalLines: 4,
+          },
+        },
+      },
+    });
+  });
+
   it("normalizes OpenCode edit output into an expandable diff result", () => {
     const messages: Message[] = [
       {

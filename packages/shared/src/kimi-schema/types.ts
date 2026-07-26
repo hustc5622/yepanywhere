@@ -78,7 +78,11 @@ export const KimiToolResultEventSchema = z.object({
   toolCallId: z.string().optional(),
   parentUuid: z.string().optional(),
   result: z
-    .object({ output: z.string().optional(), note: z.string().optional() })
+    .object({
+      output: z.string().optional(),
+      note: z.string().optional(),
+      isError: z.boolean().optional(),
+    })
     .passthrough()
     .optional(),
 });

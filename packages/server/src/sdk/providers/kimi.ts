@@ -31,6 +31,7 @@ import type {
   ToolKind,
 } from "@agentclientprotocol/sdk";
 import type { ModelInfo } from "@yep-anywhere/shared";
+import { normalizeKimiToolInput } from "../../kimi/tool-input.js";
 import { getLogger } from "../../logging/logger.js";
 import { whichCommand } from "../cli-detection.js";
 const execAsync = promisify(exec);
@@ -96,6 +97,123 @@ interface KimiSessionState {
 export interface KimiProviderConfig {
   /** Path to the kimi binary (auto-detected if not specified). */
   kimiPath?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Kimi's ACP adapter uses either the original tool name or a human-readable
+ * description as `title`. Prefer an exact name, then combine distinctive
+ * native arguments with the description/kind metadata.
+ */
+function inferKimiAcpToolName(
+  kind: ToolKind | null | undefined,
+  title: string | null | undefined,
+  rawInput: unknown,
+): string {
+  const input = isRecord(rawInput) ? rawInput : {};
+  const trimmedTitle = title?.trim();
+  const lowerTitle = trimmedTitle?.toLowerCase() ?? "";
+  const exactNames: Record<string, string> = {
+    bash: "Bash",
+    edit: "Edit",
+    glob: "Glob",
+    grep: "Grep",
+    read: "Read",
+    webfetch: "WebFetch",
+    websearch: "WebSearch",
+    write: "Write",
+  };
+  const exactName = exactNames[lowerTitle];
+  if (exactName) return exactName;
+
+  if ("old_string" in input || "new_string" in input) return "Edit";
+  if (typeof input.path === "string" && typeof input.content === "string") {
+    return "Write";
+  }
+  if (typeof input.command === "string") return "Bash";
+  if (typeof input.pattern === "string") {
+    // Kimi Glob and Grep both accept `pattern` and optional `path`. The ACP
+    // adapter preserves their distinct descriptions (`Searching …` versus
+    // `Searching for …`), while only Grep exposes the fields below.
+    if (lowerTitle.startsWith("searching for ")) return "Grep";
+    if (lowerTitle.startsWith("searching ")) return "Glob";
+    if (
+      typeof input.output_mode === "string" ||
+      typeof input.glob === "string" ||
+      typeof input.type === "string" ||
+      "-i" in input ||
+      "-A" in input ||
+      "-B" in input ||
+      "-C" in input ||
+      "-n" in input ||
+      "head_limit" in input ||
+      "offset" in input ||
+      "multiline" in input
+    ) {
+      return "Grep";
+    }
+    return "Glob";
+  }
+  if (
+    typeof input.path === "string" &&
+    (kind === "read" ||
+      typeof input.line_offset === "number" ||
+      typeof input.n_lines === "number")
+  ) {
+    return "Read";
+  }
+  if (typeof input.url === "string") return "WebFetch";
+  if (typeof input.query === "string") return "WebSearch";
+
+  if (lowerTitle.startsWith("reading ")) return "Read";
+  if (lowerTitle.startsWith("writing ")) return "Write";
+  if (lowerTitle.startsWith("editing ")) return "Edit";
+  if (lowerTitle.startsWith("running:")) return "Bash";
+  if (lowerTitle.startsWith("searching for ")) return "Grep";
+  if (lowerTitle.startsWith("searching ")) return "Glob";
+
+  switch (kind) {
+    case "execute":
+      return "Bash";
+    case "read":
+      return "Read";
+    case "fetch":
+      return "WebFetch";
+    case "think":
+      return "Think";
+    default:
+      return trimmedTitle || "KimiTool";
+  }
+}
+
+function stringifyKimiAcpValue(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function getKimiAcpToolOutput(
+  update: Extract<SessionUpdate, { sessionUpdate: "tool_call_update" }>,
+): string {
+  const textParts: string[] = [];
+  for (const item of update.content ?? []) {
+    if (
+      item.type === "content" &&
+      item.content.type === "text" &&
+      item.content.text
+    ) {
+      textParts.push(item.content.text);
+    }
+  }
+  if (textParts.length > 0) return textParts.join("\n");
+  return stringifyKimiAcpValue(update.rawOutput);
 }
 
 /**
@@ -564,8 +682,23 @@ export class KimiProvider implements AgentProvider {
 
     let assistantTextBuffer = "";
     let assistantMessageId: string | null = null;
+    let thinkingTextBuffer = "";
+    let thinkingMessageId: string | null = null;
+    let thinkingDirty = false;
+    const createThinkingSnapshot = (): SDKMessage => ({
+      type: "assistant",
+      uuid: thinkingMessageId ?? undefined,
+      session_id: sessionId,
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: thinkingTextBuffer }],
+      },
+    });
 
-    while (!signal.aborted && !promptDone) {
+    // A terminal tool update is commonly queued immediately before the prompt
+    // response resolves. Drain those already-received notifications so the
+    // final result is not lost at the turn boundary.
+    while (!signal.aborted && (!promptDone || updateQueue.length > 0)) {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       while (updateQueue.length > 0) {
@@ -575,9 +708,43 @@ export class KimiProvider implements AgentProvider {
         const sessionUpdate = notification.update;
 
         if (
+          sessionUpdate.sessionUpdate === "agent_thought_chunk" &&
+          sessionUpdate.content.type === "text"
+        ) {
+          // A reasoning stream starts a new visual block, so finish any buffered
+          // assistant text before switching into Kimi's reasoning stream.
+          if (assistantTextBuffer) {
+            yield {
+              type: "assistant",
+              uuid: assistantMessageId ?? undefined,
+              session_id: sessionId,
+              message: { role: "assistant", content: assistantTextBuffer },
+            } as SDKMessage;
+            assistantTextBuffer = "";
+            assistantMessageId = null;
+          }
+
+          thinkingTextBuffer += sessionUpdate.content.text;
+          thinkingMessageId ??= randomUUID();
+          thinkingDirty = true;
+          continue;
+        }
+
+        if (
           sessionUpdate.sessionUpdate === "agent_message_chunk" &&
           "content" in sessionUpdate
         ) {
+          // Keep every contiguous Kimi reasoning stream under one UUID.
+          // Cumulative snapshots then merge into one Thinking row client-side.
+          if (thinkingTextBuffer) {
+            if (thinkingDirty) {
+              yield createThinkingSnapshot();
+            }
+            thinkingTextBuffer = "";
+            thinkingMessageId = null;
+            thinkingDirty = false;
+          }
+
           const content = sessionUpdate.content;
           if (content && typeof content === "object" && "type" in content) {
             if (content.type === "text" && "text" in content) {
@@ -588,6 +755,15 @@ export class KimiProvider implements AgentProvider {
             }
           }
           continue;
+        }
+
+        if (thinkingTextBuffer) {
+          if (thinkingDirty) {
+            yield createThinkingSnapshot();
+          }
+          thinkingTextBuffer = "";
+          thinkingMessageId = null;
+          thinkingDirty = false;
         }
 
         if (assistantTextBuffer) {
@@ -609,6 +785,18 @@ export class KimiProvider implements AgentProvider {
           yield sdkMessage;
         }
       }
+
+      // Keep reasoning visible while it streams. Each snapshot is cumulative
+      // and reuses the same UUID, so even chunks arriving in different polling
+      // windows update one row instead of creating one row per token.
+      if (thinkingDirty && thinkingTextBuffer) {
+        yield createThinkingSnapshot();
+        thinkingDirty = false;
+      }
+    }
+
+    if (thinkingDirty && thinkingTextBuffer) {
+      yield createThinkingSnapshot();
     }
 
     if (assistantTextBuffer) {
@@ -643,6 +831,7 @@ export class KimiProvider implements AgentProvider {
           ) {
             return {
               type: "assistant",
+              uuid: randomUUID(),
               session_id: sessionId,
               message: {
                 role: "assistant",
@@ -654,23 +843,43 @@ export class KimiProvider implements AgentProvider {
         return null;
       }
 
+      case "agent_thought_chunk": {
+        if (
+          update.content.type === "text" &&
+          typeof update.content.text === "string"
+        ) {
+          return {
+            type: "assistant",
+            uuid: randomUUID(),
+            session_id: sessionId,
+            message: {
+              role: "assistant",
+              content: [{ type: "thinking", thinking: update.content.text }],
+            },
+          } as SDKMessage;
+        }
+        return null;
+      }
+
       case "tool_call": {
-        const toolUpdate = update as {
-          toolCallId?: string;
-          title?: string;
-          status?: string;
-        };
+        const name = inferKimiAcpToolName(
+          update.kind,
+          update.title,
+          update.rawInput,
+        );
+        const rawInput = isRecord(update.rawInput) ? update.rawInput : {};
         return {
           type: "assistant",
+          uuid: randomUUID(),
           session_id: sessionId,
           message: {
             role: "assistant",
             content: [
               {
                 type: "tool_use",
-                id: toolUpdate.toolCallId ?? randomUUID(),
-                name: toolUpdate.title ?? "unknown_tool",
-                input: {},
+                id: update.toolCallId,
+                name,
+                input: normalizeKimiToolInput(name, rawInput),
               },
             ],
           },
@@ -678,22 +887,46 @@ export class KimiProvider implements AgentProvider {
       }
 
       case "tool_call_update": {
-        const toolResultUpdate = update as {
-          toolCallId?: string;
-          status?: string;
-          error?: string;
-        };
-        if (toolResultUpdate.error) {
+        if (update.status === "completed" || update.status === "failed") {
           return {
             type: "user",
+            uuid: randomUUID(),
             session_id: sessionId,
             message: {
               role: "user",
               content: [
                 {
                   type: "tool_result",
-                  tool_use_id: toolResultUpdate.toolCallId ?? "",
-                  content: toolResultUpdate.error,
+                  tool_use_id: update.toolCallId,
+                  content: getKimiAcpToolOutput(update),
+                  ...(update.status === "failed" && { is_error: true }),
+                },
+              ],
+            },
+          } as SDKMessage;
+        }
+
+        // Kimi may lazy-create a tool from an arguments delta and attach the
+        // parsed `rawInput` only in a later in-progress update. Replay the same
+        // tool id with the richer payload; preprocessing deduplicates by id.
+        if (isRecord(update.rawInput)) {
+          const name = inferKimiAcpToolName(
+            update.kind,
+            update.title,
+            update.rawInput,
+          );
+          return {
+            type: "assistant",
+            uuid: randomUUID(),
+            session_id: sessionId,
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: update.toolCallId,
+                  name,
+                  input: normalizeKimiToolInput(name, update.rawInput),
                 },
               ],
             },
@@ -703,14 +936,25 @@ export class KimiProvider implements AgentProvider {
       }
 
       case "plan": {
-        const planUpdate = update as { content?: string };
-        if (planUpdate.content) {
+        if (update.entries.length > 0) {
+          const planText = update.entries
+            .map((entry) => {
+              const marker =
+                entry.status === "completed"
+                  ? "x"
+                  : entry.status === "in_progress"
+                    ? ">"
+                    : " ";
+              return `- [${marker}] ${entry.content}`;
+            })
+            .join("\n");
           return {
             type: "assistant",
+            uuid: randomUUID(),
             session_id: sessionId,
             message: {
               role: "assistant",
-              content: [{ type: "thinking", thinking: planUpdate.content }],
+              content: [{ type: "thinking", thinking: planText }],
             },
           } as SDKMessage;
         }

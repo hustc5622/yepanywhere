@@ -200,6 +200,218 @@ describe("normalizeSession", () => {
     expect(normalized.messages[0]?.finish).toBeUndefined();
   });
 
+  it("normalizes Kimi file tools and emits pairable tool result messages", () => {
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "session-kimi",
+        projectId: "test-project" as UrlProjectId,
+        title: "Kimi tools",
+        fullTitle: "Kimi tools",
+        createdAt: "2026-07-25T00:00:00.000Z",
+        updatedAt: "2026-07-25T00:00:01.000Z",
+        messageCount: 7,
+        status: { state: "idle" },
+        provider: "kimi",
+      },
+      data: {
+        provider: "kimi",
+        session: {
+          sessionId: "session-kimi",
+          createdAt: "2026-07-25T00:00:00.000Z",
+          records: [
+            {
+              type: "turn.prompt",
+              input: [{ type: "text", text: "Inspect and update the file" }],
+              time: 1,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "content.part",
+                part: { type: "think", think: "User" },
+              },
+              time: 1,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "content.part",
+                part: { type: "think", think: " wants" },
+              },
+              time: 1,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "content.part",
+                part: { type: "text", text: "Starting" },
+              },
+              time: 1,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "content.part",
+                part: { type: "text", text: "." },
+              },
+              time: 1,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "tool.call",
+                toolCallId: "read-1",
+                name: "Read",
+                args: {
+                  path: "src/app.ts",
+                  line_offset: 3,
+                  n_lines: 2,
+                },
+              },
+              time: 2,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "tool.result",
+                toolCallId: "read-1",
+                result: { output: "3\tconst oldValue = 1;\n4\t" },
+              },
+              time: 3,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "tool.call",
+                toolCallId: "write-1",
+                name: "Write",
+                args: {
+                  path: "src/new.ts",
+                  content: "export const value = 2;\n",
+                },
+              },
+              time: 4,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "tool.result",
+                toolCallId: "write-1",
+                result: { output: "Wrote 24 bytes to src/new.ts" },
+              },
+              time: 5,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "tool.call",
+                toolCallId: "edit-1",
+                name: "Edit",
+                args: {
+                  path: "src/app.ts",
+                  old_string: "const oldValue = 1;",
+                  new_string: "const oldValue = 2;",
+                },
+              },
+              time: 6,
+            },
+            {
+              type: "context.append_loop_event",
+              event: {
+                type: "tool.result",
+                toolCallId: "edit-1",
+                result: {
+                  output: "old_string was not found",
+                  isError: true,
+                },
+              },
+              time: 7,
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+
+    expect(normalized.messages).toHaveLength(7);
+    expect(normalized.messages[1]?.message?.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "User wants",
+      },
+      {
+        type: "text",
+        text: "Starting.",
+      },
+      {
+        type: "tool_use",
+        id: "read-1",
+        name: "Read",
+        input: {
+          path: "src/app.ts",
+          file_path: "src/app.ts",
+          line_offset: 3,
+          offset: 3,
+          n_lines: 2,
+          limit: 2,
+        },
+      },
+    ]);
+    expect(normalized.messages[2]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "read-1",
+            content: "3\tconst oldValue = 1;\n4\t",
+          },
+        ],
+      },
+    });
+    expect(normalized.messages[3]?.message?.content).toEqual([
+      {
+        type: "tool_use",
+        id: "write-1",
+        name: "Write",
+        input: {
+          path: "src/new.ts",
+          file_path: "src/new.ts",
+          content: "export const value = 2;\n",
+        },
+      },
+    ]);
+    expect(normalized.messages[5]?.message?.content).toEqual([
+      {
+        type: "tool_use",
+        id: "edit-1",
+        name: "Edit",
+        input: {
+          path: "src/app.ts",
+          file_path: "src/app.ts",
+          old_string: "const oldValue = 1;",
+          new_string: "const oldValue = 2;",
+        },
+      },
+    ]);
+    expect(normalized.messages[6]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "edit-1",
+            content: "old_string was not found",
+            is_error: true,
+          },
+        ],
+      },
+    });
+  });
+
   it("does not persist an unnamed OpenCode data URI attachment as text", () => {
     const dataUri = `data:application/pdf;base64,${"A".repeat(8_192)}`;
     const mockSession: LoadedSession = {
