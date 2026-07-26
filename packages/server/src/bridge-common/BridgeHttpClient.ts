@@ -91,11 +91,30 @@ export abstract class BridgeHttpClient<
   private pollQueued = false;
   private eventStreamAbort: AbortController | null = null;
   protected knownSessions = new Map<string, TState>();
+  /**
+   * Reports whether a session is currently owned by the local Supervisor.
+   * When it returns true, ownership is governed solely by the Supervisor and
+   * this client must not emit external/none for that session (see
+   * setOwnershipResolver / emitChanges).
+   */
+  private ownershipResolver?: (sessionId: string) => boolean;
 
   constructor(options: BridgeHttpClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.eventBus = options.eventBus;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  }
+
+  setOwnershipResolver(resolver: (sessionId: string) => boolean): void {
+    this.ownershipResolver = resolver;
+  }
+
+  /**
+   * True when the local Supervisor owns the session, i.e. ownership is `self`
+   * and this bridge client must stay silent about ownership for it.
+   */
+  private isOwnedBySupervisor(sessionId: string): boolean {
+    return this.ownershipResolver?.(sessionId) ?? false;
   }
 
   /** Fallback status when the sidecar is unreachable. */
@@ -301,13 +320,17 @@ export abstract class BridgeHttpClient<
 
       for (const [sessionId, previous] of this.knownSessions) {
         if (!nextIds.has(sessionId) && previous.active) {
-          this.eventBus.emit({
-            type: "session-status-changed",
-            sessionId,
-            projectId: previous.projectId,
-            ownership: { owner: "none" },
-            timestamp: new Date().toISOString(),
-          });
+          // Same guard as emitChanges: never clear ownership for a session the
+          // Supervisor owns; it will emit its own ownership change on exit.
+          if (!this.isOwnedBySupervisor(sessionId)) {
+            this.eventBus.emit({
+              type: "session-status-changed",
+              sessionId,
+              projectId: previous.projectId,
+              ownership: { owner: "none" },
+              timestamp: new Date().toISOString(),
+            });
+          }
           this.knownSessions.delete(sessionId);
         }
       }
@@ -337,15 +360,23 @@ export abstract class BridgeHttpClient<
     }
 
     if (!previous || previous.active !== state.active) {
-      this.eventBus.emit({
-        type: "session-status-changed",
-        sessionId: entry.id,
-        projectId: state.projectId,
-        ownership: state.active
-          ? ({ owner: "external" } as SessionSummary["ownership"])
-          : ({ owner: "none" } as SessionSummary["ownership"]),
-        timestamp,
-      });
+      // Ownership of Supervisor-owned sessions is governed solely by the
+      // Supervisor (owner: "self"). Emitting external/none here would race the
+      // Supervisor's ownership events and flip the client into a transient
+      // "external session" banner while an owned OpenCode/Codex turn drives the
+      // shared upstream server. Only report ownership for sessions we do not
+      // own; this mirrors the REST arbitration in deriveSessionRuntime.
+      if (!this.isOwnedBySupervisor(entry.id)) {
+        this.eventBus.emit({
+          type: "session-status-changed",
+          sessionId: entry.id,
+          projectId: state.projectId,
+          ownership: state.active
+            ? ({ owner: "external" } as SessionSummary["ownership"])
+            : ({ owner: "none" } as SessionSummary["ownership"]),
+          timestamp,
+        });
+      }
     }
 
     if (

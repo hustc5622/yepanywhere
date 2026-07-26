@@ -625,6 +625,18 @@ export function createApp(options: AppOptions): AppResult {
     options.runtimeController ??
     new EmbeddedRuntimeController(supervisor, options.eventBus);
 
+  // Bridge HTTP clients observe the shared upstream server (OpenCode/Codex) and
+  // replay lifecycle changes onto the EventBus. Teach them which sessions the
+  // Supervisor owns so they stay silent about ownership for owned sessions;
+  // otherwise a bridge poll racing the Supervisor's own ownership event flips
+  // the client into a transient "external session" banner during resume.
+  const bridgeOwnershipResolver = (sessionId: string): boolean =>
+    Boolean(supervisor.getProcessForSession(sessionId));
+  options.opencodeBridgeService?.setOwnershipResolver?.(
+    bridgeOwnershipResolver,
+  );
+  options.codexBridgeService?.setOwnershipResolver?.(bridgeOwnershipResolver);
+
   // Create external session tracker if eventBus is available
   const externalTracker = options.eventBus
     ? new ExternalSessionTracker({

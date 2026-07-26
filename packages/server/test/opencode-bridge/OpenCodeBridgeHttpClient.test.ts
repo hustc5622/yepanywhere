@@ -183,4 +183,55 @@ describe("OpenCodeBridgeHttpClient", () => {
       }),
     );
   });
+
+  it("suppresses external ownership for Supervisor-owned sessions", () => {
+    const eventBus = { emit: vi.fn() };
+    const client = new OpenCodeBridgeHttpClient({
+      baseUrl: "http://127.0.0.1:1",
+      eventBus: eventBus as never,
+    });
+    // The local Supervisor owns "ses_owned" but not "ses_external".
+    client.setOwnershipResolver((sessionId) => sessionId === "ses_owned");
+
+    const rawEmitChanges = (
+      client as unknown as {
+        emitChanges: (entry: {
+          id: string;
+          view: { session: { id: string }; projectName: string };
+          state: { projectId: string; activity: string; active: boolean };
+        }) => void;
+      }
+    ).emitChanges.bind(client);
+    const emitChangesFor = (id: string) =>
+      rawEmitChanges({
+        id,
+        view: { session: { id }, projectName: "demo" },
+        state: { projectId: "project_1", activity: "in-turn", active: true },
+      });
+
+    const ownershipEvents = () =>
+      eventBus.emit.mock.calls.filter(
+        ([event]) =>
+          (event as { type?: string }).type === "session-status-changed",
+      );
+
+    // Owned session: no external ownership event should reach the EventBus.
+    emitChangesFor("ses_owned");
+    expect(
+      ownershipEvents().some(
+        ([event]) =>
+          (event as { sessionId?: string }).sessionId === "ses_owned",
+      ),
+    ).toBe(false);
+
+    // Unowned session: external ownership is still reported as before.
+    emitChangesFor("ses_external");
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "session-status-changed",
+        sessionId: "ses_external",
+        ownership: { owner: "external" },
+      }),
+    );
+  });
 });

@@ -77,6 +77,16 @@ export interface BridgeController<
 > {
   start?(): MaybePromise<void>;
   shutdown?(): MaybePromise<void>;
+  /**
+   * Inject a resolver that reports whether a session is currently owned by the
+   * local Supervisor (ownership `self`). Implementations that replay bridge
+   * lifecycle changes onto the local EventBus must not emit `external`/`none`
+   * ownership for owned sessions: ownership of owned sessions is governed
+   * solely by the Supervisor, and a racing bridge poll would otherwise flip
+   * the client into a transient "external session" state. Optional because
+   * only the HTTP-client transport needs it.
+   */
+  setOwnershipResolver?(resolver: (sessionId: string) => boolean): void;
   getStatus(): MaybePromise<TStatus>;
   listSessions(): MaybePromise<TSession[]>;
   listSessionViews(): MaybePromise<BridgeSessionView[]>;
