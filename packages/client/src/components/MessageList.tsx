@@ -45,6 +45,8 @@ interface Props {
   provider?: string;
   isStreaming?: boolean;
   isProcessing?: boolean;
+  /** Latest event received for the active session. */
+  lastActivityAt?: string | null;
   /** True when context is being compressed */
   isCompacting?: boolean;
   /** Increment this to force scroll to bottom (e.g., when user sends a message) */
@@ -101,6 +103,7 @@ export const MessageList = memo(function MessageList({
   provider,
   isStreaming = false,
   isProcessing = false,
+  lastActivityAt = null,
   isCompacting = false,
   scrollTrigger = 0,
   pendingMessages = [],
@@ -255,6 +258,23 @@ export const MessageList = memo(function MessageList({
       targetItemId,
     ],
   );
+
+  // Only the assistant turn at the live transcript tail belongs to the
+  // currently running request. A pending/user row at the tail means the new
+  // turn has not produced an assistant update yet, so the previous answer must
+  // keep its original timestamp.
+  const activeAssistantTurnKey = useMemo(() => {
+    if (!isProcessing || hasNewerMessages) return null;
+
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index];
+      if (!row) continue;
+      if (row.kind === "assistant-turn") return row.key;
+      if (row.kind === "user-prompt" || row.kind === "pending") return null;
+    }
+
+    return null;
+  }, [hasNewerMessages, isProcessing, rows]);
 
   // Only window long lists, and never while a branch/target focus is pending —
   // those flows scroll to and highlight a specific DOM node, which must be
@@ -583,8 +603,9 @@ export const MessageList = memo(function MessageList({
           </div>
         );
       }
-      case "assistant-turn":
+      case "assistant-turn": {
         // Assistant items wrapped in timeline container
+        const isActiveAssistantTurn = row.key === activeAssistantTurnKey;
         return (
           <div
             className="assistant-turn"
@@ -602,11 +623,21 @@ export const MessageList = memo(function MessageList({
               />
             ))}
             <MessageActions
-              timestamp={row.turnTimestamp}
+              timestamp={
+                isActiveAssistantTurn
+                  ? getLatestTimestamp(
+                      row.turnTimestamp,
+                      row.turnUpdatedAt,
+                      lastActivityAt,
+                    )
+                  : row.turnTimestamp
+              }
+              timestampIsLastUpdate={isActiveAssistantTurn}
               copyText={row.turnCopyText}
             />
           </div>
         );
+      }
       case "load-newer":
         return (
           <div className="load-older-messages">
@@ -717,3 +748,20 @@ export const MessageList = memo(function MessageList({
     </div>
   );
 });
+
+function getLatestTimestamp(
+  ...timestamps: Array<string | null | undefined>
+): string | undefined {
+  let latestTimestamp: string | undefined;
+  let latestTimestampMs = Number.NEGATIVE_INFINITY;
+
+  for (const timestamp of timestamps) {
+    if (!timestamp) continue;
+    const timestampMs = Date.parse(timestamp);
+    if (Number.isNaN(timestampMs) || timestampMs <= latestTimestampMs) continue;
+    latestTimestamp = timestamp;
+    latestTimestampMs = timestampMs;
+  }
+
+  return latestTimestamp;
+}

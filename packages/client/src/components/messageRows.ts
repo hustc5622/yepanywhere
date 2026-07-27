@@ -43,6 +43,8 @@ export type MessageRow =
       key: string;
       items: RenderItem[];
       turnTimestamp?: string;
+      /** Most recent timestamp among all source messages in this turn. */
+      turnUpdatedAt?: string;
       turnCopyText?: string;
       turnHasTarget: boolean;
     }
@@ -113,6 +115,26 @@ function getTurnCopyText(items: RenderItem[]): string {
     .trim();
 }
 
+/** Return the newest valid source-message timestamp in an assistant turn. */
+function getTurnUpdatedAt(items: RenderItem[]): string | undefined {
+  let latestTimestamp: string | undefined;
+  let latestTimestampMs = Number.NEGATIVE_INFINITY;
+
+  for (const item of items) {
+    for (const message of item.sourceMessages) {
+      if (typeof message.timestamp !== "string") continue;
+      const timestampMs = Date.parse(message.timestamp);
+      if (Number.isNaN(timestampMs) || timestampMs <= latestTimestampMs) {
+        continue;
+      }
+      latestTimestamp = message.timestamp;
+      latestTimestampMs = timestampMs;
+    }
+  }
+
+  return latestTimestamp;
+}
+
 interface BuildMessageRowsParams {
   /** Visible render items (already filtered of plan-progress items). */
   items: RenderItem[];
@@ -173,6 +195,7 @@ export function buildMessageRows({
       key: `turn-${firstItem.id}`,
       items: group.items,
       turnTimestamp: firstItem.sourceMessages[0]?.timestamp,
+      turnUpdatedAt: getTurnUpdatedAt(group.items),
       turnCopyText: turnCopyText || undefined,
       turnHasTarget: group.items.some((item) => item.id === targetItemId),
     });

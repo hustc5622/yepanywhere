@@ -363,6 +363,7 @@ export function useSession(
   // biome-ignore lint/correctness/useExhaustiveDependencies: effect intentionally runs on session switches
   useEffect(() => {
     hasHandledConnectedEventRef.current = false;
+    setLastStreamActivityAt(null);
     setTurnHealth(null);
     setHistoryRewriteRequest(null);
     if (historyRewriteTimerRef.current) {

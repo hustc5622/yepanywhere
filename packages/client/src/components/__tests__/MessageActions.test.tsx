@@ -212,4 +212,16 @@ describe("MessageActions", () => {
     expect(context?.getAttribute("title")).toBe("10,000 context tokens");
     expect(time).not.toBeNull();
   });
+
+  it("labels a live turn timestamp as the most recent update", () => {
+    const timestamp = "2026-01-01T12:34:00.000Z";
+    const { container } = renderWithI18n(
+      <MessageActions timestamp={timestamp} timestampIsLastUpdate={true} />,
+    );
+
+    const time = container.querySelector(".message-actions-time");
+    expect(time?.getAttribute("dateTime")).toBe(timestamp);
+    expect(time?.getAttribute("title")).toContain("Last updated:");
+    expect(time?.getAttribute("aria-label")).toContain("Last updated:");
+  });
 });

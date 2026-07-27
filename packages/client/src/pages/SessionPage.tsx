@@ -1950,6 +1950,7 @@ function SessionPageContent({
                   isProcessing={
                     status.owner === "self" && processState === "in-turn"
                   }
+                  lastActivityAt={lastStreamActivityAt}
                   isCompacting={isCompacting}
                   scrollTrigger={scrollTrigger + activeWindowTrimRevision}
                   pendingMessages={pendingMessages}

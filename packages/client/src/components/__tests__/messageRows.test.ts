@@ -23,12 +23,16 @@ function userPrompt(id: string, extra: Partial<RenderItem> = {}): RenderItem {
   } as RenderItem;
 }
 
-function text(id: string, value: string): RenderItem {
+function text(
+  id: string,
+  value: string,
+  timestamp = "2024-01-01T00:00:00Z",
+): RenderItem {
   return {
     type: "text",
     id,
     text: value,
-    sourceMessages: [msg({ uuid: id, timestamp: "2024-01-01T00:00:00Z" })],
+    sourceMessages: [msg({ uuid: id, timestamp })],
   } as RenderItem;
 }
 
@@ -157,6 +161,29 @@ describe("buildMessageRows", () => {
       turnHasTarget: true,
       turnCopyText: "first\n\nsecond",
       key: "turn-t1",
+    });
+  });
+
+  it("keeps the turn start time and derives its most recent update time", () => {
+    const rows = buildMessageRows({
+      items: [
+        text("t1", "first", "2024-01-01T00:00:01Z"),
+        text("t2", "second", "2024-01-01T00:00:08Z"),
+        text("t3", "third", "2024-01-01T00:00:05Z"),
+      ],
+      hasOlderMessages: false,
+      hasNewerMessages: false,
+      pendingMessages: [],
+      deferredMessages: [],
+      isCompacting: false,
+      focusedBranchItemId: null,
+      targetItemId: null,
+    });
+    const turn = rows.find((row) => row.kind === "assistant-turn");
+
+    expect(turn).toMatchObject({
+      turnTimestamp: "2024-01-01T00:00:01Z",
+      turnUpdatedAt: "2024-01-01T00:00:08Z",
     });
   });
 

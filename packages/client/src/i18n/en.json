@@ -388,6 +388,7 @@
   "messageActionCopy": "Copy message",
   "messageActionCopied": "Copied!",
   "messageActionCopyFailed": "Copy failed",
+  "messageActionLastUpdated": "Last updated: {time}",
   "toolApprovalExpand": "Expand approval panel",
   "toolApprovalCollapse": "Collapse approval panel",
   "toolApprovalPlanTitle": "Accept this plan?",

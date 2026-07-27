@@ -10,6 +10,8 @@ import { formatTokenCount } from "../lib/tokens";
 interface MessageActionsProps {
   /** ISO timestamp string from the source message; shown on hover. */
   timestamp?: string;
+  /** Whether the timestamp represents live turn activity instead of turn start. */
+  timestampIsLastUpdate?: boolean;
   /** Context-window usage snapshot associated with this message. */
   contextBefore?: ContextUsage;
   /** Plain-text payload to copy. When omitted, the copy button is hidden. */
@@ -34,6 +36,7 @@ type CopyFeedback = { status: "copied" | "failed" } | null;
  */
 export function MessageActions({
   timestamp,
+  timestampIsLastUpdate = false,
   contextBefore,
   copyText,
   onEdit,
@@ -97,7 +100,20 @@ export function MessageActions({
         <time
           className="message-actions-time"
           dateTime={timestamp}
-          title={formatFullTimestamp(timestamp)}
+          title={
+            timestampIsLastUpdate
+              ? t("messageActionLastUpdated", {
+                  time: formatFullTimestamp(timestamp),
+                })
+              : formatFullTimestamp(timestamp)
+          }
+          aria-label={
+            timestampIsLastUpdate
+              ? t("messageActionLastUpdated", {
+                  time: formatFullTimestamp(timestamp),
+                })
+              : undefined
+          }
         >
           {formatShortTime(timestamp)}
         </time>

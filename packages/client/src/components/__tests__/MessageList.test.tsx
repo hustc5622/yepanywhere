@@ -5,7 +5,20 @@ import type { RenderItem } from "../../types/renderItems";
 import { MessageList } from "../MessageList";
 
 vi.mock("../MessageActions", () => ({
-  MessageActions: () => null,
+  MessageActions: ({
+    timestamp,
+    timestampIsLastUpdate,
+  }: {
+    timestamp?: string;
+    timestampIsLastUpdate?: boolean;
+  }) => (
+    <time
+      data-testid="message-actions"
+      data-last-update={timestampIsLastUpdate ? "true" : "false"}
+    >
+      {timestamp}
+    </time>
+  ),
 }));
 
 vi.mock("../ProcessingIndicator", () => ({
@@ -30,6 +43,26 @@ function userPromptItem(id: string, messageId = id): RenderItem {
         uuid: messageId,
         type: "user",
         message: { role: "user", content: id },
+      } satisfies Message,
+    ],
+  };
+}
+
+function assistantTextItem(
+  id: string,
+  timestamp: string,
+  text = id,
+): RenderItem {
+  return {
+    id,
+    type: "text",
+    text,
+    sourceMessages: [
+      {
+        uuid: id,
+        type: "assistant",
+        timestamp,
+        message: { role: "assistant", content: text },
       } satisfies Message,
     ],
   };
@@ -160,6 +193,88 @@ describe("MessageList target loading", () => {
 
     await waitFor(() => expect(onBranchFocused).toHaveBeenCalledTimes(1));
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+});
+
+describe("MessageList active turn timestamp", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("shows the latest activity only on the currently running assistant turn", () => {
+    const firstUpdate = "2026-07-27T04:01:00.000Z";
+    const secondUpdate = "2026-07-27T04:02:00.000Z";
+    const streamActivity = "2026-07-27T04:03:00.000Z";
+    const items = [
+      userPromptItem("u1"),
+      assistantTextItem("a1", firstUpdate),
+      assistantTextItem("a2", secondUpdate),
+    ];
+
+    const { rerender } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={items}
+        isProcessing={true}
+        lastActivityAt={streamActivity}
+      />,
+    );
+
+    let timestamp = screen.getByTestId("message-actions");
+    expect(timestamp.textContent).toBe(streamActivity);
+    expect(timestamp.dataset.lastUpdate).toBe("true");
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={items}
+        isProcessing={true}
+      />,
+    );
+    timestamp = screen.getByTestId("message-actions");
+    expect(timestamp.textContent).toBe(secondUpdate);
+    expect(timestamp.dataset.lastUpdate).toBe("true");
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={items}
+        isProcessing={false}
+        lastActivityAt={streamActivity}
+      />,
+    );
+    timestamp = screen.getByTestId("message-actions");
+    expect(timestamp.textContent).toBe(firstUpdate);
+    expect(timestamp.dataset.lastUpdate).toBe("false");
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[...items, userPromptItem("u2")]}
+        isProcessing={true}
+        lastActivityAt={streamActivity}
+      />,
+    );
+    timestamp = screen.getByTestId("message-actions");
+    expect(timestamp.textContent).toBe(firstUpdate);
+    expect(timestamp.dataset.lastUpdate).toBe("false");
   });
 });
 
