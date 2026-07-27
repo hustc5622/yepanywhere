@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readRenderer } from "../ReadRenderer";
 
@@ -18,6 +18,9 @@ const renderContext = {
   theme: "dark" as const,
 };
 
+const originalCreateObjectUrl = URL.createObjectURL;
+const originalRevokeObjectUrl = URL.revokeObjectURL;
+
 if (!readRenderer.renderInteractiveSummary) {
   throw new Error("Read renderer must provide interactive summary");
 }
@@ -25,6 +28,24 @@ if (!readRenderer.renderInteractiveSummary) {
 describe("ReadRenderer", () => {
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    if (originalCreateObjectUrl) {
+      Object.defineProperty(URL, "createObjectURL", {
+        configurable: true,
+        value: originalCreateObjectUrl,
+      });
+    } else {
+      Reflect.deleteProperty(URL, "createObjectURL");
+    }
+    if (originalRevokeObjectUrl) {
+      Object.defineProperty(URL, "revokeObjectURL", {
+        configurable: true,
+        value: originalRevokeObjectUrl,
+      });
+    } else {
+      Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
   });
 
   it("keeps normal text reads clickable", () => {
@@ -135,5 +156,43 @@ describe("ReadRenderer", () => {
           "/repo/data/benchmark_runs/j-9oi4c3ufw4__aime_25_hf/task.json",
       } as never),
     ).toBe("task.json");
+  });
+
+  it("releases temporary PDF object URLs after the viewer consumes them", () => {
+    vi.useFakeTimers();
+    const createObjectUrl = vi.fn(() => "blob:yep-pdf");
+    const revokeObjectUrl = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectUrl,
+    });
+    vi.spyOn(window, "open").mockReturnValue(window);
+
+    render(
+      <div>
+        {readRenderer.renderToolResult(
+          {
+            type: "pdf",
+            file: {
+              base64: "JVBERi0xLjQ=",
+              type: "application/pdf",
+            },
+          },
+          false,
+          renderContext,
+        )}
+      </div>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Open PDF/i }));
+    expect(createObjectUrl).toHaveBeenCalledOnce();
+    expect(revokeObjectUrl).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(60_000);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:yep-pdf");
   });
 });

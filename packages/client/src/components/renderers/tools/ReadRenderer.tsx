@@ -24,6 +24,8 @@ interface ReadResultWithAugment extends ReadResult {
   session_id?: string | number;
 }
 
+const PDF_OBJECT_URL_LIFETIME_MS = 60_000;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -488,7 +490,22 @@ function openPdfInNewTab(base64Data: string) {
   }
   const blob = new Blob([byteArray], { type: "application/pdf" });
   const url = URL.createObjectURL(blob);
-  window.open(url, "_blank");
+  try {
+    const openedWindow = window.open(url, "_blank");
+    if (!openedWindow) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    // Give the browser/PDF viewer time to consume the Blob, then release the
+    // registry entry. Keeping it forever makes every click retain a full PDF.
+    window.setTimeout(
+      () => URL.revokeObjectURL(url),
+      PDF_OBJECT_URL_LIFETIME_MS,
+    );
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
 }
 
 /**

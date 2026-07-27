@@ -374,6 +374,8 @@ export function NewSessionForm({
   const [opencodeProviderPatch, setOpencodeProviderPatch] = useState("");
   const [opencodeModelPatch, setOpencodeModelPatch] = useState("");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const pendingFilesRef = useRef<PendingFile[]>(pendingFiles);
+  pendingFilesRef.current = pendingFiles;
   const [isStarting, setIsStarting] = useState(false);
   const [startRetryBlockedMessage, setStartRetryBlockedMessage] = useState<
     string | null
@@ -383,6 +385,20 @@ export function NewSessionForm({
   >({});
   const [interimTranscript, setInterimTranscript] = useState("");
   const [isSavingDefaults, setIsSavingDefaults] = useState(false);
+
+  // Object URLs keep their backing Blob alive for the lifetime of the page.
+  // Removal and successful submission revoke them below; this cleanup covers
+  // route changes, cancelled drafts, and failed starts that unmount the form.
+  useEffect(
+    () => () => {
+      for (const pendingFile of pendingFilesRef.current) {
+        if (pendingFile.previewUrl) {
+          URL.revokeObjectURL(pendingFile.previewUrl);
+        }
+      }
+    },
+    [],
+  );
   // Unavailable providers (not installed / not authed) are collapsed by default
   // so the selector grid stays tidy instead of showing tall, uneven cards.
   const [showUnavailableProviders, setShowUnavailableProviders] =

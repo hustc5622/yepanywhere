@@ -83,6 +83,17 @@ describe("ClientLogCollector", () => {
     expect(console.error).toBe(origError);
   });
 
+  it("does not install collectors when stopped while IndexedDB is opening", async () => {
+    const startPromise = collector.start();
+    collector.stop();
+    await startPromise;
+
+    expect(console.log).toBe(origLog);
+    expect(console.warn).toBe(origWarn);
+    expect(console.error).toBe(origError);
+    expect(stateChangeListeners.size).toBe(0);
+  });
+
   it("flushes on stateChange to connected", async () => {
     await collector.start();
 

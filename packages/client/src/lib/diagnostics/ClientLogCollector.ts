@@ -47,6 +47,7 @@ export class ClientLogCollector {
   private _flushing = false;
   private _deviceId: string | undefined;
   private _flushInterval: ReturnType<typeof setInterval> | null = null;
+  private _lifecycleGeneration = 0;
 
   private _origLog: typeof console.log | null = null;
   private _origWarn: typeof console.warn | null = null;
@@ -58,19 +59,32 @@ export class ClientLogCollector {
   async start(): Promise<void> {
     if (this._started) return;
     this._started = true;
+    const generation = ++this._lifecycleGeneration;
     this._deviceId = getDeviceId();
 
+    let database: IDBDatabase | null = null;
+    let useMemoryFallback = false;
     try {
-      this._db = await openDatabase(DB_NAME, DB_VERSION, (db) => {
+      database = await openDatabase(DB_NAME, DB_VERSION, (db) => {
         db.createObjectStore(STORE_NAME, {
           keyPath: "id",
           autoIncrement: true,
         });
       });
     } catch {
-      this._useMemoryFallback = true;
+      useMemoryFallback = true;
     }
 
+    // stop() (or a newer stop/start cycle) may have happened while IndexedDB
+    // was opening. Do not install console wrappers, listeners, or intervals for
+    // an obsolete start attempt.
+    if (!this._started || generation !== this._lifecycleGeneration) {
+      database?.close();
+      return;
+    }
+
+    this._db = database;
+    this._useMemoryFallback = useMemoryFallback;
     this._wrapConsole();
     this._writeEntry(
       "info",
@@ -103,6 +117,7 @@ export class ClientLogCollector {
   stop(): void {
     if (!this._started) return;
     this._started = false;
+    this._lifecycleGeneration += 1;
 
     if (this._flushInterval !== null) {
       clearInterval(this._flushInterval);
