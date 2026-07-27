@@ -10,10 +10,12 @@ import {
   extractCodexTurnContextUsage,
 } from "../lib/codexMessageContext";
 import {
+  getMessageContent,
   getMessageId,
   mergeJSONLMessages,
   mergeStreamMessage,
 } from "../lib/mergeMessages";
+import { isMobileShellDocument } from "../lib/nativePushBridge";
 import { getProvider } from "../providers/registry";
 import type { Message, Session, SessionStatus } from "../types";
 
@@ -119,6 +121,10 @@ export interface UseSessionMessagesResult {
   loadNewerMessages: () => Promise<void>;
   /** Replace the visible window with one centered on a target message */
   loadTargetMessageWindow: (messageId: string) => Promise<boolean>;
+  /** Notify the hook whether the transcript is following its live tail. */
+  updateActiveWindowFollowingBottom: (followingBottom: boolean) => void;
+  /** Increments after a browser-local prefix trim. */
+  activeWindowTrimRevision: number;
 }
 
 function isCodexProvider(provider?: string): boolean {
@@ -132,6 +138,10 @@ function isCodexProvider(provider?: string): boolean {
  * messages load on demand via the top-of-list infinite scroll.
  */
 const INITIAL_MESSAGE_LIMIT = 100;
+const ACTIVE_WINDOW_TARGET_MESSAGES = INITIAL_MESSAGE_LIMIT;
+const ACTIVE_WINDOW_TRIGGER_MESSAGES = INITIAL_MESSAGE_LIMIT + 50;
+const ACTIVE_WINDOW_TURN_BOUNDARY_LOOKBACK = 25;
+const ACTIVE_WINDOW_MIN_BOUNDARY_AGE_MS = 60_000;
 
 function mergeOlderPagination(
   current: PaginationInfo | undefined,
@@ -176,6 +186,81 @@ function getMessageRole(message: Message): string {
     return message.role;
   }
   return "unknown";
+}
+
+function isRealUserPromptMessage(message: Message): boolean {
+  if (message.type !== "user" && getMessageRole(message) !== "user") {
+    return false;
+  }
+
+  const content = getMessageContent(message);
+  if (!Array.isArray(content)) {
+    return true;
+  }
+
+  return !content.every(
+    (block) =>
+      block &&
+      typeof block === "object" &&
+      (block as { type?: unknown }).type === "tool_result",
+  );
+}
+
+export interface ActiveMessageWindowTrimPlan {
+  messages: Message[];
+  firstRetainedMessageId: string;
+  removedMessageCount: number;
+}
+
+/**
+ * Bound a live transcript with the same message-count policy as the server's
+ * initial response. Prefer a nearby user-turn boundary for readability, but
+ * retain the hard fallback so one tool-heavy turn cannot grow without limit.
+ * The age gate avoids trimming rows that may not be persisted yet.
+ */
+export function planActiveMessageWindowTrim(
+  messages: Message[],
+  nowMs: number,
+): ActiveMessageWindowTrimPlan | null {
+  if (messages.length <= ACTIVE_WINDOW_TRIGGER_MESSAGES) {
+    return null;
+  }
+
+  const targetStartIndex = messages.length - ACTIVE_WINDOW_TARGET_MESSAGES;
+  let retainedStartIndex = targetStartIndex;
+  const earliestTurnBoundaryIndex = Math.max(
+    1,
+    targetStartIndex - ACTIVE_WINDOW_TURN_BOUNDARY_LOOKBACK,
+  );
+  for (
+    let index = targetStartIndex;
+    index >= earliestTurnBoundaryIndex;
+    index -= 1
+  ) {
+    const message = messages[index];
+    if (message && isRealUserPromptMessage(message)) {
+      retainedStartIndex = index;
+      break;
+    }
+  }
+
+  const firstRetainedMessage = messages[retainedStartIndex];
+  if (!firstRetainedMessage) return null;
+  const firstRetainedMessageId = getMessageId(firstRetainedMessage);
+  const boundaryTimestampMs = getMessageTimestampMs(firstRetainedMessage);
+  if (
+    !firstRetainedMessageId ||
+    boundaryTimestampMs === null ||
+    nowMs - boundaryTimestampMs < ACTIVE_WINDOW_MIN_BOUNDARY_AGE_MS
+  ) {
+    return null;
+  }
+
+  return {
+    messages: messages.slice(retainedStartIndex),
+    firstRetainedMessageId,
+    removedMessageCount: retainedStartIndex,
+  };
 }
 
 function isEmptyAssistantContent(message: Message): boolean {
@@ -274,6 +359,9 @@ export function useSessionMessages(
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [loadingTargetMessage, setLoadingTargetMessage] = useState(false);
+  const [activeWindowTrimRevision, setActiveWindowTrimRevision] = useState(0);
+  const [activeWindowTrimCheckRevision, setActiveWindowTrimCheckRevision] =
+    useState(0);
   const sessionRef = useRef<Session | null>(null);
 
   // Buffering: queue stream messages until initial load completes
@@ -284,6 +372,11 @@ export function useSessionMessages(
     >
   >([]);
   const initialLoadCompleteRef = useRef(false);
+  const activeWindowFollowingBottomRef = useRef(true);
+  const activeWindowTrimSuppressedRef = useRef(false);
+  const activeWindowTrimEnabledRef = useRef(
+    typeof document !== "undefined" && isMobileShellDocument(),
+  );
 
   // Track provider for DAG ordering decisions
   const providerRef = useRef<string | undefined>(undefined);
@@ -475,6 +568,10 @@ export function useSessionMessages(
     streamBufferRef.current = [];
     maxPersistedTimestampMsRef.current = Number.NEGATIVE_INFINITY;
     if (!isBranchReloadWithinSession) {
+      // History navigation only suppresses trimming for the session in which
+      // it happened. A route change starts from the new session's live tail.
+      activeWindowFollowingBottomRef.current = true;
+      activeWindowTrimSuppressedRef.current = false;
       setLoading(true);
       setAgentContent({});
     }
@@ -524,6 +621,51 @@ export function useSessionMessages(
     flushBuffer,
     applySessionSnapshot,
   ]);
+
+  const updateActiveWindowFollowingBottom = useCallback(
+    (followingBottom: boolean) => {
+      if (activeWindowFollowingBottomRef.current === followingBottom) return;
+      activeWindowFollowingBottomRef.current = followingBottom;
+      if (followingBottom) {
+        setActiveWindowTrimCheckRevision((revision) => revision + 1);
+      }
+    },
+    [],
+  );
+
+  // The server bounds initial loads, but a live session can keep appending for
+  // hours. On the Android shell, silently drop an old prefix while the reader
+  // follows the bottom. Manual history navigation suppresses trimming for the
+  // rest of this mount so loaded rows never disappear under the user.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revision is an intentional non-data signal that rechecks an unchanged message window after returning to the bottom
+  useEffect(() => {
+    if (
+      !activeWindowTrimEnabledRef.current ||
+      !initialLoadCompleteRef.current ||
+      !activeWindowFollowingBottomRef.current ||
+      activeWindowTrimSuppressedRef.current
+    ) {
+      return;
+    }
+
+    const plan = planActiveMessageWindowTrim(messages, Date.now());
+    if (!plan) return;
+
+    setMessages(plan.messages);
+    setPagination((current) => ({
+      hasOlderMessages: true,
+      hasNewerMessages: current?.hasNewerMessages,
+      totalMessageCount: Math.max(
+        current?.totalMessageCount ?? 0,
+        messages.length,
+      ),
+      returnedMessageCount: plan.messages.length,
+      truncatedBeforeMessageId: plan.firstRetainedMessageId,
+      truncatedAfterMessageId: current?.truncatedAfterMessageId,
+      totalCompactions: current?.totalCompactions ?? 0,
+    }));
+    setActiveWindowTrimRevision((revision) => revision + 1);
+  }, [messages, activeWindowTrimCheckRevision]);
 
   // Handle streaming content updates (from useStreamingContent)
   const handleStreamingUpdates = useCallback(
@@ -726,6 +868,7 @@ export function useSessionMessages(
     if (!pagination?.hasOlderMessages || !pagination.truncatedBeforeMessageId) {
       return;
     }
+    activeWindowTrimSuppressedRef.current = true;
     setLoadingOlder(true);
     try {
       const data = await api.getSession(projectId, sessionId, undefined, {
@@ -765,6 +908,7 @@ export function useSessionMessages(
     if (!pagination?.hasNewerMessages || !pagination.truncatedAfterMessageId) {
       return;
     }
+    activeWindowTrimSuppressedRef.current = true;
     setLoadingNewer(true);
     try {
       const data = await api.getSession(projectId, sessionId, undefined, {
@@ -802,6 +946,7 @@ export function useSessionMessages(
   const loadTargetMessageWindow = useCallback(
     async (messageId: string): Promise<boolean> => {
       if (!messageId) return false;
+      activeWindowTrimSuppressedRef.current = true;
       setLoadingTargetMessage(true);
       try {
         const data = await api.getSession(projectId, sessionId, undefined, {
@@ -891,5 +1036,7 @@ export function useSessionMessages(
     loadOlderMessages,
     loadNewerMessages,
     loadTargetMessageWindow,
+    updateActiveWindowFollowingBottom,
+    activeWindowTrimRevision,
   };
 }

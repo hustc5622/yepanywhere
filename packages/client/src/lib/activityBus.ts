@@ -434,6 +434,11 @@ class ActivityBus {
     }
   }
 
+  /** Ask mounted consumers to refresh after an intentional background pause. */
+  refreshConsumers(): void {
+    this.emit("refresh", undefined);
+  }
+
   /**
    * Subscribe to an event type. Returns an unsubscribe function.
    */

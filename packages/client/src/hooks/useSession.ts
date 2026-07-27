@@ -471,6 +471,8 @@ export function useSession(
     loadOlderMessages,
     loadNewerMessages,
     loadTargetMessageWindow,
+    updateActiveWindowFollowingBottom,
+    activeWindowTrimRevision,
   } = useSessionMessages({
     projectId,
     sessionId,
@@ -478,6 +480,32 @@ export function useSession(
     onLoadComplete: handleLoadComplete,
     onLoadError: handleLoadError,
   });
+
+  const lastPrunedActiveWindowRevisionRef = useRef(0);
+  useEffect(() => {
+    if (
+      activeWindowTrimRevision === 0 ||
+      activeWindowTrimRevision === lastPrunedActiveWindowRevisionRef.current
+    ) {
+      return;
+    }
+    lastPrunedActiveWindowRevisionRef.current = activeWindowTrimRevision;
+    const retainedMessageIds = new Set(
+      messages.map((message) => getMessageId(message)).filter(Boolean),
+    );
+    setMarkdownAugments((previous) => {
+      let changed = false;
+      const retained: Record<string, MarkdownAugment> = {};
+      for (const [messageId, augment] of Object.entries(previous)) {
+        if (retainedMessageIds.has(messageId)) {
+          retained[messageId] = augment;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? retained : previous;
+    });
+  }, [activeWindowTrimRevision, messages]);
 
   useEffect(() => {
     if (!historyRewriteRequest) return;
@@ -1626,6 +1654,8 @@ export function useSession(
     loadOlderMessages, // Load next chunk of older messages
     loadNewerMessages, // Load next chunk of newer messages
     loadTargetMessageWindow, // Load a bounded window around a target message
+    updateActiveWindowFollowingBottom, // Allow safe active-tail memory trimming
+    activeWindowTrimRevision, // Force bottom restoration after an accepted trim
     reconnectStream, // Force session stream reconnection (e.g., after process restart)
     truncateMessagesBefore, // Rewind/edit: drop a uuid and everything after it
     refreshSessionMessages, // Reload authoritative JSONL/session snapshot

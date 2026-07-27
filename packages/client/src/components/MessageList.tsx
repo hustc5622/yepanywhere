@@ -75,6 +75,8 @@ interface Props {
   onLoadNewerMessages?: () => void;
   /** Callback to load a bounded window around a target message */
   onLoadTargetMessage?: (messageId: string) => Promise<boolean> | boolean;
+  /** Reports whether user scrolling is following the live transcript tail. */
+  onFollowingBottomChange?: (followingBottom: boolean) => void;
   /** Edit/rewind a past user prompt (forks the session from that point) */
   onEditUserPrompt?: (args: {
     text: string;
@@ -114,6 +116,7 @@ export const MessageList = memo(function MessageList({
   onLoadOlderMessages,
   onLoadNewerMessages,
   onLoadTargetMessage,
+  onFollowingBottomChange,
   onEditUserPrompt,
   onSelectBranch,
   focusBranchId,
@@ -126,6 +129,8 @@ export const MessageList = memo(function MessageList({
   const targetMessageRef = useRef<HTMLDivElement | null>(null);
   const requestedTargetMessageRef = useRef<string | null>(null);
   const shouldAutoScrollRef = useRef(true);
+  const onFollowingBottomChangeRef = useRef(onFollowingBottomChange);
+  onFollowingBottomChangeRef.current = onFollowingBottomChange;
   const isInitialLoadRef = useRef(true);
   const isProgrammaticScrollRef = useRef(false);
   const lastHeightRef = useRef(0);
@@ -138,6 +143,12 @@ export const MessageList = memo(function MessageList({
   const virtualizeEnabledRef = useRef(false);
   const rowCountRef = useRef(0);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+
+  const setFollowingBottom = useCallback((followingBottom: boolean) => {
+    if (shouldAutoScrollRef.current === followingBottom) return;
+    shouldAutoScrollRef.current = followingBottom;
+    onFollowingBottomChangeRef.current?.(followingBottom);
+  }, []);
 
   // Scroll to bottom, marking it as programmatic so scroll handler ignores it
   const scrollToBottom = useCallback((container: HTMLElement) => {
@@ -331,7 +342,7 @@ export const MessageList = memo(function MessageList({
     const threshold = 100; // pixels from bottom
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    shouldAutoScrollRef.current = distanceFromBottom < threshold;
+    setFollowingBottom(distanceFromBottom < threshold);
 
     // Top-of-list auto-load. handleLoadOlder anchors scroll position via the
     // pre-/post-render scrollHeight delta, so the user's view stays put — no
@@ -350,7 +361,7 @@ export const MessageList = memo(function MessageList({
     ) {
       loadOlder();
     }
-  }, []);
+  }, [setFollowingBottom]);
 
   // Attach scroll listener to parent container
   useEffect(() => {
@@ -402,13 +413,13 @@ export const MessageList = memo(function MessageList({
   // Force scroll to bottom when scrollTrigger changes (user sent a message)
   useEffect(() => {
     if (scrollTrigger > 0) {
-      shouldAutoScrollRef.current = true;
+      setFollowingBottom(true);
       const container = containerRef.current?.parentElement;
       if (container) {
         scrollToBottom(container);
       }
     }
-  }, [scrollTrigger, scrollToBottom]);
+  }, [scrollTrigger, scrollToBottom, setFollowingBottom]);
 
   // Initial scroll to bottom on first render
   useEffect(() => {

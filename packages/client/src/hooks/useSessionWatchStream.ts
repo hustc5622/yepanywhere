@@ -5,6 +5,7 @@ import {
   getWebSocketConnection,
   isNonRetryableError,
 } from "../lib/connection";
+import { isMobileShellDocument } from "../lib/nativePushBridge";
 
 export interface SessionWatchTarget {
   sessionId: string;
@@ -44,6 +45,14 @@ export function useSessionWatchStream(
     : null;
 
   const connect = useCallback(() => {
+    if (
+      typeof document !== "undefined" &&
+      document.hidden &&
+      isMobileShellDocument()
+    ) {
+      mountedKeyRef.current = null;
+      return;
+    }
     const sessionTarget = targetRef.current;
     if (!sessionTarget || !targetKey) {
       mountedKeyRef.current = null;

@@ -5,6 +5,7 @@ import {
   getWebSocketConnection,
   isNonRetryableError,
 } from "../lib/connection";
+import { isMobileShellDocument } from "../lib/nativePushBridge";
 
 interface UseSessionStreamOptions {
   onMessage: (data: { eventType: string; [key: string]: unknown }) => void;
@@ -53,8 +54,17 @@ export function useSessionStream(
   const mountedSessionIdRef = useRef<string | null>(null);
   // True during intentional cleanup — suppresses reconnect in onClose handler
   const cleaningUpRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useCallback(() => {
+    if (
+      typeof document !== "undefined" &&
+      document.hidden &&
+      isMobileShellDocument()
+    ) {
+      mountedSessionIdRef.current = null;
+      return;
+    }
     if (!sessionId) {
       // Reset tracking when sessionId becomes null so we can reconnect later
       // (e.g., when status goes idle → owned again for the same session)
@@ -224,7 +234,13 @@ export function useSessionStream(
     mountedSessionIdRef.current = null;
     setConnected(false);
     // Defer so the close completes before reconnecting
-    setTimeout(() => connect(), 50);
+    if (reconnectTimerRef.current !== null) {
+      clearTimeout(reconnectTimerRef.current);
+    }
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      connect();
+    }, 50);
   }, [sessionId, connect]);
 
   useEffect(() => {
@@ -233,6 +249,10 @@ export function useSessionStream(
     return () => {
       // Set flag BEFORE close() so onClose handler doesn't schedule a ghost reconnect
       cleaningUpRef.current = true;
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       wsSubscriptionRef.current?.close();
       wsSubscriptionRef.current = null;
       // Reset mountedSessionIdRef so the next mount can connect

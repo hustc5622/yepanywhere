@@ -28,6 +28,12 @@ export type {
 interface UseFileActivityOptions {
   /** Whether to subscribe to activity events and connection polling. */
   enabled?: boolean;
+  /**
+   * Retain file events and poll connection state for the Activity inspector.
+   * Callback-only consumers should leave this off to avoid duplicate buffers
+   * and one-second timers.
+   */
+  collectEvents?: boolean;
   /** Maximum number of events to keep in buffer (default: 500) */
   maxEvents?: number;
   /** Whether to connect on mount (default: true) - ignored, bus is always connected */
@@ -59,6 +65,7 @@ const DEFAULT_MAX_EVENTS = 500;
 export function useFileActivity(options: UseFileActivityOptions = {}) {
   const {
     enabled = true,
+    collectEvents = false,
     maxEvents = DEFAULT_MAX_EVENTS,
     onFileChange,
     onSessionStatusChange,
@@ -94,6 +101,8 @@ export function useFileActivity(options: UseFileActivityOptions = {}) {
   onReconnectRef.current = onReconnect;
   const maxEventsRef = useRef(maxEvents);
   maxEventsRef.current = maxEvents;
+  const collectEventsRef = useRef(collectEvents);
+  collectEventsRef.current = collectEvents;
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
@@ -109,7 +118,7 @@ export function useFileActivity(options: UseFileActivityOptions = {}) {
         onFileChangeRef.current?.(data);
 
         // Add to events buffer (unless paused)
-        if (!pausedRef.current) {
+        if (collectEventsRef.current && !pausedRef.current) {
           setEvents((prev) => {
             const next = [data, ...prev];
             return next.slice(0, maxEventsRef.current);
@@ -179,7 +188,7 @@ export function useFileActivity(options: UseFileActivityOptions = {}) {
 
   // Sync connected state with bus (for initial render and disconnects)
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !collectEvents) return;
 
     const checkConnection = () => {
       setConnected(activityBus.connected);
@@ -188,7 +197,7 @@ export function useFileActivity(options: UseFileActivityOptions = {}) {
     // Check periodically since we don't have a disconnect event
     const interval = setInterval(checkConnection, 1000);
     return () => clearInterval(interval);
-  }, [enabled]);
+  }, [enabled, collectEvents]);
 
   const clearEvents = useCallback(() => {
     setEvents([]);

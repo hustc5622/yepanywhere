@@ -85,7 +85,7 @@ export function ActivityPage() {
   const [pathFilter, setPathFilter] = useState("");
   const [typeFilters, setTypeFilters] = useState<Set<FileType>>(new Set());
   const { events, connected, paused, clearEvents, togglePause } =
-    useFileActivity();
+    useFileActivity({ collectEvents: true });
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);

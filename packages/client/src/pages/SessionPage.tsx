@@ -255,6 +255,8 @@ function SessionPageContent({
     loadOlderMessages,
     loadNewerMessages,
     loadTargetMessageWindow,
+    updateActiveWindowFollowingBottom,
+    activeWindowTrimRevision,
     reconnectStream,
     truncateMessagesBefore,
     refreshSessionMessages,
@@ -1949,7 +1951,7 @@ function SessionPageContent({
                     status.owner === "self" && processState === "in-turn"
                   }
                   isCompacting={isCompacting}
-                  scrollTrigger={scrollTrigger}
+                  scrollTrigger={scrollTrigger + activeWindowTrimRevision}
                   pendingMessages={pendingMessages}
                   deferredMessages={deferredMessages}
                   onCancelDeferred={(tempId) =>
@@ -1965,6 +1967,7 @@ function SessionPageContent({
                   onLoadOlderMessages={loadOlderMessages}
                   onLoadNewerMessages={loadNewerMessages}
                   onLoadTargetMessage={loadTargetMessageWindow}
+                  onFollowingBottomChange={updateActiveWindowFollowingBottom}
                   onEditUserPrompt={
                     !isViewingHistoricalBranch &&
                     supportsHistoricalMessageEditing(session?.provider)
