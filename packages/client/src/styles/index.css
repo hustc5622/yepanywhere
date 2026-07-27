@@ -12031,6 +12031,29 @@ button.context-usage-indicator--button:focus-visible {
   margin: var(--space-2) var(--space-4);
 }
 
+.filter-dropdown-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.filter-dropdown-group + .filter-dropdown-group {
+  margin-top: var(--space-2);
+}
+
+.filter-dropdown-group-header {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  position: sticky;
+  top: 0;
+  background: var(--bg-surface);
+  z-index: 1;
+}
+
 .filter-dropdown-dropdown {
   display: none;
 }

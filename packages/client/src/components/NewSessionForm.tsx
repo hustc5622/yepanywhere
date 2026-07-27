@@ -880,6 +880,16 @@ export function NewSessionForm({
   const modelOptions = useMemo((): FilterOption<string>[] => {
     const options: FilterOption<string>[] = [];
 
+    // Derive a stable color per provider prefix so grouped models get a
+    // consistent colored dot in the dropdown.
+    const providerColor = (provider: string): string => {
+      let hash = 0;
+      for (let i = 0; i < provider.length; i += 1) {
+        hash = (hash * 31 + provider.charCodeAt(i)) >>> 0;
+      }
+      return `hsl(${hash % 360} 60% 55%)`;
+    };
+
     for (const model of availableModels) {
       const label = model.size
         ? `${model.name} (${(model.size / (1024 * 1024 * 1024)).toFixed(1)} GB)`
@@ -925,7 +935,18 @@ export function NewSessionForm({
       }
       if (parts.length > 0) description = parts.join(" · ");
 
-      options.push({ value: model.id, label, description });
+      // OpenCode catalog ids are `provider/model`; group by the provider
+      // prefix so users can tell which channel a model routes through. The
+      // synthetic "default" entry (no slash) stays ungrouped at the top.
+      const slashIndex = model.id.indexOf("/");
+      const group = slashIndex > 0 ? model.id.slice(0, slashIndex) : undefined;
+
+      options.push({
+        value: model.id,
+        label,
+        description,
+        ...(group ? { group, color: providerColor(group) } : {}),
+      });
     }
 
     return options;
