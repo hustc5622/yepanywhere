@@ -33,6 +33,10 @@
   var NODE_HISTORY_LIMIT = 8;
   var FRAME_LOAD_FALLBACK_MS = 6000;
   var SLOW_STATUS_MS = 8000;
+  // The longest iframe-side native request timeout is 60 seconds (log upload).
+  // Keep a small grace period, then release the source WindowProxy even if the
+  // Android callback was lost.
+  var NATIVE_PUSH_PENDING_TIMEOUT_MS = 65000;
   var CHANNELS = {
     tcp: {
       label: "TCP",
@@ -51,6 +55,7 @@
   var activeChannel = DEFAULT_CHANNEL;
   var activeTarget = null;
   var pendingNativePushFrames = {};
+  var pendingNativePushTimers = {};
 
   function logNativePush(message) {
     try {
@@ -512,9 +517,32 @@
     );
   }
 
-  window.__yepNativePushResolve = function (id, responseJson) {
+  function takePendingNativePushFrame(id) {
     var targetWindow = pendingNativePushFrames[id];
     delete pendingNativePushFrames[id];
+    if (pendingNativePushTimers[id]) {
+      clearTimeout(pendingNativePushTimers[id]);
+      delete pendingNativePushTimers[id];
+    }
+    return targetWindow;
+  }
+
+  function trackPendingNativePushFrame(id, targetWindow) {
+    takePendingNativePushFrame(id);
+    pendingNativePushFrames[id] = targetWindow;
+    pendingNativePushTimers[id] = setTimeout(function () {
+      var expiredTarget = takePendingNativePushFrame(id);
+      logNativePush(
+        "request expired id=" +
+          id +
+          " hasTarget=" +
+          (!!expiredTarget ? "true" : "false")
+      );
+    }, NATIVE_PUSH_PENDING_TIMEOUT_MS);
+  }
+
+  window.__yepNativePushResolve = function (id, responseJson) {
+    var targetWindow = takePendingNativePushFrame(id);
     logNativePush(
       "resolve from native id=" + id + " hasTarget=" + (!!targetWindow ? "true" : "false")
     );
@@ -609,12 +637,12 @@
       return;
     }
 
-    pendingNativePushFrames[id] = event.source;
+    trackPendingNativePushFrame(id, event.source);
     try {
       logNativePush("calling native method id=" + id + " bridgeMethod=" + bridgeMethod);
       bridge[bridgeMethod](id);
     } catch (error) {
-      delete pendingNativePushFrames[id];
+      takePendingNativePushFrame(id);
       logNativePush(
         "native call threw id=" +
           id +

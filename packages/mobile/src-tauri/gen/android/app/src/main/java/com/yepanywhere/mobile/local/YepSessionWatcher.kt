@@ -15,6 +15,12 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 class YepSessionWatcher(private val context: Context) {
+  private data class PendingNotificationSnapshot(
+    val session: YepNativeNotifier.SessionNotification,
+    val badgeCount: Int,
+    val shownAtMs: Long,
+  )
+
   private val appContext = context.applicationContext
   private val executor: ScheduledExecutorService =
     Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -24,8 +30,12 @@ class YepSessionWatcher(private val context: Context) {
   private val notifiedRunning = mutableSetOf<String>()
   private val notifiedUnread = mutableSetOf<String>()
   private val previouslyActive = mutableSetOf<String>()
+  private val pendingNotificationSnapshots =
+    mutableMapOf<String, PendingNotificationSnapshot>()
   private var task: ScheduledFuture<*>? = null
   private var origin: String? = null
+  private var lastBadgeCount: Int? = null
+  private var lastBadgeSyncAtMs = 0L
 
   @Synchronized
   fun start(serverOrigin: String) {
@@ -72,6 +82,9 @@ class YepSessionWatcher(private val context: Context) {
     notifiedRunning.clear()
     notifiedUnread.clear()
     previouslyActive.clear()
+    pendingNotificationSnapshots.clear()
+    lastBadgeCount = null
+    lastBadgeSyncAtMs = 0L
   }
 
   private fun pollSafely(serverOrigin: String) {
@@ -103,7 +116,15 @@ class YepSessionWatcher(private val context: Context) {
     } else {
       needsAttentionIds.size
     }
-    YepNativeNotifier.syncBadge(appContext, badgeCount)
+    val nowMs = System.currentTimeMillis()
+    if (
+      lastBadgeCount != badgeCount ||
+      nowMs - lastBadgeSyncAtMs >= NOTIFICATION_REFRESH_INTERVAL_MS
+    ) {
+      YepNativeNotifier.syncBadge(appContext, badgeCount)
+      lastBadgeCount = badgeCount
+      lastBadgeSyncAtMs = nowMs
+    }
 
     val visibleNeedsAttention = needsAttention.take(MAX_NOTIFICATIONS_PER_TIER)
     val visibleNeedsAttentionIds =
@@ -129,13 +150,23 @@ class YepSessionWatcher(private val context: Context) {
       )
     }
 
+    val canPostNotifications = YepNativeNotifier.canPostNotifications(appContext)
     for (session in visibleNeedsAttention) {
+      val previous = pendingNotificationSnapshots[session.sessionId]
+      val unchangedAndFresh =
+        previous?.session == session &&
+          previous.badgeCount == badgeCount &&
+          nowMs - previous.shownAtMs < NOTIFICATION_REFRESH_INTERVAL_MS
+      if (unchangedAndFresh || !canPostNotifications) continue
+
       YepNativeNotifier.cancelRunning(appContext, session.sessionId)
       YepNativeNotifier.showPendingInput(
         context = appContext,
         session = session,
         badgeCount = badgeCount,
       )
+      pendingNotificationSnapshots[session.sessionId] =
+        PendingNotificationSnapshot(session, badgeCount, nowMs)
     }
 
     for (session in visibleActive) {
@@ -183,6 +214,7 @@ class YepSessionWatcher(private val context: Context) {
     notifiedUnread.addAll(unreadIds)
     previouslyActive.clear()
     previouslyActive.addAll(activeIds + needsAttentionIds)
+    pendingNotificationSnapshots.keys.retainAll(visibleNeedsAttentionIds)
   }
 
   private fun cancelMissing(
@@ -244,6 +276,7 @@ class YepSessionWatcher(private val context: Context) {
           updatedAt = item.optString("updatedAt").takeIf { it.isNotBlank() },
           pendingInputType =
             item.optString("pendingInputType").takeIf { it.isNotBlank() },
+          summary = item.optString("summary").takeIf { it.isNotBlank() },
           hasUnread = item.optBoolean("hasUnread", false),
           pendingRequestId =
             item.optString("pendingRequestId").takeIf { it.isNotBlank() },
@@ -269,5 +302,6 @@ class YepSessionWatcher(private val context: Context) {
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val READ_TIMEOUT_MS = 8_000
     private const val MAX_NOTIFICATIONS_PER_TIER = 3
+    private const val NOTIFICATION_REFRESH_INTERVAL_MS = 5 * 60_000L
   }
 }

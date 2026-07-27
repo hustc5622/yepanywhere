@@ -84,6 +84,14 @@ class MainActivity : TauriActivity() {
   override fun onDestroy() {
     sessionWatcher?.stop()
     sessionWatcher = null
+    // Break the JavaScript-interface reference chain explicitly. WebView owns
+    // the bridge, while the bridge owns both this Activity and the WebView.
+    // Tauri/Wry still owns final WebView destruction in super.onDestroy().
+    mainWebView?.removeJavascriptInterface("YepNativePush")
+    nativePushBridge = null
+    mainWebView = null
+    pendingPermissionCallbackIds.clear()
+    pendingNotificationPath = null
     super.onDestroy()
   }
 

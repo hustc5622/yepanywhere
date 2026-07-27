@@ -386,7 +386,7 @@ object YepNativeNotifier {
     }
   }
 
-  private fun canPostNotifications(context: Context): Boolean {
+  internal fun canPostNotifications(context: Context): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
       return NotificationManagerCompat.from(context).areNotificationsEnabled()
     }
