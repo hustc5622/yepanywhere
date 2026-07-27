@@ -510,6 +510,7 @@ custom-openai/glm-5.2
   it("starts a Yep session on the shared server without spawning a dedicated CLI", async () => {
     let serverUrl = "";
     let abortRequests = 0;
+    const terminalNotifications: unknown[] = [];
     const methods: string[] = [];
     let createBody: Record<string, unknown> | null = null;
 
@@ -545,6 +546,14 @@ custom-openai/glm-5.2
           res.end("true");
           return;
         }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/sessions/ses_shared/terminal"
+        ) {
+          terminalNotifications.push(await readJsonBody(req));
+          res.end(JSON.stringify({ terminal: true }));
+          return;
+        }
         res.statusCode = 404;
         res.end("{}");
       },
@@ -569,7 +578,10 @@ custom-openai/glm-5.2
 
         session.abort();
         await session.iterator.return?.(undefined as never);
-        await vi.waitFor(() => expect(abortRequests).toBe(1));
+        await vi.waitFor(() => {
+          expect(abortRequests).toBe(1);
+          expect(terminalNotifications).toEqual([{ kind: "interrupted" }]);
+        });
         expect(session.isProcessAlive?.()).toBe(false);
       },
     );
@@ -2785,6 +2797,110 @@ custom-openai/glm-5.2
       }),
     );
     expect(abortRequests).toBe(1);
+  });
+
+  it("completes a finish=unknown response instead of polling forever", async () => {
+    const provider = new OpenCodeProvider({
+      lifecycle: {
+        quietWindowMs: 10,
+        reconcileIntervalMs: 5,
+        statusFailureGraceMs: 500,
+      },
+    });
+    const sendMessageAndStream = getSendMessageAndStream(provider);
+    let abortRequests = 0;
+    const terminalNotifications: unknown[] = [];
+
+    const messages = await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/event") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.flushHeaders();
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_unknown/prompt_async"
+        ) {
+          await readJsonBody(req);
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          res.setHeader("Content-Type", "application/json");
+          res.end("{}");
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          url.pathname === "/session/ses_unknown/message"
+        ) {
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify([
+              {
+                info: {
+                  id: "msg_unknown",
+                  sessionID: "ses_unknown",
+                  role: "assistant",
+                  finish: "unknown",
+                  time: { completed: Date.now() },
+                },
+                parts: [],
+              },
+            ]),
+          );
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/session/ses_unknown/abort"
+        ) {
+          abortRequests += 1;
+          res.setHeader("Content-Type", "application/json");
+          res.end("true");
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/sessions/ses_unknown/terminal"
+        ) {
+          terminalNotifications.push(await readJsonBody(req));
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ terminal: true }));
+          return;
+        }
+        res.statusCode = 404;
+        res.end();
+      },
+      async (baseUrl) => {
+        provider.configureBridgeControlUrl(baseUrl);
+        const output: Array<Record<string, unknown>> = [];
+        for await (const message of sendMessageAndStream(
+          baseUrl,
+          "ses_unknown",
+          "yep_unknown",
+          "hello",
+          new AbortController().signal,
+          async () => ({ behavior: "allow" }),
+        )) {
+          output.push(message);
+        }
+        return output;
+      },
+    );
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "result",
+        session_id: "yep_unknown",
+      }),
+    );
+    expect(messages.some((message) => message.type === "error")).toBe(false);
+    expect(abortRequests).toBe(0);
+    expect(terminalNotifications).toEqual([]);
   });
 
   it("exposes OpenCode child-process liveness to stale detection", async () => {

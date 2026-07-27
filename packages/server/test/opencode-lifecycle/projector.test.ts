@@ -124,6 +124,38 @@ describe("OpenCode lifecycle projector", () => {
     expect(projectOpenCodeLifecycle(state).active).toBe(true);
   });
 
+  it("completes an unknown finish only after stable authoritative idle", () => {
+    let state = reduceOpenCodeLifecycle(createOpenCodeLifecycleState(0), {
+      type: "start-turn",
+      now: 1,
+    });
+    state = reduceOpenCodeLifecycle(state, {
+      type: "assistant-evidence",
+      now: 10,
+      evidence: "terminal",
+    });
+    state = reduceOpenCodeLifecycle(state, {
+      type: "status-event",
+      now: 20,
+      status: { type: "idle" },
+    });
+    state = reduceOpenCodeLifecycle(state, {
+      type: "status-reconciled",
+      now: 270,
+      status: { type: "idle" },
+      expectedSequence: state.sequence,
+      quietWindowMs: 250,
+    });
+
+    expect(state.phase).toBe("terminal");
+    expect(state.terminalKind).toBe("completed");
+    expect(projectOpenCodeLifecycle(state)).toMatchObject({
+      activity: "idle",
+      active: false,
+      terminal: true,
+    });
+  });
+
   it("supports the two-sample idle fallback for old OpenCode metadata", () => {
     let state = reduceOpenCodeLifecycle(createOpenCodeLifecycleState(0), {
       type: "start-turn",
@@ -301,6 +333,24 @@ describe("OpenCode lifecycle status normalization", () => {
           role: "assistant",
           finish: "tool-calls",
           time: { completed: 1 },
+        },
+      }),
+    ).toBe("nonterminal");
+    expect(
+      readOpenCodeAssistantTerminalEvidence({
+        info: {
+          role: "assistant",
+          finish: "unknown",
+          time: { completed: 1 },
+        },
+      }),
+    ).toBe("terminal");
+    expect(
+      readOpenCodeAssistantTerminalEvidence({
+        info: {
+          role: "assistant",
+          finish: "unknown",
+          time: { created: 1 },
         },
       }),
     ).toBe("nonterminal");

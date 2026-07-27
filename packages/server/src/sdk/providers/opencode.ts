@@ -55,6 +55,7 @@ import {
   reduceOpenCodeLifecycle,
 } from "../../opencode-lifecycle/index.js";
 import type {
+  OpenCodeAssistantTerminalEvidence,
   OpenCodeLifecycleAction,
   OpenCodeLifecycleState,
 } from "../../opencode-lifecycle/index.js";
@@ -886,6 +887,10 @@ export class OpenCodeProvider implements AgentProvider {
           "Aborting shared OpenCode session",
         );
         void this.abortOpenCodeSession(baseUrl, runtimeRef.sessionId, cwd);
+        void this.notifyOpenCodeBridgeTerminal(
+          runtimeRef.sessionId,
+          "interrupted",
+        );
       }
     };
     signal.addEventListener("abort", abortHandler);
@@ -2219,7 +2224,7 @@ export class OpenCodeProvider implements AgentProvider {
     sessionId: string,
     cwd?: string,
   ): Promise<{
-    assistantEvidence?: "terminal" | "nonterminal" | "unknown";
+    assistantEvidence?: OpenCodeAssistantTerminalEvidence;
     unsettledTools: number;
   } | null> {
     try {
@@ -3450,6 +3455,39 @@ export class OpenCodeProvider implements AgentProvider {
       getLogger().warn(
         { sessionId, error },
         "Failed to abort OpenCode session after a turn error",
+      );
+    }
+  }
+
+  private async notifyOpenCodeBridgeTerminal(
+    sessionId: string,
+    kind: "failed" | "interrupted",
+    error?: string,
+  ): Promise<void> {
+    if (!this.bridgeControlUrl) return;
+    try {
+      const response = await fetch(
+        `${this.bridgeControlUrl}/sessions/${encodeURIComponent(sessionId)}/terminal`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ kind, error }),
+          signal: AbortSignal.timeout(3_000),
+        },
+      );
+      if (!response.ok) {
+        getLogger().debug(
+          { sessionId, kind, status: response.status },
+          "OpenCode bridge did not accept the terminal lifecycle update",
+        );
+      }
+    } catch (error) {
+      getLogger().debug(
+        { sessionId, kind, error },
+        "Failed to notify OpenCode bridge about a terminal turn",
       );
     }
   }

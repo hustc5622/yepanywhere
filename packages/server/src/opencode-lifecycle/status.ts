@@ -85,9 +85,12 @@ export function readOpenCodeSessionStatus(
 
 /**
  * Determine whether the newest assistant message proves that the agent loop
- * is terminal. `tool-calls` and `unknown` explicitly mean the loop may
- * continue; old OpenCode versions without finish metadata remain unknown and
- * use the stable-idle compatibility path.
+ * is terminal. A completed `tool-calls` message may still continue into tool
+ * execution. OpenCode may also finish a stream with `finish=unknown` without
+ * treating it as a fatal provider/session error, so a completed message with
+ * that finish value is terminal once authoritative idle and settled tools
+ * confirm the turn has stopped. Old OpenCode versions without finish metadata
+ * remain unknown and use the stable-idle compatibility path.
  */
 export function readOpenCodeAssistantTerminalEvidence(
   value: unknown,
@@ -101,9 +104,7 @@ export function readOpenCodeAssistantTerminalEvidence(
   const finish = readString(info, "finish")?.toLowerCase();
   if (!completed) return "nonterminal";
   if (!finish) return "unknown";
-  if (finish === "tool-calls" || finish === "unknown") {
-    return "nonterminal";
-  }
+  if (finish === "tool-calls") return "nonterminal";
   return "terminal";
 }
 

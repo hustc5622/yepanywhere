@@ -34,6 +34,7 @@ import {
   reduceOpenCodeLifecycle,
 } from "../opencode-lifecycle/index.js";
 import type {
+  OpenCodeAssistantTerminalEvidence,
   OpenCodeLifecycleAction,
   OpenCodeLifecycleState,
 } from "../opencode-lifecycle/index.js";
@@ -462,6 +463,48 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     return record
       ? isLiveOpenCodeBridgeSession(this.toBridgeSession(record))
       : false;
+  }
+
+  /**
+   * Stop bridge reconciliation immediately when the owned provider reaches a
+   * terminal state. OpenCode does not always emit session.error if the
+   * upstream session has already become idle, so relying on provider events
+   * alone can leave a stale lifecycle timer running indefinitely.
+   */
+  private finishSessionLifecycle(
+    sessionId: string,
+    kind: "failed" | "interrupted",
+    error?: string,
+  ): boolean {
+    if (!this.isSessionActive(sessionId)) return false;
+
+    const pending = this.pendingInputs.get(sessionId);
+    this.pendingInputs.delete(sessionId);
+    this.dispatchOpenCodeLifecycle(sessionId, {
+      type: "terminal",
+      now: Date.now(),
+      kind,
+    });
+    this.updateSessionState(sessionId, {
+      activity: "idle",
+      pendingInputType: undefined,
+      active: false,
+      lastTurnStatus: kind,
+      lastErrorMessage:
+        kind === "failed" ? (error ?? "OpenCode reported an error") : undefined,
+      retryStatus: undefined,
+    });
+    this.discardExternalDecision(
+      pending,
+      new Error(
+        error ??
+          `OpenCode session ${sessionId} was ${
+            kind === "failed" ? "failed" : "interrupted"
+          }`,
+      ),
+    );
+    this.refreshRootPendingProjection(sessionId);
+    return true;
   }
 
   getPendingInputRequest(sessionId: string): InputRequest | null {
@@ -1090,6 +1133,25 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
     if (parts[0] === "sessions" && parts[1]) {
       const sessionId = parts[1];
+      if (req.method === "POST" && parts[2] === "terminal") {
+        const body = asRecord(await readJsonBody(req));
+        const kind = readString(body, "kind");
+        if (kind !== "failed" && kind !== "interrupted") {
+          writeJson(res, 400, {
+            error: "kind must be failed or interrupted",
+          });
+          return;
+        }
+        writeJson(res, 200, {
+          terminal: this.finishSessionLifecycle(
+            sessionId,
+            kind,
+            readString(body, "error") ?? undefined,
+          ),
+        });
+        return;
+      }
+
       if (req.method === "GET" && parts[2] === "view") {
         await this.syncOpenCodeRuntimeState();
         writeJson(res, 200, {
@@ -1738,7 +1800,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     sessionId: string,
     directory?: string,
   ): Promise<{
-    assistantEvidence?: "terminal" | "nonterminal" | "unknown";
+    assistantEvidence?: OpenCodeAssistantTerminalEvidence;
     unsettledTools: number;
   } | null> {
     try {
@@ -2046,13 +2108,16 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (type === "session.error") {
       const message = readOpenCodeErrorMessage(properties?.error);
       if (sessionId && this.sessions.has(sessionId)) {
-        const pending = this.pendingInputs.get(sessionId);
-        this.pendingInputs.delete(sessionId);
         // User-initiated aborts terminate the turn without a failure; align
         // with codex-bridge's interrupted/failed distinction. The client
         // renders any lastErrorMessage as "Failed", so aborts must not
         // carry one.
         const aborted = isOpenCodeAbortError(properties?.error);
+        // A cleanup abort may arrive after Yep already finalized the turn.
+        // Never overwrite that terminal projection with a late interruption.
+        if (aborted && !this.isSessionActive(sessionId)) return;
+        const pending = this.pendingInputs.get(sessionId);
+        this.pendingInputs.delete(sessionId);
         this.dispatchOpenCodeLifecycle(
           sessionId,
           {

@@ -1082,6 +1082,81 @@ describe("OpenCodeBridgeService", () => {
     ]);
   });
 
+  it("projects a completed finish=unknown response as completed", async () => {
+    const opencodeServer = createServer((req, res) => {
+      const url = requestUrl(req);
+      if (req.method === "GET" && url.pathname === "/session/status") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      if (
+        req.method === "GET" &&
+        url.pathname === "/session/ses_unknown/message"
+      ) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify([
+            {
+              info: {
+                id: "msg_unknown",
+                sessionID: "ses_unknown",
+                role: "assistant",
+                finish: "unknown",
+                time: { completed: Date.now() },
+              },
+              parts: [],
+            },
+          ]),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridge = new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+      lifecycle: { quietWindowMs: 0 },
+    });
+    const internals = bridge as unknown as {
+      handleOpenCodeEvent: (event: unknown) => void;
+      reconcileOpenCodeLifecycle: (sessionId: string) => Promise<void>;
+    };
+
+    internals.handleOpenCodeEvent({
+      type: "session.status",
+      properties: {
+        sessionID: "ses_unknown",
+        status: { type: "busy" },
+      },
+    });
+    internals.handleOpenCodeEvent({
+      type: "session.status",
+      properties: {
+        sessionID: "ses_unknown",
+        status: { type: "idle" },
+      },
+    });
+    await internals.reconcileOpenCodeLifecycle("ses_unknown");
+
+    expect(bridge.isSessionActive("ses_unknown")).toBe(false);
+    expect(
+      bridge.listSessions().find((item) => item.id === "ses_unknown"),
+    ).toMatchObject({
+      activity: "idle",
+      lastTurnStatus: "completed",
+    });
+    expect(
+      bridge.listSessions().find((item) => item.id === "ses_unknown")
+        ?.lastErrorMessage,
+    ).toBeUndefined();
+  });
+
   it("preserves upstream timestamps across repeated runtime status updates", () => {
     const bridge = new OpenCodeBridgeService({
       enabled: false,
@@ -1698,6 +1773,83 @@ describe("OpenCodeBridgeService", () => {
     // Aborts are not failures; the client renders lastErrorMessage as a
     // failed badge, so it must stay clear.
     expect(session?.lastErrorMessage).toBeUndefined();
+  });
+
+  it("stops bridge reconciliation when an owned turn is interrupted over HTTP", async () => {
+    const opencodeServer = createServer((req, res) => {
+      const url = requestUrl(req);
+      if (req.method === "GET" && url.pathname === "/global/event") {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        });
+        res.write("\n");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/session/status") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ses_interrupt: { type: "busy" } }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+      lifecycle: { reconcileIntervalMs: 10_000 },
+    });
+    await bridge.start();
+    const internals = bridge as unknown as {
+      handleOpenCodeEvent: (event: unknown) => void;
+      lifecycles: Map<
+        string,
+        {
+          state: { phase: string; terminalKind?: string };
+          timer: NodeJS.Timeout | null;
+        }
+      >;
+    };
+
+    try {
+      internals.handleOpenCodeEvent({
+        type: "session.status",
+        properties: {
+          sessionID: "ses_interrupt",
+          status: { type: "busy" },
+        },
+      });
+      expect(internals.lifecycles.get("ses_interrupt")?.timer).not.toBeNull();
+
+      const response = await fetch(
+        `http://127.0.0.1:${bridgePort}/sessions/ses_interrupt/terminal`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: "interrupted" }),
+        },
+      );
+      await expect(response.json()).resolves.toEqual({ terminal: true });
+
+      expect(bridge.isSessionActive("ses_interrupt")).toBe(false);
+      expect(
+        bridge.listSessions().find((item) => item.id === "ses_interrupt"),
+      ).toMatchObject({
+        activity: "idle",
+        lastTurnStatus: "interrupted",
+      });
+      expect(internals.lifecycles.get("ses_interrupt")).toMatchObject({
+        state: { phase: "terminal", terminalKind: "interrupted" },
+        timer: null,
+      });
+    } finally {
+      await bridge.shutdown();
+    }
   });
 
   it("records a completed turn only after idle reconciliation", () => {
