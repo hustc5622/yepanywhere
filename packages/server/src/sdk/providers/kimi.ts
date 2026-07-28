@@ -20,10 +20,13 @@
 import { exec } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type {
+  ContentBlock,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
@@ -44,6 +47,12 @@ import type {
   UserMessage,
 } from "../types.js";
 import { ACPClient } from "./acp/client.js";
+import {
+  type KimiDetectedCapability,
+  type KimiProviderType,
+  getKimiModelCapability,
+  isUnknownDetectedCapability,
+} from "./kimi-capability-registry.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -89,6 +98,241 @@ export function toKimiAcpMode(mode: PermissionMode): KimiAcpMode {
 interface KimiSessionState {
   sessionId: string | null;
   permissionMode: PermissionMode;
+  /** Set once the image-not-supported warning has been surfaced. */
+  imageWarningEmitted?: boolean;
+}
+
+/**
+ * Whether the resolved Kimi model accepts image input.
+ *
+ * Kimi resolves capabilities as `declared ∪ detected` (union semantics):
+ * `image_in = declared.has('image_in') || detected.image_in`. Declared
+ * capabilities come from `config.toml` `[models."X"].capabilities` or the
+ * `KIMI_MODEL_CAPABILITIES` env overlay; detected capabilities come from a
+ * static prefix table keyed by `(provider wire type, model id)` — see
+ * `kimi-capability-registry.ts`.
+ *
+ * - `supported`   — either `image_in` is explicitly declared, or the static
+ *   catalog detects the model as vision-capable (e.g. `gpt-4o`,
+ *   `claude-3-*`, `gemini-2.5-*`).
+ * - `unsupported` — the static catalog knows the model and explicitly
+ *   reports `image_in: false` (e.g. `o3-mini` reasoning, `gpt-3.5-turbo`),
+ *   AND no `image_in` was declared. Kimi will drop images in this case.
+ * - `unknown`     — neither declared nor detected can determine the answer
+ *   (model is uncatalogued or the provider type is missing). Kimi falls
+ *   back to catalog auto-detection (`models.dev`) or the managed server
+ *   registry, which we cannot reproduce here.
+ */
+export type KimiImageSupport = "supported" | "unsupported" | "unknown";
+
+/**
+ * Read the `capabilities` list of one `[models."<alias>"]` section.
+ * Returns null when the section (or the key) is absent — Kimi then relies on
+ * catalog detection rather than on a declaration.
+ */
+function parseKimiModelCapabilities(
+  configToml: string,
+  modelId: string,
+): string[] | null {
+  const escaped = modelId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sectionRe = new RegExp(
+    `^\\s*\\[models\\.(?:"${escaped}"|${escaped})\\]\\s*$`,
+    "m",
+  );
+  const start = sectionRe.exec(configToml);
+  if (!start) return null;
+
+  const rest = configToml.slice(start.index + start[0].length);
+  // Stop at the next top-level section so a sibling model's list is not read.
+  const nextSection = /^\s*\[[^\]]+\]\s*$/m.exec(rest);
+  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+
+  const capsRe = /^\s*capabilities\s*=\s*\[([^\]]*)\]/m;
+  const caps = capsRe.exec(body);
+  if (!caps) return null;
+
+  return (caps[1] ?? "")
+    .split(",")
+    .map((entry) => entry.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+}
+
+/** Read `default_model = "..."` from config.toml. */
+function parseKimiDefaultModel(configToml: string): string | undefined {
+  const match = /^\s*default_model\s*=\s*["']([^"']+)["']/m.exec(configToml);
+  return match?.[1];
+}
+
+/**
+ * Read `provider = "..."` from one `[models."<alias>"]` section.
+ * Returns null when the section or the key is absent.
+ */
+function parseKimiModelProvider(
+  configToml: string,
+  modelId: string,
+): string | null {
+  const escaped = modelId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sectionRe = new RegExp(
+    `^\\s*\\[models\\.(?:"${escaped}"|${escaped})\\]\\s*$`,
+    "m",
+  );
+  const start = sectionRe.exec(configToml);
+  if (!start) return null;
+
+  const rest = configToml.slice(start.index + start[0].length);
+  const nextSection = /^\s*\[[^\]]+\]\s*$/m.exec(rest);
+  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+
+  const providerRe = /^\s*provider\s*=\s*["']([^"']+)["']/m;
+  return providerRe.exec(body)?.[1] ?? null;
+}
+
+/**
+ * Read `model = "..."` (the wire model id) from one `[models."<alias>"]`
+ * section. Returns null when the section or the key is absent.
+ */
+function parseKimiModelWireId(
+  configToml: string,
+  modelId: string,
+): string | null {
+  const escaped = modelId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sectionRe = new RegExp(
+    `^\\s*\\[models\\.(?:"${escaped}"|${escaped})\\]\\s*$`,
+    "m",
+  );
+  const start = sectionRe.exec(configToml);
+  if (!start) return null;
+
+  const rest = configToml.slice(start.index + start[0].length);
+  const nextSection = /^\s*\[[^\]]+\]\s*$/m.exec(rest);
+  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+
+  const modelRe = /^\s*model\s*=\s*["']([^"']+)["']/m;
+  return modelRe.exec(body)?.[1] ?? null;
+}
+
+/**
+ * Read `type = "..."` from one `[providers."<name>"]` section.
+ * Returns null when the section or the key is absent.
+ */
+function parseKimiProviderType(
+  configToml: string,
+  providerName: string,
+): KimiProviderType | null {
+  const escaped = providerName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sectionRe = new RegExp(
+    `^\\s*\\[providers\\.(?:"${escaped}"|${escaped})\\]\\s*$`,
+    "m",
+  );
+  const start = sectionRe.exec(configToml);
+  if (!start) return null;
+
+  const rest = configToml.slice(start.index + start[0].length);
+  const nextSection = /^\s*\[[^\]]+\]\s*$/m.exec(rest);
+  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+
+  const typeRe = /^\s*type\s*=\s*["']([^"']+)["']/m;
+  const match = typeRe.exec(body)?.[1];
+  if (!match) return null;
+  const known: KimiProviderType[] = [
+    "anthropic",
+    "openai",
+    "openai_responses",
+    "google-genai",
+    "vertexai",
+    "kimi",
+  ];
+  return known.includes(match as KimiProviderType)
+    ? (match as KimiProviderType)
+    : null;
+}
+
+/**
+ * Resolve the detected capability for a model alias by looking up its
+ * provider type and wire model id in the static catalog.
+ *
+ * Returns `null` when the provider type or wire model id cannot be resolved
+ * from config.toml, or when the catalog returns UNKNOWN — in those cases
+ * we cannot make an authoritative negative statement.
+ */
+function resolveDetectedCapability(
+  configToml: string,
+  aliasId: string,
+): KimiDetectedCapability | null {
+  const providerName = parseKimiModelProvider(configToml, aliasId);
+  if (!providerName) return null;
+  const providerType = parseKimiProviderType(configToml, providerName);
+  if (!providerType) return null;
+  const wireModelId = parseKimiModelWireId(configToml, aliasId);
+  if (!wireModelId) return null;
+
+  const detected = getKimiModelCapability(providerType, wireModelId);
+  if (isUnknownDetectedCapability(detected)) return null;
+  return detected;
+}
+
+/**
+ * Merge declared and detected capabilities, mirroring Kimi's union semantics:
+ * `image_in = declared.includes('image_in') || detected.image_in`.
+ *
+ * Returns `supported` when either source reports `image_in`. Returns
+ * `unsupported` only when the detected catalog explicitly knows the model
+ * and reports `image_in: false` (authoritative negative). Returns `unknown`
+ * when neither source can determine the answer.
+ */
+function mergeImageSupport(
+  declaredHasImageIn: boolean,
+  detected: KimiDetectedCapability | null,
+): KimiImageSupport {
+  if (declaredHasImageIn) return "supported";
+  if (!detected) return "unknown";
+  return detected.image_in ? "supported" : "unsupported";
+}
+
+/**
+ * Resolve whether images will actually reach the model for this session.
+ *
+ * Mirrors Kimi's own precedence: an explicit `-m <alias>` wins, then the
+ * `KIMI_MODEL_*` env overlay (which defaults to `image_in,thinking`), then
+ * `default_model` from config.toml. Capabilities are merged as
+ * `declared ∪ detected` — see KimiImageSupport for the full semantics.
+ */
+export function resolveKimiImageSupport(
+  configToml: string | null,
+  modelId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): KimiImageSupport {
+  // Env overlay path: when KIMI_MODEL_NAME is set and no explicit -m alias
+  // is provided, the overlay synthesizes an alias with declared capabilities
+  // from KIMI_MODEL_CAPABILITIES (default: image_in,thinking). The env
+  // overlay has no provider type / wire model id, so detected is null —
+  // the overlay's declared list is the sole source of truth.
+  if (!modelId && env.KIMI_MODEL_NAME) {
+    const declared = env.KIMI_MODEL_CAPABILITIES?.trim();
+    if (!declared) return "supported"; // overlay default is image_in,thinking
+    const caps = declared
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean);
+    return mergeImageSupport(caps.includes("image_in"), null);
+  }
+
+  if (!configToml) return "unknown";
+  const target = modelId ?? parseKimiDefaultModel(configToml);
+  if (!target) return "unknown";
+
+  const caps = parseKimiModelCapabilities(configToml, target);
+  const declaredHasImageIn = caps?.includes("image_in") ?? false;
+  const detected = resolveDetectedCapability(configToml, target);
+  return mergeImageSupport(declaredHasImageIn, detected);
+}
+
+/** Warning surfaced in the transcript when images cannot reach the model. */
+export function kimiImageDropWarning(modelId: string): string {
+  return [
+    `Kimi model "${modelId}" does not declare image input, so the attached image was not shown to it.`,
+    `Add "image_in" to that model's \`capabilities\` in ${KIMI_CONFIG_PATH}, or pick a vision-capable model.`,
+  ].join(" ");
 }
 
 /**
@@ -327,8 +571,32 @@ export class KimiProvider implements AgentProvider {
     return tail;
   }
 
+  /** Read config.toml, or null when it is missing/unreadable. */
+  private readKimiConfig(): string | null {
+    if (!existsSync(KIMI_CONFIG_PATH)) return null;
+    try {
+      return readFileSync(KIMI_CONFIG_PATH, "utf-8");
+    } catch {
+      return null;
+    }
+  }
+
+  /** The model alias that will be used when the session does not pin one. */
+  private resolveConfiguredModel(): string | undefined {
+    if (process.env.KIMI_MODEL_NAME) return process.env.KIMI_MODEL_NAME;
+    const config = this.readKimiConfig();
+    return config ? parseKimiDefaultModel(config) : undefined;
+  }
+
+  /** Whether images sent to this session will actually reach the model. */
+  private resolveImageSupport(modelId: string | undefined): KimiImageSupport {
+    return resolveKimiImageSupport(this.readKimiConfig(), modelId);
+  }
+
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
-    const queue = new MessageQueue();
+    // Attachments are kept on the queued message so buildPromptBlocks can turn
+    // them into native ACP image / resource_link blocks.
+    const queue = new MessageQueue({ preserveAttachments: true });
     const abortController = new AbortController();
     const sessionState: KimiSessionState = {
       sessionId: null,
@@ -441,9 +709,17 @@ export class KimiProvider implements AgentProvider {
       );
 
       const initStart = Date.now();
-      await client.initialize({});
+      const initResult = await client.initialize({});
+      // Logged for diagnostics only. Kimi's ACP layer always advertises
+      // `image: true`; whether the pixels actually reach the model depends on
+      // the resolved model's `image_in` capability (config.toml `capabilities`
+      // or catalog detection). When it is missing, Kimi silently substitutes
+      // "[image omitted: current model has no image input]" before the LLM call.
       this.log.debug(
-        { durationMs: Date.now() - initStart },
+        {
+          durationMs: Date.now() - initStart,
+          promptCapabilities: initResult.agentCapabilities?.promptCapabilities,
+        },
         "Kimi ACP initialized",
       );
 
@@ -509,12 +785,50 @@ export class KimiProvider implements AgentProvider {
 
         updateQueue.length = 0;
 
+        const promptBlocks = await this.buildPromptBlocks(message, userText);
+        const imageBlockCount = promptBlocks.filter(
+          (b) => b.type === "image",
+        ).length;
         const promptStart = Date.now();
         this.log.debug(
-          { textLength: userText.length },
+          {
+            textLength: userText.length,
+            blockCount: promptBlocks.length,
+            imageBlocks: imageBlockCount,
+            resourceLinks: promptBlocks.filter(
+              (b) => b.type === "resource_link",
+            ).length,
+          },
           "Sending prompt to Kimi",
         );
-        const promptPromise = client.prompt(sessionId, userText);
+
+        // Kimi's ACP layer accepts images unconditionally but drops them right
+        // before the LLM call when the resolved model lacks `image_in`. This
+        // is only an authoritative negative when the static catalog knows
+        // the model and reports `image_in: false` (e.g. o3-mini,
+        // gpt-3.5-turbo). A merely `unknown` model may still accept images
+        // via Kimi's catalog auto-detection, so no warning is emitted then.
+        if (imageBlockCount > 0 && !sessionState.imageWarningEmitted) {
+          const support = this.resolveImageSupport(options.model);
+          if (support === "unsupported") {
+            sessionState.imageWarningEmitted = true;
+            const modelId =
+              options.model ?? this.resolveConfiguredModel() ?? "";
+            this.log.warn(
+              { model: modelId, imageBlocks: imageBlockCount },
+              "Kimi model does not declare image_in; images will be dropped",
+            );
+            yield {
+              type: "system",
+              subtype: "warning",
+              session_id: sessionId,
+              content: kimiImageDropWarning(modelId),
+              warningKind: "kimi_image_input_unsupported",
+            } as SDKMessage;
+          }
+        }
+
+        const promptPromise = client.prompt(sessionId, promptBlocks);
 
         for await (const msg of this.yieldUpdates(
           promptPromise,
@@ -968,6 +1282,96 @@ export class KimiProvider implements AgentProvider {
         );
         return null;
     }
+  }
+
+  /**
+   * Build the ACP prompt blocks for one queued user message.
+   *
+   * `text` is always sent first (it already carries the human-readable
+   * "User uploaded files:" listing appended by MessageQueue, which the client
+   * parses back into attachment chips and which lets Kimi re-read an original
+   * at full fidelity via ReadMediaFile). Media is then attached natively:
+   *
+   * - inline base64 image blocks (REST `images[]`, pasted screenshots) become
+   *   ACP `image` blocks;
+   * - uploaded `image/*` attachments are read from disk into `image` blocks;
+   * - every other attachment becomes a `resource_link`, which Kimi's adapter
+   *   turns into a clean path reference for its Read tool.
+   *
+   * Kimi owns downscaling and original-preservation on its side
+   * (`compressPromptImageParts`), so full-size bytes are sent as-is.
+   */
+  private async buildPromptBlocks(
+    message: unknown,
+    text: string,
+  ): Promise<ContentBlock[]> {
+    const blocks: ContentBlock[] = [{ type: "text", text }];
+    if (!isRecord(message)) return blocks;
+
+    const seenImages = new Set<string>();
+
+    // 1. Inline base64 image blocks produced by MessageQueue.
+    const content = isRecord(message.message)
+      ? message.message.content
+      : undefined;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!isRecord(block) || block.type !== "image") continue;
+        const source = isRecord(block.source) ? block.source : undefined;
+        if (!source || source.type !== "base64") continue;
+        const data = typeof source.data === "string" ? source.data : undefined;
+        if (!data) continue;
+        const mimeType =
+          typeof source.media_type === "string" && source.media_type
+            ? source.media_type
+            : "image/png";
+        seenImages.add(data);
+        blocks.push({ type: "image", mimeType, data });
+      }
+    }
+
+    // 2. Uploaded attachments: images inline, everything else as a link.
+    const attachments = Array.isArray(message.attachments)
+      ? message.attachments
+      : [];
+    for (const attachment of attachments) {
+      if (!isRecord(attachment)) continue;
+      const path = typeof attachment.path === "string" ? attachment.path : "";
+      if (!path) continue;
+      const mimeType =
+        typeof attachment.mimeType === "string" ? attachment.mimeType : "";
+      const name =
+        (typeof attachment.originalName === "string"
+          ? attachment.originalName
+          : undefined) ??
+        (typeof attachment.name === "string" ? attachment.name : undefined) ??
+        basename(path);
+
+      if (mimeType.startsWith("image/")) {
+        try {
+          const data = (await readFile(path)).toString("base64");
+          if (seenImages.has(data)) continue;
+          seenImages.add(data);
+          blocks.push({ type: "image", mimeType, data });
+          continue;
+        } catch (err) {
+          // Fall through to a resource_link so the path still reaches Kimi.
+          this.log.warn(
+            { err, path },
+            "Failed to read image attachment for Kimi prompt",
+          );
+        }
+      }
+
+      blocks.push({
+        type: "resource_link",
+        uri: pathToFileURL(path).href,
+        name,
+        ...(mimeType ? { mimeType } : {}),
+      });
+    }
+
+    return blocks;
   }
 
   /**

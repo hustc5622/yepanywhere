@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type {
   ClaudeSessionEntry,
   CodexCompactedEntry,
@@ -28,6 +29,7 @@ import type {
 } from "@yep-anywhere/shared";
 import {
   getGeminiUserMessageText,
+  getKimiPromptImages,
   getKimiPromptText,
   getMessageContent,
   getModelContextWindow,
@@ -1802,6 +1804,47 @@ function convertGeminiMessages(
   return messages;
 }
 
+/**
+ * Build the normalized content for one Kimi user turn.
+ *
+ * Text-only turns stay a plain string (the common case, and what the client's
+ * prompt parser expects). When the turn carried images, they are emitted as
+ * `input_image` blocks — the same shape Codex uses, so the client renders them
+ * as attachment chips with an inline preview without provider-specific code.
+ *
+ * `blobref:` parts are served through `/api/local-image`; the blobs directory
+ * is allow-listed alongside yep's own uploads. `data:` urls are passed straight
+ * through as the preview source.
+ */
+function buildKimiUserContent(
+  input: readonly unknown[],
+  blobsDir: string | undefined,
+): string | ContentBlock[] {
+  const text = getKimiPromptText(input);
+  const images = getKimiPromptImages(input);
+  if (images.length === 0) return text;
+
+  const blocks: ContentBlock[] = [];
+  if (text) blocks.push({ type: "text", text } as ContentBlock);
+
+  for (const image of images) {
+    const block: Record<string, unknown> = {
+      type: "input_image",
+      mime_type: image.mimeType,
+    };
+    if (image.blobHash && blobsDir) {
+      const path = join(blobsDir, image.blobHash);
+      block.file_path = path;
+      block.image_url = `/api/local-image?path=${encodeURIComponent(path)}`;
+    } else if (!image.blobHash) {
+      block.image_url = image.url;
+    }
+    blocks.push(block as ContentBlock);
+  }
+
+  return blocks;
+}
+
 // --- Kimi Conversion Logic ---
 
 /**
@@ -1867,7 +1910,10 @@ function convertKimiMessages(session: KimiSessionContent): Message[] {
       messages.push({
         uuid: `${sid}-user-${userSeq++}`,
         type: "user",
-        message: { role: "user", content: getKimiPromptText(record.input) },
+        message: {
+          role: "user",
+          content: buildKimiUserContent(record.input, session.blobsDir),
+        },
         timestamp: toIso(record.time),
       });
       continue;

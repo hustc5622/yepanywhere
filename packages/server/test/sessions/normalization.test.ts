@@ -275,6 +275,72 @@ describe("normalizeSession", () => {
     ).toBe(false);
   });
 
+  it("renders Kimi prompt images as input_image blocks and hides the compression notice", () => {
+    const blobsDir =
+      "/home/u/.kimi-code/sessions/wd_x/session_y/agents/main/blobs";
+    const hash = "a".repeat(64);
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "session-kimi-img",
+        projectId: "test-project" as UrlProjectId,
+        title: "Kimi images",
+        fullTitle: "Kimi images",
+        createdAt: "2026-07-28T00:00:00.000Z",
+        updatedAt: "2026-07-28T00:00:01.000Z",
+        messageCount: 2,
+        status: { state: "idle" },
+        provider: "kimi",
+      },
+      data: {
+        provider: "kimi",
+        session: {
+          sessionId: "session-kimi-img",
+          createdAt: "2026-07-28T00:00:00.000Z",
+          blobsDir,
+          records: [
+            {
+              type: "turn.prompt",
+              input: [
+                { type: "text", text: "What is in this screenshot?" },
+                {
+                  type: "text",
+                  text: "<system>Image compressed to fit model limits: original 1290x2796 -> sent 923x2000.</system>",
+                },
+                {
+                  type: "image_url",
+                  imageUrl: { url: `blobref:image/png;${hash}` },
+                },
+                {
+                  type: "image_url",
+                  imageUrl: { url: "data:image/jpeg;base64,AAAB" },
+                },
+              ],
+              time: 1,
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    const content = normalized.messages[0]?.message?.content;
+
+    expect(content).toEqual([
+      { type: "text", text: "What is in this screenshot?" },
+      {
+        type: "input_image",
+        mime_type: "image/png",
+        file_path: `${blobsDir}/${hash}`,
+        image_url: `/api/local-image?path=${encodeURIComponent(`${blobsDir}/${hash}`)}`,
+      },
+      {
+        type: "input_image",
+        mime_type: "image/jpeg",
+        image_url: "data:image/jpeg;base64,AAAB",
+      },
+    ]);
+  });
+
   it("normalizes Kimi file tools and emits pairable tool result messages", () => {
     const mockSession: LoadedSession = {
       summary: {

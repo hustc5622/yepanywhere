@@ -13,7 +13,7 @@
  */
 
 import { readFile, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   type ContextCumulativeUsage,
   type KimiStepEndEvent,
@@ -176,6 +176,9 @@ export class KimiSessionReader implements ISessionReader {
           createdAt: summary.createdAt,
           updatedAt: summary.updatedAt,
           model: summary.model,
+          // Sibling of wire.jsonl; holds the content-addressed image bytes
+          // referenced by `blobref:` prompt parts.
+          blobsDir: join(dirname(entry.filePath), "blobs"),
           records,
         },
       },

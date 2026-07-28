@@ -379,11 +379,16 @@ export type {
   KimiWireRecord,
   KimiSessionContent,
   KimiSessionState,
+  KimiImagePart,
+  KimiBlobRef,
+  KimiPromptImage,
 } from "./kimi-schema/types.js";
 export {
   parseKimiWireJsonl,
   parseKimiSessionState,
   getKimiPromptText,
+  getKimiPromptImages,
+  parseKimiBlobRef,
   isKimiTurnPromptRecord,
   isKimiLoopEventRecord,
   isKimiModelConfigRecord,

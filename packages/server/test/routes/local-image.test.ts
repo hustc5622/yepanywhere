@@ -40,6 +40,73 @@ describe("Local image routes", () => {
     expect(await response.text()).toBe("png-bytes");
   });
 
+  it("serves extensionless Kimi blobs by sniffing the image signature", async () => {
+    const blobsDir = path.join(
+      tempDir,
+      "sessions",
+      "wd_x",
+      "agents",
+      "main",
+      "blobs",
+    );
+    await mkdir(blobsDir, { recursive: true });
+
+    const hash = "b".repeat(64);
+    const filePath = path.join(blobsDir, hash);
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("body"),
+    ]);
+    await writeFile(filePath, png);
+
+    const routes = createLocalImageRoutes({
+      allowedPaths: [path.join(tempDir, "sessions")],
+    });
+
+    const response = await routes.request(
+      `/?path=${encodeURIComponent(filePath)}`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+  });
+
+  it("rejects extensionless files that are not images", async () => {
+    const blobsDir = path.join(tempDir, "sessions", "blobs");
+    await mkdir(blobsDir, { recursive: true });
+
+    const filePath = path.join(blobsDir, "c".repeat(64));
+    await writeFile(filePath, "not an image at all");
+
+    const routes = createLocalImageRoutes({
+      allowedPaths: [path.join(tempDir, "sessions")],
+    });
+
+    const response = await routes.request(
+      `/?path=${encodeURIComponent(filePath)}`,
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("ignores empty allowed path prefixes", async () => {
+    const filePath = path.join(tempDir, "outside.png");
+    await writeFile(filePath, "png-bytes");
+
+    const routes = createLocalImageRoutes({
+      allowedPaths: [""],
+    });
+
+    const response = await routes.request(
+      `/?path=${encodeURIComponent(filePath)}`,
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: "Path not in allowed directories",
+    });
+  });
+
   it("rejects files outside the allowed directories", async () => {
     const uploadsDir = path.join(tempDir, "uploads");
     const otherDir = path.join(tempDir, "other");

@@ -36,6 +36,23 @@ export const KimiThinkPartSchema = z.object({
   think: z.string(),
 });
 
+/**
+ * An image in `turn.prompt.input`.
+ *
+ * Kimi rewrites inline image data before persisting: the (possibly downscaled)
+ * bytes are content-addressed into `<agentDir>/blobs/<sha256>` and the part's
+ * url becomes `blobref:<mimeType>;<sha256>`. A `data:` url can still appear for
+ * records written by other paths, so both forms are accepted.
+ */
+export const KimiImagePartSchema = z.object({
+  type: z.literal("image_url"),
+  imageUrl: z.object({
+    url: z.string(),
+    id: z.string().nullish(),
+  }),
+});
+export type KimiImagePart = z.infer<typeof KimiImagePartSchema>;
+
 /** A part inside `content.part` — either assistant text or reasoning. */
 export const KimiContentPartValueSchema = z.union([
   KimiTextPartSchema,
@@ -175,6 +192,12 @@ export interface KimiSessionContent {
   createdAt?: string;
   updatedAt?: string;
   model?: string;
+  /**
+   * Absolute path to the agent's `blobs/` directory, used to resolve
+   * `blobref:<mime>;<sha256>` image parts to real files. Absent when the
+   * session was not loaded from disk.
+   */
+  blobsDir?: string;
   records: KimiWireRecord[];
 }
 
@@ -261,6 +284,26 @@ export function parseKimiSessionState(
   }
 }
 
+/**
+ * Kimi injects a `<system>Image compressed to fit model limits: ...</system>`
+ * text part immediately before an image it had to downscale. It is guidance for
+ * the model (it names the on-disk original so the agent can re-read a crop at
+ * full fidelity), not something the user wrote — so it is excluded from the
+ * transcript's user text.
+ *
+ * The filter matches ONLY the exact Kimi-injected prefix. A naive
+ * `<system>...</system>` match would also drop legitimate user text that
+ * happens to be wrapped in a `<system>` tag, corrupting transcripts and
+ * session titles. Kimi 0.29.1 itself only matches this specific compression
+ * notice.
+ */
+const KIMI_SYSTEM_PART_RE =
+  /^<system>Image compressed to fit model limits:[\s\S]*<\/system>$/;
+
+function isKimiInjectedSystemText(text: string): boolean {
+  return KIMI_SYSTEM_PART_RE.test(text.trim());
+}
+
 /** Extract concatenated text from a `turn.prompt.input` array. */
 export function getKimiPromptText(input: readonly unknown[]): string {
   return input
@@ -272,12 +315,64 @@ export function getKimiPromptText(input: readonly unknown[]): string {
         (part as { type?: unknown }).type === "text" &&
         typeof (part as { text?: unknown }).text === "string"
       ) {
-        return (part as { text: string }).text;
+        const text = (part as { text: string }).text;
+        return isKimiInjectedSystemText(text) ? "" : text;
       }
       return "";
     })
     .filter(Boolean)
     .join("\n");
+}
+
+/** A `blobref:<mimeType>;<sha256>` reference resolved to its parts. */
+export interface KimiBlobRef {
+  mimeType: string;
+  hash: string;
+}
+
+/**
+ * Parse Kimi's content-addressed blob url. Returns null for any other form
+ * (notably `data:` urls, which already carry their own bytes).
+ */
+export function parseKimiBlobRef(url: string): KimiBlobRef | null {
+  if (!url.startsWith("blobref:")) return null;
+  const body = url.slice("blobref:".length);
+  const sep = body.lastIndexOf(";");
+  if (sep <= 0) return null;
+  const mimeType = body.slice(0, sep).trim();
+  const hash = body.slice(sep + 1).trim();
+  // Content-addressed by sha256; reject anything that could escape the blobs dir.
+  if (!mimeType || !/^[0-9a-f]{64}$/.test(hash)) return null;
+  return { mimeType, hash };
+}
+
+/** An image referenced by a user turn, resolved for presentation. */
+export interface KimiPromptImage {
+  /** Original url as persisted (`blobref:...` or `data:...`). */
+  url: string;
+  mimeType: string;
+  /** Set when the url was a `blobref:`; names a file in the agent blobs dir. */
+  blobHash?: string;
+}
+
+/** Extract the images attached to a `turn.prompt.input` array, in order. */
+export function getKimiPromptImages(
+  input: readonly unknown[],
+): KimiPromptImage[] {
+  const images: KimiPromptImage[] = [];
+  for (const raw of input) {
+    const parsed = KimiImagePartSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const url = parsed.data.imageUrl.url;
+    const ref = parseKimiBlobRef(url);
+    if (ref) {
+      images.push({ url, mimeType: ref.mimeType, blobHash: ref.hash });
+      continue;
+    }
+    const dataMatch = /^data:([^;,]+)[;,]/.exec(url);
+    images.push({ url, mimeType: dataMatch?.[1] ?? "image/png" });
+  }
+  return images;
 }
 
 // Type guards used by the normalization layer.

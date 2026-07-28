@@ -248,10 +248,14 @@ export function loadConfig(): Config {
     path.join(os.homedir(), ".gemini", "tmp");
   const codexSessionsDir =
     process.env.CODEX_SESSIONS_DIR ?? getDefaultCodexSessionsDir();
+  // Empty env values must not become an empty local-image allowlist prefix:
+  // `${prefix}/` would be "/" and match every absolute path.
+  const configuredKimiSessionsDir = process.env.KIMI_SESSIONS_DIR?.trim();
+  const configuredKimiCodeHome = process.env.KIMI_CODE_HOME?.trim();
   const kimiSessionsDir =
-    process.env.KIMI_SESSIONS_DIR ??
+    configuredKimiSessionsDir ||
     path.join(
-      process.env.KIMI_CODE_HOME ?? path.join(os.homedir(), ".kimi-code"),
+      configuredKimiCodeHome || path.join(os.homedir(), ".kimi-code"),
       "sessions",
     );
   const codexBridgePort = parseIntOrDefault(
@@ -506,12 +510,17 @@ export function loadConfig(): Config {
     voiceInputEnabled: process.env.VOICE_INPUT !== "false",
     // Always allow yep-managed uploads. ALLOWED_IMAGE_PATHS adds external paths
     // like /tmp; an empty value disables only those extras.
+    // kimiSessionsDir is included so transcripts can render the prompt images
+    // Kimi persists content-addressed under `<session>/agents/*/blobs/`.
     allowedImagePaths: Array.from(
-      new Set([
-        managedUploadsDir,
-        codexGeneratedImagesDir,
-        ...extraAllowedImagePaths,
-      ]),
+      new Set(
+        [
+          managedUploadsDir,
+          codexGeneratedImagesDir,
+          kimiSessionsDir,
+          ...extraAllowedImagePaths,
+        ].filter((allowedPath) => allowedPath.trim().length > 0),
+      ),
     ),
     allowedLocalFilePaths: Array.from(
       new Set([codexHomeDir, ...extraAllowedLocalFilePaths]),

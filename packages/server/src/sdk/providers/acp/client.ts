@@ -14,7 +14,9 @@ import { Readable, Writable } from "node:stream";
 import {
   type Agent,
   type Client,
+  type ClientCapabilities,
   ClientSideConnection,
+  type ContentBlock,
   type InitializeResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
@@ -175,9 +177,15 @@ export class ACPClient {
   /**
    * Initialize the ACP connection.
    * Must be called after connect() and before newSession().
+   *
+   * The returned `agentCapabilities` describes what the agent's ACP layer can
+   * ingest (e.g. `promptCapabilities.image`). Note that it reflects the
+   * adapter, not the currently selected model — Kimi advertises
+   * `image: true` unconditionally and drops images later if the resolved model
+   * lacks the `image_in` capability.
    */
   async initialize(
-    capabilities: Record<string, boolean> = {},
+    capabilities: ClientCapabilities = {},
   ): Promise<InitializeResponse> {
     if (!this.connection) {
       throw new Error("ACPClient not connected. Call connect() first.");
@@ -275,23 +283,44 @@ export class ACPClient {
   /**
    * Send a prompt to the agent and get a response.
    *
-   * Note: In Phase 1, this is a simple request/response pattern.
-   * Session updates are delivered via the callback set with setSessionUpdateCallback().
-   * Phase 2+ will add streaming support.
+   * Accepts either a plain string (wrapped into a single `text` block) or a
+   * pre-built `ContentBlock[]` for multimodal prompts. Agents that advertise
+   * `promptCapabilities.image` / `.embeddedContext` consume `image` and
+   * `resource_link` blocks natively; a file path embedded in prompt text does
+   * not put the bytes in front of the model.
+   *
+   * Note: this is a simple request/response pattern. Session updates are
+   * delivered via the callback set with setSessionUpdateCallback().
    */
-  async prompt(sessionId: string, text: string): Promise<unknown> {
+  async prompt(
+    sessionId: string,
+    content: string | readonly ContentBlock[],
+  ): Promise<unknown> {
     if (!this.connection) {
       throw new Error("ACPClient not connected. Call connect() first.");
     }
 
+    const blocks: ContentBlock[] =
+      typeof content === "string"
+        ? [{ type: "text", text: content }]
+        : [...content];
+
     this.log.debug(
-      { sessionId, textLength: text.length },
+      {
+        sessionId,
+        blockCount: blocks.length,
+        blockTypes: blocks.map((b) => b.type),
+        textLength: blocks.reduce(
+          (n, b) => n + (b.type === "text" ? b.text.length : 0),
+          0,
+        ),
+      },
       "Sending ACP prompt",
     );
 
     const result = await this.connection.prompt({
       sessionId,
-      prompt: [{ type: "text", text }],
+      prompt: blocks,
     });
 
     this.log.debug({ result }, "ACP prompt complete");

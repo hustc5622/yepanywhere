@@ -1,4 +1,9 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type {
+  ContentBlock,
   SessionNotification,
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
@@ -6,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACPClient } from "../../../src/sdk/providers/acp/client.js";
 import {
   KimiProvider,
+  resolveKimiImageSupport,
   toKimiAcpMode,
 } from "../../../src/sdk/providers/kimi.js";
 import type { SDKMessage } from "../../../src/sdk/types.js";
@@ -380,6 +386,455 @@ describe("KimiProvider ACP updates", () => {
           },
         ],
       },
+    });
+  });
+});
+
+function buildKimiPromptBlocks(
+  provider: KimiProvider,
+  message: unknown,
+  text: string,
+): Promise<ContentBlock[]> {
+  return (
+    provider as unknown as {
+      buildPromptBlocks(
+        message: unknown,
+        text: string,
+      ): Promise<ContentBlock[]>;
+    }
+  ).buildPromptBlocks(message, text);
+}
+
+describe("KimiProvider prompt blocks", () => {
+  it("sends text only when the message has no media", async () => {
+    const provider = new KimiProvider();
+
+    expect(
+      await buildKimiPromptBlocks(
+        provider,
+        { message: { role: "user", content: "hello" } },
+        "hello",
+      ),
+    ).toEqual([{ type: "text", text: "hello" }]);
+  });
+
+  it("forwards inline base64 image blocks as native ACP image blocks", async () => {
+    const provider = new KimiProvider();
+
+    const blocks = await buildKimiPromptBlocks(
+      provider,
+      {
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: "image/jpeg",
+                data: "AAAB",
+              },
+            },
+          ],
+        },
+      },
+      "look",
+    );
+
+    expect(blocks).toEqual([
+      { type: "text", text: "look" },
+      { type: "image", mimeType: "image/jpeg", data: "AAAB" },
+    ]);
+  });
+
+  it("reads image attachments from disk and links other files", async () => {
+    const provider = new KimiProvider();
+    const dir = await mkdtemp(join(tmpdir(), "kimi-prompt-"));
+    const imagePath = join(dir, "shot.png");
+    const notePath = join(dir, "note.txt");
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await writeFile(imagePath, bytes);
+    await writeFile(notePath, "hi");
+
+    try {
+      const blocks = await buildKimiPromptBlocks(
+        provider,
+        {
+          message: { role: "user", content: "check these" },
+          attachments: [
+            {
+              path: imagePath,
+              mimeType: "image/png",
+              originalName: "shot.png",
+            },
+            {
+              path: notePath,
+              mimeType: "text/plain",
+              originalName: "note.txt",
+            },
+          ],
+        },
+        "check these",
+      );
+
+      expect(blocks).toEqual([
+        { type: "text", text: "check these" },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: bytes.toString("base64"),
+        },
+        {
+          type: "resource_link",
+          uri: pathToFileURL(notePath).href,
+          name: "note.txt",
+          mimeType: "text/plain",
+        },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to a resource_link when an image cannot be read", async () => {
+    const provider = new KimiProvider();
+    const missing = join(tmpdir(), "kimi-missing-image.png");
+
+    const blocks = await buildKimiPromptBlocks(
+      provider,
+      {
+        message: { role: "user", content: "x" },
+        attachments: [
+          { path: missing, mimeType: "image/png", originalName: "gone.png" },
+        ],
+      },
+      "x",
+    );
+
+    expect(blocks).toEqual([
+      { type: "text", text: "x" },
+      {
+        type: "resource_link",
+        uri: pathToFileURL(missing).href,
+        name: "gone.png",
+        mimeType: "image/png",
+      },
+    ]);
+  });
+
+  it("does not send the same image twice when it arrives inline and as an upload", async () => {
+    const provider = new KimiProvider();
+    const dir = await mkdtemp(join(tmpdir(), "kimi-dedupe-"));
+    const imagePath = join(dir, "same.png");
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d]);
+    await writeFile(imagePath, bytes);
+
+    try {
+      const blocks = await buildKimiPromptBlocks(
+        provider,
+        {
+          message: {
+            role: "user",
+            content: [
+              { type: "text", text: "y" },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: bytes.toString("base64"),
+                },
+              },
+            ],
+          },
+          attachments: [
+            {
+              path: imagePath,
+              mimeType: "image/png",
+              originalName: "same.png",
+            },
+          ],
+        },
+        "y",
+      );
+
+      expect(blocks.filter((b) => b.type === "image")).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveKimiImageSupport", () => {
+  const config = `default_model = "custom-kimi/kimi-k3"
+
+[providers.custom-kimi]
+type = "openai"
+
+[models."custom-kimi/kimi-k3"]
+provider = "custom-kimi"
+model = "kimi-k3"
+capabilities = [ "thinking", "always_thinking", "tool_use" ]
+
+[models."custom-kimi/kimi-vision"]
+provider = "custom-kimi"
+model = "kimi-k3"
+capabilities = [ "tool_use", "image_in" ]
+
+[models."custom-kimi/kimi-auto"]
+provider = "custom-kimi"
+model = "kimi-k3"
+
+[thinking]
+enabled = true
+`;
+
+  it("reports unknown when declared capabilities omit image_in and the catalog does not know the model", () => {
+    // kimi-k3 is not in the static prefix table, and `image_in` is not
+    // declared. The catalog returns UNKNOWN, so we cannot make an
+    // authoritative negative statement — Kimi's own catalog detection
+    // (models.dev) may still resolve it.
+    expect(resolveKimiImageSupport(config, "custom-kimi/kimi-k3", {})).toBe(
+      "unknown",
+    );
+  });
+
+  it("reports supported when image_in is declared", () => {
+    expect(resolveKimiImageSupport(config, "custom-kimi/kimi-vision", {})).toBe(
+      "supported",
+    );
+  });
+
+  it("reports unknown when the model declares no capabilities and the catalog does not know it", () => {
+    expect(resolveKimiImageSupport(config, "custom-kimi/kimi-auto", {})).toBe(
+      "unknown",
+    );
+  });
+
+  it("falls back to default_model when the session pins no model", () => {
+    expect(resolveKimiImageSupport(config, undefined, {})).toBe("unknown");
+  });
+
+  it("does not read a sibling model's capabilities", () => {
+    // kimi-auto sits between two models that do declare capabilities.
+    expect(
+      resolveKimiImageSupport(config, "custom-kimi/kimi-auto", {}),
+    ).not.toBe("supported");
+  });
+
+  it("reports unknown for an unrecognized model or a missing config", () => {
+    expect(resolveKimiImageSupport(config, "who/knows", {})).toBe("unknown");
+    expect(resolveKimiImageSupport(null, "custom-kimi/kimi-k3", {})).toBe(
+      "unknown",
+    );
+  });
+
+  it("honours the KIMI_MODEL_* overlay, which defaults to image_in", () => {
+    expect(
+      resolveKimiImageSupport(config, undefined, { KIMI_MODEL_NAME: "m" }),
+    ).toBe("supported");
+    // env overlay with no image_in and no detected capability → unknown
+    // (the env overlay has no provider type / wire model id, so detected
+    // is null and cannot provide an authoritative negative either).
+    expect(
+      resolveKimiImageSupport(config, undefined, {
+        KIMI_MODEL_NAME: "m",
+        KIMI_MODEL_CAPABILITIES: "thinking",
+      }),
+    ).toBe("unknown");
+    expect(
+      resolveKimiImageSupport(config, undefined, {
+        KIMI_MODEL_NAME: "m",
+        KIMI_MODEL_CAPABILITIES: "thinking, image_in",
+      }),
+    ).toBe("supported");
+  });
+
+  it("lets an explicit model override the env overlay", () => {
+    expect(
+      resolveKimiImageSupport(config, "custom-kimi/kimi-vision", {
+        KIMI_MODEL_NAME: "m",
+        KIMI_MODEL_CAPABILITIES: "thinking",
+      }),
+    ).toBe("supported");
+  });
+
+  describe("catalog detection (declared ∪ detected)", () => {
+    const catalogConfig = `default_model = "openai/gpt-4o"
+
+[providers.openai]
+type = "openai"
+
+[providers.anthropic]
+type = "anthropic"
+
+[providers.google]
+type = "google-genai"
+
+[providers.openai-resp]
+type = "openai_responses"
+
+[models."openai/gpt-4o"]
+provider = "openai"
+model = "gpt-4o"
+capabilities = [ "tool_use" ]
+
+[models."openai/gpt-4o-no-decl"]
+provider = "openai"
+model = "gpt-4o"
+
+[models."openai/o3-mini"]
+provider = "openai"
+model = "o3-mini"
+
+[models."openai/gpt-35-turbo"]
+provider = "openai"
+model = "gpt-3.5-turbo"
+
+[models."anthropic/claude-3-5-sonnet"]
+provider = "anthropic"
+model = "claude-3-5-sonnet-20241022"
+
+[models."anthropic/claude-sonnet-4"]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[models."google/gemini-25-pro"]
+provider = "google"
+model = "gemini-2.5-pro"
+
+[models."google/gemini-15-flash"]
+provider = "google"
+model = "gemini-1.5-flash"
+
+[models."openai-resp/gpt-4o-resp"]
+provider = "openai-resp"
+model = "gpt-4o"
+`;
+
+    it("detects gpt-4o as supported even without declared image_in", () => {
+      // The gpt-4o prefix is in the OpenAI vision list; declared `tool_use`
+      // alone is enough because detected.image_in is true (union semantics).
+      expect(resolveKimiImageSupport(catalogConfig, "openai/gpt-4o", {})).toBe(
+        "supported",
+      );
+    });
+
+    it("detects gpt-4o as supported with no capabilities declared at all", () => {
+      expect(
+        resolveKimiImageSupport(catalogConfig, "openai/gpt-4o-no-decl", {}),
+      ).toBe("supported");
+    });
+
+    it("detects o3-mini as unsupported (reasoning, no image_in)", () => {
+      // o\d+ matches the OpenAI reasoning pattern: image_in: false. No
+      // declared image_in either → authoritative negative.
+      expect(resolveKimiImageSupport(catalogConfig, "openai/o3-mini", {})).toBe(
+        "unsupported",
+      );
+    });
+
+    it("detects gpt-3.5-turbo as unsupported (text-only, no image_in)", () => {
+      expect(
+        resolveKimiImageSupport(catalogConfig, "openai/gpt-35-turbo", {}),
+      ).toBe("unsupported");
+    });
+
+    it("detects claude-3-5-sonnet as supported (anthropic vision prefix)", () => {
+      expect(
+        resolveKimiImageSupport(
+          catalogConfig,
+          "anthropic/claude-3-5-sonnet",
+          {},
+        ),
+      ).toBe("supported");
+    });
+
+    it("detects claude-sonnet-4 as supported (anthropic thinking vision prefix)", () => {
+      expect(
+        resolveKimiImageSupport(catalogConfig, "anthropic/claude-sonnet-4", {}),
+      ).toBe("supported");
+    });
+
+    it("detects gemini-2.5-pro as supported (gemini thinking multimodal)", () => {
+      expect(
+        resolveKimiImageSupport(catalogConfig, "google/gemini-25-pro", {}),
+      ).toBe("supported");
+    });
+
+    it("detects gemini-1.5-flash as supported (gemini multimodal)", () => {
+      expect(
+        resolveKimiImageSupport(catalogConfig, "google/gemini-15-flash", {}),
+      ).toBe("supported");
+    });
+
+    it("detects gpt-4o over openai_responses wire as supported", () => {
+      expect(
+        resolveKimiImageSupport(catalogConfig, "openai-resp/gpt-4o-resp", {}),
+      ).toBe("supported");
+    });
+
+    it("returns unknown when provider type is missing", () => {
+      const noTypeConfig = `default_model = "mystery/gpt-4o"
+
+[providers.mystery]
+
+[models."mystery/gpt-4o"]
+provider = "mystery"
+model = "gpt-4o"
+`;
+      expect(resolveKimiImageSupport(noTypeConfig, "mystery/gpt-4o", {})).toBe(
+        "unknown",
+      );
+    });
+
+    it("returns unknown when wire model id is missing", () => {
+      const noModelConfig = `default_model = "openai/alias-only"
+
+[providers.openai]
+type = "openai"
+
+[models."openai/alias-only"]
+provider = "openai"
+capabilities = [ "tool_use" ]
+`;
+      expect(
+        resolveKimiImageSupport(noModelConfig, "openai/alias-only", {}),
+      ).toBe("unknown");
+    });
+
+    it("returns unknown for a kimi wire type (catalog returns UNKNOWN)", () => {
+      const kimiWireConfig = `default_model = "kimi/native"
+
+[providers.kimi-native]
+type = "kimi"
+
+[models."kimi/native"]
+provider = "kimi-native"
+model = "kimi-k3"
+`;
+      expect(resolveKimiImageSupport(kimiWireConfig, "kimi/native", {})).toBe(
+        "unknown",
+      );
+    });
+
+    it("declared image_in overrides an unsupported detected catalog entry", () => {
+      // Union semantics: declared image_in adds the capability even when
+      // the static catalog reports image_in: false for the wire model.
+      const overrideConfig = `default_model = "openai/o3-with-vision"
+
+[providers.openai]
+type = "openai"
+
+[models."openai/o3-with-vision"]
+provider = "openai"
+model = "o3-mini"
+capabilities = [ "image_in", "tool_use" ]
+`;
+      expect(
+        resolveKimiImageSupport(overrideConfig, "openai/o3-with-vision", {}),
+      ).toBe("supported");
     });
   });
 });

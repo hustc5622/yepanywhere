@@ -39,6 +39,7 @@ describe("loadConfig codex paths", () => {
   it("always allows the managed uploads directory for local-image", async () => {
     vi.stubEnv("CODEX_HOME", "/tmp/codex-home");
     vi.stubEnv("YEP_ANYWHERE_DATA_DIR", "/tmp/yep-data");
+    vi.stubEnv("KIMI_SESSIONS_DIR", "/tmp/kimi-home/sessions");
     vi.stubEnv("ALLOWED_IMAGE_PATHS", "");
 
     const { loadConfig } = await import("../src/config.js");
@@ -47,12 +48,14 @@ describe("loadConfig codex paths", () => {
     expect(config.allowedImagePaths).toEqual([
       "/tmp/yep-data/uploads",
       "/tmp/codex-home/generated_images",
+      "/tmp/kimi-home/sessions",
     ]);
   });
 
   it("merges managed uploads with configured local-image paths", async () => {
     vi.stubEnv("CODEX_HOME", "/tmp/codex-home");
     vi.stubEnv("YEP_ANYWHERE_DATA_DIR", "/tmp/yep-data");
+    vi.stubEnv("KIMI_SESSIONS_DIR", "/tmp/kimi-home/sessions");
     vi.stubEnv("ALLOWED_IMAGE_PATHS", "/tmp, /var/tmp, /tmp");
 
     const { loadConfig } = await import("../src/config.js");
@@ -61,9 +64,29 @@ describe("loadConfig codex paths", () => {
     expect(config.allowedImagePaths).toEqual([
       "/tmp/yep-data/uploads",
       "/tmp/codex-home/generated_images",
+      "/tmp/kimi-home/sessions",
       "/tmp",
       "/var/tmp",
     ]);
+  });
+
+  it("does not allow an empty Kimi sessions path to become an image prefix", async () => {
+    vi.stubEnv("CODEX_HOME", "/tmp/codex-home");
+    vi.stubEnv("YEP_ANYWHERE_DATA_DIR", "/tmp/yep-data");
+    vi.stubEnv("KIMI_CODE_HOME", "/tmp/kimi-home");
+    vi.stubEnv("KIMI_SESSIONS_DIR", "");
+    vi.stubEnv("ALLOWED_IMAGE_PATHS", "");
+
+    const { loadConfig } = await import("../src/config.js");
+    const config = loadConfig();
+
+    expect(config.kimiSessionsDir).toBe("/tmp/kimi-home/sessions");
+    expect(config.allowedImagePaths).toEqual([
+      "/tmp/yep-data/uploads",
+      "/tmp/codex-home/generated_images",
+      "/tmp/kimi-home/sessions",
+    ]);
+    expect(config.allowedImagePaths).not.toContain("");
   });
 
   it("allows Codex home and configured roots for local text files", async () => {
