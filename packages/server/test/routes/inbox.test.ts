@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodexBridgeController } from "../../src/codex-bridge/types.js";
 import type { SessionIndexService } from "../../src/indexes/index.js";
 import type { NotificationService } from "../../src/notifications/index.js";
+import type { OpenCodeBridgeController } from "../../src/opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../../src/projects/codex-scanner.js";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import {
@@ -404,6 +405,60 @@ describe("Inbox Routes", () => {
       expect(result.active).toHaveLength(0);
       expect(result.recentActivity).toHaveLength(0);
       expect(result.unread8h).toHaveLength(0);
+    });
+
+    it("surfaces a bridge-held approval on a session Yep still owns", async () => {
+      // The owned OpenCode process missed `permission.asked` across an SSE
+      // reconnect, so only the bridge holds the request. The inbox used to
+      // consult the bridge only when no process existed, which hid the blocker
+      // from needs-attention entirely.
+      const project = createProject("proj1", "myproject", "/sessions/proj1");
+      const session = createSession("sess-owned", "proj1", minutesAgo(2), {
+        provider: "opencode",
+      });
+      const opencodeBridgeService = {
+        listSessionViews: vi.fn(async () => [
+          {
+            session: { ...session, ownership: { owner: "external" as const } },
+            projectName: project.name,
+            activity: "waiting-input" as const,
+            pendingInputType: "tool-approval" as const,
+            active: true,
+          },
+        ]),
+        isSessionActive: vi.fn(async () => true),
+        getPendingInputRequest: vi.fn(async () => ({
+          id: "per_bridge_only",
+          type: "tool-approval",
+          prompt: "Allow external_directory?",
+        })),
+      } as unknown as OpenCodeBridgeController;
+
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
+      sessionsByDir.set("/sessions/proj1", [session]);
+      processMap.set("sess-owned", {
+        getPendingInputRequest: () => null,
+        state: { type: "in-turn" },
+      });
+
+      const result = await makeRequest({
+        scanner: mockScanner,
+        readerFactory: mockReaderFactory,
+        supervisor: mockSupervisor,
+        notificationService: mockNotificationService,
+        sessionIndexService: mockSessionIndexService,
+        opencodeBridgeService,
+      });
+
+      expect(result.needsAttention).toHaveLength(1);
+      expect(result.needsAttention[0]?.sessionId).toBe("sess-owned");
+      expect(result.needsAttention[0]?.pendingRequestId).toBe(
+        "per_bridge_only",
+      );
+      // One lookup for the one waiting session, not a serialized sweep.
+      expect(
+        opencodeBridgeService.getPendingInputRequest,
+      ).toHaveBeenCalledTimes(1);
     });
 
     it("session in active tier does not appear in lower tiers", async () => {

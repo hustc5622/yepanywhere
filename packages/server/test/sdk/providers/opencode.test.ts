@@ -4038,3 +4038,228 @@ custom-openai/glm-5.2
     expect(formatOpenCodeError(undefined)).toBeNull();
   });
 });
+
+/**
+ * A live permission-mode switch must reach the OpenCode session itself.
+ * Yep-side state alone left the native session on its original `ask` rules, so
+ * the UI showed bypassPermissions while OpenCode kept raising
+ * external_directory/bash approvals.
+ *
+ * OpenCode merges (appends) a PATCHed ruleset onto the session's existing one
+ * (`Permission.merge` in the session update handler) and resolves an action
+ * with `findLast` (`Permission.evaluate`), so these tests replay the real
+ * upstream semantics against the recorded PATCH bodies.
+ */
+describe("OpenCodeProvider live permission mode", () => {
+  interface RecordedPatch {
+    url: string;
+    directoryHeader: string | null;
+    permission: Array<{ permission: string; pattern: string; action: string }>;
+  }
+
+  function wildcardMatch(value: string, pattern: string): boolean {
+    if (pattern === "*") return true;
+    const escaped = pattern
+      .split("*")
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*");
+    return new RegExp(`^${escaped}$`).test(value);
+  }
+
+  /** Mirror of upstream Permission.evaluate: last matching rule wins. */
+  function evaluate(
+    permission: string,
+    ruleset: RecordedPatch["permission"],
+  ): string {
+    return (
+      ruleset.findLast(
+        (rule) =>
+          wildcardMatch(permission, rule.permission) &&
+          wildcardMatch("*", rule.pattern),
+      )?.action ?? "ask"
+    );
+  }
+
+  async function withPermissionServer<T>(
+    run: (input: {
+      session: Awaited<ReturnType<OpenCodeProvider["startSession"]>>;
+      patches: RecordedPatch[];
+      paths: string[];
+      failNext: (status: number) => void;
+    }) => Promise<T>,
+  ): Promise<T> {
+    const patches: RecordedPatch[] = [];
+    const paths: string[] = [];
+    let failStatus: number | null = null;
+
+    return withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        paths.push(`${req.method} ${url.pathname}`);
+        res.setHeader("content-type", "application/json");
+        if (req.method === "PATCH" && url.pathname === "/session/ses_live") {
+          const body = (await readJsonBody(req)) as {
+            permission?: RecordedPatch["permission"];
+          } | null;
+          if (failStatus !== null) {
+            res.statusCode = failStatus;
+            res.end(JSON.stringify({ error: "nope" }));
+            return;
+          }
+          patches.push({
+            url: req.url ?? "",
+            directoryHeader:
+              (req.headers["x-opencode-directory"] as string | undefined) ??
+              null,
+            permission: body?.permission ?? [],
+          });
+          res.end(JSON.stringify({ id: "ses_live" }));
+          return;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+      },
+      async (baseUrl) => {
+        const provider = new OpenCodeProvider();
+        // Drive runtimeRef exactly like a running turn would, without
+        // spawning an OpenCode CLI.
+        (
+          provider as unknown as {
+            runSession: (
+              ...args: unknown[]
+            ) => AsyncIterableIterator<Record<string, unknown>>;
+          }
+        ).runSession = async function* (...args: unknown[]) {
+          const runtimeRef = args[6] as {
+            baseUrl?: string;
+            cwd?: string;
+            sessionId?: string;
+            alive?: boolean;
+            sharedServer?: boolean;
+          };
+          runtimeRef.baseUrl = baseUrl;
+          runtimeRef.cwd = "/repo/app";
+          runtimeRef.sessionId = "ses_live";
+          runtimeRef.alive = true;
+          runtimeRef.sharedServer = true;
+          yield { type: "system", subtype: "init" };
+        };
+
+        const session = await provider.startSession({ cwd: "/repo/app" });
+        await session.iterator.next();
+        try {
+          return await run({
+            session,
+            patches,
+            paths,
+            failNext: (status) => {
+              failStatus = status;
+            },
+          });
+        } finally {
+          session.abort();
+        }
+      },
+    );
+  }
+
+  it("exposes setPermissionMode on the AgentSession", async () => {
+    await withPermissionServer(async ({ session }) => {
+      expect(typeof session.setPermissionMode).toBe("function");
+    });
+  });
+
+  it("PATCHes the native session with the directory query and header", async () => {
+    await withPermissionServer(async ({ session, patches, paths }) => {
+      await session.setPermissionMode?.("bypassPermissions");
+
+      expect(patches).toHaveLength(1);
+      const patch = patches[0];
+      expect(new URL(patch?.url ?? "", "http://127.0.0.1").pathname).toBe(
+        "/session/ses_live",
+      );
+      expect(
+        new URL(patch?.url ?? "", "http://127.0.0.1").searchParams.get(
+          "directory",
+        ),
+      ).toBe("/repo/app");
+      expect(patch?.directoryHeader).toBe("/repo/app");
+      expect(patch?.permission).toEqual([
+        { permission: "*", pattern: "*", action: "allow" },
+      ]);
+      // Session-scoped only: a project-level /config write would leak a
+      // Yep-only override into the user's repo.
+      expect(paths.some((path) => path.includes("/config"))).toBe(false);
+    });
+  });
+
+  it("keeps the wildcard fallback first so tool rules retain precedence", async () => {
+    await withPermissionServer(async ({ session, patches }) => {
+      await session.setPermissionMode?.("acceptEdits");
+
+      expect(patches[0]?.permission[0]).toEqual({
+        permission: "*",
+        pattern: "*",
+        action: "ask",
+      });
+      const bashIndex = patches[0]?.permission.findIndex(
+        (rule) => rule.permission === "bash",
+      );
+      expect(bashIndex).toBeGreaterThan(0);
+    });
+  });
+
+  it("lets each appended block win under upstream findLast evaluation", async () => {
+    await withPermissionServer(async ({ session, patches }) => {
+      await session.setPermissionMode?.("default");
+      await session.setPermissionMode?.("bypassPermissions");
+
+      // Upstream appends, so the effective ruleset is every patch flattened.
+      const afterBypass = patches.flatMap((patch) => patch.permission);
+      expect(evaluate("bash", afterBypass)).toBe("allow");
+      expect(evaluate("edit", afterBypass)).toBe("allow");
+      expect(evaluate("external_directory", afterBypass)).toBe("allow");
+
+      await session.setPermissionMode?.("acceptEdits");
+      const afterAcceptEdits = patches.flatMap((patch) => patch.permission);
+      expect(evaluate("edit", afterAcceptEdits)).toBe("allow");
+      expect(evaluate("write", afterAcceptEdits)).toBe("allow");
+      expect(evaluate("read", afterAcceptEdits)).toBe("allow");
+      expect(evaluate("bash", afterAcceptEdits)).toBe("ask");
+      expect(evaluate("external_directory", afterAcceptEdits)).toBe("ask");
+
+      await session.setPermissionMode?.("default");
+      const afterDefault = patches.flatMap((patch) => patch.permission);
+      expect(evaluate("edit", afterDefault)).toBe("ask");
+      expect(evaluate("bash", afterDefault)).toBe("ask");
+      expect(evaluate("read", afterDefault)).toBe("allow");
+    });
+  });
+
+  it("rejects with the upstream status when the PATCH fails", async () => {
+    await withPermissionServer(async ({ session, failNext }) => {
+      failNext(503);
+      await expect(
+        session.setPermissionMode?.("bypassPermissions"),
+      ).rejects.toThrow(/503/);
+    });
+  });
+
+  it("rejects instead of silently succeeding before the session is ready", async () => {
+    const provider = new OpenCodeProvider();
+    (
+      provider as unknown as {
+        runSession: (
+          ...args: unknown[]
+        ) => AsyncIterableIterator<Record<string, unknown>>;
+      }
+    ).runSession = async function* () {
+      yield { type: "system", subtype: "init" };
+    };
+    const session = await provider.startSession({ cwd: "/repo/app" });
+    await expect(
+      session.setPermissionMode?.("bypassPermissions"),
+    ).rejects.toThrow(/not ready/);
+    session.abort();
+  });
+});

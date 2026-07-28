@@ -386,6 +386,31 @@ describe("Process", () => {
       expect(process.modeVersion).toBe(1);
     });
 
+    it("does not publish a local mode change when the provider rejects it", async () => {
+      // Publishing anyway is what let the UI show bypassPermissions while the
+      // OpenCode session kept its `ask` rules and went on asking.
+      const setProviderMode = vi.fn(async () => {
+        throw new Error("Failed to configure session permissions: 503");
+      });
+      const process = new Process(createMockIterator([]), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        setPermissionModeFn: setProviderMode,
+      });
+      const events: Array<{ type: string }> = [];
+      process.subscribe((event) => events.push(event));
+
+      await expect(
+        process.syncPermissionMode("bypassPermissions"),
+      ).rejects.toThrow(/503/);
+
+      expect(process.permissionMode).toBe("auto");
+      expect(process.modeVersion).toBe(0);
+      expect(events.some((event) => event.type === "mode-change")).toBe(false);
+    });
+
     it("initializes modeVersion to 0", async () => {
       const iterator = createMockIterator([]);
       const process = new Process(iterator, {

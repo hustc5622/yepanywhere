@@ -681,6 +681,33 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     });
   }
 
+  /**
+   * Whether this bridge already holds `requestId` for the session (directly,
+   * or projected from a descendant subagent), or is mid-flight answering it.
+   * Used to skip a full runtime reconciliation on the approval hot path.
+   */
+  private hasKnownPendingInput(sessionId: string, requestId: string): boolean {
+    if (this.pendingInputs.get(sessionId)?.request.id === requestId) {
+      return true;
+    }
+    const origin = this.findPendingByRequestIdForRoot(sessionId, requestId);
+    if (origin) return true;
+    // In-flight replies are keyed by the session that owns the pending input,
+    // which for a projected subagent request is the child, not the root.
+    return (
+      this.inputResponses.has(`${sessionId}\0${requestId}`) ||
+      this.hasInFlightInputResponse(requestId)
+    );
+  }
+
+  private hasInFlightInputResponse(requestId: string): boolean {
+    const suffix = `\0${requestId}`;
+    for (const key of this.inputResponses.keys()) {
+      if (key.endsWith(suffix)) return true;
+    }
+    return false;
+  }
+
   async respondToInput(
     requestedSessionId: string,
     requestId: string,
@@ -1304,22 +1331,27 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
       if (req.method === "POST" && parts[2] === "input") {
         const body = (await readJsonBody(req)) as InputRequestBody | null;
-        if (!body?.requestId || !body.response) {
+        const response = parseOpenCodeBridgeInputResponse(body?.response);
+        if (!body?.requestId || !response) {
           writeJson(res, 400, {
             error: "requestId and response are required",
           });
           return;
         }
-        const responseKey = `${sessionId}\0${body.requestId}`;
-        if (!this.inputResponses.has(responseKey)) {
-          // Approval replies are rare and must not act on stale state, so this
-          // path keeps the unthrottled full reconciliation.
+        // Reply verbs are validated instead of trusted: `respondToInput`
+        // treats everything that is not "deny" as an approval, so an unknown
+        // string used to silently approve.
+        if (!this.hasKnownPendingInput(sessionId, body.requestId)) {
+          // The request is unknown here, so the SSE stream may have missed it.
+          // Only then is the unthrottled full reconciliation worth its cost;
+          // an already-known request must not trigger a fan-out across every
+          // managed directory on each approval click.
           await this.syncOpenCodeRuntimeState();
         }
         const accepted = await this.respondToInput(
           sessionId,
           body.requestId,
-          body.response,
+          response,
           body.answers,
         );
         if (accepted) {
@@ -1343,7 +1375,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
             await client.respondToInput(
               sessionId,
               body.requestId,
-              body.response,
+              response,
               body.answers,
               body.feedback,
             )
@@ -3508,6 +3540,24 @@ function readHeader(
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value[0] ?? null;
   return null;
+}
+
+/**
+ * Accept only the known reply verbs. `respondToInput` treats anything other
+ * than "deny" as an approval, so an unvalidated body could approve a
+ * permission through a typo.
+ */
+function parseOpenCodeBridgeInputResponse(
+  value: unknown,
+): OpenCodeBridgeInputResponse | null {
+  return value === "approve" ||
+    value === "approve_accept_edits" ||
+    value === "approve_for_session" ||
+    value === "approve_strict_auto_review" ||
+    value === "approve_always" ||
+    value === "deny"
+    ? value
+    : null;
 }
 
 function unwrapOpenCodeEvent(

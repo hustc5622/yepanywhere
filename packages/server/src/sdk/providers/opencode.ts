@@ -840,6 +840,29 @@ export class OpenCodeProvider implements AgentProvider {
           ? child.exitCode === null && child.signalCode === null
           : false;
       },
+      // A live mode switch must reach the OpenCode session, not just Yep's
+      // view of it. Without this the UI showed bypassPermissions while the
+      // native session kept its `ask` rules and went on raising
+      // external_directory/bash approvals. Session-scoped only: writing
+      // /config would persist a Yep-only override into the user's project and
+      // change what attached `of` clients see.
+      setPermissionMode: async (mode: PermissionMode) => {
+        const { baseUrl, cwd, sessionId: nativeSessionId } = runtimeRef;
+        if (!baseUrl || !cwd || !nativeSessionId) {
+          throw new Error(
+            "Cannot change OpenCode permission mode: session runtime is not ready",
+          );
+        }
+        // OpenCode merges (appends) the patched rules onto the session's
+        // existing ruleset and evaluates with `findLast`, so appending a full
+        // block whose wildcard comes first is what makes the new mode win.
+        await this.patchOpenCodeSessionPermission(
+          baseUrl,
+          nativeSessionId,
+          cwd,
+          this.buildOpenCodeSessionPermission(mode),
+        );
+      },
       ...(options.opencodeConfig
         ? {}
         : {

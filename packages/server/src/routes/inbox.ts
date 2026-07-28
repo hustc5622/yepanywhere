@@ -272,7 +272,11 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       }),
     );
 
-    // Enrich each session with process state and notification data
+    // Enrich each session with process state and notification data.
+    // Bridge request-id lookups are deferred: resolving them inline turned one
+    // inbox poll into a serialized round-trip per waiting session.
+    const bridgeRequestIdTargets = new Set<string>();
+
     for (const { project, sessions } of projectSessionResults) {
       for (const session of sessions) {
         const metadata = deps.sessionMetadataService?.getMetadata(session.id);
@@ -293,20 +297,19 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
           if (state === "in-turn" || state === "waiting-input") {
             activity = state;
           }
-        } else {
+        }
+        if (!pendingInputType) {
+          // Same owner priority as the session routes: an owned process with no
+          // pending request of its own must still surface a bridge-held one,
+          // otherwise a blocked session never reaches needs-attention.
           const bridgedSession = bridgedSessionById.get(session.id) ?? null;
           if (
             bridgedSession &&
             activeBridgeSessionIds.has(bridgedSession.session.id)
           ) {
             pendingInputType = bridgedSession.pendingInputType;
-            activity = bridgedSession.activity;
-            if (pendingInputType) {
-              pendingRequestId = await getBridgePendingRequestId(
-                deps,
-                session.id,
-              );
-            }
+            activity ??= bridgedSession.activity;
+            if (pendingInputType) bridgeRequestIdTargets.add(session.id);
           }
         }
 
@@ -355,13 +358,11 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       const bridgeOnlyPendingType = bridgeOnlyActive
         ? item.pendingInputType
         : undefined;
+      if (bridgeOnlyPendingType) bridgeRequestIdTargets.add(item.session.id);
       allSessions.push({
         session: item.session,
         projectName: item.projectName,
         pendingInputType: bridgeOnlyPendingType,
-        pendingRequestId: bridgeOnlyPendingType
-          ? await getBridgePendingRequestId(deps, item.session.id)
-          : undefined,
         activity: bridgeOnlyActive ? item.activity : undefined,
         hasUnread,
         customTitle: metadata?.customTitle ?? item.session.customTitle,
@@ -370,6 +371,24 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
         originator: item.session.originator,
         source: item.session.source,
       });
+    }
+
+    if (bridgeRequestIdTargets.size > 0) {
+      const resolved = new Map(
+        await Promise.all(
+          Array.from(bridgeRequestIdTargets, async (sessionId) => {
+            return [
+              sessionId,
+              await getBridgePendingRequestId(deps, sessionId),
+            ] as const;
+          }),
+        ),
+      );
+      for (const item of allSessions) {
+        if (item.pendingRequestId) continue;
+        const requestId = resolved.get(item.session.id);
+        if (requestId) item.pendingRequestId = requestId;
+      }
     }
 
     // Build the inbox response by categorizing into tiers

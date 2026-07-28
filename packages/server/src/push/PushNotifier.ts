@@ -104,6 +104,26 @@ export class PushNotifier {
    * delivery before deciding whether a dismiss is needed.
    */
   private sessionsWithNotification = new Map<string, true | Promise<boolean>>();
+  /**
+   * Session-scoped dedupe state for pending-input pushes.
+   *
+   * `process-state-changed` re-fires while a session stays in waiting-input
+   * (the bridge transport re-emits on turn-status/retry changes), and
+   * EventBus fans these out via `void handleProcessStateChange()` — so
+   * multiple concurrent handlers can race the first delivery. The state is
+   * registered atomically BEFORE awaiting the send result, so a repeat of
+   * the same request id is skipped whether the first send is still pending
+   * or already delivered.
+   *
+   * On send failure the state is only cleared when the map still holds the
+   * same request id AND the same promise object, so a newer request cannot
+   * be wiped out by an older async completion.
+   */
+  private sessionInputState = new Map<
+    string,
+    | { kind: "in-flight"; requestId: string; promise: Promise<boolean> }
+    | { kind: "delivered"; requestId: string }
+  >();
   private sessionsWithHaltedNotification = new Set<string>();
   private sessionTitlesBySessionId = new Map<string, CachedSessionTitles>();
 
@@ -171,6 +191,9 @@ export class PushNotifier {
 
     // Send dismiss when leaving waiting-input (if we sent a notification for it)
     if (event.activity !== "waiting-input") {
+      // Clear the dedupe state so a stale async completion cannot revive it
+      // or overwrite a newer request's state.
+      this.sessionInputState.delete(event.sessionId);
       const notificationState = this.sessionsWithNotification.get(
         event.sessionId,
       );
@@ -208,23 +231,48 @@ export class PushNotifier {
       return;
     }
 
-    // Get the process to access the InputRequest details. Bridge sessions
-    // (codex/opencode TUIs) have no managed process; their pending input
-    // lives in the bridge sidecar instead. Without this fallback, external
-    // approvals never produced a push notification.
+    // Resolve the pending input request, preferring the owned runtime process
+    // when it actually carries one, and falling back to the bridge sidecar
+    // otherwise. The bridge is consulted even when a process owns the
+    // session, because the process can be `in-turn` (no pending request of
+    // its own) while the bridge's long connection still holds a tool
+    // approval that Yep must surface. Without this fallback, mobile push
+    // was never sent for bridge-held approvals on owned sessions.
     let request: InputRequest | null = null;
     if (process) {
-      if (this.getProcessActivity(process) !== "waiting-input") {
-        return;
+      // Only short-circuit when the owned process is itself waiting for
+      // input AND carries a request. An in-turn process with no pending
+      // request must still fall through to the bridge.
+      if (this.getProcessActivity(process) === "waiting-input") {
+        request = this.getPendingInputRequest(process);
       }
-      request = this.getPendingInputRequest(process);
-    } else if (this.bridgeControllers) {
+    }
+    // When the owned process has no pending request, consult the bridge
+    // sidecar too. The bridge is consulted even when a process owns the
+    // session, because the process can be `in-turn` (no pending request of
+    // its own) while the bridge's long connection still holds a tool
+    // approval that Yep must surface. Without this fallback, mobile push
+    // was never sent for bridge-held approvals on owned sessions.
+    // `request` is null at this point (checked above), so the bridge result
+    // does not collide with a process request id; when a process request
+    // existed, the branch above already set `request` and we skip the
+    // bridge.
+    if (!request && this.bridgeControllers) {
       request = await getAnyBridgePendingInputRequest(
         this.bridgeControllers,
         event.sessionId,
       );
     }
     if (!request) return;
+
+    // Dedupe by request id across concurrent handlers. The state is read
+    // and written synchronously below, so a repeat of the same request id
+    // that arrives while the first send is still in-flight is skipped
+    // before it can call sendToAll.
+    const existing = this.sessionInputState.get(event.sessionId);
+    if (existing && existing.requestId === request.id) {
+      return;
+    }
     const inputType =
       request.type === "tool-approval" ? "tool-approval" : "user-question";
 
@@ -260,16 +308,47 @@ export class PushNotifier {
     const connectedIds =
       this.connectedBrowsers?.getConnectedBrowserProfileIds() ?? [];
     const sendPromise = this.sendPendingInput(payload, connectedIds);
+
+    // Atomically register the in-flight state BEFORE awaiting so concurrent
+    // repeats of the same request id are deduped while this send is pending.
+    const inFlightEntry = {
+      kind: "in-flight" as const,
+      requestId: request.id,
+      promise: sendPromise,
+    };
+    this.sessionInputState.set(event.sessionId, inFlightEntry);
     this.sessionsWithNotification.set(event.sessionId, sendPromise);
 
     const sent = await sendPromise;
+    const current = this.sessionInputState.get(event.sessionId);
     if (sent) {
+      // Only promote to delivered when the state still refers to this same
+      // request. A newer request could have replaced it in the meantime.
+      if (
+        current &&
+        current.kind === "in-flight" &&
+        current.requestId === request.id &&
+        current.promise === sendPromise
+      ) {
+        this.sessionInputState.set(event.sessionId, {
+          kind: "delivered",
+          requestId: request.id,
+        });
+      }
       this.sessionsWithNotification.set(event.sessionId, true);
     } else if (
-      this.sessionsWithNotification.get(event.sessionId) === sendPromise
+      current &&
+      current.kind === "in-flight" &&
+      current.requestId === request.id &&
+      current.promise === sendPromise
     ) {
-      this.sessionsWithNotification.delete(event.sessionId);
+      // Send failed and the state still points at this attempt: clear it so
+      // the same request can be retried. A newer request's state is left
+      // untouched.
+      this.sessionInputState.delete(event.sessionId);
     }
+    // When the state was replaced by a newer request, leave it as-is so the
+    // newer request's in-flight/delivered record survives this completion.
   }
 
   private async sendPendingInput(
@@ -347,6 +426,7 @@ export class PushNotifier {
     }
 
     this.sessionsWithNotification.delete(event.sessionId);
+    this.sessionInputState.delete(event.sessionId);
     this.sessionsWithHaltedNotification.delete(event.sessionId);
     this.sessionTitlesBySessionId.delete(event.sessionId);
     await this.sendDismiss(event.sessionId);
