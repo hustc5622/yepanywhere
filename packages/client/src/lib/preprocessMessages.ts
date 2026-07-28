@@ -1352,6 +1352,22 @@ function scoreToolResult(result: ToolResultData): number {
     // JSONL-complete result beats a partial streaming snapshot.
     score += 10_000;
   }
+  // For OpenCode `question` results, richer answer sets should outrank
+  // partial ones. A live-stream `{questions, answers:{}}` snapshot arrives
+  // before the completed tool_result carries the real `metadata.answers`;
+  // without this, the empty-answers copy scores equal to the filled one and
+  // `attachToolResult` keeps the stale copy on duplicate arrival.
+  const structured = result.structured;
+  if (
+    structured &&
+    typeof structured === "object" &&
+    !Array.isArray(structured)
+  ) {
+    const answers = (structured as { answers?: unknown }).answers;
+    if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+      score += Object.keys(answers as Record<string, unknown>).length;
+    }
+  }
   return score;
 }
 
@@ -1403,6 +1419,7 @@ function attachToolResult(
       content,
       block.is_error || false,
       item.toolInput,
+      getBlockMetadata(block),
     );
   }
 
@@ -1442,11 +1459,25 @@ function attachToolResult(
   pendingToolCalls.delete(toolUseId);
 }
 
+/**
+ * Pull the provider-stamped metadata bag off a tool_result block. OpenCode
+ * writes the final `state.metadata` (including `answers` for the `question`
+ * tool) onto the completed `tool_result` as `opencodeMetadata`; the streamed
+ * `tool_use` snapshot may never be re-emitted with that metadata, so the
+ * result block is the authoritative source.
+ */
+function getBlockMetadata(block: ContentBlock): unknown {
+  if (!isRecord(block)) return undefined;
+  const metadata = block.opencodeMetadata;
+  return metadata !== undefined ? metadata : undefined;
+}
+
 function normalizeOpenCodeToolResult(
   toolName: string,
   content: string,
   isError: boolean,
   input: unknown,
+  resultMetadata?: unknown,
 ): unknown {
   const normalized = toolName.toLowerCase();
 
@@ -1513,7 +1544,7 @@ function normalizeOpenCodeToolResult(
   }
 
   if (normalized === "question") {
-    return normalizeOpenCodeQuestionResult(input);
+    return normalizeOpenCodeQuestionResult(input, resultMetadata);
   }
 
   return undefined;
@@ -1521,11 +1552,23 @@ function normalizeOpenCodeToolResult(
 
 /**
  * Build an AskUserQuestion-shaped result for opencode's `question` tool by
- * pairing the (already normalized) prompts with the selected answers. opencode
- * reports answers as `metadata.answers`: an array of selected-label arrays,
- * ordered to match the questions.
+ * pairing the (already normalized) prompts with the selected answers.
+ *
+ * Answer precedence:
+ * 1. `resultMetadata.answers` — stamped on the completed `tool_result`
+ *    block's `opencodeMetadata` during live streaming. This is the
+ *    authoritative source because the server emits the `tool_result` once
+ *    the user submits, without re-emitting the `tool_use` with the final
+ *    metadata (the `tool_use` dedup keys off the input fingerprint, which
+ *    doesn't change when answers arrive).
+ * 2. `input.opencodeMetadata.answers` — fallback for persisted snapshots
+ *    where the metadata was also copied onto the `tool_use` block. Without
+ *    this, full-session refreshes would regress.
  */
-function normalizeOpenCodeQuestionResult(input: unknown): unknown {
+function normalizeOpenCodeQuestionResult(
+  input: unknown,
+  resultMetadata?: unknown,
+): unknown {
   if (!isRecord(input) || !Array.isArray(input.questions)) {
     return undefined;
   }
@@ -1534,10 +1577,15 @@ function normalizeOpenCodeQuestionResult(input: unknown): unknown {
     return undefined;
   }
 
-  const metadata = isRecord(input.opencodeMetadata)
+  const resultMeta = isRecord(resultMetadata) ? resultMetadata : undefined;
+  const inputMeta = isRecord(input.opencodeMetadata)
     ? input.opencodeMetadata
     : undefined;
-  const rawAnswers = Array.isArray(metadata?.answers) ? metadata.answers : [];
+  const rawAnswers = Array.isArray(resultMeta?.answers)
+    ? resultMeta.answers
+    : Array.isArray(inputMeta?.answers)
+      ? inputMeta.answers
+      : [];
 
   const answers: Record<string, string[]> = {};
   questions.forEach((question, index) => {

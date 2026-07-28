@@ -641,6 +641,257 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("reads question answers from the live tool_result metadata, not the tool_use", () => {
+    // Live-stream shape: the tool_use is emitted first without the final
+    // answers; the completed tool_result carries `opencodeMetadata.answers`.
+    // The server does not re-emit the tool_use with the final metadata
+    // (input fingerprint is unchanged), so the result block is the only
+    // authoritative source of answers during streaming.
+    const messages: Message[] = [
+      {
+        id: "msg-question-use",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_question_live",
+            name: "question",
+            input: {
+              questions: [
+                {
+                  header: "Materializer",
+                  question: "How far should MySQL-as-source go?",
+                  multiple: false,
+                  options: [
+                    { label: "Full", description: "Everything from MySQL" },
+                    { label: "Partial", description: "Only pytest scripts" },
+                  ],
+                },
+                {
+                  header: "Framework",
+                  question: "Which frameworks to support?",
+                  multiple: true,
+                  options: [
+                    { label: "pytest", description: "" },
+                    { label: "unittest", description: "" },
+                  ],
+                },
+              ],
+            },
+            opencodeStatus: "running",
+            opencodeTitle: "Asked 2 questions",
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+      {
+        id: "msg-question-result",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_question_live",
+            content:
+              'User has answered your questions: "How far should MySQL-as-source go?"="Full", "Which frameworks to support?"="pytest, unittest".',
+            is_error: false,
+            opencodeStatus: "completed",
+            opencodeMetadata: {
+              answers: [["Full"], ["pytest", "unittest"]],
+            },
+          },
+        ],
+        timestamp: "2024-01-01T00:00:01Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    const item = items[0];
+    if (!item || item.type !== "tool_call") {
+      throw new Error("expected a tool_call item");
+    }
+    expect(item).toMatchObject({
+      id: "call_question_live",
+      toolName: "question",
+      status: "complete",
+    });
+
+    const structured = item.toolResult?.structured as {
+      answers: Record<string, string[]>;
+    };
+    // Single-select answer is keyed by the normalized question id.
+    expect(structured.answers).toEqual({
+      "question-0": ["Full"],
+      "question-1": ["pytest", "unittest"],
+    });
+
+    // Renderer summary is derived from `Object.keys(answers).length`.
+    const answered = Object.keys(structured.answers || {}).length;
+    expect(answered).toBe(2);
+    expect(`${answered} answered`).toBe("2 answered");
+  });
+
+  it("upgrades an empty question result when a richer duplicate arrives later", () => {
+    // Reproduces the duplicate-result race: a streaming partial lands as
+    // `{questions, answers:{}}` (no answers on the tool_use yet), and the
+    // authoritative completed tool_result (with answers in its metadata)
+    // arrives afterwards as a duplicate.
+    const questionsInput = {
+      questions: [
+        {
+          header: "DB",
+          question: "Which DB driver?",
+          multiple: false,
+          options: [
+            { label: "unknown", description: "Recommended" },
+            { label: "unsupported", description: "Restore unsupported" },
+          ],
+        },
+        {
+          header: "Recovery",
+          question: "Recover on crash?",
+          multiple: false,
+          options: [
+            { label: "unknown", description: "Recommended" },
+            { label: "unsupported", description: "Restore unsupported" },
+          ],
+        },
+      ],
+    };
+
+    const messages: Message[] = [
+      {
+        id: "msg-question-use",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_question_dup",
+            name: "question",
+            input: questionsInput,
+            opencodeStatus: "running",
+            opencodeTitle: "Asked 2 questions",
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+      {
+        id: "msg-question-partial",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_question_dup",
+            content: "User has answered your questions: .",
+            is_error: false,
+            opencodeStatus: "completed",
+            // No answers on the first (partial) result.
+          },
+        ],
+        timestamp: "2024-01-01T00:00:01Z",
+      },
+      {
+        id: "msg-question-complete",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_question_dup",
+            content:
+              'User has answered your questions: "Which DB driver?"="unknown", "Recover on crash?"="unsupported".',
+            is_error: false,
+            opencodeStatus: "completed",
+            opencodeMetadata: {
+              answers: [["unknown"], ["unsupported"]],
+            },
+          },
+        ],
+        timestamp: "2024-01-01T00:00:02Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    const item = items[0];
+    if (!item || item.type !== "tool_call") {
+      throw new Error("expected a tool_call item");
+    }
+    expect(item).toMatchObject({
+      id: "call_question_dup",
+      status: "complete",
+    });
+
+    const structured = item.toolResult?.structured as {
+      answers: Record<string, string[]>;
+    };
+    // Richer duplicate wins: answers are populated, not empty.
+    expect(structured.answers).toEqual({
+      "question-0": ["unknown"],
+      "question-1": ["unsupported"],
+    });
+    expect(Object.keys(structured.answers || {}).length).toBe(2);
+  });
+
+  it("falls back to tool_use metadata when the result block has none", () => {
+    // Persisted-snapshot compatibility: the metadata lives on the tool_use
+    // block instead of the tool_result. This is the shape full-session
+    // refreshes produce, and the fix must not regress it.
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_question_persist",
+            name: "question",
+            input: {
+              questions: [
+                {
+                  header: "Scope",
+                  question: "Include tests?",
+                  multiple: false,
+                  options: [
+                    { label: "yes", description: "" },
+                    { label: "no", description: "" },
+                  ],
+                },
+              ],
+            },
+            opencodeStatus: "completed",
+            opencodeTitle: "Asked 1 question",
+            opencodeMetadata: {
+              answers: [["yes"]],
+            },
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "call_question_persist",
+            content:
+              'User has answered your questions: "Include tests?"="yes".',
+            is_error: false,
+            opencodeStatus: "completed",
+          },
+        ],
+        timestamp: "2024-01-01T00:00:00Z",
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    const item = items[0];
+    if (!item || item.type !== "tool_call") {
+      throw new Error("expected a tool_call item");
+    }
+    const structured = item.toolResult?.structured as {
+      answers: Record<string, string[]>;
+    };
+    expect(structured.answers).toEqual({ "question-0": ["yes"] });
+  });
+
   it("collapses repeated plan progress snapshots within one user turn", () => {
     const messages: Message[] = [
       {
