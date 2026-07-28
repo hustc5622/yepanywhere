@@ -34,10 +34,12 @@ import {
   type BridgeControllers,
   getAnyBridgePendingInputRequest,
   getAnyBridgeSessionView,
-  isAnyBridgeSessionActive,
   respondToAnyBridgeInput,
 } from "../bridge-common/multi.js";
-import { isLiveBridgeSessionView } from "../bridge-common/session-state.js";
+import {
+  isActiveBridgeSessionView,
+  isLiveBridgeSessionView,
+} from "../bridge-common/session-state.js";
 import type { BridgeInputResponse } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import { getLogger } from "../logging/logger.js";
@@ -540,13 +542,6 @@ async function getBridgeSessionView(
   sessionId: string,
 ): Promise<NonNullable<BridgeSessionView> | null> {
   return getAnyBridgeSessionView(bridgeControllers(deps), sessionId);
-}
-
-async function isBridgeSessionActive(
-  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
-  sessionId: string,
-): Promise<boolean> {
-  return isAnyBridgeSessionActive(bridgeControllers(deps), sessionId);
 }
 
 async function getBridgePendingInputRequest(
@@ -1210,16 +1205,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const bridgeView = await getBridgeSessionView(deps, sessionId);
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;
-    const bridgeSessionActive = bridgedSession
-      ? await isBridgeSessionActive(deps, sessionId)
-      : false;
+    // The view already carries the sidecar's liveness verdict, so no extra
+    // `/sessions/:id/active` round-trip is needed on every session open.
     const isBridgeSessionLive =
-      bridgedSession !== null && isLiveAnyBridgeSessionView(bridgedSession);
+      bridgedSession !== null && isActiveBridgeSessionView(bridgedSession);
 
     // Check if session is being controlled by an external program
     const isExternal =
       (deps.externalTracker?.isExternal(sessionId) ?? false) ||
-      (isBridgeSessionLive && bridgeSessionActive);
+      isBridgeSessionLive;
 
     const runtime = deriveSessionRuntime({
       process,
@@ -1571,16 +1565,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const bridgeView = await getBridgeSessionView(deps, sessionId);
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;
-    const bridgeSessionActive = bridgedSession
-      ? await isBridgeSessionActive(deps, sessionId)
-      : false;
+    // The view already carries the sidecar's liveness verdict, so no extra
+    // `/sessions/:id/active` round-trip is needed on every session open.
     const isBridgeSessionLive =
-      bridgedSession !== null && isLiveAnyBridgeSessionView(bridgedSession);
+      bridgedSession !== null && isActiveBridgeSessionView(bridgedSession);
 
     // Check if session is being controlled by an external program
     const isExternal =
       (deps.externalTracker?.isExternal(sessionId) ?? false) ||
-      (isBridgeSessionLive && bridgeSessionActive);
+      isBridgeSessionLive;
 
     // Check if we've ever owned this session (for orphan detection)
     // Only mark tools as "aborted" if we owned the session and know it terminated
@@ -3137,16 +3130,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       const activeProcess =
         await runtimeController.getProcessSnapshotForSession(sessionId);
       const bridgeView = await getBridgeSessionView(deps, sessionId);
-      const bridgeSessionActive = bridgeView
-        ? await isBridgeSessionActive(deps, sessionId)
-        : false;
       const isBridgeSessionLive =
-        bridgeView !== null && isLiveAnyBridgeSessionView(bridgeView);
+        bridgeView !== null && isActiveBridgeSessionView(bridgeView);
       const runtime = deriveSessionRuntime({
         process: activeProcess,
         externalActive:
           (deps.externalTracker?.isExternal(sessionId) ?? false) ||
-          (isBridgeSessionLive && bridgeSessionActive),
+          isBridgeSessionLive,
         externalActivity: bridgeView?.activity,
       });
 

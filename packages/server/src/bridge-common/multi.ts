@@ -1,4 +1,5 @@
 import type { InputRequest, UserQuestionAnswers } from "@yep-anywhere/shared";
+import { isActiveBridgeSessionView } from "./session-state.js";
 import type {
   BridgeController,
   BridgeInputResponse,
@@ -31,14 +32,24 @@ export async function getAnyBridgeSessionView(
   return null;
 }
 
-export async function isAnyBridgeSessionActive(
+/**
+ * Live bridge sessions taken straight from the bulk `/session-views`
+ * snapshots, without a per-session round-trip.
+ *
+ * Each snapshot entry already carries the sidecar's own liveness verdict
+ * (`BridgeSessionView.active`) - the same answer `/sessions/:id/active` would
+ * give. Asking the sidecar again per session turned a project listing into
+ * `1 + sessions x 2` bridge requests (~300 sockets for ~148 sessions), and
+ * every one of those requests made the OpenCode sidecar reconcile its managed
+ * directories, multiplying into thousands of upstream connections until the
+ * machine ran out of ephemeral ports. Callers that need liveness for a whole
+ * list must therefore filter the snapshot in memory.
+ */
+export async function listActiveBridgeSessionViews(
   controllers: BridgeControllers,
-  sessionId: string,
-): Promise<boolean> {
-  for (const controller of controllers) {
-    if (await controller?.isSessionActive(sessionId)) return true;
-  }
-  return false;
+): Promise<BridgeSessionView[]> {
+  const views = await listAllBridgeSessionViews(controllers);
+  return views.filter((view) => isActiveBridgeSessionView(view));
 }
 
 export async function getAnyBridgePendingInputRequest(

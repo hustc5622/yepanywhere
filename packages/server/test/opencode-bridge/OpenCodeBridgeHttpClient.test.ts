@@ -31,6 +31,137 @@ function listen(server: ReturnType<typeof createServer>): Promise<string> {
 }
 
 describe("OpenCodeBridgeHttpClient", () => {
+  it("resolves session liveness with a single sidecar request", async () => {
+    const requests: string[] = [];
+    const bridge = createServer((req, res) => {
+      requests.push(req.url ?? "");
+      if (req.url === "/sessions/ses_live/view") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            sessionView: {
+              session: {
+                id: "ses_live",
+                projectId: "project_1",
+                title: "Live OpenCode session",
+                fullTitle: "Live OpenCode session",
+                createdAt: "2026-07-20T08:50:00.000Z",
+                updatedAt: "2026-07-20T08:50:01.000Z",
+                messageCount: 1,
+                ownership: { owner: "external" },
+                provider: "opencode",
+                activity: "in-turn",
+              },
+              projectName: "demo",
+              activity: "in-turn",
+              active: true,
+            },
+          }),
+        );
+        return;
+      }
+      if (req.url === "/sessions/ses_idle/view") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            sessionView: {
+              session: {
+                id: "ses_idle",
+                projectId: "project_1",
+                title: "Idle OpenCode session",
+                fullTitle: "Idle OpenCode session",
+                createdAt: "2026-07-20T08:00:00.000Z",
+                updatedAt: "2026-07-20T08:10:00.000Z",
+                messageCount: 7,
+                ownership: { owner: "none" },
+                provider: "opencode",
+              },
+              projectName: "demo",
+              active: false,
+            },
+          }),
+        );
+        return;
+      }
+      if (req.url === "/sessions/ses_stale/view") {
+        // TUI died mid-turn: still tagged in-turn, but reported inactive.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            sessionView: {
+              session: {
+                id: "ses_stale",
+                projectId: "project_1",
+                title: "Stale OpenCode session",
+                fullTitle: "Stale OpenCode session",
+                createdAt: "2026-07-20T08:00:00.000Z",
+                updatedAt: "2026-07-20T08:10:00.000Z",
+                messageCount: 3,
+                ownership: { owner: "none" },
+                provider: "opencode",
+                activity: "in-turn",
+              },
+              projectName: "demo",
+              activity: "in-turn",
+              active: false,
+            },
+          }),
+        );
+        return;
+      }
+      if (req.url === "/sessions/ses_empty/view") {
+        // Not displayable: no messages and no live runtime state.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            sessionView: {
+              session: {
+                id: "ses_empty",
+                projectId: "project_1",
+                title: null,
+                fullTitle: null,
+                createdAt: "2026-07-20T08:00:00.000Z",
+                updatedAt: "2026-07-20T08:00:00.000Z",
+                messageCount: 0,
+                ownership: { owner: "none" },
+                provider: "opencode",
+              },
+              projectName: "demo",
+            },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const client = new OpenCodeBridgeHttpClient({
+      baseUrl: await listen(bridge),
+    });
+
+    await expect(client.isSessionActive("ses_live")).resolves.toBe(true);
+    // Exactly one request: probing `/active` and `/view` in parallel doubled
+    // every liveness check and, with it, the sidecar's upstream fan-out.
+    expect(requests).toEqual(["/sessions/ses_live/view"]);
+
+    requests.length = 0;
+    await expect(client.isSessionActive("ses_idle")).resolves.toBe(false);
+    expect(requests).toEqual(["/sessions/ses_idle/view"]);
+
+    // The sidecar verdict wins over the view's own activity field.
+    requests.length = 0;
+    await expect(client.isSessionActive("ses_stale")).resolves.toBe(false);
+    expect(requests).toEqual(["/sessions/ses_stale/view"]);
+
+    // Undisplayable and unknown sessions stay inactive, as before.
+    requests.length = 0;
+    await expect(client.isSessionActive("ses_empty")).resolves.toBe(false);
+    await expect(client.isSessionActive("ses_missing")).resolves.toBe(false);
+    expect(requests).toHaveLength(2);
+    expect(requests.every((url) => url.endsWith("/view"))).toBe(true);
+  });
+
   it("polls the session-view snapshot once instead of synchronizing twice", async () => {
     let sessionsRequests = 0;
     let sessionViewRequests = 0;
@@ -90,6 +221,90 @@ describe("OpenCodeBridgeHttpClient", () => {
         session: expect.objectContaining({ id: "ses_live" }),
       }),
     );
+  });
+
+  it("coalesces a burst of push signals into one leading and one trailing poll", async () => {
+    let sessionViewRequests = 0;
+    const bridge = createServer((req, res) => {
+      if (req.url === "/session-views") {
+        sessionViewRequests += 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ sessions: [] }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const eventBus = { emit: vi.fn() };
+    const client = new OpenCodeBridgeHttpClient({
+      baseUrl: await listen(bridge),
+      eventBus: eventBus as never,
+    });
+    const internals = client as unknown as { requestPoll: () => void };
+
+    try {
+      for (let index = 0; index < 30; index += 1) internals.requestPoll();
+
+      await vi.waitFor(() => expect(sessionViewRequests).toBe(1));
+      // Still one poll well inside the 200ms window: the remaining 29 signals
+      // were collapsed rather than each costing a bridge request.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(sessionViewRequests).toBe(1);
+
+      // The collapsed signals are not dropped - one trailing poll re-reads the
+      // final state once the window elapses.
+      await vi.waitFor(() => expect(sessionViewRequests).toBe(2), {
+        timeout: 1_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(sessionViewRequests).toBe(2);
+    } finally {
+      client.shutdown();
+    }
+  });
+
+  it("collapses push signals that race an in-flight poll into one trailing poll", async () => {
+    let sessionViewRequests = 0;
+    const bridge = createServer((req, res) => {
+      if (req.url === "/session-views") {
+        sessionViewRequests += 1;
+        // Slow enough that every later signal arrives while the poll runs.
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ sessions: [] }));
+        }, 120);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const eventBus = { emit: vi.fn() };
+    const client = new OpenCodeBridgeHttpClient({
+      baseUrl: await listen(bridge),
+      eventBus: eventBus as never,
+    });
+    const internals = client as unknown as {
+      pollSessions: () => Promise<void>;
+      requestPoll: () => void;
+    };
+
+    try {
+      const leading = internals.pollSessions();
+      for (let index = 0; index < 50; index += 1) internals.requestPoll();
+      await leading;
+
+      // One leading poll plus at most one merged trailing refresh - not one
+      // poll per signal, and not a self-sustaining poll loop.
+      await vi.waitFor(() => expect(sessionViewRequests).toBe(2), {
+        timeout: 2_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(sessionViewRequests).toBe(2);
+    } finally {
+      client.shutdown();
+    }
   });
 
   it("emits runtime state changes without overwriting persisted session content", () => {

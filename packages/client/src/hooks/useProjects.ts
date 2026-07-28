@@ -56,6 +56,32 @@ export function useProject(projectId: string | undefined) {
 
 const REFETCH_DEBOUNCE_MS = 500;
 
+/**
+ * Module-level single-flight for `GET /api/projects`.
+ *
+ * A page typically mounts several `useProjects()` consumers (page shell,
+ * project selector, FAB, ...) and every one of them also reacts to session
+ * status events. Each instance debounces on its own, so they fire near
+ * simultaneously and used to issue one `/api/projects` request each - the
+ * server then repeated the whole project + bridge snapshot per request.
+ * Sharing the in-flight promise collapses that burst into one request without
+ * introducing a stale cache: as soon as it settles the next call refetches.
+ *
+ * This is only the second line of defence; the server-side fix (bulk bridge
+ * snapshots instead of per-session probes) is what bounds the cost per
+ * request.
+ */
+let projectsRequest: Promise<{ projects: Project[] }> | null = null;
+
+function fetchProjectsShared(): Promise<{ projects: Project[] }> {
+  if (!projectsRequest) {
+    projectsRequest = api.getProjects().finally(() => {
+      projectsRequest = null;
+    });
+  }
+  return projectsRequest;
+}
+
 export interface UseProjectsOptions {
   /** Skip project fetches while the consuming UI is hidden. */
   enabled?: boolean;
@@ -82,7 +108,7 @@ export function useProjects(options: UseProjectsOptions = {}) {
     setLoading(!hasResolvedInitialFetchRef.current);
     setError(null);
     try {
-      const data = await api.getProjects();
+      const data = await fetchProjectsShared();
       setProjects(data.projects);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));

@@ -52,6 +52,20 @@ export interface BridgeSessionView {
   projectName: string;
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
+  /**
+   * The sidecar's own liveness verdict, i.e. exactly what
+   * `GET /sessions/:id/active` would answer for this session.
+   *
+   * It is deliberately *not* re-derivable from `activity` /
+   * `pendingInputType`: a codex session whose TUI died mid-turn keeps
+   * `activity: "in-turn"` while holding no connection, so treating live
+   * activity as "active" would strand it in the inbox forever. Shipping the
+   * verdict inside the bulk `/session-views` snapshot lets callers answer
+   * liveness for a whole list without a per-session round-trip. Optional so
+   * that an older sidecar (which omits it) still degrades to the
+   * activity-derived approximation.
+   */
+  active?: boolean;
 }
 
 /** Status fields shared by every bridge sidecar. */

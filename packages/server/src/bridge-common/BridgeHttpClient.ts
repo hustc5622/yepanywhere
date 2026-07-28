@@ -9,7 +9,11 @@ import type {
 } from "@yep-anywhere/shared";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
-import { bridgeOwnership, isLiveBridgeSessionView } from "./session-state.js";
+import {
+  bridgeOwnership,
+  isActiveBridgeSessionView,
+  isLiveBridgeSessionView,
+} from "./session-state.js";
 import type {
   BridgeController,
   BridgeInputResponse,
@@ -47,6 +51,15 @@ export interface BridgePollEntry<TState extends BridgePollState> {
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const EVENT_STREAM_RETRY_MS = 5_000;
+/**
+ * Floor between poll cycles. Sidecars debounce their push signal to ~20/s, and
+ * each poll costs the sidecar a `/session-views` request plus its upstream
+ * reconciliation, so an unthrottled poll-on-push turned a busy turn into
+ * hundreds of short-lived TCP connections per second (ephemeral port
+ * exhaustion). Pushes arriving inside the window are coalesced into a single
+ * trailing poll, so no change signal is dropped.
+ */
+const MIN_POLL_GAP_MS = 200;
 
 function retryStatusEquals(
   a: SessionRetryStatus | undefined,
@@ -89,6 +102,8 @@ export abstract class BridgeHttpClient<
   private pollTimer: NodeJS.Timeout | null = null;
   private polling = false;
   private pollQueued = false;
+  private pollGapTimer: NodeJS.Timeout | null = null;
+  private lastPollStartedAt = 0;
   private eventStreamAbort: AbortController | null = null;
   protected knownSessions = new Map<string, TState>();
   /**
@@ -147,6 +162,10 @@ export abstract class BridgeHttpClient<
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.pollGapTimer) {
+      clearTimeout(this.pollGapTimer);
+      this.pollGapTimer = null;
+    }
     this.eventStreamAbort?.abort();
     this.eventStreamAbort = null;
   }
@@ -181,7 +200,7 @@ export abstract class BridgeHttpClient<
                 const line = buffer.slice(0, newlineIndex).trim();
                 buffer = buffer.slice(newlineIndex + 1);
                 if (line === "event: changed") {
-                  void this.pollSessions();
+                  this.requestPoll();
                 }
                 newlineIndex = buffer.indexOf("\n");
               }
@@ -242,14 +261,21 @@ export abstract class BridgeHttpClient<
     return view ? this.normalizeSessionView(view) : null;
   }
 
+  /**
+   * Liveness for a single session, at the cost of exactly one sidecar request.
+   *
+   * This used to fan out to `/sessions/:id/active` *and* `/sessions/:id/view`
+   * in parallel, which doubled every liveness probe and - because each sidecar
+   * read triggers a runtime reconciliation - doubled the upstream fan-out
+   * behind it too.
+   *
+   * The view alone is sufficient: it ships the sidecar's own `active` verdict,
+   * so this keeps the previous `active && displayable` semantics exactly (a
+   * missing or undisplayable view reports inactive).
+   */
   async isSessionActive(sessionId: string): Promise<boolean> {
-    const [data, view] = await Promise.all([
-      this.fetchJson<{ active?: boolean }>(
-        `/sessions/${encodeURIComponent(sessionId)}/active`,
-      ),
-      this.getSessionView(sessionId),
-    ]);
-    return Boolean(data?.active && view);
+    const view = await this.getSessionView(sessionId);
+    return view !== null && isActiveBridgeSessionView(view);
   }
 
   async getPendingInputRequest(
@@ -300,6 +326,25 @@ export abstract class BridgeHttpClient<
     }
   }
 
+  /**
+   * Poll now, or schedule a single trailing poll when the previous cycle
+   * started less than `MIN_POLL_GAP_MS` ago. Bursty push signals therefore
+   * collapse into one poll per window instead of one poll per signal.
+   */
+  private requestPoll(): void {
+    if (this.pollGapTimer) return;
+    const elapsed = Date.now() - this.lastPollStartedAt;
+    if (elapsed >= MIN_POLL_GAP_MS) {
+      void this.pollSessions();
+      return;
+    }
+    this.pollGapTimer = setTimeout(() => {
+      this.pollGapTimer = null;
+      void this.pollSessions();
+    }, MIN_POLL_GAP_MS - elapsed);
+    this.pollGapTimer.unref?.();
+  }
+
   private async pollSessions(): Promise<void> {
     if (!this.eventBus) return;
     if (this.polling) {
@@ -309,6 +354,7 @@ export abstract class BridgeHttpClient<
       return;
     }
     this.polling = true;
+    this.lastPollStartedAt = Date.now();
     try {
       const entries = await this.collectPollEntries();
       const nextIds = new Set<string>();
@@ -338,7 +384,7 @@ export abstract class BridgeHttpClient<
       this.polling = false;
       if (this.pollQueued) {
         this.pollQueued = false;
-        void this.pollSessions();
+        this.requestPoll();
       }
     }
   }

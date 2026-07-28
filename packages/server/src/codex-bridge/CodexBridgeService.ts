@@ -403,6 +403,9 @@ export class CodexBridgeService implements CodexBridgeController {
         projectName: session.projectName,
         activity: session.activity,
         pendingInputType: session.pendingInputType,
+        // Published so the main server can answer liveness for a whole list
+        // from this snapshot instead of probing /active per session.
+        active: isLiveBridgeSession(session),
       }));
   }
 
@@ -426,6 +429,7 @@ export class CodexBridgeService implements CodexBridgeController {
       projectName: session.projectName,
       activity: session.activity,
       pendingInputType: session.pendingInputType,
+      active: isLiveBridgeSession(session),
     };
   }
 

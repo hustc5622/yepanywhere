@@ -7,10 +7,7 @@ import {
   toUrlProjectId,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import {
-  isAnyBridgeSessionActive,
-  listAllBridgeSessionViews,
-} from "../bridge-common/multi.js";
+import { listActiveBridgeSessionViews } from "../bridge-common/multi.js";
 import type { BridgeSessionView as CommonBridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import { getProjectGitStatusSummary } from "../git-status-summary.js";
@@ -155,35 +152,24 @@ const PROJECT_GIT_STATUS_CONCURRENCY = 6;
 
 type BridgeSessionView = CommonBridgeSessionView;
 
-async function listBridgeSessionViews(
-  deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
-): Promise<BridgeSessionView[]> {
-  return listAllBridgeSessionViews([
-    deps.codexBridgeService,
-    deps.opencodeBridgeService,
-  ]);
-}
-
-async function isBridgeSessionActive(
-  deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
-  sessionId: string,
-): Promise<boolean> {
-  return isAnyBridgeSessionActive(
-    [deps.codexBridgeService, deps.opencodeBridgeService],
-    sessionId,
-  );
-}
-
+/**
+ * Live bridge sessions for the project list / project session list.
+ *
+ * Both routes only need "is this bridge session live right now", which the
+ * bulk `/session-views` snapshot already answers per entry. This deliberately
+ * stays a single bulk request per bridge: probing `/sessions/:id/active` per
+ * session made `GET /api/projects` cost `1 + sessions x 2` sidecar requests,
+ * and every one of those fanned out inside the OpenCode sidecar into a
+ * per-directory reconciliation - enough short-lived sockets to exhaust the
+ * host's ephemeral ports (EADDRNOTAVAIL).
+ */
 async function getActiveBridgeSessionViews(
   deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
 ): Promise<BridgeSessionView[]> {
-  const views = await listBridgeSessionViews(deps);
-  const active = await Promise.all(
-    views.map(async (view) =>
-      (await isBridgeSessionActive(deps, view.session.id)) ? view : null,
-    ),
-  );
-  return active.filter((view): view is BridgeSessionView => view !== null);
+  return listActiveBridgeSessionViews([
+    deps.codexBridgeService,
+    deps.opencodeBridgeService,
+  ]);
 }
 
 function mergeBridgeSessions(

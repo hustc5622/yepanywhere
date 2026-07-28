@@ -1366,6 +1366,105 @@ describe("OpenCodeBridgeService", () => {
     });
   });
 
+  it("coalesces repeated bridge reads and skips settled directories", async () => {
+    const statusDirectories: string[] = [];
+    const opencodeServer = createServer((req, res) => {
+      const url = requestUrl(req);
+      if (req.method === "GET" && url.pathname === "/global/event") {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        });
+        res.write("\n");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/session/status") {
+        const directory = url.searchParams.get("directory") ?? "";
+        statusDirectories.push(directory);
+        res.writeHead(200, { "content-type": "application/json" });
+        // Only the busy directory reports an active session; reporting it for
+        // every directory would rewrite the session's attributed cwd.
+        res.end(
+          JSON.stringify(
+            directory === "/repo/busy" ? { ses_busy: { type: "busy" } } : {},
+          ),
+        );
+        return;
+      }
+      if (
+        req.method === "GET" &&
+        (url.pathname === "/question" || url.pathname === "/permission")
+      ) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("[]");
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const opencodeServerUrl = await listen(opencodeServer);
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl,
+      lifecycle: { reconcileIntervalMs: 10_000 },
+    });
+    await bridge.start();
+    const base = `http://127.0.0.1:${bridgePort}`;
+    const internals = bridge as unknown as {
+      handleOpenCodeEvent: (
+        event: unknown,
+        origin?: { directory?: string },
+      ) => void;
+    };
+
+    try {
+      internals.handleOpenCodeEvent(
+        {
+          type: "session.updated",
+          properties: { sessionID: "ses_settled", info: { title: "settled" } },
+        },
+        { directory: "/repo/settled" },
+      );
+      internals.handleOpenCodeEvent(
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_busy", status: { type: "busy" } },
+        },
+        { directory: "/repo/busy" },
+      );
+
+      // Let the startup reconciliation triggered by /global/event settle so
+      // its requests are not attributed to the measured loop below.
+      await fetch(`${base}/session-views`);
+      for (let stable = 0; stable < 3; ) {
+        const before = statusDirectories.length;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        stable = statusDirectories.length === before ? stable + 1 : 0;
+      }
+      statusDirectories.length = 0;
+
+      const startedAt = Date.now();
+      for (let index = 0; index < 20; index += 1) {
+        const response = await fetch(`${base}/session-views`);
+        expect(response.status).toBe(200);
+      }
+      const elapsedMs = Date.now() - startedAt;
+
+      // Unthrottled, 20 reads x 3 directories would be 60 status requests.
+      // Now at most one reconciliation per 250ms window, and only for the
+      // directory that still has an unsettled session.
+      const maxWindows = Math.ceil(elapsedMs / 250) + 1;
+      expect(statusDirectories.length).toBeLessThanOrEqual(maxWindows);
+      expect(statusDirectories).not.toContain("/repo/settled");
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it("buffers the OpenAI-compatible SSE gateway route for managed OpenCode", async () => {
     let forwardedBody = "";
     let forwardedAuthorization: string | undefined;
@@ -2934,6 +3033,272 @@ describe("OpenCodeBridgeService", () => {
         "waiting-input",
       );
       expect(bridge.getPendingInputRequest("ses_root")?.id).toBe("per_b");
+    });
+  });
+
+  describe("runtime sync fan-out", () => {
+    const DIRECTORIES = [
+      "/repo/one",
+      "/repo/two",
+      "/repo/three",
+      "/repo/four",
+      "/repo/five",
+      "/repo/six",
+    ];
+
+    interface UpstreamCounts {
+      status: string[];
+      question: string[];
+      permission: string[];
+    }
+
+    function createUpstream(options: { failFirstStatus?: boolean } = {}) {
+      const counts: UpstreamCounts = {
+        status: [],
+        question: [],
+        permission: [],
+      };
+      let statusCalls = 0;
+      const server = createServer((req, res) => {
+        const url = requestUrl(req);
+        const directory = url.searchParams.get("directory") ?? "";
+        if (req.method === "GET" && url.pathname === "/global/event") {
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+          });
+          res.write("\n");
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/session/status") {
+          statusCalls += 1;
+          if (options.failFirstStatus && statusCalls === 1) {
+            res.writeHead(500);
+            res.end("boom");
+            return;
+          }
+          counts.status.push(directory);
+          const index = DIRECTORIES.indexOf(directory);
+          res.writeHead(200, { "content-type": "application/json" });
+          // Each managed directory keeps its own session busy, so every
+          // directory stays in the fast reconciliation lane - the worst case
+          // this guard has to bound.
+          res.end(
+            JSON.stringify(
+              index >= 0 ? { [`ses_${index}`]: { type: "busy" } } : {},
+            ),
+          );
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/question") {
+          counts.question.push(directory);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("[]");
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/permission") {
+          counts.permission.push(directory);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("[]");
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+      return { server, counts };
+    }
+
+    function resetCounts(counts: UpstreamCounts): void {
+      counts.status.length = 0;
+      counts.question.length = 0;
+      counts.permission.length = 0;
+    }
+
+    function totalRequests(counts: UpstreamCounts): number {
+      return (
+        counts.status.length + counts.question.length + counts.permission.length
+      );
+    }
+
+    /** Wait until the background reconcilers stop issuing upstream requests. */
+    async function settle(counts: UpstreamCounts): Promise<void> {
+      for (let stable = 0; stable < 4; ) {
+        const before = totalRequests(counts);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        stable = totalRequests(counts) === before ? stable + 1 : 0;
+      }
+      resetCounts(counts);
+    }
+
+    function seedBusyDirectories(bridge: OpenCodeBridgeService): void {
+      const internals = bridge as unknown as {
+        handleOpenCodeEvent: (
+          event: unknown,
+          origin?: { directory?: string },
+        ) => void;
+      };
+      DIRECTORIES.forEach((directory, index) => {
+        internals.handleOpenCodeEvent(
+          {
+            type: "session.status",
+            properties: {
+              sessionID: `ses_${index}`,
+              status: { type: "busy" },
+            },
+          },
+          { directory },
+        );
+      });
+    }
+
+    it("coalesces concurrent bridge reads into a single directory sync round", async () => {
+      const { server, counts } = createUpstream();
+      const opencodeServerUrl = await listen(server);
+      const bridgePort = await getFreePort();
+      const bridge = new OpenCodeBridgeService({
+        enabled: true,
+        host: "127.0.0.1",
+        port: bridgePort,
+        serverUrl: "http://127.0.0.1:3400",
+        opencodeServerUrl,
+        lifecycle: { reconcileIntervalMs: 60_000 },
+        runtimeSyncMinIntervalMs: 400,
+        idleDirectorySyncIntervalMs: 60_000,
+      });
+      await bridge.start();
+      const base = `http://127.0.0.1:${bridgePort}`;
+
+      try {
+        seedBusyDirectories(bridge);
+        await settle(counts);
+
+        // Let the freshness window lapse so a fresh round is due.
+        await new Promise((resolve) => setTimeout(resolve, 450));
+
+        const reads = [
+          `${base}/session-views`,
+          `${base}/session-views`,
+          `${base}/session-views`,
+          `${base}/sessions/ses_0/view`,
+          `${base}/sessions/ses_0/view`,
+          `${base}/sessions/ses_1/active`,
+          `${base}/sessions/ses_1/active`,
+          `${base}/sessions/ses_2/pending-input`,
+          `${base}/sessions/ses_2/pending-input`,
+          `${base}/status`,
+          `${base}/status`,
+          `${base}/sessions`,
+        ];
+        const responses = await Promise.all(reads.map((url) => fetch(url)));
+        for (const response of responses) expect(response.status).toBe(200);
+
+        // 12 concurrent reads x 7 managed directories x 3 endpoints would be
+        // 252 upstream requests. Single-flight collapses them into one round:
+        // at most 7 directories x 3 endpoints.
+        const managedDirectoryCount = DIRECTORIES.length + 1; // + process.cwd()
+        expect(counts.status.length).toBeLessThanOrEqual(managedDirectoryCount);
+        expect(counts.question.length).toBeLessThanOrEqual(
+          managedDirectoryCount,
+        );
+        expect(counts.permission.length).toBeLessThanOrEqual(
+          managedDirectoryCount,
+        );
+        expect(totalRequests(counts)).toBeLessThanOrEqual(
+          managedDirectoryCount * 3,
+        );
+        expect(totalRequests(counts)).toBeGreaterThan(0);
+
+        // Inside the freshness window further reads are served from memory.
+        resetCounts(counts);
+        const cached = await Promise.all(reads.map((url) => fetch(url)));
+        for (const response of cached) expect(response.status).toBe(200);
+        expect(totalRequests(counts)).toBe(0);
+
+        // Once the window lapses the next round is allowed again.
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        resetCounts(counts);
+        expect((await fetch(`${base}/session-views`)).status).toBe(200);
+        expect(totalRequests(counts)).toBeGreaterThan(0);
+        expect(totalRequests(counts)).toBeLessThanOrEqual(
+          managedDirectoryCount * 3,
+        );
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it("limits per-session reads to that session's own directory", async () => {
+      const { server, counts } = createUpstream();
+      const opencodeServerUrl = await listen(server);
+      const bridgePort = await getFreePort();
+      const bridge = new OpenCodeBridgeService({
+        enabled: true,
+        host: "127.0.0.1",
+        port: bridgePort,
+        serverUrl: "http://127.0.0.1:3400",
+        opencodeServerUrl,
+        lifecycle: { reconcileIntervalMs: 60_000 },
+        runtimeSyncMinIntervalMs: 200,
+        idleDirectorySyncIntervalMs: 60_000,
+      });
+      await bridge.start();
+      const base = `http://127.0.0.1:${bridgePort}`;
+
+      try {
+        seedBusyDirectories(bridge);
+        await settle(counts);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        expect((await fetch(`${base}/sessions/ses_3/view`)).status).toBe(200);
+
+        // A single session read must not sweep the other managed directories.
+        expect(counts.status).toEqual(["/repo/four"]);
+        expect(counts.question).toEqual(["/repo/four"]);
+        expect(counts.permission).toEqual(["/repo/four"]);
+
+        // An unknown session cannot be reconciled at all, so it stays free.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        resetCounts(counts);
+        expect((await fetch(`${base}/sessions/ses_unknown/view`)).status).toBe(
+          200,
+        );
+        expect(totalRequests(counts)).toBe(0);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it("retries the next window after a failed sync instead of poisoning it", async () => {
+      const { server, counts } = createUpstream({ failFirstStatus: true });
+      const opencodeServerUrl = await listen(server);
+      const bridgePort = await getFreePort();
+      const bridge = new OpenCodeBridgeService({
+        enabled: true,
+        host: "127.0.0.1",
+        port: bridgePort,
+        serverUrl: "http://127.0.0.1:3400",
+        opencodeServerUrl,
+        lifecycle: { reconcileIntervalMs: 60_000 },
+        runtimeSyncMinIntervalMs: 200,
+        idleDirectorySyncIntervalMs: 60_000,
+      });
+      await bridge.start();
+      const base = `http://127.0.0.1:${bridgePort}`;
+
+      try {
+        seedBusyDirectories(bridge);
+        await settle(counts);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        // The failed cycle is recorded but must not wedge the reconciler.
+        expect((await fetch(`${base}/session-views`)).status).toBe(200);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        resetCounts(counts);
+        expect((await fetch(`${base}/session-views`)).status).toBe(200);
+        expect(counts.status.length).toBeGreaterThan(0);
+      } finally {
+        await bridge.shutdown();
+      }
     });
   });
 });

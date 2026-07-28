@@ -18,12 +18,11 @@ import {
   sessionMatchesKind,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import { listAllBridgeSessionViews } from "../bridge-common/multi.js";
 import {
-  getAnyBridgeSessionView,
-  isAnyBridgeSessionActive,
-  listAllBridgeSessionViews,
-} from "../bridge-common/multi.js";
-import { isLiveBridgeSessionView } from "../bridge-common/session-state.js";
+  isActiveBridgeSessionView,
+  isLiveBridgeSessionView,
+} from "../bridge-common/session-state.js";
 import type { BridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import type { SessionIndexService } from "../indexes/index.js";
@@ -114,32 +113,6 @@ async function listBridgeSessionViews(
     deps.codexBridgeService,
     deps.opencodeBridgeService,
   ]);
-}
-
-async function getBridgeSessionView(
-  deps: Pick<
-    GlobalSessionsDeps,
-    "codexBridgeService" | "opencodeBridgeService"
-  >,
-  sessionId: string,
-): Promise<NonNullable<AnyBridgeSessionView> | null> {
-  return getAnyBridgeSessionView(
-    [deps.codexBridgeService, deps.opencodeBridgeService],
-    sessionId,
-  );
-}
-
-async function isBridgeSessionActive(
-  deps: Pick<
-    GlobalSessionsDeps,
-    "codexBridgeService" | "opencodeBridgeService"
-  >,
-  sessionId: string,
-): Promise<boolean> {
-  return isAnyBridgeSessionActive(
-    [deps.codexBridgeService, deps.opencodeBridgeService],
-    sessionId,
-  );
 }
 
 function isLiveAnyBridgeSessionView(
@@ -699,17 +672,16 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         const process =
           processBySessionId.get(session.id) ??
           deps.supervisor?.getProcessForSession?.(session.id);
-        const bridgedSession =
-          bridgedSessionById.get(session.id) ??
-          (await getBridgeSessionView(deps, session.id));
-        const bridgeSessionActive = bridgedSession
-          ? await isBridgeSessionActive(deps, session.id)
-          : false;
-        const isBridgeSessionLive =
-          bridgedSession !== null && isLiveAnyBridgeSessionView(bridgedSession);
+        // The bulk `/session-views` snapshot is authoritative here: it already
+        // lists every displayable bridge session and ships the sidecar's own
+        // liveness verdict per entry. Falling back to `/sessions/:id/view` +
+        // `/sessions/:id/active` per candidate session turned one page of
+        // global sessions into two sidecar requests per session per bridge.
+        const bridgedSession = bridgedSessionById.get(session.id) ?? null;
         const isExternal =
           (deps.externalTracker?.isExternal(session.id) ?? false) ||
-          (isBridgeSessionLive && bridgeSessionActive);
+          (bridgedSession !== null &&
+            isActiveBridgeSessionView(bridgedSession));
 
         const runtime = deriveSessionRuntime({
           process,

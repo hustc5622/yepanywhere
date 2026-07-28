@@ -99,6 +99,17 @@ interface OpenCodeBridgeServiceOptions {
     statusFailureGraceMs?: number;
   };
   /**
+   * Freshness window for read-triggered runtime reconciliation. Reads served
+   * inside the window reuse the in-memory snapshot instead of hitting the
+   * upstream OpenCode server again. Primarily an escape hatch for tests.
+   */
+  runtimeSyncMinIntervalMs?: number;
+  /**
+   * Safety-net sweep interval for directories whose sessions are all settled.
+   * Primarily an escape hatch for tests.
+   */
+  idleDirectorySyncIntervalMs?: number;
+  /**
    * When set, session records survive bridge restarts by being persisted to
    * this JSON file (metadata only; live runtime state is rebuilt).
    */
@@ -259,6 +270,22 @@ interface OpenCodeBridgeLifecycle {
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const OPENAI_GATEWAY_PATH_PREFIX = "/gateway/v1";
 const EXTERNAL_DECISION_CONFIRM_TIMEOUT_MS = 30_000;
+/**
+ * Freshness window for reconciliations triggered by inbound bridge HTTP reads.
+ * The main server polls `/session-views` on every push notification (~20/s
+ * during a busy turn); without this floor each poll fanned out
+ * 3 endpoints x N directories of upstream requests, which exhausted the
+ * machine's ephemeral ports with TIME_WAIT sockets.
+ */
+const RUNTIME_SYNC_MIN_INTERVAL_MS = 750;
+/**
+ * Directories whose sessions are all settled are reconciled at most this
+ * often. They cannot change without an upstream event, so the sweep is only a
+ * safety net against missed events / externally started sessions.
+ */
+const IDLE_DIRECTORY_SYNC_INTERVAL_MS = 5_000;
+/** A directory stays in the fast lane for this long after its last activity. */
+const DIRECTORY_ACTIVE_WINDOW_MS = 15_000;
 
 export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private readonly enabled: boolean;
@@ -274,6 +301,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private readonly lifecycleQuietWindowMs: number;
   private readonly lifecycleReconcileIntervalMs: number;
   private readonly lifecycleStatusFailureGraceMs: number;
+  private readonly runtimeSyncMinIntervalMs: number;
+  private readonly idleDirectorySyncIntervalMs: number;
 
   private server: Server | null = null;
   private listening = false;
@@ -291,6 +320,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private inputResponses = new Map<string, Promise<boolean>>();
   private eventAbortController: AbortController | null = null;
   private eventReconnectTimer: NodeJS.Timeout | null = null;
+  /**
+   * In-flight read-triggered reconciliation per managed directory, so that
+   * concurrent bridge reads join one upstream fan-out instead of each starting
+   * their own (single-flight).
+   */
+  private directorySyncInFlight = new Map<string, Promise<void>>();
+  /** Last time each managed directory finished a reconciliation. */
+  private directorySyncedAt = new Map<string, number>();
   private readonly statePath?: string;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   /** Serializes atomic writes so concurrent state changes cannot race on .tmp. */
@@ -319,6 +356,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     this.lifecycleStatusFailureGraceMs =
       options.lifecycle?.statusFailureGraceMs ??
       OPENCODE_STATUS_FAILURE_GRACE_MS;
+    this.runtimeSyncMinIntervalMs =
+      options.runtimeSyncMinIntervalMs ?? RUNTIME_SYNC_MIN_INTERVAL_MS;
+    this.idleDirectorySyncIntervalMs =
+      options.idleDirectorySyncIntervalMs ?? IDLE_DIRECTORY_SYNC_INTERVAL_MS;
   }
 
   async start(): Promise<void> {
@@ -1006,12 +1047,12 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       .map((part) => decodeURIComponent(part));
 
     if (req.method === "GET" && url.pathname === "/readyz") {
-      await this.syncOpenCodeRuntimeState();
+      await this.syncOpenCodeRuntimeStateForRequest();
       writeJson(res, 200, this.getStatus());
       return;
     }
     if (req.method === "GET" && url.pathname === "/status") {
-      await this.syncOpenCodeRuntimeState();
+      await this.syncOpenCodeRuntimeStateForRequest();
       writeJson(res, 200, this.getStatus());
       return;
     }
@@ -1087,12 +1128,12 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
-      await this.syncOpenCodeRuntimeState();
+      await this.syncOpenCodeRuntimeStateForRequest();
       writeJson(res, 200, { sessions: this.listSessions() });
       return;
     }
     if (req.method === "GET" && url.pathname === "/session-views") {
-      await this.syncOpenCodeRuntimeState();
+      await this.syncOpenCodeRuntimeStateForRequest();
       writeJson(res, 200, { sessions: this.listSessionViews() });
       return;
     }
@@ -1153,7 +1194,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       }
 
       if (req.method === "GET" && parts[2] === "view") {
-        await this.syncOpenCodeRuntimeState();
+        await this.syncOpenCodeRuntimeStateForRequest(sessionId);
         writeJson(res, 200, {
           sessionView: this.getSessionView(sessionId),
         });
@@ -1161,7 +1202,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       }
 
       if (req.method === "GET" && parts[2] === "active") {
-        await this.syncOpenCodeRuntimeState();
+        await this.syncOpenCodeRuntimeStateForRequest(sessionId);
         writeJson(res, 200, {
           active: this.isSessionActive(sessionId),
         });
@@ -1193,7 +1234,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       }
 
       if (req.method === "GET" && parts[2] === "pending-input") {
-        await this.syncOpenCodeRuntimeState();
+        await this.syncOpenCodeRuntimeStateForRequest(sessionId);
         writeJson(res, 200, {
           request: this.getPendingInputRequest(sessionId),
         });
@@ -1271,6 +1312,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         }
         const responseKey = `${sessionId}\0${body.requestId}`;
         if (!this.inputResponses.has(responseKey)) {
+          // Approval replies are rare and must not act on stale state, so this
+          // path keeps the unthrottled full reconciliation.
           await this.syncOpenCodeRuntimeState();
         }
         const accepted = await this.respondToInput(
@@ -1997,6 +2040,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       projectName: session.projectName,
       activity: session.activity,
       pendingInputType: session.pendingInputType,
+      // Published so the main server can answer liveness for a whole list from
+      // this snapshot instead of probing /active per session.
+      active: isLiveOpenCodeBridgeSession(session),
     };
     return {
       ...view,
@@ -2557,26 +2603,116 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
   }
 
+  /**
+   * Full reconciliation across every managed directory. Used when state may
+   * have drifted arbitrarily (event stream (re)connect, approval replies) and
+   * therefore deliberately unthrottled.
+   */
   private async syncOpenCodeRuntimeState(baseUrl?: string): Promise<void> {
     this.sweepExternalInstances();
+    const directories = this.managedOpenCodeDirectories();
+    await this.runOpenCodeRuntimeSync(directories, baseUrl);
+  }
+
+  /**
+   * Reconciliation for inbound bridge HTTP reads (`/status`, `/session-views`,
+   * `/sessions/:id/view`, ...).
+   *
+   * The main server reads those endpoints on every push notification, so this
+   * path is the hot one and must stay cheap:
+   * - single-flight per directory: concurrent reads join the in-flight
+   *   fan-out instead of each starting their own;
+   * - a finished reconciliation is reused for `runtimeSyncMinIntervalMs`;
+   * - only directories with unsettled sessions are reconciled every window,
+   *   settled ones fall back to the slow safety-net sweep;
+   * - per-session reads (`sessionId` given) only reconcile that session's own
+   *   directory, never all managed ones.
+   *
+   * This is a safety net, not the primary state source: the upstream SSE
+   * stream (`/global/event`) keeps the in-memory view current, so serving
+   * state that is up to `runtimeSyncMinIntervalMs` behind the reconciler is
+   * not observable in the UI.
+   */
+  private async syncOpenCodeRuntimeStateForRequest(
+    sessionId?: string,
+  ): Promise<void> {
+    this.sweepExternalInstances();
+    const now = Date.now();
+    const candidates =
+      sessionId === undefined
+        ? this.openCodeDirectoriesForSweep()
+        : this.openCodeDirectoriesForSession(sessionId);
+    const due = candidates.filter((directory) =>
+      this.isDirectorySyncDue(directory, now),
+    );
+    if (due.length === 0) return;
+
+    const joined: Promise<void>[] = [];
+    const fresh: string[] = [];
+    for (const directory of due) {
+      const inFlight = this.directorySyncInFlight.get(directory);
+      if (inFlight) {
+        joined.push(inFlight);
+        continue;
+      }
+      fresh.push(directory);
+    }
+
+    if (fresh.length > 0) {
+      // runOpenCodeRuntimeSync never rejects (it records lastError instead), so
+      // a failed cycle cannot leave a rejected promise pinned in the map. The
+      // finally block clears it either way, and directorySyncedAt is advanced
+      // so the next window retries rather than hammering a broken upstream.
+      const run = this.runOpenCodeRuntimeSync(fresh);
+      for (const directory of fresh) {
+        this.directorySyncInFlight.set(directory, run);
+      }
+      joined.push(
+        run.finally(() => {
+          for (const directory of fresh) {
+            if (this.directorySyncInFlight.get(directory) === run) {
+              this.directorySyncInFlight.delete(directory);
+            }
+          }
+        }),
+      );
+    }
+
+    await Promise.all(joined);
+  }
+
+  private async runOpenCodeRuntimeSync(
+    directories: string[],
+    baseUrl?: string,
+  ): Promise<void> {
     try {
       const opencodeServerUrl =
         baseUrl ?? (await this.ensureOpenCodeServerUrl());
       await Promise.all([
-        this.syncOpenCodeSessionStatus(opencodeServerUrl),
-        this.syncOpenCodePendingQuestions(opencodeServerUrl),
-        this.syncOpenCodePendingPermissions(opencodeServerUrl),
+        this.syncOpenCodeSessionStatus(opencodeServerUrl, directories),
+        this.syncOpenCodePendingQuestions(opencodeServerUrl, directories),
+        this.syncOpenCodePendingPermissions(opencodeServerUrl, directories),
       ]);
       this.lastError = null;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
+    } finally {
+      // Stamped on completion (not on entry) so a slow cycle cannot make the
+      // freshness window look newer than the data it actually produced.
+      const syncedAt = Date.now();
+      for (const directory of directories) {
+        this.directorySyncedAt.set(directory, syncedAt);
+      }
     }
   }
 
-  private async syncOpenCodeSessionStatus(baseUrl?: string): Promise<void> {
+  private async syncOpenCodeSessionStatus(
+    baseUrl?: string,
+    directories?: string[],
+  ): Promise<void> {
     const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
     await Promise.all(
-      this.managedOpenCodeDirectories().map((directory) =>
+      (directories ?? this.managedOpenCodeDirectories()).map((directory) =>
         this.syncOpenCodeDirectoryStatus(opencodeServerUrl, directory),
       ),
     );
@@ -2588,6 +2724,74 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       if (!record.instanceId) directories.add(record.cwd);
     }
     return Array.from(directories);
+  }
+
+  /**
+   * Sweep scope for list-shaped reads: every managed directory. Also forgets
+   * bookkeeping for directories that no longer have sessions.
+   */
+  private openCodeDirectoriesForSweep(): string[] {
+    const managed = this.managedOpenCodeDirectories();
+    const known = new Set(managed);
+    for (const directory of this.directorySyncedAt.keys()) {
+      if (!known.has(directory)) this.directorySyncedAt.delete(directory);
+    }
+    return managed;
+  }
+
+  /**
+   * Sweep scope for a per-session read: only the directory that session lives
+   * in. Sessions driven by an external OpenCode instance have no directory we
+   * can reconcile over HTTP - their state arrives through the forwarder plugin
+   * - so those reads are served purely from memory.
+   */
+  private openCodeDirectoriesForSession(sessionId: string): string[] {
+    const record = this.sessions.get(sessionId);
+    if (!record || record.instanceId) return [];
+    return [record.cwd];
+  }
+
+  /**
+   * Whether a directory may be reconciled again: never inside the freshness
+   * window, then every window while it holds an unsettled session, otherwise
+   * only when the slow safety-net sweep is due.
+   */
+  private isDirectorySyncDue(directory: string, now: number): boolean {
+    const age = now - (this.directorySyncedAt.get(directory) ?? 0);
+    if (age < this.runtimeSyncMinIntervalMs) return false;
+    if (this.hasUnsettledOpenCodeSession(directory, now)) return true;
+    return age >= this.idleDirectorySyncIntervalMs;
+  }
+
+  /**
+   * True when a directory still holds a session whose lifecycle could be
+   * corrected by reconciliation: a live/retrying/idle-candidate turn, a
+   * pending approval, or a turn that ended so recently that trailing status
+   * reads still matter. Settled sessions can only change through an upstream
+   * event, which arrives on the SSE stream.
+   */
+  private hasUnsettledOpenCodeSession(directory: string, now: number): boolean {
+    for (const [sessionId, record] of this.sessions) {
+      if (record.instanceId || record.cwd !== directory) continue;
+      if (this.pendingInputs.has(sessionId)) return true;
+      const lifecycle = this.lifecycles.get(sessionId);
+      if (!lifecycle) {
+        // No lifecycle observed yet: trust the persisted record.
+        if (
+          record.active ||
+          record.activity === "in-turn" ||
+          record.activity === "waiting-input"
+        ) {
+          return true;
+        }
+        continue;
+      }
+      const { state } = lifecycle;
+      if (state.phase !== "idle" && state.phase !== "terminal") return true;
+      if (state.waitingInput) return true;
+      if (now - state.lastActivityAt < DIRECTORY_ACTIVE_WINDOW_MS) return true;
+    }
+    return false;
   }
 
   private async syncOpenCodeDirectoryStatus(
@@ -2650,10 +2854,13 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
   }
 
-  private async syncOpenCodePendingQuestions(baseUrl?: string): Promise<void> {
+  private async syncOpenCodePendingQuestions(
+    baseUrl?: string,
+    directories?: string[],
+  ): Promise<void> {
     const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
     await Promise.all(
-      this.managedOpenCodeDirectories().map((directory) =>
+      (directories ?? this.managedOpenCodeDirectories()).map((directory) =>
         this.syncOpenCodeDirectoryPendingQuestions(
           opencodeServerUrl,
           directory,
@@ -2733,10 +2940,11 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
    */
   private async syncOpenCodePendingPermissions(
     baseUrl?: string,
+    directories?: string[],
   ): Promise<void> {
     const opencodeServerUrl = baseUrl ?? (await this.ensureOpenCodeServerUrl());
     await Promise.all(
-      this.managedOpenCodeDirectories().map((directory) =>
+      (directories ?? this.managedOpenCodeDirectories()).map((directory) =>
         this.syncOpenCodeDirectoryPendingPermissions(
           opencodeServerUrl,
           directory,

@@ -16,10 +16,12 @@ import {
 import { Hono } from "hono";
 import {
   getAnyBridgePendingInputRequest,
-  isAnyBridgeSessionActive,
   listAllBridgeSessionViews,
 } from "../bridge-common/multi.js";
-import { isLiveBridgeSessionView } from "../bridge-common/session-state.js";
+import {
+  isActiveBridgeSessionView,
+  isLiveBridgeSessionView,
+} from "../bridge-common/session-state.js";
 import type { BridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import type { SessionIndexService } from "../indexes/index.js";
@@ -85,16 +87,6 @@ async function listBridgeSessionViews(
     deps.codexBridgeService,
     deps.opencodeBridgeService,
   ]);
-}
-
-async function isBridgeSessionActive(
-  deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
-  sessionId: string,
-): Promise<boolean> {
-  return isAnyBridgeSessionActive(
-    [deps.codexBridgeService, deps.opencodeBridgeService],
-    sessionId,
-  );
 }
 
 /**
@@ -237,15 +229,14 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
     const bridgedSessionById = new Map(
       bridgeSessionViews.map((item) => [item.session.id, item]),
     );
-    const activeBridgeSessionIds = new Set<string>();
-    await Promise.all(
-      bridgeSessionViews.map(async (item) => {
-        if (!isLiveAnyBridgeSessionView(item)) return;
-        const isActive = await isBridgeSessionActive(deps, item.session.id);
-        if (isActive) {
-          activeBridgeSessionIds.add(item.session.id);
-        }
-      }),
+    // The sidecar's liveness verdict rides along in the bulk snapshot, so this
+    // no longer costs one extra bridge request per bridge session. Semantics
+    // are unchanged: a stale view that still claims `in-turn` while the CLI
+    // holds no connection stays out of the active/needs-attention tiers.
+    const activeBridgeSessionIds = new Set(
+      bridgeSessionViews
+        .filter((item) => isActiveBridgeSessionView(item))
+        .map((item) => item.session.id),
     );
 
     // Fetch sessions from all projects in parallel

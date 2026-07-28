@@ -923,17 +923,21 @@ describe("Global Sessions Routes", () => {
       const session = createSession("sess1", "proj1", minutesAgo(5), {
         provider: "codex",
       });
+      // A real sidecar always lists the session in its bulk snapshot too, and
+      // ships its own liveness verdict with it.
+      const bridgeView = {
+        session: {
+          ...session,
+          ownership: { owner: "external" },
+          source: "codex-bridge",
+        },
+        projectName: "project",
+        activity: "idle",
+        active: true,
+      };
       const codexBridgeService = {
-        listSessionViews: vi.fn(async () => []),
-        getSessionView: vi.fn(async () => ({
-          session: {
-            ...session,
-            ownership: { owner: "external" },
-            source: "codex-bridge",
-          },
-          projectName: "project",
-          activity: "idle",
-        })),
+        listSessionViews: vi.fn(async () => [bridgeView]),
+        getSessionView: vi.fn(async () => bridgeView),
         isSessionActive: vi.fn(async () => true),
       } as unknown as CodexBridgeController;
 
@@ -959,20 +963,22 @@ describe("Global Sessions Routes", () => {
         lastErrorMessage: "stale persisted error",
         retryStatus: { attempt: 2, message: "stale retry" },
       });
+      const bridgeView = {
+        session: {
+          ...session,
+          ownership: { owner: "external" },
+          source: "codex-bridge",
+          lastTurnStatus: undefined,
+          lastErrorMessage: undefined,
+          retryStatus: undefined,
+        },
+        projectName: "project",
+        activity: "idle",
+        active: true,
+      };
       const codexBridgeService = {
-        listSessionViews: vi.fn(async () => []),
-        getSessionView: vi.fn(async () => ({
-          session: {
-            ...session,
-            ownership: { owner: "external" },
-            source: "codex-bridge",
-            lastTurnStatus: undefined,
-            lastErrorMessage: undefined,
-            retryStatus: undefined,
-          },
-          projectName: "project",
-          activity: "idle",
-        })),
+        listSessionViews: vi.fn(async () => [bridgeView]),
+        getSessionView: vi.fn(async () => bridgeView),
         isSessionActive: vi.fn(async () => true),
       } as unknown as CodexBridgeController;
 

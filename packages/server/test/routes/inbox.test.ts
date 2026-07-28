@@ -232,15 +232,19 @@ describe("Inbox Routes", () => {
       const session = createSession("bridge-sess", "proj1", hoursAgo(2), {
         provider: "codex",
       });
+      // Shape a real codex sidecar emits for a session whose TUI died
+      // mid-turn: no connection left (active: false, ownership none) while the
+      // last observed activity is still "in-turn".
       const codexBridgeService = {
         listSessionViews: vi.fn(async () => [
           {
             session: {
               ...session,
-              ownership: { owner: "external" },
+              ownership: { owner: "none" },
             },
             projectName: project.name,
             activity: "in-turn" as const,
+            active: false,
           },
         ]),
         isSessionActive: vi.fn(async () => false),
@@ -260,9 +264,9 @@ describe("Inbox Routes", () => {
 
       expect(result.active).toHaveLength(0);
       expect(result.needsAttention).toHaveLength(0);
-      expect(codexBridgeService.isSessionActive).toHaveBeenCalledWith(
-        "bridge-sess",
-      );
+      // The verdict comes from the bulk snapshot: no per-session probe at all,
+      // which is what kept /api/inbox O(1) in bridge requests.
+      expect(codexBridgeService.isSessionActive).not.toHaveBeenCalled();
     });
 
     it("categorizes session updated in last hour into recentActivity", async () => {

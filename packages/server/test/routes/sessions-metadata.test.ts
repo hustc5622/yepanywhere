@@ -420,6 +420,67 @@ describe("Sessions metadata route", () => {
     }
   });
 
+  it("resolves bridge liveness for session detail without a second probe", async () => {
+    const project = createProject();
+    const summary: SessionSummary = {
+      id: "ses_detail",
+      projectId: project.id,
+      title: "OpenCode detail session",
+      fullTitle: "OpenCode detail session",
+      createdAt: "2026-07-20T09:00:00.000Z",
+      updatedAt: "2026-07-20T09:05:00.000Z",
+      messageCount: 2,
+      ownership: { owner: "none" },
+      provider: "opencode",
+      source: "opencode-bridge",
+    };
+    const reader = {
+      getSessionSummary: vi.fn(async () => summary),
+      getSession: vi.fn(async () => ({
+        summary,
+        data: {
+          provider: "opencode" as const,
+          session: { messages: [] },
+        },
+        messagesAlreadyProjected: true,
+      })),
+    } as unknown as ISessionReader;
+    const isSessionActive = vi.fn(async () => true);
+    const opencodeBridgeService = {
+      getSessionView: vi.fn(async () => ({
+        session: { ...summary, ownership: { owner: "external" as const } },
+        projectName: project.name,
+        activity: "in-turn" as const,
+        active: true,
+      })),
+      isSessionActive,
+      getPendingInputRequest: vi.fn(async () => null),
+    } as unknown as NonNullable<SessionsDeps["opencodeBridgeService"]>;
+
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+        wasEverOwned: vi.fn(async () => false),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(() => reader),
+      opencodeBridgeService,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}`,
+    );
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.session.ownership).toEqual({ owner: "external" });
+    // The view already answered liveness; probing /active again doubled the
+    // bridge (and, behind it, upstream) request count on every session open.
+    expect(isSessionActive).not.toHaveBeenCalled();
+  });
+
   it("prefers persisted provider over conflicting client resume provider", async () => {
     const project = createProject();
     const resumeSession = vi.fn(async () => ({
