@@ -23,8 +23,15 @@ type Listener = (event: ProcessEvent) => void | Promise<void>;
 function createMockProcess(overrides?: Partial<Record<string, unknown>>): {
   process: Process;
   fireEvent: (event: ProcessEvent) => Promise<void>;
+  /**
+   * Fire without awaiting, mirroring `Process.emit`, which calls listeners
+   * synchronously and ignores the returned promise. Use `drain` afterwards.
+   */
+  fireEventDetached: (event: ProcessEvent) => void;
+  drain: () => Promise<void>;
 } {
   let listener: Listener | null = null;
+  const detached: Array<void | Promise<void>> = [];
 
   const process = {
     id: "proc-1",
@@ -53,7 +60,20 @@ function createMockProcess(overrides?: Partial<Record<string, unknown>>): {
     if (listener) await listener(event);
   };
 
-  return { process, fireEvent };
+  const fireEventDetached = (event: ProcessEvent) => {
+    if (listener) detached.push(listener(event));
+  };
+
+  const drain = async () => {
+    await Promise.all(detached);
+    // Let trailing microtasks settle (fake timers are active in these suites,
+    // so timer-based waiting is not an option).
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+  };
+
+  return { process, fireEvent, fireEventDetached, drain };
 }
 
 type BusHandler = (event: BusEvent) => void;
@@ -393,6 +413,138 @@ describe("createSessionSubscription", () => {
     expect(input?._rawPatch).toContain("diff --git a/src/example.ts");
     expect(Array.isArray(input?._structuredPatch)).toBe(true);
     expect(input?._structuredPatch?.length).toBeGreaterThan(0);
+  });
+
+  it("preserves provider emission order across uneven augmentation work", async () => {
+    // OpenCode returns `[message_stop, assistant(text), assistant(tool_use)]`
+    // from a single upstream event. The text message carries string content, so
+    // it goes through final-markdown rendering and the streaming coordinator,
+    // while the tool_use message needs no augmentation. Handling events
+    // concurrently let the tool row overtake the text it follows, which pushed
+    // streamed commentary below its tool call until the authoritative snapshot
+    // rewrote the transcript.
+    const { process, fireEventDetached, drain } = createMockProcess();
+    const { emit, events } = collectEmit();
+
+    createSessionSubscription(process, emit);
+
+    fireEventDetached({
+      type: "message",
+      message: {
+        type: "stream_event",
+        event: {
+          type: "message_start",
+          message: { id: "msg_step_1", role: "assistant", content: [] },
+        },
+      },
+    } as unknown as ProcessEvent);
+    fireEventDetached({
+      type: "message",
+      message: {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Reading the file." },
+        },
+      },
+    } as unknown as ProcessEvent);
+    fireEventDetached({
+      type: "message",
+      message: { type: "stream_event", event: { type: "message_stop" } },
+    } as unknown as ProcessEvent);
+    fireEventDetached({
+      type: "message",
+      message: {
+        type: "assistant",
+        uuid: "msg_step_1",
+        message: { role: "assistant", content: "Reading the file." },
+      },
+    } as unknown as ProcessEvent);
+    fireEventDetached({
+      type: "message",
+      message: {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_1", name: "Bash", input: {} },
+          ],
+        },
+      },
+    } as unknown as ProcessEvent);
+
+    await drain();
+
+    const describeMessage = (data: unknown): string => {
+      const message = data as Record<string, unknown>;
+      if (message.type === "stream_event") {
+        return `stream:${(message.event as Record<string, unknown> | undefined)?.type}`;
+      }
+      const content = (message.message as { content?: unknown } | undefined)
+        ?.content;
+      if (typeof content === "string") return "assistant:text";
+      if (Array.isArray(content)) {
+        return `assistant:${(content[0] as { type?: string })?.type}`;
+      }
+      return "assistant:unknown";
+    };
+
+    expect(
+      events
+        .filter(([type]) => type === "message")
+        .map(([, data]) => describeMessage(data)),
+    ).toEqual([
+      "stream:message_start",
+      "stream:content_block_delta",
+      "stream:message_stop",
+      "assistant:text",
+      "assistant:tool_use",
+    ]);
+  });
+
+  it("does not re-accumulate streamed text from its final assistant message", async () => {
+    const accumulateStreamingText = vi.fn();
+    const { process, fireEvent } = createMockProcess({
+      accumulateStreamingText,
+    });
+    const { emit } = collectEmit();
+
+    createSessionSubscription(process, emit);
+
+    await fireEvent({
+      type: "message",
+      message: {
+        type: "stream_event",
+        event: {
+          type: "message_start",
+          message: { id: "msg_step_1", role: "assistant", content: [] },
+        },
+      },
+    } as unknown as ProcessEvent);
+    await fireEvent({
+      type: "message",
+      message: {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Reading the file." },
+        },
+      },
+    } as unknown as ProcessEvent);
+    await fireEvent({
+      type: "message",
+      message: {
+        type: "assistant",
+        uuid: "msg_step_1",
+        message: { role: "assistant", content: "Reading the file." },
+      },
+    } as unknown as ProcessEvent);
+
+    expect(accumulateStreamingText.mock.calls).toEqual([
+      ["msg_step_1", "Reading the file."],
+    ]);
   });
 
   it("emits complete and stops further events", async () => {

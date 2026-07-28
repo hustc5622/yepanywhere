@@ -63,6 +63,7 @@ import {
   getOpenCodeAttachmentLabel,
   hasYepUploadMetadataForFile,
 } from "../../opencode/attachments.js";
+import { formatOpenCodeError } from "../../opencode/error.js";
 import {
   type OpenCodeQuestion,
   buildOpenCodeQuestionAnswers,
@@ -213,6 +214,10 @@ interface OpenCodeConfigProvidersResponse {
     models?: Record<
       string,
       {
+        api?: {
+          id?: string;
+          npm?: string;
+        };
         variants?: Record<string, unknown>;
       }
     >;
@@ -318,6 +323,73 @@ function requestProtocolForOpenCodeNpm(
   if (npm === "@ai-sdk/openai-compatible") return "openai-compatible";
   if (npm === "@ai-sdk/anthropic") return "anthropic";
   return null;
+}
+
+function anthropicModelUsesAdaptiveThinking(apiId: string): boolean {
+  // Anthropic's dated aliases (for example claude-opus-4-20250514) still use
+  // token-budget thinking. Remove release-date segments before parsing the
+  // semantic version so the date is not mistaken for a huge minor version.
+  const normalized = apiId
+    .toLowerCase()
+    .replace(/[-_.@]\d{8}(?=[^0-9]|$)/g, "");
+  const directOpus =
+    /(?:^|[^a-z0-9])(?:claude[-_.])?opus[-_.](\d+)(?:[.-](\d+))?(?:[^0-9]|$)/i.exec(
+      normalized,
+    );
+  const invertedOpus =
+    /(?:^|[^a-z0-9])claude[-_.](\d+)(?:[.-](\d+))?[-_.]opus(?:[^a-z0-9]|$)/i.exec(
+      normalized,
+    );
+  const opus = directOpus ?? invertedOpus;
+  if (opus) {
+    const major = Number(opus[1]);
+    const minor = Number(opus[2] ?? 0);
+    if (major > 4 || (major === 4 && minor >= 7)) return true;
+  }
+
+  const directSonnet =
+    /(?:^|[^a-z0-9])(?:claude[-_.])?sonnet[-_.](\d+)(?:[^0-9]|$)/i.exec(
+      normalized,
+    );
+  const invertedSonnet =
+    /(?:^|[^a-z0-9])claude[-_.](\d+)[-_.]sonnet(?:[^a-z0-9]|$)/i.exec(
+      normalized,
+    );
+  const sonnetMajor = Number((directSonnet ?? invertedSonnet)?.[1] ?? 0);
+  return sonnetMajor >= 5 || normalized.includes("fable-5");
+}
+
+/**
+ * OpenCode versions before the adaptive-model matcher recognizes bare names
+ * such as `claude-opus-5` can advertise a legacy `thinking.type=enabled`
+ * variant that the upstream model rejects. Only suppress that contradictory
+ * catalog entry; once OpenCode advertises adaptive thinking, the variant is
+ * accepted normally again.
+ */
+function isInvalidLegacyAdaptiveVariant(
+  modelId: string,
+  model: {
+    api?: unknown;
+    variants?: Record<string, unknown>;
+  },
+  variant: string,
+): boolean {
+  const api = isRecord(model.api) ? model.api : undefined;
+  const npm = api?.npm;
+  if (
+    npm !== "@ai-sdk/anthropic" &&
+    npm !== "@ai-sdk/google-vertex/anthropic"
+  ) {
+    return false;
+  }
+
+  const apiId = typeof api?.id === "string" ? api.id : modelId;
+  if (!anthropicModelUsesAdaptiveThinking(apiId)) return false;
+
+  const config = model.variants?.[variant];
+  const thinking =
+    isRecord(config) && isRecord(config.thinking) ? config.thinking : undefined;
+  return thinking?.type === "enabled";
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -683,10 +755,22 @@ export class OpenCodeProvider implements AgentProvider {
       );
       const api = isRecord(metadata?.api) ? metadata.api : undefined;
       const protocol = requestProtocolForOpenCodeNpm(api?.npm);
-      const variants = isRecord(metadata?.variants)
-        ? Object.keys(metadata.variants).map((reasoningEffort) => ({
-            reasoningEffort,
-          }))
+      const variantConfigs = isRecord(metadata?.variants)
+        ? metadata.variants
+        : undefined;
+      const variants = variantConfigs
+        ? Object.keys(variantConfigs)
+            .filter(
+              (reasoningEffort) =>
+                !isInvalidLegacyAdaptiveVariant(
+                  header.modelId,
+                  { api, variants: variantConfigs },
+                  reasoningEffort,
+                ),
+            )
+            .map((reasoningEffort) => ({
+              reasoningEffort,
+            }))
         : [];
       const byProtocol: ReasoningEffortsByProtocol = {};
       if (protocol && variants.length > 0) byProtocol[protocol] = variants;
@@ -1600,6 +1684,7 @@ export class OpenCodeProvider implements AgentProvider {
     );
     const unsettledToolParts = new Set<string>();
     let resultReady = false;
+    let terminalError: string | null = null;
     let nextSafetyReconcileAt = Date.now() + this.lifecycleReconcileIntervalMs;
     const transitionLifecycle = (action: OpenCodeLifecycleAction) => {
       const previous = lifecycle;
@@ -2137,6 +2222,7 @@ export class OpenCodeProvider implements AgentProvider {
         if (state.postError) {
           abortSse();
           const error = state.postError;
+          terminalError = error.message;
           log.error({ error }, "Failed to send message to OpenCode");
           await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
           yield {
@@ -2149,6 +2235,7 @@ export class OpenCodeProvider implements AgentProvider {
 
         if (state.responseError) {
           abortSse();
+          terminalError = state.responseError;
           await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
           yield {
             type: "error",
@@ -2159,6 +2246,7 @@ export class OpenCodeProvider implements AgentProvider {
         }
 
         if (state.sseError) {
+          terminalError = state.sseError.message;
           await this.abortOpenCodeSession(baseUrl, opencodeSessionId, cwd);
           yield {
             type: "error",
@@ -2212,10 +2300,15 @@ export class OpenCodeProvider implements AgentProvider {
       }
     }
 
-    // Process transitions to idle on any result. Emit exactly once, and only
-    // after the projector confirmed stable terminal idle.
-    if (resultReady && !signal.aborted) {
-      yield this.createResultMessage(sessionId, emissionState.latestUsage);
+    // Process transitions to idle on any result. A failed prompt returns to
+    // OpenCode's resident queue loop just like a successful one, so it needs an
+    // explicit error result as the turn boundary too.
+    if (!signal.aborted && (resultReady || terminalError)) {
+      yield this.createResultMessage(
+        sessionId,
+        emissionState.latestUsage,
+        terminalError,
+      );
     }
   }
 
@@ -2454,11 +2547,19 @@ export class OpenCodeProvider implements AgentProvider {
   private createResultMessage(
     sessionId: string,
     usage?: Record<string, unknown>,
+    error?: string | null,
   ): SDKMessage {
     return {
       type: "result",
       session_id: sessionId,
       ...(usage ? { usage } : {}),
+      ...(error
+        ? {
+            subtype: "error_during_execution",
+            is_error: true,
+            error,
+          }
+        : {}),
     } as SDKMessage;
   }
 
@@ -2896,8 +2997,13 @@ export class OpenCodeProvider implements AgentProvider {
     blockType: "text" | "thinking",
   ): SDKMessage[] {
     const streamState = this.getAssistantStreamState(emissionState);
+    // OpenCode creates a fresh assistant message for every post-tool model
+    // step. The part's native messageID is therefore authoritative; using the
+    // prior message.updated id here causes the client to replace an earlier row
+    // in place instead of appending the final response after its tool calls.
     const messageId =
-      streamState.messageId ?? currentMessageId ?? part.messageID;
+      part.messageID || currentMessageId || streamState.messageId;
+    if (!messageId) return [];
 
     if (
       streamState.messageId &&
@@ -3121,8 +3227,26 @@ export class OpenCodeProvider implements AgentProvider {
       const provider = catalog.providers?.find(
         (item) => item.id === parsedModel.providerID,
       );
-      const variants = provider?.models?.[parsedModel.modelID]?.variants;
+      const catalogModel = provider?.models?.[parsedModel.modelID];
+      const variants = catalogModel?.variants;
       if (variants && Object.hasOwn(variants, requestedVariant)) {
+        if (
+          catalogModel &&
+          isInvalidLegacyAdaptiveVariant(
+            parsedModel.modelID,
+            catalogModel,
+            requestedVariant,
+          )
+        ) {
+          getLogger().warn(
+            {
+              model,
+              requestedVariant,
+            },
+            "OpenCode advertised a legacy thinking variant for an adaptive Anthropic model; using Default",
+          );
+          return undefined;
+        }
         return requestedVariant;
       }
 
@@ -3627,31 +3751,7 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   private formatOpenCodeError(error: unknown): string | null {
-    if (!error) return null;
-
-    if (typeof error === "string") return error;
-    if (!isRecord(error)) return String(error);
-
-    const data = error.data;
-    if (isRecord(data)) {
-      const message = data.message;
-      if (typeof message === "string" && message.trim()) {
-        return message;
-      }
-    }
-
-    if (typeof error.message === "string" && error.message.trim()) {
-      return error.message;
-    }
-
-    if (typeof error.name === "string" && error.name.trim()) {
-      return error.name;
-    }
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return "OpenCode message failed";
-    }
+    return formatOpenCodeError(error);
   }
 
   /**

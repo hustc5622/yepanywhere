@@ -137,90 +137,119 @@ export function createSessionSubscription(
     }
   }, 30_000);
 
+  // Message ids the provider has streamed token-by-token. Their final message
+  // must not be replayed into the markdown coordinator or the catch-up buffer.
+  const streamedMessageIds = new Set<string>();
+
+  // Augmentation is async, so handling events concurrently would let cheap
+  // events overtake expensive ones and reorder the outbound stream. OpenCode
+  // returns `[message_stop, assistant(text), assistant(tool_use)]` from a single
+  // upstream event; without this queue the tool_use rows (no augmentation work)
+  // arrive before the text they follow, so the streamed commentary is dropped
+  // from its place and only reappears in the final authoritative snapshot.
+  let eventQueue: Promise<void> = Promise.resolve();
+  // Returns the queued promise so callers (and tests) can await drain; the
+  // Process listener contract ignores it.
+  const enqueue = (handler: () => Promise<void>): Promise<void> => {
+    eventQueue = eventQueue.then(handler).catch((err) => {
+      options?.onError?.(err);
+    });
+    return eventQueue;
+  };
+
   // IMPORTANT: Subscribe BEFORE capturing state to prevent race condition.
   // Any state change is guaranteed to either:
   // 1. Be captured in the state snapshot below (if it happened before)
   // 2. Be received by this subscriber (if it happened after)
-  const unsubscribe = process.subscribe(async (event: ProcessEvent) => {
-    if (completed) return;
+  const unsubscribe = process.subscribe((event: ProcessEvent) =>
+    enqueue(async () => {
+      if (completed) return;
 
-    try {
-      switch (event.type) {
-        case "message": {
-          const message = normalizeStreamMessage(
-            event.message as Record<string, unknown>,
-          );
-          const aug = await getAugmenter();
-          await aug.processMessage(message);
-          emit("message", markSubagent(message));
-
-          const startMessageId =
-            extractMessageIdFromStart(message) ??
-            extractIdFromAssistant(message);
-          if (startMessageId) {
-            currentStreamingMessageId = startMessageId;
-          }
-
-          const textDelta =
-            extractTextDelta(message) ?? extractTextFromAssistant(message);
-          if (textDelta && currentStreamingMessageId) {
-            process.accumulateStreamingText(
-              currentStreamingMessageId,
-              textDelta,
+      try {
+        switch (event.type) {
+          case "message": {
+            const message = normalizeStreamMessage(
+              event.message as Record<string, unknown>,
             );
+            const aug = await getAugmenter();
+            await aug.processMessage(message);
+            emit("message", markSubagent(message));
+
+            const streamStartMessageId = extractMessageIdFromStart(message);
+            if (streamStartMessageId) {
+              streamedMessageIds.add(streamStartMessageId);
+            }
+            const startMessageId =
+              streamStartMessageId ?? extractIdFromAssistant(message);
+            if (startMessageId) {
+              currentStreamingMessageId = startMessageId;
+            }
+
+            const finalId = extractIdFromAssistant(message);
+            const alreadyStreamed =
+              finalId !== null && streamedMessageIds.has(finalId);
+            const textDelta =
+              extractTextDelta(message) ??
+              (alreadyStreamed ? null : extractTextFromAssistant(message));
+            if (textDelta && currentStreamingMessageId) {
+              process.accumulateStreamingText(
+                currentStreamingMessageId,
+                textDelta,
+              );
+            }
+
+            if (isStreamingComplete(message)) {
+              currentStreamingMessageId = null;
+              process.clearStreamingText();
+            }
+            break;
           }
 
-          if (isStreamingComplete(message)) {
-            currentStreamingMessageId = null;
-            process.clearStreamingText();
-          }
-          break;
+          case "state-change":
+            emit("status", {
+              state: event.state.type,
+              ...(event.state.type === "waiting-input"
+                ? { request: event.state.request }
+                : {}),
+            });
+            break;
+
+          case "mode-change":
+            emit("mode-change", {
+              permissionMode: event.mode,
+              modeVersion: event.version,
+            });
+            break;
+
+          case "error":
+            emit("error", { message: event.error.message });
+            break;
+
+          case "session-id-changed":
+            emit("session-id-changed", {
+              oldSessionId: event.oldSessionId,
+              newSessionId: event.newSessionId,
+            });
+            break;
+
+          case "deferred-queue":
+            emit("deferred-queue", { messages: event.messages });
+            break;
+
+          case "complete":
+            if (augmenter) {
+              await augmenter.flush();
+            }
+            emit("complete", { timestamp: new Date().toISOString() });
+            completed = true;
+            clearInterval(heartbeatInterval);
+            break;
         }
-
-        case "state-change":
-          emit("status", {
-            state: event.state.type,
-            ...(event.state.type === "waiting-input"
-              ? { request: event.state.request }
-              : {}),
-          });
-          break;
-
-        case "mode-change":
-          emit("mode-change", {
-            permissionMode: event.mode,
-            modeVersion: event.version,
-          });
-          break;
-
-        case "error":
-          emit("error", { message: event.error.message });
-          break;
-
-        case "session-id-changed":
-          emit("session-id-changed", {
-            oldSessionId: event.oldSessionId,
-            newSessionId: event.newSessionId,
-          });
-          break;
-
-        case "deferred-queue":
-          emit("deferred-queue", { messages: event.messages });
-          break;
-
-        case "complete":
-          if (augmenter) {
-            await augmenter.flush();
-          }
-          emit("complete", { timestamp: new Date().toISOString() });
-          completed = true;
-          clearInterval(heartbeatInterval);
-          break;
+      } catch (err) {
+        options?.onError?.(err);
       }
-    } catch (err) {
-      options?.onError?.(err);
-    }
-  });
+    }),
+  );
 
   // Now that we're subscribed, capture state and emit "connected"
   const currentState = process.state;

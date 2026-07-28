@@ -60,6 +60,10 @@ import {
   getOpenCodeAttachmentLabel,
   hasYepUploadMetadataForFile,
 } from "../opencode/attachments.js";
+import {
+  formatOpenCodeError,
+  isOpenCodeAbortError,
+} from "../opencode/error.js";
 import type { ContentBlock, Message, Session } from "../supervisor/types.js";
 import { collectVisibleClaudeEntries } from "./claude-messages.js";
 import { applyCodexRollbackMarkers } from "./codex-rollback.js";
@@ -1946,6 +1950,12 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
     const openCodeHasToolPart =
       message.role === "assistant" &&
       parts.some((part) => part.type === "tool");
+    const openCodeHasError =
+      message.role === "assistant" && message.error !== undefined;
+    const openCodeError =
+      openCodeHasError && !isOpenCodeAbortError(message.error)
+        ? formatOpenCodeError(message.error)
+        : null;
 
     messages.push({
       uuid,
@@ -1969,6 +1979,7 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
       ...(message.finish && { finish: message.finish }),
       ...(openCodeHasToolPart && { openCodeHasToolPart: true }),
       ...(message.role === "assistant" &&
+        !openCodeHasError &&
         !message.finish &&
         typeof message.time?.completed === "number" && {
           // Legacy OpenCode messages may omit `finish`. A completed message
@@ -1978,6 +1989,19 @@ function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
         }),
       ...(message.path && { path: message.path }),
     });
+
+    if (openCodeError) {
+      messages.push({
+        uuid: `${uuid}:error`,
+        type: "error",
+        error: openCodeError,
+        content: openCodeError,
+        timestamp: message.time?.completed
+          ? new Date(message.time.completed).toISOString()
+          : timestamp,
+        parentUuid: uuid,
+      });
+    }
   }
 
   return messages;

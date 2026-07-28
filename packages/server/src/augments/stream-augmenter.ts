@@ -135,6 +135,11 @@ export async function createStreamAugmenter(
   let coordinator: StreamCoordinator | null = null;
   let coordinatorInitPromise: Promise<StreamCoordinator> | null = null;
   let currentStreamingMessageId: string | null = null;
+  // Message ids the provider streamed token-by-token via stream_event deltas.
+  // Their final assistant message repeats the same text, so it must not be fed
+  // back into the coordinator: that both duplicates the rendered blocks and
+  // leaves buffered text behind for the next message.
+  const streamedMessageIds = new Set<string>();
 
   const getCoordinator = async (): Promise<StreamCoordinator> => {
     if (coordinator) return coordinator;
@@ -497,8 +502,11 @@ export async function createStreamAugmenter(
   return {
     async processMessage(message: Record<string, unknown>): Promise<void> {
       // Track message ID from message_start or assistant messages
-      const messageId =
-        extractMessageIdFromStart(message) ?? extractIdFromAssistant(message);
+      const streamStartMessageId = extractMessageIdFromStart(message);
+      if (streamStartMessageId) {
+        streamedMessageIds.add(streamStartMessageId);
+      }
+      const messageId = streamStartMessageId ?? extractIdFromAssistant(message);
       if (messageId) {
         currentStreamingMessageId = messageId;
       }
@@ -512,9 +520,16 @@ export async function createStreamAugmenter(
       await augmentWriteInputs(message);
       await augmentExitPlanMode(message);
 
-      // Process text deltas for streaming markdown
+      // Process text deltas for streaming markdown.
+      // `extractTextFromAssistant` exists for providers that never stream
+      // (whole-text assistant messages). Providers that stream deltas and then
+      // land the same text as a final message must skip it.
+      const finalId = extractIdFromAssistant(message);
+      const alreadyStreamed =
+        finalId !== null && streamedMessageIds.has(finalId);
       const textDelta =
-        extractTextDelta(message) ?? extractTextFromAssistant(message);
+        extractTextDelta(message) ??
+        (alreadyStreamed ? null : extractTextFromAssistant(message));
       if (textDelta) {
         await processTextChunk(textDelta);
       }
@@ -539,6 +554,7 @@ export async function createStreamAugmenter(
         coordinator.reset();
       }
       currentStreamingMessageId = null;
+      streamedMessageIds.clear();
     },
 
     getCurrentMessageId(): string | null {

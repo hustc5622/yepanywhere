@@ -106,6 +106,7 @@ export const OpenCodeMessageSchema = z.object({
     })
     .optional(),
   finish: z.string().optional(),
+  error: z.unknown().optional(),
   summary: z
     .object({
       title: z.string().optional(),

@@ -340,6 +340,52 @@ yep-anthropic/glm-5.2
     });
   });
 
+  it("hides invalid legacy variants for adaptive Anthropic models", () => {
+    const provider = new OpenCodeProvider();
+    const parseOpenCodeVerboseModels = (
+      provider as unknown as {
+        parseOpenCodeVerboseModels: (output: string) => ModelInfo[];
+      }
+    ).parseOpenCodeVerboseModels.bind(provider);
+
+    const models = parseOpenCodeVerboseModels(`opencode models --verbose
+mafia/claude-opus-5
+{
+  "api": { "id": "claude-opus-5", "npm": "@ai-sdk/anthropic" },
+  "variants": {
+    "high": { "thinking": { "type": "enabled", "budgetTokens": 16000 } }
+  }
+}
+mafia/claude-opus-5-fixed
+{
+  "api": { "id": "claude-opus-5", "npm": "@ai-sdk/anthropic" },
+  "variants": {
+    "high": { "thinking": { "type": "adaptive" }, "effort": "high" }
+  }
+}
+mafia/claude-opus-4-20250514
+{
+  "api": { "id": "claude-opus-4-20250514", "npm": "@ai-sdk/anthropic" },
+  "variants": {
+    "high": { "thinking": { "type": "enabled", "budgetTokens": 16000 } }
+  }
+}`);
+
+    expect(models[0]).not.toHaveProperty("supportedReasoningEfforts");
+    expect(models[1]).toMatchObject({
+      supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+      supportedReasoningEffortsByProtocol: {
+        anthropic: [{ reasoningEffort: "high" }],
+      },
+    });
+    expect(models[2]).toMatchObject({
+      supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+      supportedReasoningEffortsByProtocol: {
+        anthropic: [{ reasoningEffort: "high" }],
+      },
+    });
+  });
+
   it("does not synthesize variants for ordinary CLI model entries", () => {
     const provider = new OpenCodeProvider();
     const parseOpenCodeVerboseModels = (
@@ -800,6 +846,103 @@ custom-openai/glm-5.2
             "max",
           ),
         ).resolves.toBeUndefined();
+      },
+    );
+  });
+
+  it("rejects legacy enabled-thinking variants for adaptive Anthropic models", async () => {
+    const provider = new OpenCodeProvider();
+    const resolveOpenCodeVariant = (
+      provider as unknown as {
+        resolveOpenCodeVariant: (
+          baseUrl: string,
+          cwd: string,
+          model: string,
+          variant: string,
+        ) => Promise<string | undefined>;
+      }
+    ).resolveOpenCodeVariant.bind(provider);
+
+    await withTestServer(
+      (_req, res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            providers: [
+              {
+                id: "mafia",
+                models: {
+                  "claude-opus-5": {
+                    api: {
+                      id: "claude-opus-5",
+                      npm: "@ai-sdk/anthropic",
+                    },
+                    variants: {
+                      high: {
+                        thinking: {
+                          type: "enabled",
+                          budgetTokens: 16_000,
+                        },
+                      },
+                    },
+                  },
+                  "claude-opus-5-fixed": {
+                    api: {
+                      id: "claude-opus-5",
+                      npm: "@ai-sdk/anthropic",
+                    },
+                    variants: {
+                      high: {
+                        thinking: { type: "adaptive" },
+                        effort: "high",
+                      },
+                    },
+                  },
+                  "claude-opus-4-20250514": {
+                    api: {
+                      id: "claude-opus-4-20250514",
+                      npm: "@ai-sdk/anthropic",
+                    },
+                    variants: {
+                      high: {
+                        thinking: {
+                          type: "enabled",
+                          budgetTokens: 16_000,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          }),
+        );
+      },
+      async (baseUrl) => {
+        await expect(
+          resolveOpenCodeVariant(
+            baseUrl,
+            "/repo",
+            "mafia/claude-opus-5",
+            "high",
+          ),
+        ).resolves.toBeUndefined();
+        await expect(
+          resolveOpenCodeVariant(
+            baseUrl,
+            "/repo",
+            "mafia/claude-opus-5-fixed",
+            "high",
+          ),
+        ).resolves.toBe("high");
+        await expect(
+          resolveOpenCodeVariant(
+            baseUrl,
+            "/repo",
+            "mafia/claude-opus-4-20250514",
+            "high",
+          ),
+        ).resolves.toBe("high");
       },
     );
   });
@@ -2796,6 +2939,13 @@ custom-openai/glm-5.2
         error: "Upstream unavailable",
       }),
     );
+    expect(messages.at(-1)).toMatchObject({
+      type: "result",
+      session_id: "yep_error",
+      subtype: "error_during_execution",
+      is_error: true,
+      error: "Upstream unavailable",
+    });
     expect(abortRequests).toBe(1);
   });
 
@@ -3348,6 +3498,106 @@ custom-openai/glm-5.2
         }),
       }),
     ]);
+  });
+
+  it("starts post-tool assistant text under the new OpenCode step message ID", () => {
+    const provider = new OpenCodeProvider();
+    const convertPartToSDKMessages = getConvertPartToSDKMessages(provider);
+    const emissionState = createEmissionState();
+
+    convertPartToSDKMessages(
+      {
+        id: "part_step_1",
+        sessionID: "ses_1",
+        messageID: "msg_step_1",
+        type: "text",
+        text: "I will inspect the file.",
+      },
+      "yep_session",
+      undefined,
+      null,
+      "assistant",
+      emissionState,
+    );
+    convertPartToSDKMessages(
+      {
+        id: "tool_step_1",
+        sessionID: "ses_1",
+        messageID: "msg_step_1",
+        type: "tool",
+        callID: "call_1",
+        tool: "read",
+        state: {
+          status: "completed",
+          input: { filePath: "/repo/app.ts" },
+          output: "const value = 1;",
+        },
+      },
+      "yep_session",
+      undefined,
+      "msg_step_1",
+      "assistant",
+      emissionState,
+    );
+
+    // message.updated can still point at the preceding assistant step when the
+    // first part for the post-tool step arrives. The native part.messageID must
+    // win so the client appends a new row below the tool.
+    const postToolMessages = convertPartToSDKMessages(
+      {
+        id: "part_step_2",
+        sessionID: "ses_1",
+        messageID: "msg_step_2",
+        type: "text",
+        text: "The file is valid.",
+      },
+      "yep_session",
+      undefined,
+      "msg_step_1",
+      "assistant",
+      emissionState,
+    );
+
+    expect(postToolMessages).toEqual([
+      expect.objectContaining({
+        type: "stream_event",
+        event: expect.objectContaining({
+          type: "message_start",
+          message: expect.objectContaining({ id: "msg_step_2" }),
+        }),
+      }),
+      expect.objectContaining({
+        type: "stream_event",
+        event: expect.objectContaining({ type: "content_block_start" }),
+      }),
+      expect.objectContaining({
+        type: "stream_event",
+        event: expect.objectContaining({
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: "The file is valid." },
+        }),
+      }),
+    ]);
+
+    expect(
+      convertPartToSDKMessages(
+        {
+          id: "finish_step_2",
+          sessionID: "ses_1",
+          messageID: "msg_step_2",
+          type: "step-finish",
+        },
+        "yep_session",
+        undefined,
+        "msg_step_1",
+        "assistant",
+        emissionState,
+      ).at(-1),
+    ).toMatchObject({
+      type: "assistant",
+      uuid: "msg_step_2",
+      message: { role: "assistant", content: "The file is valid." },
+    });
   });
 
   it("re-emits tool_use when running-stage input materializes", () => {

@@ -200,6 +200,81 @@ describe("normalizeSession", () => {
     expect(normalized.messages[0]?.finish).toBeUndefined();
   });
 
+  it("preserves persisted OpenCode assistant errors as visible messages", () => {
+    const created = Date.parse("2026-07-28T03:13:46.000Z");
+    const completed = Date.parse("2026-07-28T03:13:48.000Z");
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "opencode-error-session",
+        projectId: "test-project" as UrlProjectId,
+        title: "OpenCode error",
+        fullTitle: "OpenCode error",
+        createdAt: new Date(created).toISOString(),
+        updatedAt: new Date(completed).toISOString(),
+        messageCount: 2,
+        status: { state: "idle" },
+        provider: "opencode",
+      },
+      data: {
+        provider: "opencode",
+        session: {
+          messages: [
+            {
+              message: {
+                id: "msg-error",
+                sessionID: "opencode-error-session",
+                role: "assistant",
+                time: { created, completed },
+                error: {
+                  name: "APIError",
+                  data: {
+                    message: "thinking.enabled is not supported for this model",
+                  },
+                },
+              },
+              parts: [],
+            },
+            {
+              message: {
+                id: "msg-aborted",
+                sessionID: "opencode-error-session",
+                role: "assistant",
+                time: { created: completed + 1, completed: completed + 2 },
+                error: {
+                  name: "MessageAbortedError",
+                  data: { message: "The operation was aborted." },
+                },
+              },
+              parts: [],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+
+    expect(normalized.messages[0]).not.toHaveProperty("openCodeCompleted");
+    expect(normalized.messages[1]).toMatchObject({
+      uuid: "msg-error:error",
+      type: "error",
+      error: "thinking.enabled is not supported for this model",
+      content: "thinking.enabled is not supported for this model",
+      parentUuid: "msg-error",
+      timestamp: new Date(completed).toISOString(),
+    });
+    expect(normalized.messages[2]).toMatchObject({
+      uuid: "msg-aborted",
+      type: "assistant",
+    });
+    expect(normalized.messages[2]).not.toHaveProperty("openCodeCompleted");
+    expect(
+      normalized.messages.some(
+        (message) => message.uuid === "msg-aborted:error",
+      ),
+    ).toBe(false);
+  });
+
   it("normalizes Kimi file tools and emits pairable tool result messages", () => {
     const mockSession: LoadedSession = {
       summary: {

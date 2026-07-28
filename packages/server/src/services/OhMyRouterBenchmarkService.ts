@@ -94,13 +94,19 @@ function getRequestHeaders(
 
 function getRequestBody(
   modelId: string,
+  model: ModelInfo,
   protocol: OpenCodeRequestProtocol,
 ): Record<string, unknown> {
+  // OhMyRouter's Claude Opus 4.8 rejects explicit temperature with
+  // "temperature is deprecated for this model". Only send temperature for
+  // models that are known to accept it (non-Claude-Opus-4.8 families).
+  const supportsTemperature = !modelId.startsWith("claude-opus-4-8");
+
   if (protocol === "anthropic") {
     return {
       model: modelId,
       max_tokens: BENCHMARK_MAX_TOKENS,
-      temperature: 0,
+      ...(supportsTemperature ? { temperature: 0 } : {}),
       stream: true,
       messages: [{ role: "user", content: BENCHMARK_PROMPT }],
     };
@@ -108,7 +114,7 @@ function getRequestBody(
   return {
     model: modelId,
     max_tokens: BENCHMARK_MAX_TOKENS,
-    temperature: 0,
+    ...(supportsTemperature ? { temperature: 0 } : {}),
     stream: true,
     stream_options: { include_usage: true },
     messages: [{ role: "user", content: BENCHMARK_PROMPT }],
@@ -196,7 +202,7 @@ export async function benchmarkOhMyRouterModel(
     const response = await fetchImpl(getRequestUrl(config, protocol), {
       method: "POST",
       headers: getRequestHeaders(config, protocol),
-      body: JSON.stringify(getRequestBody(model.id, protocol)),
+      body: JSON.stringify(getRequestBody(model.id, model, protocol)),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) {
