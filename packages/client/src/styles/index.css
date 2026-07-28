@@ -56,6 +56,10 @@
     calc(100vw - var(--sidebar-width, 280px) - 32px)
   );
   --session-inspector-width: 320px;
+
+  /* New Session form column. Mobile-first 600px is intentionally narrow;
+     the desktop layout widens it (see the wide-screen media query). */
+  --new-session-content-max-width: 600px;
 }
 
 /* ==========================================================================
@@ -8493,7 +8497,7 @@ button.context-usage-indicator--button:focus-visible {
    ========================================================================== */
 
 .new-session-container {
-  max-width: 600px;
+  max-width: var(--new-session-content-max-width, 600px);
   margin: 0 auto;
 }
 
@@ -9714,6 +9718,35 @@ button.context-usage-indicator--button:focus-visible {
     max-width: var(--session-content-max-width);
     margin: 0 auto;
     width: 100%;
+  }
+
+  /* New Session form: the 600px mobile column leaves a lot of empty space on
+     wide screens. Everything inside it is fluid (textarea, provider chips,
+     model grids), so widen the column and let the inner grids reflow. */
+  .main-content-constrained .new-session-container {
+    --new-session-content-max-width: 1100px;
+  }
+
+  /* Keep the secondary control from ballooning; give the extra width to the
+     model picker instead. */
+  .main-content-constrained .new-session-model-controls {
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 320px);
+  }
+
+  /* Mode / executor pickers are single-column stacks on mobile. At the wider
+     desktop width that would just be tall, mostly-empty bars, so lay them out
+     side by side and show more options without scrolling. */
+  .main-content-constrained .new-session-container .mode-options,
+  .main-content-constrained .new-session-container .executor-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    align-items: stretch;
+  }
+
+  /* Equal-height cards in each grid row. */
+  .main-content-constrained .new-session-container .mode-option,
+  .main-content-constrained .new-session-container .executor-option {
+    height: 100%;
   }
 
   /* Show sidebar toggle on desktop for collapse/expand functionality */
