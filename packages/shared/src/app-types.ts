@@ -375,6 +375,136 @@ export function getOpenCodeModelDefaultLimits(
 }
 
 /**
+ * Short-name → display label map for Claude SDK model options.
+ * These are the logical short names used by the Claude provider config
+ * (e.g. "opus", "sonnet"), not full model IDs.
+ */
+const CLAUDE_SHORT_LABELS: Record<string, string> = {
+  opus: "Opus 4.8",
+  sonnet: "Sonnet 5",
+  haiku: "Haiku 4.5",
+  "claude-fable-5": "Fable 5",
+};
+
+/**
+ * Known OpenCode gateway provider channel IDs that should be surfaced as a
+ * qualifier when the model is routed through a non-default channel. The
+ * "anthropic" and "yep-anthropic" channels are treated as the default and
+ * do not get a qualifier.
+ */
+const VISIBLE_OPENCODE_CHANNELS = new Set([
+  "mafia",
+  "ohmyrouter",
+  "gemini",
+  "kimi",
+]);
+
+/**
+ * Parse a Claude model ID into a human-readable display label.
+ *
+ * Handles:
+ * - Full versioned IDs: "claude-opus-5" → "Opus 5"
+ *   "claude-opus-4-8" → "Opus 4.8", "claude-opus-4-8-fast" → "Opus 4.8 Fast"
+ * - Date-suffixed IDs: "claude-opus-4-5-20251101" → "Opus 4.5"
+ * - Short SDK names: "opus" → "Opus 4.8", "sonnet" → "Sonnet 5"
+ * - Extended context: "[1m]" suffix → " 1M"
+ * - Unknown families: "claude-newmodel-3-2-pro" → "Newmodel 3.2 Pro"
+ *
+ * @param modelId - Bare model ID (no provider prefix), may include `[1m]`
+ * @param shortLabels - Optional override map for short-name matching
+ */
+export function resolveClaudeModelLabel(
+  modelId: string,
+  shortLabels: Record<string, string> = CLAUDE_SHORT_LABELS,
+): string {
+  const isExtendedContext = modelId.includes("[1m]");
+  const raw = modelId.replace(/\[.*?\]/g, "").trim();
+  const suffix = isExtendedContext ? " 1M" : "";
+
+  // Short SDK names: "opus", "sonnet", "haiku", "claude-fable-5"
+  if (shortLabels[raw]) return `${shortLabels[raw]}${suffix}`;
+
+  // Full Claude IDs: claude-{family}-{version}[-{variant}][-{date}]
+  // e.g. claude-opus-4-8, claude-opus-4-8-fast, claude-opus-5, claude-sonnet-4-5-20250929
+  const match = raw.match(/^claude-(\w+)-(.+)$/);
+  if (match?.[1] && match[2]) {
+    const family = match[1];
+    const rest = match[2];
+    // For full IDs, only capitalize the family — don't use the short label
+    // (which includes its own version, e.g. "Opus 4.8") to avoid duplication.
+    const familyLabel = capitalize(family);
+
+    // Strip trailing date like -20251101
+    const withoutDate = rest.replace(/-\d{8}$/, "");
+
+    const numericParts: string[] = [];
+    const textParts: string[] = [];
+    for (const token of withoutDate.split("-")) {
+      if (/^\d+$/.test(token)) {
+        numericParts.push(token);
+      } else {
+        textParts.push(capitalize(token.toLowerCase()));
+      }
+    }
+
+    const versionStr = numericParts.join(".");
+    const textStr = textParts.length > 0 ? ` ${textParts.join(" ")}` : "";
+
+    if (!versionStr && !textStr) {
+      return `${familyLabel}${suffix}`;
+    }
+    return `${familyLabel} ${versionStr}${textStr}${suffix}`.trim();
+  }
+
+  // Fallback: capitalize
+  return `${capitalize(raw)}${suffix}`;
+}
+
+/**
+ * Resolve a model string into a human-readable display label for the
+ * ProviderBadge component.
+ *
+ * Accepts:
+ * - Namespaced OpenCode refs: "mafia/claude-opus-5", "anthropic/claude-opus-4-8"
+ * - Bare model IDs: "claude-opus-4-8-fast", "claude-opus-5"
+ * - Claude SDK short names: "opus", "sonnet", "default"
+ * - Extended context suffix: "[1m]"
+ *
+ * For namespaced OpenCode models routed through a non-default channel
+ * (e.g. "mafia"), the channel name is prepended to disambiguate.
+ *
+ * @param model - Model string (may include provider prefix)
+ * @returns Display label or null for "default"/empty
+ */
+export function resolveModelDisplayLabel(
+  model: string | undefined,
+): string | null {
+  if (!model || model.trim() === "default") return null;
+
+  const trimmed = model.trim();
+  const slashIdx = trimmed.lastIndexOf("/");
+  const providerChannel = slashIdx >= 0 ? trimmed.slice(0, slashIdx) : "";
+  const bareModel = slashIdx >= 0 ? trimmed.slice(slashIdx + 1) : trimmed;
+
+  const label = resolveClaudeModelLabel(bareModel);
+
+  // Surface non-default routing channels for OpenCode namespaced models
+  if (
+    providerChannel &&
+    VISIBLE_OPENCODE_CHANNELS.has(providerChannel) &&
+    bareModel.startsWith("claude-")
+  ) {
+    return `${capitalize(providerChannel)} ${label}`;
+  }
+
+  return label;
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
  * Get the context window size for a given model.
  *
  * Parses model IDs like:

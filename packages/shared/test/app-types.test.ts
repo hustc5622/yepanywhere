@@ -5,6 +5,8 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   getModelContextWindow,
   getOpenCodeModelDefaultLimits,
+  resolveClaudeModelLabel,
+  resolveModelDisplayLabel,
 } from "../src/app-types.js";
 
 describe("getModelContextWindow", () => {
@@ -94,5 +96,115 @@ describe("getOpenCodeModelDefaultLimits", () => {
   it("returns undefined for unknown families", () => {
     expect(getOpenCodeModelDefaultLimits("gpt-image-2")).toBeUndefined();
     expect(getOpenCodeModelDefaultLimits(undefined)).toBeUndefined();
+  });
+});
+
+describe("resolveClaudeModelLabel", () => {
+  it("resolves full versioned Opus 5", () => {
+    expect(resolveClaudeModelLabel("claude-opus-5")).toBe("Opus 5");
+  });
+
+  it("resolves full versioned Opus 4.8", () => {
+    expect(resolveClaudeModelLabel("claude-opus-4-8")).toBe("Opus 4.8");
+  });
+
+  it("resolves Opus 4.8 Fast variant", () => {
+    expect(resolveClaudeModelLabel("claude-opus-4-8-fast")).toBe(
+      "Opus 4.8 Fast",
+    );
+  });
+
+  it("resolves short SDK name opus", () => {
+    expect(resolveClaudeModelLabel("opus")).toBe("Opus 4.8");
+  });
+
+  it("resolves short SDK name sonnet", () => {
+    expect(resolveClaudeModelLabel("sonnet")).toBe("Sonnet 5");
+  });
+
+  it("resolves short SDK name haiku", () => {
+    expect(resolveClaudeModelLabel("haiku")).toBe("Haiku 4.5");
+  });
+
+  it("strips date suffix from full ID", () => {
+    expect(resolveClaudeModelLabel("claude-opus-4-5-20251101")).toBe(
+      "Opus 4.5",
+    );
+    expect(resolveClaudeModelLabel("claude-sonnet-4-5-20250929")).toBe(
+      "Sonnet 4.5",
+    );
+  });
+
+  it("handles [1m] extended context suffix", () => {
+    expect(resolveClaudeModelLabel("claude-opus-4-8[1m]")).toBe("Opus 4.8 1M");
+    expect(resolveClaudeModelLabel("opus[1m]")).toBe("Opus 4.8 1M");
+    expect(resolveClaudeModelLabel("sonnet[1m]")).toBe("Sonnet 5 1M");
+  });
+
+  it("capitalizes unknown Claude family", () => {
+    expect(resolveClaudeModelLabel("claude-newmodel-3-2")).toBe("Newmodel 3.2");
+  });
+
+  it("handles fable 5 short name", () => {
+    expect(resolveClaudeModelLabel("claude-fable-5")).toBe("Fable 5");
+  });
+});
+
+describe("resolveModelDisplayLabel", () => {
+  it("returns null for default/empty", () => {
+    expect(resolveModelDisplayLabel(undefined)).toBeNull();
+    expect(resolveModelDisplayLabel("default")).toBeNull();
+    expect(resolveModelDisplayLabel("")).toBeNull();
+  });
+
+  it("resolves namespaced Mafia Opus 5 with channel prefix", () => {
+    expect(resolveModelDisplayLabel("mafia/claude-opus-5")).toBe(
+      "Mafia Opus 5",
+    );
+  });
+
+  it("resolves namespaced Anthropic Opus 4.8 without channel prefix", () => {
+    expect(resolveModelDisplayLabel("anthropic/claude-opus-4-8")).toBe(
+      "Opus 4.8",
+    );
+  });
+
+  it("resolves namespaced Anthropic Opus 4.8 Fast", () => {
+    expect(resolveModelDisplayLabel("anthropic/claude-opus-4-8-fast")).toBe(
+      "Opus 4.8 Fast",
+    );
+  });
+
+  it("resolves bare claude-opus-5", () => {
+    expect(resolveModelDisplayLabel("claude-opus-5")).toBe("Opus 5");
+  });
+
+  it("resolves bare claude-opus-4-8", () => {
+    expect(resolveModelDisplayLabel("claude-opus-4-8")).toBe("Opus 4.8");
+  });
+
+  it("resolves bare claude-opus-4-8-fast", () => {
+    expect(resolveModelDisplayLabel("claude-opus-4-8-fast")).toBe(
+      "Opus 4.8 Fast",
+    );
+  });
+
+  it("resolves short SDK name opus", () => {
+    expect(resolveModelDisplayLabel("opus")).toBe("Opus 4.8");
+  });
+
+  it("resolves short SDK name sonnet", () => {
+    expect(resolveModelDisplayLabel("sonnet")).toBe("Sonnet 5");
+  });
+
+  it("resolves extended context suffix", () => {
+    expect(resolveModelDisplayLabel("claude-opus-4-8[1m]")).toBe("Opus 4.8 1M");
+    expect(resolveModelDisplayLabel("opus[1m]")).toBe("Opus 4.8 1M");
+  });
+
+  it("does not add channel prefix for yep-anthropic", () => {
+    expect(resolveModelDisplayLabel("yep-anthropic/claude-opus-4-8")).toBe(
+      "Opus 4.8",
+    );
   });
 });

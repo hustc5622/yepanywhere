@@ -267,9 +267,23 @@ describe("MessageList active turn timestamp", () => {
     rerender(
       <MessageList
         messages={[]}
-        preprocessedItems={[...items, userPromptItem("u2")]}
-        isProcessing={true}
+        preprocessedItems={items}
+        isProcessing={false}
         lastActivityAt={streamActivity}
+        latestTurnUsesUpdateTime={true}
+      />,
+    );
+    timestamp = screen.getByTestId("message-actions");
+    expect(timestamp.textContent).toBe(streamActivity);
+    expect(timestamp.dataset.lastUpdate).toBe("true");
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[...items, userPromptItem("u2")]}
+        isProcessing={false}
+        lastActivityAt={streamActivity}
+        latestTurnUsesUpdateTime={true}
       />,
     );
     timestamp = screen.getByTestId("message-actions");

@@ -682,6 +682,11 @@ function SessionPageContent({
       ? sessionUpdatedAt
       : lastStreamActivityAt;
   }, [sessionUpdatedAt, lastStreamActivityAt]);
+  // OpenCode task children run inside their parent process, so a directly
+  // opened child can be owner=none even though its persisted updatedAt keeps
+  // advancing. Preserve that authoritative time on the child's latest turn.
+  const isOpenCodeSubagentSession =
+    session?.provider === "opencode" && Boolean(session.parentSessionId);
 
   useEngagementTracking({
     sessionId,
@@ -1950,7 +1955,12 @@ function SessionPageContent({
                   isProcessing={
                     status.owner === "self" && processState === "in-turn"
                   }
-                  lastActivityAt={lastStreamActivityAt}
+                  lastActivityAt={
+                    isOpenCodeSubagentSession
+                      ? activityAt
+                      : lastStreamActivityAt
+                  }
+                  latestTurnUsesUpdateTime={isOpenCodeSubagentSession}
                   isCompacting={isCompacting}
                   scrollTrigger={scrollTrigger + activeWindowTrimRevision}
                   pendingMessages={pendingMessages}

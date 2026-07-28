@@ -1,5 +1,5 @@
 import type { ProviderName } from "@yep-anywhere/shared";
-import { MODEL_OPTIONS } from "../hooks/useModelSettings";
+import { resolveModelDisplayLabel } from "@yep-anywhere/shared";
 
 const PROVIDER_COLORS: Record<ProviderName, string> = {
   claude: "var(--provider-claude)", // Claude orange
@@ -62,34 +62,7 @@ export function ProviderBadge({
   const getModelLabel = (modelName: string | undefined): string | null => {
     if (!modelName) return null;
     if (modelName === "default") return null;
-    const isExtendedContext = modelName.includes("[1m]");
-
-    // Check if it's a known short model option (e.g., "opus", "sonnet")
-    const knownModel = MODEL_OPTIONS.find((o) => o.value === modelName);
-    if (knownModel && knownModel.value !== "default") {
-      return knownModel.label;
-    }
-
-    // Parse full model IDs like "claude-opus-4-5-20251101" or "claude-sonnet-4-20250514"
-    // Extract the model family (opus, sonnet, haiku) from the full ID
-    const claudeMatch = modelName.match(/claude-(\w+)-/);
-    if (claudeMatch?.[1]) {
-      const family = claudeMatch[1];
-      // Check if the extracted family is a known model
-      const familyModel = MODEL_OPTIONS.find((o) => o.value === family);
-      if (familyModel) {
-        return isExtendedContext
-          ? `${familyModel.label} 1M`
-          : familyModel.label;
-      }
-      // Capitalize unknown family
-      const capitalized = family.charAt(0).toUpperCase() + family.slice(1);
-      return isExtendedContext ? `${capitalized} 1M` : capitalized;
-    }
-
-    // For other models, capitalize first letter
-    const capitalized = modelName.charAt(0).toUpperCase() + modelName.slice(1);
-    return isExtendedContext ? `${capitalized} 1M` : capitalized;
+    return resolveModelDisplayLabel(modelName);
   };
 
   const normalizeConfigLabel = (value: string | undefined): string | null => {

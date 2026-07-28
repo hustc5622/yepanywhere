@@ -217,6 +217,8 @@ export {
   escalateContextWindow,
   getModelContextWindow,
   getOpenCodeModelDefaultLimits,
+  resolveModelDisplayLabel,
+  resolveClaudeModelLabel,
 } from "./app-types.js";
 
 // Session utilities

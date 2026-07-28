@@ -45,8 +45,14 @@ interface Props {
   provider?: string;
   isStreaming?: boolean;
   isProcessing?: boolean;
-  /** Latest event received for the active session. */
+  /** Latest stream or authoritative session activity timestamp. */
   lastActivityAt?: string | null;
+  /**
+   * Keep the latest assistant turn in last-update mode even when this page
+   * does not own a running process. Provider-native child sessions use their
+   * authoritative session updatedAt because their work runs inside the parent.
+   */
+  latestTurnUsesUpdateTime?: boolean;
   /** True when context is being compressed */
   isCompacting?: boolean;
   /** Increment this to force scroll to bottom (e.g., when user sends a message) */
@@ -104,6 +110,7 @@ export const MessageList = memo(function MessageList({
   isStreaming = false,
   isProcessing = false,
   lastActivityAt = null,
+  latestTurnUsesUpdateTime = false,
   isCompacting = false,
   scrollTrigger = 0,
   pendingMessages = [],
@@ -259,12 +266,16 @@ export const MessageList = memo(function MessageList({
     ],
   );
 
-  // Only the assistant turn at the live transcript tail belongs to the
-  // currently running request. A pending/user row at the tail means the new
-  // turn has not produced an assistant update yet, so the previous answer must
-  // keep its original timestamp.
-  const activeAssistantTurnKey = useMemo(() => {
-    if (!isProcessing || hasNewerMessages) return null;
+  // Only the assistant turn at the transcript tail can use last-update
+  // semantics. Normally that means the locally running request. A
+  // provider-native child session can opt in after completion too because its
+  // authoritative session updatedAt represents work performed inside the
+  // parent process. A pending/user row at the tail means no assistant update
+  // exists yet, so the previous answer must keep its original timestamp.
+  const lastUpdatedAssistantTurnKey = useMemo(() => {
+    if ((!isProcessing && !latestTurnUsesUpdateTime) || hasNewerMessages) {
+      return null;
+    }
 
     for (let index = rows.length - 1; index >= 0; index -= 1) {
       const row = rows[index];
@@ -274,7 +285,7 @@ export const MessageList = memo(function MessageList({
     }
 
     return null;
-  }, [hasNewerMessages, isProcessing, rows]);
+  }, [hasNewerMessages, isProcessing, latestTurnUsesUpdateTime, rows]);
 
   // Only window long lists, and never while a branch/target focus is pending —
   // those flows scroll to and highlight a specific DOM node, which must be
@@ -605,7 +616,7 @@ export const MessageList = memo(function MessageList({
       }
       case "assistant-turn": {
         // Assistant items wrapped in timeline container
-        const isActiveAssistantTurn = row.key === activeAssistantTurnKey;
+        const usesLastUpdateTimestamp = row.key === lastUpdatedAssistantTurnKey;
         return (
           <div
             className="assistant-turn"
@@ -624,7 +635,7 @@ export const MessageList = memo(function MessageList({
             ))}
             <MessageActions
               timestamp={
-                isActiveAssistantTurn
+                usesLastUpdateTimestamp
                   ? getLatestTimestamp(
                       row.turnTimestamp,
                       row.turnUpdatedAt,
@@ -632,7 +643,7 @@ export const MessageList = memo(function MessageList({
                     )
                   : row.turnTimestamp
               }
-              timestampIsLastUpdate={isActiveAssistantTurn}
+              timestampIsLastUpdate={usesLastUpdateTimestamp}
               copyText={row.turnCopyText}
             />
           </div>
