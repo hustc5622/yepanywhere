@@ -1,10 +1,66 @@
+import { fromUrlProjectId, isUrlProjectId } from "@yep-anywhere/shared";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api/client";
 import { useToastContext } from "../contexts/ToastContext";
 import { useI18n } from "../i18n";
+import { appPath } from "../lib/apiPath";
 import { writeClipboardText } from "../lib/clipboard";
 import { getProvider } from "../providers/registry";
+
+/**
+ * Decode a base64url project id back into its absolute path.
+ *
+ * Project ids are always built from a normalized absolute path, so anything
+ * that does not decode to one is treated as unknown and the caller omits the
+ * row rather than leaking mojibake.
+ */
+function decodeProjectPath(projectId: string): string | undefined {
+  if (!isUrlProjectId(projectId)) return undefined;
+  try {
+    const decoded = fromUrlProjectId(projectId);
+    // U+FFFD means the bytes were not valid UTF-8 to begin with.
+    if (!decoded.startsWith("/") || decoded.includes("\uFFFD"))
+      return undefined;
+    return decoded;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Text produced by "Copy session info".
+ *
+ * A bare session id is not resolvable to a project by any Yep API, client
+ * route or CLI — every read path is keyed by `projectId + sessionId`. So the
+ * copied block carries the project path and a deep link, which is what makes
+ * it useful when pasted into an agent running in some other directory.
+ */
+export function buildSessionInfoText(input: {
+  sessionId: string;
+  projectId: string;
+  title?: string | null;
+  provider?: string;
+}): string {
+  const { sessionId, projectId, title, provider } = input;
+  const rows: Array<[string, string | undefined]> = [
+    ["Title", title ?? undefined],
+    ["Session ID", sessionId],
+    ["Provider", provider],
+    ["Project", decodeProjectPath(projectId)],
+    [
+      "Link",
+      `${window.location.origin}${appPath(
+        `/projects/${projectId}/sessions/${sessionId}`,
+      )}`,
+    ],
+  ];
+
+  return rows
+    .filter(([, value]) => value && value.trim().length > 0)
+    .map(([label, value]) => `${label}: ${value}`)
+    .join("\n");
+}
 
 export interface SessionMenuProps {
   sessionId: string;
@@ -196,24 +252,14 @@ export function SessionMenu({
     }
   };
 
-  const buildSessionInfoText = () => {
-    const rows: Array<[string, string | undefined]> = [
-      ["Title", title || undefined],
-      ["Session ID", sessionId],
-    ];
-
-    return rows
-      .filter(([, value]) => value && value.trim().length > 0)
-      .map(([label, value]) => `${label}: ${value}`)
-      .join("\n");
-  };
-
   const handleCopySessionInfo = async () => {
     setIsOpen(false);
     setDropdownPosition(null);
     triggerRef.current?.blur();
     try {
-      await writeClipboardText(buildSessionInfoText());
+      await writeClipboardText(
+        buildSessionInfoText({ sessionId, projectId, title, provider }),
+      );
       showToast(t("sessionMenuInfoCopied"), "success");
     } catch (error) {
       console.error("Failed to copy session info:", error);

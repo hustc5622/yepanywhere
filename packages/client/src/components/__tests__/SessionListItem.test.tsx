@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { toUrlProjectId } from "@yep-anywhere/shared";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -102,7 +103,9 @@ describe("SessionListItem archive feedback", () => {
       value: { writeText },
     });
 
+    const projectId = toUrlProjectId("/Users/someone/work/alpha");
     renderItem({
+      projectId,
       projectName: "Project Alpha",
       model: "gpt-5-codex",
       basePath: "/yep",
@@ -115,8 +118,16 @@ describe("SessionListItem archive feedback", () => {
       expect(writeText).toHaveBeenCalled();
     });
     const copiedText = writeText.mock.calls[0]?.[0] as string;
+    // The copied block must be self-locating: a bare session id cannot be
+    // resolved back to a project by any API, route or CLI.
     expect(copiedText).toBe(
-      ["Title: Session title", "Session ID: session-1"].join("\n"),
+      [
+        "Title: Session title",
+        "Session ID: session-1",
+        "Provider: codex",
+        "Project: /Users/someone/work/alpha",
+        `Link: ${window.location.origin}/projects/${projectId}/sessions/session-1`,
+      ].join("\n"),
     );
   });
 

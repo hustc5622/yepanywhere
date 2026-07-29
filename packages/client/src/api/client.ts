@@ -26,6 +26,7 @@ import type {
   SessionCreatedBy,
   SessionKind,
   SessionLastTurnStatus,
+  SessionLocateResponse,
   SessionQuestion,
   SessionRetryStatus,
   SessionRuntime,
@@ -1204,6 +1205,18 @@ export const api = {
   getArchivedSession: (sessionId: string) =>
     fetchJSON<ArchiveSessionResponse>(
       `/archive/sessions/${encodeURIComponent(sessionId)}`,
+    ),
+
+  /**
+   * Resolve a bare session id to the project that owns it.
+   *
+   * Every other session endpoint is keyed by `projectId + sessionId`, so this
+   * is the only way to act on an id that arrived without its project (pasted
+   * from a chat, a bug report, or another machine).
+   */
+  locateSession: (sessionId: string) =>
+    fetchJSON<SessionLocateResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/locate`,
     ),
 
   /**

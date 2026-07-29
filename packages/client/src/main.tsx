@@ -79,6 +79,11 @@ const SessionPage = lazy(() =>
     default: module.SessionPage,
   })),
 );
+const SessionLocatorPage = lazy(() =>
+  import("./pages/SessionLocatorPage").then((module) => ({
+    default: module.SessionLocatorPage,
+  })),
+);
 const TerminalPage = lazy(() =>
   import("./pages/TerminalPage").then((module) => ({
     default: module.TerminalPage,
@@ -180,6 +185,11 @@ createRoot(rootElement).render(
                 <Route
                   path="/projects/:projectId/sessions/:sessionId"
                   element={<SessionPage />}
+                />
+                {/* Bare session id: resolve its project, then redirect. */}
+                <Route
+                  path="/sessions/:sessionId"
+                  element={<SessionLocatorPage />}
                 />
               </Route>
               {/* File page has its own layout (no sidebar) */}
