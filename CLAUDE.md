@@ -269,7 +269,7 @@ bash yep.sh rebuild        # 重构建项目
 2. `pnpm typecheck` - TypeScript 类型检查
 3. `pnpm --filter client build` - 构建客户端
 4. `pnpm build:bundle` - 构建完整部署包
-5. `cd dist/npm-package && npm install --omit=dev` - 安装运行时依赖
+5. `cd dist/npm-package && npm ci --omit=dev` - 按运行时锁安装依赖
 6. `chmod +x dist/npm-package/dist/cli.js` - 设置执行权限
 7. 自动重启生产模式（LaunchAgent 守护）并执行部署验证
 
@@ -277,12 +277,13 @@ bash yep.sh rebuild        # 重构建项目
 
 ### ⚠️ 重要：依赖安装方法
 
-在 `dist/npm-package/` 中安装依赖时，**必须使用 `npm install`，不能使用 `pnpm install`**。
+在 `dist/npm-package/` 中安装依赖时，**必须使用 `npm ci`，不能使用 `pnpm install` 或 `npm install`**。
 
 **原因**：
 - `dist/npm-package/` 是独立的打包产物，不是 workspace 的一部分
 - pnpm 在 monorepo 中会尝试链接 workspace，导致路径错误
-- npm 将其视为独立包，正确安装所有依赖到 node_modules/
+- `npm ci` 严格按受版本控制的 `scripts/runtime-package-lock.json` 安装所有依赖
+- 构建会把该锁复制为 `dist/npm-package/npm-shrinkwrap.json`
 
 **错误方法**：
 ```bash
@@ -293,7 +294,7 @@ pnpm install  # ❌ 会失败！
 **正确方法**：
 ```bash
 cd dist/npm-package
-npm install --omit=dev  # ✅ 正确
+npm ci --omit=dev  # ✅ 正确
 ```
 
 ### 使用 scripts/deploy.sh（完整部署）
@@ -325,8 +326,9 @@ pnpm build:bundle
 
 # 3. 安装运行时依赖（关键：必须用 npm）
 cd dist/npm-package
-npm install --omit=dev --no-audit --no-fund
+npm ci --omit=dev --no-audit --no-fund
 cd ../..
+pnpm bundle:verify dist/npm-package
 
 # 4. 设置执行权限
 chmod +x dist/npm-package/dist/cli.js

@@ -11,12 +11,11 @@
  * See docs/research/codex-local-models.md for background.
  */
 
-import { type ChildProcess, exec, execFile, spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { promisify } from "node:util";
 import type { ModelInfo } from "@yep-anywhere/shared";
 import {
   type CodexToolCallContext,
@@ -27,6 +26,7 @@ import { getLogger } from "../../logging/logger.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
 import { MessageQueue } from "../messageQueue.js";
 import type { SDKMessage } from "../types.js";
+import { OllamaClient, getOllamaUrl } from "./ollama-client.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -35,8 +35,6 @@ import type {
 } from "./types.js";
 
 const log = getLogger().child({ component: "codex-oss-provider" });
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
 
 /**
  * Configuration for CodexOSS provider.
@@ -198,12 +196,7 @@ export class CodexOSSProvider implements AgentProvider {
   async isAuthenticated(): Promise<boolean> {
     // For OSS mode, we just need Ollama running
     if (this.localProvider === "ollama") {
-      try {
-        await execAsync("ollama list", { timeout: 5000 });
-        return true;
-      } catch {
-        return false;
-      }
+      return new OllamaClient(getOllamaUrl()).isReachable();
     }
     // TODO: LMStudio check
     return false;
@@ -235,40 +228,7 @@ export class CodexOSSProvider implements AgentProvider {
     }
 
     try {
-      const { stdout } = await execAsync("ollama list", { timeout: 5000 });
-      const lines = stdout.trim().split("\n");
-
-      if (lines.length < 2) {
-        return [];
-      }
-
-      const models: ModelInfo[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line) continue;
-
-        // Parse: NAME ID SIZE MODIFIED
-        const parts = line.split(/\s+/);
-        if (parts.length >= 3) {
-          const name = parts[0] ?? "";
-          const sizeNum = Number.parseFloat(parts[2] ?? "0");
-          const sizeUnit = parts[3]?.toUpperCase() ?? "";
-          let sizeBytes: number | undefined;
-          if (sizeUnit === "GB") {
-            sizeBytes = Math.round(sizeNum * 1024 * 1024 * 1024);
-          } else if (sizeUnit === "MB") {
-            sizeBytes = Math.round(sizeNum * 1024 * 1024);
-          }
-
-          models.push({
-            id: name,
-            name: name,
-            size: sizeBytes,
-          });
-        }
-      }
-
-      return models;
+      return await new OllamaClient(getOllamaUrl()).listModels();
     } catch (error) {
       log.debug({ error }, "Failed to get Ollama models");
       return [];
@@ -626,6 +586,8 @@ export class CodexOSSProvider implements AgentProvider {
       "--oss",
       "--local-provider",
       this.localProvider,
+      "-c",
+      `model_providers.${this.localProvider}.base_url=${JSON.stringify(getOllamaUrl())}`,
       "--json",
     ];
 
@@ -661,6 +623,8 @@ export class CodexOSSProvider implements AgentProvider {
       prompt,
       "-c",
       `model_provider="${this.localProvider}"`,
+      "-c",
+      `model_providers.${this.localProvider}.base_url=${JSON.stringify(getOllamaUrl())}`,
     ];
 
     if (options.model) {

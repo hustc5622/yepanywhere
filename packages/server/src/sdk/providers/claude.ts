@@ -592,7 +592,9 @@ export class ClaudeProvider implements AgentProvider {
       },
       setMaxThinkingTokens: (tokens: number | null) =>
         sdkQuery.setMaxThinkingTokens(tokens),
-      interrupt: () => sdkQuery.interrupt(),
+      interrupt: async () => {
+        await sdkQuery.interrupt();
+      },
       supportedModels: async (): Promise<ModelInfo[]> => {
         const models = await sdkQuery.supportedModels();
         // Map SDK ModelInfo (value, displayName, description) to our ModelInfo (id, name, description)

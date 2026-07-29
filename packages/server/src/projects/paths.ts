@@ -324,19 +324,26 @@ export async function recoverCwdFromSessionDir(
  * the recovered cwd, or null if `projectPath` is already healthy / nothing
  * could be recovered.
  */
+export type StartCwdResolution =
+  | { status: "valid"; cwd: string }
+  | { status: "recovered"; cwd: string }
+  | { status: "missing"; cwd: null };
+
 export async function resolveStartCwd(
   projectPath: string,
   sessionDir: string,
-): Promise<string | null> {
+): Promise<StartCwdResolution> {
   try {
     const s = await stat(projectPath);
-    if (s.isDirectory()) return null;
+    if (s.isDirectory()) return { status: "valid", cwd: projectPath };
   } catch {
     // fall through to recovery
   }
 
   const recovered = await recoverCwdFromSessionDir(sessionDir);
-  return recovered ?? null;
+  return recovered
+    ? { status: "recovered", cwd: recovered }
+    : { status: "missing", cwd: null };
 }
 
 /**

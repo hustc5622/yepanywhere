@@ -63,7 +63,6 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
  */
 async function getLatestVersion(
   currentVersion: string,
-  installId?: string,
   options?: { forceRefresh?: boolean },
 ): Promise<string | null> {
   // Return cached value if fresh
@@ -259,7 +258,7 @@ export function createVersionRoutes(options?: VersionRouteOptions): Hono {
     // For dev versions like "v0.1.7-3-g050bfd2", extract base version "v0.1.7"
     // to compare against the update server.
     const baseVersion = current.split("-")[0] || current;
-    const latest = await getLatestVersion(baseVersion, options?.installId, {
+    const latest = await getLatestVersion(baseVersion, {
       forceRefresh: fresh,
     });
     const updateAvailable = latest ? isNewerSemver(baseVersion, latest) : false;

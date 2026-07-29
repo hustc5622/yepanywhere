@@ -116,6 +116,35 @@ describe("ProjectScanner cache", () => {
     expect(refreshed).toHaveLength(2);
   });
 
+  it("命中缓存时重新校验项目路径并使失效快照过期", async () => {
+    const projectsDir = join(tmpdir(), `project-scanner-${randomUUID()}`);
+    const projectPath = join(tmpdir(), `project-path-${randomUUID()}`);
+    tempDirs.push(projectsDir, projectPath);
+    await mkdir(projectPath, { recursive: true });
+    await createClaudeProject(
+      projectsDir,
+      "localhost",
+      projectPath,
+      "sess-stale",
+    );
+
+    const scanner = new ProjectScanner({
+      projectsDir,
+      enableCodex: false,
+      enableGemini: false,
+      cacheTtlMs: 60000,
+    });
+    const projectId = encodeProjectId(projectPath);
+    expect(await scanner.getOrCreateProject(projectId)).not.toBeNull();
+
+    await rm(projectPath, { recursive: true, force: true });
+    const stale = await scanner.getOrCreateProject(projectId);
+    expect(stale?.path).toBe(projectPath);
+    expect((scanner as unknown as { cacheDirty: boolean }).cacheDirty).toBe(
+      true,
+    );
+  });
+
   it("coalesces concurrent scans into one in-flight refresh", async () => {
     const projectsDir = join(tmpdir(), `project-scanner-${randomUUID()}`);
     tempDirs.push(projectsDir);

@@ -68,3 +68,6 @@ packages/server/bundled/
 # Reference repos (cloned for source reading)
 references/
 start.sh
+
+# AI agent workspace memory (project-local, not source)
+.workbuddy/

@@ -483,7 +483,16 @@ export class ProjectScanner {
 
     // First check if project already exists
     const existing = await this.getProject(resolvedProjectId);
-    if (existing) return existing;
+    if (existing) {
+      try {
+        const stats = await stat(existing.path);
+        if (stats.isDirectory()) return existing;
+      } catch {
+        // 保留 sessionDir 供调用方恢复 cwd，但不再把失效项目留在新快照中。
+      }
+      this.invalidateCache();
+      return existing;
+    }
 
     // Decode the projectId to get the path
     let projectPath: string;
@@ -498,6 +507,13 @@ export class ProjectScanner {
       const canonicalId = encodeProjectId(canonicalProjectPath);
       const canonicalProject = await this.getProject(canonicalId);
       if (canonicalProject) {
+        try {
+          const stats = await stat(canonicalProject.path);
+          if (stats.isDirectory()) return canonicalProject;
+        } catch {
+          // 与上面的缓存命中一致，保留恢复所需的 sessionDir。
+        }
+        this.invalidateCache();
         return canonicalProject;
       }
       projectPath = canonicalProjectPath;

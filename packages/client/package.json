@@ -23,7 +23,7 @@
     "@yep-anywhere/shared": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^7.11.0",
+    "react-router-dom": "7.18.2",
     "uqr": "^0.1.2",
     "zod": "^4.3.4"
   },

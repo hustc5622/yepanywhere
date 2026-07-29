@@ -60,6 +60,10 @@ jobs:
       - name: Verify package contents
         run: |
           cd dist/npm-package
+          npm ci --omit=dev --no-audit --no-fund
+          cd ../..
+          pnpm bundle:verify dist/npm-package
+          cd dist/npm-package
           npm pack --dry-run
           echo "Package contents verified"
 

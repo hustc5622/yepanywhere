@@ -18,7 +18,10 @@ import {
   normalizeCodexImageGenerationRecord,
   summarizeCodexImageGenerationResult,
 } from "../../codex/image-generation.js";
-import { getCodexMcpAppServerArgs } from "../../codex/mcp-profile.js";
+import {
+  discoverConfiguredCodexMcpServers,
+  getCodexMcpAppServerArgs,
+} from "../../codex/mcp-profile.js";
 import {
   type CodexToolCallContext,
   normalizeCodexCommandExecutionOutput,
@@ -335,6 +338,13 @@ export interface CodexProviderConfig {
   baseUrl?: string;
   /** API key override (normally read from ~/.codex/auth.json) */
   apiKey?: string;
+  /**
+   * Model provider to send in thread/start & thread/resume (e.g. "openai",
+   * "ccvibe", "azure"). When omitted, codex uses its own configured default
+   * provider (from ~/.codex/config.toml), which lets yep-anywhere reuse the
+   * local codex's native provider instead of being hard-pinned to OpenAI cloud.
+   */
+  modelProvider?: string;
 }
 
 class AsyncQueue<T> {
@@ -744,6 +754,23 @@ export class CodexProvider implements AgentProvider {
       env.OPENAI_API_KEY = this.config.apiKey;
     }
     return env;
+  }
+
+  /**
+   * Resolve the model provider to request from the codex app-server.
+   *
+   * Returns `undefined` when no override is configured, which makes the
+   * app-server fall back to the codex CLI's own default provider (read from
+   * ~/.codex/config.toml). This lets yep-anywhere transparently reuse the
+   * local codex's configured provider (e.g. a ChatGPT-app-backed `ccvibe`
+   * provider) instead of being hard-pinned to the OpenAI cloud.
+   */
+  private resolveModelProvider(): string | undefined {
+    const fromConfig = this.config.modelProvider?.trim();
+    if (fromConfig) return fromConfig;
+    const fromEnv = process.env.YEP_CODEX_MODEL_PROVIDER?.trim();
+    if (fromEnv) return fromEnv;
+    return undefined;
   }
 
   /**
@@ -1159,11 +1186,15 @@ export class CodexProvider implements AgentProvider {
     setActiveClient: (client: CodexAppServerClient) => void,
   ): AsyncIterableIterator<SDKMessage> {
     const codexCommand = await this.resolveCodexCommand();
+    const configuredMcpServers =
+      options.codexMcpMode === "clear"
+        ? await discoverConfiguredCodexMcpServers(codexCommand)
+        : [];
     const appServer = new CodexAppServerClient(
       codexCommand,
       options.cwd,
       this.getCodexEnv(),
-      getCodexMcpAppServerArgs(options.codexMcpMode),
+      getCodexMcpAppServerArgs(options.codexMcpMode, configuredMcpServers),
     );
     setActiveClient(appServer);
 
@@ -1209,17 +1240,18 @@ export class CodexProvider implements AgentProvider {
         );
       }
 
+      const modelProvider = this.resolveModelProvider();
       const threadResumeParams: ThreadResumeParams = {
         threadId: options.resumeSessionId ?? sessionId,
         model: requestedModel,
-        modelProvider: CODEX_CLOUD_MODEL_PROVIDER,
+        ...(modelProvider ? { modelProvider } : {}),
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
       };
       const threadStartParams: ThreadStartParams = {
         model: requestedModel,
-        modelProvider: CODEX_CLOUD_MODEL_PROVIDER,
+        ...(modelProvider ? { modelProvider } : {}),
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
@@ -1284,7 +1316,7 @@ export class CodexProvider implements AgentProvider {
             sandbox: CODEX_POLICY_OVERRIDES.sandbox,
           },
           model: requestedModel,
-          modelProvider: CODEX_CLOUD_MODEL_PROVIDER,
+          modelProvider: modelProvider ?? "(codex default)",
         },
         "Started Codex app-server session thread",
       );
@@ -2837,5 +2869,17 @@ export class CodexProvider implements AgentProvider {
 
 /**
  * Default Codex provider instance.
+ *
+ * `YEP_CODEX_MODEL_PROVIDER` lets operators pin the model provider sent to the
+ * codex app-server (e.g. "openai", "ccvibe"). When unset, yep-anywhere omits
+ * the field so codex uses its own configured default provider.
+ * `YEP_CODEX_PATH` / `CODEX_CLI_PATH` (honored in findCodexCliPath) can point
+ * at a specific codex binary (e.g. the ChatGPT-app-bundled one).
  */
-export const codexProvider = new CodexProvider();
+export const codexProvider = new CodexProvider({
+  modelProvider: process.env.YEP_CODEX_MODEL_PROVIDER?.trim() || undefined,
+  codexPath:
+    process.env.YEP_CODEX_PATH?.trim() ||
+    process.env.CODEX_CLI_PATH?.trim() ||
+    undefined,
+});

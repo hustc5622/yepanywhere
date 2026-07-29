@@ -26,14 +26,13 @@ describe("GET /version", () => {
     global.fetch = vi.fn(handler) as unknown as typeof fetch;
   }
 
-  it("parses version from update server 200 response", async () => {
+  it("parses tag_name from GitHub Releases response", async () => {
     mockFetch(
       () =>
         new Response(
           JSON.stringify({
-            version: "99.0.0",
-            notes: "New release",
-            pub_date: "2026-01-01T00:00:00Z",
+            tag_name: "v99.0.0",
+            name: "Release 99.0.0",
           }),
         ),
     );
@@ -48,8 +47,8 @@ describe("GET /version", () => {
     expect(json.current).toBeDefined();
   });
 
-  it("treats 204 as up-to-date", async () => {
-    mockFetch(() => new Response(null, { status: 204 }));
+  it("treats a GitHub 404 as no published release", async () => {
+    mockFetch(() => new Response(null, { status: 404 }));
 
     const { createVersionRoutes } = await importVersion();
     const routes = createVersionRoutes();
@@ -89,39 +88,29 @@ describe("GET /version", () => {
     expect(json.updateAvailable).toBe(false);
   });
 
-  it("sends installId as X-CFU-ID header", async () => {
+  it("sends GitHub API headers without leaking installId", async () => {
     let capturedHeaders: Headers | undefined;
     mockFetch((_url, init) => {
       capturedHeaders = new Headers(init?.headers);
-      return new Response(null, { status: 204 });
+      return new Response(null, { status: 404 });
     });
 
     const { createVersionRoutes } = await importVersion();
     const routes = createVersionRoutes({ installId: "my-install-id" });
     await routes.request("/");
 
-    expect(capturedHeaders?.get("X-CFU-ID")).toBe("my-install-id");
-  });
-
-  it("omits X-CFU-ID header when installId is not provided", async () => {
-    let capturedHeaders: Headers | undefined;
-    mockFetch((_url, init) => {
-      capturedHeaders = new Headers(init?.headers);
-      return new Response(null, { status: 204 });
-    });
-
-    const { createVersionRoutes } = await importVersion();
-    const routes = createVersionRoutes();
-    await routes.request("/");
-
     expect(capturedHeaders?.get("X-CFU-ID")).toBeNull();
+    expect(capturedHeaders?.get("Accept")).toBe("application/vnd.github+json");
+    expect(capturedHeaders?.get("User-Agent")).toBe(
+      "yepanywhere-version-check",
+    );
   });
 
   it("sends current version in URL path", async () => {
     let capturedUrl = "";
     mockFetch((url) => {
       capturedUrl = String(url);
-      return new Response(null, { status: 204 });
+      return new Response(null, { status: 404 });
     });
 
     const { createVersionRoutes } = await importVersion();
@@ -129,7 +118,7 @@ describe("GET /version", () => {
     await routes.request("/");
 
     expect(capturedUrl).toMatch(
-      /https:\/\/updates\.yepanywhere\.com\/version\/.+/,
+      /https:\/\/api\.github\.com\/repos\/Gumekn\/yepanywhere_pb_fork\/releases\/latest/,
     );
   });
 
@@ -141,7 +130,7 @@ describe("GET /version", () => {
     let fetchCount = 0;
     mockFetch(() => {
       fetchCount++;
-      return new Response(JSON.stringify({ version: "1.0.0" }));
+      return new Response(JSON.stringify({ tag_name: "v1.0.0" }));
     });
 
     const { createVersionRoutes } = await importVersion();
@@ -167,7 +156,7 @@ describe("GET /version", () => {
     let fetchCount = 0;
     mockFetch(() => {
       fetchCount++;
-      return new Response(JSON.stringify({ version: "1.0.0" }));
+      return new Response(JSON.stringify({ tag_name: "v1.0.0" }));
     });
 
     const { createVersionRoutes } = await importVersion();

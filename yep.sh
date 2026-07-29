@@ -122,7 +122,8 @@ install_runtime_dependencies() {
     check_bundle_layout || return 1
 
     print_info "安装运行时依赖到 dist/npm-package ..."
-    (cd "$BUNDLE_DIR" && npm install --omit=dev --no-audit --no-fund --silent)
+    (cd "$BUNDLE_DIR" && npm ci --omit=dev --no-audit --no-fund --silent --cache "$BUNDLE_DIR/.npm-cache")
+    pnpm bundle:verify "$BUNDLE_DIR"
     chmod +x "$BUNDLE_CLI" 2>/dev/null || true
     chmod +x "$BUNDLE_DIR"/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
     print_success "运行时依赖安装完成"

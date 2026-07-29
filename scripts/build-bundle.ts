@@ -15,6 +15,10 @@
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  createRuntimeShrinkwrap,
+  getRuntimeDependencies,
+} from "./runtime-package.js";
 
 const ROOT_DIR = path.resolve(import.meta.dirname, "..");
 const CLIENT_DIST = path.join(ROOT_DIR, "packages/client/dist");
@@ -323,11 +327,6 @@ step("Bundle client into staging", () => {
 step("Generate package.json for npm", () => {
   log("Generating package.json for npm publishing...");
 
-  const sourcePackageJsonPath = path.join(SERVER_PACKAGE, "package.json");
-  const sourcePackageJson = JSON.parse(
-    fs.readFileSync(sourcePackageJsonPath, "utf-8"),
-  );
-
   // Create a new package.json for publishing
   const npmPackageJson: Record<string, unknown> = {
     name: "yepanywhere",
@@ -346,13 +345,14 @@ step("Generate package.json for npm", () => {
     exports: {
       ".": "./dist/index.js",
     },
-    files: ["dist", "client-dist", "bundled", "README.md"],
-    // Copy dependencies from source, excluding workspace deps
-    dependencies: Object.fromEntries(
-      Object.entries(sourcePackageJson.dependencies || {}).filter(
-        ([name]) => !name.startsWith("@yep-anywhere/"),
-      ),
-    ),
+    files: [
+      "dist",
+      "client-dist",
+      "bundled",
+      "README.md",
+      "npm-shrinkwrap.json",
+    ],
+    dependencies: getRuntimeDependencies(),
     repository: {
       type: "git",
       url: "git+https://github.com/kzahel/yepanywhere.git",
@@ -379,6 +379,15 @@ step("Generate package.json for npm", () => {
   log(`  Version: ${NPM_VERSION}`);
   log("  Written to: dist/npm-package/package.json");
   log("  (Original packages/server/package.json unchanged)");
+});
+
+step("Copy reproducible runtime lock", () => {
+  const shrinkwrap = createRuntimeShrinkwrap(NPM_VERSION);
+  fs.writeFileSync(
+    path.join(STAGING_DIR, "npm-shrinkwrap.json"),
+    `${JSON.stringify(shrinkwrap, null, 2)}\n`,
+  );
+  log("  Written to: dist/npm-package/npm-shrinkwrap.json");
 });
 
 // Copy README to staging

@@ -190,6 +190,12 @@ export class Process {
   /** Resolvers waiting for the real session ID */
   private sessionIdResolvers: Array<(id: string) => void> = [];
   private sessionIdResolved = false;
+  private initializationResolved = false;
+  private initializationError: Error | null = null;
+  private initializationWaiters: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
 
   /** Timestamp of last SDK message received (for staleness detection) */
   private _lastMessageTime: Date;
@@ -706,6 +712,16 @@ export class Process {
     this.stopBucketSwapTimer();
     this.iteratorDone = true;
 
+    if (!this.initializationResolved) {
+      this.initializationError =
+        error ??
+        new Error(`Provider session terminated before startup: ${reason}`);
+      for (const waiter of this.initializationWaiters) {
+        waiter.reject(this.initializationError);
+      }
+      this.initializationWaiters = [];
+    }
+
     // Wake up hold wait if held (so processMessages loop can exit)
     if (this._holdResolve) {
       this._holdResolve();
@@ -755,6 +771,33 @@ export class Process {
           resolve(this._sessionId);
         }
       }, timeoutMs);
+    });
+  }
+
+  /** 等待 provider 发出 init；若启动阶段退出则立即失败。 */
+  waitForInitialization(timeoutMs = 5000): Promise<void> {
+    if (this.initializationResolved) return Promise.resolve();
+    if (this.initializationError)
+      return Promise.reject(this.initializationError);
+
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject };
+      this.initializationWaiters.push(waiter);
+      const timeout = setTimeout(() => {
+        const index = this.initializationWaiters.indexOf(waiter);
+        if (index >= 0) this.initializationWaiters.splice(index, 1);
+        reject(
+          new Error("Provider session startup timed out before initialization"),
+        );
+      }, timeoutMs);
+      waiter.resolve = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      waiter.reject = (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      };
     });
   }
 
@@ -1539,8 +1582,14 @@ export class Process {
 
         if (result.done) {
           this.iteratorDone = true;
-          // Don't transition to idle if we're waiting for input
-          if (this._state.type !== "waiting-input") {
+          if (this.messageQueue) {
+            this.transportFailed = true;
+            this.markTerminated(
+              this.initializationResolved
+                ? "provider session ended"
+                : "provider session ended before initialization",
+            );
+          } else if (this._state.type !== "waiting-input") {
             this.transitionToIdle();
           }
           break;
@@ -1578,6 +1627,9 @@ export class Process {
           const oldSessionId = this._sessionId;
           this._sessionId = message.session_id;
           this.sessionIdResolved = true;
+          this.initializationResolved = true;
+          for (const waiter of this.initializationWaiters) waiter.resolve();
+          this.initializationWaiters = [];
           if (typeof message.model === "string" && message.model) {
             this._resolvedModel = message.model;
           }
@@ -1651,6 +1703,16 @@ export class Process {
         }
 
         // Handle special message types
+        if (message.type === "error" && !this.initializationResolved) {
+          const startupError = new Error(
+            typeof message.error === "string"
+              ? message.error
+              : "Provider session failed before initialization",
+          );
+          this.transportFailed = true;
+          this.markTerminated("provider startup failed", startupError);
+          break;
+        }
         if (message.type === "system" && message.subtype === "input_request") {
           // Legacy mock SDK behavior - handle input_request message
           this.handleInputRequest(message);

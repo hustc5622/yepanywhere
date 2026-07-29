@@ -771,9 +771,12 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message.text, messageUuid, message.tempId);
 
-    // Wait for the real session ID from the provider before registering
-    if (!resumeSessionId) {
-      await process.waitForSessionId();
+    // 返回迭代器不代表子进程已启动；只有 init 握手成功后才能登记所有权。
+    try {
+      await process.waitForInitialization();
+    } catch (error) {
+      await process.abort();
+      throw error;
     }
 
     this.registerProcess(process, !resumeSessionId);

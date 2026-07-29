@@ -110,6 +110,12 @@ export function getCodexCommonPaths(): string[] {
  * Returns the path if found, null otherwise.
  */
 export async function findCodexCliPath(): Promise<string | null> {
+  // Allow operators to pin a specific codex binary (e.g. the ChatGPT-app
+  // bundled codex at /Applications/ChatGPT.app/Contents/Resources/codex).
+  const envPath =
+    process.env.YEP_CODEX_PATH?.trim() || process.env.CODEX_CLI_PATH?.trim();
+  if (envPath && existsSync(envPath)) return envPath;
+
   try {
     const { stdout } = await execAsync(whichCommand("codex"), {
       encoding: "utf-8",

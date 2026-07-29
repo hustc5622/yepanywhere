@@ -4,6 +4,10 @@ import type { IncomingMessage } from "node:http";
 import { basename } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
+import {
+  discoverConfiguredCodexMcpServers,
+  getCodexMcpAppServerArgs,
+} from "../codex/mcp-profile.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
 import type { SessionSummary } from "../supervisor/types.js";
@@ -101,6 +105,7 @@ interface SessionRecord {
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const JSON_RPC_VERSION = "2.0";
+const CODEX_CLEAR_BASE_ARG_COUNT = 4;
 const MAX_MCP_STARTUP_EVENTS = 50;
 
 interface CodexBridgeUpstreamState {
@@ -1478,7 +1483,20 @@ export class CodexBridgeService implements CodexBridgeController {
     const port = await this.findAvailableManagedPort(startPort);
     const url = `ws://127.0.0.1:${port}`;
     const state = this.getUpstreamState(profile);
-    const args = this.upstreamArgsByProfile[profile];
+    const configuredMcpServers =
+      profile === "clear"
+        ? await discoverConfiguredCodexMcpServers(codexPath)
+        : [];
+    const discoveredArgs = getCodexMcpAppServerArgs(
+      profile === "clear" ? "clear" : "full",
+      configuredMcpServers,
+    );
+    const args = [
+      ...this.upstreamArgsByProfile[profile],
+      ...discoveredArgs.slice(
+        profile === "clear" ? CODEX_CLEAR_BASE_ARG_COUNT : 0,
+      ),
+    ];
     const spawnArgs = ["app-server", ...args, "--listen", url];
     console.log(
       `[CodexBridge] Starting managed Codex app-server profile=${profile} path=${codexPath} args=${JSON.stringify(spawnArgs)}`,

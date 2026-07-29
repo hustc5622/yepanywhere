@@ -269,7 +269,8 @@ if $DO_BUILD; then
   # installs the dependencies for end users; for local dev we have to do
   # it ourselves, otherwise `yepanywhere` boots with ERR_MODULE_NOT_FOUND.
   log "Installing runtime dependencies in dist/npm-package ..."
-  (cd dist/npm-package && npm install --omit=dev --no-audit --no-fund --silent)
+  (cd dist/npm-package && npm ci --omit=dev --no-audit --no-fund --silent --cache dist/npm-package/.npm-cache)
+  pnpm bundle:verify dist/npm-package
   chmod +x dist/npm-package/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
 
   # Sanity-check the linked global command resolves to our bundle.

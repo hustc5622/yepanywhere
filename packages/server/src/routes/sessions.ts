@@ -1485,11 +1485,18 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // session we can't read the named session's jsonl (it doesn't exist
     // yet) — scan the project's session directory instead. Any existing
     // jsonl carries the SDK-written cwd, which is the source of truth.
-    const recoveredCwd = await resolveStartCwd(
+    const cwdResolution = await resolveStartCwd(
       project.path,
       project.sessionDir,
     );
-    if (recoveredCwd) {
+    if (cwdResolution.status === "missing") {
+      return c.json(
+        { error: `Project directory ${project.path} no longer exists` },
+        404,
+      );
+    }
+    if (cwdResolution.status === "recovered") {
+      const recoveredCwd = cwdResolution.cwd;
       const recoveredId = encodeProjectId(recoveredCwd);
       const fresh = await deps.scanner.getOrCreateProject(recoveredId);
       if (!fresh) {

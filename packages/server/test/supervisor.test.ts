@@ -17,6 +17,44 @@ describe("Supervisor", () => {
   });
 
   describe("startSession", () => {
+    it("provider 在 init 前报错时不登记失效会话", async () => {
+      const provider: AgentProvider = {
+        name: "codex",
+        displayName: "Codex",
+        supportsPermissionMode: true,
+        supportsThinkingToggle: false,
+        supportsSlashCommands: false,
+        isInstalled: async () => true,
+        isAuthenticated: async () => true,
+        getAuthStatus: async () => ({
+          installed: true,
+          authenticated: true,
+          enabled: true,
+        }),
+        getAvailableModels: async () => [],
+        startSession: async () => {
+          async function* iterator() {
+            yield { type: "error", error: "invalid transport" } as const;
+            yield { type: "result" } as const;
+          }
+          return {
+            iterator: iterator(),
+            queue: new MessageQueue(),
+            abort: () => {},
+          };
+        },
+      };
+      const providerSupervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+      });
+
+      await expect(
+        providerSupervisor.startSession("/tmp/test", { text: "hi" }),
+      ).rejects.toThrow("invalid transport");
+      expect(providerSupervisor.getAllProcesses()).toHaveLength(0);
+    });
+
     it("starts a session and returns a process", async () => {
       mockSdk.addScenario(createMockScenario("sess-123", "Hello!"));
 
