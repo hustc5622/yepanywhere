@@ -1101,6 +1101,8 @@
   "modeClickToSelect": "Click to select mode",
   "actionCancel": "Cancel",
   "messageActionEdit": "Edit message",
+  "messagePhaseProgress": "Progress",
+  "messageContinuedAfterAnswer": "Continued after your answer",
   "sessionEditingFromHere": "Editing this message — sending will branch the conversation from here",
   "sessionSyncingBranch": "Syncing edited branch…",
   "sessionInspectorOpen": "Open session outline",

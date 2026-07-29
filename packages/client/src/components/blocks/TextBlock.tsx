@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useOptionalSessionMetadata } from "../../contexts/SessionMetadataContext";
 import { useStreamingMarkdownContext } from "../../contexts/StreamingMarkdownContext";
 import { useStreamingMarkdown } from "../../hooks/useStreamingMarkdown";
+import { useOptionalI18n } from "../../i18n";
 import { appPath } from "../../lib/apiPath";
 import {
   parseLineColumn,
@@ -144,6 +145,7 @@ export const TextBlock = memo(function TextBlock({
   phase,
   augmentHtml,
 }: Props) {
+  const i18n = useOptionalI18n();
   const [fileModal, setFileModal] = useState<{
     filePath: string;
     lineNumber?: number;
@@ -259,7 +261,9 @@ export const TextBlock = memo(function TextBlock({
       onClick={handleClick}
     >
       {phase === "commentary" && (
-        <div className="text-block-phase">Progress</div>
+        <div className="text-block-phase">
+          {i18n?.t("messagePhaseProgress") ?? "Progress"}
+        </div>
       )}
       {/* Always render streaming elements when streaming so refs are ready for augments */}
       {renderStreamingContainer && (

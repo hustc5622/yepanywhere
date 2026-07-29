@@ -106,3 +106,8 @@ export function useI18n() {
   }
   return context;
 }
+
+/** Optional variant for independently rendered leaf components and tests. */
+export function useOptionalI18n() {
+  return useContext(I18nContext);
+}

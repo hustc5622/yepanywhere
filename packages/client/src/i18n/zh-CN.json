@@ -1101,6 +1101,8 @@
   "modeClickToSelect": "点击选择模式",
   "actionCancel": "取消",
   "messageActionEdit": "编辑消息",
+  "messagePhaseProgress": "进度",
+  "messageContinuedAfterAnswer": "根据你的回答继续",
   "sessionEditingFromHere": "正在编辑此消息 — 发送将从这里新建分支",
   "sessionSyncingBranch": "正在同步编辑分支…",
   "sessionInspectorOpen": "打开会话索引",

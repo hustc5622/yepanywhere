@@ -42,6 +42,10 @@ export type MessageRow =
       kind: "assistant-turn";
       key: string;
       items: RenderItem[];
+      /** Text blocks immediately preceding an answered question are progress. */
+      progressTextItemIds: string[];
+      /** This turn resumed after a question result that contains the user's answer. */
+      resumedAfterQuestion: boolean;
       turnTimestamp?: string;
       /** Most recent timestamp among all source messages in this turn. */
       turnUpdatedAt?: string;
@@ -54,37 +58,132 @@ export type MessageRow =
   | { kind: "compacting" }
   | { kind: "processing" };
 
+interface MessageTurnGroup {
+  isUserPrompt: boolean;
+  items: RenderItem[];
+  resumedAfterQuestion: boolean;
+}
+
+function isQuestionToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase().replace(/[^a-z]/g, "");
+  return normalized === "question" || normalized === "askuserquestion";
+}
+
+function hasRecordedQuestionAnswer(item: RenderItem): boolean {
+  if (item.type !== "tool_call") return false;
+  const structured = item.toolResult?.structured;
+  if (
+    !structured ||
+    typeof structured !== "object" ||
+    Array.isArray(structured)
+  ) {
+    return false;
+  }
+  const answers = (structured as { answers?: unknown }).answers;
+  return (
+    answers !== null &&
+    typeof answers === "object" &&
+    !Array.isArray(answers) &&
+    Object.keys(answers).length > 0
+  );
+}
+
+/**
+ * A successful question result is an implicit user interaction. Providers such
+ * as OpenCode persist the answer on the tool result instead of emitting a new
+ * user-prompt message, so it still needs to end the current visual turn.
+ */
+function isAnsweredQuestion(item: RenderItem): boolean {
+  return (
+    item.type === "tool_call" &&
+    isQuestionToolName(item.toolName) &&
+    item.status === "complete" &&
+    item.toolResult !== undefined &&
+    !item.toolResult.isError &&
+    hasRecordedQuestionAnswer(item)
+  );
+}
+
 /**
  * Groups consecutive assistant items (text, thinking, tool_call) into turns.
- * User prompts break the grouping and are returned as separate groups.
+ * User prompts and successful question results break the grouping. The latter
+ * preserves the otherwise-hidden point where the user answered and the agent
+ * resumed execution.
  */
-export function groupItemsIntoTurns(
-  items: RenderItem[],
-): Array<{ isUserPrompt: boolean; items: RenderItem[] }> {
-  const groups: Array<{ isUserPrompt: boolean; items: RenderItem[] }> = [];
+export function groupItemsIntoTurns(items: RenderItem[]): MessageTurnGroup[] {
+  const groups: MessageTurnGroup[] = [];
   let currentAssistantGroup: RenderItem[] = [];
+  let currentResumedAfterQuestion = false;
+  let nextAssistantResumesAfterQuestion = false;
+
+  const flushAssistantGroup = () => {
+    if (currentAssistantGroup.length === 0) return;
+    groups.push({
+      isUserPrompt: false,
+      items: currentAssistantGroup,
+      resumedAfterQuestion: currentResumedAfterQuestion,
+    });
+    currentAssistantGroup = [];
+    currentResumedAfterQuestion = false;
+  };
 
   for (const item of items) {
     if (item.type === "user_prompt" || item.type === "session_setup") {
       // Flush any pending assistant items
-      if (currentAssistantGroup.length > 0) {
-        groups.push({ isUserPrompt: false, items: currentAssistantGroup });
-        currentAssistantGroup = [];
-      }
+      flushAssistantGroup();
+      // An explicit user row already provides the visual boundary.
+      nextAssistantResumesAfterQuestion = false;
       // User prompt is its own group
-      groups.push({ isUserPrompt: true, items: [item] });
+      groups.push({
+        isUserPrompt: true,
+        items: [item],
+        resumedAfterQuestion: false,
+      });
     } else {
+      if (currentAssistantGroup.length === 0) {
+        currentResumedAfterQuestion = nextAssistantResumesAfterQuestion;
+        nextAssistantResumesAfterQuestion = false;
+      }
       // Accumulate assistant items
       currentAssistantGroup.push(item);
+      if (isAnsweredQuestion(item)) {
+        flushAssistantGroup();
+        nextAssistantResumesAfterQuestion = true;
+      }
     }
   }
 
   // Flush remaining assistant items
-  if (currentAssistantGroup.length > 0) {
-    groups.push({ isUserPrompt: false, items: currentAssistantGroup });
-  }
+  flushAssistantGroup();
 
   return groups;
+}
+
+/**
+ * OpenCode has no commentary/final channel marker. Treat only the contiguous
+ * text immediately before an answered question as progress: it is a checkpoint
+ * leading into a decision, not the final response for the whole user turn.
+ */
+function getQuestionPreludeTextItemIds(items: RenderItem[]): string[] {
+  let questionIndex = -1;
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (item && isAnsweredQuestion(item)) {
+      questionIndex = index;
+      break;
+    }
+  }
+  if (questionIndex < 0) return [];
+
+  const ids: string[] = [];
+  for (let index = questionIndex - 1; index >= 0; index--) {
+    const item = items[index];
+    if (!item || item.type !== "text") break;
+    if (item.phase === undefined) {
+      ids.unshift(item.id);
+    }
+  }
+  return ids;
 }
 
 export function getBranchId(item: RenderItem): string | undefined {
@@ -194,6 +293,8 @@ export function buildMessageRows({
       kind: "assistant-turn",
       key: `turn-${firstItem.id}`,
       items: group.items,
+      progressTextItemIds: getQuestionPreludeTextItemIds(group.items),
+      resumedAfterQuestion: group.resumedAfterQuestion,
       turnTimestamp: firstItem.sourceMessages[0]?.timestamp,
       turnUpdatedAt: getTurnUpdatedAt(group.items),
       turnCopyText: turnCopyText || undefined,

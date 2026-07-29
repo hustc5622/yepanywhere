@@ -36,7 +36,7 @@ function text(
   } as RenderItem;
 }
 
-function toolCall(id: string): RenderItem {
+function toolCall(id: string, overrides: Partial<RenderItem> = {}): RenderItem {
   return {
     type: "tool_call",
     id,
@@ -44,7 +44,22 @@ function toolCall(id: string): RenderItem {
     toolInput: {},
     status: "complete",
     sourceMessages: [msg({ uuid: id })],
+    ...overrides,
   } as RenderItem;
+}
+
+function answeredQuestion(id: string): RenderItem {
+  return toolCall(id, {
+    toolName: "question",
+    toolResult: {
+      content: "User answered the question",
+      isError: false,
+      structured: {
+        questions: [],
+        answers: { "question-0": ["Recommended"] },
+      },
+    },
+  });
 }
 
 describe("groupItemsIntoTurns", () => {
@@ -68,6 +83,74 @@ describe("groupItemsIntoTurns", () => {
 
   it("returns an empty array for no items", () => {
     expect(groupItemsIntoTurns([])).toEqual([]);
+  });
+
+  it("splits after an answered question and marks the resumed assistant group", () => {
+    const groups = groupItemsIntoTurns([
+      userPrompt("u1"),
+      text("checkpoint", "Three checks passed; one needs a decision."),
+      answeredQuestion("q1"),
+      toolCall("probe"),
+      text("final", "The probe passed."),
+    ]);
+
+    expect(groups.map((group) => group.items.map((item) => item.id))).toEqual([
+      ["u1"],
+      ["checkpoint", "q1"],
+      ["probe", "final"],
+    ]);
+    expect(groups.map((group) => group.resumedAfterQuestion)).toEqual([
+      false,
+      false,
+      true,
+    ]);
+  });
+
+  it("does not split at a pending, failed, or unanswered question", () => {
+    const pendingQuestion = toolCall("q-pending", {
+      toolName: "question",
+      status: "pending",
+    });
+    const failedQuestion = toolCall("q-failed", {
+      toolName: "AskUserQuestion",
+      status: "error",
+      toolResult: { content: "cancelled", isError: true },
+    });
+    const unansweredQuestion = toolCall("q-unanswered", {
+      toolName: "question",
+      toolResult: {
+        content: "Question completed without an answer",
+        isError: false,
+        structured: { questions: [], answers: {} },
+      },
+    });
+
+    const groups = groupItemsIntoTurns([
+      text("before", "Need input"),
+      pendingQuestion,
+      failedQuestion,
+      unansweredQuestion,
+      toolCall("after"),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.items).toHaveLength(5);
+    expect(groups[0]?.resumedAfterQuestion).toBe(false);
+  });
+
+  it("uses an explicit user prompt instead of an extra resumed marker", () => {
+    const groups = groupItemsIntoTurns([
+      text("checkpoint", "Choose one."),
+      answeredQuestion("q1"),
+      userPrompt("explicit-answer"),
+      toolCall("after"),
+    ]);
+
+    expect(groups.map((group) => group.resumedAfterQuestion)).toEqual([
+      false,
+      false,
+      false,
+    ]);
   });
 });
 
@@ -184,6 +267,36 @@ describe("buildMessageRows", () => {
     expect(turn).toMatchObject({
       turnTimestamp: "2024-01-01T00:00:01Z",
       turnUpdatedAt: "2024-01-01T00:00:08Z",
+    });
+  });
+
+  it("marks a question prelude as progress and the following turn as resumed", () => {
+    const rows = buildMessageRows({
+      items: [
+        toolCall("validation"),
+        text("checkpoint", "Three checks passed; one needs a decision."),
+        answeredQuestion("q1"),
+        toolCall("probe"),
+        text("final", "The probe passed."),
+      ],
+      hasOlderMessages: false,
+      hasNewerMessages: false,
+      pendingMessages: [],
+      deferredMessages: [],
+      isCompacting: false,
+      focusedBranchItemId: null,
+      targetItemId: null,
+    });
+    const turns = rows.filter((row) => row.kind === "assistant-turn");
+
+    expect(turns).toHaveLength(2);
+    expect(turns[0]).toMatchObject({
+      progressTextItemIds: ["checkpoint"],
+      resumedAfterQuestion: false,
+    });
+    expect(turns[1]).toMatchObject({
+      progressTextItemIds: [],
+      resumedAfterQuestion: true,
     });
   });
 

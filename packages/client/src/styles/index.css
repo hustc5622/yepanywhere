@@ -3088,6 +3088,22 @@ a.sidebar-nav-item {
   margin-top: var(--space-1);
 }
 
+.assistant-turn + .assistant-turn-resumed {
+  margin-top: var(--space-3);
+}
+
+.assistant-turn-resume-boundary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-2) 24px;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  line-height: 1.2;
+  user-select: none;
+}
+
 /* Metadata block (opened/uploaded files) sits *under* the bubble and stays
    right-aligned so it reads as belonging to the user message above. */
 .user-prompt-container .user-prompt-metadata {

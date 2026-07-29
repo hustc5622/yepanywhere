@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useOptionalI18n } from "../i18n";
 import {
   type ActiveToolApproval,
   isPlanProgressItem,
@@ -134,6 +135,7 @@ export const MessageList = memo(function MessageList({
   targetMessageId,
   onTargetFocused,
 }: Props) {
+  const i18n = useOptionalI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const focusedBranchRef = useRef<HTMLDivElement | null>(null);
   const targetMessageRef = useRef<HTMLDivElement | null>(null);
@@ -619,20 +621,37 @@ export const MessageList = memo(function MessageList({
         const usesLastUpdateTimestamp = row.key === lastUpdatedAssistantTurnKey;
         return (
           <div
-            className="assistant-turn"
+            className={`assistant-turn${row.resumedAfterQuestion ? " assistant-turn-resumed" : ""}`}
             ref={row.turnHasTarget ? targetMessageRef : undefined}
           >
-            {row.items.map((item) => (
-              <RenderItemComponent
-                key={item.id}
-                item={item}
-                isStreaming={isStreaming}
-                thinkingExpanded={thinkingExpanded}
-                toggleThinkingExpanded={toggleThinkingExpanded}
-                sessionProvider={provider}
-                onSelectBranch={onSelectBranch}
-              />
-            ))}
+            {row.resumedAfterQuestion && (
+              <div className="assistant-turn-resume-boundary">
+                <span aria-hidden="true">↳</span>
+                <span>
+                  {i18n?.t("messageContinuedAfterAnswer") ??
+                    "Continued after your answer"}
+                </span>
+              </div>
+            )}
+            {row.items.map((item) => {
+              const renderedItem =
+                item.type === "text" &&
+                item.phase === undefined &&
+                row.progressTextItemIds.includes(item.id)
+                  ? { ...item, phase: "commentary" as const }
+                  : item;
+              return (
+                <RenderItemComponent
+                  key={item.id}
+                  item={renderedItem}
+                  isStreaming={isStreaming}
+                  thinkingExpanded={thinkingExpanded}
+                  toggleThinkingExpanded={toggleThinkingExpanded}
+                  sessionProvider={provider}
+                  onSelectBranch={onSelectBranch}
+                />
+              );
+            })}
             <MessageActions
               timestamp={
                 usesLastUpdateTimestamp

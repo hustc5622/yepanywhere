@@ -27,7 +27,10 @@ vi.mock("../ProcessingIndicator", () => ({
 
 vi.mock("../RenderItemComponent", () => ({
   RenderItemComponent: ({ item }: { item: RenderItem }) => (
-    <div data-testid={`render-item-${item.id}`}>
+    <div
+      data-testid={`render-item-${item.id}`}
+      data-phase={item.type === "text" ? item.phase : undefined}
+    >
       {"content" in item ? String(item.content) : item.id}
     </div>
   ),
@@ -63,6 +66,37 @@ function assistantTextItem(
         type: "assistant",
         timestamp,
         message: { role: "assistant", content: text },
+      } satisfies Message,
+    ],
+  };
+}
+
+function assistantToolItem(
+  id: string,
+  toolName: string,
+  answered = false,
+): RenderItem {
+  return {
+    id,
+    type: "tool_call",
+    toolName,
+    toolInput: {},
+    toolResult: answered
+      ? {
+          content: "User answered the question",
+          isError: false,
+          structured: {
+            questions: [],
+            answers: { "question-0": ["Recommended"] },
+          },
+        }
+      : { content: "done", isError: false },
+    status: "complete",
+    sourceMessages: [
+      {
+        uuid: id,
+        type: "assistant",
+        message: { role: "assistant", content: [] },
       } satisfies Message,
     ],
   };
@@ -289,6 +323,53 @@ describe("MessageList active turn timestamp", () => {
     timestamp = screen.getByTestId("message-actions");
     expect(timestamp.textContent).toBe(firstUpdate);
     expect(timestamp.dataset.lastUpdate).toBe("false");
+  });
+});
+
+describe("MessageList question continuation", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("labels the checkpoint as progress and shows where execution resumes", () => {
+    render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantToolItem("validation", "Bash"),
+          assistantTextItem(
+            "checkpoint",
+            "2026-07-28T13:14:24.000Z",
+            "Three checks passed; one needs a decision.",
+          ),
+          assistantToolItem("decision", "question", true),
+          assistantToolItem("probe", "Bash"),
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("render-item-checkpoint").dataset.phase).toBe(
+      "commentary",
+    );
+    expect(screen.getByText("Continued after your answer")).toBeDefined();
+    expect(document.querySelectorAll(".assistant-turn")).toHaveLength(2);
   });
 });
 
