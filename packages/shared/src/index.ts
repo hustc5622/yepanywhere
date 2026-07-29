@@ -232,6 +232,9 @@ export type {
   UnifiedSession,
   ClaudeSessionFile,
   CodexSessionContent,
+  SessionLocation,
+  SessionLocationSource,
+  SessionLocateResponse,
 } from "./session/index.js";
 
 // Context status (full SDK breakdown + fallback estimate)

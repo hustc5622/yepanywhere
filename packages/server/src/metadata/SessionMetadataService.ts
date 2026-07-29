@@ -12,6 +12,7 @@ import type {
   OpenCodeSessionConfig,
   ProviderName,
   SessionCreatedBy,
+  UrlProjectId,
 } from "@yep-anywhere/shared";
 
 export interface SessionMetadata {
@@ -27,6 +28,16 @@ export interface SessionMetadata {
   model?: string;
   /** Provider used for this session (for backward compatibility with sessions that don't have provider in JSONL) */
   provider?: ProviderName;
+  /**
+   * Project that owned this session when Yep started it.
+   *
+   * Recorded so a bare session id can be resolved back to a project without
+   * the expensive per-project, per-provider reader scan. Treated as a hint
+   * only: the path goes stale if the project directory is moved, so callers
+   * must verify it still exists before trusting it.
+   */
+  projectId?: UrlProjectId;
+  projectPath?: string;
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
   /** Codex MCP profile for app-server sessions. */
@@ -211,6 +222,26 @@ export class SessionMetadataService {
   }
 
   /**
+   * Record which project a session belongs to.
+   *
+   * This is the reverse index that makes a bare session id resolvable: without
+   * it, finding the owning project means scanning every project with every
+   * provider reader.
+   */
+  async setProjectLocation(
+    sessionId: string,
+    projectId: UrlProjectId | undefined,
+    projectPath: string | undefined,
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      projectId: projectId || undefined,
+      projectPath: projectPath || undefined,
+    }));
+    await this.save();
+  }
+
+  /**
    * Set the executor (SSH host) for a session.
    * Used to track which remote executor ran a session for resume.
    */
@@ -258,6 +289,23 @@ export class SessionMetadataService {
    */
   getProvider(sessionId: string): string | undefined {
     return this.getMetadata(sessionId)?.provider;
+  }
+
+  /**
+   * Get the recorded project for a session, if Yep started it.
+   *
+   * Both fields are required for the result to be useful, so a partially
+   * written entry reports as unknown rather than half an answer.
+   */
+  getProjectLocation(
+    sessionId: string,
+  ): { projectId: UrlProjectId; projectPath: string } | undefined {
+    const metadata = this.getMetadata(sessionId);
+    if (!metadata?.projectId || !metadata.projectPath) return undefined;
+    return {
+      projectId: metadata.projectId,
+      projectPath: metadata.projectPath,
+    };
   }
 
   /**
@@ -395,6 +443,8 @@ export class SessionMetadataService {
       cleaned.opencodeConfig = updated.opencodeConfig;
     }
     if (updated.createdBy) cleaned.createdBy = updated.createdBy;
+    if (updated.projectId) cleaned.projectId = updated.projectId;
+    if (updated.projectPath) cleaned.projectPath = updated.projectPath;
 
     if (Object.keys(cleaned).length === 0) {
       // Remove the entry entirely if empty

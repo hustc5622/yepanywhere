@@ -477,6 +477,7 @@ describe("Sessions API", () => {
         setProvider: vi.fn(async () => undefined),
         setOpenCodeConfig: vi.fn(async () => undefined),
         setCreatedBy: vi.fn(async () => undefined),
+        setProjectLocation: vi.fn(async () => undefined),
       };
       const { app, supervisor } = createApp({
         sdk: mockSdk,
@@ -543,6 +544,11 @@ describe("Sessions API", () => {
       expect(sessionMetadataService.setCreatedBy).toHaveBeenCalledWith(
         "ses_opencode_fork",
         "yep",
+      );
+      expect(sessionMetadataService.setProjectLocation).toHaveBeenCalledWith(
+        "ses_opencode_fork",
+        projectId,
+        expect.any(String),
       );
     });
 

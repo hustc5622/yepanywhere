@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SessionMetadataService } from "../../src/metadata/SessionMetadataService.js";
+import { encodeProjectId } from "../../src/projects/paths.js";
 
 describe("SessionMetadataService", () => {
   let testDir: string;
@@ -248,6 +249,76 @@ describe("SessionMetadataService", () => {
       await service.setCreatedBy("session-1", undefined);
 
       expect(service.getMetadata("session-1")).toBeUndefined();
+    });
+  });
+
+  describe("setProjectLocation", () => {
+    it("persists the owning project so a bare session id stays resolvable", async () => {
+      await service.initialize();
+      await service.setProjectLocation(
+        "session-1",
+        encodeProjectId("/Users/someone/work/alpha"),
+        "/Users/someone/work/alpha",
+      );
+
+      const newService = new SessionMetadataService({ dataDir: testDir });
+      await newService.initialize();
+
+      expect(newService.getProjectLocation("session-1")).toEqual({
+        projectId: encodeProjectId("/Users/someone/work/alpha"),
+        projectPath: "/Users/someone/work/alpha",
+      });
+    });
+
+    it("reports unknown when only half the location was recorded", async () => {
+      await service.initialize();
+      await service.setProjectLocation(
+        "session-1",
+        encodeProjectId("/Users/someone/work/alpha"),
+        undefined,
+      );
+
+      expect(service.getProjectLocation("session-1")).toBeUndefined();
+    });
+
+    it("reports unknown for sessions Yep never started", async () => {
+      await service.initialize();
+
+      expect(service.getProjectLocation("session-unknown")).toBeUndefined();
+    });
+
+    it("preserves the recorded location when other fields change", async () => {
+      await service.initialize();
+      await service.setProjectLocation(
+        "session-1",
+        encodeProjectId("/Users/someone/work/alpha"),
+        "/Users/someone/work/alpha",
+      );
+      await service.setProvider("session-1", "opencode");
+      await service.setTitle("session-1", "Renamed");
+
+      expect(service.getProjectLocation("session-1")).toEqual({
+        projectId: encodeProjectId("/Users/someone/work/alpha"),
+        projectPath: "/Users/someone/work/alpha",
+      });
+    });
+
+    it("follows a durable id remap", async () => {
+      await service.initialize();
+      await service.setProjectLocation(
+        "temporary-id",
+        encodeProjectId("/Users/someone/work/alpha"),
+        "/Users/someone/work/alpha",
+      );
+
+      await service.remapSessionId("temporary-id", "durable-id");
+
+      expect(service.getProjectLocation("durable-id")?.projectPath).toBe(
+        "/Users/someone/work/alpha",
+      );
+      expect(service.getProjectLocation("temporary-id")?.projectPath).toBe(
+        "/Users/someone/work/alpha",
+      );
     });
   });
 

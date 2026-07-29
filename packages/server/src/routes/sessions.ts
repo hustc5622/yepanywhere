@@ -88,6 +88,7 @@ import {
   resolveSessionSources,
 } from "../sessions/provider-resolution.js";
 import { validateQuestionAnswers } from "../sessions/question-answers.js";
+import { locateSession } from "../sessions/session-locator.js";
 import {
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
@@ -1116,18 +1117,33 @@ function emitArchiveFileEvents(
   }
 }
 
-async function markSessionCreatedByYep(
+/**
+ * Record that Yep started this session, and where.
+ *
+ * The project is persisted as the reverse index behind
+ * `GET /api/sessions/:sessionId/locate`: without it, resolving a bare session
+ * id means scanning every project with every provider reader. This is the only
+ * point in the request where the session id and its project are both known for
+ * certain, and `project` is already post-recovery, so a stale projectId from
+ * the URL never gets persisted.
+ */
+async function recordYepSessionOrigin(
   deps: SessionsDeps,
   sessionId: string,
-  projectId: string,
+  project: Project,
 ): Promise<void> {
   if (!deps.sessionMetadataService) return;
 
   await deps.sessionMetadataService.setCreatedBy(sessionId, "yep");
+  await deps.sessionMetadataService.setProjectLocation(
+    sessionId,
+    project.id,
+    project.path,
+  );
   deps.eventBus?.emit({
     type: "session-metadata-changed",
     sessionId,
-    projectId: projectId as UrlProjectId,
+    projectId: project.id,
     timestamp: new Date().toISOString(),
   });
 }
@@ -1215,6 +1231,22 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "Archived session not found" }, 404);
     }
     return c.json({ session: record });
+  });
+
+  // GET /api/sessions/:sessionId/locate - Resolve a bare session id to its
+  // owning project.
+  //
+  // Every other read path is keyed by projectId + sessionId, so an id on its
+  // own (copied from the UI, pasted into an agent running elsewhere, quoted in
+  // a bug report) is not addressable. This is the one route that turns one
+  // back into a location.
+  routes.get("/sessions/:sessionId/locate", async (c) => {
+    const sessionId = c.req.param("sessionId");
+    const location = await locateSession(deps, sessionId);
+    if (!location) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+    return c.json({ session: location });
   });
 
   // GET /api/projects/:projectId/sessions/:sessionId/agents - Get agent mappings
@@ -2178,7 +2210,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         );
       }
     }
-    await markSessionCreatedByYep(deps, result.sessionId, project.id);
+    await recordYepSessionOrigin(deps, result.sessionId, project);
 
     return c.json({
       sessionId: result.sessionId,
@@ -2316,7 +2348,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         );
       }
     }
-    await markSessionCreatedByYep(deps, result.sessionId, project.id);
+    await recordYepSessionOrigin(deps, result.sessionId, project);
 
     return c.json({
       sessionId: result.sessionId,
@@ -2676,7 +2708,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       }
     }
     if (actualSessionId !== sessionId) {
-      await markSessionCreatedByYep(deps, actualSessionId, project.id);
+      await recordYepSessionOrigin(deps, actualSessionId, project);
     }
 
     recordOpenCodeContextWindowOverride(deps, {

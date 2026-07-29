@@ -9,3 +9,9 @@ export type {
   CodexSessionContent,
   UnifiedSession,
 } from "./UnifiedSession.js";
+
+export type {
+  SessionLocateResponse,
+  SessionLocation,
+  SessionLocationSource,
+} from "./SessionLocation.js";
