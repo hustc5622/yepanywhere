@@ -16,6 +16,7 @@ import {
 import { PageHeader } from "../components/PageHeader";
 import { SessionListItem } from "../components/SessionListItem";
 import { SessionListSkeleton } from "../components/Skeleton";
+import { useToastContext } from "../contexts/ToastContext";
 import { useDrafts } from "../hooks/useDrafts";
 import { useGlobalSessions } from "../hooks/useGlobalSessions";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
@@ -49,12 +50,40 @@ const getSessionListTitle = (session: GlobalSessionItem): string | null =>
   session.customTitle ?? session.aiTitle ?? session.title ?? null;
 
 /**
+ * A session can be archived only if it is not already archived and its runtime
+ * is not busy. The server hard-blocks (409) archiving of busy sessions
+ * (waiting-input / hold / in-turn / external), so filtering them out client-side
+ * avoids doomed requests and keeps bulk archive tolerant of mixed selections.
+ */
+const canArchiveSession = (session: GlobalSessionItem): boolean =>
+  !session.isArchived && session.runtime?.canArchive !== false;
+
+/** Max number of busy session names to spell out before summarizing the rest. */
+const MAX_BUSY_NAMES = 3;
+
+/** Build a readable "A, B, C +N more" list of busy session titles for a toast. */
+const formatBusyNames = (
+  busy: GlobalSessionItem[],
+  t: ReturnType<typeof useI18n>["t"],
+): string => {
+  const names = busy
+    .slice(0, MAX_BUSY_NAMES)
+    .map((s) => getSessionListTitle(s) ?? t("sessionUntitled"));
+  let label = names.join(", ");
+  if (busy.length > MAX_BUSY_NAMES) {
+    label += ` ${t("bulkArchiveMore", { count: busy.length - MAX_BUSY_NAMES })}`;
+  }
+  return label;
+};
+
+/**
  * Global sessions page showing all sessions across all projects.
  * Supports filtering by project, status, provider, and search query.
  * Includes multi-select mode with bulk actions.
  */
 export function GlobalSessionsPage() {
   const { t } = useI18n();
+  const { showToast } = useToastContext();
   const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
     useNavigationLayout();
   const basePath = useRemoteBasePath();
@@ -448,35 +477,94 @@ export function GlobalSessionsPage() {
   );
 
   // Bulk action handlers
+
+  /**
+   * Archive a batch of sessions tolerantly:
+   * - skip sessions that are busy/already archived (would 409 server-side)
+   * - use allSettled so one failure never aborts the whole batch
+   * - report a per-batch summary, naming the busy sessions that were skipped
+   */
+  const archiveSessions = useCallback(
+    async (targets: GlobalSessionItem[]): Promise<void> => {
+      const archivable = targets.filter(canArchiveSession);
+      const busy = targets.filter(
+        (s) => !s.isArchived && !canArchiveSession(s),
+      );
+
+      if (archivable.length === 0) {
+        if (busy.length > 0) {
+          showToast(
+            t("bulkArchiveSkippedNames", { names: formatBusyNames(busy, t) }),
+            "error",
+          );
+        } else {
+          showToast(t("bulkArchiveNoneEligible"), "error");
+        }
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        archivable.map((s) =>
+          api.updateSessionMetadata(s.id, { archived: true }),
+        ),
+      );
+      const succeeded = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - succeeded;
+
+      const parts: string[] = [];
+      if (succeeded > 0) {
+        parts.push(t("bulkArchiveSucceeded", { count: succeeded }));
+      }
+      if (busy.length > 0) {
+        parts.push(
+          t("bulkArchiveSkippedNames", { names: formatBusyNames(busy, t) }),
+        );
+      }
+      if (failed > 0) {
+        parts.push(t("bulkArchiveFailed", { count: failed }));
+      }
+      if (parts.length > 0) {
+        showToast(parts.join(" · "), failed > 0 ? "error" : "success");
+      }
+    },
+    [showToast, t],
+  );
+
   const handleBulkArchive = useCallback(async () => {
     if (isBulkActionPending) return;
     setIsBulkActionPending(true);
     try {
-      await Promise.all(
-        Array.from(selectedIds).map((id) =>
-          api.updateSessionMetadata(id, { archived: true }),
-        ),
-      );
+      await archiveSessions(sessions.filter((s) => selectedIds.has(s.id)));
       handleClearSelection();
     } finally {
       setIsBulkActionPending(false);
     }
-  }, [selectedIds, isBulkActionPending, handleClearSelection]);
+  }, [
+    sessions,
+    selectedIds,
+    isBulkActionPending,
+    handleClearSelection,
+    archiveSessions,
+  ]);
 
   const handleBulkUnarchive = useCallback(async () => {
     if (isBulkActionPending) return;
     setIsBulkActionPending(true);
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         Array.from(selectedIds).map((id) =>
           api.updateSessionMetadata(id, { archived: false }),
         ),
       );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        showToast(t("bulkArchiveFailed", { count: failed }), "error");
+      }
       handleClearSelection();
     } finally {
       setIsBulkActionPending(false);
     }
-  }, [selectedIds, isBulkActionPending, handleClearSelection]);
+  }, [selectedIds, isBulkActionPending, handleClearSelection, showToast, t]);
 
   const handleBulkStar = useCallback(async () => {
     if (isBulkActionPending) return;
@@ -537,23 +625,19 @@ export function GlobalSessionsPage() {
   // "Archive all" for filtered results (no manual selection needed)
   const handleArchiveAllFiltered = useCallback(async () => {
     if (isBulkActionPending) return;
-    const archivable = filteredSessions.filter((s) => !s.isArchived);
+    const archivable = filteredSessions.filter(canArchiveSession);
     if (archivable.length === 0) return;
     setIsBulkActionPending(true);
     try {
-      await Promise.all(
-        archivable.map((s) =>
-          api.updateSessionMetadata(s.id, { archived: true }),
-        ),
-      );
+      await archiveSessions(archivable);
     } finally {
       setIsBulkActionPending(false);
     }
-  }, [filteredSessions, isBulkActionPending]);
+  }, [filteredSessions, isBulkActionPending, archiveSessions]);
 
   // Count of archivable sessions in filtered results
   const archivableFilteredCount = useMemo(
-    () => filteredSessions.filter((s) => !s.isArchived).length,
+    () => filteredSessions.filter(canArchiveSession).length,
     [filteredSessions],
   );
 
@@ -561,7 +645,7 @@ export function GlobalSessionsPage() {
   const bulkActionState = useMemo(() => {
     const selectedSessions = sessions.filter((s) => selectedIds.has(s.id));
     return {
-      canArchive: selectedSessions.some((s) => !s.isArchived),
+      canArchive: selectedSessions.some(canArchiveSession),
       canUnarchive: selectedSessions.some((s) => s.isArchived),
       canStar: selectedSessions.some((s) => !s.isStarred),
       canUnstar: selectedSessions.some((s) => s.isStarred),

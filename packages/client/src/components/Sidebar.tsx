@@ -50,6 +50,24 @@ function canArchiveSession(session: GlobalSessionItem): boolean {
   return !session.isArchived && session.runtime?.canArchive !== false;
 }
 
+/** Max number of busy session names to spell out before summarizing the rest. */
+const MAX_BUSY_NAMES = 3;
+
+/** Build a readable "A, B, C +N more" list of busy session titles for a toast. */
+function formatBusyNames(
+  busy: GlobalSessionItem[],
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const names = busy
+    .slice(0, MAX_BUSY_NAMES)
+    .map((s) => getSessionListTitle(s) ?? t("sessionUntitled"));
+  let label = names.join(", ");
+  if (busy.length > MAX_BUSY_NAMES) {
+    label += ` ${t("bulkArchiveMore", { count: busy.length - MAX_BUSY_NAMES })}`;
+  }
+  return label;
+}
+
 function compareSessionsByUpdatedAtDesc(
   a: GlobalSessionItem,
   b: GlobalSessionItem,
@@ -459,10 +477,17 @@ export function Sidebar({
     if (isBulkArchivePending || selectedSessions.length === 0) return;
 
     const archivableSessions = selectedSessions.filter(canArchiveSession);
+    const busySessions = selectedSessions.filter(
+      (s) => !s.isArchived && !canArchiveSession(s),
+    );
     if (archivableSessions.length === 0) {
       showToast(
-        selectedSessions[0]?.runtime?.archiveBlockReason ??
-          t("sessionArchiveFailed"),
+        busySessions.length > 0
+          ? t("bulkArchiveSkippedNames", {
+              names: formatBusyNames(busySessions, t),
+            })
+          : (selectedSessions[0]?.runtime?.archiveBlockReason ??
+              t("sessionArchiveFailed")),
         "error",
       );
       return;
@@ -470,15 +495,31 @@ export function Sidebar({
 
     setIsBulkArchivePending(true);
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         archivableSessions.map((session) =>
           api.updateSessionMetadata(session.id, { archived: true }),
         ),
       );
-      showToast(
-        t("sidebarArchivedSelected", { count: archivableSessions.length }),
-        "success",
-      );
+      const succeeded = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - succeeded;
+
+      const parts: string[] = [];
+      if (succeeded > 0) {
+        parts.push(t("sidebarArchivedSelected", { count: succeeded }));
+      }
+      if (busySessions.length > 0) {
+        parts.push(
+          t("bulkArchiveSkippedNames", {
+            names: formatBusyNames(busySessions, t),
+          }),
+        );
+      }
+      if (failed > 0) {
+        parts.push(t("bulkArchiveFailed", { count: failed }));
+      }
+      if (parts.length > 0) {
+        showToast(parts.join(" · "), failed > 0 ? "error" : "success");
+      }
       handleClearSelection();
       await refetchSessionLists();
     } catch (err) {
