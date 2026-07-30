@@ -13,7 +13,7 @@ import { Hono } from "hono";
 import { listActiveBridgeSessionViews } from "../bridge-common/multi.js";
 import type { BridgeSessionView as CommonBridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
-import { getProjectGitStatusSummary } from "../git-status-summary.js";
+import { GitStatusSummaryCache } from "../git-status-summary.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type {
   ProjectMetadataService,
@@ -325,6 +325,12 @@ async function getProjectGitStatusSummaries(
 export function createProjectsRoutes(deps: ProjectsDeps): Hono {
   const routes = new Hono();
 
+  // Shared across all requests to this route instance so the short TTL +
+  // single-flight cache actually collapses repeated `GET /api/projects` polls
+  // into one git invocation per project. Tests can bypass it via
+  // `deps.gitStatusProvider`.
+  const gitStatusCache = new GitStatusSummaryCache();
+
   /**
    * Get owned sessions for a project that might not be in the file list yet.
    * New sessions may not have user/assistant messages written to disk yet.
@@ -460,7 +466,7 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
     const rawProjects = await deps.scanner.listProjects();
     const gitStatusProvider =
       deps.gitStatusProvider ??
-      ((project: Project) => getProjectGitStatusSummary(project.path));
+      ((project: Project) => gitStatusCache.get(project.path));
     const [ownedProcesses, gitStatusSummaries, activeBridgeViews] =
       await Promise.all([
         loadOwnedProcessViews(deps),

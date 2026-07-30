@@ -6,6 +6,18 @@ const execFileAsync = promisify(execFile);
 
 const GIT_STATUS_TIMEOUT_MS = 2_000;
 
+/**
+ * How long a git status summary stays fresh before it is recomputed.
+ *
+ * `GET /api/projects` asks for every project's summary on each request, and the
+ * mobile client polls that endpoint frequently. Without a cache each request
+ * spawned `2 x N` git subprocesses (status + stash list per project), which is
+ * the single most expensive uncached path in the project list. A short TTL
+ * mirrors the ProjectScanner snapshot window and collapses bursts of polls into
+ * one git invocation per project.
+ */
+const GIT_STATUS_CACHE_TTL_MS = 3_000;
+
 export const NOT_A_GIT_REPO_SUMMARY: ProjectGitStatusSummary = {
   isGitRepo: false,
   branch: null,
@@ -149,4 +161,77 @@ function isNotGitRepoError(err: unknown): boolean {
     }
   }
   return false;
+}
+
+interface GitStatusCacheEntry {
+  value: ProjectGitStatusSummary | null;
+  timestamp: number;
+}
+
+export interface GitStatusSummaryCacheOptions {
+  /** Freshness window in milliseconds. Defaults to {@link GIT_STATUS_CACHE_TTL_MS}. */
+  ttlMs?: number;
+  /** Override the underlying git invocation (primarily for tests). */
+  compute?: (projectPath: string) => Promise<ProjectGitStatusSummary | null>;
+}
+
+/**
+ * Per-project-path cache for git status summaries.
+ *
+ * Combines a short TTL with single-flight deduplication so concurrent callers
+ * (e.g. the `getProjectGitStatusSummaries` worker pool during `GET
+ * /api/projects`) share one in-flight git invocation per project instead of
+ * spawning a fresh subprocess each time. Cache entries are keyed by absolute
+ * project path and bounded by the active project set.
+ */
+export class GitStatusSummaryCache {
+  private readonly ttlMs: number;
+  private readonly compute: (
+    projectPath: string,
+  ) => Promise<ProjectGitStatusSummary | null>;
+  private readonly cache = new Map<string, GitStatusCacheEntry>();
+  private readonly inFlight = new Map<
+    string,
+    Promise<ProjectGitStatusSummary | null>
+  >();
+
+  constructor(options: GitStatusSummaryCacheOptions = {}) {
+    this.ttlMs = options.ttlMs ?? GIT_STATUS_CACHE_TTL_MS;
+    this.compute = options.compute ?? getProjectGitStatusSummary;
+  }
+
+  async get(projectPath: string): Promise<ProjectGitStatusSummary | null> {
+    const now = Date.now();
+    const cached = this.cache.get(projectPath);
+    if (cached && now - cached.timestamp < this.ttlMs) {
+      return cached.value;
+    }
+
+    const existing = this.inFlight.get(projectPath);
+    if (existing) return existing;
+
+    const promise = this.compute(projectPath)
+      .then((value) => {
+        this.cache.set(projectPath, { value, timestamp: Date.now() });
+        return value;
+      })
+      .finally(() => {
+        if (this.inFlight.get(projectPath) === promise) {
+          this.inFlight.delete(projectPath);
+        }
+      });
+
+    this.inFlight.set(projectPath, promise);
+    return promise;
+  }
+
+  /** Drop the cached summary for a project so the next read recomputes it. */
+  invalidate(projectPath: string): void {
+    this.cache.delete(projectPath);
+  }
+
+  /** Drop all cached summaries. */
+  clear(): void {
+    this.cache.clear();
+  }
 }
