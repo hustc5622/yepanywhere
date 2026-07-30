@@ -11,6 +11,7 @@
  * Unlike Claude's DAG structure, Codex sessions are linear.
  */
 
+import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import {
   type CodexEventMsgEntry,
@@ -165,22 +166,65 @@ export class CodexSessionReader implements ISessionReader {
     sessionId: string,
     projectId: UrlProjectId,
   ): Promise<SessionSummary | null> {
+    const loaded = await this.loadSessionEntries(sessionId);
+    if (!loaded) return null;
+    return this.buildSummaryFromEntries(
+      loaded.entries,
+      loaded.stats,
+      sessionId,
+      projectId,
+    );
+  }
+
+  /**
+   * Locate, read and parse a Codex session file exactly once.
+   *
+   * Returns the parsed entries with the file stats so callers derive both the
+   * summary and the branch projection without re-reading (readJsonlLines) and
+   * re-parsing the whole rollout file. Returns null when the file is missing or
+   * has no parseable entries.
+   */
+  private async loadSessionEntries(sessionId: string): Promise<{
+    stats: Stats;
+    entries: CodexSessionEntry[];
+  } | null> {
     const sessionFile = await this.findSessionFile(sessionId);
     if (!sessionFile) return null;
 
     try {
       const lines = await readJsonlLines(sessionFile.filePath);
       if (lines.length === 0 || (lines.length === 1 && !lines[0])) return null;
-      const entries: CodexSessionEntry[] = [];
 
+      const entries: CodexSessionEntry[] = [];
       for (const line of lines) {
         const entry = parseCodexSessionEntry(line);
         if (entry) {
           entries.push(entry);
         }
       }
-
       if (entries.length === 0) return null;
+
+      const stats = await stat(sessionFile.filePath);
+      return { stats, entries };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Derive a session summary from already-parsed Codex entries.
+   *
+   * Pure with respect to I/O — the file has already been read and stat'd by
+   * {@link loadSessionEntries}. Returns null for files without session_meta or
+   * with no conversation messages.
+   */
+  private buildSummaryFromEntries(
+    entries: CodexSessionEntry[],
+    stats: Stats,
+    sessionId: string,
+    projectId: UrlProjectId,
+  ): SessionSummary | null {
+    try {
       const branchView = buildCodexBranchView(entries, sessionId);
       const visibleEntries = branchView.entries;
 
@@ -190,7 +234,6 @@ export class CodexSessionReader implements ISessionReader {
         | undefined;
       if (!metaEntry) return null;
 
-      const stats = await stat(sessionFile.filePath);
       const extractedTitle = this.extractTitle(visibleEntries);
       const { title, fullTitle } =
         extractedTitle.title === null
@@ -263,21 +306,23 @@ export class CodexSessionReader implements ISessionReader {
     afterMessageId?: string,
     options?: GetSessionOptions,
   ): Promise<LoadedSession | null> {
-    const summary = await this.getSessionSummary(sessionId, projectId);
+    // Read + parse the rollout file exactly once, then derive both the summary
+    // and the branch projection from the same entries. Previously this called
+    // getSessionSummary() (which read + parsed via readJsonlLines) and then
+    // re-read + re-parsed the whole file for buildCodexBranchView, doubling the
+    // I/O and parse cost on every open / page / branch switch.
+    const loaded = await this.loadSessionEntries(sessionId);
+    if (!loaded) return null;
+
+    const summary = this.buildSummaryFromEntries(
+      loaded.entries,
+      loaded.stats,
+      sessionId,
+      projectId,
+    );
     if (!summary) return null;
 
-    const sessionFile = await this.findSessionFile(sessionId);
-    if (!sessionFile) return null;
-
-    const lines = await readJsonlLines(sessionFile.filePath);
-
-    const entries: CodexSessionEntry[] = [];
-    for (const line of lines) {
-      const entry = parseCodexSessionEntry(line);
-      if (entry) {
-        entries.push(entry);
-      }
-    }
+    const entries = loaded.entries;
 
     // Filter entries if needed (for incremental fetching)
     // Note: Codex entries are not 1:1 with messages, so standard ID filtering is tricky

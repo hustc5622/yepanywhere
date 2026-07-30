@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -266,6 +267,31 @@ export class ClaudeSessionReader implements ISessionReader {
     sessionId: string,
     projectId: UrlProjectId,
   ): Promise<SessionSummary | null> {
+    const loaded = await this.loadSessionEntriesFromDir(dir, sessionId);
+    if (!loaded) return null;
+    return this.buildSummaryFromEntries(
+      loaded.messages,
+      loaded.stats,
+      sessionId,
+      projectId,
+    );
+  }
+
+  /**
+   * Read and parse a session JSONL file exactly once.
+   *
+   * Returns the parsed entries alongside the file stats so callers can derive
+   * both the summary and the branch projection without re-reading or
+   * re-parsing the file. Returns null when the file is missing or empty.
+   */
+  private async loadSessionEntriesFromDir(
+    dir: string,
+    sessionId: string,
+  ): Promise<{
+    filePath: string;
+    stats: Stats;
+    messages: ClaudeSessionEntry[];
+  } | null> {
     const filePath = join(dir, `${sessionId}.jsonl`);
 
     try {
@@ -288,6 +314,27 @@ export class ClaudeSessionReader implements ISessionReader {
         })
         .filter((m): m is ClaudeSessionEntry => m !== null);
 
+      const stats = await stat(filePath);
+      return { filePath, stats, messages };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Derive a session summary from already-parsed entries.
+   *
+   * Pure with respect to I/O — the file has already been read and stat'd by
+   * {@link loadSessionEntriesFromDir}. Returns null for metadata-only files
+   * that have no user/assistant conversation messages yet.
+   */
+  private buildSummaryFromEntries(
+    messages: ClaudeSessionEntry[],
+    stats: Stats,
+    sessionId: string,
+    projectId: UrlProjectId,
+  ): SessionSummary | null {
+    try {
       // Build DAG and get active branch (filters out dead branches from rewinds, etc.)
       const { activeBranch } = buildDag(messages);
 
@@ -305,7 +352,6 @@ export class ClaudeSessionReader implements ISessionReader {
         return null;
       }
 
-      const stats = await stat(filePath);
       const firstUserMessage = this.findFirstUserMessage(messages);
       const fullTitle = firstUserMessage || null;
       const model = this.extractModel(conversationMessages);
@@ -370,56 +416,60 @@ export class ClaudeSessionReader implements ISessionReader {
     afterMessageId?: string,
     _options?: GetSessionOptions,
   ): Promise<LoadedSession | null> {
-    const summary = await this.getSessionSummary(sessionId, projectId);
-    if (!summary) return null;
+    // Read + parse the session file exactly once, then derive both the summary
+    // and the branch projection from the same entries. Previously this method
+    // called getSessionSummary() (which read + parsed the file) and then
+    // re-read + re-parsed the same file for buildClaudeBranchView, doubling the
+    // I/O and JSON.parse cost on every open / page / branch switch.
+    for (const dir of this.allSessionDirs) {
+      const loaded = await this.loadSessionEntriesFromDir(dir, sessionId);
+      if (!loaded) continue;
 
-    // Find the session file across all dirs
-    const filePath = await this.findSessionFile(sessionId);
-    if (!filePath) return null;
-    const content = await readFile(filePath, "utf-8");
-    const lines = content.trim().split("\n");
-
-    const rawMessages: ClaudeSessionEntry[] = [];
-    for (const line of lines) {
-      try {
-        rawMessages.push(JSON.parse(line) as ClaudeSessionEntry);
-      } catch {
-        // Skip malformed lines
-      }
-    }
-
-    const branchView = buildClaudeBranchView(
-      rawMessages,
-      sessionId,
-      _options?.branchId,
-      { includeOrphans: _options?.includeOrphans },
-    );
-
-    // Filter messages for incremental fetching if needed. Use the selected
-    // branch projection so a historical branch does not append active-branch
-    // siblings during branch navigation.
-    let finalMessages = branchView.entries;
-    if (afterMessageId) {
-      const afterIndex = finalMessages.findIndex(
-        (m) => "uuid" in m && m.uuid === afterMessageId,
+      const summary = this.buildSummaryFromEntries(
+        loaded.messages,
+        loaded.stats,
+        sessionId,
+        projectId,
       );
-      if (afterIndex !== -1) {
-        finalMessages = finalMessages.slice(afterIndex + 1);
+      // Skip metadata-only files with no conversation yet, matching the
+      // dir-scanning behaviour of getSessionSummary().
+      if (!summary) continue;
+
+      const branchView = buildClaudeBranchView(
+        loaded.messages,
+        sessionId,
+        _options?.branchId,
+        { includeOrphans: _options?.includeOrphans },
+      );
+
+      // Filter messages for incremental fetching if needed. Use the selected
+      // branch projection so a historical branch does not append active-branch
+      // siblings during branch navigation.
+      let finalMessages = branchView.entries;
+      if (afterMessageId) {
+        const afterIndex = finalMessages.findIndex(
+          (m) => "uuid" in m && m.uuid === afterMessageId,
+        );
+        if (afterIndex !== -1) {
+          finalMessages = finalMessages.slice(afterIndex + 1);
+        }
       }
+
+      return {
+        summary,
+        data: {
+          provider: summary.provider as "claude" | "claude-ollama",
+          session: {
+            messages: finalMessages,
+          },
+        },
+        messagesAlreadyProjected: true,
+        orphanedToolUses: branchView.orphanedToolUses,
+        branchState: branchView.branchState,
+      };
     }
 
-    return {
-      summary,
-      data: {
-        provider: summary.provider as "claude" | "claude-ollama",
-        session: {
-          messages: finalMessages,
-        },
-      },
-      messagesAlreadyProjected: true,
-      orphanedToolUses: branchView.orphanedToolUses,
-      branchState: branchView.branchState,
-    };
+    return null;
   }
 
   /**
