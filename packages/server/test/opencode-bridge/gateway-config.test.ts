@@ -3,10 +3,60 @@ import {
   buildManagedOpenCodeEnv,
   buildUserConfiguredOpenCodeEnv,
   fetchOpenCodeGatewayModels,
+  gatewayResponseNeedsBuffering,
   getManagedOpenCodeModelRef,
   resolveOpenCodeGatewayConfig,
   resolveOpenCodeOpenAICompatibleBaseURL,
 } from "../../src/opencode-bridge/gateway-config.js";
+
+describe("gatewayResponseNeedsBuffering", () => {
+  it("buffers GLM models by default", () => {
+    expect(gatewayResponseNeedsBuffering("glm-4.6", {})).toBe(true);
+    expect(gatewayResponseNeedsBuffering("zhipu/GLM-4.5", {})).toBe(true);
+  });
+
+  it("streams non-GLM models by default", () => {
+    expect(gatewayResponseNeedsBuffering("kimi-k2", {})).toBe(false);
+    expect(gatewayResponseNeedsBuffering("claude-sonnet-4", {})).toBe(false);
+    expect(gatewayResponseNeedsBuffering(undefined, {})).toBe(false);
+  });
+
+  it("honors the force-buffer safety switch", () => {
+    expect(
+      gatewayResponseNeedsBuffering("kimi-k2", {
+        YEP_OPENCODE_GATEWAY_FORCE_BUFFER: "true",
+      }),
+    ).toBe(true);
+    expect(
+      gatewayResponseNeedsBuffering(undefined, {
+        YEP_OPENCODE_GATEWAY_FORCE_BUFFER: "true",
+      }),
+    ).toBe(true);
+  });
+
+  it("supports a custom comma-separated model match list", () => {
+    const env = { YEP_OPENCODE_GATEWAY_BUFFER_MODELS: "kimi, foo-bar" };
+    expect(gatewayResponseNeedsBuffering("kimi-k2", env)).toBe(true);
+    expect(gatewayResponseNeedsBuffering("foo-bar-3", env)).toBe(true);
+    // GLM is no longer matched once the list is overridden.
+    expect(gatewayResponseNeedsBuffering("glm-4.6", env)).toBe(false);
+  });
+
+  it("treats a blank override as unset and disables matching with a sentinel", () => {
+    // Whitespace-only override is ignored, so the GLM default still applies.
+    expect(
+      gatewayResponseNeedsBuffering("glm-4.6", {
+        YEP_OPENCODE_GATEWAY_BUFFER_MODELS: "   ",
+      }),
+    ).toBe(true);
+    // A non-matching sentinel effectively streams everything.
+    expect(
+      gatewayResponseNeedsBuffering("glm-4.6", {
+        YEP_OPENCODE_GATEWAY_BUFFER_MODELS: "none",
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("OpenCode gateway configuration", () => {
   it("uses dedicated OpenCode credentials ahead of global and title settings", () => {

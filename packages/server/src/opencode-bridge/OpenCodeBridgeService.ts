@@ -3,6 +3,9 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
 import * as path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import type {
   AgentActivity,
   InputRequest,
@@ -49,6 +52,7 @@ import type { SessionSummary } from "../supervisor/types.js";
 import {
   type OpenCodeGatewayConfig,
   buildUserConfiguredOpenCodeEnv,
+  gatewayResponseNeedsBuffering,
 } from "./gateway-config.js";
 import {
   isLiveOpenCodeBridgeSession,
@@ -3205,16 +3209,54 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         body:
           requestBody.length > 0 ? requestBody.toString("utf-8") : undefined,
       });
+
+      const contentType =
+        upstream.headers.get("content-type") ?? "application/json";
+
       // GLM's Chat Completions stream is valid SSE, but its very small chunks
-      // trigger an OpenCode AI SDK decoding bug around tool calls. Buffering
-      // only this local compatibility route preserves the exact SSE payload
-      // while presenting it as one coherent body to OpenCode.
-      const responseBody = Buffer.from(await upstream.arrayBuffer());
-      res.writeHead(upstream.status, {
-        "content-type":
-          upstream.headers.get("content-type") ?? "application/json",
-      });
-      res.end(responseBody);
+      // trigger an OpenCode AI SDK decoding bug around tool calls. Buffer only
+      // those responses so the exact SSE payload is presented as one coherent
+      // body; every other model is streamed through untouched so first-byte
+      // latency and memory stay proportional to the payload instead of the
+      // whole completion.
+      const model = readModelFromBody(requestBody);
+      if (gatewayResponseNeedsBuffering(model)) {
+        const responseBody = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(upstream.status, { "content-type": contentType });
+        res.end(responseBody);
+        return;
+      }
+
+      const streamHeaders: Record<string, string> = {
+        "content-type": contentType,
+      };
+      // Preserve SSE-friendly hints so intermediaries do not buffer the stream.
+      const cacheControl = upstream.headers.get("cache-control");
+      if (cacheControl) streamHeaders["cache-control"] = cacheControl;
+      res.writeHead(upstream.status, streamHeaders);
+
+      if (!upstream.body) {
+        res.end();
+        return;
+      }
+
+      try {
+        await pipeline(
+          Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>),
+          res,
+        );
+      } catch (streamError) {
+        // Client disconnects and upstream aborts surface here. The headers are
+        // already sent, so just tear down the response instead of writing a
+        // 502 body into a partially streamed reply.
+        if (!res.writableEnded) {
+          res.destroy(
+            streamError instanceof Error
+              ? streamError
+              : new Error(String(streamError)),
+          );
+        }
+      }
     } catch (error) {
       writeJson(res, 502, {
         error: `OpenAI-compatible gateway request failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -3250,6 +3292,16 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       this.opencodeServerUrl ??
       `http://127.0.0.1:${this.opencodeStartPort}`
     );
+  }
+}
+
+function readModelFromBody(body: Buffer): string | undefined {
+  if (body.length === 0) return undefined;
+  try {
+    const parsed = JSON.parse(body.toString("utf-8")) as { model?: unknown };
+    return typeof parsed.model === "string" ? parsed.model : undefined;
+  } catch {
+    return undefined;
   }
 }
 

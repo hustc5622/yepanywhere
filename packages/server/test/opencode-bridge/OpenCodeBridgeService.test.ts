@@ -3302,3 +3302,126 @@ describe("OpenCodeBridgeService", () => {
     });
   });
 });
+
+describe("OpenCodeBridgeService OpenAI-compatible gateway proxy", () => {
+  interface GatedUpstream {
+    url: string;
+    releaseTail: () => void;
+    tailReleased: () => boolean;
+  }
+
+  async function startGatedSseUpstream(): Promise<GatedUpstream> {
+    let release: () => void = () => {};
+    let released = false;
+    const gate = new Promise<void>((resolve) => {
+      release = () => {
+        released = true;
+        resolve();
+      };
+    });
+    const upstream = createServer(async (_req, res) => {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      });
+      res.write("data: chunk-1\n\n");
+      await gate;
+      res.write("data: chunk-2\n\n");
+      res.end();
+    });
+    const url = await listen(upstream);
+    return { url, releaseTail: release, tailReleased: () => released };
+  }
+
+  function startProxy(bridge: OpenCodeBridgeService): Promise<string> {
+    const proxy = createServer((req, res) => {
+      void (
+        bridge as unknown as {
+          proxyOpenAICompatibleRequest: (
+            req: typeof req,
+            res: typeof res,
+            url: URL,
+          ) => Promise<void>;
+        }
+      ).proxyOpenAICompatibleRequest(req, res, requestUrl(req));
+    });
+    return listen(proxy);
+  }
+
+  function makeBridge(apiBase: string): OpenCodeBridgeService {
+    return new OpenCodeBridgeService({
+      enabled: false,
+      host: "127.0.0.1",
+      port: 0,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+      gatewayConfig: { apiKey: "test-key", apiBase },
+    });
+  }
+
+  it("streams non-GLM responses without waiting for the full body", async () => {
+    const upstream = await startGatedSseUpstream();
+    const bridge = makeBridge(upstream.url);
+    const proxyUrl = await startProxy(bridge);
+
+    const response = await fetch(`${proxyUrl}/gateway/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "kimi-k2", stream: true }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
+    expect(response.body).not.toBeNull();
+
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+
+    // The first chunk must arrive while the upstream is still holding the tail,
+    // proving the proxy forwards incrementally instead of buffering.
+    const first = await reader.read();
+    expect(decoder.decode(first.value)).toContain("chunk-1");
+    expect(upstream.tailReleased()).toBe(false);
+
+    upstream.releaseTail();
+
+    let rest = "";
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      rest += decoder.decode(next.value);
+    }
+    expect(rest).toContain("chunk-2");
+  });
+
+  it("buffers GLM responses until the upstream completes", async () => {
+    const upstream = await startGatedSseUpstream();
+    const bridge = makeBridge(upstream.url);
+    const proxyUrl = await startProxy(bridge);
+
+    const responsePromise = fetch(`${proxyUrl}/gateway/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", stream: true }),
+    });
+
+    // Give the proxy time to reach upstream and start buffering. Because GLM is
+    // buffered, the client must not receive headers until we release the tail.
+    const settled = await Promise.race([
+      responsePromise.then(() => "resolved" as const),
+      new Promise<"pending">((resolve) =>
+        setTimeout(() => resolve("pending"), 150),
+      ),
+    ]);
+    expect(settled).toBe("pending");
+    expect(upstream.tailReleased()).toBe(false);
+
+    upstream.releaseTail();
+
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain("chunk-1");
+    expect(text).toContain("chunk-2");
+  });
+});

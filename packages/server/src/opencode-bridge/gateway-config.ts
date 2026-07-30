@@ -70,6 +70,50 @@ export function resolveOpenCodeOpenAICompatibleBaseURL(
   return `${bridgeControlUrl.replace(/\/+$/, "")}/gateway/v1`;
 }
 
+const DEFAULT_BUFFERED_GATEWAY_MODEL_TOKENS = ["glm"];
+
+/**
+ * Decide whether an OpenAI-compatible gateway response must be fully buffered
+ * before being handed back to OpenCode.
+ *
+ * Some upstream models (notably GLM) emit valid but very small SSE chunks whose
+ * tool-call deltas trigger an AI SDK decoder race inside OpenCode. Only those
+ * responses need buffering; everything else is streamed through untouched so
+ * first-byte latency and memory stay proportional to the actual payload instead
+ * of the whole completion.
+ *
+ * Overrides:
+ * - `YEP_OPENCODE_GATEWAY_FORCE_BUFFER=true` forces every response to buffer
+ *   (safety switch to restore the previous behaviour if a new model regresses).
+ * - `YEP_OPENCODE_GATEWAY_BUFFER_MODELS` replaces the default match list with a
+ *   comma-separated set of case-insensitive substrings matched against the
+ *   request's `model` id.
+ */
+export function gatewayResponseNeedsBuffering(
+  model: string | undefined,
+  env: Env = process.env,
+): boolean {
+  if (clean(env.YEP_OPENCODE_GATEWAY_FORCE_BUFFER) === "true") {
+    return true;
+  }
+  if (!model) return false;
+  const tokens = parseBufferedModelTokens(env);
+  if (tokens.length === 0) return false;
+  const normalized = model.toLowerCase();
+  return tokens.some((token) => normalized.includes(token));
+}
+
+function parseBufferedModelTokens(env: Env): string[] {
+  const override = clean(env.YEP_OPENCODE_GATEWAY_BUFFER_MODELS);
+  if (override === undefined) {
+    return DEFAULT_BUFFERED_GATEWAY_MODEL_TOKENS;
+  }
+  return override
+    .split(",")
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function defaultSubModule(apiBase: string): string | undefined {
   try {
     return new URL(apiBase).hostname === "api.ohmyrouter.com"
