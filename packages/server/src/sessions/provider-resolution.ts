@@ -347,7 +347,18 @@ export async function findSessionSummaryAcrossProviders(
   preferredProvider?: ProviderName | string,
 ): Promise<ResolvedSessionSummary | null> {
   for (const source of getSessionSources(project, deps, preferredProvider)) {
-    const summary = await source.reader.getSessionSummary(sessionId, projectId);
+    // Prefer the shared SessionIndex cache (mtime/size validated, and the same
+    // persisted index the project list warms) so high-frequency callers like
+    // the recents panel don't re-read + fully re-parse each session file. Fall
+    // back to the reader directly when no index service is wired up.
+    const summary = deps.sessionIndexService
+      ? await deps.sessionIndexService.getSessionSummaryWithCache(
+          source.sessionDir,
+          projectId,
+          sessionId,
+          source.reader,
+        )
+      : await source.reader.getSessionSummary(sessionId, projectId);
     if (summary) {
       return { source, summary };
     }

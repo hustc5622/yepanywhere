@@ -62,6 +62,24 @@ export interface ISessionIndexService {
   ): Promise<string | null>;
 
   /**
+   * Get the full summary for a single session, using cache when possible.
+   * More efficient than getSessionsWithCache when you only need one session:
+   * on a cold cache it parses only the requested session rather than the whole
+   * directory, while still sharing the persisted index with the project list.
+   *
+   * @param sessionDir - Directory containing session files
+   * @param projectId - The project ID
+   * @param sessionId - The session ID
+   * @param reader - Session reader for parsing files on cache miss
+   */
+  getSessionSummaryWithCache(
+    sessionDir: string,
+    projectId: UrlProjectId,
+    sessionId: string,
+    reader: ISessionReader,
+  ): Promise<SessionSummary | null>;
+
+  /**
    * Invalidate the cache for a specific session.
    * Call this when you know a session file has been modified.
    *

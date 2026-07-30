@@ -134,6 +134,8 @@ export class SessionIndexService implements ISessionIndexService {
   private inFlightSessionLoads: Map<string, Promise<SessionSummary[]>> =
     new Map();
   private inFlightTitleLoads: Map<string, Promise<string | null>> = new Map();
+  private inFlightSummaryLoads: Map<string, Promise<SessionSummary | null>> =
+    new Map();
   private cacheStats = {
     requests: 0,
     fastHits: 0,
@@ -485,32 +487,7 @@ export class SessionIndexService implements ISessionIndexService {
 
     for (const [sessionId, cached] of Object.entries(index.sessions)) {
       if (cached.isEmpty) continue;
-      summaries.push({
-        id: sessionId,
-        projectId,
-        title: cached.title,
-        fullTitle: cached.fullTitle,
-        createdAt: cached.createdAt,
-        updatedAt: cached.updatedAt,
-        messageCount: cached.messageCount,
-        userQuestions: cached.userQuestions,
-        ownership: { owner: "none" },
-        contextUsage: cached.contextUsage,
-        cumulativeUsage: cached.cumulativeUsage,
-        compactCount: cached.compactCount,
-        compactEvents: cached.compactEvents,
-        provider: cached.provider ?? DEFAULT_PROVIDER,
-        model: cached.model,
-        reasoningEffort: cached.reasoningEffort,
-        serviceTier: cached.serviceTier,
-        originator: cached.originator,
-        source: cached.source,
-        createdBy: cached.createdBy,
-        interrupted: cached.interrupted,
-        ...(cached.forkParentSessionId
-          ? { forkParentSessionId: cached.forkParentSessionId }
-          : {}),
-      });
+      summaries.push(this.cachedToSummary(sessionId, cached, projectId));
     }
 
     summaries.sort(
@@ -519,6 +496,40 @@ export class SessionIndexService implements ISessionIndexService {
     );
 
     return summaries;
+  }
+
+  /** Reconstruct a full SessionSummary from a single cached index entry. */
+  private cachedToSummary(
+    sessionId: string,
+    cached: CachedSessionSummary,
+    projectId: UrlProjectId,
+  ): SessionSummary {
+    return {
+      id: sessionId,
+      projectId,
+      title: cached.title,
+      fullTitle: cached.fullTitle,
+      createdAt: cached.createdAt,
+      updatedAt: cached.updatedAt,
+      messageCount: cached.messageCount,
+      userQuestions: cached.userQuestions,
+      ownership: { owner: "none" },
+      contextUsage: cached.contextUsage,
+      cumulativeUsage: cached.cumulativeUsage,
+      compactCount: cached.compactCount,
+      compactEvents: cached.compactEvents,
+      provider: cached.provider ?? DEFAULT_PROVIDER,
+      model: cached.model,
+      reasoningEffort: cached.reasoningEffort,
+      serviceTier: cached.serviceTier,
+      originator: cached.originator,
+      source: cached.source,
+      createdBy: cached.createdBy,
+      interrupted: cached.interrupted,
+      ...(cached.forkParentSessionId
+        ? { forkParentSessionId: cached.forkParentSessionId }
+        : {}),
+    };
   }
 
   private toCachedSummary(
@@ -1201,6 +1212,89 @@ export class SessionIndexService implements ISessionIndexService {
       // File error - return null
     }
 
+    return null;
+  }
+
+  /**
+   * Get the full summary for a single session, using cache when possible.
+   *
+   * More efficient than getSessionsWithCache when you only need one session
+   * (e.g. the recents panel resolving up to 100 individual entries): on a cold
+   * cache it parses only the requested session instead of the whole directory,
+   * and it shares/writes back the same persisted index the project list uses,
+   * so a session already indexed there costs just a stat + cache hit.
+   */
+  async getSessionSummaryWithCache(
+    sessionDir: string,
+    projectId: UrlProjectId,
+    sessionId: string,
+    reader: ISessionReader,
+  ): Promise<SessionSummary | null> {
+    const loadKey = this.getTitleLoadKey(
+      sessionDir,
+      projectId,
+      sessionId,
+      reader,
+    );
+    const inFlight = this.inFlightSummaryLoads.get(loadKey);
+    if (inFlight) return inFlight;
+
+    const promise = this.getSessionSummaryWithCacheInternal(
+      sessionDir,
+      projectId,
+      sessionId,
+      reader,
+    );
+    this.inFlightSummaryLoads.set(loadKey, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.inFlightSummaryLoads.get(loadKey) === promise) {
+        this.inFlightSummaryLoads.delete(loadKey);
+      }
+    }
+  }
+
+  private async getSessionSummaryWithCacheInternal(
+    sessionDir: string,
+    projectId: UrlProjectId,
+    sessionId: string,
+    reader: ISessionReader,
+  ): Promise<SessionSummary | null> {
+    const index = await this.loadIndex(sessionDir, projectId, reader);
+    const cached = index.sessions[sessionId];
+    const filePath =
+      (await reader.getSessionFilePath?.(sessionId)) ??
+      path.join(sessionDir, `${sessionId}.jsonl`);
+
+    let stats: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      stats = await fs.stat(filePath);
+    } catch {
+      // The file is not at the expected path under this sessionDir. Readers
+      // like ClaudeSessionReader can still resolve it across merged/additional
+      // dirs, so fall back to a direct (uncached) read rather than dropping the
+      // session entirely.
+      return reader.getSessionSummary(sessionId, projectId);
+    }
+
+    const mtime = stats.mtimeMs;
+    const size = stats.size;
+
+    if (cached && cached.fileMtime === mtime && cached.indexedBytes === size) {
+      if (cached.isEmpty) return null;
+      return this.cachedToSummary(sessionId, cached, projectId);
+    }
+
+    const summary = await reader.getSessionSummary(sessionId, projectId);
+    if (summary) {
+      index.sessions[sessionId] = this.toCachedSummary(summary, mtime, size);
+      await this.saveIndex(sessionDir, reader);
+      return summary;
+    }
+
+    index.sessions[sessionId] = this.toEmptyCachedSummary(mtime, size);
+    await this.saveIndex(sessionDir, reader);
     return null;
   }
 

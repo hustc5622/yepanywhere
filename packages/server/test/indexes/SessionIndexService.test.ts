@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { toUrlProjectId } from "@yep-anywhere/shared";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionIndexService } from "../../src/indexes/SessionIndexService.js";
 import { SessionReader } from "../../src/sessions/reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
@@ -586,6 +586,127 @@ describe("SessionIndexService", () => {
         codexReader,
       );
       expect(refreshed[0]?.title).toBe("Updated title");
+    });
+  });
+
+  describe("getSessionSummaryWithCache", () => {
+    it("returns the full summary and serves it from cache on repeat calls", async () => {
+      await createSession("session-1", "Cached summary");
+
+      const parseSpy = vi.spyOn(reader, "getSessionSummary");
+
+      const first = await service.getSessionSummaryWithCache(
+        sessionDir,
+        projectId,
+        "session-1",
+        reader,
+      );
+      expect(first?.id).toBe("session-1");
+      expect(first?.title).toBe("Cached summary");
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+
+      // Same mtime/size -> cache hit, reader is not asked to parse again.
+      const second = await service.getSessionSummaryWithCache(
+        sessionDir,
+        projectId,
+        "session-1",
+        reader,
+      );
+      expect(second?.id).toBe("session-1");
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("re-parses when the file mtime/size changes", async () => {
+      await createSession("session-1", "Original");
+      await service.getSessionSummaryWithCache(
+        sessionDir,
+        projectId,
+        "session-1",
+        reader,
+      );
+
+      const updatedJsonl = JSON.stringify({
+        type: "user",
+        message: { content: "Updated body that changes size" },
+        uuid: "msg-updated",
+        timestamp: new Date().toISOString(),
+      });
+      await writeFile(join(sessionDir, "session-1.jsonl"), `${updatedJsonl}\n`);
+
+      const parseSpy = vi.spyOn(reader, "getSessionSummary");
+      const refreshed = await service.getSessionSummaryWithCache(
+        sessionDir,
+        projectId,
+        "session-1",
+        reader,
+      );
+      expect(refreshed?.title).toBe("Updated body that changes size");
+      expect(parseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns null for a session that does not exist", async () => {
+      const result = await service.getSessionSummaryWithCache(
+        sessionDir,
+        projectId,
+        "missing",
+        reader,
+      );
+      expect(result).toBeNull();
+    });
+
+    it("falls back to the reader when the file is not under sessionDir", async () => {
+      const summary: SessionSummary = {
+        id: "session-elsewhere",
+        projectId: projectId as ReturnType<typeof toUrlProjectId>,
+        title: "Resolved via reader fallback",
+        fullTitle: "Resolved via reader fallback",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 1,
+        ownership: { owner: "none" },
+        provider: "claude",
+      };
+      // No file at sessionDir/session-elsewhere.jsonl and no getSessionFilePath,
+      // so the stat probe fails; the reader must still resolve the summary.
+      const fallbackReader = {
+        getSessionSummary: vi.fn(async () => summary),
+      } as unknown as ISessionReader;
+
+      const result = await service.getSessionSummaryWithCache(
+        sessionDir,
+        projectId,
+        "session-elsewhere",
+        fallbackReader,
+      );
+      expect(result?.title).toBe("Resolved via reader fallback");
+      expect(vi.mocked(fallbackReader.getSessionSummary)).toHaveBeenCalledWith(
+        "session-elsewhere",
+        projectId,
+      );
+    });
+
+    it("deduplicates concurrent lookups for the same session", async () => {
+      await createSession("session-1", "Concurrent");
+      const parseSpy = vi.spyOn(reader, "getSessionSummary");
+
+      const [a, b] = await Promise.all([
+        service.getSessionSummaryWithCache(
+          sessionDir,
+          projectId,
+          "session-1",
+          reader,
+        ),
+        service.getSessionSummaryWithCache(
+          sessionDir,
+          projectId,
+          "session-1",
+          reader,
+        ),
+      ]);
+
+      expect(a?.id).toBe("session-1");
+      expect(b?.id).toBe("session-1");
+      expect(parseSpy).toHaveBeenCalledTimes(1);
     });
   });
 
