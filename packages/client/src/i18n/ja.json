@@ -82,6 +82,8 @@
   "projectsErrorPrefix": "エラー:",
   "projectsAdd": "プロジェクトを追加",
   "projectsAddPlaceholder": "プロジェクトのパスを入力してください（例: ~/code/my-project）",
+  "projectsBrowse": "フォルダを選択",
+  "projectsBrowseHint": "サーバー端末のフォルダを参照 — デスクトップ・スマホ・タブレットで利用可",
   "projectsAdding": "追加中...",
   "projectsAddConfirm": "追加",
   "projectsCancel": "キャンセル",
@@ -891,5 +893,13 @@
   "sessionInspectorPending": "Pending",
   "sessionInspectorExternal": "External",
   "sessionInspectorSelf": "Owned",
-  "sessionInspectorIdle": "Idle"
+  "sessionInspectorIdle": "Idle",
+  "folderBrowseTitle": "プロジェクトフォルダを選択",
+  "folderBrowseClose": "閉じる",
+  "folderBrowseCurrent": "現在のパス（サーバー端末）",
+  "folderBrowseUp": "上へ",
+  "folderBrowseSelectHere": "このフォルダを選択",
+  "folderBrowseLoading": "読み込み中…",
+  "folderBrowseEmpty": "このディレクトリにサブフォルダはありません",
+  "folderBrowseError": "このディレクトリを読み取れません"
 }

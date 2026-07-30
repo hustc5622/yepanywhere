@@ -63,6 +63,7 @@ import {
 import { createDevRoutes } from "./routes/dev.js";
 import { createDeviceRoutes } from "./routes/devices.js";
 import { createFilesRoutes } from "./routes/files.js";
+import { createFsBrowseRoutes } from "./routes/fs-browse.js";
 import { createGitStatusRoutes } from "./routes/git-status.js";
 import { createGlobalSessionsRoutes } from "./routes/global-sessions.js";
 import { health } from "./routes/health.js";
@@ -990,6 +991,9 @@ export function createApp(options: AppOptions): AppResult {
 
   // Files routes (file browser)
   app.route("/api/projects", createFilesRoutes({ scanner }));
+
+  // Server-side filesystem browser (folder picker for remote / mobile web)
+  app.route("/api/filesystem", createFsBrowseRoutes());
 
   // Git status routes
   app.route("/api/projects", createGitStatusRoutes({ scanner }));

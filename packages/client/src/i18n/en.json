@@ -89,6 +89,8 @@
   "projectsErrorPrefix": "Error:",
   "projectsAdd": "Add Project",
   "projectsAddPlaceholder": "Enter project path (e.g., ~/code/my-project)",
+  "projectsBrowse": "Browse folder",
+  "projectsBrowseHint": "Browse folders on the server device — works on desktop, phone, and tablet",
   "projectsAdding": "Adding...",
   "projectsAddConfirm": "Add",
   "projectsCancel": "Cancel",
@@ -999,5 +1001,13 @@
   "localAccessModeCustom": "Custom Hostname Whitelist",
   "localAccessModeCustomDescription": "Only allow specified hostnames (recommended)",
   "localAccessModeAllowAll": "Allow All Hostnames",
-  "localAccessModeAllowAllDescription": "Accept requests from any hostname (unsafe, for testing only)"
+  "localAccessModeAllowAllDescription": "Accept requests from any hostname (unsafe, for testing only)",
+  "folderBrowseTitle": "Select project folder",
+  "folderBrowseClose": "Close",
+  "folderBrowseCurrent": "Current path (server device)",
+  "folderBrowseUp": "Up",
+  "folderBrowseSelectHere": "Select this folder",
+  "folderBrowseLoading": "Loading…",
+  "folderBrowseEmpty": "No subfolders in this directory",
+  "folderBrowseError": "Unable to read this directory"
 }

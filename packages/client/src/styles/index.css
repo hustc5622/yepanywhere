@@ -670,6 +670,35 @@ h2 {
   box-sizing: border-box;
 }
 
+.add-project-input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.add-project-input-row input {
+  width: auto;
+  flex: 1;
+}
+
+.add-project-browse {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: var(--font-size-base);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border-input);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.add-project-browse:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .add-project-form input {
   width: 100%;
   padding: 0.75rem;
@@ -12043,4 +12072,126 @@ button.context-usage-indicator--button:focus-visible {
   margin-top: var(--space-3);
   padding-top: var(--space-3);
   border-top: 1px solid var(--border-color);
+}
+
+/* ============ Folder Browser Modal (server-side filesystem picker) ============ */
+.folder-browser {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 320px;
+}
+
+.folder-browser-path {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-input);
+  border-radius: 6px;
+}
+
+.folder-browser-path-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.folder-browser-path-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.folder-browser-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.folder-browser-actions .btn-primary,
+.folder-browser-actions .btn-secondary {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: var(--font-size-base);
+  cursor: pointer;
+  border: 1px solid var(--border-input);
+}
+
+.folder-browser-actions .btn-primary {
+  background: var(--accent, #2f6feb);
+  border-color: var(--accent, #2f6feb);
+  color: #fff;
+}
+
+.folder-browser-actions .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.folder-browser-actions .btn-secondary {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.folder-browser-actions .btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.folder-browser-error {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger, #e5484d) 12%, transparent);
+  color: var(--danger, #e5484d);
+  font-size: var(--font-size-sm);
+}
+
+.folder-browser-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.25rem;
+}
+
+.folder-browser-loading,
+.folder-browser-empty {
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.folder-browser-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--font-size-base);
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-browser-item:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+}
+
+.folder-browser-item-icon {
+  flex-shrink: 0;
+}
+
+.folder-browser-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

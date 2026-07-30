@@ -82,6 +82,8 @@
   "projectsErrorPrefix": "Error:",
   "projectsAdd": "Agregar proyecto",
   "projectsAddPlaceholder": "Introduce la ruta del proyecto (por ejemplo, ~/code/my-project)",
+  "projectsBrowse": "Examinar carpeta",
+  "projectsBrowseHint": "Explora carpetas en el dispositivo del servidor — funciona en escritorio, móvil y tableta",
   "projectsAdding": "Agregando...",
   "projectsAddConfirm": "Agregar",
   "projectsCancel": "Cancelar",
@@ -891,5 +893,13 @@
   "sessionInspectorPending": "Pending",
   "sessionInspectorExternal": "External",
   "sessionInspectorSelf": "Owned",
-  "sessionInspectorIdle": "Idle"
+  "sessionInspectorIdle": "Idle",
+  "folderBrowseTitle": "Seleccionar carpeta del proyecto",
+  "folderBrowseClose": "Cerrar",
+  "folderBrowseCurrent": "Ruta actual (dispositivo del servidor)",
+  "folderBrowseUp": "Subir",
+  "folderBrowseSelectHere": "Seleccionar esta carpeta",
+  "folderBrowseLoading": "Cargando…",
+  "folderBrowseEmpty": "No hay subcarpetas en este directorio",
+  "folderBrowseError": "No se puede leer este directorio"
 }

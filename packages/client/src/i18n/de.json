@@ -82,6 +82,8 @@
   "projectsErrorPrefix": "Fehler:",
   "projectsAdd": "Projekt hinzufügen",
   "projectsAddPlaceholder": "Projektpfad eingeben (z. B. ~/code/my-project)",
+  "projectsBrowse": "Ordner auswählen",
+  "projectsBrowseHint": "Durchsuche Ordner auf dem Server-Gerät — funktioniert auf Desktop, Handy und Tablet",
   "projectsAdding": "Wird hinzugefügt...",
   "projectsAddConfirm": "Hinzufügen",
   "projectsCancel": "Abbrechen",
@@ -891,5 +893,13 @@
   "sessionInspectorPending": "Pending",
   "sessionInspectorExternal": "External",
   "sessionInspectorSelf": "Owned",
-  "sessionInspectorIdle": "Idle"
+  "sessionInspectorIdle": "Idle",
+  "folderBrowseTitle": "Projektordner auswählen",
+  "folderBrowseClose": "Schließen",
+  "folderBrowseCurrent": "Aktueller Pfad (Server-Gerät)",
+  "folderBrowseUp": "Hoch",
+  "folderBrowseSelectHere": "Diesen Ordner auswählen",
+  "folderBrowseLoading": "Wird geladen…",
+  "folderBrowseEmpty": "Keine Unterordner in diesem Verzeichnis",
+  "folderBrowseError": "Verzeichnis kann nicht gelesen werden"
 }

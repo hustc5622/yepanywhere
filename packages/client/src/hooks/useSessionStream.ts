@@ -176,6 +176,9 @@ export function useSessionStream(
           setConnected(false);
           wsSubscriptionRef.current = null;
           mountedSessionIdRef.current = null;
+          // Treat clean close as a potential stall — trigger error recovery
+          // so the caller can check server metadata and recover processState.
+          optionsRef.current.onError?.(new Event("close"));
         },
       };
 

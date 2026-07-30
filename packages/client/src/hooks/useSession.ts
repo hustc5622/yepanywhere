@@ -1126,6 +1126,59 @@ export function useSession(
     }
   }, [projectId, sessionId]);
 
+  // ── In-turn timeout safety valve ──────────────────────────────────────
+  //
+  // When processState is "in-turn" but no stream activity has arrived for
+  // a while, the agent may have hung / crashed / been OOM-killed without the
+  // WebSocket closing cleanly. Without this guard the UI stays stuck on
+  // "Pondering..." forever.
+  //
+  // The timer fires every IN_TURN_CHECK_INTERVAL_MS. If we're in "in-turn"
+  // and lastStreamActivityAt is older than IN_TURN_STUCK_THRESHOLD_MS, we
+  // probe the server metadata to recover the real state. This is the same
+  // fallback handleStreamError uses on stream error/close.
+  const IN_TURN_STUCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 min
+  const IN_TURN_CHECK_INTERVAL_MS = 30 * 1000; // check every 30 s
+
+  const inTurnCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (processState !== "in-turn") {
+      if (inTurnCheckTimerRef.current) {
+        clearInterval(inTurnCheckTimerRef.current);
+        inTurnCheckTimerRef.current = null;
+      }
+      return;
+    }
+
+    // Already running
+    if (inTurnCheckTimerRef.current) return;
+
+    inTurnCheckTimerRef.current = setInterval(() => {
+      if (!lastStreamActivityAt) {
+        // No activity recorded at all — check immediately
+        void handleStreamError();
+        return;
+      }
+
+      const elapsed = Date.now() - new Date(lastStreamActivityAt).getTime();
+      if (elapsed > IN_TURN_STUCK_THRESHOLD_MS) {
+        void handleStreamError();
+      }
+    }, IN_TURN_CHECK_INTERVAL_MS);
+
+    return () => {
+      if (inTurnCheckTimerRef.current) {
+        clearInterval(inTurnCheckTimerRef.current);
+        inTurnCheckTimerRef.current = null;
+      }
+    };
+  }, [processState, lastStreamActivityAt, handleStreamError]);
+
+  // ── End in-turn timeout safety valve ────────────────────────────────
+
   // Only connect to session stream when we own the session
   // External sessions are tracked via the activity stream instead
   const { connected, reconnect: reconnectStream } = useSessionStream(

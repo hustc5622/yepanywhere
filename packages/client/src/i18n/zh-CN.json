@@ -89,6 +89,8 @@
   "projectsErrorPrefix": "错误：",
   "projectsAdd": "添加项目",
   "projectsAddPlaceholder": "输入项目路径（例如：~/code/my-project）",
+  "projectsBrowse": "选择文件夹",
+  "projectsBrowseHint": "浏览运行服务的设备上的文件夹，桌面/手机/平板均可使用",
   "projectsAdding": "添加中...",
   "projectsAddConfirm": "添加",
   "projectsCancel": "取消",
@@ -999,5 +1001,13 @@
   "localAccessModeCustom": "自定义域名白名单",
   "localAccessModeCustomDescription": "只允许指定的域名访问（推荐）",
   "localAccessModeAllowAll": "允许所有域名",
-  "localAccessModeAllowAllDescription": "接受来自任意域名的请求（不安全，仅用于测试）"
+  "localAccessModeAllowAllDescription": "接受来自任意域名的请求（不安全，仅用于测试）",
+  "folderBrowseTitle": "选择项目文件夹",
+  "folderBrowseClose": "关闭",
+  "folderBrowseCurrent": "当前路径（服务端设备）",
+  "folderBrowseUp": "上级目录",
+  "folderBrowseSelectHere": "选择此目录",
+  "folderBrowseLoading": "加载中…",
+  "folderBrowseEmpty": "此目录没有子文件夹",
+  "folderBrowseError": "无法读取该目录"
 }

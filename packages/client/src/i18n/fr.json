@@ -82,6 +82,8 @@
   "projectsErrorPrefix": "Erreur :",
   "projectsAdd": "Ajouter un projet",
   "projectsAddPlaceholder": "Entrez le chemin du projet (par ex. ~/code/my-project)",
+  "projectsBrowse": "Parcourir le dossier",
+  "projectsBrowseHint": "Parcourez les dossiers de l'appareil serveur — fonctionne sur ordinateur, téléphone et tablette",
   "projectsAdding": "Ajout...",
   "projectsAddConfirm": "Ajouter",
   "projectsCancel": "Annuler",
@@ -891,5 +893,13 @@
   "sessionInspectorPending": "Pending",
   "sessionInspectorExternal": "External",
   "sessionInspectorSelf": "Owned",
-  "sessionInspectorIdle": "Idle"
+  "sessionInspectorIdle": "Idle",
+  "folderBrowseTitle": "Sélectionner un dossier de projet",
+  "folderBrowseClose": "Fermer",
+  "folderBrowseCurrent": "Chemin actuel (appareil serveur)",
+  "folderBrowseUp": "Remonter",
+  "folderBrowseSelectHere": "Sélectionner ce dossier",
+  "folderBrowseLoading": "Chargement…",
+  "folderBrowseEmpty": "Aucun sous-dossier dans ce répertoire",
+  "folderBrowseError": "Impossible de lire ce répertoire"
 }
