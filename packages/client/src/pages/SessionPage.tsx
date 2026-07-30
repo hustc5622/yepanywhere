@@ -8,6 +8,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { api } from "../api/client";
+import { FileEditor } from "../components/FileEditor";
 import { MessageInput, type UploadProgress } from "../components/MessageInput";
 import { MessageInputToolbar } from "../components/MessageInputToolbar";
 import { MessageList } from "../components/MessageList";
@@ -15,10 +16,12 @@ import { ModelSwitchModal } from "../components/ModelSwitchModal";
 import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { QuestionAnswerPanel } from "../components/QuestionAnswerPanel";
 import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
+import { RepoExplorer } from "../components/RepoExplorer";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
+import { Modal } from "../components/ui/Modal";
 import { AgentContentProvider } from "../contexts/AgentContentContext";
 import { SessionMetadataProvider } from "../contexts/SessionMetadataContext";
 import {
@@ -329,6 +332,115 @@ function SessionPageContent({
     navState?.targetMessageId ?? null,
   );
   const [isInspectorOpen, setInspectorOpen] = useState(false);
+  // Repo panel open/closed preference is remembered across sessions (Codex
+  // keeps its layout). Default to open on first visit.
+  const [isRepoOpen, setRepoOpen] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem("yep_repo_panel_open");
+      return stored === null ? true : stored === "1";
+    } catch {
+      return true;
+    }
+  });
+  // In-page file tabs (VS Code-style): the chat is one tab, opened files are others.
+  const [openFileTabs, setOpenFileTabs] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<string>("chat");
+  const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(new Set());
+  const [pendingCloseTab, setPendingCloseTab] = useState<string | null>(null);
+  const saveHandlers = useRef<Map<string, () => Promise<void>>>(new Map());
+
+  const updateSaveHandler = useCallback(
+    (path: string, fn: (() => Promise<void>) | null) => {
+      if (fn) saveHandlers.current.set(path, fn);
+      else saveHandlers.current.delete(path);
+    },
+    [],
+  );
+
+  const openOrFocusFileTab = useCallback((path: string) => {
+    setOpenFileTabs((prev) => (prev.includes(path) ? prev : [...prev, path]));
+    setActiveTab(path);
+  }, []);
+
+  const handleTabDirty = useCallback((path: string, dirty: boolean) => {
+    setDirtyTabs((prev) => {
+      const next = new Set(prev);
+      if (dirty) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  }, []);
+
+  const closeTab = useCallback((path: string) => {
+    setOpenFileTabs((prev) => {
+      const idx = prev.indexOf(path);
+      const next = prev.filter((p) => p !== path);
+      setActiveTab((cur) => {
+        if (cur !== path) return cur;
+        return next.length > 0
+          ? (next[Math.max(0, idx - 1)] ?? "chat")
+          : "chat";
+      });
+      return next;
+    });
+    setDirtyTabs((prev) => {
+      const next = new Set(prev);
+      next.delete(path);
+      return next;
+    });
+    saveHandlers.current.delete(path);
+  }, []);
+
+  const requestCloseTab = useCallback(
+    (path: string) => {
+      if (dirtyTabs.has(path)) setPendingCloseTab(path);
+      else closeTab(path);
+    },
+    [dirtyTabs, closeTab],
+  );
+
+  const confirmCloseTab = useCallback(
+    async (save: boolean) => {
+      const path = pendingCloseTab;
+      setPendingCloseTab(null);
+      if (!path) return;
+      if (save) {
+        try {
+          await saveHandlers.current.get(path)?.();
+        } catch {
+          // editor shows the save error; still close per user intent
+        }
+      }
+      closeTab(path);
+    },
+    [pendingCloseTab, closeTab],
+  );
+
+  // Warn before unload while there are unsaved edits.
+  useEffect(() => {
+    if (dirtyTabs.size === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirtyTabs.size]);
+
+  // Keep activeTab valid (fall back to chat if its file tab disappeared).
+  useEffect(() => {
+    if (activeTab !== "chat" && !openFileTabs.includes(activeTab)) {
+      setActiveTab("chat");
+    }
+  }, [openFileTabs, activeTab]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("yep_repo_panel_open", isRepoOpen ? "1" : "0");
+    } catch {
+      // ignore storage failures (private mode, etc.)
+    }
+  }, [isRepoOpen]);
   const handleTargetFocused = useCallback(() => {
     setTargetMessageId(null);
   }, []);
@@ -1428,6 +1540,23 @@ function SessionPageContent({
     </svg>
   );
 
+  const RepoIcon = () => (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+    </svg>
+  );
+
   return (
     <div
       className={
@@ -1592,6 +1721,16 @@ function SessionPageContent({
                   <SessionOutlineIcon />
                 </button>
               )}
+              <button
+                type="button"
+                className={`session-repo-toggle${isRepoOpen ? " is-active" : ""}`}
+                onClick={() => setRepoOpen(!isRepoOpen)}
+                title={isRepoOpen ? t("repoClose") : t("repoOpen")}
+                aria-label={isRepoOpen ? t("repoClose") : t("repoOpen")}
+                aria-pressed={isRepoOpen}
+              >
+                <RepoIcon />
+              </button>
               {!loading && session && (
                 <button
                   type="button"
@@ -1652,199 +1791,309 @@ function SessionPageContent({
           </div>
         )}
 
-        <main className="session-messages">
-          {loading ? (
-            <SessionMessagesSkeleton />
-          ) : (
-            <SessionMetadataProvider
-              projectId={projectId}
-              projectPath={project?.path ?? null}
-              sessionId={sessionId}
+        <div
+          className="editor-tabbar"
+          role="tablist"
+          aria-label={t("editorTabs" as never)}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "chat"}
+            className={`editor-tab${activeTab === "chat" ? " is-active" : ""}`}
+            onClick={() => setActiveTab("chat")}
+          >
+            <span className="editor-tab-label">
+              {t("editorTabChat" as never)}
+            </span>
+          </button>
+          {openFileTabs.map((p) => (
+            <div
+              key={p}
+              role="tab"
+              aria-selected={activeTab === p}
+              tabIndex={0}
+              className={`editor-tab editor-tab--file${activeTab === p ? " is-active" : ""}${dirtyTabs.has(p) ? " is-dirty" : ""}`}
             >
-              <AgentContentProvider
-                agentContent={agentContent}
-                setAgentContent={setAgentContent}
-                toolUseToAgent={toolUseToAgent}
-                projectId={projectId}
-                sessionId={sessionId}
+              <button
+                type="button"
+                className="editor-tab-main"
+                onClick={() => setActiveTab(p)}
+                title={p}
               >
-                <MessageList
-                  messages={messages}
-                  preprocessedItems={renderItems}
-                  provider={session?.provider}
-                  isProcessing={
-                    status.owner === "self" && processState === "in-turn"
-                  }
-                  isCompacting={isCompacting}
-                  scrollTrigger={scrollTrigger}
-                  pendingMessages={pendingMessages}
-                  deferredMessages={deferredMessages}
-                  onCancelDeferred={(tempId) =>
-                    api.cancelDeferredMessage(sessionId, tempId)
-                  }
-                  markdownAugments={markdownAugments}
-                  activeToolApproval={activeToolApproval}
-                  hasOlderMessages={pagination?.hasOlderMessages}
-                  hasNewerMessages={pagination?.hasNewerMessages}
-                  loadingOlder={loadingOlder}
-                  loadingNewer={loadingNewer}
-                  loadingTargetMessage={loadingTargetMessage}
-                  onLoadOlderMessages={loadOlderMessages}
-                  onLoadNewerMessages={loadNewerMessages}
-                  onLoadTargetMessage={loadTargetMessageWindow}
-                  onEditUserPrompt={
-                    !isViewingHistoricalBranch &&
-                    (session?.provider === "claude" ||
-                      session?.provider === "codex" ||
-                      !session?.provider)
-                      ? handleEditUserPrompt
-                      : undefined
-                  }
-                  onSelectBranch={handleSelectBranch}
-                  focusBranchId={pendingBranchFocusId}
-                  onBranchFocused={handleBranchFocused}
-                  targetMessageId={targetMessageId}
-                  onTargetFocused={handleTargetFocused}
-                />
-              </AgentContentProvider>
-            </SessionMetadataProvider>
-          )}
-        </main>
-
-        <footer className="session-input">
+                <TabFileIcon />
+                <span className="editor-tab-label">{p.split("/").pop()}</span>
+                {dirtyTabs.has(p) && (
+                  <span className="editor-tab-dot" aria-hidden="true">
+                    ●
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                className="editor-tab-close"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  requestCloseTab(p);
+                }}
+                aria-label={t("editorClose" as never)}
+                title={t("editorClose" as never)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="session-workbench-body">
           <div
-            className={`session-connection-bar session-connection-${sessionConnectionStatus}`}
-          />
-          <div className="session-input-inner">
-            {/* User question panel */}
-            {pendingInputRequest &&
-              pendingInputRequest.sessionId === actualSessionId &&
-              isAskUserQuestion && (
-                <QuestionAnswerPanel
-                  request={pendingInputRequest}
-                  sessionId={actualSessionId}
-                  onSubmit={handleQuestionSubmit}
-                  onDeny={handleDeny}
-                  readOnly={isPersistedInputRequest}
-                />
+            className={`chat-panel${activeTab === "chat" ? " is-active" : ""}`}
+          >
+            <main className="session-messages">
+              {loading ? (
+                <SessionMessagesSkeleton />
+              ) : (
+                <SessionMetadataProvider
+                  projectId={projectId}
+                  projectPath={project?.path ?? null}
+                  sessionId={sessionId}
+                >
+                  <AgentContentProvider
+                    agentContent={agentContent}
+                    setAgentContent={setAgentContent}
+                    toolUseToAgent={toolUseToAgent}
+                    projectId={projectId}
+                    sessionId={sessionId}
+                  >
+                    <MessageList
+                      messages={messages}
+                      preprocessedItems={renderItems}
+                      provider={session?.provider}
+                      isProcessing={
+                        status.owner === "self" && processState === "in-turn"
+                      }
+                      isCompacting={isCompacting}
+                      scrollTrigger={scrollTrigger}
+                      pendingMessages={pendingMessages}
+                      deferredMessages={deferredMessages}
+                      onCancelDeferred={(tempId) =>
+                        api.cancelDeferredMessage(sessionId, tempId)
+                      }
+                      markdownAugments={markdownAugments}
+                      activeToolApproval={activeToolApproval}
+                      hasOlderMessages={pagination?.hasOlderMessages}
+                      hasNewerMessages={pagination?.hasNewerMessages}
+                      loadingOlder={loadingOlder}
+                      loadingNewer={loadingNewer}
+                      loadingTargetMessage={loadingTargetMessage}
+                      onLoadOlderMessages={loadOlderMessages}
+                      onLoadNewerMessages={loadNewerMessages}
+                      onLoadTargetMessage={loadTargetMessageWindow}
+                      onEditUserPrompt={
+                        !isViewingHistoricalBranch &&
+                        (session?.provider === "claude" ||
+                          session?.provider === "codex" ||
+                          !session?.provider)
+                          ? handleEditUserPrompt
+                          : undefined
+                      }
+                      onSelectBranch={handleSelectBranch}
+                      focusBranchId={pendingBranchFocusId}
+                      onBranchFocused={handleBranchFocused}
+                      targetMessageId={targetMessageId}
+                      onTargetFocused={handleTargetFocused}
+                    />
+                  </AgentContentProvider>
+                </SessionMetadataProvider>
               )}
+            </main>
 
-            {/* Tool approval: show panel + always-visible toolbar */}
-            {pendingInputRequest &&
-              pendingInputRequest.sessionId === actualSessionId &&
-              !isAskUserQuestion && (
-                <>
-                  <ToolApprovalPanel
-                    request={pendingInputRequest}
-                    sessionId={actualSessionId}
-                    agentName={approvalAgentName}
-                    onApprove={handleApprove}
-                    onDeny={handleDeny}
-                    onApproveAcceptEdits={handleApproveAcceptEdits}
-                    onApproveForSession={handleApproveForSession}
-                    onApproveAlways={handleApproveAlways}
-                    onDenyWithFeedback={handleDenyWithFeedback}
-                    collapsed={approvalCollapsed}
-                    onCollapsedChange={setApprovalCollapsed}
-                  />
-                  <MessageInputToolbar
+            <footer className="session-input">
+              <div
+                className={`session-connection-bar session-connection-${sessionConnectionStatus}`}
+              />
+              <div className="session-input-inner">
+                {/* User question panel */}
+                {pendingInputRequest &&
+                  pendingInputRequest.sessionId === actualSessionId &&
+                  isAskUserQuestion && (
+                    <QuestionAnswerPanel
+                      request={pendingInputRequest}
+                      sessionId={actualSessionId}
+                      onSubmit={handleQuestionSubmit}
+                      onDeny={handleDeny}
+                      readOnly={isPersistedInputRequest}
+                    />
+                  )}
+
+                {/* Tool approval: show panel + always-visible toolbar */}
+                {pendingInputRequest &&
+                  pendingInputRequest.sessionId === actualSessionId &&
+                  !isAskUserQuestion && (
+                    <>
+                      <ToolApprovalPanel
+                        request={pendingInputRequest}
+                        sessionId={actualSessionId}
+                        agentName={approvalAgentName}
+                        onApprove={handleApprove}
+                        onDeny={handleDeny}
+                        onApproveAcceptEdits={handleApproveAcceptEdits}
+                        onApproveForSession={handleApproveForSession}
+                        onApproveAlways={handleApproveAlways}
+                        onDenyWithFeedback={handleDenyWithFeedback}
+                        collapsed={approvalCollapsed}
+                        onCollapsedChange={setApprovalCollapsed}
+                      />
+                      <MessageInputToolbar
+                        mode={permissionMode}
+                        onModeChange={setPermissionMode}
+                        isHeld={holdModeEnabled ? isHeld : undefined}
+                        onHoldChange={holdModeEnabled ? setHold : undefined}
+                        supportsPermissionMode={supportsPermissionMode}
+                        supportsThinkingToggle={supportsThinkingToggle}
+                        contextUsage={session?.contextUsage}
+                        projectId={projectId}
+                        sessionId={actualSessionId}
+                        isRunning={status.owner === "self"}
+                        isThinking={processState === "in-turn"}
+                        onStop={handleAbort}
+                        pendingApproval={
+                          approvalCollapsed
+                            ? {
+                                type: "tool-approval",
+                                onExpand: () => setApprovalCollapsed(false),
+                              }
+                            : undefined
+                        }
+                      />
+                    </>
+                  )}
+
+                {/* Edit/rewind banner: shown while editing a past message */}
+                {editRewind && (
+                  <div
+                    className="edit-rewind-banner"
+                    data-testid="edit-rewind-banner"
+                  >
+                    <span className="edit-rewind-banner-text">
+                      {t("sessionEditingFromHere")}
+                    </span>
+                    <button
+                      type="button"
+                      className="edit-rewind-banner-cancel"
+                      onClick={handleCancelEdit}
+                    >
+                      {t("actionCancel")}
+                    </button>
+                  </div>
+                )}
+
+                {/* No pending approval: show full message input */}
+                {!(
+                  pendingInputRequest &&
+                  pendingInputRequest.sessionId === actualSessionId &&
+                  !isAskUserQuestion
+                ) && (
+                  <MessageInput
+                    onSend={handleSend}
+                    onQueue={
+                      status.owner !== "none" && processState !== "idle"
+                        ? handleQueue
+                        : undefined
+                    }
+                    placeholder={
+                      status.owner === "external"
+                        ? t("sessionPlaceholderExternal")
+                        : processState === "idle"
+                          ? t("sessionPlaceholderResume")
+                          : t("sessionPlaceholderQueue")
+                    }
                     mode={permissionMode}
                     onModeChange={setPermissionMode}
                     isHeld={holdModeEnabled ? isHeld : undefined}
                     onHoldChange={holdModeEnabled ? setHold : undefined}
                     supportsPermissionMode={supportsPermissionMode}
                     supportsThinkingToggle={supportsThinkingToggle}
-                    contextUsage={session?.contextUsage}
-                    projectId={projectId}
-                    sessionId={actualSessionId}
                     isRunning={status.owner === "self"}
                     isThinking={processState === "in-turn"}
                     onStop={handleAbort}
-                    pendingApproval={
-                      approvalCollapsed
-                        ? {
-                            type: "tool-approval",
-                            onExpand: () => setApprovalCollapsed(false),
-                          }
-                        : undefined
+                    draftKey={`draft-message-${sessionId}`}
+                    onDraftControlsReady={handleDraftControlsReady}
+                    collapsed={
+                      !!(
+                        pendingInputRequest &&
+                        pendingInputRequest.sessionId === actualSessionId
+                      )
                     }
+                    contextUsage={session?.contextUsage}
+                    projectId={projectId}
+                    sessionId={sessionId}
+                    attachments={attachments}
+                    onAttach={handleAttach}
+                    onRemoveAttachment={handleRemoveAttachment}
+                    uploadProgress={uploadProgress}
+                    commandPrefix={commandPrefix}
+                    commandLabel={commandLabel}
+                    commands={activeCommands}
+                    showCommandButton={showCommandButton}
+                    commandButtons={commandButtons}
+                    onCustomCommand={handleCustomCommand}
                   />
-                </>
-              )}
-
-            {/* Edit/rewind banner: shown while editing a past message */}
-            {editRewind && (
-              <div
-                className="edit-rewind-banner"
-                data-testid="edit-rewind-banner"
-              >
-                <span className="edit-rewind-banner-text">
-                  {t("sessionEditingFromHere")}
-                </span>
+                )}
+              </div>
+            </footer>
+          </div>
+          {openFileTabs.map((p) => (
+            <div
+              key={p}
+              className={`file-panel${activeTab === p ? " is-active" : ""}`}
+            >
+              <FileEditor
+                projectId={projectId}
+                filePath={p}
+                onClose={() => requestCloseTab(p)}
+                onDirtyChange={(d) => handleTabDirty(p, d)}
+                onSaveRef={(fn) => updateSaveHandler(p, fn)}
+              />
+            </div>
+          ))}
+        </div>
+        {pendingCloseTab && (
+          <Modal
+            title={t("editorUnsavedConfirmTitle" as never)}
+            onClose={() => setPendingCloseTab(null)}
+          >
+            <div className="unsaved-confirm">
+              <p>
+                {t("editorUnsavedConfirmBody" as never, {
+                  name: pendingCloseTab.split("/").pop() || pendingCloseTab,
+                })}
+              </p>
+              <div className="unsaved-confirm-actions">
                 <button
                   type="button"
-                  className="edit-rewind-banner-cancel"
-                  onClick={handleCancelEdit}
+                  className="btn btn-primary"
+                  onClick={() => confirmCloseTab(true)}
                 >
-                  {t("actionCancel")}
+                  {t("editorSaveAndClose" as never)}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => confirmCloseTab(false)}
+                >
+                  {t("editorCloseWithoutSave" as never)}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setPendingCloseTab(null)}
+                >
+                  {t("editorCancel" as never)}
                 </button>
               </div>
-            )}
-
-            {/* No pending approval: show full message input */}
-            {!(
-              pendingInputRequest &&
-              pendingInputRequest.sessionId === actualSessionId &&
-              !isAskUserQuestion
-            ) && (
-              <MessageInput
-                onSend={handleSend}
-                onQueue={
-                  status.owner !== "none" && processState !== "idle"
-                    ? handleQueue
-                    : undefined
-                }
-                placeholder={
-                  status.owner === "external"
-                    ? t("sessionPlaceholderExternal")
-                    : processState === "idle"
-                      ? t("sessionPlaceholderResume")
-                      : t("sessionPlaceholderQueue")
-                }
-                mode={permissionMode}
-                onModeChange={setPermissionMode}
-                isHeld={holdModeEnabled ? isHeld : undefined}
-                onHoldChange={holdModeEnabled ? setHold : undefined}
-                supportsPermissionMode={supportsPermissionMode}
-                supportsThinkingToggle={supportsThinkingToggle}
-                isRunning={status.owner === "self"}
-                isThinking={processState === "in-turn"}
-                onStop={handleAbort}
-                draftKey={`draft-message-${sessionId}`}
-                onDraftControlsReady={handleDraftControlsReady}
-                collapsed={
-                  !!(
-                    pendingInputRequest &&
-                    pendingInputRequest.sessionId === actualSessionId
-                  )
-                }
-                contextUsage={session?.contextUsage}
-                projectId={projectId}
-                sessionId={sessionId}
-                attachments={attachments}
-                onAttach={handleAttach}
-                onRemoveAttachment={handleRemoveAttachment}
-                uploadProgress={uploadProgress}
-                commandPrefix={commandPrefix}
-                commandLabel={commandLabel}
-                commands={activeCommands}
-                showCommandButton={showCommandButton}
-                commandButtons={commandButtons}
-                onCustomCommand={handleCustomCommand}
-              />
-            )}
-          </div>
-        </footer>
+            </div>
+          </Modal>
+        )}
       </div>
       {isWideScreen ? (
         <SessionInspector
@@ -1885,6 +2134,43 @@ function SessionPageContent({
           onSelectMessage={handleInspectorSelectMessage}
         />
       )}
+      {isWideScreen ? (
+        isRepoOpen && (
+          <RepoExplorer
+            presentation="sidebar"
+            projectId={projectId}
+            onClose={() => setRepoOpen(false)}
+            onOpenFile={(path) => openOrFocusFileTab(path)}
+          />
+        )
+      ) : (
+        <RepoExplorer
+          presentation="drawer"
+          isOpen={isRepoOpen}
+          onClose={() => setRepoOpen(false)}
+          onOpenFile={(path) => openOrFocusFileTab(path)}
+          projectId={projectId}
+        />
+      )}
     </div>
+  );
+}
+
+function TabFileIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M14 3v5h5" />
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    </svg>
   );
 }

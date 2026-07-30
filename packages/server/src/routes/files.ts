@@ -1,5 +1,5 @@
 import type { Stats } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { extname, normalize, resolve, sep } from "node:path";
 import {
   type FileContentResponse,
@@ -15,6 +15,29 @@ import type { ProjectScanner } from "../projects/scanner.js";
 
 export interface FilesDeps {
   scanner: ProjectScanner;
+}
+
+/** A single entry returned by the project directory browser. */
+export interface ProjectBrowseEntry {
+  name: string;
+  /** Path relative to the project root. */
+  path: string;
+  type: "dir" | "file";
+  /** Present for files: byte size. */
+  size?: number;
+  /** Present for files: whether the file can be displayed inline as text. */
+  isText?: boolean;
+}
+
+/** Response from the project directory browser (`GET /files/browse`). */
+export interface ProjectBrowseResponse {
+  /** The relative directory that was listed ("" for project root). */
+  path: string;
+  /** Parent relative directory, or null at the project root. */
+  parent: string | null;
+  entries: ProjectBrowseEntry[];
+  /** Set when the server could not read the directory (permission/other). */
+  error?: string;
 }
 
 /** Maximum file size to include content inline (1MB) */
@@ -422,6 +445,188 @@ export function createFilesRoutes(deps: FilesDeps): Hono {
     }
 
     return c.json(response);
+  });
+
+  /**
+   * PUT /api/projects/:projectId/files
+   * Write (create or overwrite) a text file inside the project.
+   * Body: { path: string; content: string }
+   *
+   * The path is project-scoped via `resolveFilePath` (blocks traversal), only
+   * text files are accepted (mirrors what the browser can display/edit), and
+   * the content is capped to MAX_INLINE_SIZE to avoid accidental huge writes.
+   */
+  routes.put("/:projectId/files", async (c) => {
+    const projectId = c.req.param("projectId");
+
+    if (!isUrlProjectId(projectId)) {
+      return c.json({ error: "Invalid project ID format" }, 400);
+    }
+
+    let body: { path?: unknown; content?: unknown };
+    try {
+      body = (await c.req.json()) as { path?: unknown; content?: unknown };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const relativePath = body.path;
+    const content = body.content;
+    if (typeof relativePath !== "string" || !relativePath) {
+      return c.json({ error: "Missing path" }, 400);
+    }
+    if (typeof content !== "string") {
+      return c.json({ error: "Missing content" }, 400);
+    }
+    if (content.length > MAX_INLINE_SIZE) {
+      return c.json(
+        { error: "File too large to edit", maxSize: MAX_INLINE_SIZE },
+        413,
+      );
+    }
+
+    const project = await deps.scanner.getProject(projectId);
+    if (!project) {
+      return c.json({ error: "Project not found" }, 404);
+    }
+
+    const filePath = resolveFilePath(project.path, relativePath);
+    if (!filePath) {
+      return c.json({ error: "Invalid file path" }, 400);
+    }
+
+    if (!isTextFile(filePath)) {
+      return c.json(
+        { error: "Only text files can be edited", path: relativePath },
+        415,
+      );
+    }
+
+    try {
+      await writeFile(filePath, content, "utf-8");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return c.json({ error: `Failed to write file: ${message}` }, 500);
+    }
+
+    return c.json({ ok: true, path: relativePath });
+  });
+
+  /**
+   * GET /api/projects/:projectId/files/browse
+   * List the contents of a directory inside the project (project-scoped).
+   * This powers the in-session "repo explorer" sidebar: it lets the user
+   * actively browse the repository file tree and open files, as opposed to
+   * the passive "files touched this session" list in the inspector.
+   *
+   * Query params:
+   *   - path: relative directory path inside the project (optional, defaults to root)
+   *
+   * Returns both directories and files so the UI can render a tree and let
+   * the user click a file to view it. Traversal is blocked by `resolveFilePath`.
+   */
+  routes.get("/:projectId/files/browse", async (c) => {
+    const projectId = c.req.param("projectId");
+    const relativePath = c.req.query("path") ?? "";
+
+    if (!isUrlProjectId(projectId)) {
+      return c.json({ error: "Invalid project ID format" }, 400);
+    }
+
+    const project = await deps.scanner.getProject(projectId);
+    if (!project) {
+      return c.json({ error: "Project not found" }, 404);
+    }
+
+    const projectRoot = project.path;
+
+    // Resolve + validate the requested directory stays within the project.
+    const dirPath = resolveFilePath(projectRoot, relativePath);
+    if (!dirPath) {
+      return c.json(
+        { error: "Invalid directory path", path: relativePath },
+        400,
+      );
+    }
+
+    let stats: Stats;
+    try {
+      stats = await stat(dirPath);
+    } catch {
+      return c.json({ error: "Directory not found", path: relativePath }, 404);
+    }
+    if (!stats.isDirectory()) {
+      return c.json(
+        { error: "Path is not a directory", path: relativePath },
+        400,
+      );
+    }
+
+    // Compute the parent relative path (null at project root).
+    const normalizedRel = relativePath.replace(/\/+$/, "");
+    const parent =
+      normalizedRel === "" || normalizedRel === "."
+        ? null
+        : normalizedRel.split("/").slice(0, -1).join("/");
+
+    let entries: ProjectBrowseEntry[];
+    try {
+      const dirents = await readdir(dirPath, { withFileTypes: true });
+      entries = await Promise.all(
+        dirents.map(async (dirent) => {
+          const childRelative = relativePath
+            ? `${relativePath.replace(/\/+$/, "")}/${dirent.name}`
+            : dirent.name;
+          const childAbsolute = resolve(dirPath, dirent.name);
+          if (dirent.isDirectory()) {
+            return {
+              name: dirent.name,
+              path: childRelative,
+              type: "dir" as const,
+            };
+          }
+          let size = 0;
+          let isText = false;
+          try {
+            const childStats = await stat(childAbsolute);
+            size = childStats.size;
+            isText = isTextFile(childAbsolute);
+          } catch {
+            // If we can't stat it, fall back to zero/safe defaults.
+          }
+          return {
+            name: dirent.name,
+            path: childRelative,
+            type: "file" as const,
+            size,
+            isText,
+          };
+        }),
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unable to read directory";
+      const response: ProjectBrowseResponse = {
+        path: relativePath,
+        parent,
+        entries: [],
+        error: message,
+      };
+      return c.json(response, 200);
+    }
+
+    // Sort: directories first, then files; each group by name (case-insensitive).
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    });
+
+    const response: ProjectBrowseResponse = {
+      path: relativePath,
+      parent,
+      entries,
+    };
+    return c.json(response, 200);
   });
 
   /**

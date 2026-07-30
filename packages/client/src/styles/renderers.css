@@ -3401,6 +3401,39 @@ pre.code-highlighter-plain code {
 }
 
 /* ==========================================================================
+   File Viewer Modal (Codex / ChatGPT-web style)
+   The repo tree lives in a narrow sidebar; opening a file should NOT be
+   cramped there. Instead the file opens in a wide, centered modal that
+   gives the content nearly the full viewport width/height.
+   ========================================================================== */
+
+.modal:has(.file-viewer-modal-content) {
+  width: min(1100px, 96vw);
+  max-width: 1100px;
+  height: 92dvh;
+  max-height: 92dvh;
+}
+
+/* Let the FileViewer own its own internal scrolling (header + body),
+   instead of the modal-content wrapper also scrolling. */
+.modal:has(.file-viewer-modal-content) .modal-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+.file-viewer-modal-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.file-viewer-modal-content > .file-viewer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ==========================================================================
    File Path Link
    ========================================================================== */
 

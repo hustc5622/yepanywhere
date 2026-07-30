@@ -25,6 +25,29 @@ import type {
   UploadedFile,
 } from "@yep-anywhere/shared";
 import { authEvents } from "../lib/authEvents";
+
+/** A single entry returned by the project directory browser. */
+export interface ProjectBrowseEntry {
+  name: string;
+  /** Path relative to the project root. */
+  path: string;
+  type: "dir" | "file";
+  /** Present for files: byte size. */
+  size?: number;
+  /** Present for files: whether the file can be displayed inline as text. */
+  isText?: boolean;
+}
+
+/** Response from the project directory browser (`GET /files/browse`). */
+export interface ProjectBrowseResponse {
+  /** The relative directory that was listed ("" for project root). */
+  path: string;
+  /** Parent relative directory, or null at the project root. */
+  parent: string | null;
+  entries: ProjectBrowseEntry[];
+  /** Set when the server could not read the directory. */
+  error?: string;
+}
 import type {
   AgentSession,
   InputRequest,
@@ -1232,6 +1255,21 @@ export const api = {
     if (download) params.set("download", "true");
     return `${API_BASE}/projects/${projectId}/files/raw?${params.toString()}`;
   },
+
+  // Project repository browser (powers the in-session repo explorer panel)
+  browseProjectFiles: (projectId: string, path = "") => {
+    const params = new URLSearchParams({ path });
+    return fetchJSON<ProjectBrowseResponse>(
+      `/projects/${projectId}/files/browse?${params.toString()}`,
+    );
+  },
+
+  // Write (create or overwrite) a text file inside the project.
+  updateFile: (projectId: string, path: string, content: string) =>
+    fetchJSON<{ ok: boolean; path: string }>(`/projects/${projectId}/files`, {
+      method: "PUT",
+      body: JSON.stringify({ path, content }),
+    }),
 
   // Reports API
   getReports: () => fetchJSON<ReportsListResponse>("/reports"),
