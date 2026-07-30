@@ -9,6 +9,7 @@ import { MockClaudeSDK } from "../../src/sdk/mock.js";
 describe("Projects API", () => {
   let mockSdk: MockClaudeSDK;
   let testDir: string;
+  const apiPath = (path: string) => path.replaceAll("\\", "/");
 
   beforeEach(async () => {
     mockSdk = new MockClaudeSDK();
@@ -82,6 +83,78 @@ describe("Projects API", () => {
       expect(res.status).toBe(404);
       const json = await res.json();
       expect(json.error).toBe("Project not found");
+    });
+  });
+
+  describe("GET /api/projects/directories", () => {
+    it("lists directories and supports a partial final path segment", async () => {
+      const browseRoot = join(testDir, "browse-root");
+      await mkdir(join(browseRoot, "alpha"), { recursive: true });
+      await mkdir(join(browseRoot, "beta"), { recursive: true });
+      await mkdir(join(browseRoot, ".hidden"), { recursive: true });
+      await writeFile(join(browseRoot, "README.md"), "not a directory");
+      const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
+
+      const listResponse = await app.request(
+        `/api/projects/directories?path=${encodeURIComponent(browseRoot)}`,
+      );
+      expect(listResponse.status).toBe(200);
+      const listJson = await listResponse.json();
+      expect(listJson).toMatchObject({
+        path: apiPath(browseRoot),
+        exact: true,
+        truncated: false,
+      });
+      expect(
+        listJson.directories.map((entry: { name: string }) => entry.name),
+      ).toEqual(["alpha", "beta"]);
+
+      const completionResponse = await app.request(
+        `/api/projects/directories?path=${encodeURIComponent(join(browseRoot, "al"))}`,
+      );
+      expect(completionResponse.status).toBe(200);
+      const completionJson = await completionResponse.json();
+      expect(completionJson).toMatchObject({
+        path: apiPath(browseRoot),
+        exact: false,
+      });
+      expect(completionJson.directories).toEqual([
+        {
+          name: "alpha",
+          path: apiPath(join(browseRoot, "alpha")),
+          hidden: false,
+        },
+      ]);
+    });
+
+    it("can include hidden directories on request", async () => {
+      const browseRoot = join(testDir, "hidden-root");
+      await mkdir(join(browseRoot, ".config"), { recursive: true });
+      const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
+
+      const response = await app.request(
+        `/api/projects/directories?path=${encodeURIComponent(browseRoot)}&includeHidden=true`,
+      );
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.directories).toContainEqual({
+        name: ".config",
+        path: apiPath(join(browseRoot, ".config")),
+        hidden: true,
+      });
+    });
+
+    it("rejects relative paths", async () => {
+      const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
+
+      const response = await app.request(
+        "/api/projects/directories?path=relative/path",
+      );
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "Path must be absolute",
+      });
     });
   });
 

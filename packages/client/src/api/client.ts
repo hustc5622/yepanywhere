@@ -193,6 +193,26 @@ export interface ProjectOption {
   name: string;
 }
 
+export interface ProjectDirectoryEntry {
+  name: string;
+  path: string;
+  hidden: boolean;
+}
+
+export interface ProjectDirectoryBrowseResponse {
+  /** Absolute directory whose children are being listed. */
+  path: string;
+  /** Absolute parent directory, or null at the filesystem root. */
+  parent: string | null;
+  /** Absolute home directory for the server process. */
+  home: string;
+  directories: ProjectDirectoryEntry[];
+  /** Whether the requested input was itself an existing directory. */
+  exact: boolean;
+  /** Whether more matching directories exist beyond this response. */
+  truncated: boolean;
+}
+
 /**
  * Response from the global sessions API.
  */
@@ -870,6 +890,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+
+  /**
+   * List child directories for the project path picker.
+   *
+   * A partial final path segment is treated as an autocomplete prefix.
+   */
+  browseProjectDirectories: (path: string, includeHidden = false) => {
+    const params = new URLSearchParams();
+    if (path.trim()) params.set("path", path);
+    if (includeHidden) params.set("includeHidden", "true");
+    const query = params.toString();
+    return fetchJSON<ProjectDirectoryBrowseResponse>(
+      `/projects/directories${query ? `?${query}` : ""}`,
+    );
+  },
 
   getProject: (projectId: string) =>
     fetchJSON<{ project: Project }>(`/projects/${projectId}`),

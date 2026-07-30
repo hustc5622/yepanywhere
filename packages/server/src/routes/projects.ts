@@ -1,4 +1,7 @@
+import type { Dirent } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   type PermissionMode,
   type ProjectGitStatusSummary,
@@ -89,6 +92,36 @@ export interface ProjectsDeps {
 interface ProjectActivityCounts {
   activeOwnedCount: number;
   activeExternalCount: number;
+}
+
+const MAX_DIRECTORY_BROWSE_RESULTS = 200;
+
+interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+  hidden: boolean;
+}
+
+/**
+ * Expand the two home-relative forms accepted by the project form.
+ *
+ * Deliberately do not treat "~someone" as the current user's home. The
+ * previous broad string replacement silently turned it into a different path.
+ */
+function expandHomePath(value: string): string {
+  if (value === "~") return homedir();
+  if (/^~[/\\]/.test(value)) {
+    return join(homedir(), value.slice(2));
+  }
+  return value;
+}
+
+async function isBrowsableDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 interface OwnedProcessView {
@@ -471,6 +504,85 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
     return c.json({ projects });
   });
 
+  // GET /api/projects/directories - Browse directories for path completion.
+  // This static route must stay before /:projectId so "directories" is not
+  // interpreted as a project ID.
+  routes.get("/directories", async (c) => {
+    const rawPath = c.req.query("path")?.trim() ?? "";
+    const includeHidden = c.req.query("includeHidden") === "true";
+    const requestedPath = expandHomePath(rawPath || "~");
+
+    if (!isAbsolutePath(requestedPath)) {
+      return c.json({ error: "Path must be absolute" }, 400);
+    }
+
+    const resolvedPath = resolve(requestedPath);
+    const requestedIsDirectory = await isBrowsableDirectory(resolvedPath);
+    const browsePath = requestedIsDirectory
+      ? resolvedPath
+      : dirname(resolvedPath);
+    const namePrefix = requestedIsDirectory ? "" : basename(resolvedPath);
+
+    if (!(await isBrowsableDirectory(browsePath))) {
+      return c.json({ error: "Directory not found" }, 404);
+    }
+
+    let entries: Dirent[];
+    try {
+      entries = await readdir(browsePath, { withFileTypes: true });
+    } catch {
+      return c.json({ error: "Directory cannot be read" }, 403);
+    }
+
+    const normalizedPrefix = namePrefix.toLocaleLowerCase();
+    const candidates = entries.filter((entry) => {
+      if (
+        !includeHidden &&
+        !namePrefix.startsWith(".") &&
+        entry.name.startsWith(".")
+      ) {
+        return false;
+      }
+      return entry.name.toLocaleLowerCase().startsWith(normalizedPrefix);
+    });
+
+    const directoryEntries = (
+      await Promise.all(
+        candidates.map(async (entry): Promise<DirectoryBrowseEntry | null> => {
+          const entryPath = join(browsePath, entry.name);
+          const isDirectory =
+            entry.isDirectory() ||
+            (entry.isSymbolicLink() && (await isBrowsableDirectory(entryPath)));
+          if (!isDirectory) return null;
+          return {
+            name: entry.name,
+            path: canonicalizeProjectPath(entryPath),
+            hidden: entry.name.startsWith("."),
+          };
+        }),
+      )
+    )
+      .filter((entry): entry is DirectoryBrowseEntry => entry !== null)
+      .sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        }),
+      );
+
+    const parent = dirname(browsePath);
+    const directories = directoryEntries.slice(0, MAX_DIRECTORY_BROWSE_RESULTS);
+
+    return c.json({
+      path: canonicalizeProjectPath(browsePath),
+      parent: parent === browsePath ? null : canonicalizeProjectPath(parent),
+      home: canonicalizeProjectPath(homedir()),
+      directories,
+      exact: requestedIsDirectory,
+      truncated: directoryEntries.length > directories.length,
+    });
+  });
+
   // GET /api/projects/:projectId - Get project info
   routes.get("/:projectId", async (c) => {
     const projectId = c.req.param("projectId");
@@ -504,10 +616,7 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
     }
 
     // Normalize path (remove trailing slashes, expand ~)
-    let normalizedPath = body.path.trim();
-    if (normalizedPath.startsWith("~")) {
-      normalizedPath = normalizedPath.replace("~", homedir());
-    }
+    let normalizedPath = expandHomePath(body.path.trim());
     // Remove trailing slash/backslash
     if (normalizedPath.length > 1 && /[/\\]$/.test(normalizedPath)) {
       normalizedPath = normalizedPath.slice(0, -1);

@@ -7,6 +7,7 @@ import {
 } from "../components/FilterDropdown";
 import { PageHeader } from "../components/PageHeader";
 import { ProjectCard } from "../components/ProjectCard";
+import { ProjectPathPicker } from "../components/ProjectPathPicker";
 import { ProjectListSkeleton } from "../components/Skeleton";
 import { useInboxContext } from "../contexts/InboxContext";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
@@ -296,12 +297,14 @@ export function ProjectsPage() {
             {showAddForm && (
               <div className="inbox-toolbar">
                 <form onSubmit={handleAddProject} className="add-project-form">
-                  <input
-                    type="text"
+                  <ProjectPathPicker
                     value={newProjectPath}
-                    onChange={(e) => setNewProjectPath(e.target.value)}
-                    placeholder={t("projectsAddPlaceholder")}
+                    onChange={(path) => {
+                      setNewProjectPath(path);
+                      setAddError(null);
+                    }}
                     disabled={adding}
+                    autoFocus
                   />
                   <div className="add-project-actions">
                     <button
