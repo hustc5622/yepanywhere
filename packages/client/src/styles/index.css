@@ -1174,6 +1174,8 @@ h2 {
 
 /* Forms */
 .new-session-form {
+  --new-session-accent: var(--app-yep-green);
+
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -1217,8 +1219,9 @@ h2 {
 
 .new-session-form-textarea:focus {
   outline: none;
-  border-color: var(--app-yep-green);
-  box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.15);
+  border-color: var(--new-session-accent);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--new-session-accent) 20%, transparent);
 }
 
 .new-session-form-toolbar {
@@ -1294,8 +1297,8 @@ h2 {
 }
 
 .new-session-effort-option.selected {
-  background: rgba(217, 119, 87, 0.12);
-  color: var(--app-yep-green);
+  background: color-mix(in srgb, var(--new-session-accent) 14%, transparent);
+  color: var(--new-session-accent);
 }
 
 .new-session-effort-option:disabled {
@@ -8850,6 +8853,15 @@ button.context-usage-indicator--button:focus-visible {
   margin: 0 auto;
 }
 
+.new-session-form .send-button {
+  background: var(--new-session-accent);
+}
+
+.new-session-form .send-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--new-session-accent) 55%, white);
+  outline-offset: 2px;
+}
+
 .new-session-header {
   text-align: center;
   margin-bottom: 2rem;
@@ -8895,8 +8907,8 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .new-session-defaults-button:hover:not(:disabled) {
-  border-color: var(--app-yep-green);
-  background: rgba(217, 119, 87, 0.08);
+  border-color: var(--new-session-accent);
+  background: color-mix(in srgb, var(--new-session-accent) 10%, transparent);
 }
 
 .new-session-defaults-button:disabled {
@@ -9154,8 +9166,12 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .provider-option.selected {
-  border-color: var(--app-yep-green);
-  background: rgba(217, 119, 87, 0.08);
+  border-color: var(--provider-option-accent, var(--new-session-accent));
+  background: color-mix(
+    in srgb,
+    var(--provider-option-accent, var(--new-session-accent)) 10%,
+    transparent
+  );
 }
 
 .provider-option.disabled {
@@ -9171,6 +9187,7 @@ button.context-usage-indicator--button:focus-visible {
 .provider-option-dot {
   width: 10px;
   height: 10px;
+  background: var(--provider-option-accent, var(--text-dimmed));
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -9394,8 +9411,9 @@ button.context-usage-indicator--button:focus-visible {
 
 .new-session-endpoint-option.selected {
   color: var(--text-primary);
-  background: var(--bg-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  background: color-mix(in srgb, var(--new-session-accent) 12%, var(--bg-code));
+  box-shadow: inset 0 0 0 1px var(--new-session-accent), 0 1px 2px
+    rgba(0, 0, 0, 0.08);
 }
 
 .new-session-endpoint-option:disabled {
@@ -9517,7 +9535,7 @@ button.context-usage-indicator--button:focus-visible {
 
 .new-session-limit-input:focus {
   outline: none;
-  border-color: var(--focus-border);
+  border-color: var(--new-session-accent);
 }
 
 .new-session-limit-error {
@@ -9547,6 +9565,12 @@ button.context-usage-indicator--button:focus-visible {
 
 .new-session-opencode-capability input {
   flex-shrink: 0;
+  accent-color: var(--new-session-accent);
+}
+
+.new-session-opencode-capability:has(input:checked) {
+  border-color: var(--new-session-accent);
+  background: color-mix(in srgb, var(--new-session-accent) 10%, transparent);
 }
 
 .new-session-opencode-advanced {
@@ -9593,7 +9617,7 @@ button.context-usage-indicator--button:focus-visible {
 
 .new-session-opencode-json-field textarea:focus {
   outline: none;
-  border-color: var(--focus-border);
+  border-color: var(--new-session-accent);
 }
 
 @media (max-width: 720px) {
@@ -9686,8 +9710,8 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .mode-option.selected {
-  border-color: var(--app-yep-green);
-  background: rgba(217, 119, 87, 0.08);
+  border-color: var(--new-session-accent);
+  background: color-mix(in srgb, var(--new-session-accent) 10%, transparent);
 }
 
 .mode-option:disabled {
@@ -9776,8 +9800,8 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .executor-option.selected {
-  border-color: var(--app-yep-green);
-  background: rgba(217, 119, 87, 0.08);
+  border-color: var(--new-session-accent);
+  background: color-mix(in srgb, var(--new-session-accent) 10%, transparent);
 }
 
 .executor-option:disabled {
@@ -12261,7 +12285,7 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .filter-dropdown-button.has-selection {
-  border-color: var(--app-yep-green);
+  border-color: var(--filter-dropdown-accent, var(--app-yep-green));
   color: var(--text-primary);
 }
 
@@ -12339,7 +12363,10 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .filter-dropdown-option.selected {
-  background: rgba(217, 119, 87, 0.08);
+  background: var(
+    --filter-dropdown-selected-background,
+    rgba(217, 119, 87, 0.08)
+  );
 }
 
 .filter-dropdown-checkbox {
@@ -12355,8 +12382,8 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .filter-dropdown-checkbox.checked {
-  background: var(--app-yep-green);
-  border-color: var(--app-yep-green);
+  background: var(--filter-dropdown-accent, var(--app-yep-green));
+  border-color: var(--filter-dropdown-accent, var(--app-yep-green));
   color: white;
 }
 

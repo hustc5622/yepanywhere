@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../i18n";
 
@@ -23,6 +29,8 @@ export interface FilterDropdownProps<T extends string> {
   placeholder?: string; // shown when nothing selected
   align?: "left" | "right"; // dropdown alignment, default left
   selectedDescription?: string; // optional secondary text shown inside the trigger
+  /** Optional accent used by selected states, including the mobile portal. */
+  accentColor?: string;
 }
 
 /**
@@ -39,6 +47,7 @@ export function FilterDropdown<T extends string>({
   placeholder,
   align = "left",
   selectedDescription,
+  accentColor,
 }: FilterDropdownProps<T>) {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
@@ -47,6 +56,12 @@ export function FilterDropdown<T extends string>({
   );
   const buttonRef = useRef<HTMLButtonElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
+  const accentStyle = accentColor
+    ? ({
+        "--filter-dropdown-accent": accentColor,
+        "--filter-dropdown-selected-background": `color-mix(in srgb, ${accentColor} 10%, transparent)`,
+      } as CSSProperties)
+    : undefined;
 
   const handleButtonClick = () => {
     buttonRef.current?.blur();
@@ -281,6 +296,7 @@ export function FilterDropdown<T extends string>({
             <div
               ref={sheetRef}
               className="filter-dropdown-sheet"
+              style={accentStyle}
               tabIndex={-1}
               aria-label={t("filterByLabel", { label })}
             >
@@ -299,6 +315,7 @@ export function FilterDropdown<T extends string>({
       <div
         ref={sheetRef}
         className={`filter-dropdown-dropdown ${align === "right" ? "align-right" : ""}`}
+        style={accentStyle}
         tabIndex={-1}
         aria-label={t("filterByLabel", { label })}
       >
@@ -307,7 +324,7 @@ export function FilterDropdown<T extends string>({
     ) : null;
 
   return (
-    <div className="filter-dropdown-container">
+    <div className="filter-dropdown-container" style={accentStyle}>
       <button
         ref={buttonRef}
         type="button"

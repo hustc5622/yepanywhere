@@ -15,6 +15,7 @@ import {
   resolveModel,
 } from "@yep-anywhere/shared";
 import {
+  type CSSProperties,
   type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
@@ -78,6 +79,25 @@ interface PendingFile {
 
 const CODEX_MCP_MODE_ORDER: CodexMcpMode[] = ["clear", "standard", "full"];
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
+
+const NEW_SESSION_PROVIDER_ACCENTS = {
+  claude: "var(--provider-claude)",
+  "claude-ollama": "var(--provider-claude)",
+  codex: "var(--provider-codex)",
+  "codex-oss": "var(--provider-codex)",
+  gemini: "var(--provider-gemini)",
+  "gemini-acp": "var(--provider-gemini)",
+  opencode: "var(--provider-opencode)",
+  kimi: "var(--provider-kimi)",
+} satisfies Record<ProviderName, string>;
+
+export function getNewSessionProviderAccent(
+  provider: ProviderName | null | undefined,
+): string {
+  return provider
+    ? NEW_SESSION_PROVIDER_ACCENTS[provider]
+    : "var(--app-yep-green)";
+}
 
 const EFFORT_LABEL_KEYS: Record<
   EffortLevel,
@@ -354,6 +374,10 @@ export function NewSessionForm({
   const [selectedProvider, setSelectedProvider] = useState<ProviderName | null>(
     null,
   );
+  const selectedProviderAccent = getNewSessionProviderAccent(selectedProvider);
+  const newSessionThemeStyle = {
+    "--new-session-accent": selectedProviderAccent,
+  } as CSSProperties;
   const [selectedExecutor, setSelectedExecutor] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<
@@ -1657,8 +1681,15 @@ export function NewSessionForm({
         key={p.name}
         type="button"
         className={`provider-option ${isSelected ? "selected" : ""} ${!isAvailable ? "disabled" : ""}`}
+        data-provider={p.name}
+        style={
+          {
+            "--provider-option-accent": getNewSessionProviderAccent(p.name),
+          } as CSSProperties
+        }
         onClick={() => isAvailable && handleProviderSelect(p.name)}
         disabled={isStarting || !isAvailable}
+        aria-pressed={isSelected}
         title={
           !isAvailable
             ? t("newSessionProviderUnavailable", {
@@ -1948,6 +1979,8 @@ export function NewSessionForm({
     return (
       <div
         className={`new-session-form new-session-form-compact ${interimTranscript ? "voice-recording" : ""}`}
+        data-provider={selectedProvider ?? undefined}
+        style={newSessionThemeStyle}
       >
         {inputArea}
       </div>
@@ -1958,6 +1991,8 @@ export function NewSessionForm({
   return (
     <div
       className={`new-session-form new-session-container ${interimTranscript ? "voice-recording" : ""}`}
+      data-provider={selectedProvider ?? undefined}
+      style={newSessionThemeStyle}
     >
       <div className="new-session-header">
         <h1>{t("newSessionHeaderTitle")}</h1>
@@ -2010,6 +2045,7 @@ export function NewSessionForm({
                     options={modelOptions}
                     selected={selectedModel ? [selectedModel] : []}
                     onChange={handleModelSelect}
+                    accentColor={selectedProviderAccent}
                     multiSelect={false}
                     placeholder={t("newSessionModelPlaceholder")}
                     selectedDescription={
@@ -2064,6 +2100,7 @@ export function NewSessionForm({
                         OPENCODE_DEFAULT_VARIANT,
                     ]}
                     onChange={handleOpenCodeReasoningSelect}
+                    accentColor={selectedProviderAccent}
                     multiSelect={false}
                     placeholder={t("newSessionEffortTitle")}
                     align="right"
@@ -2078,6 +2115,7 @@ export function NewSessionForm({
                     options={thinkingOptions}
                     selected={[selectedThinkingPreset]}
                     onChange={handleThinkingSelect}
+                    accentColor={selectedProviderAccent}
                     multiSelect={false}
                     placeholder={t("newSessionThinkingControlTitle")}
                     align="right"
