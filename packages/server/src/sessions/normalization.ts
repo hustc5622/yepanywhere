@@ -1855,7 +1855,7 @@ function buildKimiUserContent(
  * `context.append_message` records are ignored — they are the post-compaction
  * context-memory projection and would double-count tool results as user turns.
  */
-function convertKimiMessages(session: KimiSessionContent): Message[] {
+export function convertKimiMessages(session: KimiSessionContent): Message[] {
   const messages: Message[] = [];
   const sid = session.sessionId;
 

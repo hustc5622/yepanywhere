@@ -138,4 +138,44 @@ describe("parseAgentResultFromText", () => {
     );
     expect(result?.agentId).toBe("img123");
   });
+
+  it("parses a completed kimi Agent result", () => {
+    const result = parseAgentResultFromText(
+      block(
+        "agent_id: agent-1\nactual_subagent_type: explore\nstatus: completed\n\n[summary]\nbackend findings",
+      ),
+    );
+    expect(result?.agentId).toBe("agent-1");
+    expect(result?.status).toBe("completed");
+  });
+
+  it("marks an interrupted kimi Agent result as failed", () => {
+    const result = parseAgentResultFromText(
+      block(
+        "agent_id: agent-0\nactual_subagent_type: explore\nstatus: failed\n\nsubagent error: interrupted",
+      ),
+    );
+    expect(result?.agentId).toBe("agent-0");
+    expect(result?.status).toBe("failed");
+  });
+
+  it("uses the first AgentSwarm child for the one-to-one Task renderer", () => {
+    const result = parseAgentResultFromText(
+      block(
+        '<agent_swarm_result><subagent agent_id="agent-0" outcome="completed">frontend findings</subagent><subagent agent_id="agent-1" outcome="failed">backend error</subagent></agent_swarm_result>',
+      ),
+    );
+    expect(result?.agentId).toBe("agent-0");
+    expect(result?.status).toBe("completed");
+  });
+
+  it("marks a failed first AgentSwarm child as failed", () => {
+    const result = parseAgentResultFromText(
+      block(
+        "<agent_swarm_result><subagent outcome='failed' agent_id='agent-0'>interrupted</subagent></agent_swarm_result>",
+      ),
+    );
+    expect(result?.agentId).toBe("agent-0");
+    expect(result?.status).toBe("failed");
+  });
 });

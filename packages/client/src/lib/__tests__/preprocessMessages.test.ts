@@ -1178,6 +1178,55 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("structures completed Kimi AgentSwarm results for the Task renderer", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        type: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "Swarm_0",
+            name: "AgentSwarm",
+            input: {
+              description: "Explore frontend and backend",
+              subagent_type: "explore",
+            },
+          },
+        ],
+      },
+      {
+        id: "msg-2",
+        type: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "Swarm_0",
+            content:
+              '<agent_swarm_result><subagent agent_id="agent-0" outcome="completed">frontend findings</subagent><subagent agent_id="agent-1" outcome="failed">backend error</subagent></agent_swarm_result>',
+          },
+        ],
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "Swarm_0",
+      toolName: "AgentSwarm",
+      status: "complete",
+      toolResult: {
+        isError: false,
+        structured: {
+          agentId: "agent-0",
+          status: "completed",
+        },
+      },
+    });
+  });
+
   it("routes task notifications back into the matching Agent tool call", () => {
     const messages: Message[] = [
       {

@@ -100,17 +100,27 @@ export interface ISessionReader {
   /**
    * Get mappings from tool use IDs to agent session IDs.
    * Used for Claude's Task tool to link tool_use to subagent sessions.
-   * Non-Claude providers should return an empty array.
+   * Providers without subagent transcript support should return an empty array.
+   *
+   * @param sessionId - Optional session scope. Providers whose subagent ids
+   *   are only unique within a session (e.g. Kimi's `agent-0`/`agent-1`) use
+   *   this to scope the mappings to one session. Providers with globally
+   *   unique agent ids (Claude) may ignore it.
    */
-  getAgentMappings(): Promise<{ toolUseId: string; agentId: string }[]>;
+  getAgentMappings(
+    sessionId?: string,
+  ): Promise<{ toolUseId: string; agentId: string }[]>;
 
   /**
    * Get an agent (subagent) session by ID.
    * Used for Claude's Task tool subagent sessions (agent-*.jsonl files).
-   * Non-Claude providers should return null.
+   * Providers without subagent transcript support should return null.
+   *
+   * @param sessionId - Optional session scope; see getAgentMappings.
    */
   getAgentSession(
     agentId: string,
+    sessionId?: string,
   ): Promise<{ messages: Message[]; status: string } | null>;
 
   /**

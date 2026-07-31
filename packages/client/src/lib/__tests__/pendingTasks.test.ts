@@ -213,4 +213,35 @@ describe("findPendingTasks", () => {
 
     expect(pending).toHaveLength(0);
   });
+
+  it("detects pending kimi Agent and AgentSwarm tool calls", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-1",
+        type: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "Agent_0",
+            name: "Agent",
+            input: {
+              description: "explore frontend",
+              subagent_type: "explore",
+            },
+          },
+          {
+            type: "tool_use",
+            id: "Swarm_0",
+            name: "AgentSwarm",
+            input: { description: "explore all", subagent_type: "explore" },
+          },
+        ],
+      },
+    ];
+
+    const pending = findPendingTasks(messages);
+
+    expect(pending.map((t) => t.toolUseId)).toEqual(["Agent_0", "Swarm_0"]);
+    expect(pending[0]?.subagentType).toBe("explore");
+  });
 });

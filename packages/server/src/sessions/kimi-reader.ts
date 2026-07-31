@@ -17,6 +17,8 @@ import { dirname, join } from "node:path";
 import {
   type ContextCumulativeUsage,
   type KimiStepEndEvent,
+  type KimiToolCallEvent,
+  type KimiToolResultEvent,
   type KimiWireRecord,
   SESSION_TITLE_MAX_LENGTH,
   type SessionQuestion,
@@ -34,6 +36,7 @@ import type {
   Message,
   SessionSummary,
 } from "../supervisor/types.js";
+import { convertKimiMessages } from "./normalization.js";
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -211,16 +214,100 @@ export class KimiSessionReader implements ISessionReader {
     }
   }
 
-  /** Kimi subagents are not surfaced in this phase. */
-  async getAgentMappings(): Promise<{ toolUseId: string; agentId: string }[]> {
-    return [];
+  /**
+   * Map subagent-spawning tool calls in the main wire to their subagent ids.
+   *
+   * Kimi runs `Agent` / `AgentSwarm` subagents whose transcripts live in
+   * sibling `agents/<agentId>/wire.jsonl` files. The parent tool.result output
+   * carries the produced agent id(s): `agent_id: agent-0` for a single Agent,
+   * or `<subagent agent_id="agent-0" ...>` entries for an AgentSwarm.
+   *
+   * Kimi agent ids (`agent-0`, `agent-1`, ...) are only unique within a
+   * session, so this must be scoped by sessionId — the route forwards it.
+   */
+  async getAgentMappings(
+    sessionId?: string,
+  ): Promise<{ toolUseId: string; agentId: string }[]> {
+    if (!sessionId) return [];
+    const entry = await this.findSessionFile(sessionId);
+    if (!entry) return [];
+
+    let records: KimiWireRecord[];
+    try {
+      records = parseKimiWireJsonl(await readFile(entry.filePath, "utf-8"));
+    } catch {
+      return [];
+    }
+
+    // Collect subagent-spawning tool calls and pair them with their results.
+    const spawnCallIds = new Set<string>();
+    const resultOutputByCallId = new Map<string, string>();
+    for (const record of records) {
+      if (!isKimiLoopEventRecord(record)) continue;
+      const event = record.event;
+      if (event.type === "tool.call") {
+        const call = event as KimiToolCallEvent;
+        if (call.name === "Agent" || call.name === "AgentSwarm") {
+          spawnCallIds.add(call.toolCallId);
+        }
+      } else if (event.type === "tool.result") {
+        const res = event as KimiToolResultEvent;
+        const output = res.result?.output;
+        if (typeof output === "string" && res.toolCallId) {
+          resultOutputByCallId.set(res.toolCallId, output);
+        }
+      }
+    }
+
+    const mappings: { toolUseId: string; agentId: string }[] = [];
+    for (const toolUseId of spawnCallIds) {
+      const output = resultOutputByCallId.get(toolUseId);
+      if (!output) continue;
+      const agentIds = parseKimiSubagentIds(output);
+      // The client maps toolUseId -> agentId 1:1; use the first produced
+      // subagent. Full AgentSwarm fan-out (N subagents per call) is future
+      // work that needs a dedicated multi-agent renderer.
+      if (agentIds.length > 0) {
+        mappings.push({ toolUseId, agentId: agentIds[0] as string });
+      }
+    }
+    return mappings;
   }
 
-  /** Kimi subagents are not surfaced in this phase. */
+  /**
+   * Load a subagent transcript from `agents/<agentId>/wire.jsonl`.
+   *
+   * agentId (e.g. `agent-0`) is only unique within a session, so sessionId is
+   * required to locate the owning session directory.
+   */
   async getAgentSession(
-    _agentId: string,
+    agentId: string,
+    sessionId?: string,
   ): Promise<{ messages: Message[]; status: string } | null> {
-    return null;
+    if (!sessionId) return null;
+    // Guard against path traversal: agent ids are simple slugs.
+    if (!/^[\w.-]+$/.test(agentId) || agentId.includes("..")) return null;
+
+    const entry = await this.findSessionFile(sessionId);
+    if (!entry) return null;
+
+    const agentDir = join(entry.sessionDir, "agents", agentId);
+    const wirePath = join(agentDir, "wire.jsonl");
+
+    let records: KimiWireRecord[];
+    try {
+      records = parseKimiWireJsonl(await readFile(wirePath, "utf-8"));
+    } catch {
+      return null;
+    }
+
+    const messages = convertKimiMessages({
+      sessionId: `${sessionId}/${agentId}`,
+      blobsDir: join(agentDir, "blobs"),
+      records,
+    });
+
+    return { messages, status: inferKimiAgentStatus(records, messages) };
   }
 
   async getSessionFilePath(sessionId: string): Promise<string | null> {
@@ -480,4 +567,49 @@ export class KimiSessionReader implements ISessionReader {
     }
     return questions;
   }
+}
+
+/**
+ * Extract subagent ids from an Agent / AgentSwarm tool.result output.
+ *
+ * Single Agent result:
+ *   `agent_id: agent-0\nactual_subagent_type: explore\nstatus: completed\n...`
+ * AgentSwarm result:
+ *   `<agent_swarm_result><subagent agent_id="agent-0" ...>...</subagent>...`
+ */
+export function parseKimiSubagentIds(output: string): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string | undefined) => {
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  };
+
+  // AgentSwarm: one <subagent agent_id="..."> per child.
+  for (const m of output.matchAll(/<subagent[^>]*\bagent_id="([^"]+)"/g)) {
+    add(m[1]);
+  }
+  // Single Agent: leading `agent_id: <id>` line.
+  const single = output.match(/^\s*agent_id:\s*(\S+)/m);
+  if (single) add(single[1]);
+
+  return ids;
+}
+
+/**
+ * Infer a subagent's status from its own wire records. History view only sees
+ * terminal states: a `turn.cancel` marks an interrupted/failed run, otherwise
+ * a subagent with produced content is treated as completed.
+ */
+function inferKimiAgentStatus(
+  records: KimiWireRecord[],
+  messages: Message[],
+): "pending" | "running" | "completed" | "failed" {
+  if (messages.length === 0) return "pending";
+  for (const record of records) {
+    if ((record as { type?: string }).type === "turn.cancel") return "failed";
+  }
+  return "completed";
 }

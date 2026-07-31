@@ -993,6 +993,33 @@ interface ArchiveTarget {
   sessionFilePath: string;
 }
 
+/**
+ * Resolve the reader that actually owns `sessionId`.
+ *
+ * A project id is derived purely from the working directory, so a single path
+ * can host sessions from several providers (e.g. Claude + Codex + Kimi under
+ * the same repo). `readerFactory(project)` only yields the project's primary
+ * provider reader, which returns nothing for a session owned by a different
+ * provider — this is why the subagent (Agent/AgentSwarm) endpoints returned an
+ * empty result for Kimi sessions living under a Claude-primary project. Resolve
+ * the owning provider's reader by session instead, falling back to the primary.
+ */
+async function resolveReaderForSession(
+  deps: SessionsDeps,
+  project: Project,
+  sessionId: string,
+): Promise<ISessionReader> {
+  const preferredProvider = deps.sessionMetadataService?.getProvider(sessionId);
+  const resolved = await findSessionSummaryAcrossProviders(
+    project,
+    sessionId,
+    project.id,
+    toProviderResolutionDeps(deps),
+    preferredProvider,
+  );
+  return resolved?.source.reader ?? deps.readerFactory(project);
+}
+
 function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
   return {
     readerFactory: deps.readerFactory,
@@ -1264,8 +1291,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "Project not found" }, 404);
     }
 
-    const reader = deps.readerFactory(project);
-    const mappings = await reader.getAgentMappings();
+    const sessionId = c.req.param("sessionId");
+    const reader = await resolveReaderForSession(deps, project, sessionId);
+    const mappings = await reader.getAgentMappings(sessionId);
 
     return c.json({ mappings });
   });
@@ -1277,6 +1305,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     async (c) => {
       const projectId = c.req.param("projectId");
       const agentId = c.req.param("agentId");
+      const sessionId = c.req.param("sessionId");
 
       // Validate projectId format at API boundary
       if (!isUrlProjectId(projectId)) {
@@ -1288,8 +1317,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         return c.json({ error: "Project not found" }, 404);
       }
 
-      const reader = deps.readerFactory(project);
-      const agentSession = await reader.getAgentSession(agentId);
+      const reader = await resolveReaderForSession(deps, project, sessionId);
+      const agentSession = await reader.getAgentSession(agentId, sessionId);
 
       if (!agentSession) {
         return c.json({ error: "Agent session not found" }, 404);

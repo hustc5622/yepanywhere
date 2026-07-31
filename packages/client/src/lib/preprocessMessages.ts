@@ -1259,13 +1259,33 @@ export function parseAgentResultFromText(
 
   const displayContent = extractAgentDisplayContent(block);
 
-  // Extract agentId
-  const agentIdMatch = fullText.match(/^agentId:\s*(\S+)/m);
-  if (!agentIdMatch) return undefined;
+  // Extract agentId. Claude/SDK 0.2.76+ emit `agentId: <id>`; Kimi's Agent
+  // emits `agent_id: agent-0`, while AgentSwarm wraps each child in a
+  // `<subagent agent_id="agent-0" outcome="completed">` element. The current
+  // renderer and server mapping are 1:1, so use the first swarm child.
+  const directAgentId = fullText.match(/^agent(?:Id|_id):\s*(\S+)/m)?.[1];
+  const firstSubagentAttributes = fullText.match(/<subagent\b([^>]*)>/i)?.[1];
+  const swarmAgentId = firstSubagentAttributes?.match(
+    /\bagent_id\s*=\s*["']([^"']+)["']/i,
+  )?.[1];
+  const agentId = directAgentId ?? swarmAgentId;
+  if (!agentId) return undefined;
+
+  // Kimi Agent results carry `status:`, while AgentSwarm puts `outcome=` on
+  // each child. Honor terminal failures so interrupted children render as
+  // failed; successful and legacy results default to completed.
+  const explicitStatus =
+    fullText.match(/^status:\s*([^\s]+)/m)?.[1] ??
+    firstSubagentAttributes?.match(/\boutcome\s*=\s*["']([^"']+)["']/i)?.[1];
+  const status =
+    explicitStatus &&
+    /^(?:failed|error|cancelled|canceled|timeout)$/i.test(explicitStatus)
+      ? "failed"
+      : "completed";
 
   const result: Record<string, unknown> = {
-    agentId: agentIdMatch[1],
-    status: "completed",
+    agentId,
+    status,
   };
   if (displayContent && displayContent.length > 0) {
     result.content = displayContent;
@@ -1425,7 +1445,12 @@ function attachToolResult(
 
   // SDK 0.2.76+: Agent tool has no structured tool_use_result.
   // Parse agentId and usage stats from the text content blocks instead.
-  if (!structured && (item.toolName === "Agent" || item.toolName === "Task")) {
+  if (
+    !structured &&
+    (item.toolName === "Agent" ||
+      item.toolName === "AgentSwarm" ||
+      item.toolName === "Task")
+  ) {
     structured = parseAgentResultFromText(block);
   }
 
