@@ -16,6 +16,10 @@ interface ProjectSelectorProps {
   currentProjectName?: string;
   /** Called when a new project is selected */
   onProjectChange?: (project: Project) => void;
+  /** Reuse a project list already loaded by the parent. */
+  projects?: Project[];
+  /** Loading state for a parent-provided project list. */
+  projectsLoading?: boolean;
 }
 
 /**
@@ -26,6 +30,8 @@ export function ProjectSelector({
   currentProjectId,
   currentProjectName,
   onProjectChange,
+  projects: providedProjects,
+  projectsLoading: providedProjectsLoading,
 }: ProjectSelectorProps) {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
@@ -37,7 +43,13 @@ export function ProjectSelector({
   const navigate = useNavigate();
   const basePath = useRemoteBasePath();
 
-  const { projects, loading } = useProjects();
+  const shouldFetchProjects = providedProjects === undefined;
+  const { projects: fetchedProjects, loading: fetchedProjectsLoading } =
+    useProjects({ enabled: shouldFetchProjects });
+  const projects = providedProjects ?? fetchedProjects;
+  const loading = shouldFetchProjects
+    ? fetchedProjectsLoading
+    : (providedProjectsLoading ?? false);
 
   // Find current project name
   const currentProject = projects.find((p) => p.id === currentProjectId);
