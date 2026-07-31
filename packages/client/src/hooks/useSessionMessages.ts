@@ -100,6 +100,8 @@ export interface UseSessionMessagesResult {
   /** Reload the authoritative session snapshot from REST */
   refreshSessionMessages: (options?: {
     branchId?: string | null;
+    /** Allow an explicit history rewrite to remove messages missing from disk. */
+    replaceMessages?: boolean;
     acceptSnapshot?: (snapshot: {
       session: Session;
       messages: Message[];
@@ -171,6 +173,53 @@ function mergeNewerPagination(
     returnedMessageCount:
       current.returnedMessageCount + incoming.returnedMessageCount,
   };
+}
+
+function mergeRefreshPagination(
+  current: PaginationInfo | undefined,
+  incoming: PaginationInfo | undefined,
+): PaginationInfo | undefined {
+  if (!incoming) return current;
+  if (!current) return incoming;
+
+  return {
+    ...incoming,
+    hasOlderMessages: current.hasOlderMessages || incoming.hasOlderMessages,
+    hasNewerMessages:
+      current.hasNewerMessages || incoming.hasNewerMessages || undefined,
+    totalMessageCount: Math.max(
+      current.totalMessageCount,
+      incoming.totalMessageCount,
+    ),
+    returnedMessageCount: Math.max(
+      current.returnedMessageCount,
+      incoming.returnedMessageCount,
+    ),
+    truncatedBeforeMessageId:
+      current.truncatedBeforeMessageId ?? incoming.truncatedBeforeMessageId,
+    truncatedAfterMessageId:
+      current.truncatedAfterMessageId ?? incoming.truncatedAfterMessageId,
+  };
+}
+
+function codexSnapshotDeactivatesCurrentBranch(
+  current: Session | null,
+  incoming: Session,
+): boolean {
+  const currentBranchState =
+    current?.codexBranchState ?? current?.branchState ?? null;
+  const incomingBranchState =
+    incoming.codexBranchState ?? incoming.branchState ?? null;
+  const currentBranchId = currentBranchState?.activeBranchId;
+  if (!currentBranchId || !incomingBranchState) return false;
+
+  // A normal new turn advances activeBranchId while keeping the previous tip
+  // on the active path. A rollback is different: the previous tip remains in
+  // the append-only branch graph but is explicitly no longer active.
+  const previousTip = incomingBranchState.branches.find(
+    (branch) => branch.id === currentBranchId,
+  );
+  return previousTip?.isActive === false;
 }
 
 function getMessageRole(message: Message): string {
@@ -391,6 +440,14 @@ export function useSessionMessages(
   // Branch changes reuse the page shell and should keep showing the
   // previous message list until the selected branch content arrives.
   const loadedSessionKeyRef = useRef<string | null>(null);
+  // A full persisted refresh can be triggered by file activity, the focused
+  // session watcher, and connection catch-up at the same time. Once a refresh
+  // commits, responses from earlier generations must not overwrite it.
+  const refreshRequestGenerationRef = useRef(0);
+  // Highest refresh generation that successfully committed (or was explicitly
+  // invalidated by navigation/edit). A failed newer request must not prevent an
+  // older successful request from filling a gap.
+  const refreshAppliedGenerationRef = useRef(0);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -518,14 +575,24 @@ export function useSessionMessages(
   }, [processStreamMessage, processStreamSubagentMessage]);
 
   const applySessionSnapshot = useCallback(
-    (data: {
-      session: Session;
-      messages: Message[];
-      pagination?: PaginationInfo;
-    }) => {
+    (
+      data: {
+        session: Session;
+        messages: Message[];
+        pagination?: PaginationInfo;
+      },
+      options?: { mergeCodexMessages?: boolean },
+    ) => {
+      const mergeCodexMessages =
+        options?.mergeCodexMessages === true &&
+        isCodexProvider(data.session.provider);
       sessionRef.current = data.session;
       setSession(data.session);
-      setPagination(data.pagination);
+      setPagination((current) =>
+        mergeCodexMessages
+          ? mergeRefreshPagination(current, data.pagination)
+          : data.pagination,
+      );
       providerRef.current = data.session.provider;
 
       // Tag messages from JSONL as authoritative
@@ -533,24 +600,41 @@ export function useSessionMessages(
         ...m,
         _source: "jsonl" as const,
       }));
-      maxPersistedTimestampMsRef.current = Number.NEGATIVE_INFINITY;
+      if (!mergeCodexMessages) {
+        maxPersistedTimestampMsRef.current = Number.NEGATIVE_INFINITY;
+      }
       updatePersistedTimestampWatermark(taggedMessages);
-      setMessages(
-        isCodexProvider(data.session.provider)
-          ? reconcileCodexLinearMessages(taggedMessages)
-          : taggedMessages,
-      );
+      const replaceMessages = isCodexProvider(data.session.provider)
+        ? reconcileCodexLinearMessages(taggedMessages)
+        : taggedMessages;
+      const syncMessageRefs = (nextMessages: Message[]) => {
+        // Keep cursor refs aligned with the final snapshot/merge result. A
+        // stream "connected" event can fetch before the messages effect below
+        // has run.
+        const lastMessage = nextMessages[nextMessages.length - 1];
+        lastMessageIdRef.current = lastMessage
+          ? getMessageId(lastMessage)
+          : undefined;
+        loadedMessageCountRef.current = nextMessages.length;
+      };
 
-      // Update lastMessageIdRef synchronously to avoid race condition:
-      // stream "connected" event calls fetchNewMessages() immediately, but the
-      // useEffect that normally updates lastMessageIdRef runs asynchronously.
-      // Without this, fetchNewMessages() would use undefined and refetch everything.
-      const lastMessage = taggedMessages[taggedMessages.length - 1];
-      lastMessageIdRef.current = lastMessage
-        ? getMessageId(lastMessage)
-        : undefined;
+      if (mergeCodexMessages) {
+        setMessages((current) => {
+          const nextMessages = reconcileCodexLinearMessages(
+            mergeJSONLMessages(current, taggedMessages, {
+              skipDagOrdering: true,
+            }).messages,
+          );
+          syncMessageRefs(nextMessages);
+          return nextMessages;
+        });
+      } else {
+        // Preserve the original synchronous cursor update for initial loads;
+        // the first stream connection can catch up before React runs effects.
+        syncMessageRefs(replaceMessages);
+        setMessages(replaceMessages);
+      }
 
-      loadedMessageCountRef.current = taggedMessages.length;
       return data.session;
     },
     [updatePersistedTimestampWatermark],
@@ -563,6 +647,11 @@ export function useSessionMessages(
     const isBranchReloadWithinSession =
       loadedSessionKeyRef.current === sessionLoadKey;
     let isCurrent = true;
+
+    // A route/session/branch load supersedes any refresh started for the
+    // previously rendered snapshot.
+    const initialLoadGeneration = ++refreshRequestGenerationRef.current;
+    refreshAppliedGenerationRef.current = initialLoadGeneration;
 
     initialLoadCompleteRef.current = false;
     streamBufferRef.current = [];
@@ -584,7 +673,11 @@ export function useSessionMessages(
       })
       .then((data) => {
         if (!isCurrent) return;
-        applySessionSnapshot(data);
+        const supersededByCommittedRefresh =
+          initialLoadGeneration < refreshAppliedGenerationRef.current;
+        if (!supersededByCommittedRefresh) {
+          applySessionSnapshot(data);
+        }
 
         // Mark ready and flush buffer
         initialLoadCompleteRef.current = true;
@@ -593,13 +686,15 @@ export function useSessionMessages(
         loadedSessionKeyRef.current = sessionLoadKey;
         setLoading(false);
 
-        // Notify parent
-        onLoadComplete?.({
-          session: data.session,
-          status: data.ownership,
-          pendingInputRequest: data.pendingInputRequest,
-          slashCommands: data.slashCommands,
-        });
+        if (!supersededByCommittedRefresh) {
+          // Notify parent only for the snapshot that was actually applied.
+          onLoadComplete?.({
+            session: data.session,
+            status: data.ownership,
+            pendingInputRequest: data.pendingInputRequest,
+            slashCommands: data.slashCommands,
+          });
+        }
       })
       .catch((err) => {
         if (!isCurrent) return;
@@ -821,11 +916,13 @@ export function useSessionMessages(
   const refreshSessionMessages = useCallback(
     async (options?: {
       branchId?: string | null;
+      replaceMessages?: boolean;
       acceptSnapshot?: (snapshot: {
         session: Session;
         messages: Message[];
       }) => boolean;
     }) => {
+      const requestGeneration = ++refreshRequestGenerationRef.current;
       const resolvedBranchId =
         options?.branchId === undefined
           ? branchId
@@ -839,6 +936,9 @@ export function useSessionMessages(
           ),
           branchId: resolvedBranchId,
         });
+        if (requestGeneration < refreshAppliedGenerationRef.current) {
+          return null;
+        }
         if (
           options?.acceptSnapshot &&
           !options.acceptSnapshot({
@@ -848,7 +948,17 @@ export function useSessionMessages(
         ) {
           return null;
         }
-        const refreshedSession = applySessionSnapshot(data);
+        refreshAppliedGenerationRef.current = requestGeneration;
+        const shouldReplaceMessages =
+          options?.replaceMessages === true ||
+          !isCodexProvider(data.session.provider) ||
+          codexSnapshotDeactivatesCurrentBranch(
+            sessionRef.current,
+            data.session,
+          );
+        const refreshedSession = applySessionSnapshot(data, {
+          mergeCodexMessages: !shouldReplaceMessages,
+        });
         onLoadComplete?.({
           session: data.session,
           status: data.ownership,
@@ -946,6 +1056,9 @@ export function useSessionMessages(
   const loadTargetMessageWindow = useCallback(
     async (messageId: string): Promise<boolean> => {
       if (!messageId) return false;
+      // A user-directed window replacement supersedes background tail refreshes.
+      refreshRequestGenerationRef.current += 1;
+      refreshAppliedGenerationRef.current = refreshRequestGenerationRef.current;
       activeWindowTrimSuppressedRef.current = true;
       setLoadingTargetMessage(true);
       try {
@@ -1003,6 +1116,10 @@ export function useSessionMessages(
    */
   const truncateMessagesBefore = useCallback(
     (uuid: string, preserveTempId?: string) => {
+      // Do not let a background refresh started before the edit restore the old
+      // tail after the optimistic truncation.
+      refreshRequestGenerationRef.current += 1;
+      refreshAppliedGenerationRef.current = refreshRequestGenerationRef.current;
       setMessages((prev) =>
         truncateMessagesForEdit(prev, uuid, preserveTempId),
       );

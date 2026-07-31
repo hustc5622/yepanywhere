@@ -201,6 +201,16 @@ function cloneBlock(block: MergeableContentBlock): MergeableContentBlock {
   return { ...block, type: block.type };
 }
 
+function shallowBlockEqual(
+  left: MergeableContentBlock,
+  right: MergeableContentBlock,
+): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => Object.is(left[key], right[key]));
+}
+
 function mergeSdkContentBlocks(existing: Message, incoming: Message): Message {
   const existingBlocks = getContentBlocks(existing);
   const incomingBlocks = getContentBlocks(incoming);
@@ -234,6 +244,51 @@ function mergeSdkContentBlocks(existing: Message, incoming: Message): Message {
       mergedBlocks.push(cloneBlock(incomingBlock));
     }
   }
+
+  return {
+    ...incoming,
+    message: {
+      ...(incoming.message ?? {}),
+      content: mergedBlocks,
+    },
+  };
+}
+
+function mergeAuthoritativeContentBlocks(
+  existing: Message,
+  incoming: Message,
+): Message {
+  const existingBlocks = getContentBlocks(existing);
+  const incomingBlocks = getContentBlocks(incoming);
+  if (!existingBlocks || !incomingBlocks) {
+    return incoming;
+  }
+
+  let changed = false;
+  const mergedBlocks = incomingBlocks.map((incomingBlock, index) => {
+    const existingAtIndex = existingBlocks[index];
+    let mergedBlock: MergeableContentBlock;
+    if (blocksAreSameStream(existingAtIndex, incomingBlock)) {
+      mergedBlock = mergeBlocks(
+        existingAtIndex as MergeableContentBlock,
+        incomingBlock,
+      );
+    } else {
+      const matchingExisting = existingBlocks.find((block) =>
+        blocksAreSameStream(block, incomingBlock),
+      );
+      mergedBlock = matchingExisting
+        ? mergeBlocks(matchingExisting, incomingBlock)
+        : incomingBlock;
+    }
+
+    if (!shallowBlockEqual(mergedBlock, incomingBlock)) {
+      changed = true;
+    }
+    return mergedBlock;
+  });
+
+  if (!changed) return incoming;
 
   return {
     ...incoming,
@@ -339,16 +394,32 @@ export function mergeMessage(
     // - eventType: stream envelope type (message, status, etc.)
     // This is expected - JSONL stores conversation content, SDK includes transient fields.
     // The merge preserves SDK-only fields while using JSONL as authoritative base.
+    // Merge nested content blocks before applying the authoritative envelope.
+    // A Codex disk snapshot can lag the live app-server stream, so a shallow
+    // spread here would discard SDK-only block fields such as `partialOutput`
+    // (or replace a complete tool result with a shorter persisted snapshot).
+    const mergedContent = mergeAuthoritativeContentBlocks(existing, incoming);
     return {
       ...existing,
-      ...incoming,
+      ...mergedContent,
       _source: "jsonl",
     };
   }
 
   // If incoming is SDK and existing is JSONL, keep JSONL (it's authoritative)
   if (existingSource === "jsonl") {
-    return existing;
+    // Keep the persisted envelope while carrying forward richer live fields on
+    // the same block. This is also used by Codex semantic reconciliation when
+    // stream and JSONL copies have different message IDs but the same tool ID.
+    const mergedContent = mergeAuthoritativeContentBlocks(incoming, existing);
+    if (mergedContent === existing) {
+      return existing;
+    }
+    return {
+      ...incoming,
+      ...mergedContent,
+      _source: "jsonl",
+    };
   }
 
   // Both are SDK - use the newer one (incoming)

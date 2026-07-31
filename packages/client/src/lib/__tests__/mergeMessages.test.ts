@@ -112,6 +112,52 @@ describe("mergeMessage", () => {
     expect(result._source).toBe("jsonl");
   });
 
+  it("keeps SDK-only tool output while retaining a JSONL message envelope", () => {
+    const existing: Message = {
+      uuid: "jsonl-tool-message",
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call-1",
+            name: "Bash",
+            input: { command: "pnpm test" },
+          },
+        ],
+      },
+      _source: "jsonl",
+    };
+    const incoming: Message = {
+      uuid: "sdk-tool-message",
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call-1",
+            partialOutput: "tests still running",
+          },
+        ],
+      },
+    };
+
+    const result = mergeMessage(existing, incoming, "sdk");
+
+    expect(result.uuid).toBe("jsonl-tool-message");
+    expect(result._source).toBe("jsonl");
+    expect(result.message?.content).toMatchObject([
+      {
+        type: "tool_use",
+        id: "call-1",
+        name: "Bash",
+        partialOutput: "tests still running",
+      },
+    ]);
+  });
+
   it("SDK overwrites existing SDK", () => {
     const existing: Message = {
       id: "1",
@@ -192,6 +238,59 @@ describe("mergeJSONLMessages", () => {
       expect((result.messages[0] as Record<string, unknown>).session_id).toBe(
         "session-123",
       );
+    });
+
+    it("preserves live Codex tool output missing from a lagging JSONL block", () => {
+      const existing: Message[] = [
+        {
+          uuid: "tool-message-1",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "call-1",
+                name: "Bash",
+                input: { command: "pnpm test" },
+                partialOutput: "three suites passed",
+              },
+            ],
+          },
+          _source: "sdk",
+        },
+      ];
+      const incoming: Message[] = [
+        {
+          uuid: "tool-message-1",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "call-1",
+                name: "Bash",
+                input: { command: "pnpm test" },
+              },
+            ],
+          },
+        },
+      ];
+
+      const result = mergeJSONLMessages(existing, incoming, {
+        skipDagOrdering: true,
+      });
+
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0]?._source).toBe("jsonl");
+      expect(result.messages[0]?.message?.content).toMatchObject([
+        {
+          type: "tool_use",
+          id: "call-1",
+          partialOutput: "three suites passed",
+        },
+      ]);
     });
   });
 

@@ -517,6 +517,7 @@ export function useSession(
       historyRewriteTimerRef.current = null;
       const refreshed = await refreshSessionMessages({
         branchId: null,
+        replaceMessages: true,
         acceptSnapshot: ({ session: snapshotSession }) =>
           isCodexHistoryRewriteSnapshotReady(
             snapshotSession,
@@ -536,7 +537,10 @@ export function useSession(
         Date.now() - historyRewriteRequest.startedAt >=
         HISTORY_REWRITE_MAX_WAIT_MS
       ) {
-        await refreshSessionMessages({ branchId: null });
+        await refreshSessionMessages({
+          branchId: null,
+          replaceMessages: true,
+        });
         if (!cancelled) {
           setHistoryRewriteRequest((current) =>
             current?.id === requestId ? null : current,
