@@ -623,6 +623,13 @@ export class KimiProvider implements AgentProvider {
         abortController.abort();
         client.close();
       },
+      // Report child-process liveness so the supervisor's stale-process
+      // watchdog does not kill a healthy Kimi process during long silent
+      // spans — e.g. while an AgentSwarm/explore subagent runs for minutes,
+      // the parent ACP prompt emits no SDK messages but the process is alive.
+      // Without this the watchdog falls back to a time-based heuristic and
+      // terminates the process, aborting the in-flight turn.
+      isProcessAlive: () => client.isAlive(),
       get pid() {
         return client.pid;
       },

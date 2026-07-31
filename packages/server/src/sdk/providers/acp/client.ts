@@ -75,6 +75,27 @@ export class ACPClient {
   get pid(): number | undefined {
     return this.process?.pid;
   }
+
+  /**
+   * Whether the spawned ACP agent child process is still running.
+   *
+   * Mirrors the liveness signal used by the codex/claude/opencode providers
+   * (the Node ChildProcess exit state). The supervisor's stale-process
+   * watchdog uses this to distinguish "process died silently" from "process
+   * is busy with a long-running turn" — e.g. Kimi orchestrating AgentSwarm /
+   * explore subagents keeps the parent ACP prompt silent for minutes while
+   * the child process is very much alive. Without this, the watchdog falls
+   * back to a time-based heuristic and kills the healthy process.
+   */
+  isAlive(): boolean {
+    const child = this.process;
+    return Boolean(
+      child?.pid &&
+        child.exitCode === null &&
+        child.signalCode === null &&
+        !child.killed,
+    );
+  }
   private onSessionUpdate: SessionUpdateCallback | null = null;
   private onPermissionRequest: PermissionRequestCallback | null = null;
 

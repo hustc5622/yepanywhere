@@ -249,6 +249,11 @@ export class GeminiACPProvider implements AgentProvider {
         abortController.abort();
         client.close();
       },
+      // Report child-process liveness so the supervisor's stale-process
+      // watchdog does not kill a healthy Gemini ACP process during long
+      // silent spans (long-running tool calls / subagent work emit no SDK
+      // messages while the process is alive).
+      isProcessAlive: () => client.isAlive(),
       get pid() {
         return client.pid;
       },
