@@ -436,7 +436,7 @@ describe("Supervisor", () => {
         async (options: {
           model?: string;
           thinking?: { type: "adaptive" | "enabled" | "disabled" };
-          effort?: "low" | "medium" | "high" | "max";
+          effort?: "low" | "medium" | "high" | "xhigh";
           resumeSessionId?: string;
           initialMessage?: { text: string };
         }) => {

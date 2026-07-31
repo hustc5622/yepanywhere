@@ -25,7 +25,13 @@ import {
   normalizeSshHostAlias,
 } from "../utils/sshHostAlias.js";
 
-const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "max"];
+const EFFORT_LEVELS: readonly EffortLevel[] = [
+  "low",
+  "medium",
+  "high",
+  "max",
+  "xhigh",
+];
 
 export interface SettingsRoutesDeps {
   serverSettingsService: ServerSettingsService;

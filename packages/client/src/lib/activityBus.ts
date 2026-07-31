@@ -74,6 +74,8 @@ export interface SessionMetadataChangedEvent {
   aiTitle?: string;
   archived?: boolean;
   starred?: boolean;
+  /** Preset model for next session start (set via inspector). */
+  model?: string;
   timestamp: string;
 }
 
@@ -96,7 +98,7 @@ export interface SessionUpdatedEvent {
   contextUsage?: ContextUsage;
   /** Resolved model name (e.g., "claude-sonnet-4-5-20250929") */
   model?: string;
-  /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
+  /** Provider-specific reasoning effort (e.g. "xhigh") */
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;

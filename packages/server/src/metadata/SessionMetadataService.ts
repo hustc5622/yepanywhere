@@ -256,11 +256,16 @@ export class SessionMetadataService {
   }
 
   /**
-   * Update metadata for a session (title, archived, starred).
+   * Update metadata for a session (title, archived, starred, model).
    */
   async updateMetadata(
     sessionId: string,
-    updates: { title?: string; archived?: boolean; starred?: boolean },
+    updates: {
+      title?: string;
+      archived?: boolean;
+      starred?: boolean;
+      model?: string;
+    },
   ): Promise<void> {
     this.updateSessionMetadata(sessionId, (metadata) => {
       const result = { ...metadata };
@@ -279,6 +284,11 @@ export class SessionMetadataService {
       // Handle starred
       if (updates.starred !== undefined) {
         result.isStarred = updates.starred || undefined;
+      }
+
+      // Handle model (preset for next start)
+      if (updates.model !== undefined) {
+        result.model = updates.model || undefined;
       }
 
       return result;

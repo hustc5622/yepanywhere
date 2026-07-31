@@ -72,6 +72,7 @@ export const SERVER_SCOPED_KEYS = {
   browserProfileId: "browser-profile-id",
   notifyInApp: "notify-in-app",
   recentProject: "recent-project",
+  thinkingOption: "thinking-option",
 } as const;
 
 /** Build a server-scoped storage key */

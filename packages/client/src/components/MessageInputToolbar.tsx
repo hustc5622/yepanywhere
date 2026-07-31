@@ -1,6 +1,5 @@
 import type { UploadedFile } from "@yep-anywhere/shared";
 import { type RefObject, useState } from "react";
-import { useModelSettings } from "../hooks/useModelSettings";
 import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
 import type { ContextUsage, PermissionMode } from "../types";
@@ -71,7 +70,6 @@ export function MessageInputToolbar({
   isHeld,
   onHoldChange,
   supportsPermissionMode = true,
-  supportsThinkingToggle = true,
   canAttach,
   attachmentCount = 0,
   onAttachClick,
@@ -99,7 +97,6 @@ export function MessageInputToolbar({
   pendingApproval,
 }: MessageInputToolbarProps) {
   const { t } = useI18n();
-  const { thinkingMode, cycleThinkingMode, thinkingLevel } = useModelSettings();
   const [isContextModalOpen, setIsContextModalOpen] = useState(false);
   const visibleCommandButtons =
     commandButtons?.filter((button) => button.showButton) ??
@@ -149,60 +146,6 @@ export function MessageInputToolbar({
             <span className="attach-count">{attachmentCount}</span>
           )}
         </button>
-        {supportsThinkingToggle && (
-          <button
-            type="button"
-            className={`thinking-toggle-button ${thinkingMode !== "off" ? `active ${thinkingMode}` : ""}`}
-            onClick={cycleThinkingMode}
-            title={
-              thinkingMode === "off"
-                ? t("newSessionThinkingOff")
-                : thinkingMode === "auto"
-                  ? t("newSessionThinkingAuto")
-                  : t("newSessionThinkingOn", { level: thinkingLevel })
-            }
-            aria-label={t("newSessionThinkingMode", { mode: thinkingMode })}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-              {thinkingMode === "auto" && (
-                <g>
-                  <circle
-                    cx="19"
-                    cy="5"
-                    r="5.5"
-                    fill="currentColor"
-                    stroke="none"
-                  />
-                  <text
-                    x="19"
-                    y="5"
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    fill="var(--bg-primary, #1a1a2e)"
-                    fontSize="8"
-                    fontWeight="700"
-                    fontFamily="system-ui, sans-serif"
-                    stroke="none"
-                  >
-                    A
-                  </text>
-                </g>
-              )}
-            </svg>
-          </button>
-        )}
         {voiceButtonRef && onVoiceTranscript && onInterimTranscript && (
           <VoiceInputButton
             ref={voiceButtonRef}

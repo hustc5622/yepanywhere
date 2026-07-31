@@ -11,6 +11,25 @@ interface ProviderRouteDeps {
   enabledProviders?: string[];
 }
 
+/**
+ * Reasoning-effort levels each provider actually accepts, in canonical order.
+ * These are the verbatim native keywords (exactly what the provider's own
+ * CLI / VS Code plugin uses) passed straight through to the SDK, so the UI
+ * never presents a phantom level and never remaps one provider's name onto
+ * another's.
+ */
+const PROVIDER_REASONING_LEVELS: Record<string, string[]> = {
+  // Codex CLI/SDK native levels.
+  codex: ["low", "medium", "high", "xhigh"],
+  "codex-oss": ["low", "medium", "high", "xhigh"],
+  // Claude Code CLI/SDK native levels.
+  claude: ["low", "medium", "high", "max"],
+};
+
+function reasoningEffortLevelsFor(name: string): string[] | undefined {
+  return PROVIDER_REASONING_LEVELS[name];
+}
+
 async function buildProviderInfo(
   provider: AgentProvider,
   modelInfoService?: ModelInfoService,
@@ -38,6 +57,7 @@ async function buildProviderInfo(
     supportsPermissionMode: provider.supportsPermissionMode,
     supportsThinkingToggle: provider.supportsThinkingToggle,
     supportsSlashCommands: provider.supportsSlashCommands,
+    reasoningEffortLevels: reasoningEffortLevelsFor(provider.name),
   };
 }
 

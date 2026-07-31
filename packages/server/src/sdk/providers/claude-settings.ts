@@ -80,6 +80,7 @@ function readSettingsEnv(
 }
 
 function normalizeEffortLevel(value: unknown): EffortLevel | undefined {
+  // Backward-compat: older configs may have stored "xhigh" for Claude.
   if (value === "xhigh") return "max";
   if (typeof value !== "string") return undefined;
   return EFFORT_LEVELS.has(value as EffortLevel)

@@ -927,5 +927,15 @@
   "editorUnsavedConfirmBody": "Die Datei „{name}“ hat nicht gespeicherte Änderungen. Vor dem Schließen speichern?",
   "editorSaveAndClose": "Speichern und schließen",
   "editorCloseWithoutSave": "Schließen ohne zu speichern",
-  "editorCancel": "Abbrechen"
+  "editorCancel": "Abbrechen",
+  "inspectorModel": "Modell",
+  "inspectorModelDefault": "Standard (Anbieterkonfiguration)",
+  "inspectorThinking": "Denktiefe",
+  "inspectorThinkingOff": "Aus",
+  "inspectorThinkingAuto": "Automatisch",
+  "inspectorThinkingLow": "Niedrig",
+  "inspectorThinkingMedium": "Mittel",
+  "inspectorThinkingHigh": "Hoch",
+  "inspectorThinkingMax": "Maximal",
+  "inspectorRepo": "Projekt-Repository"
 }

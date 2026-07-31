@@ -1046,7 +1046,7 @@ export class CodexProvider implements AgentProvider {
   }
 
   private mapEffortToReasoningEffort(
-    effort?: import("@yep-anywhere/shared").EffortLevel,
+    effort?: string,
     thinking?: import("@yep-anywhere/shared").ThinkingConfig,
   ): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
     if (thinking?.type === "disabled") {
@@ -1055,15 +1055,18 @@ export class CodexProvider implements AgentProvider {
     if (!effort) {
       return undefined;
     }
+    // Pass through Codex-native reasoning-effort keywords verbatim so the
+    // frontend can send exactly what the local Codex accepts (e.g. "xhigh").
     switch (effort) {
+      case "none":
+      case "minimal":
       case "low":
-        return "low";
       case "medium":
-        return "medium";
       case "high":
-        return "high";
-      case "max":
-        return "xhigh";
+      case "xhigh":
+        return effort;
+      default:
+        return undefined;
     }
   }
 

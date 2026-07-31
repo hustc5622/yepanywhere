@@ -927,5 +927,15 @@
   "editorUnsavedConfirmBody": "ファイル「{name}」には未保存の変更があります。閉じる前に保存しますか？",
   "editorSaveAndClose": "保存して閉じる",
   "editorCloseWithoutSave": "保存せずに閉じる",
-  "editorCancel": "キャンセル"
+  "editorCancel": "キャンセル",
+  "inspectorModel": "モデル",
+  "inspectorModelDefault": "デフォルト（プロバイダー設定）",
+  "inspectorThinking": "思考量",
+  "inspectorThinkingOff": "オフ",
+  "inspectorThinkingAuto": "自動",
+  "inspectorThinkingLow": "低",
+  "inspectorThinkingMedium": "中",
+  "inspectorThinkingHigh": "高",
+  "inspectorThinkingMax": "最大",
+  "inspectorRepo": "プロジェクトリポジトリ"
 }

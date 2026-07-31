@@ -91,6 +91,13 @@ export interface ProviderInfo {
   supportsPermissionMode?: boolean;
   /** Whether this provider supports extended thinking toggle (default: true for backward compat) */
   supportsThinkingToggle?: boolean;
+  /**
+   * Reasoning-effort levels this provider actually accepts, in canonical
+   * order. The frontend renders these verbatim so the choices always match the
+   * local provider (e.g. Codex: ["low","medium","high","xhigh"]). Undefined for
+   * providers that don't expose a discrete effort scale.
+   */
+  reasoningEffortLevels?: string[];
   /** Whether this provider supports slash commands (default: false) */
   supportsSlashCommands?: boolean;
 }
@@ -190,10 +197,11 @@ export function resolveModel(
 }
 
 /**
- * Effort level for Claude's response quality.
- * Maps to the SDK's effort parameter.
+ * Effort level for reasoning effort.
+ * Uses Codex-native keywords (low/medium/high/xhigh) so the frontend
+ * always presents levels that match the local provider exactly.
  */
-export type EffortLevel = "low" | "medium" | "high" | "max";
+export type EffortLevel = "low" | "medium" | "high" | "max" | "xhigh";
 
 /**
  * Thinking mode for the 3-way toggle.
@@ -208,10 +216,10 @@ export type ThinkingMode = "off" | "auto" | "on";
  * Wire format (backward compatible):
  * - "off": Thinking disabled
  * - "auto": Adaptive thinking, no effort override
- * - "on:low" | "on:medium" | "on:high" | "on:max": Forced-on thinking at effort level
+ * - "on:low" | "on:medium" | "on:high" | "on:xhigh": Forced-on thinking at effort level
  * - EffortLevel (plain): Adaptive thinking with effort (backward compat with old clients)
  */
-export type ThinkingOption = "off" | "auto" | `on:${EffortLevel}` | EffortLevel;
+export type ThinkingOption = "off" | "auto" | `on:${string}` | EffortLevel;
 
 /**
  * Thinking configuration for the SDK.

@@ -108,7 +108,7 @@ export interface GlobalSessionItem {
   contextUsage?: ContextUsage;
   /** Model name from the session summary (matches contextUsage's scope). */
   model?: string;
-  /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
+  /** Provider-specific reasoning effort (e.g. "xhigh") */
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;

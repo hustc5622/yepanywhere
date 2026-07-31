@@ -71,6 +71,15 @@ export default defineConfig({
             return "vendor-router";
           }
           if (id.includes("/zod/")) return "vendor-zod";
+          // Heavy, on-demand-only preview libraries: keep them out of the
+          // eager vendor chunk so they load lazily when a file is opened.
+          if (
+            id.includes("/xlsx/") ||
+            id.includes("/docx-preview/") ||
+            id.includes("/papaparse/")
+          ) {
+            return "preview-libs";
+          }
           return "vendor";
         },
       },

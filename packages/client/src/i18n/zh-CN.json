@@ -938,6 +938,11 @@
   "fileViewerDownload": "下载",
   "fileViewerExitFullscreen": "退出全屏",
   "fileViewerFullscreen": "全屏",
+  "fileViewerParsing": "正在解析…",
+  "fileViewerTooLarge": "文件过大，无法预览，请下载查看。",
+  "fileViewerPreviewFailed": "无法预览此文件。",
+  "fileViewerUnsupported": "该格式暂不支持预览，请下载查看。",
+  "fileViewerTruncatedRows": "仅显示前 {shown} 行（共 {total} 行）",
   "voiceInputStart": "开始语音输入（Ctrl+Space）",
   "voiceInputStop": "停止语音输入（Ctrl+Space）",
   "voiceInputStartLabel": "开始语音输入",
@@ -1035,5 +1040,15 @@
   "editorUnsavedConfirmBody": "文件“{name}”有未保存的更改，要在关闭前保存吗？",
   "editorSaveAndClose": "保存并关闭",
   "editorCloseWithoutSave": "不保存，直接关闭",
-  "editorCancel": "取消"
+  "editorCancel": "取消",
+  "inspectorModel": "模型",
+  "inspectorModelDefault": "默认（使用提供商配置）",
+  "inspectorThinking": "思考程度",
+  "inspectorThinkingOff": "关闭",
+  "inspectorThinkingAuto": "自动",
+  "inspectorThinkingLow": "低",
+  "inspectorThinkingMedium": "中",
+  "inspectorThinkingHigh": "高",
+  "inspectorThinkingMax": "最高",
+  "inspectorRepo": "项目仓库"
 }

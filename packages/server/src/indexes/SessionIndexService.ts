@@ -49,7 +49,7 @@ export interface CachedSessionSummary {
   provider: ProviderName;
   /** Model used for this session (e.g. "gemini-2.5-pro") */
   model?: string;
-  /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
+  /** Provider-specific reasoning effort (e.g. "xhigh") */
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;

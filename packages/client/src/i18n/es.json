@@ -927,5 +927,15 @@
   "editorUnsavedConfirmBody": "El archivo «{name}» tiene cambios sin guardar. ¿Guardar antes de cerrar?",
   "editorSaveAndClose": "Guardar y cerrar",
   "editorCloseWithoutSave": "Cerrar sin guardar",
-  "editorCancel": "Cancelar"
+  "editorCancel": "Cancelar",
+  "inspectorModel": "Modelo",
+  "inspectorModelDefault": "Predeterminado (configuración del proveedor)",
+  "inspectorThinking": "Nivel de razonamiento",
+  "inspectorThinkingOff": "Desactivado",
+  "inspectorThinkingAuto": "Automático",
+  "inspectorThinkingLow": "Bajo",
+  "inspectorThinkingMedium": "Medio",
+  "inspectorThinkingHigh": "Alto",
+  "inspectorThinkingMax": "Máximo",
+  "inspectorRepo": "Repositorio del proyecto"
 }

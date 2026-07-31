@@ -137,7 +137,7 @@ export interface GlobalSessionItem {
   contextUsage?: ContextUsage;
   /** Model name from the session summary (e.g. "opus", "gpt-5.5"). */
   model?: string;
-  /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh"). */
+  /** Provider-specific reasoning effort (e.g. "xhigh"). */
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast"). */
   serviceTier?: string;
@@ -1071,7 +1071,12 @@ export const api = {
 
   updateSessionMetadata: (
     sessionId: string,
-    updates: { title?: string; archived?: boolean; starred?: boolean },
+    updates: {
+      title?: string;
+      archived?: boolean;
+      starred?: boolean;
+      model?: string;
+    },
   ) =>
     fetchJSON<SessionMetadataUpdateResponse>(
       `/sessions/${sessionId}/metadata`,

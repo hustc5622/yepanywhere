@@ -16,7 +16,6 @@ import { ModelSwitchModal } from "../components/ModelSwitchModal";
 import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { QuestionAnswerPanel } from "../components/QuestionAnswerPanel";
 import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
-import { RepoExplorer } from "../components/RepoExplorer";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
@@ -332,16 +331,6 @@ function SessionPageContent({
     navState?.targetMessageId ?? null,
   );
   const [isInspectorOpen, setInspectorOpen] = useState(false);
-  // Repo panel open/closed preference is remembered across sessions (Codex
-  // keeps its layout). Default to open on first visit.
-  const [isRepoOpen, setRepoOpen] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem("yep_repo_panel_open");
-      return stored === null ? true : stored === "1";
-    } catch {
-      return true;
-    }
-  });
   // In-page file tabs (VS Code-style): the chat is one tab, opened files are others.
   const [openFileTabs, setOpenFileTabs] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<string>("chat");
@@ -434,13 +423,6 @@ function SessionPageContent({
     }
   }, [openFileTabs, activeTab]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem("yep_repo_panel_open", isRepoOpen ? "1" : "0");
-    } catch {
-      // ignore storage failures (private mode, etc.)
-    }
-  }, [isRepoOpen]);
   const handleTargetFocused = useCallback(() => {
     setTargetMessageId(null);
   }, []);
@@ -1721,16 +1703,6 @@ function SessionPageContent({
                   <SessionOutlineIcon />
                 </button>
               )}
-              <button
-                type="button"
-                className={`session-repo-toggle${isRepoOpen ? " is-active" : ""}`}
-                onClick={() => setRepoOpen(!isRepoOpen)}
-                title={isRepoOpen ? t("repoClose") : t("repoOpen")}
-                aria-label={isRepoOpen ? t("repoClose") : t("repoOpen")}
-                aria-pressed={isRepoOpen}
-              >
-                <RepoIcon />
-              </button>
               {!loading && session && (
                 <button
                   type="button"
@@ -2112,6 +2084,9 @@ function SessionPageContent({
           status={status}
           processState={processState}
           onSelectMessage={handleInspectorSelectMessage}
+          onOpenFile={(path) => openOrFocusFileTab(path)}
+          processId={status.owner === "self" ? status.processId : undefined}
+          providers={providers}
         />
       ) : (
         <SessionInspector
@@ -2132,24 +2107,9 @@ function SessionPageContent({
           status={status}
           processState={processState}
           onSelectMessage={handleInspectorSelectMessage}
-        />
-      )}
-      {isWideScreen ? (
-        isRepoOpen && (
-          <RepoExplorer
-            presentation="sidebar"
-            projectId={projectId}
-            onClose={() => setRepoOpen(false)}
-            onOpenFile={(path) => openOrFocusFileTab(path)}
-          />
-        )
-      ) : (
-        <RepoExplorer
-          presentation="drawer"
-          isOpen={isRepoOpen}
-          onClose={() => setRepoOpen(false)}
           onOpenFile={(path) => openOrFocusFileTab(path)}
-          projectId={projectId}
+          processId={status.owner === "self" ? status.processId : undefined}
+          providers={providers}
         />
       )}
     </div>

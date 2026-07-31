@@ -72,6 +72,7 @@ const EFFORT_LABEL_KEYS: Record<
   low: "newSessionEffortLow",
   medium: "newSessionEffortMedium",
   high: "newSessionEffortHigh",
+  xhigh: "newSessionEffortMax",
   max: "newSessionEffortMax",
 };
 
@@ -92,7 +93,7 @@ const THINKING_PRESET_ORDER: readonly ThinkingPreset[] = [
   "on:low",
   "on:medium",
   "on:high",
-  "on:max",
+  "on:xhigh",
 ];
 
 function isEffortLevel(value: string): value is EffortLevel {
@@ -248,15 +249,9 @@ export function NewSessionForm({
   };
   const getEffortLabel = useCallback(
     (effort: EffortLevel): string => {
-      if (
-        (selectedProvider === "codex" || selectedProvider === "codex-oss") &&
-        effort === "max"
-      ) {
-        return "xhigh";
-      }
       return t(EFFORT_LABEL_KEYS[effort]);
     },
-    [selectedProvider, t],
+    [t],
   );
   const selectedThinkingPreset = getThinkingPreset(thinkingMode, thinkingLevel);
   const thinkingOptions = useMemo((): FilterOption<ThinkingPreset>[] => {

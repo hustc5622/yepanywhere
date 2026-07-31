@@ -938,6 +938,11 @@
   "fileViewerDownload": "Download",
   "fileViewerExitFullscreen": "Exit fullscreen",
   "fileViewerFullscreen": "Fullscreen",
+  "fileViewerParsing": "Parsing...",
+  "fileViewerTooLarge": "File is too large to preview. Please download to view.",
+  "fileViewerPreviewFailed": "Failed to preview this file.",
+  "fileViewerUnsupported": "Preview is not available for this format. Download to view.",
+  "fileViewerTruncatedRows": "Showing first {shown} of {total} rows",
   "voiceInputStart": "Start voice input (Ctrl+Space)",
   "voiceInputStop": "Stop voice input (Ctrl+Space)",
   "voiceInputStartLabel": "Start voice input",
@@ -1035,5 +1040,15 @@
   "editorUnsavedConfirmBody": "The file \"{name}\" has unsaved changes. Save before closing?",
   "editorSaveAndClose": "Save and close",
   "editorCloseWithoutSave": "Close without saving",
-  "editorCancel": "Cancel"
+  "editorCancel": "Cancel",
+  "inspectorModel": "Model",
+  "inspectorModelDefault": "Default (provider config)",
+  "inspectorThinking": "Reasoning effort",
+  "inspectorThinkingOff": "Off",
+  "inspectorThinkingAuto": "Auto",
+  "inspectorThinkingLow": "Low",
+  "inspectorThinkingMedium": "Medium",
+  "inspectorThinkingHigh": "High",
+  "inspectorThinkingMax": "Max",
+  "inspectorRepo": "Repository"
 }

@@ -230,7 +230,7 @@ describe("Sessions metadata route", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         message: "continue",
-        thinking: "max",
+        thinking: "xhigh",
       }),
     });
 

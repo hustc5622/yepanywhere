@@ -927,5 +927,15 @@
   "editorUnsavedConfirmBody": "Le fichier « {name} » contient des modifications non enregistrées. Enregistrer avant de fermer ?",
   "editorSaveAndClose": "Enregistrer et fermer",
   "editorCloseWithoutSave": "Fermer sans enregistrer",
-  "editorCancel": "Annuler"
+  "editorCancel": "Annuler",
+  "inspectorModel": "Modèle",
+  "inspectorModelDefault": "Par défaut (configuration du fournisseur)",
+  "inspectorThinking": "Niveau de réflexion",
+  "inspectorThinkingOff": "Désactivé",
+  "inspectorThinkingAuto": "Automatique",
+  "inspectorThinkingLow": "Faible",
+  "inspectorThinkingMedium": "Moyen",
+  "inspectorThinkingHigh": "Élevé",
+  "inspectorThinkingMax": "Maximum",
+  "inspectorRepo": "Dépôt du projet"
 }

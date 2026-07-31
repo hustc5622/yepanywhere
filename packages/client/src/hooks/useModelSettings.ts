@@ -35,7 +35,8 @@ export const EFFORT_LEVEL_OPTIONS: {
   { value: "low", label: "Low", description: "Fastest responses" },
   { value: "medium", label: "Medium", description: "Moderate thinking" },
   { value: "high", label: "High", description: "Deep reasoning" },
-  { value: "max", label: "Max", description: "Maximum effort" },
+  { value: "xhigh", label: "Max", description: "Maximum effort (Codex)" },
+  { value: "max", label: "Max", description: "Maximum effort (Claude)" },
 ];
 
 function loadModel(): ModelOption {
@@ -54,14 +55,14 @@ function saveModel(model: ModelOption) {
 const LEGACY_LEVEL_MAP: Record<string, EffortLevel> = {
   light: "low",
   medium: "medium",
-  thorough: "max",
+  thorough: "xhigh",
 };
 
 function loadEffortLevel(): EffortLevel {
   const stored = getServerScoped("thinkingLevel", LEGACY_KEYS.thinkingLevel);
   if (stored) {
     // Check for new effort level values
-    if (["low", "medium", "high", "max"].includes(stored)) {
+    if (["low", "medium", "high", "max", "xhigh"].includes(stored)) {
       return stored as EffortLevel;
     }
     // Migrate old thinking level values
@@ -121,6 +122,30 @@ function saveVoiceInputEnabled(enabled: boolean) {
 }
 
 /**
+ * Full thinking option (e.g. "off", "auto", "on:low", "on:xhigh").
+ * Storing the complete option keeps provider-native effort keywords (like
+ * Codex "xhigh") intact instead of collapsing them into a different scale.
+ */
+function loadThinkingOption(): ThinkingOption {
+  const stored = getServerScoped("thinkingOption");
+  if (stored === "off" || stored === "auto") {
+    return stored;
+  }
+  if (stored?.startsWith("on:")) {
+    return stored as ThinkingOption;
+  }
+  // Migrate from the legacy mode + level pair.
+  const mode = loadThinkingMode();
+  if (mode === "off") return "off";
+  if (mode === "auto") return "auto";
+  return `on:${loadEffortLevel()}` as ThinkingOption;
+}
+
+function saveThinkingOption(option: ThinkingOption) {
+  setServerScoped("thinkingOption", option);
+}
+
+/**
  * Hook to manage model and thinking preferences.
  */
 export function useModelSettings() {
@@ -129,6 +154,8 @@ export function useModelSettings() {
     useState<EffortLevel>(loadEffortLevel);
   const [thinkingMode, setThinkingModeState] =
     useState<ThinkingMode>(loadThinkingMode);
+  const [thinkingOption, setThinkingOptionState] =
+    useState<ThinkingOption>(loadThinkingOption);
   const [voiceInputEnabled, setVoiceInputEnabledState] = useState<boolean>(
     loadVoiceInputEnabled,
   );
@@ -146,6 +173,11 @@ export function useModelSettings() {
   const setThinkingMode = useCallback((mode: ThinkingMode) => {
     setThinkingModeState(mode);
     saveThinkingMode(mode);
+  }, []);
+
+  const setThinkingOption = useCallback((option: ThinkingOption) => {
+    setThinkingOptionState(option);
+    saveThinkingOption(option);
   }, []);
 
   const cycleThinkingMode = useCallback(() => {
@@ -177,6 +209,8 @@ export function useModelSettings() {
     thinkingMode,
     setThinkingMode,
     cycleThinkingMode,
+    thinkingOption,
+    setThinkingOption,
     voiceInputEnabled,
     setVoiceInputEnabled,
     toggleVoiceInput,
@@ -194,13 +228,11 @@ export function getModelSetting(): ModelOption {
  * Get thinking setting as ThinkingOption (for API compatibility).
  * - "off" when thinking is disabled
  * - "auto" for adaptive (model decides when to think)
- * - "on:level" for forced-on thinking at that effort level
+ * - "on:level" for forced-on thinking at that effort level (level may be a
+ *   provider-native keyword such as Codex "xhigh")
  */
 export function getThinkingSetting(): ThinkingOption {
-  const mode = loadThinkingMode();
-  if (mode === "off") return "off";
-  if (mode === "auto") return "auto";
-  return `on:${loadEffortLevel()}`;
+  return loadThinkingOption();
 }
 
 /**

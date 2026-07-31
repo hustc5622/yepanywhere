@@ -1523,6 +1523,174 @@ h2 {
   font-weight: 500;
 }
 
+/* Interactive status card: model + reasoning-effort fields */
+.session-inspector-provider-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.session-inspector-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-inspector-field-label {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.session-inspector-select {
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--bg-input, var(--bg-field, #ffffff));
+  color: var(--text-primary, #1a1a2e);
+  border: 1px solid var(--border-input, var(--border-color, #c8c8d0));
+  border-radius: var(--radius-sm, 6px);
+  padding: 6px 28px 6px 8px;
+  font-size: var(--font-size-sm, 13px);
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px;
+}
+
+.session-inspector-select:focus-visible {
+  outline: 2px solid var(--accent-color, #4c8bf5);
+  outline-offset: 1px;
+}
+
+.session-inspector-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Collapsible inspector sections */
+.session-inspector-section.is-collapsed .session-inspector-section-body,
+.session-inspector-section.is-collapsed > .session-inspector-list {
+  display: none;
+}
+
+.session-inspector-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.session-inspector-section-toggle h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.session-inspector-chevron {
+  transition: transform 0.15s ease;
+  transform: rotate(0deg);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.session-inspector-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+/* VS Code-style repository tree */
+.repo-tree {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.repo-tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.repo-tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.repo-tree-item:hover {
+  background-color: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.repo-tree-item.is-open {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.repo-tree-item-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.repo-tree-item--dir .repo-tree-item-icon {
+  color: var(--accent-color, #4c8bf5);
+}
+
+.repo-tree-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-tree-item-meta {
+  flex-shrink: 0;
+  color: var(--text-dimmed);
+  font-size: var(--font-size-xs);
+}
+
+.repo-tree-loading,
+.repo-tree-empty,
+.repo-tree-error {
+  padding: 6px 8px;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.repo-tree-error {
+  color: var(--danger-color, #e5534b);
+}
+
+.repo-tree-child {
+  padding-left: 22px;
+}
+
 .session-inspector-section-link {
   flex-shrink: 0;
   color: var(--link-color);
@@ -3642,15 +3810,16 @@ a.sidebar-nav-item {
     display: block;
     position: absolute;
     bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
+    /* Left-align with the button edge so it never overflows leftward */
+    left: 0;
     margin-bottom: var(--space-2);
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
     min-width: 220px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    z-index: 100;
+    /* High z-index to stay above sidebar and other overlapping elements */
+    z-index: 1000;
     animation: dropdownFadeIn 0.15s ease-out;
   }
 
@@ -3669,11 +3838,11 @@ a.sidebar-nav-item {
   @keyframes dropdownFadeIn {
     from {
       opacity: 0;
-      transform: translateX(-50%) translateY(4px);
+      transform: translateY(4px);
     }
     to {
       opacity: 1;
-      transform: translateX(-50%) translateY(0);
+      transform: translateY(0);
     }
   }
 

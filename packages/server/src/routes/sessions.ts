@@ -1452,8 +1452,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         isArchived: metadata?.isArchived,
         isStarred: metadata?.isStarred,
         createdBy: metadata?.createdBy ?? session.createdBy,
-        // Model comes from the session reader (extracted from JSONL)
-        model: session.model,
+        // Model: prefer explicit user preset from metadata, fall back to
+        // the model recorded in the session JSONL (from last run).
+        model: metadata?.model ?? session.model,
         lastSeenAt,
         hasUnread,
       },
@@ -2396,7 +2397,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "Session metadata service not available" }, 503);
     }
 
-    let body: { title?: string; archived?: boolean; starred?: boolean } = {};
+    let body: {
+      title?: string;
+      archived?: boolean;
+      starred?: boolean;
+      model?: string;
+    } = {};
     try {
       body = await c.req.json();
     } catch {
@@ -2407,10 +2413,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (
       body.title === undefined &&
       body.archived === undefined &&
-      body.starred === undefined
+      body.starred === undefined &&
+      body.model === undefined
     ) {
       return c.json(
-        { error: "At least title, archived, or starred must be provided" },
+        {
+          error:
+            "At least title, archived, starred, or model must be provided",
+        },
         400,
       );
     }
@@ -2522,6 +2532,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       title: body.title,
       archived: body.archived,
       starred: body.starred,
+      model: body.model,
     });
 
     // Emit SSE event so sidebar and other clients can update
@@ -2532,6 +2543,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         title: body.title,
         archived: body.archived,
         starred: body.starred,
+        model: body.model,
         timestamp: new Date().toISOString(),
       });
     }

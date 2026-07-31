@@ -110,7 +110,7 @@ export interface SessionSummary {
   provider: ProviderName;
   /** Model used for this session (extracted from JSONL, e.g. "claude-opus-4-5-20251101") */
   model?: string;
-  /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
+  /** Provider-specific reasoning effort (e.g. "xhigh") */
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;
@@ -233,7 +233,7 @@ export interface ProcessInfo {
   effort?: EffortLevel;
   /** Model used for this session (e.g., "claude-opus-4-5-20251101") */
   model?: string;
-  /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
+  /** Provider-specific reasoning effort (e.g. "xhigh") */
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;

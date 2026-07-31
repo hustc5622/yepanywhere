@@ -31,7 +31,7 @@ interface ProviderBadgeProps {
   compact?: boolean;
   /** Model name to display alongside provider (e.g., "opus", "sonnet") */
   model?: string;
-  /** Provider-specific reasoning effort (e.g., Codex "xhigh", Claude "max") */
+  /** Provider-specific reasoning effort (e.g., "xhigh") */
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g., "fast") */
   serviceTier?: string;
@@ -100,12 +100,6 @@ export function ProviderBadge({
   ): string | null => {
     const normalized = normalizeConfigLabel(effort);
     if (!normalized || normalized === "none") return null;
-    if (
-      (provider === "codex" || provider === "codex-oss") &&
-      normalized === "max"
-    ) {
-      return "xhigh";
-    }
     return normalized;
   };
 

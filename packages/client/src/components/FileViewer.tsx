@@ -1,8 +1,7 @@
 import type { FileContentResponse } from "@yep-anywhere/shared";
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { type ApiError, api } from "../api/client";
 import { useI18n } from "../i18n";
-import { appPath } from "../lib/apiPath";
 
 interface FileViewerProps {
   projectId: string;
@@ -67,13 +66,6 @@ function getLanguageFromPath(filePath: string): string {
 }
 
 /**
- * Check if file is an image.
- */
-function isImageFile(mimeType: string): boolean {
-  return mimeType.startsWith("image/");
-}
-
-/**
  * Check if file is markdown.
  */
 function isMarkdownFile(filePath: string): boolean {
@@ -99,6 +91,110 @@ function getErrorFilePath(err: unknown, fallbackPath: string): string | null {
   return fallbackPath.startsWith("/") ? fallbackPath : null;
 }
 
+function extOf(filePath: string): string {
+  const base = filePath.split("/").pop() || filePath;
+  const i = base.lastIndexOf(".");
+  return i >= 0 ? base.slice(i + 1).toLowerCase() : "";
+}
+
+/** What kind of inline preview (if any) this file supports. */
+type PreviewKind = "image" | "pdf" | "docx" | "spreadsheet" | "csv" | "binary";
+
+function getPreviewKind(filePath: string, mimeType: string): PreviewKind {
+  const ext = extOf(filePath);
+  if (mimeType.startsWith("image/")) return "image";
+  if (ext === "pdf" || mimeType === "application/pdf") return "pdf";
+  if (ext === "docx") return "docx";
+  if (ext === "xlsx" || ext === "xls") return "spreadsheet";
+  if (ext === "csv" || ext === "tsv") return "csv";
+  return "binary";
+}
+
+/** Cap on raw bytes we parse in the browser to keep the UI responsive. */
+const MAX_PREVIEW_BYTES = 8 * 1024 * 1024;
+/** Max rows rendered per sheet (remaining rows are dropped with a notice). */
+const MAX_SHEET_ROWS = 1000;
+/** Max rows rendered for CSV previews. */
+const MAX_CSV_ROWS = 5000;
+
+interface SheetView {
+  name: string;
+  rows: (string | number)[][];
+  totalRows: number;
+  truncated: boolean;
+}
+
+interface ParsedPreview {
+  kind: "spreadsheet" | "csv";
+  sheets: SheetView[];
+  truncated: boolean;
+}
+
+async function fetchBytes(url: string): Promise<ArrayBuffer> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.arrayBuffer();
+}
+
+async function parseSpreadsheet(buffer: ArrayBuffer): Promise<ParsedPreview> {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.read(new Uint8Array(buffer), {
+    type: "array",
+    cellDates: true,
+  });
+  const sheets: SheetView[] = wb.SheetNames.map((name) => {
+    const ws = wb.Sheets[name];
+    if (!ws) {
+      return { name, rows: [], totalRows: 0, truncated: false };
+    }
+    const json = XLSX.utils.sheet_to_json<unknown[]>(ws, {
+      header: 1,
+      defval: "",
+      raw: false,
+      blankrows: false,
+    });
+    const allRows = json as (string | number)[][];
+    const truncated = allRows.length > MAX_SHEET_ROWS;
+    return {
+      name,
+      rows: allRows.slice(0, MAX_SHEET_ROWS),
+      totalRows: allRows.length,
+      truncated,
+    };
+  });
+  return {
+    kind: "spreadsheet",
+    sheets,
+    truncated: sheets.some((s) => s.truncated),
+  };
+}
+
+async function parseCsv(
+  buffer: ArrayBuffer,
+  delimiter: string,
+): Promise<ParsedPreview> {
+  const text = new TextDecoder("utf-8").decode(new Uint8Array(buffer));
+  const Papa = (await import("papaparse")).default;
+  const result = Papa.parse<unknown[]>(text, {
+    delimiter,
+    skipEmptyLines: false,
+  });
+  const allRows = result.data as (string | number)[][];
+  const truncated = allRows.length > MAX_CSV_ROWS;
+  return {
+    kind: "csv",
+    sheets: [
+      {
+        name: "CSV",
+        rows: allRows.slice(0, MAX_CSV_ROWS),
+        totalRows: allRows.length,
+        truncated,
+      },
+    ],
+    truncated,
+  };
+}
+
 /**
  * FileViewer component - displays file content with appropriate formatting.
  */
@@ -120,6 +216,20 @@ export const FileViewer = memo(function FileViewer({
   const [showPreview, setShowPreview] = useState(false);
   const [highlightedLineRef, setHighlightedLineRef] =
     useState<HTMLElement | null>(null);
+
+  // Office / tabular preview state
+  const [parsed, setParsed] = useState<ParsedPreview | null>(null);
+  const [rawBytes, setRawBytes] = useState<ArrayBuffer | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const docxRef = useRef<HTMLDivElement>(null);
+
+  // Correct, BASE_PATH-aware URL for binary/inline content (fixes broken
+  // images/PDF under sub-path deployments and the desktop shell).
+  const rawUrl = api.getFileRawUrl(projectId, filePath);
+  const previewKind: PreviewKind = fileData
+    ? getPreviewKind(filePath, fileData.metadata.mimeType)
+    : "binary";
 
   useEffect(() => {
     let cancelled = false;
@@ -148,6 +258,82 @@ export const FileViewer = memo(function FileViewer({
       cancelled = true;
     };
   }, [projectId, filePath, t]);
+
+  // Fetch + parse office/tabular formats in the browser.
+  useEffect(() => {
+    if (!fileData) return;
+    setParsed(null);
+    setRawBytes(null);
+    setPreviewError(null);
+    setPreviewLoading(false);
+
+    const k = getPreviewKind(filePath, fileData.metadata.mimeType);
+    if (k === "image" || k === "pdf" || k === "binary") return;
+
+    if (fileData.metadata.size > MAX_PREVIEW_BYTES) {
+      setPreviewError("too-large");
+      return;
+    }
+
+    let cancelled = false;
+    setPreviewLoading(true);
+    fetchBytes(rawUrl)
+      .then(async (buf) => {
+        if (cancelled) return;
+        if (k === "docx") {
+          setRawBytes(buf);
+          setPreviewLoading(false);
+        } else if (k === "spreadsheet") {
+          const p = await parseSpreadsheet(buf);
+          if (!cancelled) {
+            setParsed(p);
+            setPreviewLoading(false);
+          }
+        } else if (k === "csv") {
+          const p = await parseCsv(buf, extOf(filePath) === "tsv" ? "\t" : ",");
+          if (!cancelled) {
+            setParsed(p);
+            setPreviewLoading(false);
+          }
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPreviewError(
+            err instanceof Error ? err.message : "preview-failed",
+          );
+          setPreviewLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, fileData, rawUrl]);
+
+  // Render DOCX once bytes are ready.
+  useEffect(() => {
+    if (previewKind !== "docx" || !docxRef.current || !rawBytes) return;
+    let cancelled = false;
+    setPreviewLoading(true);
+    void (async () => {
+      try {
+        const { renderAsync } = await import("docx-preview");
+        if (cancelled || !docxRef.current) return;
+        docxRef.current.innerHTML = "";
+        await renderAsync(new Blob([rawBytes]), docxRef.current);
+        if (!cancelled) setPreviewLoading(false);
+      } catch (err) {
+        if (!cancelled) {
+          setPreviewError(err instanceof Error ? err.message : "docx-failed");
+          setPreviewLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [previewKind, rawBytes]);
 
   // Handle Escape key to exit fullscreen
   useEffect(() => {
@@ -191,9 +377,7 @@ export const FileViewer = memo(function FileViewer({
   }, [projectId, filePath]);
 
   const handleOpenInNewTab = useCallback(() => {
-    const url = appPath(
-      `/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`,
-    );
+    const url = `${window.location.origin}/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`;
     window.open(url, "_blank");
   }, [projectId, filePath]);
 
@@ -230,19 +414,61 @@ export const FileViewer = memo(function FileViewer({
     );
   }
 
-  const { metadata, content, rawUrl } = fileData;
+  const { metadata, content } = fileData;
   const displayPath = metadata.absolutePath ?? filePath;
-  const isImage = isImageFile(metadata.mimeType);
 
   // Render content based on file type
   const renderContent = () => {
     // Image files
-    if (isImage) {
+    if (previewKind === "image") {
       return (
         <div className="file-viewer-image">
           <img src={rawUrl} alt={fileName} />
         </div>
       );
+    }
+
+    // PDF files (native browser rendering, zero dependencies)
+    if (previewKind === "pdf") {
+      return (
+        <div className="file-viewer-pdf">
+          <iframe src={rawUrl} title={fileName} />
+        </div>
+      );
+    }
+
+    // DOCX files (rendered from bytes via docx-preview)
+    if (previewKind === "docx") {
+      if (previewError === "too-large")
+        return <LargeFileNotice onDownload={handleDownload} />;
+      if (previewError)
+        return <PreviewErrorNotice onDownload={handleDownload} />;
+      return (
+        <div className="file-viewer-docx">
+          <div ref={docxRef} className="docx-body" />
+          {previewLoading && (
+            <div className="file-viewer-loading-inline">
+              {t("fileViewerParsing" as never)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Spreadsheet (xlsx/xls) and CSV/TSV files
+    if (previewKind === "spreadsheet" || previewKind === "csv") {
+      if (previewError === "too-large")
+        return <LargeFileNotice onDownload={handleDownload} />;
+      if (previewError)
+        return <PreviewErrorNotice onDownload={handleDownload} />;
+      if (previewLoading || !parsed) {
+        return (
+          <div className="file-viewer-loading-inline">
+            {t("fileViewerParsing" as never)}
+          </div>
+        );
+      }
+      return <TablePreview data={parsed} />;
     }
 
     // Text files
@@ -370,7 +596,7 @@ export const FileViewer = memo(function FileViewer({
       );
     }
 
-    // Binary files or files too large
+    // Binary files or unsupported formats (e.g. legacy .doc) -> download only
     return (
       <div className="file-viewer-binary">
         <p>{t("fileViewerBinary" as never)}</p>
@@ -482,6 +708,91 @@ export const FileViewer = memo(function FileViewer({
     </div>
   );
 });
+
+/** Shown when a previewable file exceeds the in-browser size limit. */
+function LargeFileNotice({ onDownload }: { onDownload: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="file-viewer-binary">
+      <p>{t("fileViewerTooLarge" as never)}</p>
+      <button
+        type="button"
+        className="file-viewer-download-btn"
+        onClick={onDownload}
+      >
+        {t("fileViewerDownloadFile" as never)}
+      </button>
+    </div>
+  );
+}
+
+/** Shown when parsing a previewable file fails. */
+function PreviewErrorNotice({ onDownload }: { onDownload: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="file-viewer-binary">
+      <p>{t("fileViewerPreviewFailed" as never)}</p>
+      <button
+        type="button"
+        className="file-viewer-download-btn"
+        onClick={onDownload}
+      >
+        {t("fileViewerDownloadFile" as never)}
+      </button>
+    </div>
+  );
+}
+
+/** Renders parsed tabular data (CSV / XLSX) as a scrollable, escaped table. */
+function TablePreview({ data }: { data: ParsedPreview }) {
+  const { t } = useI18n();
+  const [active, setActive] = useState(0);
+  const sheet = data.sheets[active] ?? data.sheets[0];
+  if (!sheet) return null;
+  const maxCols = sheet.rows.reduce((m, r) => Math.max(m, r.length), 0);
+
+  return (
+    <div className="file-viewer-table-wrap">
+      {data.sheets.length > 1 && (
+        <div className="sheet-tabs">
+          {data.sheets.map((s, i) => (
+            <button
+              key={s.name}
+              type="button"
+              className={`sheet-tab ${i === active ? "active" : ""}`}
+              onClick={() => setActive(i)}
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="table-scroll">
+        <table className="preview-table">
+          <tbody>
+            {sheet.rows.map((row, ri) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: positional rows in a read-only table preview
+              <tr key={ri}>
+                {Array.from({ length: maxCols }).map((_, ci) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: positional cells in a read-only table preview
+                  <td key={ci}>{row[ci] ?? ""}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {sheet.truncated && (
+        <div className="table-truncated-note">
+          {t("fileViewerTruncatedRows" as never, {
+            shown: sheet.rows.length,
+            total: sheet.totalRows,
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Icons
 function CopyIcon() {
