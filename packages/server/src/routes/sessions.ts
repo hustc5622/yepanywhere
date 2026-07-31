@@ -220,6 +220,27 @@ function supportsResumeSessionAt(
   return provider === "claude" || provider === "opencode";
 }
 
+/**
+ * Resolve the effective Codex model source for a resume.
+ *
+ * A persisted source belongs to the existing thread and must remain sticky.
+ * Only legacy sessions with no source metadata may infer a known custom source
+ * from their persisted model slug; otherwise the provider defaults to OpenAI.
+ */
+function resolveCodexResumeSource(
+  model: string | undefined,
+  persistedSource: string | undefined,
+): string | undefined {
+  const trimmedPersistedSource = persistedSource?.trim();
+  if (trimmedPersistedSource) {
+    return trimmedPersistedSource;
+  }
+
+  const registry = getCodexModelSourceRegistry();
+  const trimmedModel = model?.trim();
+  return trimmedModel ? registry.findModelSource(trimmedModel) : undefined;
+}
+
 function parseOptionalPositiveInteger(
   value: unknown,
   fieldName: string,
@@ -2715,15 +2736,16 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         ? sessionSummary?.reasoningEffort
         : undefined);
 
-    // Resume must reuse the session's original Codex model source. Priority:
-    // Codex JSONL model_provider (via reader summary) → Yep metadata → openai.
-    // A body-supplied codexModelProvider never silently migrates an existing
-    // thread to another provider (see design §8.6).
+    // Resume must reuse the session's original Codex model source. For legacy
+    // sessions with no source metadata, infer a known custom source from the
+    // persisted model slug before falling back to openai.
     const resumeCodexModelProvider =
       providerName === "codex"
-        ? (sessionSummary?.codexModelProvider ??
-          deps.sessionMetadataService?.getCodexModelProvider?.(sessionId) ??
-          undefined)
+        ? resolveCodexResumeSource(
+            sessionSummary?.model ?? model,
+            sessionSummary?.codexModelProvider ??
+              deps.sessionMetadataService?.getCodexModelProvider?.(sessionId),
+          )
         : undefined;
     if (
       providerName === "codex" &&

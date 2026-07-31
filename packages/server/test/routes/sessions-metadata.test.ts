@@ -481,7 +481,7 @@ describe("Sessions metadata route", () => {
     expect(isSessionActive).not.toHaveBeenCalled();
   });
 
-  it("prefers persisted provider over conflicting client resume provider", async () => {
+  it("prefers persisted provider and Codex source over conflicting resume settings", async () => {
     const project = createProject();
     const resumeSession = vi.fn(async () => ({
       id: "proc-1",
@@ -500,12 +500,16 @@ describe("Sessions metadata route", () => {
       readerFactory: vi.fn(
         () =>
           ({
-            getSessionSummary: vi.fn(async () => null),
+            getSessionSummary: vi.fn(async () => ({
+              ...createSummary(),
+              codexModelProvider: "openai",
+            })),
           }) as unknown as ISessionReader,
       ),
       sessionMetadataService: {
         getProvider: vi.fn(() => "codex"),
         getExecutor: vi.fn(() => undefined),
+        getCodexModelProvider: vi.fn(() => "deepseek"),
       } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
     });
 
@@ -517,6 +521,8 @@ describe("Sessions metadata route", () => {
         body: JSON.stringify({
           message: "continue",
           provider: "claude",
+          model: "deepseek-v4-flash",
+          codexModelProvider: "deepseek",
         }),
       },
     );
@@ -527,7 +533,69 @@ describe("Sessions metadata route", () => {
       project.path,
       expect.objectContaining({ text: "continue" }),
       undefined,
-      expect.objectContaining({ providerName: "codex" }),
+      expect.objectContaining({
+        providerName: "codex",
+        model: "deepseek-v4-flash",
+        codexModelProvider: "openai",
+      }),
+    );
+  });
+
+  it("infers a custom Codex source only when legacy session metadata is missing", async () => {
+    const project = createProject();
+    const resumeSession = vi.fn(async () => ({
+      id: "proc-1",
+      sessionId: "sess-1",
+      permissionMode: "default",
+      modeVersion: 0,
+    }));
+
+    const routes = createSessionsRoutes({
+      supervisor: {
+        resumeSession,
+      } as unknown as SessionsDeps["supervisor"],
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () =>
+          ({
+            getSessionSummary: vi.fn(async () => ({
+              ...createSummary(),
+              model: "deepseek-v4-flash",
+              codexModelProvider: undefined,
+            })),
+          }) as unknown as ISessionReader,
+      ),
+      sessionMetadataService: {
+        getProvider: vi.fn(() => "codex"),
+        getExecutor: vi.fn(() => undefined),
+        getCodexModelProvider: vi.fn(() => undefined),
+      } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/sess-1/resume`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: "continue",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(resumeSession).toHaveBeenCalledWith(
+      "sess-1",
+      project.path,
+      expect.objectContaining({ text: "continue" }),
+      undefined,
+      expect.objectContaining({
+        providerName: "codex",
+        model: undefined,
+        codexModelProvider: "deepseek",
+      }),
     );
   });
 

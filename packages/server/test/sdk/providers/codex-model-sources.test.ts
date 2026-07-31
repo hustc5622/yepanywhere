@@ -103,6 +103,14 @@ describe("CodexModelSourceRegistry", () => {
     expect(parsed.models[0].context_window).toBe(1_000_000);
   });
 
+  it("maps a model slug back to its owning custom source", () => {
+    const registry = withKey();
+    expect(registry.findModelSource("deepseek-v4-flash")).toBe("deepseek");
+    // OpenAI live models have no catalog owner.
+    expect(registry.findModelSource("gpt-5.6-sol")).toBeUndefined();
+    expect(registry.findModelSource(undefined)).toBeUndefined();
+  });
+
   it("exposes catalog models as composite picker ModelInfo", () => {
     const registry = withKey();
     const infos = registry.getCatalogModelInfos(registry.require("deepseek"));

@@ -224,6 +224,22 @@ export class CodexModelSourceRegistry {
     });
   }
 
+  /**
+   * Find the custom source that owns a model slug (via its catalog allowlist).
+   * Returns undefined for models with no custom-source owner (e.g. OpenAI live
+   * models), since the built-in source has no catalog to match against.
+   */
+  findModelSource(modelSlug: string | undefined): string | undefined {
+    if (!modelSlug) return undefined;
+    for (const definition of this.list()) {
+      if (!definition.catalog) continue;
+      if (definition.catalog.allowedModelIds.includes(modelSlug)) {
+        return definition.id;
+      }
+    }
+    return undefined;
+  }
+
   /** Whether a model slug is selectable for a source in the new-session picker. */
   isModelSelectable(sourceId: string, modelSlug: string | undefined): boolean {
     const definition = CODEX_MODEL_SOURCE_DEFINITIONS[sourceId];
