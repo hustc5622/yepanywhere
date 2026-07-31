@@ -12,6 +12,7 @@ import { createRemoteSpawn } from "../remote-spawn.js";
 import { filterEnvForChildProcess } from "./env-filter.js";
 
 const CONTROL_PROBE_TIMEOUT_MS = 20_000;
+const CONTROL_PROBE_CONNECT_TIMEOUT_MS = 2_000;
 const FIVE_HOURS_MINUTES = 5 * 60;
 const SEVEN_DAYS_MINUTES = 7 * 24 * 60;
 
@@ -248,7 +249,12 @@ export async function probeRemoteClaudeControl(
       persistSession: false,
       settingSources: ["user", "project", "local"],
       env: filterEnvForChildProcess(),
-      spawnClaudeCodeProcess: createRemoteSpawn({ executor }),
+      // Catalog/usage discovery is best-effort initialization work. Fail fast
+      // when the executor is offline without shortening real session startup.
+      spawnClaudeCodeProcess: createRemoteSpawn({
+        executor,
+        connectTimeoutMs: CONTROL_PROBE_CONNECT_TIMEOUT_MS,
+      }),
     },
   });
 

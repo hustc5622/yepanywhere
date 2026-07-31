@@ -880,6 +880,11 @@ export const api = {
   // Provider API
   getProviders: () => fetchJSON<{ providers: ProviderInfo[] }>("/providers"),
 
+  getProvider: (name: ProviderName, options?: { fresh?: boolean }) =>
+    fetchJSON<{ provider: ProviderInfo }>(
+      `/providers/${encodeURIComponent(name)}${options?.fresh ? "?fresh=1" : ""}`,
+    ),
+
   getProjects: () => fetchJSON<{ projects: Project[] }>("/projects"),
 
   /**

@@ -72,6 +72,8 @@ export interface RemoteCommandResult {
 
 export interface RemoteSpawnOptions {
   executor: RemoteExecutorConfig;
+  /** Override SSH connection timeout without changing session startup policy. */
+  connectTimeoutMs?: number;
   /** Correlates SSH transport logs with the provider/session startup attempt. */
   startupId?: string;
   /** Called with the local SSH child, primarily for liveness/PID reporting. */
@@ -545,9 +547,13 @@ export function createRemoteSpawn(
       `Starting Claude Code through SSH on ${executorLabel(executor)}`,
     );
 
-    const child = spawn("ssh", buildSshArgs(executor, remoteCommand), {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const child = spawn(
+      "ssh",
+      buildSshArgs(executor, remoteCommand, options.connectTimeoutMs),
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
     options.onSpawn?.(child);
 
     const stallTimers = REMOTE_STARTUP_STALL_THRESHOLDS_MS.map(

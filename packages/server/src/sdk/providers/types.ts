@@ -206,6 +206,12 @@ export interface AgentProvider {
    * Get available models for this provider.
    * For local providers (Codex with Ollama), this queries the local model list.
    * For cloud providers (Claude, Gemini), this returns a static list.
+   *
+   * Listing endpoints may set `waitForRefresh` to false so providers backed by
+   * a slow remote catalog can return cached or fallback metadata immediately
+   * and refresh it in the background.
    */
-  getAvailableModels(): Promise<ModelInfo[]>;
+  getAvailableModels(options?: {
+    waitForRefresh?: boolean;
+  }): Promise<ModelInfo[]>;
 }

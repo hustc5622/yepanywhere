@@ -10,6 +10,8 @@ interface ProviderRouteDeps {
   modelInfoService?: ModelInfoService;
   /** If non-empty, only these provider names are exposed. */
   enabledProviders?: string[];
+  /** Test seam for provider discovery. */
+  providers?: AgentProvider[];
   /** Test seam for the remote Claude control channel. */
   getClaudeUsage?: (options: {
     fresh?: boolean;
@@ -19,10 +21,11 @@ interface ProviderRouteDeps {
 async function buildProviderInfo(
   provider: AgentProvider,
   modelInfoService?: ModelInfoService,
+  waitForModelRefresh = false,
 ): Promise<ProviderInfo> {
   const [authStatus, models] = await Promise.all([
     provider.getAuthStatus(),
-    provider.getAvailableModels(),
+    provider.getAvailableModels({ waitForRefresh: waitForModelRefresh }),
   ]);
   modelInfoService?.ingestModels(provider.name as ProviderName, models);
 
@@ -65,18 +68,17 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
 
   // GET /api/providers - Get all available providers with auth status and models
   routes.get("/", async (c) => {
-    let providers = getAllProviders();
+    let providers = deps.providers ?? getAllProviders();
     if (deps.enabledProviders && deps.enabledProviders.length > 0) {
       const enabled = new Set(deps.enabledProviders);
       providers = providers.filter((p) => enabled.has(p.name));
     }
-    const providerInfos: ProviderInfo[] = [];
-
-    for (const provider of providers) {
-      providerInfos.push(
-        await buildProviderInfo(provider, deps.modelInfoService),
-      );
-    }
+    const waitForModelRefresh = c.req.query("fresh") === "1";
+    const providerInfos = await Promise.all(
+      providers.map((provider) =>
+        buildProviderInfo(provider, deps.modelInfoService, waitForModelRefresh),
+      ),
+    );
 
     return c.json({ providers: providerInfos });
   });
@@ -94,6 +96,7 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
     const providerInfo = await buildProviderInfo(
       provider,
       deps.modelInfoService,
+      c.req.query("fresh") === "1",
     );
 
     return c.json({ provider: providerInfo });

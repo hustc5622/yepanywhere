@@ -123,6 +123,7 @@ const CLAUDE_MODELS_FALLBACK: ModelInfo[] = [
 ];
 
 const CLAUDE_USAGE_CACHE_TTL_MS = 30_000;
+const CLAUDE_CONTROL_FAILURE_CACHE_TTL_MS = 30_000;
 
 function cloneClaudeModels(models: ModelInfo[]): ModelInfo[] {
   return models.map((model) => ({
@@ -329,6 +330,7 @@ export class ClaudeProvider implements AgentProvider {
   private cachedModels: ModelInfo[] | null = null;
   private cachedUsage: ClaudeUsageResponse | null = null;
   private cachedUsageExpiresAt = 0;
+  private modelRefreshRetryAt = 0;
   private controlProbe: Promise<ClaudeControlProbeResult> | null = null;
 
   constructor(config: ClaudeProviderConfig = {}) {
@@ -348,6 +350,7 @@ export class ClaudeProvider implements AgentProvider {
     this.cachedModels = null;
     this.cachedUsage = null;
     this.cachedUsageExpiresAt = 0;
+    this.modelRefreshRetryAt = 0;
   }
 
   setSessionFileObserver(
@@ -376,12 +379,28 @@ export class ClaudeProvider implements AgentProvider {
     };
   }
 
-  async getAvailableModels(): Promise<ModelInfo[]> {
+  async getAvailableModels(
+    options: { waitForRefresh?: boolean } = {},
+  ): Promise<ModelInfo[]> {
     if (this.cachedModels) return cloneClaudeModels(this.cachedModels);
     if (this.remoteExecutors.length === 0) {
       return cloneClaudeModels(CLAUDE_MODELS_FALLBACK);
     }
 
+    if (this.modelRefreshRetryAt > Date.now()) {
+      return cloneClaudeModels(CLAUDE_MODELS_FALLBACK);
+    }
+
+    if (options.waitForRefresh === false) {
+      void this.refreshAvailableModels();
+      return cloneClaudeModels(CLAUDE_MODELS_FALLBACK);
+    }
+
+    const models = await this.refreshAvailableModels();
+    return models ?? cloneClaudeModels(CLAUDE_MODELS_FALLBACK);
+  }
+
+  private async refreshAvailableModels(): Promise<ModelInfo[] | null> {
     try {
       const result = await this.refreshRemoteControl();
       if (result.models?.length) return cloneClaudeModels(result.models);
@@ -401,7 +420,7 @@ export class ClaudeProvider implements AgentProvider {
         "Unable to read the remote Claude model catalog; using fallback metadata",
       );
     }
-    return cloneClaudeModels(CLAUDE_MODELS_FALLBACK);
+    return null;
   }
 
   async getUsage(
@@ -444,12 +463,29 @@ export class ClaudeProvider implements AgentProvider {
       .then((result) => {
         if (result.models?.length) {
           this.cachedModels = cloneClaudeModels(result.models);
+          this.modelRefreshRetryAt = 0;
+        } else {
+          this.modelRefreshRetryAt =
+            Date.now() + CLAUDE_CONTROL_FAILURE_CACHE_TTL_MS;
         }
         if (result.usage) {
           this.cachedUsage = { usage: result.usage, error: null };
-          this.cachedUsageExpiresAt = Date.now() + CLAUDE_USAGE_CACHE_TTL_MS;
+        } else {
+          this.cachedUsage = {
+            usage: null,
+            error: result.usageError ?? "Claude plan usage is unavailable",
+          };
         }
+        this.cachedUsageExpiresAt = Date.now() + CLAUDE_USAGE_CACHE_TTL_MS;
         return result;
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.modelRefreshRetryAt =
+          Date.now() + CLAUDE_CONTROL_FAILURE_CACHE_TTL_MS;
+        this.cachedUsage = { usage: null, error: message };
+        this.cachedUsageExpiresAt = Date.now() + CLAUDE_USAGE_CACHE_TTL_MS;
+        throw error;
       })
       .finally(() => {
         this.controlProbe = null;

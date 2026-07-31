@@ -205,6 +205,30 @@ describe("remote Claude spawn", () => {
     child.emit("exit", 0, null);
   });
 
+  it("allows best-effort probes to use a shorter SSH connect timeout", () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    const spawnRemote = createRemoteSpawn({
+      executor,
+      connectTimeoutMs: 2_000,
+    });
+
+    spawnRemote({
+      command: "node",
+      args: ["/local/node_modules/claude-agent-sdk/cli.js"],
+      cwd: "/mnt/utm/projects/yep",
+      env: {},
+      signal: new AbortController().signal,
+    });
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      "ssh",
+      expect.arrayContaining(["ConnectTimeout=2"]),
+      expect.any(Object),
+    );
+    child.emit("exit", 255, null);
+  });
+
   it("warns while remote Claude has not produced stdout", async () => {
     vi.useFakeTimers();
     const child = fakeChild();
