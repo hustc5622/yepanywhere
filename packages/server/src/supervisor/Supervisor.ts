@@ -78,6 +78,8 @@ export interface ModelSettings {
   reasoningEffort?: string;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
+  /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
+  codexModelProvider?: string;
   /** Managed OpenCode provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Provider to use for this session. undefined = use the runtime default. */
@@ -435,6 +437,7 @@ export class Supervisor {
       effort: modelSettings?.effort,
       reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
+      codexModelProvider: modelSettings?.codexModelProvider,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,
@@ -566,6 +569,7 @@ export class Supervisor {
         permissionMode: effectiveMode,
         model: modelSettings?.model ?? null,
         codexMcpMode: modelSettings?.codexMcpMode ?? null,
+        codexModelProvider: modelSettings?.codexModelProvider ?? null,
         resumeSessionAt: rewind.resumeSessionAt,
         rollbackNumTurns: rewind.rollbackNumTurns,
       },
@@ -583,6 +587,7 @@ export class Supervisor {
       effort: modelSettings?.effort,
       reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
+      codexModelProvider: modelSettings?.codexModelProvider,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,

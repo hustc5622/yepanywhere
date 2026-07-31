@@ -42,6 +42,8 @@ export interface SessionMetadata {
   executor?: string;
   /** Codex MCP profile for app-server sessions. */
   codexMcpMode?: CodexMcpMode;
+  /** Effective Codex model source (Codex `model_provider`) for this session. */
+  codexModelProvider?: string;
   /** Managed OpenCode provider/model settings used to resume the session. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Whether Yep created this session, or it was discovered from an external client. */
@@ -257,8 +259,8 @@ export class SessionMetadataService {
   }
 
   /**
-   * Set the Codex MCP profile for a session.
-   * Used to keep Codex app-server resumes aligned with the original launch.
+   * Persist the Codex MCP profile used to launch an app-server session so
+   * resumes/restarts reload the same MCP configuration.
    */
   async setCodexMcpMode(
     sessionId: string,
@@ -267,6 +269,21 @@ export class SessionMetadataService {
     this.updateSessionMetadata(sessionId, (metadata) => ({
       ...metadata,
       codexMcpMode: codexMcpMode || undefined,
+    }));
+    await this.save();
+  }
+
+  /**
+   * Persist the effective Codex model source (Codex `model_provider`) so
+   * resumes/restarts start the app-server with the same provider and catalog.
+   */
+  async setCodexModelProvider(
+    sessionId: string,
+    codexModelProvider: string | undefined,
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      codexModelProvider: codexModelProvider || undefined,
     }));
     await this.save();
   }
@@ -322,6 +339,10 @@ export class SessionMetadataService {
    */
   getCodexMcpMode(sessionId: string): CodexMcpMode | undefined {
     return this.getMetadata(sessionId)?.codexMcpMode;
+  }
+
+  getCodexModelProvider(sessionId: string): string | undefined {
+    return this.getMetadata(sessionId)?.codexModelProvider;
   }
 
   getOpenCodeConfig(sessionId: string): OpenCodeSessionConfig | undefined {
@@ -439,6 +460,9 @@ export class SessionMetadataService {
     if (updated.provider) cleaned.provider = updated.provider;
     if (updated.executor) cleaned.executor = updated.executor;
     if (updated.codexMcpMode) cleaned.codexMcpMode = updated.codexMcpMode;
+    if (updated.codexModelProvider) {
+      cleaned.codexModelProvider = updated.codexModelProvider;
+    }
     if (updated.opencodeConfig) {
       cleaned.opencodeConfig = updated.opencodeConfig;
     }

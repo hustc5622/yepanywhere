@@ -1,6 +1,7 @@
 import type { ProviderInfo, ProviderName } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import type { ClaudeUsageResponse } from "../sdk/providers/claude-control.js";
+import { getCodexModelSourceRegistry } from "../sdk/providers/codex-model-sources.js";
 import { claudeProvider, getAllProviders } from "../sdk/providers/index.js";
 import type { AgentProvider } from "../sdk/providers/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
@@ -34,6 +35,9 @@ async function buildProviderInfo(
     expiresAt: authStatus.expiresAt?.toISOString(),
     user: authStatus.user,
     models,
+    ...(provider.name === "codex"
+      ? { codexModelSources: getCodexModelSourceRegistry().getPublicSources() }
+      : {}),
     supportsPermissionMode: provider.supportsPermissionMode,
     permissionModes: provider.permissionModes,
     supportsThinkingToggle: provider.supportsThinkingToggle,

@@ -755,6 +755,20 @@ export function NewSessionForm({
       const providerName = provider.name;
       const models = provider.models ?? [];
       const savedOpenCodeConfig = savedDefaults?.opencodeConfig;
+      // Codex saved defaults store the bare model slug plus a separate model
+      // source; map them back to the composite picker id (e.g.
+      // "deepseek/deepseek-v4-flash") so the right grouped option preselects.
+      const codexPreferredModel =
+        providerName === "codex" &&
+        savedDefaults?.model &&
+        savedDefaults?.codexModelProvider
+          ? models.find(
+              (m) =>
+                m.modelProvider === savedDefaults.codexModelProvider &&
+                (m.providerModelId ?? m.id) === savedDefaults.model,
+            )?.id
+          : undefined;
+
       const preferredModel =
         providerName === "opencode"
           ? getPreferredOpenCodeModelId(
@@ -765,7 +779,9 @@ export function NewSessionForm({
             )
           : getPreferredModelId(
               models,
-              savedDefaults?.model ?? provider.currentModel,
+              codexPreferredModel ??
+                savedDefaults?.model ??
+                provider.currentModel,
               providerName === "codex" ? DEFAULT_CODEX_MODEL : undefined,
             );
 
@@ -959,11 +975,21 @@ export function NewSessionForm({
       }
       if (parts.length > 0) description = parts.join(" · ");
 
-      // OpenCode catalog ids are `provider/model`; group by the provider
-      // prefix so users can tell which channel a model routes through. The
-      // synthetic "default" entry (no slash) stays ungrouped at the top.
-      const slashIndex = model.id.indexOf("/");
-      const group = slashIndex > 0 ? model.id.slice(0, slashIndex) : undefined;
+      // Codex models carry an explicit model source (Codex `model_provider`);
+      // group by its friendly display name so users can tell which channel a
+      // model routes through. OpenCode catalog ids are `provider/model` and
+      // group by the slash prefix. The synthetic "default" entry (no slash,
+      // no source) stays ungrouped at the top.
+      let group: string | undefined;
+      if (model.modelProvider) {
+        const source = selectedProviderInfo?.codexModelSources?.find(
+          (candidate) => candidate.id === model.modelProvider,
+        );
+        group = source?.displayName ?? model.modelProvider;
+      } else {
+        const slashIndex = model.id.indexOf("/");
+        group = slashIndex > 0 ? model.id.slice(0, slashIndex) : undefined;
+      }
 
       options.push({
         value: model.id,
@@ -974,7 +1000,28 @@ export function NewSessionForm({
     }
 
     return options;
-  }, [availableModels, getEffortLabel, selectedProvider, t]);
+  }, [
+    availableModels,
+    getEffortLabel,
+    selectedProvider,
+    selectedProviderInfo?.codexModelSources,
+    t,
+  ]);
+
+  // Codex model sources that exist but cannot be selected yet (e.g. the server
+  // is missing the source's API key). Shown as a setup hint under the picker.
+  const unavailableCodexSourceHints = useMemo(() => {
+    if (selectedProvider !== "codex") return [];
+    return (selectedProviderInfo?.codexModelSources ?? [])
+      .filter((source) => !source.available)
+      .map((source) =>
+        source.unavailableReason === "missing_api_key"
+          ? t("newSessionCodexSourceMissingKey", { source: source.displayName })
+          : t("newSessionCodexSourceUnavailable", {
+              source: source.displayName,
+            }),
+      );
+  }, [selectedProvider, selectedProviderInfo?.codexModelSources, t]);
 
   const selectedModelCapabilitySummary = useMemo(() => {
     if (selectedProvider === "opencode") {
@@ -1253,6 +1300,18 @@ export function NewSessionForm({
     selectedProvider === "opencode" && isManagedOpenCodeModel
       ? undefined
       : (selectedModel ?? undefined);
+  // Codex picker ids may be composite `source/model`; the API takes the bare
+  // model slug plus a separate `codexModelProvider` (model source) field.
+  const codexModelProviderForRequest =
+    selectedProvider === "codex"
+      ? (selectedModelInfo?.modelProvider ?? undefined)
+      : undefined;
+  const modelForRequest =
+    selectedProvider === "codex"
+      ? (selectedModelInfo?.providerModelId ??
+        selectedModelForRequest ??
+        undefined)
+      : selectedModelForRequest;
   const thinkingForRequest = supportsThinkingToggle
     ? getThinkingOption(thinkingMode, effectiveThinkingEffort)
     : undefined;
@@ -1261,19 +1320,21 @@ export function NewSessionForm({
     (executorsLoading || selectedExecutor === null);
   const currentProviderDefaults = useMemo(
     (): NewSessionProviderDefaults => ({
-      model: selectedModelForRequest,
+      model: modelForRequest,
       thinking: thinkingForRequest,
       reasoningEffort: selectedReasoningEffort,
       permissionMode: mode,
       codexMcpMode:
         selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
+      codexModelProvider: codexModelProviderForRequest,
       opencodeConfig: opencodeConfigForRequest,
     }),
     [
       mode,
       opencodeConfigForRequest,
       selectedCodexMcpMode,
-      selectedModelForRequest,
+      codexModelProviderForRequest,
+      modelForRequest,
       selectedProvider,
       selectedReasoningEffort,
       thinkingForRequest,
@@ -1352,12 +1413,13 @@ export function NewSessionForm({
       const thinking = thinkingForRequest;
       const sessionOptions = {
         mode,
-        model: selectedModelForRequest,
+        model: modelForRequest,
         thinking,
         reasoningEffort: selectedReasoningEffort,
         provider: selectedProvider ?? undefined,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
+        codexModelProvider: codexModelProviderForRequest,
         opencodeConfig: opencodeConfigForRequest,
         executor:
           selectedProvider === "claude"
@@ -1655,7 +1717,9 @@ export function NewSessionForm({
   const defaultsMatchCurrent =
     (savedDefaults?.provider ?? undefined) ===
       (selectedProvider ?? undefined) &&
-    (savedProviderDefaults?.model ?? undefined) === selectedModelForRequest &&
+    (savedProviderDefaults?.model ?? undefined) === modelForRequest &&
+    (savedProviderDefaults?.codexModelProvider ?? undefined) ===
+      codexModelProviderForRequest &&
     savedPermissionMode === mode &&
     thinkingDefaultsMatch &&
     reasoningEffortDefaultsMatch &&
@@ -2052,6 +2116,13 @@ export function NewSessionForm({
                       selectedModelCapabilitySummary ?? undefined
                     }
                   />
+                  {unavailableCodexSourceHints.length > 0 && (
+                    <ul className="new-session-model-source-hints">
+                      {unavailableCodexSourceHints.map((hint) => (
+                        <li key={hint}>{hint}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
               {showOpenCodeEndpointSelector && (

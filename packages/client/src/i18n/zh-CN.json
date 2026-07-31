@@ -211,6 +211,8 @@
   "newSessionClaudeUsageAdditionalTitle": "其他 Claude 限额",
   "newSessionModelContextWindow": "上下文：{size}",
   "newSessionModelThinkingEfforts": "思考强度：{levels}",
+  "newSessionCodexSourceMissingKey": "需在 Yep 服务端配置 {source} 的 API Key 后才可使用。",
+  "newSessionCodexSourceUnavailable": "{source} 当前不可用。",
   "newSessionDefaultsDescription": "将当前提供商设为默认并单独保存其配置；其他提供商的已保存配置会保留。",
   "newSessionDefaultsAction": "设为默认",
   "newSessionDefaultsSaving": "正在保存...",

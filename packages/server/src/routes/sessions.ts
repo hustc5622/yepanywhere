@@ -63,6 +63,10 @@ import type {
   RuntimeController,
   RuntimeStartResponse,
 } from "../runtime/types.js";
+import {
+  CodexModelSourceError,
+  getCodexModelSourceRegistry,
+} from "../sdk/providers/codex-model-sources.js";
 import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
@@ -113,7 +117,6 @@ import {
 } from "../utils/sshHostAlias.js";
 import type { EventBus } from "../watcher/index.js";
 import { resolveSessionModel } from "./session-model.js";
-
 /**
  * Type guard to check if a result is a QueuedResponse
  */
@@ -177,6 +180,38 @@ function isCodexProviderName(
   provider: ProviderName | string | undefined,
 ): provider is "codex" | "codex-oss" {
   return provider === "codex" || provider === "codex-oss";
+}
+
+/**
+ * Validate/normalize a client-selected Codex model source for a NEW session.
+ *
+ * Returns the effective source id (defaulting to `openai` for Codex), or an
+ * error with a stable code when the source is unknown/unavailable, the model
+ * does not belong to the source, or the field was sent for a non-Codex
+ * provider. The browser only ever supplies a source id; base URL, key, and
+ * catalog path stay server-owned.
+ */
+function resolveCodexModelProviderForStart(
+  provider: ProviderName | undefined,
+  codexModelProvider: string | undefined,
+  model: string | undefined,
+): { value?: string; error?: string; code?: string } {
+  // Codex source is only meaningful for the cloud Codex provider.
+  if (provider !== "codex") {
+    return { value: undefined };
+  }
+  const registry = getCodexModelSourceRegistry();
+  const sourceId = codexModelProvider?.trim() || "openai";
+  try {
+    const source = registry.require(sourceId);
+    registry.assertModelSelectable(source.id, model);
+    return { value: source.id };
+  } catch (error) {
+    if (error instanceof CodexModelSourceError) {
+      return { error: error.message, code: error.code };
+    }
+    throw error;
+  }
 }
 
 function supportsResumeSessionAt(
@@ -674,6 +709,8 @@ interface StartSessionBody {
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
+  /** Codex model source (Codex `model_provider`). Only used for Codex. */
+  codexModelProvider?: string;
   /** OpenCode-only managed provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Client-generated temp ID for optimistic UI tracking */
@@ -716,6 +753,8 @@ interface CreateSessionBody {
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
+  /** Codex model source (Codex `model_provider`). Only used for Codex. */
+  codexModelProvider?: string;
   /** OpenCode-only managed provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
@@ -2153,6 +2192,21 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       body.provider ?? project.provider,
     );
 
+    const parsedCodexModelProvider = resolveCodexModelProviderForStart(
+      body.provider ?? project.provider,
+      body.codexModelProvider,
+      model,
+    );
+    if (parsedCodexModelProvider.error) {
+      return c.json(
+        {
+          error: parsedCodexModelProvider.error,
+          code: parsedCodexModelProvider.code,
+        },
+        400,
+      );
+    }
+
     // Debug: log what we received
     console.log("[startSession] Request body:", {
       provider: body.provider,
@@ -2185,6 +2239,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         ),
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
+        codexModelProvider: parsedCodexModelProvider.value,
         opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
         executor,
         globalInstructions,
@@ -2307,6 +2362,21 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       body.provider ?? project.provider,
     );
 
+    const parsedCodexModelProvider = resolveCodexModelProviderForStart(
+      body.provider ?? project.provider,
+      body.codexModelProvider,
+      model,
+    );
+    if (parsedCodexModelProvider.error) {
+      return c.json(
+        {
+          error: parsedCodexModelProvider.error,
+          code: parsedCodexModelProvider.code,
+        },
+        400,
+      );
+    }
+
     const globalInstructions =
       deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
 
@@ -2323,6 +2393,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         ),
         providerName: body.provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
+        codexModelProvider: parsedCodexModelProvider.value,
         opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
         executor,
         globalInstructions,
@@ -2374,6 +2445,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         await deps.sessionMetadataService.setCodexMcpMode?.(
           result.sessionId,
           parsedCodexMcpMode.codexMcpMode,
+        );
+      }
+      if (result.provider === "codex" && parsedCodexModelProvider.value) {
+        await deps.sessionMetadataService.setCodexModelProvider?.(
+          result.sessionId,
+          parsedCodexModelProvider.value,
         );
       }
     }
@@ -2638,6 +2715,33 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         ? sessionSummary?.reasoningEffort
         : undefined);
 
+    // Resume must reuse the session's original Codex model source. Priority:
+    // Codex JSONL model_provider (via reader summary) → Yep metadata → openai.
+    // A body-supplied codexModelProvider never silently migrates an existing
+    // thread to another provider (see design §8.6).
+    const resumeCodexModelProvider =
+      providerName === "codex"
+        ? (sessionSummary?.codexModelProvider ??
+          deps.sessionMetadataService?.getCodexModelProvider?.(sessionId) ??
+          undefined)
+        : undefined;
+    if (
+      providerName === "codex" &&
+      body.codexModelProvider &&
+      resumeCodexModelProvider &&
+      body.codexModelProvider !== resumeCodexModelProvider
+    ) {
+      getLogger().warn(
+        {
+          event: "codex_model_provider_resume_conflict",
+          sessionId,
+          requested: body.codexModelProvider,
+          persisted: resumeCodexModelProvider,
+        },
+        "Ignoring codexModelProvider on resume; keeping the session's original source",
+      );
+    }
+
     const result = await runtimeController.resumeSession({
       sessionId,
       projectPath: project.path,
@@ -2657,6 +2761,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             ? (parsedCodexMcpMode.codexMcpMode ??
               deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
+        codexModelProvider: resumeCodexModelProvider,
         opencodeConfig,
         executor,
         globalInstructions,
@@ -2681,6 +2786,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       await deps.sessionMetadataService.setCodexMcpMode?.(
         sessionId,
         parsedCodexMcpMode.codexMcpMode,
+      );
+    }
+    if (
+      deps.sessionMetadataService &&
+      providerName === "codex" &&
+      resumeCodexModelProvider
+    ) {
+      // Backfill so subsequent resumes have a fast, source-of-truth lookup.
+      await deps.sessionMetadataService.setCodexModelProvider?.(
+        sessionId,
+        resumeCodexModelProvider,
       );
     }
     if (deps.sessionMetadataService && parsedOpenCodeConfig.opencodeConfig) {
@@ -2894,6 +3010,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           providerName === "codex"
             ? (parsedCodexMcpMode.codexMcpMode ??
               deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
+            : undefined,
+        codexModelProvider:
+          providerName === "codex"
+            ? deps.sessionMetadataService?.getCodexModelProvider?.(sessionId)
             : undefined,
         opencodeConfig,
         executor:

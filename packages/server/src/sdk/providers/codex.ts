@@ -39,6 +39,11 @@ import type {
   UserMessage,
 } from "../types.js";
 import type { ToolApprovalResult } from "../types.js";
+import {
+  type CodexModelSourceDefinition,
+  DEFAULT_CODEX_MODEL_SOURCE,
+  getCodexModelSourceRegistry,
+} from "./codex-model-sources.js";
 import type {
   AskForApproval as CodexAskForApproval,
   ErrorNotification as CodexErrorNotification,
@@ -132,7 +137,7 @@ const APP_SERVER_MODEL_LIST_REQUEST_ID = 2;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
 /** Max characters of live command output kept for the streaming preview. */
 const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
-const CODEX_CLOUD_MODEL_PROVIDER = "openai";
+const DEFAULT_CODEX_MODEL_PROVIDER = DEFAULT_CODEX_MODEL_SOURCE;
 const CODEX_MODEL_PROVIDER_NAMES = new Set(["openai", "azure"]);
 const CODEX_THREAD_ROLLBACK_DEPRECATION_NOTICE =
   "thread/rollback is deprecated and will be removed soon";
@@ -783,7 +788,11 @@ export class CodexProvider implements AgentProvider {
   readonly supportsSlashCommands = false;
 
   private readonly config: CodexProviderConfig;
-  private modelCache: { models: ModelInfo[]; expiresAt: number } | null = null;
+  /** Per-source model list cache (keyed by Codex model source id). */
+  private readonly modelCacheBySource = new Map<
+    string,
+    { models: ModelInfo[]; expiresAt: number }
+  >();
 
   constructor(config: CodexProviderConfig = {}) {
     this.config = config;
@@ -856,52 +865,94 @@ export class CodexProvider implements AgentProvider {
   }
 
   /**
-   * Get available models for Codex cloud.
-   * Queries Codex app-server's model/list endpoint with a static fallback.
+   * Get available models for Codex, aggregated across all available model
+   * sources (OpenAI live list + any configured custom sources such as
+   * DeepSeek). A single source failing (e.g. missing DeepSeek key) never blanks
+   * out the others.
    */
   async getAvailableModels(): Promise<ModelInfo[]> {
+    const registry = getCodexModelSourceRegistry();
+    const installed = await this.isCodexCliInstalled();
+    const aggregated: ModelInfo[] = [];
+
+    for (const source of registry.list()) {
+      const availability = registry.getAvailability(source.id);
+      if (!availability.available) continue;
+      try {
+        const models = await this.getModelsForSource(source, installed);
+        aggregated.push(...models);
+      } catch (error) {
+        log.warn(
+          { source: source.id, error },
+          "Failed to load Codex models for source; skipping",
+        );
+      }
+    }
+
+    return aggregated;
+  }
+
+  private async getModelsForSource(
+    source: CodexModelSourceDefinition,
+    installed: boolean,
+  ): Promise<ModelInfo[]> {
     const now = Date.now();
-    if (this.modelCache && this.modelCache.expiresAt > now) {
-      return this.modelCache.models;
+    const cached = this.modelCacheBySource.get(source.id);
+    if (cached && cached.expiresAt > now) {
+      return cached.models;
     }
 
-    let models: ModelInfo[] = [];
-    if (await this.isCodexCliInstalled()) {
-      models = await this.getModelsFromAppServer();
+    let models: ModelInfo[];
+    if (source.catalog) {
+      // Custom sources ship a managed catalog; model/list has no provider
+      // filter so we surface the catalog's allowlisted models directly.
+      models = getCodexModelSourceRegistry().getCatalogModelInfos(source);
+    } else {
+      // Built-in OpenAI: query a short-lived app-server for the live list,
+      // falling back to the static list when the query fails.
+      models = installed ? await this.getModelsFromAppServer(source) : [];
+      if (models.length === 0) {
+        models = FALLBACK_CODEX_MODELS.map((model) => ({
+          ...model,
+          modelProvider: source.id,
+          providerModelId: model.id,
+        }));
+      }
     }
 
-    if (models.length === 0) {
-      models = FALLBACK_CODEX_MODELS;
-    }
-
-    this.modelCache = {
+    this.modelCacheBySource.set(source.id, {
       models,
       expiresAt: now + MODEL_CACHE_TTL_MS,
-    };
-
+    });
     return models;
   }
 
-  private async getModelsFromAppServer(): Promise<ModelInfo[]> {
+  private async getModelsFromAppServer(
+    source: CodexModelSourceDefinition,
+  ): Promise<ModelInfo[]> {
     try {
-      const appServerModels = await this.requestAppServerModelList();
-      return this.normalizeModelList(appServerModels);
+      const appServerModels = await this.requestAppServerModelList(source);
+      return this.normalizeModelList(appServerModels, source);
     } catch (error) {
       log.debug(
-        { error },
+        { source: source.id, error },
         "Failed to query Codex app-server model list, using fallback models",
       );
       return [];
     }
   }
 
-  private async requestAppServerModelList(): Promise<AppServerModel[]> {
+  private async requestAppServerModelList(
+    source: CodexModelSourceDefinition,
+  ): Promise<AppServerModel[]> {
     const codexCommand = await this.resolveCodexCommand();
+    const sourceArgs = getCodexModelSourceRegistry().buildAppServerArgs(source);
     return new Promise((resolve, reject) => {
       const child = spawn(
         codexCommand,
         [
           "app-server",
+          ...sourceArgs,
           ...getCodexMcpAppServerArgs("standard"),
           "--listen",
           "stdio://",
@@ -1043,7 +1094,10 @@ export class CodexProvider implements AgentProvider {
     });
   }
 
-  private normalizeModelList(models: AppServerModel[]): ModelInfo[] {
+  private normalizeModelList(
+    models: AppServerModel[],
+    source: CodexModelSourceDefinition,
+  ): ModelInfo[] {
     const orderLookup = new Map<string, number>(
       PREFERRED_MODEL_ORDER.map((id, idx) => [id, idx]),
     );
@@ -1065,6 +1119,8 @@ export class CodexProvider implements AgentProvider {
 
       deduped.set(modelId, {
         id: modelId,
+        modelProvider: source.id,
+        providerModelId: modelId,
         name: this.formatModelName(model.displayName || modelId),
         description: model.description,
         supportedReasoningEfforts: model.supportedReasoningEfforts
@@ -1087,6 +1143,8 @@ export class CodexProvider implements AgentProvider {
       if (upgradeId && !deduped.has(upgradeId)) {
         deduped.set(upgradeId, {
           id: upgradeId,
+          modelProvider: source.id,
+          providerModelId: upgradeId,
           name: this.formatModelName(upgradeId),
         });
       }
@@ -1271,11 +1329,21 @@ export class CodexProvider implements AgentProvider {
     setActiveClient: (client: CodexAppServerClient) => void,
   ): AsyncIterableIterator<SDKMessage> {
     const codexCommand = await this.resolveCodexCommand();
+    // Resolve the session's Codex model source and start the app-server with
+    // its provider/catalog overrides so model discovery, catalog, auth, and the
+    // thread `modelProvider` all point at the same source.
+    const registry = getCodexModelSourceRegistry();
+    const modelSource = registry.require(
+      options.codexModelProvider ?? DEFAULT_CODEX_MODEL_PROVIDER,
+    );
     const appServer = new CodexAppServerClient(
       codexCommand,
       options.cwd,
       this.getCodexEnv(),
-      getCodexMcpAppServerArgs(options.codexMcpMode),
+      [
+        ...registry.buildAppServerArgs(modelSource),
+        ...getCodexMcpAppServerArgs(options.codexMcpMode),
+      ],
     );
     setActiveClient(appServer);
 
@@ -1319,7 +1387,7 @@ export class CodexProvider implements AgentProvider {
           {
             sessionId: options.resumeSessionId ?? null,
             requestedModel: options.model,
-            modelProvider: CODEX_CLOUD_MODEL_PROVIDER,
+            modelProvider: modelSource.id,
           },
           "Ignoring Codex model option that looks like a model provider",
         );
@@ -1328,14 +1396,14 @@ export class CodexProvider implements AgentProvider {
       const threadResumeParams: ThreadResumeParams = {
         threadId: options.resumeSessionId ?? sessionId,
         model: requestedModel,
-        modelProvider: CODEX_CLOUD_MODEL_PROVIDER,
+        modelProvider: modelSource.id,
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
       };
       const threadStartParams: ThreadStartParams = {
         model: requestedModel,
-        modelProvider: CODEX_CLOUD_MODEL_PROVIDER,
+        modelProvider: modelSource.id,
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
@@ -1389,6 +1457,11 @@ export class CodexProvider implements AgentProvider {
         );
       }
 
+      // The app-server returns the provider it actually bound the thread to;
+      // trust that effective value over the requested one for logs/metadata.
+      const effectiveModelProvider =
+        threadResult.modelProvider || modelSource.id;
+
       log.info(
         {
           sessionId,
@@ -1401,7 +1474,12 @@ export class CodexProvider implements AgentProvider {
             sandbox: CODEX_POLICY_OVERRIDES.sandbox,
           },
           model: requestedModel,
-          modelProvider: CODEX_CLOUD_MODEL_PROVIDER,
+          codexModelProvider: effectiveModelProvider,
+          credentialPresent: Boolean(
+            modelSource.providerConfig?.envKey
+              ? process.env[modelSource.providerConfig.envKey]
+              : true,
+          ),
         },
         "Started Codex app-server session thread",
       );
@@ -1414,6 +1492,7 @@ export class CodexProvider implements AgentProvider {
           session_id: sessionId,
           cwd: options.cwd,
           model: threadResult.model,
+          modelProvider: effectiveModelProvider,
           reasoningEffort: threadResult.reasoningEffort,
           serviceTier: threadResult.serviceTier,
         } as SDKMessage),

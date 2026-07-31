@@ -20,6 +20,7 @@ export {
 export type {
   ProviderName,
   ProviderInfo,
+  CodexModelSourceInfo,
   RemoteExecutorConfig,
   RemoteSessionStorageConfig,
   RemoteSessionStorageMode,

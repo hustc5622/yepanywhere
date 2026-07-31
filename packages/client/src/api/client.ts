@@ -322,6 +322,8 @@ export interface SessionOptions {
   reasoningEffort?: string;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
+  /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
+  codexModelProvider?: string;
   /** OpenCode-only managed provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
@@ -1004,6 +1006,7 @@ export const api = {
         reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
+        codexModelProvider: options?.codexModelProvider,
         opencodeConfig: options?.opencodeConfig,
         executor: options?.executor,
         attachments,
@@ -1024,6 +1027,7 @@ export const api = {
         reasoningEffort: options?.reasoningEffort,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
+        codexModelProvider: options?.codexModelProvider,
         opencodeConfig: options?.opencodeConfig,
         executor: options?.executor,
       }),
@@ -1066,6 +1070,7 @@ export const api = {
           reasoningEffort: options?.reasoningEffort,
           provider: options?.provider,
           codexMcpMode: options?.codexMcpMode,
+          codexModelProvider: options?.codexModelProvider,
           opencodeConfig: options?.opencodeConfig,
           executor: options?.executor,
           attachments,

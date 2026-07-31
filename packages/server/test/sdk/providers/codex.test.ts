@@ -231,6 +231,8 @@ process.stdin.on("data", (chunk) => {
         expect(JSON.parse(readFileSync(capturePath, "utf8"))).toMatchObject({
           argv: [
             "app-server",
+            "-c",
+            'model_provider="openai"',
             "--disable",
             "apps",
             "--disable",
@@ -287,7 +289,13 @@ process.stdin.on("data", (chunk) => {
           model: "gpt-5.5",
         });
         expect(JSON.parse(readFileSync(capturePath, "utf8"))).toMatchObject({
-          argv: ["app-server", "--listen", "stdio://"],
+          argv: [
+            "app-server",
+            "-c",
+            'model_provider="openai"',
+            "--listen",
+            "stdio://",
+          ],
           method: "thread/start",
           params: {
             model: null,
@@ -384,6 +392,8 @@ process.stdin.on("data", (chunk) => {
         expect(JSON.parse(readFileSync(capturePath, "utf8"))).toMatchObject({
           argv: [
             "app-server",
+            "-c",
+            'model_provider="openai"',
             "--disable",
             "apps",
             "--disable",
@@ -1374,9 +1384,12 @@ describe("CodexProvider Configuration", () => {
     const normalize = (models: AppServerModel[]) =>
       (
         new CodexProvider() as unknown as {
-          normalizeModelList: (m: AppServerModel[]) => Array<{ id: string }>;
+          normalizeModelList: (
+            m: AppServerModel[],
+            source: { id: string },
+          ) => Array<{ id: string }>;
         }
-      ).normalizeModelList(models);
+      ).normalizeModelList(models, { id: "openai" });
 
     it("ranks the account default model first", () => {
       const result = normalize([

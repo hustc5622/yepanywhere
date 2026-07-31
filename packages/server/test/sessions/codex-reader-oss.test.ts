@@ -321,6 +321,26 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(summary?.provider).toBe("codex");
   });
 
+  it("identifies DeepSeek cloud sessions as codex, not codex-oss", async () => {
+    // model_provider=deepseek is a cloud Responses-API source; the "deepseek"
+    // brand in the model name must not misroute it to the local OSS provider.
+    const sessionId = "deepseek-cloud-1";
+    await createSessionFile(sessionId, "deepseek", "deepseek-v4-flash");
+
+    const summary = await reader.getSessionSummary(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+    expect(summary?.provider).toBe("codex");
+    expect(summary?.codexModelProvider).toBe("deepseek");
+
+    const session = await reader.getSession(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+    expect(session?.data.provider).toBe("codex");
+  });
+
   it("uses the latest visible entry timestamp for updatedAt", async () => {
     const sessionId = "touched-codex-session";
     const messageTime = new Date("2026-01-01T00:00:00.000Z");

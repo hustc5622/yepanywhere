@@ -75,6 +75,13 @@ type CodexSessionFile = CodexSessionManifestEntry;
 const CODEX_SESSION_FILE_CACHE_TTL_MS = 5000;
 const CODEX_COMPACTION_EVENT_DEDUPE_WINDOW_MS = 5_000;
 
+/**
+ * Codex `model_provider` ids that run models locally (Ollama/LM Studio). These
+ * map to the `codex-oss` provider; every other explicit provider is a cloud
+ * Codex source and stays under `codex`.
+ */
+const LOCAL_CODEX_MODEL_PROVIDERS = new Set(["ollama", "lmstudio", "local"]);
+
 function timestampToMs(timestamp: string | undefined): number | null {
   if (!timestamp) return null;
   const ms = Date.parse(timestamp);
@@ -275,6 +282,7 @@ export class CodexSessionReader implements ISessionReader {
         compactEvents,
         provider,
         model,
+        codexModelProvider: metaEntry.payload.model_provider ?? undefined,
         reasoningEffort: runtimeConfig.reasoningEffort,
         serviceTier: runtimeConfig.serviceTier,
         originator: metaEntry.payload.originator,
@@ -1052,37 +1060,28 @@ export class CodexSessionReader implements ISessionReader {
     metaEntry: CodexSessionMetaEntry,
     model?: string,
   ): "codex" | "codex-oss" {
-    // Check explicit provider field if available
+    // An explicit model_provider is the authoritative signal. Only known LOCAL
+    // provider ids map to codex-oss; any other explicit provider (including
+    // cloud custom providers like "deepseek") is a cloud Codex source. A model
+    // brand name (e.g. "deepseek") must never override an explicit cloud
+    // provider — see docs/project/2026-07-31-codex-model-source-selection.md.
     if (metaEntry.payload.model_provider) {
       const provider = metaEntry.payload.model_provider.toLowerCase();
-      if (
-        provider === "ollama" ||
-        provider === "lmstudio" ||
-        provider === "local"
-      ) {
-        return "codex-oss";
-      }
-      if (provider === "openai" || provider === "azure") {
-        return "codex";
-      }
+      return LOCAL_CODEX_MODEL_PROVIDERS.has(provider) ? "codex-oss" : "codex";
     }
 
-    // fallback: check model name for known local models if provider not set
+    // Fallback only when model_provider is absent: limited legacy model-name
+    // heuristic for older local sessions that predate the provider field.
     if (model) {
       const lowerModel = model.toLowerCase();
-      // Heuristic: models starting with "gpt-" or "o1-" are usually OpenAI
       if (lowerModel.startsWith("gpt-") || lowerModel.startsWith("o1-")) {
         return "codex";
       }
-      // Heuristic: other models often implying local usage (llama, mistral, qwen, etc)
-      // or if we just default to everything else being oss?
-      // For safety, let's just stick to specific local keywords for now to avoid false positives.
       if (
         lowerModel.includes("llama") ||
         lowerModel.includes("mistral") ||
         lowerModel.includes("qwen") ||
         lowerModel.includes("gemma") ||
-        lowerModel.includes("deepseek") ||
         lowerModel.includes("phi")
       ) {
         return "codex-oss";

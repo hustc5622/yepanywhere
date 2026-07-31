@@ -211,6 +211,8 @@
   "newSessionClaudeUsageAdditionalTitle": "Other Claude limits",
   "newSessionModelContextWindow": "Context: {size}",
   "newSessionModelThinkingEfforts": "Thinking: {levels}",
+  "newSessionCodexSourceMissingKey": "{source} is unavailable until its API key is configured on the Yep server.",
+  "newSessionCodexSourceUnavailable": "{source} is currently unavailable.",
   "newSessionDefaultsDescription": "Make this the default provider and save its settings separately. Other providers' saved settings are preserved.",
   "newSessionDefaultsAction": "Set as default",
   "newSessionDefaultsSaving": "Saving...",

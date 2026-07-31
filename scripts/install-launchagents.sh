@@ -369,6 +369,9 @@ write_server_plist() {
   if [[ -n "${NEW_LLM_API_KEY:-}" ]]; then
     env_args+=("NEW_LLM_API_KEY" "$NEW_LLM_API_KEY")
   fi
+  if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+    env_args+=("DEEPSEEK_API_KEY" "$DEEPSEEK_API_KEY")
+  fi
   if [[ -n "${SESSION_TITLE_MODEL:-}" ]]; then
     env_args+=("SESSION_TITLE_MODEL" "$SESSION_TITLE_MODEL")
   fi

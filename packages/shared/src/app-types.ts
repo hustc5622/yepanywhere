@@ -542,6 +542,21 @@ export function getModelContextWindow(
     if (limits) return limits.context;
   }
 
+  // Codex now supports non-OpenAI model sources (e.g. DeepSeek). Their windows
+  // differ from the OpenAI Codex default (258K), so consult the curated limits
+  // table for any Codex model that is not an OpenAI gpt-5/codex slug. The
+  // authoritative window still comes from the app-server token-usage report
+  // (recorded per session); this is only the picker/offline fallback.
+  if (provider === "codex") {
+    const lower = model.toLowerCase();
+    const isOpenAiCodexSlug =
+      lower.startsWith("gpt-") || lower.includes("codex");
+    if (!isOpenAiCodexSlug) {
+      const limits = getOpenCodeModelDefaultLimits(model);
+      if (limits) return limits.context;
+    }
+  }
+
   const lowerModel = model.toLowerCase();
 
   if (lowerModel.includes("[1m]")) {
@@ -738,6 +753,8 @@ export interface AppSessionSummary {
   model?: string;
   // Provider-specific reasoning effort for this session (e.g. "max", "xhigh")
   reasoningEffort?: string;
+  /** Codex model source (Codex `model_provider`) for this session, when known. */
+  codexModelProvider?: string;
   // Provider-specific service tier / speed label (e.g. "fast")
   serviceTier?: string;
   // Notification fields

@@ -139,6 +139,8 @@ export interface SessionSummary {
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */
   reasoningEffort?: string;
+  /** Codex model source (Codex `model_provider`) for this session, when known. */
+  codexModelProvider?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;
   /** Launcher identifier from session metadata (e.g. "Codex Desktop", "yep-anywhere") */

@@ -93,10 +93,24 @@ export interface ReasoningEffortInfo {
 }
 
 export interface ModelInfo {
-  /** Model identifier (e.g., "sonnet", "qwen2.5-coder:0.5b") */
+  /**
+   * Model identifier used in the picker. For providers that expose multiple
+   * upstream channels (OpenCode, Codex) this is a composite `source/model`
+   * id (e.g. "deepseek/deepseek-v4-flash"); otherwise it is the bare slug.
+   */
   id: string;
   /** Canonical provider model id resolved from an alias, when available. */
   resolvedModel?: string;
+  /**
+   * Codex app-server `modelProvider` (model source). Only set for Codex models
+   * that are not the default `openai` source, so clients can group and route.
+   */
+  modelProvider?: string;
+  /**
+   * Bare model slug actually sent to the provider (without the `source/`
+   * prefix). Only set when `id` is a composite `source/model` value.
+   */
+  providerModelId?: string;
   /** Human-readable name */
   name: string;
   /** Description of the model's capabilities (optional) */
@@ -205,6 +219,25 @@ export interface SlashCommand {
 }
 
 /**
+ * A selectable Codex model source (Codex `model_provider`) surfaced to the UI.
+ *
+ * This is intentionally minimal: it never carries connection details such as
+ * base URL, API key, env key value, or catalog path. When a source is
+ * unavailable, `unavailableReason` is a stable code (e.g. "missing_api_key")
+ * that clients localize.
+ */
+export interface CodexModelSourceInfo {
+  /** Codex `model_provider` id, e.g. "openai" or "deepseek". */
+  id: string;
+  /** Human-readable display name, e.g. "OpenAI" or "DeepSeek". */
+  displayName: string;
+  /** Whether the source can be selected for a new session right now. */
+  available: boolean;
+  /** Stable reason code when `available` is false, for client localization. */
+  unavailableReason?: string;
+}
+
+/**
  * Provider info for UI display.
  */
 export interface ProviderInfo {
@@ -217,6 +250,8 @@ export interface ProviderInfo {
   user?: { email?: string; name?: string };
   /** Available models for this provider */
   models?: ModelInfo[];
+  /** Selectable Codex model sources (Codex `model_provider`), Codex only. */
+  codexModelSources?: CodexModelSourceInfo[];
   /** Provider's current CLI/default model, when discoverable */
   currentModel?: string;
   /** Provider's current CLI/default effort level, when discoverable */
@@ -293,6 +328,8 @@ export interface NewSessionProviderDefaults {
   reasoningEffort?: string;
   permissionMode?: PermissionMode;
   codexMcpMode?: CodexMcpMode;
+  /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
+  codexModelProvider?: string;
   /** OpenCode-only managed provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
 }
@@ -389,6 +426,9 @@ function getLegacyNewSessionProviderDefaults(
   }
   if (defaults.codexMcpMode !== undefined) {
     providerDefaults.codexMcpMode = defaults.codexMcpMode;
+  }
+  if (defaults.codexModelProvider !== undefined) {
+    providerDefaults.codexModelProvider = defaults.codexModelProvider;
   }
   if (defaults.opencodeConfig !== undefined) {
     providerDefaults.opencodeConfig = defaults.opencodeConfig;

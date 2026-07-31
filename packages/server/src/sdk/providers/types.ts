@@ -76,6 +76,8 @@ export interface StartSessionOptions {
   reasoningEffort?: string;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
+  /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
+  codexModelProvider?: string;
   /** Managed provider/model configuration consumed by OpenCode. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Tool approval callback */
