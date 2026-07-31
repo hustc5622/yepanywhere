@@ -565,19 +565,23 @@ export class SessionContentIndexService {
   }
 
   /**
-   * Search all sessions within an index for `queryLower` (must be lowercased).
-   * Returns one result per matching session with up to `perSessionMatchLimit`
-   * snippets.
+   * Search sessions within an index for `queryLower` (must be lowercased).
+   * When `filterSessionId` is provided, only that exact session is inspected.
+   * Returns one result per matching session with up to
+   * `perSessionMatchLimit` snippets.
    */
   searchScope(
     index: SessionContentIndexState,
     queryLower: string,
     perSessionMatchLimit: number,
+    filterSessionId?: string,
   ): ScopeSearchResult[] {
     const results: ScopeSearchResult[] = [];
     if (!queryLower) return results;
 
     for (const [sessionId, session] of Object.entries(index.sessions)) {
+      if (filterSessionId && sessionId !== filterSessionId) continue;
+
       if (session.isEmpty) {
         // Still allow title-only matches for empty sessions.
         const titleMatch =

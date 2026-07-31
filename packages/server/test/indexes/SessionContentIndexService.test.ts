@@ -137,6 +137,23 @@ describe("SessionContentIndexService", () => {
     expect(service.searchScope(index, "nonexistent", 3)).toHaveLength(0);
   });
 
+  it("can restrict content matches to one session", async () => {
+    await createSession("s1", "shared search term", "first answer");
+    await createSession("s2", "shared search term", "second answer");
+    const index = await service.ensureIndexed(
+      sessionDir,
+      projectId,
+      reader,
+      loadMessages,
+    );
+
+    const results = service.searchScope(index, "shared", 200, "s2");
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.sessionId).toBe("s2");
+    expect(results[0]?.matches[0]?.messageId).toBe("s2-u");
+  });
+
   it("re-indexes a session after its file changes (mtime invalidation)", async () => {
     await createSession("s1", "original question", "original answer");
     let index = await service.ensureIndexed(

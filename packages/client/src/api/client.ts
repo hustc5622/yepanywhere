@@ -1551,11 +1551,17 @@ export const api = {
       stats: GlobalSessionStats;
     }>("/sessions/stats"),
 
-  /** Full-text content search across sessions (global or per-project). */
-  search: (params: { q: string; project?: string; limit?: number }) => {
+  /** Full-text content search across sessions, a project, or one session. */
+  search: (params: {
+    q: string;
+    project?: string;
+    session?: string;
+    limit?: number;
+  }) => {
     const searchParams = new URLSearchParams();
     searchParams.set("q", params.q);
     if (params.project) searchParams.set("project", params.project);
+    if (params.session) searchParams.set("session", params.session);
     if (params.limit) searchParams.set("limit", String(params.limit));
     return fetchJSON<SearchResponse>(`/search?${searchParams.toString()}`);
   },

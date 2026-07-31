@@ -1,7 +1,8 @@
 /**
  * Search route - full-text search across session message content.
  *
- * Scope is global by default, or a single project via `?project=`.
+ * Scope is global by default, a single project via `?project=`, or a single
+ * session via `?project=&session=`.
  * Results are grouped per session, each with snippet matches that the client
  * can deep-link + highlight. Backed by SessionContentIndexService, which caches
  * per-message text and only re-parses files that changed (mtime/size + watcher
@@ -83,6 +84,7 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const MIN_QUERY_LENGTH = 2;
 const MATCHES_PER_SESSION = 3;
+const MATCHES_FOR_SINGLE_SESSION = 200;
 
 /**
  * Build the loadMessages callback the content index uses on cache miss.
@@ -109,11 +111,12 @@ export function createSearchRoutes(deps: SearchDeps): Hono {
   const routes = new Hono();
   const loadMessages = createLoadMessages();
 
-  // GET /api/search?q=&project=&limit=
+  // GET /api/search?q=&project=&session=&limit=
   routes.get("/", async (c) => {
     const start = Date.now();
     const rawQuery = c.req.query("q")?.trim() ?? "";
     const filterProjectId = c.req.query("project");
+    const filterSessionId = c.req.query("session")?.trim() || undefined;
     const limitParam = c.req.query("limit");
     const limit = Math.min(
       Math.max(1, Number.parseInt(limitParam || "", 10) || DEFAULT_LIMIT),
@@ -185,7 +188,8 @@ export function createSearchRoutes(deps: SearchDeps): Hono {
           const scopeResults = deps.sessionContentIndexService.searchScope(
             index,
             queryLower,
-            MATCHES_PER_SESSION,
+            filterSessionId ? MATCHES_FOR_SINGLE_SESSION : MATCHES_PER_SESSION,
+            filterSessionId,
           );
           for (const result of scopeResults) {
             if (bySession.has(result.sessionId)) continue;

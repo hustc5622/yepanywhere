@@ -22,6 +22,7 @@ import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
 import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
+import { SessionSearchBar } from "../components/SessionSearchBar";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
 import { AgentContentProvider } from "../contexts/AgentContentContext";
@@ -334,12 +335,19 @@ function SessionPageContent({
     initialBranchFocus.messageId,
   );
   const [isInspectorOpen, setInspectorOpen] = useState(false);
+  const [isSessionSearchOpen, setSessionSearchOpen] = useState(false);
   const handleTargetFocused = useCallback(() => {
     setTargetMessageId(null);
   }, []);
-  const handleInspectorSelectMessage = useCallback((messageId: string) => {
+  const handleSelectMessage = useCallback((messageId: string) => {
     if (!messageId) return;
     setTargetMessageId(messageId);
+  }, []);
+  const handleOpenSessionSearch = useCallback(() => {
+    setSessionSearchOpen(true);
+  }, []);
+  const handleCloseSessionSearch = useCallback(() => {
+    setSessionSearchOpen(false);
   }, []);
 
   // React Router can reuse this component when only the session parameter
@@ -1669,6 +1677,23 @@ function SessionPageContent({
     </svg>
   );
 
+  const SessionSearchIcon = () => (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  );
+
   const SessionInfoIcon = () => (
     <svg
       width="20"
@@ -1844,6 +1869,26 @@ function SessionPageContent({
               </div>
             </div>
             <div className="session-header-right">
+              <button
+                type="button"
+                className={`session-search-button${
+                  isSessionSearchOpen ? " active" : ""
+                }`}
+                onClick={() =>
+                  isSessionSearchOpen
+                    ? handleCloseSessionSearch()
+                    : handleOpenSessionSearch()
+                }
+                title={t("sessionSearchTitle")}
+                aria-label={t("sessionSearchTitle")}
+                aria-expanded={isSessionSearchOpen}
+                aria-controls={
+                  isSessionSearchOpen ? "session-search-panel" : undefined
+                }
+                aria-keyshortcuts="Control+F Meta+F"
+              >
+                <SessionSearchIcon />
+              </button>
               {!isWideScreen && (
                 <button
                   type="button"
@@ -1869,6 +1914,15 @@ function SessionPageContent({
             </div>
           </div>
         </header>
+
+        <SessionSearchBar
+          isOpen={isSessionSearchOpen}
+          projectId={projectId}
+          sessionId={sessionId}
+          onOpen={handleOpenSessionSearch}
+          onClose={handleCloseSessionSearch}
+          onSelectMessage={handleSelectMessage}
+        />
 
         {session?.parentSessionId && (
           <Link
@@ -2213,7 +2267,7 @@ function SessionPageContent({
           basePath={basePath}
           status={status}
           processState={processState}
-          onSelectMessage={handleInspectorSelectMessage}
+          onSelectMessage={handleSelectMessage}
         />
       ) : (
         <SessionInspector
@@ -2233,7 +2287,7 @@ function SessionPageContent({
           basePath={basePath}
           status={status}
           processState={processState}
-          onSelectMessage={handleInspectorSelectMessage}
+          onSelectMessage={handleSelectMessage}
         />
       )}
     </div>
