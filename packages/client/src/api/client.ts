@@ -529,6 +529,7 @@ export interface DeploymentJob {
   exitCode?: number | null;
   signal?: string | null;
   log?: string;
+  errorReason?: string;
 }
 
 export type ApkBuildType = "release" | "debug";

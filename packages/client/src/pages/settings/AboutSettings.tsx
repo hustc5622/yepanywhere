@@ -38,6 +38,9 @@ export function AboutSettings() {
     useState<DeploymentStatusResponse | null>(null);
   const [deploymentLoading, setDeploymentLoading] = useState(false);
   const [deploymentError, setDeploymentError] = useState<string | null>(null);
+  const [deploymentSuccess, setDeploymentSuccess] = useState<string | null>(
+    null,
+  );
 
   // Fetch worker activity on mount
   useEffect(() => {
@@ -87,6 +90,7 @@ export function AboutSettings() {
   const handleRestart = useCallback(async () => {
     setRestarting(true);
     setDeploymentError(null);
+    setDeploymentSuccess(null);
     try {
       if (deploymentCapable) {
         const { job } = await api.startDeployment({ action: "server-restart" });
@@ -109,7 +113,13 @@ export function AboutSettings() {
   useEffect(() => {
     if (!restarting || !restartJobId) return;
 
+    // 兜底：轮询超过 15 分钟仍未拿到终态（极端情况下服务端彻底失联），
+    // 强制解除“更新中”，避免按钮永久卡死。
+    const MAX_ATTEMPTS = 360; // 2.5s * 360 ≈ 15 分钟
+    let attempts = 0;
+
     const interval = window.setInterval(() => {
+      attempts += 1;
       void api
         .getDeploymentJob(restartJobId)
         .then(({ job }) => {
@@ -119,19 +129,34 @@ export function AboutSettings() {
 
           if (job.status === "running") return;
 
+          // 任务结束：无论成功/失败都先解除“更新中”状态
           setRestartJobId(null);
           setRestarting(false);
 
           if (job.status === "failed") {
-            setDeploymentError(t("aboutRestartDeployFailed"));
+            setDeploymentSuccess(null);
+            setDeploymentError(
+              job.errorReason
+                ? `更新失败：${job.errorReason}`
+                : t("aboutRestartDeployFailed"),
+            );
             return;
           }
 
+          // 更新成功
+          setDeploymentError(null);
+          setDeploymentSuccess(t("aboutDeploySuccess"));
           void refetchVersionFresh();
           void refreshDeploymentStatus();
         })
         .catch(() => {
-          // The server can be unavailable briefly while the deploy job restarts it.
+          // 服务端在重启过程中可能短暂不可用，继续轮询；超过上限则兜底退出。
+          if (attempts >= MAX_ATTEMPTS) {
+            window.clearInterval(interval);
+            setRestartJobId(null);
+            setRestarting(false);
+            setDeploymentError(t("aboutDeployStatusUnknown"));
+          }
         });
     }, 2500);
 
@@ -165,6 +190,7 @@ export function AboutSettings() {
   const handleUpdateNow = useCallback(async () => {
     setRestarting(true);
     setDeploymentError(null);
+    setDeploymentSuccess(null);
     try {
       const { job } = await api.startDeployment({ action: "git-pull-update" });
       setRestartJobId(job.id);
@@ -181,6 +207,7 @@ export function AboutSettings() {
   const handleUpdateToLocal = useCallback(async () => {
     setRestarting(true);
     setDeploymentError(null);
+    setDeploymentSuccess(null);
     try {
       const { job } = await api.startDeployment({ action: "server" });
       setRestartJobId(job.id);
@@ -357,6 +384,9 @@ export function AboutSettings() {
             )}
             {deploymentError && (
               <p className="settings-warning">{deploymentError}</p>
+            )}
+            {deploymentSuccess && (
+              <p className="settings-update-success">{deploymentSuccess}</p>
             )}
           </div>
           <div style={{ display: "flex", gap: "8px", flexDirection: "column" }}>

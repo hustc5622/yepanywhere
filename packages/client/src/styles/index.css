@@ -5735,6 +5735,12 @@ a.sidebar-nav-item {
   font-weight: 500;
 }
 
+.settings-update-success {
+  color: var(--success-color);
+  font-weight: 600;
+  margin-top: var(--space-1);
+}
+
 .settings-up-to-date {
   color: var(--text-muted);
 }

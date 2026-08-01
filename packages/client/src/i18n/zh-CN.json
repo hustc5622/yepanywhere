@@ -779,6 +779,8 @@
   "aboutStagedBundleOutdated": "（已构建包与服务端不同）",
   "aboutUnableRefresh": "暂时无法刷新更新状态。",
   "aboutRestartDeployFailed": "服务端重启失败。请到开发设置里查看部署日志。",
+  "aboutDeploySuccess": "更新成功！服务已用新版本重启。",
+  "aboutDeployStatusUnknown": "更新状态未知（轮询超时）。请刷新页面或到开发设置查看部署日志确认结果。",
   "aboutUpdateHint": "运行 `npm i -g yepanywhere` 进行更新",
   "aboutChecking": "检查中...",
   "aboutCheckUpdates": "检查更新",

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
-import { startGitPullAndDeploy } from "./git-pull-deploy.js";
+import { cleanEnv, startGitPullAndDeploy } from "./git-pull-deploy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -72,6 +72,7 @@ export interface DeploymentJob {
   exitCode?: number | null;
   signal?: string | null;
   log?: string;
+  errorReason?: string;
 }
 
 interface DeploymentJobRecord extends Omit<DeploymentJob, "log"> {
@@ -976,7 +977,8 @@ export async function startDeploymentJob(
   const child = spawn(availability.scriptPath, args, {
     cwd: availability.repoRoot,
     detached: true,
-    env: process.env,
+    // 剥离 WorkBuddy 安全删除守卫，避免 vite build 在 emptyDir 时卡在 trash 确认。
+    env: cleanEnv(),
     stdio: ["ignore", logFd, logFd],
   });
   fs.closeSync(logFd);

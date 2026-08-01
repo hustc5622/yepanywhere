@@ -779,6 +779,8 @@
   "aboutStagedBundleOutdated": "(built package differs from server)",
   "aboutUnableRefresh": "Unable to refresh update status right now.",
   "aboutRestartDeployFailed": "Server restart failed. Check the deployment log in Development settings.",
+  "aboutDeploySuccess": "Update succeeded! The service has been restarted with the new version.",
+  "aboutDeployStatusUnknown": "Update status unknown (polling timed out). Refresh the page or check the deployment log in Development settings to confirm the result.",
   "aboutUpdateHint": "Run `npm i -g yepanywhere` to update",
   "aboutChecking": "Checking...",
   "aboutCheckUpdates": "Check for Updates",
