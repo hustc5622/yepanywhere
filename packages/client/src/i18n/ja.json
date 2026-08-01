@@ -7,6 +7,7 @@
   "actionCloseSidebar": "サイドバーを閉じる",
   "actionExpandSidebar": "サイドバーを展開",
   "actionResizeSidebar": "サイドバーのサイズを変更",
+  "actionResizeInspector": "セッション索引のサイズを変更",
   "actionShowMore": "さらに {count} 件表示",
   "sidebarNewSession": "新しいセッション",
   "sidebarInbox": "受信箱",

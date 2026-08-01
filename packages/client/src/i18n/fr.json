@@ -7,6 +7,7 @@
   "actionCloseSidebar": "Fermer la barre latérale",
   "actionExpandSidebar": "Développer la barre latérale",
   "actionResizeSidebar": "Redimensionner la barre latérale",
+  "actionResizeInspector": "Redimensionner l'index de session",
   "actionShowMore": "Afficher {count} de plus",
   "sidebarNewSession": "Nouvelle session",
   "sidebarInbox": "Boîte de réception",

@@ -4,6 +4,7 @@ import type {
   SessionQuestion,
   ThinkingOption,
 } from "@yep-anywhere/shared";
+import type React from "react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -41,6 +42,14 @@ interface SessionInspectorProps {
   presentation: InspectorPresentation;
   isOpen?: boolean;
   onClose?: () => void;
+  /** Desktop sidebar mode: current inspector width in pixels */
+  inspectorWidth?: number;
+  /** Desktop sidebar mode: called when resize starts */
+  onResizeStart?: () => void;
+  /** Desktop sidebar mode: called during resize with new width */
+  onResize?: (width: number) => void;
+  /** Desktop sidebar mode: called when resize ends */
+  onResizeEnd?: () => void;
   messages: Message[];
   userQuestions?: SessionQuestion[];
   markdownAugments?: Record<string, MarkdownAugment>;
@@ -120,6 +129,10 @@ export function SessionInspector({
   presentation,
   isOpen = true,
   onClose,
+  inspectorWidth,
+  onResizeStart,
+  onResize,
+  onResizeEnd,
   messages,
   userQuestions,
   markdownAugments,
@@ -142,6 +155,47 @@ export function SessionInspector({
   const [activeTab, setActiveTab] = useState<InspectorTab>("questions");
   const [copiedSessionId, setCopiedSessionId] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Desktop sidebar resize state (right panel: dragging the left edge)
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartX = useRef<number | null>(null);
+  const resizeStartWidth = useRef<number | null>(null);
+
+  const handleResizeMouseDown = (e: React.MouseEvent) => {
+    if (presentation !== "sidebar" || !inspectorWidth) return;
+    e.preventDefault();
+    resizeStartX.current = e.clientX;
+    resizeStartWidth.current = inspectorWidth;
+    setIsResizing(true);
+    onResizeStart?.();
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (resizeStartX.current === null || resizeStartWidth.current === null)
+        return;
+      // Left edge dragged left (negative diff) => panel gets wider.
+      const diff = e.clientX - resizeStartX.current;
+      const newWidth = resizeStartWidth.current - diff;
+      onResize?.(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      resizeStartX.current = null;
+      resizeStartWidth.current = null;
+      setIsResizing(false);
+      onResizeEnd?.();
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizing, onResize, onResizeEnd]);
   // Optimistic local state for model select (prop may lag after API call).
   const [selectedModel, setSelectedModel] = useState(model ?? "default");
   // Sync optimistic state when prop changes externally (SSE, re-fetch, etc.).
@@ -678,9 +732,21 @@ export function SessionInspector({
 
   return (
     <aside
-      className="session-inspector session-inspector--sidebar"
+      className={`session-inspector session-inspector--sidebar${isResizing ? " is-resizing" : ""}`}
       aria-label={t("sessionInspectorTitle")}
+      style={inspectorWidth ? { width: inspectorWidth } : undefined}
     >
+      {/* Resize handle - sidebar mode only, on the left edge */}
+      {presentation === "sidebar" && (
+        <div
+          className={`session-inspector-resize-handle ${isResizing ? "active" : ""}`}
+          onMouseDown={handleResizeMouseDown}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("actionResizeInspector")}
+          tabIndex={0}
+        />
+      )}
       {body}
     </aside>
   );

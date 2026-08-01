@@ -7,6 +7,7 @@
   "actionCloseSidebar": "关闭侧边栏",
   "actionExpandSidebar": "展开侧边栏",
   "actionResizeSidebar": "调整侧边栏宽度",
+  "actionResizeInspector": "调整会话索引宽度",
   "actionShowMore": "再显示 {count} 条",
   "sidebarNewSession": "新建会话",
   "sidebarInbox": "收件箱",

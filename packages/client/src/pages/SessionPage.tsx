@@ -35,6 +35,7 @@ import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import type { DraftControls } from "../hooks/useDraftPersistence";
 import { useEngagementTracking } from "../hooks/useEngagementTracking";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
+import { useInspectorWidth } from "../hooks/useInspectorWidth";
 import { getModelSetting, getThinkingSetting } from "../hooks/useModelSettings";
 import { useProject } from "../hooks/useProjects";
 import { useProviders } from "../hooks/useProviders";
@@ -163,6 +164,7 @@ function SessionPageContent({
   const { t } = useI18n();
   const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
     useNavigationLayout();
+  const inspector = useInspectorWidth();
   const basePath = useRemoteBasePath();
   const { project } = useProject(projectId);
   const navigate = useNavigate();
@@ -2070,6 +2072,10 @@ function SessionPageContent({
       {isWideScreen ? (
         <SessionInspector
           presentation="sidebar"
+          inspectorWidth={inspector.width}
+          onResizeStart={() => inspector.setIsResizing(true)}
+          onResize={inspector.setWidth}
+          onResizeEnd={() => inspector.setIsResizing(false)}
           messages={messages}
           userQuestions={session?.userQuestions}
           markdownAugments={markdownAugments}

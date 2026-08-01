@@ -7,6 +7,7 @@
   "actionCloseSidebar": "Seitenleiste schließen",
   "actionExpandSidebar": "Seitenleiste erweitern",
   "actionResizeSidebar": "Größe der Seitenleiste ändern",
+  "actionResizeInspector": "Größe des Sitzungsindex ändern",
   "actionShowMore": "{count} weitere anzeigen",
   "sidebarNewSession": "Neue Sitzung",
   "sidebarInbox": "Posteingang",

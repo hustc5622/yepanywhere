@@ -1203,6 +1203,31 @@ h2 {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+
+/* Resize handle on the LEFT edge (right-side panel) */
+.session-inspector-resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.session-inspector-resize-handle:hover,
+.session-inspector-resize-handle.active {
+  background: var(--app-yep-green);
+  opacity: 0.6;
+}
+
+.session-inspector--sidebar.is-resizing {
+  transition: none;
+  user-select: none;
 }
 
 .session-inspector-header {

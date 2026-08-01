@@ -7,6 +7,7 @@
   "actionCloseSidebar": "Cerrar barra lateral",
   "actionExpandSidebar": "Expandir barra lateral",
   "actionResizeSidebar": "Cambiar tamaño de la barra lateral",
+  "actionResizeInspector": "Cambiar tamaño del índice de sesión",
   "actionShowMore": "Mostrar {count} más",
   "sidebarNewSession": "Nueva sesión",
   "sidebarInbox": "Bandeja de entrada",
