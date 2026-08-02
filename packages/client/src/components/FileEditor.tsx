@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useI18n } from "../i18n";
 import { FileViewer } from "./FileViewer";
+import { MarkdownRichEditor, type SaveState } from "./MarkdownRichEditor";
 
 interface FileEditorProps {
   projectId: string;
@@ -16,18 +17,75 @@ interface FileEditorProps {
   onSaveRef?: (save: (() => Promise<void>) | null) => void;
 }
 
-type EditorMode = "preview" | "edit";
+function isMarkdownPath(filePath: string): boolean {
+  const ext = filePath.split(".").pop()?.toLowerCase() || "";
+  return ext === "md" || ext === "markdown";
+}
 
 /**
- * FileEditor — an in-page, VS Code-style file tab. Shows a syntax-highlighted
- * preview (reusing FileViewer) and an editable mode (line-numbered textarea)
- * that can be saved back to the server. Editing is manual: unsaved changes are
- * tracked (`dirty`) and reported to the parent so it can warn before closing.
+ * FileEditor — an in-page, VS Code-style file tab.
  *
- * Keyboard shortcuts (Win/Mac): Ctrl/Cmd+S saves, Ctrl/Cmd+Z / A etc. are
- * handled natively by the textarea.
+ *   - .md  → MarkdownRichEditor (Tiptap WYSIWYG, click-to-edit, auto-save).
+ *            No source/preview toggle, no edit-mode tab. The rich text view
+ *            *is* the editor.
+ *   - any other text file → FileViewer (syntax-highlighted preview) plus a
+ *            line-numbered textarea for editing. Manual save (Cmd/Ctrl+S).
+ *
+ * Keyboard shortcuts (Win/Mac): Ctrl/Cmd+S saves in both modes.
  */
-export function FileEditor({
+export function FileEditor(props: FileEditorProps) {
+  if (isMarkdownPath(props.filePath)) {
+    return <MarkdownFileEditor {...props} />;
+  }
+  return <TextFileEditor {...props} />;
+}
+
+// ---------------------------------------------------------------------------
+// Markdown (.md) — Tiptap WYSIWYG
+// ---------------------------------------------------------------------------
+
+function MarkdownFileEditor({
+  projectId,
+  filePath,
+  onDirtyChange,
+  onSaveRef,
+}: FileEditorProps) {
+  const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
+
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+
+  // Report dirty to the parent. "dirty" / "saving" / "error" all count as
+  // having unsaved local changes; "saved" / "idle" do not.
+  const dirty =
+    saveState.kind === "dirty" ||
+    saveState.kind === "saving" ||
+    saveState.kind === "error";
+  useEffect(() => {
+    onDirtyChangeRef.current(dirty);
+  }, [dirty]);
+
+  return (
+    <div className="file-editor">
+      <div className="file-editor-body">
+        <MarkdownRichEditor
+          projectId={projectId}
+          filePath={filePath}
+          onSaveStateChange={setSaveState}
+          onSaveRef={onSaveRef}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Plain text / code — existing preview + textarea behavior
+// ---------------------------------------------------------------------------
+
+type EditorMode = "preview" | "edit";
+
+function TextFileEditor({
   projectId,
   filePath,
   onClose,
@@ -35,7 +93,7 @@ export function FileEditor({
   onSaveRef,
 }: FileEditorProps) {
   const { t } = useI18n();
-  const [fileData, setFileData] = useState<FileContentResponse | null>(null);
+  const [, setFileData] = useState<FileContentResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<EditorMode>("preview");

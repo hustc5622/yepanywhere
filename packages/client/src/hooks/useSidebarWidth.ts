@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { UI_KEYS } from "../lib/storageKeys";
 
 // ===== Configuration Constants (easy to tweak) =====
-export const SIDEBAR_MIN_WIDTH = 280; // Current default, minimum allowed
+export const SIDEBAR_MIN_WIDTH = 240; // Narrow default so the center chat / preview gets more space
 export const SIDEBAR_MAX_WIDTH = 560; // 2x minimum
 export const SIDEBAR_COLLAPSED_WIDTH = 56;
 export const MIN_CONTENT_WIDTH = 600; // Minimum main content area width

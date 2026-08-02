@@ -3771,12 +3771,134 @@ pre.code-highlighter-plain code {
   margin-top: 1.5rem;
   margin-bottom: 0.5rem;
   font-weight: 600;
+  line-height: 1.3;
+  /* Keep anchored headings clear of the top edge when scrolled into view */
+  scroll-margin-top: 1rem;
+}
+
+/* Distinct size + weight per level so the document hierarchy is visible */
+.markdown-preview .markdown-rendered h1 {
+  font-size: 1.9rem;
+  font-weight: 700;
+}
+.markdown-preview .markdown-rendered h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--border-color);
+}
+.markdown-preview .markdown-rendered h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.markdown-preview .markdown-rendered h4 {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.markdown-preview .markdown-rendered h5 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+.markdown-preview .markdown-rendered h6 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-muted);
 }
 
 .markdown-preview .markdown-rendered h1:first-child,
 .markdown-preview .markdown-rendered h2:first-child,
 .markdown-preview .markdown-rendered h3:first-child {
   margin-top: 0;
+}
+
+/* Heading anchor link (shown on hover) for copy/permalink affordance */
+.markdown-preview .markdown-rendered .md-heading {
+  position: relative;
+}
+
+.markdown-preview .markdown-rendered .md-heading-anchor {
+  position: absolute;
+  left: -1.1em;
+  width: 1em;
+  text-align: center;
+  color: var(--text-muted);
+  opacity: 0;
+  text-decoration: none;
+  font-weight: 400;
+  transition: opacity 0.15s ease;
+}
+
+.markdown-preview .markdown-rendered .md-heading:hover .md-heading-anchor,
+.markdown-preview .markdown-rendered .md-heading-anchor:focus-visible {
+  opacity: 0.7;
+}
+
+.markdown-preview .markdown-rendered .md-heading-anchor:hover {
+  opacity: 1;
+  color: var(--primary-color);
+}
+
+/* Brief highlight when navigated to via TOC / anchor click */
+@keyframes md-heading-flash {
+  from {
+    background-color: color-mix(in srgb, var(--primary-color) 22%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.markdown-preview .markdown-rendered .md-heading-flash {
+  animation: md-heading-flash 1.2s ease-out;
+  border-radius: 4px;
+}
+
+/* Emphasis & inline formatting */
+.markdown-preview .markdown-rendered strong {
+  font-weight: 700;
+}
+.markdown-preview .markdown-rendered em {
+  font-style: italic;
+}
+.markdown-preview .markdown-rendered del {
+  color: var(--text-muted);
+}
+.markdown-preview .markdown-rendered hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 1.5rem 0;
+}
+.markdown-preview .markdown-rendered kbd {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+}
+.markdown-preview .markdown-rendered .task-list-item {
+  list-style: none;
+  margin-left: -1.2rem;
+}
+.markdown-preview .markdown-rendered input[type="checkbox"] {
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+/* Mermaid diagrams (rendered client-side from ```mermaid blocks) */
+.markdown-preview .markdown-rendered .mermaid {
+  text-align: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin: 0.75rem 0;
+  overflow-x: auto;
+}
+.markdown-preview .markdown-rendered .mermaid svg {
+  max-width: 100%;
+  height: auto;
 }
 
 .markdown-preview .markdown-rendered p {
@@ -3849,6 +3971,72 @@ pre.code-highlighter-plain code {
 .markdown-preview .markdown-rendered img {
   max-width: 100%;
   height: auto;
+}
+
+/* Table of contents (document outline) for markdown previews */
+.markdown-toc {
+  margin: 0.5rem 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  padding: 0.5rem 0.75rem;
+}
+
+.markdown-toc summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-primary);
+  user-select: none;
+}
+
+.markdown-toc > ul {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.markdown-toc-item .markdown-toc-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--link-color);
+  padding: 0.2rem 0.25rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown-toc-item .markdown-toc-link:hover {
+  background: var(--bg-hover);
+  text-decoration: underline;
+}
+
+.markdown-toc-level-1 .markdown-toc-link {
+  font-weight: 600;
+}
+.markdown-toc-level-2 .markdown-toc-link {
+  padding-left: 1rem;
+}
+.markdown-toc-level-3 .markdown-toc-link {
+  padding-left: 2rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.markdown-toc-level-4 .markdown-toc-link {
+  padding-left: 3rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.markdown-toc-level-5 .markdown-toc-link,
+.markdown-toc-level-6 .markdown-toc-link {
+  padding-left: 3.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
 /* Note: When "Show full context" is clicked in the diff modal, JS automatically

@@ -133,6 +133,34 @@ function renderTextWithLocalMediaLinks(text: string): string {
     .join("");
 }
 
+/**
+ * GitHub-style slugger state for heading ids. Reset per render so ids stay
+ * stable within a single document but don't collide across documents.
+ */
+const headingSlugs = new Map<string, number>();
+
+/**
+ * Turn a heading's raw text into a stable, url-safe slug.
+ * Keeps CJK characters and word characters, drops markdown/emphasis markers
+ * and HTML tags, and collapses whitespace to dashes.
+ */
+function slugify(text: string): string {
+  const cleaned = text
+    .replace(/[`*_~]/g, "")
+    .replace(/<[^>]+>/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w一-鿿\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return cleaned || "section";
+}
+
+/** Match fenced ```mermaid code blocks produced by marked (after sanitize). */
+const MERMAID_BLOCK_RE =
+  /<pre><code class="language-mermaid(?:\s[^"]*)?">([\s\S]*?)<\/code><\/pre>/g;
+
 const MARKDOWN_SANITIZE_OPTIONS = {
   allowedTags: [
     "a",
@@ -140,6 +168,7 @@ const MARKDOWN_SANITIZE_OPTIONS = {
     "br",
     "code",
     "del",
+    "div",
     "em",
     "h1",
     "h2",
@@ -175,6 +204,13 @@ const MARKDOWN_SANITIZE_OPTIONS = {
       "data-column",
     ],
     code: ["class"],
+    div: ["class"],
+    h1: ["id"],
+    h2: ["id"],
+    h3: ["id"],
+    h4: ["id"],
+    h5: ["id"],
+    h6: ["id"],
     img: ["src", "alt", "title"],
     input: ["type", "checked", "disabled"],
     ol: ["start"],
@@ -249,6 +285,17 @@ const renderer: RendererObject<string, string> = {
     const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
     return `<img src="${escapedSrc}"${altAttr}${titleAttr}>`;
   },
+  heading(
+    this: RendererThis<string, string>,
+    { tokens, depth, text }: Tokens.Heading,
+  ) {
+    const inner = this.parser.parseInline(tokens);
+    const base = slugify(text);
+    const count = headingSlugs.get(base) ?? 0;
+    const id = count === 0 ? base : `${base}-${count + 1}`;
+    headingSlugs.set(base, count + 1);
+    return `<h${depth} id="${escapeHtml(id)}" class="md-heading">${inner}<a class="md-heading-anchor" href="#${escapeHtml(id)}" aria-hidden="true" tabindex="-1">#</a></h${depth}>\n`;
+  },
 };
 
 const markdownRenderer = new Marked({
@@ -291,10 +338,17 @@ export function sanitizeUrl(
  * Render markdown to sanitized HTML with raw HTML disabled.
  */
 export function renderSafeMarkdown(markdown: string): string {
+  // Reset per-document slug state so heading ids are unique within a file.
+  headingSlugs.clear();
   const rendered = markdownRenderer.parse(markdown, { async: false });
   const html = typeof rendered === "string" ? rendered : "";
   const sanitized = sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS);
-  return sanitized.trim();
+  // Promote ```mermaid fenced blocks to <div class="mermaid"> for client rendering.
+  const withMermaid = sanitized.replace(
+    MERMAID_BLOCK_RE,
+    (_match, code: string) => `<div class="mermaid">${code}</div>`,
+  );
+  return withMermaid.trim();
 }
 
 function escapeHtml(text: string): string {

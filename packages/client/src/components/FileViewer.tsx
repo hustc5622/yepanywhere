@@ -73,6 +73,33 @@ function isMarkdownFile(filePath: string): boolean {
   return ext === "md" || ext === "markdown";
 }
 
+interface TocEntry {
+  id: string;
+  text: string;
+  level: number;
+}
+
+/**
+ * Extract the heading outline (title structure) from server-rendered markdown
+ * HTML. Returns headings in document order with their slug id, text, and level.
+ */
+function extractHeadings(html: string): TocEntry[] {
+  if (typeof document === "undefined" || !html) return [];
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const headings = doc.querySelectorAll("h1, h2, h3, h4, h5, h6");
+  const entries: TocEntry[] = [];
+  for (const h of headings) {
+    const id = h.id;
+    if (!id) continue;
+    const clone = h.cloneNode(true) as HTMLElement;
+    clone.querySelector(".md-heading-anchor")?.remove();
+    const text = (clone.textContent || "").trim();
+    if (!text) continue;
+    entries.push({ id, text, level: Number(h.tagName[1]) });
+  }
+  return entries;
+}
+
 /**
  * Get filename from path.
  */
@@ -223,6 +250,77 @@ export const FileViewer = memo(function FileViewer({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const docxRef = useRef<HTMLDivElement>(null);
+  const markdownRef = useRef<HTMLDivElement | null>(null);
+
+  // Smoothly scroll the markdown preview to a specific heading (by slug id).
+  const scrollToMarkdownHeading = useCallback((id: string) => {
+    const root = markdownRef.current;
+    if (!root) return;
+    const target = root.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.classList.add("md-heading-flash");
+    window.setTimeout(() => target.classList.remove("md-heading-flash"), 1200);
+  }, []);
+
+  // Render mermaid diagrams lazily and wire heading-anchor navigation once the
+  // server-rendered markdown HTML has been injected into the DOM. The body reads
+  // the injected DOM, so the rendered-HTML/filePath deps can't be statically seen.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: DOM-derived deps
+  useEffect(() => {
+    const root = markdownRef.current;
+    if (!root || !showPreview) return;
+
+    const anchors = Array.from(
+      root.querySelectorAll<HTMLAnchorElement>("a.md-heading-anchor"),
+    );
+    const onAnchorClick = (e: Event) => {
+      const href = (e.currentTarget as HTMLAnchorElement).getAttribute("href");
+      if (!href || !href.startsWith("#")) return;
+      e.preventDefault();
+      scrollToMarkdownHeading(decodeURIComponent(href.slice(1)));
+    };
+    for (const a of anchors) {
+      a.addEventListener("click", onAnchorClick);
+    }
+
+    const mermaidNodes = Array.from(
+      root.querySelectorAll<HTMLElement>(".mermaid"),
+    ).filter((n) => !n.getAttribute("data-mermaid-processed"));
+    let cancelled = false;
+    if (mermaidNodes.length > 0) {
+      import("mermaid")
+        .then(({ default: mermaid }) => {
+          if (cancelled) return;
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "loose",
+            theme: "neutral",
+            fontFamily: "inherit",
+          });
+          return mermaid.run({ nodes: mermaidNodes });
+        })
+        .then(() => {
+          if (cancelled) return;
+          for (const n of mermaidNodes) {
+            n.setAttribute("data-mermaid-processed", "true");
+          }
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      cancelled = true;
+      for (const a of anchors) {
+        a.removeEventListener("click", onAnchorClick);
+      }
+    };
+  }, [
+    showPreview,
+    fileData?.renderedMarkdownHtml,
+    filePath,
+    scrollToMarkdownHeading,
+  ]);
 
   // Correct, BASE_PATH-aware URL for binary/inline content (fixes broken
   // images/PDF under sub-path deployments and the desktop shell).
@@ -498,11 +596,34 @@ export const FileViewer = memo(function FileViewer({
 
       // Show rendered markdown preview
       if (showPreview && fileData.renderedMarkdownHtml) {
+        const toc = extractHeadings(fileData.renderedMarkdownHtml);
         return (
           <>
             {toggleButton}
+            {toc.length > 1 && (
+              <details className="markdown-toc" open>
+                <summary>{t("fileViewerToc" as never)}</summary>
+                <ul>
+                  {toc.map((h) => (
+                    <li
+                      key={h.id}
+                      className={`markdown-toc-item markdown-toc-level-${h.level}`}
+                    >
+                      <button
+                        type="button"
+                        className="markdown-toc-link"
+                        onClick={() => scrollToMarkdownHeading(h.id)}
+                      >
+                        {h.text}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
             <div className="markdown-preview">
               <div
+                ref={markdownRef}
                 className="markdown-rendered"
                 // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
                 dangerouslySetInnerHTML={{

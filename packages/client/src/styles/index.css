@@ -12897,6 +12897,658 @@ button.context-usage-indicator--button:focus-visible {
   tab-size: 2;
 }
 
+/* ===== Markdown rich editor (Tiptap) =====
+   The .md file path renders a single WYSIWYG surface — no source/preview
+   toggle, no edit-mode tab. Visual style is kept consistent with the read-
+   only .markdown-preview / .markdown-rendered markup so a file looks the
+   same in the editor tab and in the modal preview. */
+.markdown-rich-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-surface);
+}
+
+.markdown-rich-editor-state {
+  padding: 1rem;
+  color: var(--text-muted);
+}
+
+.markdown-rich-editor-state--error {
+  color: #f85149;
+}
+
+/* ---- Format toolbar (B / I / H1 … / list / quote / code / link / image /
+        undo / redo). One row, fixed at the top of the editor. ---- */
+.markdown-rich-editor-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary, var(--bg-surface));
+  flex-shrink: 0;
+}
+
+.markdown-rich-editor-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+.markdown-rich-editor-toolbar-divider {
+  width: 1px;
+  height: 1.1rem;
+  margin: 0 0.25rem;
+  background: var(--border-color);
+  opacity: 0.6;
+}
+
+.markdown-rich-editor-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.85rem;
+  height: 1.85rem;
+  padding: 0 0.35rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease, border-color 0.1s ease;
+}
+
+.markdown-rich-editor-toolbar-btn:hover:not(:disabled) {
+  background: var(--bg-hover, var(--bg-secondary));
+  color: var(--text-primary);
+}
+
+.markdown-rich-editor-toolbar-btn.is-active {
+  background: var(--bg-hover, var(--bg-secondary));
+  border-color: var(--accent, var(--border-color));
+  color: var(--text-primary);
+}
+
+.markdown-rich-editor-toolbar-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.markdown-rich-editor-toolbar-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Right-aligns the SaveStateBadge inside the format toolbar. */
+.markdown-rich-editor-toolbar-spacer {
+  flex: 1;
+  min-width: 0.25rem;
+}
+
+/* ---- Body wrapper around ProseMirror's content area. ---- */
+.markdown-rich-editor-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  /* Anchor for the absolutely-positioned outline toggle button at the
+     top-right of the editor area. */
+  position: relative;
+}
+
+/* ---- Row containing editor body + outline panel. ---- */
+.markdown-rich-editor-body-row {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---- Frontmatter metadata block (YAML). ----
+   Rendered above the editor so the file's `---...---` block is clearly
+   separated from the document body and is never parsed as markdown. */
+.markdown-rich-editor-frontmatter {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.02));
+  margin: 0.5rem 1rem 0;
+  padding: 0.5rem 0.75rem;
+}
+.markdown-rich-editor-frontmatter-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.markdown-rich-editor-frontmatter-label-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent, #2563eb);
+  display: inline-block;
+}
+.markdown-rich-editor-frontmatter textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+  font-family: var(--font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  box-sizing: border-box;
+  outline: none;
+}
+.markdown-rich-editor-frontmatter textarea:focus {
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--accent, #2563eb) 25%, transparent);
+}
+
+/* ---- Heading outline / navigation panel. ---- */
+.markdown-rich-editor-outline {
+  flex-shrink: 0;
+  width: var(--outline-width, 200px);
+  border-left: 1px solid var(--border-color);
+  background: var(--bg-secondary, transparent);
+  padding: 0.5rem 0;
+  overflow-y: auto;
+  font-size: 0.75rem;
+  position: relative;
+}
+.markdown-rich-editor-outline-title {
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0 0.6rem 0.4rem;
+}
+.markdown-rich-editor-outline ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.markdown-rich-editor-outline-item.level-1
+  > .markdown-rich-editor-outline-link {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.markdown-rich-editor-outline-item.level-2
+  > .markdown-rich-editor-outline-link {
+  color: var(--text-secondary);
+}
+.markdown-rich-editor-outline-item.level-3
+  > .markdown-rich-editor-outline-link {
+  color: var(--text-secondary);
+}
+.markdown-rich-editor-outline-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0.3rem 0.6rem;
+  border-radius: 0;
+  cursor: pointer;
+  /* Allow long Chinese / mixed headings to wrap onto multiple lines so
+     users can read the full title instead of an ellipsized fragment. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.4;
+  border-left: 2px solid transparent;
+}
+.markdown-rich-editor-outline-item.level-1
+  > .markdown-rich-editor-outline-link {
+  padding-left: 0.6rem;
+}
+.markdown-rich-editor-outline-item.level-2
+  > .markdown-rich-editor-outline-link {
+  padding-left: 1.1rem;
+}
+.markdown-rich-editor-outline-item.level-3
+  > .markdown-rich-editor-outline-link {
+  padding-left: 1.6rem;
+}
+.markdown-rich-editor-outline-link:hover {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+  color: var(--text-primary);
+  border-left-color: var(--accent, #2563eb);
+}
+.markdown-rich-editor-outline-toggle {
+  /* Legacy class kept for fallback. The new toggle lives outside the
+     outline panel (see .markdown-rich-editor-outline-toggle-btn below). */
+  display: none;
+}
+
+/* ---- Outline toggle button (top-right of the editor area).
+   Reuses the .sidebar-toggle visual style for consistency with the left
+   sidebar's collapse/expand button. */
+.markdown-rich-editor-outline-toggle-btn {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  z-index: 2;
+  /* Layout / visual props are inherited from .sidebar-toggle. */
+}
+
+/* ---- Heading flash highlight after clicking an outline item. ---- */
+.tiptap-editor h1.md-heading-flash,
+.tiptap-editor h2.md-heading-flash,
+.tiptap-editor h3.md-heading-flash,
+.tiptap-editor h4.md-heading-flash,
+.tiptap-editor h5.md-heading-flash,
+.tiptap-editor h6.md-heading-flash {
+  animation: md-heading-flash-anim 1.2s ease;
+  border-radius: 4px;
+}
+@keyframes md-heading-flash-anim {
+  0% {
+    background-color: rgba(255, 220, 0, 0.45);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+/* ---- Outline resize handle (left edge of the panel, mirrors
+   .sidebar-resize-handle on the left sidebar). ---- */
+.markdown-rich-editor-outline-resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+.markdown-rich-editor-outline-resize-handle:hover,
+.markdown-rich-editor-outline.is-resizing
+  .markdown-rich-editor-outline-resize-handle {
+  background: var(--app-yep-green);
+  opacity: 0.6;
+}
+.markdown-rich-editor-outline.is-resizing {
+  /* Prevent transition lag while dragging. */
+  transition: none;
+  user-select: none;
+}
+
+/* Hide outline on narrow viewports. */
+@media (max-width: 900px) {
+  .markdown-rich-editor-outline,
+  .markdown-rich-editor-outline-toggle-btn {
+    display: none;
+  }
+}
+
+/* ---- ProseMirror content surface. ----
+   Tiptap adds the `tiptap-editor` class via editorProps.attributes; the
+   class is also available as a hook for future theming. The .ProseMirror
+   selector is added by Tiptap itself and styles the editable root. */
+.tiptap-editor,
+.tiptap-editor.ProseMirror {
+  flex: 1;
+  min-height: 0;
+  padding: 0.5rem 0.9rem 1.5rem;
+  outline: none;
+  /* Match the main app body (--font-size-base = 13px) so the editor feels
+     consistent with sidebar text rather than oversized. */
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  color: var(--text-primary);
+  caret-color: var(--text-primary);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.tiptap-editor > *:first-child {
+  margin-top: 0;
+}
+
+.tiptap-editor > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Placeholder shown when the document is empty (Tiptap injects a span with
+   this class before the first block). */
+.tiptap-editor p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--text-muted);
+  pointer-events: none;
+  height: 0;
+}
+
+/* ---- Paragraphs and inline formatting ---- */
+.tiptap-editor p {
+  margin: 0.6rem 0;
+}
+
+.tiptap-editor strong {
+  font-weight: 700;
+}
+
+.tiptap-editor em {
+  font-style: italic;
+}
+
+.tiptap-editor s {
+  color: var(--text-muted);
+}
+
+.tiptap-editor a {
+  color: var(--link-color, #58a6ff);
+  text-decoration: underline;
+  text-decoration-color: color-mix(
+    in srgb,
+    var(--link-color, #58a6ff) 50%,
+    transparent
+  );
+  text-underline-offset: 2px;
+  transition: text-decoration-color 0.15s;
+}
+
+.tiptap-editor a:hover {
+  text-decoration-color: currentColor;
+}
+
+/* ---- Headings (H1–H6) ---- */
+.tiptap-editor h1,
+.tiptap-editor h2,
+.tiptap-editor h3,
+.tiptap-editor h4,
+.tiptap-editor h5,
+.tiptap-editor h6 {
+  margin: 0.9rem 0 0.25rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Heading hierarchy: each level is only ~2px taller than the previous
+   so titles stay visually subordinate to the body, but are still clearly
+   distinguished. Body is 0.8125rem (13px) — h1 ≈ +4px, h2 ≈ +3px,
+   h3 ≈ +2px, h4 ≈ +1px, h5 = body size, h6 = body size (muted). */
+.tiptap-editor h1 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-top: 1.2rem;
+}
+.tiptap-editor h2 {
+  font-size: 1rem;
+  font-weight: 700;
+  padding-bottom: 0.15rem;
+  border-bottom: 1px solid var(--border-color);
+}
+.tiptap-editor h3 {
+  font-size: 0.925rem;
+  font-weight: 600;
+}
+.tiptap-editor h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.tiptap-editor h5 {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.tiptap-editor h6 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* ---- Inline code ---- */
+.tiptap-editor code {
+  font-family: var(--font-mono, "SF Mono", Monaco, monospace);
+  font-size: 0.88em;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+/* Within a code block, drop the inline-code chrome so the source is
+   readable. CodeBlockLowlight also adds hljs classes for highlighting. */
+.tiptap-editor pre code,
+.tiptap-editor pre {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+/* ---- Code block (fenced ```) — lowlight-driven syntax highlighting ---- */
+.tiptap-editor pre {
+  margin: 0.75rem 0;
+  padding: 0.85rem 1rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: var(--font-mono, "SF Mono", Monaco, monospace);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* lowlight default token classes. */
+.tiptap-editor pre .hljs-comment,
+.tiptap-editor pre .hljs-quote {
+  color: #8b949e;
+  font-style: italic;
+}
+.tiptap-editor pre .hljs-keyword,
+.tiptap-editor pre .hljs-selector-tag,
+.tiptap-editor pre .hljs-subst {
+  color: #ff7b72;
+}
+.tiptap-editor pre .hljs-string,
+.tiptap-editor pre .hljs-doctag {
+  color: #a5d6ff;
+}
+.tiptap-editor pre .hljs-number,
+.tiptap-editor pre .hljs-literal {
+  color: #79c0ff;
+}
+.tiptap-editor pre .hljs-title,
+.tiptap-editor pre .hljs-section,
+.tiptap-editor pre .hljs-name {
+  color: #d2a8ff;
+}
+.tiptap-editor pre .hljs-attribute,
+.tiptap-editor pre .hljs-variable {
+  color: #ffa657;
+}
+.tiptap-editor pre .hljs-built_in,
+.tiptap-editor pre .hljs-type {
+  color: #ffa657;
+}
+.tiptap-editor pre .hljs-symbol,
+.tiptap-editor pre .hljs-bullet {
+  color: #f2cc60;
+}
+.tiptap-editor pre .hljs-meta,
+.tiptap-editor pre .hljs-deletion {
+  color: #8b949e;
+}
+.tiptap-editor pre .hljs-addition {
+  color: #aff5b4;
+}
+.tiptap-editor pre .hljs-emphasis {
+  font-style: italic;
+}
+.tiptap-editor pre .hljs-strong {
+  font-weight: 700;
+}
+
+/* ---- Blockquote ---- */
+.tiptap-editor blockquote {
+  margin: 0.75rem 0;
+  padding: 0.25rem 0.9rem;
+  border-left: 3px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+/* ---- Lists ---- */
+.tiptap-editor ul,
+.tiptap-editor ol {
+  margin: 0.6rem 0;
+  padding-left: 1.5rem;
+}
+
+.tiptap-editor ul {
+  list-style: disc;
+}
+.tiptap-editor ol {
+  list-style: decimal;
+}
+.tiptap-editor li {
+  margin: 0.2rem 0;
+}
+.tiptap-editor li > p {
+  margin: 0.2rem 0;
+}
+
+/* Tiptap emits `data-tight="true"` when tiptap-markdown is configured with
+   tightLists; the default style keeps <p> margins inside <li> tight. */
+.tiptap-editor ul[data-tight="true"] li > p,
+.tiptap-editor ol[data-tight="true"] li > p {
+  margin: 0;
+}
+
+/* ---- Task list (GitHub-style checkboxes) ---- */
+.tiptap-editor ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.25rem;
+}
+.tiptap-editor ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+.tiptap-editor ul[data-type="taskList"] li > label {
+  flex-shrink: 0;
+  margin-top: 0.2rem;
+}
+.tiptap-editor ul[data-type="taskList"] li > div {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Horizontal rule ---- */
+.tiptap-editor hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 1.5rem 0;
+}
+
+/* ---- Hard line break (Shift+Enter when `breaks: true`) ---- */
+.tiptap-editor br.ProseMirror-trailingBreak {
+  display: block;
+  content: "";
+  height: 0;
+}
+
+/* ---- Images ---- */
+.tiptap-editor img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin: 0.5rem 0;
+}
+
+/* ---- Tables (rendered by tiptap via @tiptap/extension-table) ---- */
+.tiptap-editor table {
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  table-layout: fixed;
+  width: 100%;
+  overflow: hidden;
+}
+.tiptap-editor table td,
+.tiptap-editor table th {
+  min-width: 1em;
+  border: 1px solid var(--border-color);
+  padding: 0.4rem 0.6rem;
+  vertical-align: top;
+  position: relative;
+}
+.tiptap-editor table th {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  text-align: left;
+}
+.tiptap-editor table .selectedCell:after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--accent, #58a6ff) 18%, transparent);
+  pointer-events: none;
+}
+.tiptap-editor table .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: -2px;
+  width: 4px;
+  background: var(--accent, #58a6ff);
+  pointer-events: none;
+}
+.tiptap-editor .tableWrapper {
+  overflow-x: auto;
+}
+.tiptap-editor.resize-cursor {
+  cursor: ew-resize;
+}
+
+/* ---- Selection ---- */
+.tiptap-editor ::selection {
+  background: color-mix(in srgb, var(--accent, #58a6ff) 30%, transparent);
+}
+
+/* ---- Saving badge in the parent toolbar ---- */
+.file-editor-saving {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.file-editor-saving::before {
+  content: "";
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-muted);
+  border-top-color: transparent;
+  animation: file-editor-saving-spin 0.8s linear infinite;
+}
+
+@keyframes file-editor-saving-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ===== Unsaved-changes confirm modal ===== */
 .unsaved-confirm {
   display: flex;
