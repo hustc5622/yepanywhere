@@ -264,8 +264,7 @@ export function TerminalPage() {
   const params = useParams<{ terminalId?: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
 
   // Stable terminal id for the lifetime of this page mount. Either taken
   // from the URL (attach to existing) or freshly generated (new shell).
@@ -526,9 +525,7 @@ export function TerminalPage() {
         <PageHeader
           title="Terminal"
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
         <div className="terminal-status-bar">
           <span

@@ -828,22 +828,32 @@ export function Sidebar({
         }
       >
         <div className="sidebar-header">
-          {isDesktop && isCollapsed ? (
-            /* Desktop collapsed mode: show toggle button to expand */
-            <button
-              type="button"
-              className="sidebar-toggle"
-              onClick={onToggleExpanded}
-              title={t("actionExpandSidebar")}
-              aria-label={t("actionExpandSidebar")}
-            >
-              <SidebarToggleIcon />
-            </button>
-          ) : isDesktop ? (
-            /* Desktop expanded mode: show brand (toggle is in toolbar) */
-            <span className="sidebar-brand">
-              <YepAnywhereLogo />
-            </span>
+          {isDesktop ? (
+            <>
+              {!isCollapsed && (
+                <span className="sidebar-brand">
+                  <YepAnywhereLogo />
+                </span>
+              )}
+              <button
+                type="button"
+                className="sidebar-toggle"
+                onClick={onToggleExpanded}
+                title={
+                  isCollapsed
+                    ? t("actionExpandSidebar")
+                    : t("actionCollapseSidebar")
+                }
+                aria-label={
+                  isCollapsed
+                    ? t("actionExpandSidebar")
+                    : t("actionCollapseSidebar")
+                }
+                aria-expanded={!isCollapsed}
+              >
+                <SidebarToggleIcon />
+              </button>
+            </>
           ) : (
             /* Mobile mode: brand text + close button */
             <>

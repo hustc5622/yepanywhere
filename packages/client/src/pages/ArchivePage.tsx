@@ -34,8 +34,7 @@ function getArchivedSessionSize(session: ArchivedSessionRecord): number {
 
 export function ArchivePage() {
   const { t, locale } = useI18n();
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
   const navigate = useNavigate();
   const basePath = useRemoteBasePath();
 
@@ -133,9 +132,7 @@ export function ArchivePage() {
         <PageHeader
           title={t("archiveTitle")}
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         <main className="page-scroll-container">

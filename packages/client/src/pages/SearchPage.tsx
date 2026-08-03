@@ -38,8 +38,7 @@ function HighlightedSnippet({ match }: { match: SearchMatch }) {
  */
 export function SearchPage() {
   const { t } = useI18n();
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
   const basePath = useRemoteBasePath();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -200,9 +199,7 @@ export function SearchPage() {
         <PageHeader
           title={t("searchTitle")}
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         <main className="page-scroll-container">

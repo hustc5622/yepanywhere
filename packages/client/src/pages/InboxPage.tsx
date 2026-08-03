@@ -53,6 +53,7 @@ export function InboxPage() {
               : t("inboxTitle")
           }
           onOpenSidebar={openSidebar}
+          isWideScreen={isWideScreen}
         />
 
         <InboxContent

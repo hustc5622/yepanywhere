@@ -224,6 +224,7 @@ export function AgentsPage() {
         <PageHeader
           title={t("agentsTitle" as never)}
           onOpenSidebar={openSidebar}
+          isWideScreen={isWideScreen}
         />
 
         <main className="page-scroll-container">

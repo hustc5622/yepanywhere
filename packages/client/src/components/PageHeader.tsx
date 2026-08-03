@@ -8,12 +8,8 @@ interface PageHeaderProps {
   titleElement?: ReactNode;
   /** Mobile: opens the sidebar overlay */
   onOpenSidebar?: () => void;
-  /** Desktop: toggles sidebar expanded/collapsed */
-  onToggleSidebar?: () => void;
   /** Whether we're in desktop mode (wide screen) */
-  isWideScreen?: boolean;
-  /** Whether the sidebar is currently collapsed (desktop only) */
-  isSidebarCollapsed?: boolean;
+  isWideScreen: boolean;
   /** Show a back button instead of sidebar toggle */
   showBack?: boolean;
   /** Callback when back button is clicked */
@@ -57,23 +53,14 @@ export function PageHeader({
   title,
   titleElement,
   onOpenSidebar,
-  onToggleSidebar,
-  isWideScreen = false,
-  isSidebarCollapsed = false,
+  isWideScreen,
   showBack = false,
   onBack,
 }: PageHeaderProps) {
   const { t } = useI18n();
-  // On desktop: toggle sidebar collapse. On mobile: open sidebar overlay
-  // Hide the toggle on desktop when sidebar is collapsed (sidebar has its own toggle)
-  const handleToggle = isWideScreen
-    ? isSidebarCollapsed
-      ? undefined
-      : onToggleSidebar
-    : onOpenSidebar;
-  const toggleTitle = isWideScreen
-    ? t("actionToggleSidebar")
-    : t("actionOpenSidebar");
+  // Desktop sidebar controls live inside the sidebar itself. Content headers
+  // only need an entry point for the mobile overlay.
+  const handleOpenSidebar = isWideScreen ? undefined : onOpenSidebar;
 
   return (
     <header className="session-header">
@@ -90,13 +77,13 @@ export function PageHeader({
               <BackIcon />
             </button>
           ) : (
-            handleToggle && (
+            handleOpenSidebar && (
               <button
                 type="button"
                 className="sidebar-toggle"
-                onClick={handleToggle}
-                title={toggleTitle}
-                aria-label={toggleTitle}
+                onClick={handleOpenSidebar}
+                title={t("actionOpenSidebar")}
+                aria-label={t("actionOpenSidebar")}
               >
                 <SidebarToggleIcon />
               </button>

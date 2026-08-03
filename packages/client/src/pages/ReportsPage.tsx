@@ -415,8 +415,7 @@ function ReportsDocumentMenu({ report }: { report: ReportDocument }) {
 export function ReportsPage() {
   const { t, locale } = useI18n();
   const { showToast } = useToastContext();
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedPath = searchParams.get("path") || "";
 
@@ -1073,9 +1072,7 @@ export function ReportsPage() {
         <PageHeader
           title={t("reportsTitle")}
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         {selectionDraft &&

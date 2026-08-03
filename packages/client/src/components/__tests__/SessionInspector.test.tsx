@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { SessionQuestion } from "@yep-anywhere/shared";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +19,7 @@ function renderInspector(
   provider: ProviderName,
   messages: Message[],
   userQuestions?: SessionQuestion[],
+  onClose?: () => void,
 ) {
   window.localStorage.setItem(UI_KEYS.locale, "en");
   return render(
@@ -26,6 +27,7 @@ function renderInspector(
       <I18nProvider>
         <SessionInspector
           presentation="sidebar"
+          onClose={onClose}
           messages={messages}
           userQuestions={userQuestions}
           projectId="project-1"
@@ -43,6 +45,20 @@ describe("SessionInspector", () => {
   afterEach(() => {
     cleanup();
     window.localStorage.removeItem(UI_KEYS.locale);
+  });
+
+  it("offers a collapse control for the desktop sidebar", () => {
+    const onClose = vi.fn();
+    renderInspector("claude", [], undefined, onClose);
+
+    const collapseButton = screen.getByRole("button", {
+      name: "Collapse session outline",
+    });
+    expect(collapseButton.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(collapseButton);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("shows Codex channel metadata for Codex sessions", () => {

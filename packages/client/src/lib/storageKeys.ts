@@ -48,6 +48,7 @@ export const UI_KEYS = {
   tabSize: "yep-anywhere-tab-size",
   sidebarWidth: "yep-anywhere-sidebar-width",
   sidebarExpanded: "yep-anywhere-sidebar-expanded",
+  sessionInspectorExpanded: "yep-anywhere-session-inspector-expanded",
   reportsDocumentPanelExpanded: "yep-anywhere-reports-document-panel-expanded",
   funPhrases: "yep-anywhere-fun-phrases-enabled",
   streamingEnabled: "yep-anywhere-streaming-enabled",

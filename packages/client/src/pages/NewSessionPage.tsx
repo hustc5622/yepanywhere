@@ -16,8 +16,7 @@ export function NewSessionPage() {
   const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const projectId = searchParams.get("projectId");
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
 
   // Get all projects to find default if no projectId specified
   const { projects, loading: projectsLoading } = useProjects();
@@ -77,9 +76,7 @@ export function NewSessionPage() {
           <PageHeader
             title={t("newSessionTitle")}
             onOpenSidebar={openSidebar}
-            onToggleSidebar={toggleSidebar}
             isWideScreen={isWideScreen}
-            isSidebarCollapsed={isSidebarCollapsed}
           />
           <main className="page-scroll-container">
             <div className="page-content-inner">
@@ -122,9 +119,7 @@ export function NewSessionPage() {
             ) : undefined
           }
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         <main className="page-scroll-container">

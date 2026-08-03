@@ -43,8 +43,7 @@ export function ProjectsPage() {
   const navigate = useNavigate();
   const basePath = useRemoteBasePath();
 
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
 
   // Count needs-attention items per project (client-side filter - free)
   const attentionByProject = useMemo(() => {
@@ -200,9 +199,7 @@ export function ProjectsPage() {
         <PageHeader
           title={t("pageTitleProjects")}
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         <main className="page-scroll-container">

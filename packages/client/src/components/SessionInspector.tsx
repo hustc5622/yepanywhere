@@ -210,14 +210,29 @@ export function SessionInspector({
             {questions.length} {t("sessionInspectorQuestions").toLowerCase()}
           </div>
         </div>
-        {presentation === "drawer" && (
+        {onClose && (
           <button
             type="button"
             className="session-inspector-close"
             onClick={onClose}
-            aria-label={t("sessionInspectorClose")}
+            title={
+              presentation === "sidebar"
+                ? t("sessionInspectorCollapse")
+                : t("sessionInspectorClose")
+            }
+            aria-label={
+              presentation === "sidebar"
+                ? t("sessionInspectorCollapse")
+                : t("sessionInspectorClose")
+            }
+            aria-controls="session-inspector-panel"
+            aria-expanded="true"
           >
-            <CloseIcon />
+            {presentation === "sidebar" ? (
+              <CollapseRightPanelIcon />
+            ) : (
+              <CloseIcon />
+            )}
           </button>
         )}
       </div>
@@ -541,6 +556,7 @@ export function SessionInspector({
         }}
       >
         <aside
+          id="session-inspector-panel"
           className="session-inspector session-inspector--drawer"
           aria-label={t("sessionInspectorTitle")}
           onClick={(event) => event.stopPropagation()}
@@ -554,6 +570,7 @@ export function SessionInspector({
 
   return (
     <aside
+      id="session-inspector-panel"
       className="session-inspector session-inspector--sidebar"
       aria-label={t("sessionInspectorTitle")}
     >
@@ -1188,6 +1205,26 @@ function CloseIcon() {
     >
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function CollapseRightPanelIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="15" y1="3" x2="15" y2="21" />
+      <polyline points="10 9 13 12 10 15" />
     </svg>
   );
 }

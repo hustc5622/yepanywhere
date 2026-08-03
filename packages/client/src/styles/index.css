@@ -1627,6 +1627,11 @@ h2 {
   background: var(--bg-hover);
 }
 
+.session-inspector-close:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
+
 .session-inspector-status-card {
   margin: var(--space-3);
   padding: var(--space-2);

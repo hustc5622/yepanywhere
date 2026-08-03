@@ -519,8 +519,7 @@ export function BridgeRuntimePrompt({
 }
 
 export function EmulatorPage() {
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
   const {
     version: versionInfo,
     loading: versionLoading,
@@ -603,9 +602,7 @@ export function EmulatorPage() {
         <PageHeader
           title="Devices"
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
         <main className="page-scroll-container">
           <div className="page-content-inner">

@@ -48,6 +48,7 @@ import {
   type StreamingMarkdownCallbacks,
   useSession,
 } from "../hooks/useSession";
+import { useSessionInspectorPreference } from "../hooks/useSessionInspectorPreference";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
 import {
@@ -179,8 +180,7 @@ function SessionPageContent({
   sessionId: string;
 }) {
   const { t } = useI18n();
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
   const basePath = useRemoteBasePath();
   const { project } = useProject(projectId);
   const navigate = useNavigate();
@@ -334,7 +334,11 @@ function SessionPageContent({
   const [targetMessageId, setTargetMessageId] = useState<string | null>(
     initialBranchFocus.messageId,
   );
-  const [isInspectorOpen, setInspectorOpen] = useState(false);
+  const [isInspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
+  const {
+    isExpanded: isInspectorExpanded,
+    setIsExpanded: setInspectorExpanded,
+  } = useSessionInspectorPreference();
   const [isSessionSearchOpen, setSessionSearchOpen] = useState(false);
   const handleTargetFocused = useCallback(() => {
     setTargetMessageId(null);
@@ -1730,23 +1734,14 @@ function SessionPageContent({
         <header className="session-header">
           <div className="session-header-inner">
             <div className="session-header-left">
-              {/* Sidebar toggle - on mobile: opens sidebar, on desktop: collapses/expands */}
-              {/* Hide on desktop when collapsed (sidebar has its own toggle) */}
-              {!(isWideScreen && isSidebarCollapsed) && (
+              {/* Desktop sidebar controls live in the sidebar itself. */}
+              {!isWideScreen && (
                 <button
                   type="button"
                   className="sidebar-toggle"
-                  onClick={isWideScreen ? toggleSidebar : openSidebar}
-                  title={
-                    isWideScreen
-                      ? t("sessionToggleSidebar")
-                      : t("sessionOpenSidebar")
-                  }
-                  aria-label={
-                    isWideScreen
-                      ? t("sessionToggleSidebar")
-                      : t("sessionOpenSidebar")
-                  }
+                  onClick={openSidebar}
+                  title={t("sessionOpenSidebar")}
+                  aria-label={t("sessionOpenSidebar")}
                 >
                   <SidebarIcon />
                 </button>
@@ -1889,13 +1884,31 @@ function SessionPageContent({
               >
                 <SessionSearchIcon />
               </button>
-              {!isWideScreen && (
+              {(!isWideScreen || !isInspectorExpanded) && (
                 <button
                   type="button"
                   className="session-inspector-toggle"
-                  onClick={() => setInspectorOpen(true)}
-                  title={t("sessionInspectorOpen")}
-                  aria-label={t("sessionInspectorOpen")}
+                  onClick={() => {
+                    if (isWideScreen) {
+                      setInspectorExpanded(true);
+                    } else {
+                      setInspectorDrawerOpen(true);
+                    }
+                  }}
+                  title={
+                    isWideScreen
+                      ? t("sessionInspectorExpand")
+                      : t("sessionInspectorOpen")
+                  }
+                  aria-label={
+                    isWideScreen
+                      ? t("sessionInspectorExpand")
+                      : t("sessionInspectorOpen")
+                  }
+                  aria-controls="session-inspector-panel"
+                  aria-expanded={
+                    isWideScreen ? isInspectorExpanded : isInspectorDrawerOpen
+                  }
                 >
                   <SessionOutlineIcon />
                 </button>
@@ -2252,28 +2265,31 @@ function SessionPageContent({
         </footer>
       </div>
       {isWideScreen ? (
-        <SessionInspector
-          presentation="sidebar"
-          messages={messages}
-          userQuestions={session?.userQuestions}
-          markdownAugments={markdownAugments}
-          activeToolApproval={activeToolApproval}
-          projectId={projectId}
-          sessionId={actualSessionId}
-          provider={session?.provider}
-          model={session?.model}
-          reasoningEffort={session?.reasoningEffort}
-          serviceTier={session?.serviceTier}
-          basePath={basePath}
-          status={status}
-          processState={processState}
-          onSelectMessage={handleSelectMessage}
-        />
+        isInspectorExpanded ? (
+          <SessionInspector
+            presentation="sidebar"
+            onClose={() => setInspectorExpanded(false)}
+            messages={messages}
+            userQuestions={session?.userQuestions}
+            markdownAugments={markdownAugments}
+            activeToolApproval={activeToolApproval}
+            projectId={projectId}
+            sessionId={actualSessionId}
+            provider={session?.provider}
+            model={session?.model}
+            reasoningEffort={session?.reasoningEffort}
+            serviceTier={session?.serviceTier}
+            basePath={basePath}
+            status={status}
+            processState={processState}
+            onSelectMessage={handleSelectMessage}
+          />
+        ) : null
       ) : (
         <SessionInspector
           presentation="drawer"
-          isOpen={isInspectorOpen}
-          onClose={() => setInspectorOpen(false)}
+          isOpen={isInspectorDrawerOpen}
+          onClose={() => setInspectorDrawerOpen(false)}
           messages={messages}
           userQuestions={session?.userQuestions}
           markdownAugments={markdownAugments}

@@ -10,10 +10,6 @@ export interface NavigationLayoutContext {
   openSidebar: () => void;
   /** Whether we're in desktop mode (wide screen) */
   isWideScreen: boolean;
-  /** Desktop mode: sidebar is collapsed (icons only) */
-  isSidebarCollapsed: boolean;
-  /** Desktop mode: callback to toggle sidebar expanded/collapsed state */
-  toggleSidebar: () => void;
 }
 
 /**
@@ -62,8 +58,6 @@ export function NavigationLayout() {
   const context: NavigationLayoutContext = {
     openSidebar: () => setSidebarOpen(true),
     isWideScreen,
-    isSidebarCollapsed: effectivelyCollapsed,
-    toggleSidebar: handleToggleExpanded,
   };
 
   // CSS variable for sidebar width

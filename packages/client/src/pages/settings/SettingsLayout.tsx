@@ -75,8 +75,7 @@ export function SettingsLayout() {
   const { category } = useParams<{ category?: string }>();
   const navigate = useNavigate();
   const basePath = useRemoteBasePath();
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
   const { version: versionInfo } = useVersion();
   const capabilities = versionInfo?.capabilities ?? [];
 
@@ -126,9 +125,7 @@ export function SettingsLayout() {
             <PageHeader
               title={t("pageTitleSettings")}
               onOpenSidebar={openSidebar}
-              onToggleSidebar={toggleSidebar}
               isWideScreen={isWideScreen}
-              isSidebarCollapsed={isSidebarCollapsed}
             />
             <main className="page-scroll-container">
               <div className="page-content-inner">
@@ -157,6 +154,7 @@ export function SettingsLayout() {
           <PageHeader
             title={currentCategory?.label || t("pageTitleSettings")}
             onOpenSidebar={openSidebar}
+            isWideScreen={isWideScreen}
             showBack
             onBack={handleBack}
           />
@@ -177,9 +175,7 @@ export function SettingsLayout() {
         <PageHeader
           title={t("pageTitleSettings")}
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
         <main className="page-scroll-container">
           <div className="settings-two-column">

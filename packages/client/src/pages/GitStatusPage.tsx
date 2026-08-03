@@ -30,8 +30,7 @@ export function GitStatusPage() {
   const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const projectId = searchParams.get("projectId");
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
 
   const { projects, loading: projectsLoading } = useProjects();
   const effectiveProjectId = projectId || projects[0]?.id;
@@ -70,9 +69,7 @@ export function GitStatusPage() {
             ) : undefined
           }
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         <main className="page-scroll-container">

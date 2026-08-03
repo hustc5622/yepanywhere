@@ -84,8 +84,7 @@ const formatBusyNames = (
 export function GlobalSessionsPage() {
   const { t } = useI18n();
   const { showToast } = useToastContext();
-  const { openSidebar, isWideScreen, toggleSidebar, isSidebarCollapsed } =
-    useNavigationLayout();
+  const { openSidebar, isWideScreen } = useNavigationLayout();
   const basePath = useRemoteBasePath();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -722,9 +721,7 @@ export function GlobalSessionsPage() {
         <PageHeader
           title={pageTitle}
           onOpenSidebar={openSidebar}
-          onToggleSidebar={toggleSidebar}
           isWideScreen={isWideScreen}
-          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         <main className="page-scroll-container">

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -125,6 +131,41 @@ describe("Sidebar recent session browsing", () => {
         originalLocalStorageDescriptor,
       );
     }
+  });
+
+  it("renders the desktop collapse control inside the expanded sidebar", () => {
+    const onToggleExpanded = vi.fn();
+    const { container } = renderSidebar([], { onToggleExpanded });
+    const header = container.querySelector(".sidebar-header");
+
+    expect(header).not.toBeNull();
+    const collapseButton = within(header as HTMLElement).getByRole("button", {
+      name: "Collapse sidebar",
+    });
+    expect(collapseButton.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(collapseButton);
+
+    expect(onToggleExpanded).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the desktop expand control inside the collapsed sidebar", () => {
+    const onToggleExpanded = vi.fn();
+    const { container } = renderSidebar([], {
+      isCollapsed: true,
+      onToggleExpanded,
+    });
+    const header = container.querySelector(".sidebar-header");
+
+    expect(header).not.toBeNull();
+    const expandButton = within(header as HTMLElement).getByRole("button", {
+      name: "Expand sidebar",
+    });
+    expect(expandButton.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(expandButton);
+
+    expect(onToggleExpanded).toHaveBeenCalledTimes(1);
   });
 
   it("keeps starred sessions collapsed until the section header is clicked", () => {

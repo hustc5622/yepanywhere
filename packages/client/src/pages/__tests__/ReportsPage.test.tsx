@@ -50,8 +50,6 @@ vi.mock("../../layouts", () => ({
   useNavigationLayout: () => ({
     openSidebar: vi.fn(),
     isWideScreen: mocks.isWideScreen,
-    isSidebarCollapsed: false,
-    toggleSidebar: vi.fn(),
   }),
 }));
 
