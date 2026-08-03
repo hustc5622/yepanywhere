@@ -952,6 +952,8 @@
   "markdownEditorPlaceholder": "Commencez à écrire…",
   "markdownEditorWrongType": "L'éditeur enrichi ne prend en charge que les fichiers .md",
   "editorFrontmatterLabel": "Métadonnées",
+  "editorFrontmatterEdit": "Modifier",
+  "editorFrontmatterDone": "Terminé",
   "editorOutline": "Sommaire",
   "editorOutlineCollapse": "Réduire le sommaire",
   "editorOutlineExpand": "Développer le sommaire",

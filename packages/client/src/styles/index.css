@@ -12997,9 +12997,6 @@ button.context-usage-indicator--button:focus-visible {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  /* Anchor for the absolutely-positioned outline toggle button at the
-     top-right of the editor area. */
-  position: relative;
 }
 
 /* ---- Row containing editor body + outline panel. ---- */
@@ -13010,26 +13007,38 @@ button.context-usage-indicator--button:focus-visible {
   min-height: 0;
 }
 
-/* ---- Frontmatter metadata block (YAML). ----
-   Rendered above the editor so the file's `---...---` block is clearly
-   separated from the document body and is never parsed as markdown. */
+/* ---- Frontmatter metadata block (YAML) ----
+   Renders INSIDE the scrollable editor body, above the document content.
+   Visually it recedes from the body: small font, muted gray text, dashed
+   row separators. Default is a read-only key/value table; a small toggle
+   button flips into a raw YAML textarea for structural edits. The block
+   sits at the very top of the document so it scrolls with the content. */
 .markdown-rich-editor-frontmatter {
+  margin: 0.6rem 1rem 1rem;
+  padding: 0.4rem 0.75rem 0.5rem;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-secondary, rgba(0, 0, 0, 0.02));
-  margin: 0.5rem 1rem 0;
-  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.markdown-rich-editor-frontmatter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
 }
 .markdown-rich-editor-frontmatter-label {
-  font-size: 0.72rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-muted);
-  margin-bottom: 0.35rem;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
 }
 .markdown-rich-editor-frontmatter-label-dot {
   width: 6px;
@@ -13038,22 +13047,104 @@ button.context-usage-indicator--button:focus-visible {
   background: var(--accent, #2563eb);
   display: inline-block;
 }
-.markdown-rich-editor-frontmatter textarea {
+.markdown-rich-editor-frontmatter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-surface, transparent);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease, border-color 0.1s ease;
+}
+.markdown-rich-editor-frontmatter-toggle:hover {
+  background: var(--bg-hover, var(--bg-secondary));
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent, #2563eb) 40%, transparent);
+}
+.markdown-rich-editor-frontmatter-toggle.is-editing,
+.markdown-rich-editor-frontmatter.is-editing
+  .markdown-rich-editor-frontmatter-toggle {
+  color: var(--accent, #2563eb);
+  border-color: color-mix(in srgb, var(--accent, #2563eb) 40%, transparent);
+}
+.markdown-rich-editor-frontmatter-toggle svg {
+  width: 12px;
+  height: 12px;
+}
+.markdown-rich-editor-frontmatter-table {
   width: 100%;
-  min-height: 4.5rem;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.markdown-rich-editor-frontmatter-table tr {
+  border-bottom: 1px dashed
+    color-mix(in srgb, var(--border-color) 65%, transparent);
+}
+.markdown-rich-editor-frontmatter-table tr:last-child {
+  border-bottom: none;
+}
+.markdown-rich-editor-frontmatter-key {
+  text-align: left;
+  vertical-align: top;
+  font-family: var(--font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 0.2rem 0.65rem 0.2rem 0;
+  white-space: nowrap;
+  width: 1%;
+  /* Pin the key column to a narrow, content-driven width so long values
+     wrap naturally instead of pushing the table horizontally. */
+}
+.markdown-rich-editor-frontmatter-value {
+  vertical-align: top;
+  padding: 0.2rem 0;
+  color: var(--text-secondary);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.markdown-rich-editor-frontmatter-value.kind-multiline {
+  /* Multi-line scalars (e.g. block-style `description: |`) keep their
+     formatting but stay inside the table cell. */
+  white-space: pre-wrap;
+}
+.markdown-rich-editor-frontmatter-value.kind-list,
+.markdown-rich-editor-frontmatter-value.kind-object {
+  font-family: var(--font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.markdown-rich-editor-frontmatter-value .is-placeholder {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+.markdown-rich-editor-frontmatter-empty {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 0.15rem 0;
+}
+.markdown-rich-editor-frontmatter-textarea {
+  width: 100%;
   resize: vertical;
   font-family: var(--font-mono, "SF Mono", Menlo, Consolas, monospace);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   line-height: 1.55;
-  background: var(--bg-primary, #fff);
+  background: var(--bg-primary, var(--bg-surface));
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   border-radius: 4px;
-  padding: 0.5rem 0.6rem;
+  padding: 0.45rem 0.55rem;
   box-sizing: border-box;
   outline: none;
 }
-.markdown-rich-editor-frontmatter textarea:focus {
+.markdown-rich-editor-frontmatter-textarea:focus {
   border-color: var(--accent, #2563eb);
   box-shadow: 0 0 0 2px
     color-mix(in srgb, var(--accent, #2563eb) 25%, transparent);
@@ -13137,14 +13228,11 @@ button.context-usage-indicator--button:focus-visible {
   display: none;
 }
 
-/* ---- Outline toggle button (top-right of the editor area).
-   Reuses the .sidebar-toggle visual style for consistency with the left
-   sidebar's collapse/expand button. */
+/* ---- Outline toggle button (far right of the toolbar, after the
+   save-state badge). Reuses the .sidebar-toggle visual style for
+   consistency with the left sidebar's collapse/expand button. */
 .markdown-rich-editor-outline-toggle-btn {
-  position: absolute;
-  top: 0.4rem;
-  right: 0.4rem;
-  z-index: 2;
+  flex-shrink: 0;
   /* Layout / visual props are inherited from .sidebar-toggle. */
 }
 

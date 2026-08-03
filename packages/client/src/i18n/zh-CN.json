@@ -1068,6 +1068,8 @@
   "markdownEditorPlaceholder": "开始编辑…",
   "markdownEditorWrongType": "富文本编辑器仅支持 .md 文件",
   "editorFrontmatterLabel": "元数据",
+  "editorFrontmatterEdit": "编辑",
+  "editorFrontmatterDone": "完成",
   "editorOutline": "目录",
   "editorOutlineCollapse": "收起目录",
   "editorOutlineExpand": "展开目录",

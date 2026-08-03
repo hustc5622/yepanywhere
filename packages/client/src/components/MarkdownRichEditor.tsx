@@ -93,6 +93,86 @@ function joinFrontmatter(frontmatter: string | null, body: string): string {
   return `---\n${fm}\n---\n\n${body}`;
 }
 
+interface FrontmatterRow {
+  key: string;
+  value: string;
+  /** How to render the value. Multi-line scalars keep their newlines; list
+   *  and object literals are shown as a single muted line. */
+  kind: "string" | "multiline" | "list" | "object" | "empty";
+}
+
+/**
+ * Tiny YAML key-value parser used purely for display. We don't need full
+ * YAML — frontmatter in markdown files is almost always a flat
+ * `key: scalar` map, occasionally with multi-line scalars or inline
+ * `[a, b]` lists. Anything we can't classify as "scalar" gets a single
+ * muted line so the user can still see something is there.
+ *
+ * Exported for unit tests; consumers should treat the output as opaque
+ * rows for rendering.
+ */
+export function parseFrontmatterRows(yaml: string): FrontmatterRow[] {
+  const rows: FrontmatterRow[] = [];
+  const lines = yaml.replace(/\t/g, "  ").split(/\r?\n/);
+  let i = 0;
+  // `lines[i]` is `string | undefined` under `noUncheckedIndexedAccess`;
+  // treat the end-of-input case as an empty line so the loop terminates.
+  const at = (idx: number): string => lines[idx] ?? "";
+  while (i < lines.length) {
+    const line = at(i);
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      i++;
+      continue;
+    }
+    const m = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
+    if (!m) {
+      i++;
+      continue;
+    }
+    const key = m[1] ?? "";
+    const raw = (m[2] ?? "").trim();
+    // Empty value → look at the indented continuation lines that follow.
+    if (raw === "" || raw === "|" || raw === ">") {
+      const buf: string[] = [];
+      i++;
+      while (i < lines.length) {
+        const next = at(i);
+        if (next === "" || !/^\s/.test(next)) break;
+        buf.push(next.replace(/^\s+/, ""));
+        i++;
+      }
+      const text = buf.join("\n").trim();
+      rows.push({
+        key,
+        value: text,
+        kind: text ? "multiline" : "empty",
+      });
+      continue;
+    }
+    // Inline list `[a, b, c]`.
+    if (/^\[.*]$/.test(raw)) {
+      const inner = raw.slice(1, -1).trim();
+      const items = inner
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      rows.push({ key, value: items.join(" • "), kind: "list" });
+      i++;
+      continue;
+    }
+    // Inline object / JSON-ish — show as-is in a muted line.
+    if (raw.startsWith("{") || raw.startsWith("&")) {
+      rows.push({ key, value: raw, kind: "object" });
+      i++;
+      continue;
+    }
+    rows.push({ key, value: raw, kind: "string" });
+    i++;
+  }
+  return rows;
+}
+
 function slugifyHeading(text: string): string {
   const slug = text
     .toLowerCase()
@@ -266,6 +346,12 @@ function MarkdownRichEditorInner({
   // without reading stale state from a closure.
   const outlineWidthLiveRef = useRef<number>(outlineWidth);
   outlineWidthLiveRef.current = outlineWidth;
+  // Frontmatter view/edit toggle. Default is the read-only table view;
+  // flipping to edit reveals the raw YAML textarea so the user can make
+  // structural changes (e.g. add/rename keys). The textarea auto-saves
+  // through `recomputeAndScheduleSave`, same as the body.
+  const [frontmatterEditing, setFrontmatterEditing] = useState(false);
+  const frontmatterTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const setOutlineWidth = useCallback((next: number) => {
     const clamped = Math.min(
@@ -600,37 +686,53 @@ function MarkdownRichEditorInner({
 
   return (
     <div className="markdown-rich-editor">
-      {hasFrontmatter && (
-        <div className="markdown-rich-editor-frontmatter">
-          <div className="markdown-rich-editor-frontmatter-label">
-            <span className="markdown-rich-editor-frontmatter-label-dot" />
-            {t("editorFrontmatterLabel" as never)}
-          </div>
-          <textarea
-            spellCheck={false}
-            value={frontmatterText}
-            onChange={(e) => {
-              const next = e.target.value;
-              setFrontmatterText(next);
-              recomputeAndScheduleSave(next);
-            }}
-            aria-label={t("editorFrontmatterLabel" as never)}
-          />
-        </div>
-      )}
-      <FormatToolbar editor={editor} saveState={saveState} />
-      <div className="markdown-rich-editor-body-row">
-        <div className="markdown-rich-editor-body">
-          <EditorContent
-            editor={editor}
-            className="markdown-rich-editor-surface"
-          />
-          {showOutline && (
+      <FormatToolbar
+        editor={editor}
+        saveState={saveState}
+        trailing={
+          showOutline ? (
             <OutlineToggleButton
               open={outlineOpen}
               onClick={() => setOutlineOpen((v) => !v)}
             />
+          ) : null
+        }
+      />
+      <div className="markdown-rich-editor-body-row">
+        <div className="markdown-rich-editor-body">
+          {hasFrontmatter && (
+            <FrontmatterBlock
+              editing={frontmatterEditing}
+              value={frontmatterText}
+              onToggle={() => {
+                setFrontmatterEditing((v) => {
+                  const next = !v;
+                  // When switching into edit mode, focus the textarea on
+                  // the next frame so the cursor lands at the end.
+                  if (next) {
+                    requestAnimationFrame(() => {
+                      const ta = frontmatterTextareaRef.current;
+                      if (ta) {
+                        ta.focus();
+                        const len = ta.value.length;
+                        ta.setSelectionRange(len, len);
+                      }
+                    });
+                  }
+                  return next;
+                });
+              }}
+              onChange={(next) => {
+                setFrontmatterText(next);
+                recomputeAndScheduleSave(next);
+              }}
+              textareaRef={frontmatterTextareaRef}
+            />
           )}
+          <EditorContent
+            editor={editor}
+            className="markdown-rich-editor-surface"
+          />
         </div>
         {showOutline && outlineOpen && (
           <HeadingNav
@@ -647,15 +749,123 @@ function MarkdownRichEditorInner({
 }
 
 // ---------------------------------------------------------------------------
+// Frontmatter block
+// ---------------------------------------------------------------------------
+
+interface FrontmatterBlockProps {
+  editing: boolean;
+  value: string;
+  onToggle: () => void;
+  onChange: (next: string) => void;
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+}
+
+/**
+ * Renders the YAML frontmatter inside the editor body so it scrolls with
+ * the document. Default state is a read-only key/value table styled to
+ * visually recede from the main content (smaller, muted, gray). Clicking
+ * the "编辑" / "完成" toggle flips to a raw YAML textarea for structural
+ * edits — the textarea still auto-saves through the same path as the body.
+ */
+function FrontmatterBlock({
+  editing,
+  value,
+  onToggle,
+  onChange,
+  textareaRef,
+}: FrontmatterBlockProps) {
+  const { t } = useI18n();
+  const rows = parseFrontmatterRows(value);
+  const toggleLabel = editing
+    ? (t("editorFrontmatterDone" as never) as string)
+    : (t("editorFrontmatterEdit" as never) as string);
+  return (
+    <section
+      className={`markdown-rich-editor-frontmatter ${editing ? "is-editing" : ""}`}
+      aria-label={t("editorFrontmatterLabel" as never)}
+    >
+      <header className="markdown-rich-editor-frontmatter-header">
+        <span className="markdown-rich-editor-frontmatter-label">
+          <span className="markdown-rich-editor-frontmatter-label-dot" />
+          {t("editorFrontmatterLabel" as never)}
+        </span>
+        <button
+          type="button"
+          className="markdown-rich-editor-frontmatter-toggle"
+          onClick={onToggle}
+          aria-pressed={editing}
+          title={toggleLabel}
+        >
+          {editing ? (
+            <Icon path="M5 12l4 4L19 6" />
+          ) : (
+            <Icon path="M4 20h4l10-10-4-4L4 16v4zM14 5l4 4" />
+          )}
+          <span className="markdown-rich-editor-frontmatter-toggle-label">
+            {toggleLabel}
+          </span>
+        </button>
+      </header>
+      {editing ? (
+        <textarea
+          ref={textareaRef}
+          className="markdown-rich-editor-frontmatter-textarea"
+          spellCheck={false}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={t("editorFrontmatterLabel" as never)}
+          rows={Math.max(3, Math.min(12, value.split("\n").length + 1))}
+        />
+      ) : rows.length === 0 ? (
+        <div className="markdown-rich-editor-frontmatter-empty">—</div>
+      ) : (
+        <table className="markdown-rich-editor-frontmatter-table">
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <th
+                  scope="row"
+                  className="markdown-rich-editor-frontmatter-key"
+                >
+                  {row.key}
+                </th>
+                <td
+                  className={`markdown-rich-editor-frontmatter-value kind-${row.kind}`}
+                >
+                  {row.kind === "empty" ? (
+                    <span className="is-placeholder">—</span>
+                  ) : row.kind === "multiline" ? (
+                    // Multi-line scalars keep their newlines via CSS
+                    // `white-space: pre-wrap` (see the value rule below).
+                    <span className="markdown-rich-editor-frontmatter-value-multiline">
+                      {row.value}
+                    </span>
+                  ) : (
+                    row.value
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Toolbar
 // ---------------------------------------------------------------------------
 
 interface FormatToolbarProps {
   editor: Editor;
   saveState: SaveState;
+  /** Optional node rendered at the far right of the toolbar (after the
+   *  save-state badge), e.g. the outline panel toggle. */
+  trailing?: React.ReactNode;
 }
 
-function FormatToolbar({ editor, saveState }: FormatToolbarProps) {
+function FormatToolbar({ editor, saveState, trailing }: FormatToolbarProps) {
   const { t } = useI18n();
   return (
     <div
@@ -805,6 +1015,7 @@ function FormatToolbar({ editor, saveState }: FormatToolbarProps) {
       </ToolbarGroup>
       <div className="markdown-rich-editor-toolbar-spacer" />
       <SaveStateBadge state={saveState} />
+      {trailing}
     </div>
   );
 }

@@ -1068,6 +1068,8 @@
   "markdownEditorPlaceholder": "Start writing…",
   "markdownEditorWrongType": "Rich editor only supports .md files",
   "editorFrontmatterLabel": "Metadata",
+  "editorFrontmatterEdit": "Edit",
+  "editorFrontmatterDone": "Done",
   "editorOutline": "Contents",
   "editorOutlineCollapse": "Collapse contents",
   "editorOutlineExpand": "Expand contents",
