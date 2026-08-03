@@ -422,6 +422,99 @@ export const CodexContextCompactedEventSchema = z.object({
 });
 
 /**
+ * Structured file change emitted by Codex for apply_patch lifecycle events.
+ * Mirrors codex_protocol::protocol::FileChange.
+ */
+export const CodexFileChangeSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("add"),
+      content: z.string(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("delete"),
+      content: z.string(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("update"),
+      unified_diff: z.string(),
+      move_path: z.string().nullable().optional(),
+    })
+    .passthrough(),
+]);
+
+export type CodexFileChange = z.infer<typeof CodexFileChangeSchema>;
+
+export const CodexPatchChangesSchema = z.record(
+  z.string(),
+  CodexFileChangeSchema,
+);
+
+export const CodexPatchApplyStatusSchema = z.enum([
+  "completed",
+  "failed",
+  "declined",
+]);
+
+export type CodexPatchApplyStatus = z.infer<typeof CodexPatchApplyStatusSchema>;
+
+/** Patch application started. Usually streamed, but accepted in JSONL too. */
+export const CodexPatchApplyBeginEventSchema = z
+  .object({
+    type: z.literal("patch_apply_begin"),
+    call_id: z.string(),
+    turn_id: z.string().optional(),
+    auto_approved: z.boolean().optional(),
+    changes: CodexPatchChangesSchema,
+  })
+  .passthrough();
+
+export type CodexPatchApplyBeginEvent = z.infer<
+  typeof CodexPatchApplyBeginEventSchema
+>;
+
+/** Latest structured patch while apply_patch arguments are still streaming. */
+export const CodexPatchApplyUpdatedEventSchema = z
+  .object({
+    type: z.literal("patch_apply_updated"),
+    call_id: z.string(),
+    changes: CodexPatchChangesSchema,
+  })
+  .passthrough();
+
+export type CodexPatchApplyUpdatedEvent = z.infer<
+  typeof CodexPatchApplyUpdatedEventSchema
+>;
+
+/**
+ * Completed patch application.
+ *
+ * Yep keeps completion fields optional at the ingestion boundary so an older
+ * or partially written rollout remains readable. Normalization prefers
+ * `status`, then falls back to `success`.
+ */
+export const CodexPatchApplyEndEventSchema = z
+  .object({
+    type: z.literal("patch_apply_end"),
+    call_id: z.string(),
+    turn_id: z.string().optional(),
+    stdout: z.string().optional(),
+    stderr: z.string().optional(),
+    success: z.boolean().optional(),
+    changes: CodexPatchChangesSchema.optional(),
+    status: CodexPatchApplyStatusSchema.optional(),
+  })
+  .passthrough();
+
+export type CodexPatchApplyEndEvent = z.infer<
+  typeof CodexPatchApplyEndEventSchema
+>;
+
+/**
  * Generic item completion event.
  */
 export const CodexItemCompletedEventSchema = z
@@ -499,6 +592,9 @@ export const CodexEventMsgPayloadSchema = z.discriminatedUnion("type", [
   CodexAgentReasoningEventSchema,
   CodexTokenCountEventSchema,
   CodexContextCompactedEventSchema,
+  CodexPatchApplyBeginEventSchema,
+  CodexPatchApplyUpdatedEventSchema,
+  CodexPatchApplyEndEventSchema,
   CodexItemCompletedEventSchema,
   CodexImageGenerationEndEventSchema,
   CodexTurnAbortedEventSchema,

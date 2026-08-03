@@ -190,25 +190,23 @@ function codexPersistedEntries(): CodexSessionEntry[] {
       },
     },
     {
-      type: "response_item",
+      type: "event_msg",
       timestamp: "2026-03-05T12:00:07.000Z",
       payload: {
-        type: "custom_tool_call",
+        type: "patch_apply_end",
         call_id: "call-edit",
-        name: "apply_patch",
-        input: {
-          file_path: "src/readme.md",
-          changes: [{ path: "src/readme.md", kind: "update", diff: EDIT_DIFF }],
+        turn_id: "turn-parity-1",
+        stdout: "File changes applied:\nupdate: src/readme.md",
+        stderr: "",
+        success: true,
+        status: "completed",
+        changes: {
+          "src/readme.md": {
+            type: "update",
+            unified_diff: EDIT_DIFF,
+            move_path: null,
+          },
         },
-      },
-    },
-    {
-      type: "response_item",
-      timestamp: "2026-03-05T12:00:08.000Z",
-      payload: {
-        type: "custom_tool_call_output",
-        call_id: "call-edit",
-        output: "File changes applied:\nupdate: src/readme.md",
       },
     },
     {

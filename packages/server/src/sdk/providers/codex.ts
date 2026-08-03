@@ -14,6 +14,15 @@ import {
   summarizeCodexNormalizedMessage,
 } from "../../codex/correlationDebugLogger.js";
 import {
+  type CodexFileChangeStatus,
+  type NormalizedCodexFileChange,
+  buildCodexEditInput,
+  formatCodexFileChangeResult,
+  isCodexFileChangeError,
+  normalizeCodexFileChangeStatus,
+  normalizeCodexFileChanges,
+} from "../../codex/file-change.js";
+import {
   buildCodexImageGenerationResultText,
   normalizeCodexImageGenerationRecord,
   summarizeCodexImageGenerationResult,
@@ -358,12 +367,6 @@ async function terminateChildProcess(
   }
 }
 
-interface NormalizedFileChange {
-  path: string;
-  kind: "add" | "delete" | "update";
-  diff?: string;
-}
-
 type NormalizedThreadItem =
   | { id: string; type: "reasoning"; text: string }
   | {
@@ -383,8 +386,8 @@ type NormalizedThreadItem =
   | {
       id: string;
       type: "file_change";
-      changes: NormalizedFileChange[];
-      status: string;
+      changes: NormalizedCodexFileChange[];
+      status: CodexFileChangeStatus;
     }
   | {
       id: string;
@@ -2378,52 +2381,11 @@ export class CodexProvider implements AgentProvider {
       }
 
       case "file_change": {
-        const changesRaw = Array.isArray(itemRecord.changes)
-          ? itemRecord.changes
-          : [];
-        const changes: NormalizedFileChange[] = [];
-        for (const change of changesRaw) {
-          if (!change || typeof change !== "object") continue;
-          const record = change as Record<string, unknown>;
-          const path = this.getOptionalString(record.path);
-          if (!path) continue;
-
-          let kind: "add" | "delete" | "update" = "update";
-          const rawKind = record.kind;
-          if (typeof rawKind === "string") {
-            if (
-              rawKind === "add" ||
-              rawKind === "delete" ||
-              rawKind === "update"
-            ) {
-              kind = rawKind;
-            }
-          } else if (rawKind && typeof rawKind === "object") {
-            const rawType = this.getOptionalString(
-              (rawKind as Record<string, unknown>).type,
-            );
-            if (
-              rawType === "add" ||
-              rawType === "delete" ||
-              rawType === "update"
-            ) {
-              kind = rawType;
-            }
-          }
-
-          const diff = this.getOptionalString(record.diff) ?? undefined;
-          changes.push({
-            path,
-            kind,
-            ...(diff ? { diff } : {}),
-          });
-        }
-
         return {
           id,
           type: "file_change",
-          changes,
-          status: this.normalizeStatus(itemRecord.status),
+          changes: normalizeCodexFileChanges(itemRecord.changes),
+          status: normalizeCodexFileChangeStatus(itemRecord.status),
         };
       }
 
@@ -2882,16 +2844,7 @@ export class CodexProvider implements AgentProvider {
       }
 
       case "file_change": {
-        const changesSummary = item.changes
-          .map((c) => `${c.kind}: ${c.path}`)
-          .join("\n");
-        const editInput: Record<string, unknown> = {
-          changes: item.changes,
-        };
-        const singlePath = item.changes[0]?.path;
-        if (singlePath && item.changes.length === 1) {
-          editInput.file_path = singlePath;
-        }
+        const editInput = buildCodexEditInput(item.changes);
 
         const toolUseMessage = withCodexTimestamp(
           {
@@ -2936,12 +2889,13 @@ export class CodexProvider implements AgentProvider {
                   {
                     type: "tool_result",
                     tool_use_id: item.id,
-                    content:
-                      item.status === "completed"
-                        ? `File changes applied:\n${changesSummary}`
-                        : item.status === "declined"
-                          ? `File changes declined:\n${changesSummary}`
-                          : `File changes failed:\n${changesSummary}`,
+                    content: formatCodexFileChangeResult(
+                      item.changes,
+                      item.status,
+                    ),
+                    ...(isCodexFileChangeError(item.status)
+                      ? { is_error: true }
+                      : {}),
                   },
                 ],
               },

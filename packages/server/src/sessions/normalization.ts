@@ -9,6 +9,7 @@ import type {
   CodexImageGenerationPayload,
   CodexMessagePayload,
   CodexMessagePhase,
+  CodexPatchApplyEndEvent,
   CodexReasoningPayload,
   CodexResponseItemEntry,
   CodexSessionEntry,
@@ -42,6 +43,13 @@ import {
   logCodexCorrelationDebug,
   summarizeCodexNormalizedMessage,
 } from "../codex/correlationDebugLogger.js";
+import {
+  buildCodexEditInput,
+  formatCodexFileChangeResult,
+  isCodexFileChangeError,
+  normalizeCodexFileChangeStatus,
+  normalizeCodexFileChanges,
+} from "../codex/file-change.js";
 import {
   buildCodexImageGenerationResultText,
   isCodexImageGenerationRecord,
@@ -407,6 +415,8 @@ function convertCodexEntries(
   const responseItemImageGenerationIds =
     collectResponseItemImageGenerationIds(entries);
   const imageGenerationEndKeys = collectCodexImageGenerationEndKeys(entries);
+  const patchApplyEndByCallId = collectCodexPatchApplyEndEvents(entries);
+  const directEditCallIds = collectCodexDirectEditCallIds(entries);
 
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
     const entry = entries[entryIndex];
@@ -418,7 +428,10 @@ function convertCodexEntries(
         messageIndex++,
         toolCallContexts,
         externalToolCalls,
-        { skippedImageGenerationCallKeys: imageGenerationEndKeys },
+        {
+          skippedImageGenerationCallKeys: imageGenerationEndKeys,
+          patchApplyEndByCallId,
+        },
       );
       const convertedMessages = Array.isArray(converted)
         ? converted
@@ -493,9 +506,40 @@ function convertCodexEntries(
           : entry.payload.type === "image_generation_end"
             ? convertCodexImageGenerationEndEvent(entry, messageIndex)
             : null;
+      const patchApplyPayload =
+        entry.payload.type === "patch_apply_end" ? entry.payload : null;
+      const patchApplyMessages = patchApplyPayload
+        ? convertCodexPatchApplyEndEvent(
+            entry,
+            messageIndex,
+            !directEditCallIds.has(patchApplyPayload.call_id),
+          )
+        : null;
       // Skip agent_message and agent_reasoning events when response_item exists;
       // those are streaming artifacts that duplicate full response data.
-      if (imageGenerationMessages) {
+      if (patchApplyMessages && patchApplyPayload) {
+        messageIndex++;
+        for (const msg of patchApplyMessages) {
+          if (isCodexCorrelationDebugEnabled()) {
+            logCodexCorrelationDebug({
+              sessionId,
+              channel: "jsonl",
+              authority: "durable",
+              entryType: entry.type,
+              payloadType: entry.payload.type,
+              eventKind: "file_change",
+              turnId: getCodexEventPayloadTurnId(entry.payload),
+              callId: patchApplyPayload.call_id,
+              status: normalizeCodexFileChangeStatus(
+                patchApplyPayload.status,
+                patchApplyPayload.success,
+              ),
+              ...summarizeCodexNormalizedMessage(msg),
+            });
+          }
+          messages.push(msg);
+        }
+      } else if (imageGenerationMessages) {
         messageIndex++;
         for (const msg of imageGenerationMessages) {
           if (isCodexCorrelationDebugEnabled()) {
@@ -736,6 +780,47 @@ function collectResponseItemImageGenerationIds(
   return ids;
 }
 
+function collectCodexPatchApplyEndEvents(
+  entries: CodexSessionEntry[],
+): Map<string, CodexPatchApplyEndEvent> {
+  const events = new Map<string, CodexPatchApplyEndEvent>();
+  for (const entry of entries) {
+    if (
+      entry.type === "event_msg" &&
+      entry.payload.type === "patch_apply_end"
+    ) {
+      events.set(entry.payload.call_id, entry.payload);
+    }
+  }
+  return events;
+}
+
+function collectCodexDirectEditCallIds(
+  entries: CodexSessionEntry[],
+): Set<string> {
+  const callIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type !== "response_item") continue;
+    const payload = entry.payload;
+    if (
+      payload.type !== "function_call" &&
+      payload.type !== "custom_tool_call"
+    ) {
+      continue;
+    }
+    const rawName = payload.name;
+    if (
+      typeof rawName === "string" &&
+      canonicalizeCodexToolName(rawName, payload.namespace ?? undefined) ===
+        "Edit"
+    ) {
+      const callId = getCodexResponsePayloadCallId(payload);
+      if (callId) callIds.add(callId);
+    }
+  }
+  return callIds;
+}
+
 function collectCodexImageGenerationEndKeys(
   entries: CodexSessionEntry[],
 ): Set<string> {
@@ -820,12 +905,79 @@ function convertCodexImageGenerationEndEvent(
   );
 }
 
+function convertCodexPatchApplyEndEvent(
+  entry: CodexEventMsgEntry,
+  index: number,
+  includeToolUse = true,
+): Message[] | null {
+  if (entry.payload.type !== "patch_apply_end") {
+    return null;
+  }
+
+  const payload = entry.payload;
+  const changes = normalizeCodexFileChanges(payload.changes);
+  const status = normalizeCodexFileChangeStatus(
+    payload.status,
+    payload.success,
+  );
+  const isError = isCodexFileChangeError(status);
+  const stdout = payload.stdout?.trim() ?? "";
+  const stderr = payload.stderr?.trim() ?? "";
+  const fallbackResult = formatCodexFileChangeResult(changes, status);
+  const resultText = isError
+    ? [stderr, stdout].filter(Boolean).join("\n") || fallbackResult
+    : stdout || stderr || fallbackResult;
+  const uuid = `codex-${index}-${entry.timestamp}-patch`;
+
+  const toolUseMessage: Message = {
+    uuid,
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: payload.call_id,
+          name: "Edit",
+          input: buildCodexEditInput(changes),
+          status: isError ? "error" : "completed",
+        },
+      ],
+    },
+    codexToolName: "apply_patch",
+    timestamp: entry.timestamp,
+  };
+  const toolResultMessage: Message = {
+    uuid: `${uuid}-result`,
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: payload.call_id,
+          content: resultText,
+          ...(isError && { is_error: true }),
+        },
+      ],
+    },
+    timestamp: entry.timestamp,
+  };
+
+  return includeToolUse
+    ? [toolUseMessage, toolResultMessage]
+    : [toolResultMessage];
+}
+
 function convertCodexResponseItem(
   entry: CodexResponseItemEntry,
   index: number,
   toolCallContexts: Map<string, CodexToolCallContext>,
   externalToolCalls: PendingExternalCodexToolCall[],
-  options: { skippedImageGenerationCallKeys?: Set<string> } = {},
+  options: {
+    skippedImageGenerationCallKeys?: Set<string>;
+    patchApplyEndByCallId?: ReadonlyMap<string, CodexPatchApplyEndEvent>;
+  } = {},
 ): Message | Message[] | null {
   const payload = entry.payload;
   const uuid = `codex-${index}-${entry.timestamp}`;
@@ -851,11 +1003,18 @@ function convertCodexResponseItem(
         uuid,
         entry.timestamp,
       );
+      enrichCodexEditConversionWithPatchEvent(
+        converted,
+        options.patchApplyEndByCallId?.get(converted.callId),
+      );
       toolCallContexts.set(converted.callId, converted.context);
       return converted.message;
     }
 
     case "function_call_output":
+      if (options.patchApplyEndByCallId?.has(payload.call_id)) {
+        return null;
+      }
       return convertCodexToolCallOutputPayload(
         payload.call_id,
         payload.output,
@@ -870,12 +1029,19 @@ function convertCodexResponseItem(
         uuid,
         entry.timestamp,
       );
+      enrichCodexEditConversionWithPatchEvent(
+        converted,
+        options.patchApplyEndByCallId?.get(converted.callId),
+      );
       toolCallContexts.set(converted.callId, converted.context);
       return converted.message;
     }
 
     case "custom_tool_call_output": {
       const customCallId = payload.call_id ?? `${uuid}-custom-tool-result`;
+      if (options.patchApplyEndByCallId?.has(customCallId)) {
+        return null;
+      }
       return convertCodexToolCallOutputPayload(
         customCallId,
         payload.output,
@@ -907,6 +1073,38 @@ function convertCodexResponseItem(
 
     default:
       return null;
+  }
+}
+
+function enrichCodexEditConversionWithPatchEvent(
+  conversion: CodexToolUseConversion,
+  event: CodexPatchApplyEndEvent | undefined,
+): void {
+  if (!event || conversion.context.toolName !== "Edit") return;
+
+  const changes = normalizeCodexFileChanges(event.changes);
+  if (changes.length === 0) return;
+
+  const editInput = buildCodexEditInput(changes);
+  const currentInput = conversion.context.input;
+  const mergedInput = isRecord(currentInput)
+    ? { ...currentInput, ...editInput }
+    : {
+        ...(currentInput !== undefined ? { input: currentInput } : {}),
+        ...editInput,
+      };
+  conversion.context.input = mergedInput;
+
+  const content = conversion.message.message?.content;
+  if (!Array.isArray(content)) return;
+  const toolUse = content.find(
+    (block) =>
+      block.type === "tool_use" &&
+      block.id === conversion.callId &&
+      block.name === "Edit",
+  );
+  if (toolUse) {
+    toolUse.input = mergedInput;
   }
 }
 

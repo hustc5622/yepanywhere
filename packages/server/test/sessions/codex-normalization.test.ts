@@ -1014,6 +1014,44 @@ describe("Codex Normalization", () => {
     ]);
   });
 
+  it("projects code-mode patch_apply_end events into completed Edit rows", () => {
+    const entries = loadCodexFixtureEntries("code-mode-apply-patch");
+
+    const normalized = normalizeSession(buildLoadedSession(entries));
+    const renderItems = preprocessMessages(normalized.messages);
+    const editItem = renderItems.find(
+      (item) => item.type === "tool_call" && item.toolName === "Edit",
+    );
+
+    expect(normalized.messages).toHaveLength(4);
+    expect(editItem?.type).toBe("tool_call");
+    if (editItem?.type !== "tool_call") {
+      throw new Error(
+        "Expected patch_apply_end to produce an Edit render item",
+      );
+    }
+
+    expect(editItem.status).toBe("complete");
+    expect(editItem.id).toBe("exec-inner-patch");
+    expect(editItem.toolInput).toMatchObject({
+      changes: [
+        {
+          path: "/repo/src/a.ts",
+          kind: "add",
+          diff: "export const value = 1;\n",
+        },
+        {
+          path: "/repo/src/z.ts",
+          kind: "update",
+          diff: "@@ -1 +1 @@\n-old\n+new\n",
+        },
+      ],
+    });
+    expect(editItem.toolResult?.content).toContain(
+      "Success. Updated the following files:",
+    );
+  });
+
   it("surfaces a literal code-mode update_plan alongside the outer exec", () => {
     const script = `
       const plan = await tools.update_plan({
@@ -1657,6 +1695,110 @@ describe("Codex Normalization", () => {
       name: "Edit",
     });
     expect(toolResultMessage?.toolUseResult).toMatchObject({ ok: true });
+  });
+
+  it("merges matching patch events into direct apply_patch without duplicates", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2026-08-03T07:18:17.000Z",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "call-direct-patch",
+          name: "apply_patch",
+          input: "*** Begin Patch\n*** End Patch",
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2026-08-03T07:18:18.000Z",
+        payload: {
+          type: "patch_apply_end",
+          call_id: "call-direct-patch",
+          turn_id: "turn-1",
+          stdout: "Success. Updated the following files:\nM src/a.ts\n",
+          stderr: "",
+          success: true,
+          status: "completed",
+          changes: {
+            "src/a.ts": {
+              type: "update",
+              unified_diff: "@@ -1 +1 @@\n-old\n+new\n",
+              move_path: null,
+            },
+          },
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: "2026-08-03T07:18:18.100Z",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-direct-patch",
+          output: '{"ok":true}',
+        },
+      },
+    ];
+
+    const normalized = normalizeSession(buildLoadedSession(entries));
+    const renderItems = preprocessMessages(normalized.messages);
+    const editItems = renderItems.filter(
+      (item) => item.type === "tool_call" && item.toolName === "Edit",
+    );
+
+    expect(normalized.messages).toHaveLength(2);
+    expect(editItems).toHaveLength(1);
+    expect(editItems[0]).toMatchObject({
+      type: "tool_call",
+      id: "call-direct-patch",
+      status: "complete",
+      toolInput: {
+        input: "*** Begin Patch\n*** End Patch",
+        file_path: "src/a.ts",
+        changes: [
+          {
+            path: "src/a.ts",
+            kind: "update",
+            diff: "@@ -1 +1 @@\n-old\n+new\n",
+          },
+        ],
+      },
+    });
+  });
+
+  it("marks failed patch_apply_end events as failed Edit rows", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "event_msg",
+        timestamp: "2026-08-03T07:18:18.000Z",
+        payload: {
+          type: "patch_apply_end",
+          call_id: "exec-failed-patch",
+          turn_id: "turn-1",
+          stdout: "",
+          stderr: "Failed to apply patch",
+          success: false,
+          status: "failed",
+          changes: {},
+        },
+      },
+    ];
+
+    const normalized = normalizeSession(buildLoadedSession(entries));
+    const renderItems = preprocessMessages(normalized.messages);
+    const editItem = renderItems.find(
+      (item) => item.type === "tool_call" && item.toolName === "Edit",
+    );
+
+    expect(editItem).toMatchObject({
+      type: "tool_call",
+      id: "exec-failed-patch",
+      status: "error",
+      toolResult: {
+        content: "Failed to apply patch",
+        isError: true,
+      },
+    });
   });
 
   it("preserves custom tool namespaces instead of treating namespaced exec as code mode", () => {
