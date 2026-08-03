@@ -81,6 +81,27 @@ pnpm start
 
 在浏览器打开 http://localhost:3400。应用会自动检测已安装的 CLI 智能体。
 
+## 本地服务管理
+
+macOS 和 Windows 使用同一个入口管理开发与生产服务：
+
+```bash
+pnpm yep
+```
+
+入口会先让你选择目标系统，再提供相同的启动、停止、重启、状态和重构建操作。也可以直接执行单个操作：
+
+```bash
+pnpm yep status
+pnpm yep start-dev
+pnpm yep restart-prod
+pnpm yep rebuild
+```
+
+在 Windows 上需要 Windows PowerShell（系统自带）和 Node.js 20+；生产模式的登录自启会使用当前用户的计划任务。macOS 仍可直接使用 `bash yep.sh`，保持原有的 LaunchAgent 管理方式。
+
+完整部署使用 `pnpm run deploy -- --server-only`。`pnpm deploy` 是 pnpm 自带的 workspace 命令，不会调用本项目的部署脚本。
+
 ## 远程访问
 
 服务器运行在你的机器上，客户端会直接连接服务器的 WebSocket。你可以从手机通过自己的网络访问它，例如 Tailscale、局域网 IP，或者带 SSL 终止的反向代理/隧道（如 Caddy）。

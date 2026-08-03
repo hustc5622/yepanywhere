@@ -61,7 +61,20 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes("node_modules")) return;
           if (id.includes("/@xterm/")) return "vendor-xterm";
-          if (id.includes("/react/") || id.includes("/react-dom/")) {
+          // CRITICAL: react, react-dom AND scheduler MUST live in the same
+          // chunk. react-dom imports `scheduler`; `scheduler` (and other React
+          // ecosystem libs like lucide-react) then re-import React, forming a
+          // cross-chunk ESM cycle. Under that cycle, `vendor-react`'s React
+          // export is not yet assigned when lucide's top-level
+          // `createContext({})` runs, throwing
+          // "Cannot read properties of undefined (reading 'createContext')"
+          // and leaving the app blank. Keeping them together removes the
+          // back-edge and the cycle.
+          if (
+            id.includes("/react/") ||
+            id.includes("/react-dom/") ||
+            id.includes("/scheduler/")
+          ) {
             return "vendor-react";
           }
           if (

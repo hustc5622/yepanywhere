@@ -236,6 +236,16 @@ function getCandidateRepoRoots(explicit?: string): string[] {
   ]);
 }
 
+/**
+ * The deploy entrypoint differs per platform:
+ *   - macOS / Linux: the bash script `scripts/deploy.sh`
+ *   - Windows: the PowerShell script `scripts/deploy.ps1`
+ * Both expose the same CLI flags so the API contract is unchanged.
+ */
+function deployScriptName(): string {
+  return process.platform === "win32" ? "deploy.ps1" : "deploy.sh";
+}
+
 export function getDeploymentAvailability(options?: DeployRoutesOptions): {
   available: boolean;
   reason?: string;
@@ -243,7 +253,7 @@ export function getDeploymentAvailability(options?: DeployRoutesOptions): {
   scriptPath?: string;
 } {
   for (const repoRoot of getCandidateRepoRoots(options?.repoRoot)) {
-    const scriptPath = path.join(repoRoot, "scripts", "deploy.sh");
+    const scriptPath = path.join(repoRoot, "scripts", deployScriptName());
     if (fs.existsSync(scriptPath)) {
       return {
         available: true,
@@ -255,8 +265,7 @@ export function getDeploymentAvailability(options?: DeployRoutesOptions): {
 
   return {
     available: false,
-    reason:
-      "scripts/deploy.sh was not found. Set YEP_DEPLOY_REPO_ROOT to the repository root to enable remote deploy actions.",
+    reason: `scripts/${deployScriptName()} was not found. Set YEP_DEPLOY_REPO_ROOT to the repository root to enable remote deploy actions.`,
   };
 }
 
@@ -955,7 +964,14 @@ export async function startDeploymentJob(
   const id = randomUUID();
   const now = new Date().toISOString();
   const logPath = path.join(getLogsDir(options?.dataDir), `${id}.log`);
-  const command = ["scripts/deploy.sh", ...args].map(quoteCommandArg).join(" ");
+  const command = [
+    process.platform === "win32"
+      ? `powershell -File scripts/${deployScriptName()}`
+      : `scripts/${deployScriptName()}`,
+    ...args,
+  ]
+    .map(quoteCommandArg)
+    .join(" ");
   await fsp.writeFile(
     logPath,
     `$ ${command}\nstartedAt=${now}\nrepoRoot=${availability.repoRoot}\n\n`,
@@ -974,7 +990,24 @@ export async function startDeploymentJob(
   await writeJobRecord(options?.dataDir, record);
 
   const logFd = fs.openSync(logPath, "a");
-  const child = spawn(availability.scriptPath, args, {
+
+  // On Windows the deploy entrypoint is a PowerShell script, so we must invoke
+  // powershell explicitly. On POSIX we exec the script directly.
+  const spawnCommand =
+    process.platform === "win32" ? "powershell" : availability.scriptPath;
+  const spawnArgs =
+    process.platform === "win32"
+      ? [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          availability.scriptPath,
+          ...args,
+        ]
+      : args;
+
+  const child = spawn(spawnCommand, spawnArgs, {
     cwd: availability.repoRoot,
     detached: true,
     // 剥离 WorkBuddy 安全删除守卫，避免 vite build 在 emptyDir 时卡在 trash 确认。

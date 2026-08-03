@@ -201,27 +201,49 @@ export async function startGitPullAndDeploy(
       // 步骤 5/5: 重启服务（独立 try，重启异常不影响已记录的 succeeded 状态）
       try {
         logStream.write("\n==> 步骤 5/5: 重启服务\n");
-        const yepScript = path.join(repoRoot, "yep.sh");
-        if (fs.existsSync(yepScript)) {
-          logStream.write("使用 yep.sh 重启生产模式...\n");
-          await runStep("restart-prod", "bash", [yepScript, "restart-prod"], {
-            cwd: repoRoot,
-            timeout: 180000,
-          });
+        if (process.platform === "win32") {
+          const deployPs1 = path.join(repoRoot, "scripts", "deploy.ps1");
+          if (fs.existsSync(deployPs1)) {
+            logStream.write("使用 deploy.ps1 重启生产模式 (Windows)...\n");
+            await runStep(
+              "restart-prod",
+              "powershell",
+              [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                deployPs1,
+                "--restart-only",
+              ],
+              { cwd: repoRoot, timeout: 180000 },
+            );
+          } else {
+            throw new Error("未找到重启脚本 scripts/deploy.ps1");
+          }
         } else {
-          const deployScript = path.join(
-            repoRoot,
-            "scripts",
-            "redeploy-server.sh",
-          );
-          if (fs.existsSync(deployScript)) {
-            logStream.write("使用 redeploy-server.sh 重启...\n");
-            await runStep("redeploy", deployScript, ["--restart-only"], {
+          const yepScript = path.join(repoRoot, "yep.sh");
+          if (fs.existsSync(yepScript)) {
+            logStream.write("使用 yep.sh 重启生产模式...\n");
+            await runStep("restart-prod", "bash", [yepScript, "restart-prod"], {
               cwd: repoRoot,
               timeout: 180000,
             });
           } else {
-            throw new Error("未找到重启脚本");
+            const deployScript = path.join(
+              repoRoot,
+              "scripts",
+              "redeploy-server.sh",
+            );
+            if (fs.existsSync(deployScript)) {
+              logStream.write("使用 redeploy-server.sh 重启...\n");
+              await runStep("redeploy", deployScript, ["--restart-only"], {
+                cwd: repoRoot,
+                timeout: 180000,
+              });
+            } else {
+              throw new Error("未找到重启脚本");
+            }
           }
         }
       } catch (restartErr) {
