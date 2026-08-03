@@ -490,6 +490,17 @@ install_runtime_dependencies() {
   chmod +x "$REPO_ROOT"/dist/npm-package/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
 }
 
+sync_opencode_forwarder_plugin() {
+  local installer="$REPO_ROOT/dist/npm-package/scripts/install-opencode-yep-plugin.sh"
+  if [[ ! -x "$installer" ]]; then
+    err "Expected bundled OpenCode plugin installer at $installer, but it is missing or not executable."
+    return 1
+  fi
+
+  log "Syncing the OpenCode forwarder plugin from the new bundle ..."
+  "$installer"
+}
+
 ensure_bundle_ready() {
   if [[ ! -f "$SERVER_CLI_JS" ]]; then
     err "Expected $SERVER_CLI_JS, but it's missing. Rebuild before restarting."
@@ -513,6 +524,11 @@ if $DO_BUILD; then
   # installs the dependencies for end users; for local dev we have to do
   # it ourselves, otherwise `yepanywhere` boots with ERR_MODULE_NOT_FOUND.
   install_runtime_dependencies
+
+  # Default OpenCode TUI/run processes load this global plugin instead of the
+  # server bundle directly. Keep it on the exact version being deployed so a
+  # bridge fix cannot remain dormant behind a stale, manually copied plugin.
+  sync_opencode_forwarder_plugin
 
   # Sanity-check the linked global command resolves to our bundle.
   GLOBAL_BIN="$(command -v yepanywhere 2>/dev/null || true)"

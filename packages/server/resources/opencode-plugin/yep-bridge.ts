@@ -13,9 +13,11 @@
  *
  * Environment:
  * - YEP_OPENCODE_BRIDGE_URL   override bridge base URL (default http://127.0.0.1:4520)
- * - YEP_MANAGED_OPENCODE=1    set by Yep-managed servers; the plugin stays
- *                             inert there because those events already reach
- *                             the bridge via /global/event SSE.
+ * - YEP_MANAGED_OPENCODE=1    bootstrap marker set by Yep-managed servers.
+ * - YEP_MANAGED_OPENCODE_SERVER_PORT
+ *                             scopes that marker to the exact `serve` process;
+ *                             both markers are consumed during plugin startup
+ *                             so child processes cannot inherit managed status.
  * - YEP_OPENCODE_PLUGIN_DISABLE=1  hard off-switch.
  */
 
@@ -53,6 +55,58 @@ const DECISION_POLL_TIMEOUT_MS = 30_000;
 const DECISION_RETRY_DELAY_MS = 5_000;
 const EVENT_RETRY_DELAY_MS = 1_000;
 
+const MANAGED_MARKER_ENV = "YEP_MANAGED_OPENCODE";
+const MANAGED_SERVER_PORT_ENV = "YEP_MANAGED_OPENCODE_SERVER_PORT";
+
+function readCliOption(args: string[], name: string): string | undefined {
+  const directIndex = args.indexOf(name);
+  if (directIndex >= 0) return args[directIndex + 1];
+  const prefix = `${name}=`;
+  return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+}
+
+function parsePort(value: string | undefined): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const port = Number(value);
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65_535
+    ? port
+    : null;
+}
+
+/**
+ * Consume the managed-server bootstrap marker and decide whether it belongs to
+ * this exact OpenCode process.
+ *
+ * Environment variables normally leak into every tool, daemon, and nested
+ * `opencode run` launched by a managed server. Treating the boolean marker as a
+ * permanent identity therefore makes those unrelated descendants invisible to
+ * Yep. New launchers add the exact managed server port, which must match this
+ * process' `serve --port` invocation. Legacy launchers remain compatible, but
+ * only an actual `serve` command is considered managed.
+ *
+ * Delete the bootstrap variables for both matched and inherited markers. The
+ * current plugin has already made its decision, and descendants must establish
+ * their own identity instead of inheriting this one.
+ */
+function consumeManagedServerMarker(): boolean {
+  if (process.env[MANAGED_MARKER_ENV] !== "1") return false;
+
+  const expectedPortValue = process.env[MANAGED_SERVER_PORT_ENV];
+  const args = process.argv.slice(2);
+  const isServe = args[0] === "serve";
+  const expectedPort = parsePort(expectedPortValue);
+  const actualPort = parsePort(readCliOption(args, "--port"));
+
+  Reflect.deleteProperty(process.env, MANAGED_MARKER_ENV);
+  Reflect.deleteProperty(process.env, MANAGED_SERVER_PORT_ENV);
+
+  if (!isServe) return false;
+  // No port means the process came from a pre-scoping Yep launcher. Preserve
+  // compatibility while still refusing to silence inherited `run`/TUI modes.
+  if (expectedPortValue === undefined) return true;
+  return expectedPort !== null && actualPort === expectedPort;
+}
+
 interface YepDecision {
   id: string;
   confirmed?: boolean;
@@ -88,10 +142,8 @@ export const YepBridge = async (input: {
   client: unknown;
   directory: string;
 }) => {
-  if (
-    process.env.YEP_MANAGED_OPENCODE === "1" ||
-    process.env.YEP_OPENCODE_PLUGIN_DISABLE === "1"
-  ) {
+  const isManagedServer = consumeManagedServerMarker();
+  if (isManagedServer || process.env.YEP_OPENCODE_PLUGIN_DISABLE === "1") {
     return {};
   }
 

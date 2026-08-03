@@ -406,6 +406,17 @@ reload_agent() {
 
 log "Installing Yep Anywhere LaunchAgents ..."
 
+if $INSTALL_OPENCODE_BRIDGE; then
+  OPENCODE_PLUGIN_INSTALLER="$REPO_ROOT/dist/npm-package/scripts/install-opencode-yep-plugin.sh"
+  if [[ ! -x "$OPENCODE_PLUGIN_INSTALLER" ]]; then
+    err "Expected bundled OpenCode plugin installer at $OPENCODE_PLUGIN_INSTALLER."
+    err "Run scripts/deploy.sh --server-only once to rebuild dist/npm-package, then retry."
+    exit 1
+  fi
+  log "Syncing the OpenCode forwarder plugin ..."
+  "$OPENCODE_PLUGIN_INSTALLER"
+fi
+
 if $INSTALL_CODEX_BRIDGE; then
   BRIDGE_PLIST="$(write_bridge_plist)"
   reload_agent "$BRIDGE_LABEL" "$BRIDGE_PLIST"

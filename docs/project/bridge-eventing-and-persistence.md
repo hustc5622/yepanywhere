@@ -48,7 +48,7 @@
 
 方案：**全局转发插件 + bridge 外部实例 API**。
 
-- 插件源：`packages/server/resources/opencode-plugin/yep-bridge.ts`；安装：`scripts/install-opencode-yep-plugin.sh`（复制到 `~/.config/opencode/plugin/yep-bridge.ts`，opencode 对所有实例自动加载）。
+- 插件源：`packages/server/resources/opencode-plugin/yep-bridge.ts`；安装：`scripts/install-opencode-yep-plugin.sh`（复制到 `~/.config/opencode/plugin/yep-bridge.ts`，opencode 对所有实例自动加载）。安装脚本是幂等的；`scripts/redeploy-server.sh` 每次成功构建 bundle 后会同步该版本，首次安装 OpenCode bridge LaunchAgent 时也会同步，避免运行时继续加载旧的手工副本。
 - 插件行为：实例启动时 `POST /external/instances` 注册（instanceId + directory）；`event` 钩子把 permission/question/session.\* 事件 `POST /external/events` 转给 4520；同时对 `GET /external/instances/:id/decisions?waitMs=25000` 长轮询，取到决策后用**进程内 SDK client** 应用（permission → `postSessionIdPermissionsPermissionId`；question → 底层 hey-api client 直调 `/question/:id/reply|reject`）。TUI 弹窗与 Yep 前端谁先答都行，`permission.replied` 事件双向对账。
 - bridge 侧（`OpenCodeBridgeService`）：`SessionRecord.instanceId` 标记外部实例会话（cwd 用插件上报的真实 directory）；`respondToInput` 对带 instanceId 的 pending 走决策队列而非 HTTP 回复；外部会话不参与托管 server 的 status 对账，改用**长轮询心跳**判活（静默 90s 置 idle，10min 遗忘）。
-- 防重复上报：Yep 托管的 opencode 进程（bridge 4521 + provider per-session serve）注入 `YEP_MANAGED_OPENCODE=1`，插件在这些进程内保持沉默；`YEP_OPENCODE_PLUGIN_DISABLE=1` 为硬开关；`YEP_OPENCODE_BRIDGE_URL` 覆盖 bridge 地址。
+- 防重复上报：Yep 托管的 opencode 进程（bridge 4521 + provider per-session serve）注入一次性启动标记 `YEP_MANAGED_OPENCODE=1`，并用 `YEP_MANAGED_OPENCODE_SERVER_PORT` 绑定当前 `serve --port`。插件只对命令与端口都匹配的 server 保持沉默，初始化后立即从 `process.env` 删除这两个标记，避免 agent 启动的服务、工具和嵌套 `opencode run` 继承 managed 身份。兼容旧 launcher 时，没有 port 标记也只允许 `serve` 命令静默；`YEP_OPENCODE_PLUGIN_DISABLE=1` 仍是可继承的硬开关；`YEP_OPENCODE_BRIDGE_URL` 覆盖 bridge 地址。

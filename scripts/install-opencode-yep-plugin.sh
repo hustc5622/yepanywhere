@@ -34,6 +34,11 @@ if [[ ! -f "$SOURCE" ]]; then
 fi
 
 mkdir -p "$TARGET_DIR"
+if [[ -f "$TARGET" ]] && cmp -s "$SOURCE" "$TARGET"; then
+  echo "Already up to date: $TARGET"
+  exit 0
+fi
+
 cp "$SOURCE" "$TARGET"
 echo "Installed $TARGET"
 echo "New opencode instances will now report approvals to the Yep bridge (4520)."

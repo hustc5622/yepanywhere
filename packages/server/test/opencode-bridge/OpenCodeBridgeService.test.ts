@@ -83,7 +83,9 @@ const server = http.createServer((req, res) => {
       llmApiKey: process.env.LLM_API_KEY ?? null,
       llmApiBase: process.env.LLM_API_BASE ?? null,
       llmSubModule: process.env.LLM_SUB_MODULE ?? null,
-      managedApiKey: process.env.YEP_OPENCODE_LLM_API_KEY ?? null
+      managedApiKey: process.env.YEP_OPENCODE_LLM_API_KEY ?? null,
+      managedMarker: process.env.YEP_MANAGED_OPENCODE ?? null,
+      managedServerPort: process.env.YEP_MANAGED_OPENCODE_SERVER_PORT ?? null
     }));
     return;
   }
@@ -1709,6 +1711,8 @@ describe("OpenCodeBridgeService", () => {
       llmApiBase: "https://api.ohmyrouter.com/v1",
       llmSubModule: "claude-code-internal",
       managedApiKey: "bridge-key",
+      managedMarker: "1",
+      managedServerPort: String(startPort),
     });
 
     await bridge.shutdown();

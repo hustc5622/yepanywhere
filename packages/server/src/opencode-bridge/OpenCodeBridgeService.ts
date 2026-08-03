@@ -3098,7 +3098,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         // The Yep forwarder plugin (installed globally in
         // ~/.config/opencode/plugin) must stay inert inside Yep-managed
         // servers: their events already reach the bridge via /global/event.
+        // Pair the bootstrap marker with the exact serve port so a nested
+        // opencode process cannot inherit the managed-server identity.
         YEP_MANAGED_OPENCODE: "1",
+        YEP_MANAGED_OPENCODE_SERVER_PORT: String(port),
       },
     });
     this.opencodeProcess = child;

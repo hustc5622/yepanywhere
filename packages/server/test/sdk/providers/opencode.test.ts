@@ -3895,11 +3895,14 @@ custom-openai/glm-5.2
     const provider = new OpenCodeProvider();
     const getOpenCodeEnv = (
       provider as unknown as {
-        getOpenCodeEnv: () => NodeJS.ProcessEnv;
+        getOpenCodeEnv: (
+          config: undefined,
+          managedServerPort: number,
+        ) => NodeJS.ProcessEnv;
       }
     ).getOpenCodeEnv.bind(provider);
 
-    const env = getOpenCodeEnv();
+    const env = getOpenCodeEnv(undefined, 4567);
     const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
       provider?: Record<string, { options?: Record<string, unknown> }>;
     };
@@ -3907,6 +3910,8 @@ custom-openai/glm-5.2
     expect(env.LLM_API_KEY).toBe("test-key");
     expect(env.LLM_API_BASE).toBe("https://example.test/v1");
     expect(env).not.toHaveProperty("YEP_OPENCODE_LLM_API_KEY");
+    expect(env.YEP_MANAGED_OPENCODE).toBe("1");
+    expect(env.YEP_MANAGED_OPENCODE_SERVER_PORT).toBe("4567");
     expect(config.provider).toBeUndefined();
     expect(env).not.toHaveProperty("LLM_SUB_MODULE");
   });
@@ -3924,17 +3929,23 @@ custom-openai/glm-5.2
     const provider = new OpenCodeProvider();
     const getOpenCodeEnv = (
       provider as unknown as {
-        getOpenCodeEnv: (config: {
-          model: string;
-          requestProtocol: "anthropic";
-        }) => NodeJS.ProcessEnv;
+        getOpenCodeEnv: (
+          config: {
+            model: string;
+            requestProtocol: "anthropic";
+          },
+          managedServerPort: number,
+        ) => NodeJS.ProcessEnv;
       }
     ).getOpenCodeEnv.bind(provider);
 
-    const env = getOpenCodeEnv({
-      model: "deepseek-v4-pro",
-      requestProtocol: "anthropic",
-    });
+    const env = getOpenCodeEnv(
+      {
+        model: "deepseek-v4-pro",
+        requestProtocol: "anthropic",
+      },
+      4567,
+    );
     const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
       provider?: Record<string, { options?: Record<string, unknown> }>;
     };
@@ -3957,17 +3968,23 @@ custom-openai/glm-5.2
     const provider = new OpenCodeProvider();
     const getOpenCodeEnv = (
       provider as unknown as {
-        getOpenCodeEnv: (config: {
-          model: string;
-          requestProtocol: "openai-compatible";
-        }) => NodeJS.ProcessEnv;
+        getOpenCodeEnv: (
+          config: {
+            model: string;
+            requestProtocol: "openai-compatible";
+          },
+          managedServerPort: number,
+        ) => NodeJS.ProcessEnv;
       }
     ).getOpenCodeEnv.bind(provider);
 
-    const env = getOpenCodeEnv({
-      model: "glm-5.2",
-      requestProtocol: "openai-compatible",
-    });
+    const env = getOpenCodeEnv(
+      {
+        model: "glm-5.2",
+        requestProtocol: "openai-compatible",
+      },
+      4567,
+    );
     const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
       provider?: Record<string, { options?: Record<string, unknown> }>;
     };
@@ -3988,19 +4005,25 @@ custom-openai/glm-5.2
     const provider = new OpenCodeProvider();
     const getOpenCodeEnv = (
       provider as unknown as {
-        getOpenCodeEnv: (config: {
-          model: string;
-          requestProtocol: "anthropic";
-          limits: { context: number; output: number };
-        }) => NodeJS.ProcessEnv;
+        getOpenCodeEnv: (
+          config: {
+            model: string;
+            requestProtocol: "anthropic";
+            limits: { context: number; output: number };
+          },
+          managedServerPort: number,
+        ) => NodeJS.ProcessEnv;
       }
     ).getOpenCodeEnv.bind(provider);
 
-    const env = getOpenCodeEnv({
-      model: "deepseek-v4-pro",
-      requestProtocol: "anthropic",
-      limits: { context: 1_000_000, output: 32_000 },
-    });
+    const env = getOpenCodeEnv(
+      {
+        model: "deepseek-v4-pro",
+        requestProtocol: "anthropic",
+        limits: { context: 1_000_000, output: 32_000 },
+      },
+      4567,
+    );
     const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
       provider?: Record<
         string,

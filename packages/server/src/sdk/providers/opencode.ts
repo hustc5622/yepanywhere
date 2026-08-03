@@ -965,7 +965,7 @@ export class OpenCodeProvider implements AgentProvider {
           {
             cwd,
             stdio: ["pipe", "pipe", "pipe"],
-            env: this.getOpenCodeEnv(options.opencodeConfig),
+            env: this.getOpenCodeEnv(options.opencodeConfig, port),
             shell: process.platform === "win32",
           },
         );
@@ -3754,7 +3754,8 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   private getOpenCodeEnv(
-    sessionConfig?: OpenCodeSessionConfig,
+    sessionConfig: OpenCodeSessionConfig | undefined,
+    managedServerPort: number,
   ): NodeJS.ProcessEnv {
     const gatewayConfig = resolveOpenCodeGatewayConfig(process.env);
     const env = sessionConfig
@@ -3770,6 +3771,10 @@ export class OpenCodeProvider implements AgentProvider {
       // Keep the global Yep forwarder plugin inert inside Yep-managed
       // per-session servers; the provider consumes their events directly.
       YEP_MANAGED_OPENCODE: "1",
+      // Scope the bootstrap marker to this exact serve invocation. The plugin
+      // consumes both values at startup so tools and nested OpenCode processes
+      // do not inherit managed-server identity.
+      YEP_MANAGED_OPENCODE_SERVER_PORT: String(managedServerPort),
     };
   }
 
