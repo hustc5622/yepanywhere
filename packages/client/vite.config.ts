@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { cspPlugin } from "./vite-plugin-csp";
+import { faviconVersionPlugin } from "./vite-plugin-favicon-version";
 import { reloadNotify } from "./vite-plugin-reload-notify";
 
 // NO_FRONTEND_RELOAD: Disable HMR and use manual reload notifications instead
@@ -52,6 +53,8 @@ function getDevBuildId(): string {
   }
 }
 
+const buildId = process.env.YEP_BUILD_ID ?? getDevBuildId();
+
 export default defineConfig({
   clearScreen: false,
   base: basePath,
@@ -81,7 +84,7 @@ export default defineConfig({
     },
   },
   define: {
-    __BUILD_ID__: JSON.stringify(process.env.YEP_BUILD_ID ?? getDevBuildId()),
+    __BUILD_ID__: JSON.stringify(buildId),
     __APP_VERSION__: JSON.stringify(
       process.env.YEP_BUILD_VERSION ??
         process.env.YEP_BUILD_GIT_DESCRIBE ??
@@ -97,6 +100,9 @@ export default defineConfig({
     react(),
     // When HMR is disabled, use reload-notify plugin to tell backend about changes
     reloadNotify({ enabled: noFrontendReload }),
+    // A browser can remember a failed favicon download for the lifetime of the
+    // process. A build-specific URL guarantees that a successful deploy retries.
+    faviconVersionPlugin(buildId),
     // Content Security Policy (stricter in production, permissive in dev for HMR)
     cspPlugin({ isRemote: false }),
   ],

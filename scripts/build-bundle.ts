@@ -15,6 +15,10 @@
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  promoteStagedDirectory,
+  resolveBundleOutputDirectory,
+} from "./promote-staged-directory.js";
 
 const ROOT_DIR = path.resolve(import.meta.dirname, "..");
 const CLIENT_DIST = path.join(ROOT_DIR, "packages/client/dist");
@@ -30,8 +34,27 @@ const OPENCODE_PLUGIN_INSTALLER = path.join(
   "scripts/install-opencode-yep-plugin.sh",
 );
 
-// Staging directory for npm publishing (keeps workspace package.json intact)
-const STAGING_DIR = path.join(ROOT_DIR, "dist/npm-package");
+// Build into an unpublished sibling first. The currently running 8022 process
+// serves files directly from dist/npm-package/client-dist, so deleting or
+// mutating that directory during compilation creates real asset 404s.
+// YEP_BUNDLE_OUTPUT_DIR is primarily for isolated verification and packaging.
+const PUBLISHED_DIR = resolveBundleOutputDirectory(
+  ROOT_DIR,
+  process.env.YEP_BUNDLE_OUTPUT_DIR,
+);
+const STAGING_DIR = path.join(
+  path.dirname(PUBLISHED_DIR),
+  `.${path.basename(PUBLISHED_DIR)}.build-${process.pid}-${Date.now()}`,
+);
+let stagingPublished = false;
+
+// A normal build failure must leave the published bundle intact and should not
+// leave a partially assembled staging tree behind.
+process.once("exit", () => {
+  if (!stagingPublished && fs.existsSync(STAGING_DIR)) {
+    fs.rmSync(STAGING_DIR, { recursive: true, force: true });
+  }
+});
 
 // Version for npm package - set via NPM_VERSION env var (from git tag in CI) or fallback
 const NPM_VERSION = process.env.NPM_VERSION || "0.4.8";
@@ -132,6 +155,8 @@ function step(name: string, fn: () => void): void {
 step("Clean previous builds", () => {
   log("Removing old dist directories...");
 
+  // Never clean PUBLISHED_DIR here. It is still serving the current UI while
+  // shared/client/server compilation runs.
   const dirsToClean = [SHARED_DIST, CLIENT_DIST, SERVER_DIST, STAGING_DIR];
 
   for (const dir of dirsToClean) {
@@ -222,7 +247,9 @@ step("Write build metadata", () => {
     `${JSON.stringify(BUILD_INFO, null, 2)}\n`,
   );
   log(`  Build id: ${BUILD_INFO.buildId}`);
-  log("  Written to: dist/npm-package/build-info.json");
+  log(
+    `  Staged at: ${path.relative(ROOT_DIR, path.join(STAGING_DIR, "build-info.json"))}`,
+  );
 });
 
 // Copy server dist to staging
@@ -423,7 +450,9 @@ step("Generate package.json for npm", () => {
 
   log("  Package name: yepanywhere");
   log(`  Version: ${NPM_VERSION}`);
-  log("  Written to: dist/npm-package/package.json");
+  log(
+    `  Staged at: ${path.relative(ROOT_DIR, path.join(STAGING_DIR, "package.json"))}`,
+  );
   log("  (Original packages/server/package.json unchanged)");
 });
 
@@ -471,6 +500,117 @@ MIT
   }
 });
 
+// Validate everything that the running service needs before the stable path is
+// changed. In particular, this catches a client build that omitted favicon
+// files or failed to add a fresh favicon URL.
+step("Validate staged bundle", () => {
+  const requiredFiles = [
+    "build-info.json",
+    "package.json",
+    "dist/cli.js",
+    "client-dist/index.html",
+    "client-dist/build-info.json",
+    "client-dist/favicon.ico",
+    "client-dist/icon-192.png",
+  ];
+
+  for (const relativePath of requiredFiles) {
+    const absolutePath = path.join(STAGING_DIR, relativePath);
+    if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
+      throw new Error(`Required staged file is missing: ${relativePath}`);
+    }
+    if (fs.statSync(absolutePath).size === 0) {
+      throw new Error(`Required staged file is empty: ${relativePath}`);
+    }
+  }
+
+  for (const relativePath of [
+    "build-info.json",
+    "client-dist/build-info.json",
+  ]) {
+    const buildInfo = JSON.parse(
+      fs.readFileSync(path.join(STAGING_DIR, relativePath), "utf8"),
+    ) as { buildId?: unknown };
+    if (buildInfo.buildId !== BUILD_INFO.buildId) {
+      throw new Error(
+        `${relativePath} has build id ${String(buildInfo.buildId)}, expected ${BUILD_INFO.buildId}`,
+      );
+    }
+  }
+
+  const stagedClientDir = path.join(STAGING_DIR, "client-dist");
+  const indexHtml = fs.readFileSync(
+    path.join(stagedClientDir, "index.html"),
+    "utf8",
+  );
+  const linkTags = indexHtml.match(/<link\b[^>]*>/gi) ?? [];
+  let localIconCount = 0;
+
+  for (const tag of linkTags) {
+    const rel = tag.match(/\brel\s*=\s*(["'])([^"']*)\1/i)?.[2];
+    const href = tag.match(/\bhref\s*=\s*(["'])([^"']*)\1/i)?.[2];
+    const isIcon = rel
+      ?.toLowerCase()
+      .split(/\s+/)
+      .some((token) => token === "icon" || token.endsWith("-icon"));
+    if (!isIcon || !href || /^(?:data:|https?:|\/\/)/i.test(href)) continue;
+
+    localIconCount += 1;
+    const iconUrl = new URL(href, "http://bundle.invalid");
+    if (iconUrl.searchParams.get("v") !== BUILD_INFO.buildId) {
+      throw new Error(
+        `Icon URL is not versioned with build id ${BUILD_INFO.buildId}: ${href}`,
+      );
+    }
+  }
+
+  if (localIconCount === 0) {
+    throw new Error("No local favicon links were found in staged index.html");
+  }
+
+  for (const match of indexHtml.matchAll(
+    /\b(?:src|href)\s*=\s*(["'])([^"']+)\1/gi,
+  )) {
+    const reference = match[2];
+    if (!reference || /^(?:data:|https?:|\/\/)/i.test(reference)) continue;
+
+    const assetUrl = new URL(reference, "http://bundle.invalid");
+    if (!assetUrl.pathname.includes("/assets/")) continue;
+
+    const basePrefix =
+      BUILD_INFO.basePath === "/" ? "/" : `${BUILD_INFO.basePath}/`;
+    if (!assetUrl.pathname.startsWith(basePrefix)) {
+      throw new Error(
+        `Client asset URL does not use configured base path ${BUILD_INFO.basePath}: ${reference}`,
+      );
+    }
+
+    const relativeAssetPath = assetUrl.pathname.slice(basePrefix.length);
+    const stagedAssetPath = path.join(stagedClientDir, relativeAssetPath);
+    if (!fs.existsSync(stagedAssetPath)) {
+      throw new Error(`Referenced client asset is missing: ${reference}`);
+    }
+  }
+
+  log(`  Validated ${requiredFiles.length} required files`);
+  log(`  Validated ${localIconCount} build-versioned icon links`);
+});
+
+// Only after every build and validation step succeeds do we expose the new
+// directory at the stable path. A failed rename restores the previous bundle.
+step("Publish staged bundle", () => {
+  // Re-check immediately before the destructive cutover. A long build gives
+  // another process time to create or redirect the configured output path.
+  resolveBundleOutputDirectory(ROOT_DIR, PUBLISHED_DIR);
+  promoteStagedDirectory({
+    stagedDir: STAGING_DIR,
+    publishedDir: PUBLISHED_DIR,
+    onWarning: (message) => log(`WARNING: ${message}`),
+  });
+  stagingPublished = true;
+  log(`  Published at: ${path.relative(ROOT_DIR, PUBLISHED_DIR)}`);
+});
+
 // Helper: Recursive copy
 function copyRecursive(src: string, dest: string): void {
   const stats = fs.statSync(src);
@@ -502,9 +642,9 @@ const allSuccess = results.every((r) => r.success);
 if (allSuccess) {
   log("\n✓ All build steps completed successfully!");
   log("\nThe npm package is ready for publishing:");
-  log(`  Location: ${path.relative(ROOT_DIR, STAGING_DIR)}`);
+  log(`  Location: ${path.relative(ROOT_DIR, PUBLISHED_DIR)}`);
   log("\nNext steps:");
-  log("  1. cd dist/npm-package");
+  log(`  1. cd ${path.relative(ROOT_DIR, PUBLISHED_DIR)}`);
   log("  2. Test: npm pack");
   log("  3. Publish: npm publish");
   log("\nNote: packages/server/package.json is unchanged (workspace intact)");
