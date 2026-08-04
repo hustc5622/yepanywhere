@@ -155,6 +155,19 @@ export const KimiModelConfigRecordSchema = z.object({
   time: z.number().optional(),
 });
 
+/**
+ * `config.update` carrying the resolved subagent profile. Kimi writes a second
+ * `config.update` into each child's wire log with `profileName` set to the
+ * subagent type (`explore`, `coder`, …). This is the authoritative,
+ * per-agent source of the subagent type — independent of the parent tool
+ * call's requested `subagent_type`.
+ */
+export const KimiProfileConfigRecordSchema = z.object({
+  type: z.literal("config.update"),
+  profileName: z.string(),
+  time: z.number().optional(),
+});
+
 export const KimiTurnPromptRecordSchema = z.object({
   type: z.literal("turn.prompt"),
   input: z.array(z.unknown()),
@@ -393,4 +406,221 @@ export function isKimiModelConfigRecord(
   record: KimiWireRecord,
 ): record is z.infer<typeof KimiModelConfigRecordSchema> {
   return record.type === "config.update" && "modelAlias" in record;
+}
+
+// =============================================================================
+// Subagent metrics + lifecycle derivation (pure, from a child wire.jsonl)
+// =============================================================================
+
+/**
+ * Provider-agnostic subagent lifecycle status. Mirrors
+ * `SubagentStatus` in app-types; duplicated here to keep the kimi-schema
+ * module free of cross-imports.
+ */
+export type KimiSubagentStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "suspended"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "backgrounded";
+
+export interface KimiSubagentUsage {
+  contextTokens?: number;
+  inputOther?: number;
+  inputCacheRead?: number;
+  inputCacheCreation?: number;
+  output?: number;
+  totalTokens?: number;
+}
+
+export interface KimiSubagentMetrics {
+  usage?: KimiSubagentUsage;
+  toolUseCount?: number;
+  stepCount?: number;
+  durationMs?: number;
+}
+
+/** Resolve the subagent profile/type from a child's `config.update` record. */
+export function getKimiSubagentType(
+  records: readonly KimiWireRecord[],
+): string | undefined {
+  for (const record of records) {
+    if (record.type !== "config.update") continue;
+    const profileName = (record as { profileName?: unknown }).profileName;
+    if (typeof profileName === "string" && profileName.length > 0) {
+      return profileName;
+    }
+  }
+  return undefined;
+}
+
+/** Extract a record's millisecond timestamp when present. */
+function kimiRecordTime(record: KimiWireRecord): number | undefined {
+  const t = (record as { time?: unknown }).time;
+  if (typeof t === "number" && Number.isFinite(t)) return t;
+  if (
+    record.type === "metadata" &&
+    typeof (record as { created_at?: unknown }).created_at === "number"
+  ) {
+    return (record as { created_at: number }).created_at;
+  }
+  return undefined;
+}
+
+/**
+ * Derive run metrics for a subagent from its own `wire.jsonl` records.
+ *
+ * Rules (authoritative, non-heuristic — every value is measured from persisted
+ * records, and absent measurements are omitted rather than zero-filled):
+ *  - `toolUseCount`: number of child `tool.call` loop events.
+ *  - `stepCount`:    number of child `step.end` loop events.
+ *  - `usage`:        per-`step.end.usage` accumulated; cache reads/writes kept
+ *                    as independent fields; `totalTokens` is their sum with
+ *                    output; `contextTokens` is the last step's input total
+ *                    (inputOther + inputCacheRead + inputCacheCreation), which
+ *                    approximates Kimi's context-window fill.
+ *  - `durationMs`:   first record timestamp → last record timestamp.
+ */
+export function deriveKimiSubagentMetrics(
+  records: readonly KimiWireRecord[],
+): KimiSubagentMetrics {
+  let toolUseCount = 0;
+  let stepCount = 0;
+  let inputOther = 0;
+  let output = 0;
+  let inputCacheRead = 0;
+  let inputCacheCreation = 0;
+  let sawUsage = false;
+  let lastContextInput: number | undefined;
+
+  let firstTime: number | undefined;
+  let lastTime: number | undefined;
+
+  for (const record of records) {
+    const t = kimiRecordTime(record);
+    if (t !== undefined) {
+      if (firstTime === undefined || t < firstTime) firstTime = t;
+      if (lastTime === undefined || t > lastTime) lastTime = t;
+    }
+
+    if (!isKimiLoopEventRecord(record)) continue;
+    const event = record.event;
+    if (event.type === "tool.call") {
+      toolUseCount += 1;
+    } else if (event.type === "step.end") {
+      stepCount += 1;
+      const usage = (event as KimiStepEndEvent).usage;
+      if (usage) {
+        sawUsage = true;
+        const other = usage.inputOther ?? 0;
+        const cacheRead = usage.inputCacheRead ?? 0;
+        const cacheCreation = usage.inputCacheCreation ?? 0;
+        inputOther += other;
+        output += usage.output ?? 0;
+        inputCacheRead += cacheRead;
+        inputCacheCreation += cacheCreation;
+        lastContextInput = other + cacheRead + cacheCreation;
+      }
+    }
+  }
+
+  const metrics: KimiSubagentMetrics = {};
+  if (toolUseCount > 0) metrics.toolUseCount = toolUseCount;
+  if (stepCount > 0) metrics.stepCount = stepCount;
+  if (
+    firstTime !== undefined &&
+    lastTime !== undefined &&
+    lastTime > firstTime
+  ) {
+    metrics.durationMs = lastTime - firstTime;
+  }
+  if (sawUsage) {
+    metrics.usage = {
+      inputOther,
+      output,
+      inputCacheRead,
+      inputCacheCreation,
+      totalTokens: inputOther + output + inputCacheRead + inputCacheCreation,
+      ...(lastContextInput !== undefined
+        ? { contextTokens: lastContextInput }
+        : {}),
+    };
+  }
+  return metrics;
+}
+
+/**
+ * Infer a subagent's lifecycle status from its own wire records.
+ *
+ * Signals (in priority order):
+ *  - `turn.cancel` record             → `interrupted` (user/parent aborted).
+ *  - last `step.end.finishReason` is a
+ *    terminal completion (`end_turn`, `stop`) → `completed`.
+ *  - has begun stepping but no terminal
+ *    signal yet                       → `running`.
+ *  - only setup records, nothing ran  → `queued`.
+ *
+ * A terminal parent tool.result wins over a clean child end because it carries
+ * the batch/parent outcome. A non-terminal parent state (`running`,
+ * `backgrounded`, `suspended`) is only a fallback: the child's own terminal
+ * wire must still be allowed to converge it to completed. This never guesses
+ * "completed" merely because messages exist.
+ */
+export function inferKimiSubagentStatus(
+  records: readonly KimiWireRecord[],
+  resolvedStatus?: KimiSubagentStatus,
+): KimiSubagentStatus {
+  let hasCancel = false;
+  let sawStepBegin = false;
+  let sawStepEnd = false;
+  let lastFinishReason: string | undefined;
+  let sawActivity = false;
+
+  for (const record of records) {
+    if (record.type === "turn.cancel") {
+      hasCancel = true;
+      continue;
+    }
+    if (!isKimiLoopEventRecord(record)) continue;
+    const event = record.event;
+    switch (event.type) {
+      case "step.begin":
+        sawStepBegin = true;
+        sawActivity = true;
+        break;
+      case "content.part":
+      case "tool.call":
+      case "tool.result":
+        sawActivity = true;
+        break;
+      case "step.end": {
+        sawStepEnd = true;
+        sawActivity = true;
+        const reason = (event as KimiStepEndEvent).finishReason;
+        if (typeof reason === "string") lastFinishReason = reason;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  if (hasCancel) return "interrupted";
+
+  const completedTerminally =
+    sawStepEnd &&
+    typeof lastFinishReason === "string" &&
+    /^(?:end_turn|stop|completed)$/i.test(lastFinishReason);
+  const resolvedTerminally =
+    resolvedStatus === "completed" ||
+    resolvedStatus === "failed" ||
+    resolvedStatus === "interrupted";
+  if (resolvedTerminally) return resolvedStatus;
+  if (completedTerminally) return "completed";
+  if (resolvedStatus !== undefined) return resolvedStatus;
+  if (sawStepBegin || sawActivity) return "running";
+  return "queued";
 }

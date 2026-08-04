@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  type KimiWireRecord,
   getKimiPromptImages,
   getKimiPromptText,
+  inferKimiSubagentStatus,
   parseKimiBlobRef,
 } from "../../src/kimi-schema/types.js";
 
@@ -116,5 +118,29 @@ describe("getKimiPromptImages", () => {
 
   it("returns nothing for a text-only turn", () => {
     expect(getKimiPromptImages([{ type: "text", text: "hi" }])).toEqual([]);
+  });
+});
+
+describe("inferKimiSubagentStatus", () => {
+  const completedRecords: KimiWireRecord[] = [
+    {
+      type: "context.append_loop_event",
+      event: { type: "step.end", finishReason: "end_turn" },
+      time: 2,
+    },
+  ];
+
+  it("lets a background child converge to completed from its own wire", () => {
+    expect(inferKimiSubagentStatus(completedRecords, "backgrounded")).toBe(
+      "completed",
+    );
+  });
+
+  it("keeps a non-terminal parent status until the child finishes", () => {
+    expect(inferKimiSubagentStatus([], "backgrounded")).toBe("backgrounded");
+  });
+
+  it("keeps an authoritative terminal failure over a clean child end", () => {
+    expect(inferKimiSubagentStatus(completedRecords, "failed")).toBe("failed");
   });
 });

@@ -9,6 +9,8 @@ import type {
   ProjectGitStatusSummary,
   SessionBranchOption,
   SessionBranchState,
+  SubagentDescriptor,
+  SubagentMetrics,
 } from "@yep-anywhere/shared";
 
 // Re-export shared types
@@ -203,6 +205,12 @@ export interface Session extends SessionSummary {
 export interface AgentSession {
   messages: Message[];
   status: AgentStatusType;
+  /** Resolved subagent type/profile (e.g. `explore`), when known. */
+  agentType?: string;
+  /** Derived run metrics (usage breakdown, tool/step counts, duration). */
+  metrics?: SubagentMetrics;
+  /** Rich identity + lifecycle descriptor, when the provider supplies it. */
+  descriptor?: SubagentDescriptor;
 }
 
 /**

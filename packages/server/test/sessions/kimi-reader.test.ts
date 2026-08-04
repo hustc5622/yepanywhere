@@ -6,6 +6,7 @@ import { encodeProjectId } from "../../src/projects/paths.js";
 import {
   KimiSessionReader,
   parseKimiSubagentIds,
+  parseKimiSubagentResults,
 } from "../../src/sessions/kimi-reader.js";
 
 /**
@@ -162,8 +163,18 @@ describe("KimiSessionReader subagent surfacing", () => {
       const mappings = await reader.getAgentMappings(SESSION_ID);
       expect(mappings).toEqual(
         expect.arrayContaining([
-          { toolUseId: "Agent_0", agentId: "agent-0" },
-          { toolUseId: "Agent_1", agentId: "agent-1" },
+          expect.objectContaining({
+            toolUseId: "Agent_0",
+            agentId: "agent-0",
+            agentType: "explore",
+            status: "failed",
+          }),
+          expect.objectContaining({
+            toolUseId: "Agent_1",
+            agentId: "agent-1",
+            agentType: "explore",
+            status: "completed",
+          }),
         ]),
       );
       expect(mappings).toHaveLength(2);
@@ -179,16 +190,27 @@ describe("KimiSessionReader subagent surfacing", () => {
   });
 
   describe("getAgentSession", () => {
-    it("loads a completed subagent transcript", async () => {
+    it("loads a completed subagent transcript with type + descriptor", async () => {
       const session = await reader.getAgentSession("agent-1", SESSION_ID);
       expect(session).not.toBeNull();
       expect(session?.status).toBe("completed");
       expect(session?.messages.length).toBeGreaterThan(0);
+      expect(session?.agentType).toBe("explore");
+      expect(session?.descriptor).toMatchObject({
+        agentId: "agent-1",
+        parentAgentId: "main",
+        parentToolUseId: "Agent_1",
+        status: "completed",
+        type: "explore",
+      });
     });
 
-    it("marks an interrupted subagent as failed", async () => {
+    it("marks an interrupted subagent (turn.cancel) as interrupted", async () => {
       const session = await reader.getAgentSession("agent-0", SESSION_ID);
+      // Coarse status collapses interrupted → failed for back-compat…
       expect(session?.status).toBe("failed");
+      // …but the rich descriptor preserves the interrupted distinction.
+      expect(session?.descriptor?.status).toBe("interrupted");
     });
 
     it("returns null without a session scope", async () => {
@@ -228,5 +250,275 @@ describe("parseKimiSubagentIds", () => {
 
   it("dedupes and returns [] when no id is present", () => {
     expect(parseKimiSubagentIds("no ids here")).toEqual([]);
+  });
+});
+
+describe("parseKimiSubagentResults", () => {
+  it("parses status + type from a single Agent result", () => {
+    expect(
+      parseKimiSubagentResults(
+        "agent_id: agent-0\nactual_subagent_type: explore\nstatus: completed",
+      ),
+    ).toEqual([{ agentId: "agent-0", status: "completed", type: "explore" }]);
+  });
+
+  it("parses a background Agent result as backgrounded", () => {
+    const out =
+      "task_id: t1\nstatus: running\nagent_id: agent-3\nactual_subagent_type: coder\nautomatic_notification: true";
+    expect(parseKimiSubagentResults(out)).toEqual([
+      {
+        agentId: "agent-3",
+        status: "backgrounded",
+        type: "coder",
+        runInBackground: true,
+      },
+    ]);
+  });
+
+  it("parses each AgentSwarm child with its outcome + swarmIndex", () => {
+    const out =
+      '<agent_swarm_result><subagent agent_id="agent-0" outcome="completed">a</subagent><subagent agent_id="agent-1" outcome="failed">b</subagent></agent_swarm_result>';
+    expect(parseKimiSubagentResults(out)).toEqual([
+      { agentId: "agent-0", status: "completed", swarmIndex: 0 },
+      { agentId: "agent-1", status: "failed", swarmIndex: 1 },
+    ]);
+  });
+
+  it("maps Kimi's aborted swarm outcome to interrupted", () => {
+    const out =
+      '<agent_swarm_result><subagent agent_id="agent-0" state="started" outcome="aborted">interrupted</subagent></agent_swarm_result>';
+    expect(parseKimiSubagentResults(out)).toEqual([
+      { agentId: "agent-0", status: "interrupted", swarmIndex: 0 },
+    ]);
+  });
+});
+
+// ── AgentSwarm fan-out: one parent tool call → N children ────────────────
+describe("KimiSessionReader AgentSwarm fan-out", () => {
+  let sessionsDir: string;
+  let reader: KimiSessionReader;
+  const SWARM_SESSION = "session_swarm";
+
+  const SWARM_MAIN = jsonl([
+    { type: "metadata", protocol_version: "1.4", created_at: 1 },
+    {
+      type: "turn.prompt",
+      input: [{ type: "text", text: "explore in parallel" }],
+      time: 1,
+    },
+    {
+      type: "context.append_loop_event",
+      event: {
+        type: "tool.call",
+        toolCallId: "AgentSwarm_0",
+        name: "AgentSwarm",
+        args: { subagent_type: "explore", description: "parallel explore" },
+      },
+      time: 2,
+    },
+    {
+      type: "context.append_loop_event",
+      event: {
+        type: "tool.result",
+        toolCallId: "AgentSwarm_0",
+        result: {
+          output:
+            '<agent_swarm_result><subagent agent_id="agent-0" outcome="completed">a</subagent><subagent agent_id="agent-1" outcome="failed">b</subagent></agent_swarm_result>',
+        },
+      },
+      time: 9,
+    },
+  ]);
+
+  const CHILD = (created: number, tools: number) =>
+    jsonl([
+      { type: "metadata", protocol_version: "1.4", created_at: created },
+      { type: "config.update", profileName: "explore", time: created },
+      {
+        type: "turn.prompt",
+        input: [{ type: "text", text: "go" }],
+        time: created + 1,
+      },
+      ...Array.from({ length: tools }, (_, i) => ({
+        type: "context.append_loop_event",
+        event: { type: "tool.call", toolCallId: `t${i}`, name: "Read" },
+        time: created + 2 + i,
+      })),
+      {
+        type: "context.append_loop_event",
+        event: {
+          type: "step.end",
+          finishReason: "end_turn",
+          usage: {
+            inputOther: 100,
+            output: 50,
+            inputCacheRead: 200,
+            inputCacheCreation: 0,
+          },
+        },
+        time: created + 2 + tools,
+      },
+    ]);
+
+  beforeEach(async () => {
+    sessionsDir = join(
+      tmpdir(),
+      `kimi-swarm-${Math.random().toString(36).slice(2)}`,
+    );
+    const dir = join(sessionsDir, "wd_test", SWARM_SESSION);
+    await mkdir(join(dir, "agents", "main"), { recursive: true });
+    await mkdir(join(dir, "agents", "agent-0"), { recursive: true });
+    await mkdir(join(dir, "agents", "agent-1"), { recursive: true });
+    await writeFile(
+      join(dir, "state.json"),
+      JSON.stringify({ workDir: WORK_DIR, title: "swarm" }),
+    );
+    await writeFile(join(dir, "agents", "main", "wire.jsonl"), SWARM_MAIN);
+    await writeFile(join(dir, "agents", "agent-0", "wire.jsonl"), CHILD(10, 3));
+    await writeFile(join(dir, "agents", "agent-1", "wire.jsonl"), CHILD(20, 2));
+    reader = new KimiSessionReader({ sessionsDir });
+  });
+
+  afterEach(async () => {
+    await rm(sessionsDir, { recursive: true, force: true });
+  });
+
+  it("maps one AgentSwarm call to all N children with swarmIndex", async () => {
+    const mappings = await reader.getAgentMappings(SWARM_SESSION);
+    expect(mappings).toHaveLength(2);
+    expect(mappings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolUseId: "AgentSwarm_0",
+          agentId: "agent-0",
+          swarmIndex: 0,
+          status: "completed",
+        }),
+        expect.objectContaining({
+          toolUseId: "AgentSwarm_0",
+          agentId: "agent-1",
+          swarmIndex: 1,
+          status: "failed",
+        }),
+      ]),
+    );
+  });
+
+  it("derives per-child usage breakdown, tool count, step count, duration", async () => {
+    const session = await reader.getAgentSession("agent-0", SWARM_SESSION);
+    expect(session?.metrics).toMatchObject({
+      toolUseCount: 3,
+      stepCount: 1,
+    });
+    expect(session?.metrics?.usage).toMatchObject({
+      inputOther: 100,
+      output: 50,
+      inputCacheRead: 200,
+      inputCacheCreation: 0,
+      totalTokens: 350,
+      contextTokens: 300,
+    });
+    // duration = last time (created+2+tools=10+2+3=15) - first (10) = 5000? No:
+    // times are raw ms; created=10, last tool.call at 10+2+2=14, step.end at 15.
+    expect(session?.metrics?.durationMs).toBe(5);
+    expect(session?.descriptor?.status).toBe("completed");
+    expect(session?.descriptor?.swarmIndex).toBe(0);
+  });
+
+  it("collapses a failed swarm child to failed status", async () => {
+    // agent-1's own wire shows a clean end_turn, but the parent swarm result
+    // marked it outcome=failed — the authoritative parent outcome wins.
+    const session = await reader.getAgentSession("agent-1", SWARM_SESSION);
+    expect(session?.descriptor?.status).toBe("failed");
+    expect(session?.status).toBe("failed");
+  });
+});
+
+// ── Robustness: malformed / partial / growing wire files ─────────────────
+describe("KimiSessionReader robustness", () => {
+  let sessionsDir: string;
+  let reader: KimiSessionReader;
+  const S = "session_robust";
+  let dir: string;
+
+  beforeEach(async () => {
+    sessionsDir = join(
+      tmpdir(),
+      `kimi-robust-${Math.random().toString(36).slice(2)}`,
+    );
+    dir = join(sessionsDir, "wd_test", S);
+    await mkdir(join(dir, "agents", "main"), { recursive: true });
+    await mkdir(join(dir, "agents", "agent-0"), { recursive: true });
+    await writeFile(
+      join(dir, "state.json"),
+      JSON.stringify({ workDir: WORK_DIR, title: "robust" }),
+    );
+    await writeFile(
+      join(dir, "agents", "main", "wire.jsonl"),
+      jsonl([
+        { type: "metadata", created_at: 1 },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "Agent_0",
+            name: "Agent",
+            args: { subagent_type: "explore", description: "d" },
+          },
+          time: 2,
+        },
+      ]),
+    );
+    reader = new KimiSessionReader({ sessionsDir });
+  });
+
+  afterEach(async () => {
+    await rm(sessionsDir, { recursive: true, force: true });
+  });
+
+  it("tolerates a trailing half-written JSONL line", async () => {
+    const good = jsonl([
+      { type: "metadata", created_at: 10 },
+      { type: "config.update", profileName: "explore", time: 10 },
+      {
+        type: "context.append_loop_event",
+        event: { type: "tool.call", toolCallId: "t0", name: "Read" },
+        time: 11,
+      },
+    ]);
+    // Append a truncated final line (mid-write growth on disk).
+    await writeFile(
+      join(dir, "agents", "agent-0", "wire.jsonl"),
+      `${good}{"type":"context.append_loop_event","event":{"type":"tool.ca`,
+    );
+    const session = await reader.getAgentSession("agent-0", S);
+    expect(session).not.toBeNull();
+    expect(session?.metrics?.toolUseCount).toBe(1);
+    // Still-running (no terminal end_turn) → running.
+    expect(session?.descriptor?.status).toBe("running");
+  });
+
+  it("returns running while a child has begun but not finished", async () => {
+    await writeFile(
+      join(dir, "agents", "agent-0", "wire.jsonl"),
+      jsonl([
+        { type: "metadata", created_at: 10 },
+        { type: "config.update", profileName: "explore", time: 10 },
+        {
+          type: "context.append_loop_event",
+          event: { type: "step.begin", step: 1 },
+          time: 11,
+        },
+      ]),
+    );
+    const session = await reader.getAgentSession("agent-0", S);
+    expect(session?.status).toBe("running");
+    expect(session?.descriptor?.status).toBe("running");
+  });
+
+  it("returns [] mappings while the child result has not landed yet", async () => {
+    // No tool.result in the main wire → no authoritative identity yet.
+    const mappings = await reader.getAgentMappings(S);
+    expect(mappings).toEqual([]);
   });
 });

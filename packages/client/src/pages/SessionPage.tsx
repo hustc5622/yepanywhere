@@ -222,6 +222,7 @@ function SessionPageContent({
     agentContent,
     setAgentContent,
     toolUseToAgent,
+    toolUseToAgentIds,
     markdownAugments,
     status,
     processState,
@@ -2012,6 +2013,7 @@ function SessionPageContent({
                 agentContent={agentContent}
                 setAgentContent={setAgentContent}
                 toolUseToAgent={toolUseToAgent}
+                toolUseToAgentIds={toolUseToAgentIds}
                 projectId={projectId}
                 sessionId={sessionId}
               >

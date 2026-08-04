@@ -823,12 +823,121 @@ export interface AppSession extends AppSessionSummary {
 export type AgentStatus = "pending" | "running" | "completed" | "failed";
 
 /**
+ * Rich lifecycle status for a subagent, aligned with Kimi's subagent
+ * lifecycle (`subagent.spawned/started/completed/failed/suspended`).
+ *
+ * A provider-agnostic superset of {@link AgentStatus} so a single Agent card
+ * (and each AgentSwarm member) can distinguish "still queued", "suspended",
+ * "interrupted by the user", and "detached to background" — states the coarse
+ * pending/running/completed/failed triple cannot express.
+ */
+export type SubagentStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "suspended"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "backgrounded";
+
+/**
+ * Token usage for one subagent, with cache reads/writes kept as independent
+ * fields so the UI can show a breakdown instead of a single opaque number.
+ *
+ * Semantics (Kimi `TokenUsage` + `contextTokens`):
+ *  - `contextTokens`      current context-window fill (Kimi's headline number).
+ *  - `inputOther`         non-cached input tokens.
+ *  - `inputCacheRead`     input tokens served from the prompt cache.
+ *  - `inputCacheCreation` input tokens written to the prompt cache.
+ *  - `output`             generated output tokens.
+ *  - `totalTokens`        cumulative throughput =
+ *                         inputOther + inputCacheRead + inputCacheCreation + output.
+ *
+ * `totalTokens` is NOT the same as `contextTokens`: the former is the summed
+ * per-step throughput over the whole run, the latter is the size of the live
+ * context at the most recent step.
+ */
+export interface SubagentUsage {
+  contextTokens?: number;
+  inputOther?: number;
+  inputCacheRead?: number;
+  inputCacheCreation?: number;
+  output?: number;
+  totalTokens?: number;
+}
+
+/**
+ * Derived run metrics for a subagent. Every field is optional: a value that
+ * cannot be derived is omitted (never zero-filled) so the UI can hide it
+ * rather than render a misleading `0ms` / `0 tokens`.
+ */
+export interface SubagentMetrics {
+  usage?: SubagentUsage;
+  /** Number of tool calls the subagent made. */
+  toolUseCount?: number;
+  /** Number of completed LLM steps. */
+  stepCount?: number;
+  /** Wall-clock run duration in milliseconds. */
+  durationMs?: number;
+}
+
+/**
+ * Provider-agnostic identity + lifecycle descriptor for a subagent. This is
+ * the stable contract the UI renders against; providers normalize their
+ * native shapes (Kimi `subagent.spawned` / roster / tool.result) into it.
+ */
+export interface SubagentDescriptor {
+  /** Provider subagent id, unique within its session (e.g. Kimi `agent-0`). */
+  agentId: string;
+  /** Owning agent id (Kimi `main`), when known. */
+  parentAgentId?: string;
+  /** Parent tool_use id that spawned this subagent (e.g. Kimi `Agent_0`). */
+  parentToolUseId?: string;
+  /** Resolved subagent type/profile (e.g. `explore`, `coder`). */
+  type?: string;
+  /** Short task description for UI display. */
+  description?: string;
+  /** Position within an AgentSwarm fan-out, when applicable. */
+  swarmIndex?: number;
+  /** Whether the subagent was launched detached (background). */
+  runInBackground?: boolean;
+  status: SubagentStatus;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+/**
  * Agent session content returned by getAgentSession API.
  * Used for lazy-loading completed Task subagent content.
  */
 export interface AgentSession {
   messages: AppMessage[];
   status: AgentStatus;
+  /** Resolved subagent type/profile (e.g. `explore`), when known. */
+  agentType?: string;
+  /** Derived run metrics (usage breakdown, tool/step counts, duration). */
+  metrics?: SubagentMetrics;
+  /** Rich identity + lifecycle descriptor, when the provider can supply it. */
+  descriptor?: SubagentDescriptor;
+}
+
+/**
+ * Mapping of a spawning tool_use id to the subagent id(s) it produced.
+ *
+ * For a single Kimi `Agent` call this is 1:1; an `AgentSwarm` call fans out to
+ * N children that all share one `toolUseId` but carry distinct `swarmIndex`
+ * values. Consumers must therefore treat the mapping as many-to-one, not 1:1.
+ */
+export interface AgentMapping {
+  toolUseId: string;
+  agentId: string;
+  /** Resolved subagent type/profile, when known. */
+  agentType?: string;
+  /** Position within an AgentSwarm fan-out, when applicable. */
+  swarmIndex?: number;
+  /** Rich lifecycle status, when the provider can derive it. */
+  status?: SubagentStatus;
 }
 
 // =============================================================================

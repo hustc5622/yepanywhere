@@ -1,17 +1,21 @@
 import { getSessionDisplayTitle } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import type { SessionMetadataChangedEvent } from "../../lib/activityBus";
+import { extractSessionIdFromFileEvent } from "../../lib/sessionFile";
 import type { Message, Session } from "../../types";
 import {
   type PendingMessage,
+  buildAgentMappingLoadPlan,
   isCodexHistoryRewriteSnapshotReady,
+  isKimiAuthoritativeSnapshotReady,
   isToolUseOnlyAssistantMessage,
   mergeSessionMetadataChange,
   processStateFromProcessEvent,
   reconcilePendingMessagesWithConfirmedMessages,
   sessionTurnHealthFromSession,
+  shouldDeferKimiPersistedSync,
   shouldRefreshFullPersistedSession,
-  shouldRefreshOpenCodeAuthoritativeSnapshot,
+  shouldRefreshSettledAuthoritativeSnapshot,
 } from "../useSession";
 
 function pending(overrides?: Partial<PendingMessage>): PendingMessage {
@@ -241,18 +245,21 @@ describe("mergeSessionMetadataChange", () => {
   });
 });
 
-describe("shouldRefreshOpenCodeAuthoritativeSnapshot", () => {
-  it("refreshes an owned OpenCode session once its turn becomes idle", () => {
-    expect(
-      shouldRefreshOpenCodeAuthoritativeSnapshot(
-        "opencode",
-        "self",
-        "idle",
-        "ses-current",
-        "ses-current",
-      ),
-    ).toBe(true);
-  });
+describe("shouldRefreshSettledAuthoritativeSnapshot", () => {
+  it.each(["opencode", "kimi"] as const)(
+    "refreshes an owned %s session once its turn becomes idle",
+    (provider) => {
+      expect(
+        shouldRefreshSettledAuthoritativeSnapshot(
+          provider,
+          "self",
+          "idle",
+          "ses-current",
+          "ses-current",
+        ),
+      ).toBe(true);
+    },
+  );
 
   it.each([
     ["claude", "self", "idle", "ses-current"],
@@ -263,7 +270,7 @@ describe("shouldRefreshOpenCodeAuthoritativeSnapshot", () => {
     "does not refresh for provider=%s owner=%s state=%s eventSession=%s",
     (provider, owner, state, eventSessionId) => {
       expect(
-        shouldRefreshOpenCodeAuthoritativeSnapshot(
+        shouldRefreshSettledAuthoritativeSnapshot(
           provider,
           owner,
           state,
@@ -275,8 +282,182 @@ describe("shouldRefreshOpenCodeAuthoritativeSnapshot", () => {
   );
 });
 
+describe("shouldDeferKimiPersistedSync", () => {
+  it.each(["in-turn", "waiting-input", "hold", undefined] as const)(
+    "defers an owned Kimi snapshot while state=%s",
+    (state) => {
+      expect(shouldDeferKimiPersistedSync("kimi", "self", state)).toBe(true);
+    },
+  );
+
+  it.each([
+    ["kimi", "self", "idle"],
+    ["kimi", "none", "in-turn"],
+    ["opencode", "self", "in-turn"],
+  ] as const)(
+    "does not defer provider=%s owner=%s state=%s",
+    (provider, owner, state) => {
+      expect(shouldDeferKimiPersistedSync(provider, owner, state)).toBe(false);
+    },
+  );
+});
+
+describe("buildAgentMappingLoadPlan", () => {
+  const swarmToolUse: Message = {
+    id: "assistant-swarm",
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "AgentSwarm_0",
+          name: "AgentSwarm",
+          input: {
+            description: "inspect in parallel",
+            subagent_type: "explore",
+          },
+        },
+      ],
+    },
+  };
+  const swarmResult: Message = {
+    id: "user-swarm-result",
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "AgentSwarm_0",
+          content:
+            '<agent_swarm_result><subagent agent_id="agent-0" outcome="completed"/><subagent agent_id="agent-1" outcome="completed"/></agent_swarm_result>',
+        },
+      ],
+    },
+  };
+
+  it("waits for Kimi's authoritative result, then keeps the completed swarm eligible", () => {
+    expect(
+      buildAgentMappingLoadPlan([swarmToolUse], "kimi", "session-1"),
+    ).toBeNull();
+
+    const completedPlan = buildAgentMappingLoadPlan(
+      [swarmToolUse, swarmResult],
+      "kimi",
+      "session-1",
+    );
+    expect(completedPlan?.tasks).toEqual([
+      expect.objectContaining({
+        toolUseId: "AgentSwarm_0",
+        resultCount: 1,
+      }),
+    ]);
+  });
+
+  it("advances the Kimi load key when another result for the call lands", () => {
+    const firstPlan = buildAgentMappingLoadPlan(
+      [swarmToolUse, swarmResult],
+      "kimi",
+      "session-1",
+    );
+    const secondPlan = buildAgentMappingLoadPlan(
+      [
+        swarmToolUse,
+        swarmResult,
+        {
+          ...swarmResult,
+          id: "user-swarm-result-2",
+        },
+      ],
+      "kimi",
+      "session-1",
+    );
+
+    expect(firstPlan?.loadKey).not.toBe(secondPlan?.loadKey);
+    expect(secondPlan?.tasks[0]?.resultCount).toBe(2);
+  });
+
+  it("preserves pending-only mapping restoration for other providers", () => {
+    expect(
+      buildAgentMappingLoadPlan([swarmToolUse], "claude", "session-1")?.tasks,
+    ).toHaveLength(1);
+    expect(
+      buildAgentMappingLoadPlan(
+        [swarmToolUse, swarmResult],
+        "claude",
+        "session-1",
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("isKimiAuthoritativeSnapshotReady", () => {
+  const assistantMessage = (uuid: string, content: string): Message => ({
+    type: "assistant",
+    uuid,
+    message: { role: "assistant", content },
+  });
+
+  const current = [
+    userMessage({
+      uuid: "persisted-user-0",
+      message: { role: "user", content: "first question" },
+    }),
+    assistantMessage("persisted-assistant-0", "first answer"),
+    userMessage({
+      uuid: "live-user-1",
+      message: { role: "user", content: "second question" },
+    }),
+    assistantMessage("live-assistant-1", "second answer"),
+  ];
+
+  it("rejects a wire snapshot that has not persisted the latest prompt", () => {
+    expect(isKimiAuthoritativeSnapshotReady(current, current.slice(0, 2))).toBe(
+      false,
+    );
+  });
+
+  it("rejects a wire snapshot missing the current turn's final output", () => {
+    expect(
+      isKimiAuthoritativeSnapshotReady(current, [
+        ...current.slice(0, 2),
+        userMessage({
+          uuid: "session-user-1",
+          message: { role: "user", content: "second question" },
+        }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("accepts the complete persisted turn despite different message ids", () => {
+    expect(
+      isKimiAuthoritativeSnapshotReady(current, [
+        ...current.slice(0, 2),
+        userMessage({
+          uuid: "session-user-1",
+          message: { role: "user", content: "second question" },
+        }),
+        assistantMessage("session-assistant-1", "second answer"),
+      ]),
+    ).toBe(true);
+  });
+});
+
+describe("extractSessionIdFromFileEvent", () => {
+  it("extracts Kimi's session directory instead of the wire.jsonl basename", () => {
+    expect(
+      extractSessionIdFromFileEvent({
+        provider: "kimi",
+        relativePath:
+          "wd_example/session_186997d7-2289-4e62-993c-c97c703ded86/agents/main/wire.jsonl",
+      }),
+    ).toBe("session_186997d7-2289-4e62-993c-c97c703ded86");
+  });
+});
+
 describe("shouldRefreshFullPersistedSession", () => {
-  it.each(["codex", "codex-oss", "opencode"] as const)(
+  it.each(["codex", "codex-oss", "opencode", "kimi"] as const)(
     "reloads the authoritative window for %s in-place updates",
     (provider) => {
       expect(shouldRefreshFullPersistedSession(provider)).toBe(true);

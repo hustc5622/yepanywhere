@@ -6,8 +6,11 @@
  */
 
 import type {
+  AgentMapping,
   CodexBranchState,
   SessionBranchState,
+  SubagentDescriptor,
+  SubagentMetrics,
   UnifiedSession,
   UrlProjectId,
 } from "@yep-anywhere/shared";
@@ -107,9 +110,7 @@ export interface ISessionReader {
    *   this to scope the mappings to one session. Providers with globally
    *   unique agent ids (Claude) may ignore it.
    */
-  getAgentMappings(
-    sessionId?: string,
-  ): Promise<{ toolUseId: string; agentId: string }[]>;
+  getAgentMappings(sessionId?: string): Promise<AgentMapping[]>;
 
   /**
    * Get an agent (subagent) session by ID.
@@ -121,7 +122,13 @@ export interface ISessionReader {
   getAgentSession(
     agentId: string,
     sessionId?: string,
-  ): Promise<{ messages: Message[]; status: string } | null>;
+  ): Promise<{
+    messages: Message[];
+    status: string;
+    agentType?: string;
+    metrics?: SubagentMetrics;
+    descriptor?: SubagentDescriptor;
+  } | null>;
 
   /**
    * Get the file path for a session by ID.

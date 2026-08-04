@@ -1,3 +1,4 @@
+import type { SubagentDescriptor, SubagentMetrics } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type PaginationInfo, api } from "../api/client";
 import {
@@ -28,6 +29,12 @@ export interface AgentContent {
     inputTokens: number;
     percentage: number;
   };
+  /** Resolved subagent type/profile (e.g. `explore`), when known. */
+  agentType?: string;
+  /** Derived run metrics (usage breakdown, tool/step counts, duration). */
+  metrics?: SubagentMetrics;
+  /** Rich identity + lifecycle descriptor, when the provider supplies it. */
+  descriptor?: SubagentDescriptor;
 }
 
 /** Map of agentId → agent content */
@@ -71,6 +78,12 @@ export interface UseSessionMessagesResult {
   agentContent: AgentContentMap;
   /** Mapping from Task tool_use_id → agentId */
   toolUseToAgent: Map<string, string>;
+  /**
+   * Mapping from Task tool_use_id → all subagent ids it produced. A single
+   * `Agent` call is 1:1; an `AgentSwarm` call fans out to N children that
+   * share one tool_use_id. Consumers rendering the full fan-out use this.
+   */
+  toolUseToAgentIds: Map<string, string[]>;
   /** Whether initial load is in progress */
   loading: boolean;
   /** Session data from initial load */
@@ -91,6 +104,10 @@ export interface UseSessionMessagesResult {
   setAgentContent: React.Dispatch<React.SetStateAction<AgentContentMap>>;
   /** Update toolUseToAgent mapping */
   setToolUseToAgent: React.Dispatch<React.SetStateAction<Map<string, string>>>;
+  /** Update toolUseToAgentIds (fan-out) mapping */
+  setToolUseToAgentIds: React.Dispatch<
+    React.SetStateAction<Map<string, string[]>>
+  >;
   /** Direct messages setter (for clearing streaming placeholders) */
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   /** Rewind/edit: drop the given uuid and everything after it */
@@ -402,6 +419,9 @@ export function useSessionMessages(
   const [toolUseToAgent, setToolUseToAgent] = useState<Map<string, string>>(
     () => new Map(),
   );
+  const [toolUseToAgentIds, setToolUseToAgentIds] = useState<
+    Map<string, string[]>
+  >(() => new Map());
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
   const [pagination, setPagination] = useState<PaginationInfo | undefined>();
@@ -859,6 +879,13 @@ export function useSessionMessages(
         next.set(toolUseId, agentId);
         return next;
       });
+      setToolUseToAgentIds((prev) => {
+        const existing = prev.get(toolUseId);
+        if (existing?.includes(agentId)) return prev;
+        const next = new Map(prev);
+        next.set(toolUseId, existing ? [...existing, agentId] : [agentId]);
+        return next;
+      });
     },
     [],
   );
@@ -876,7 +903,14 @@ export function useSessionMessages(
         lastMessageIdRef.current,
         { branchId },
       );
-      if (data.messages.length > 0) {
+      if (data.session.provider === "kimi") {
+        // Kimi's reader cannot honor afterMessageId because its normalized
+        // message ids are synthesized from the full wire transcript. Treat
+        // the response as an authoritative snapshot instead of appending it:
+        // live Kimi messages use process UUIDs, so an incremental merge would
+        // see every persisted copy as new and append old turns at the tail.
+        applySessionSnapshot(data);
+      } else if (data.messages.length > 0) {
         updatePersistedTimestampWatermark(data.messages);
         setMessages((prev) => {
           const result = mergeJSONLMessages(prev, data.messages, {
@@ -890,11 +924,13 @@ export function useSessionMessages(
       }
       // Update session metadata (including title, model, contextUsage) which may have changed
       // For new sessions, prev may be null if JSONL didn't exist on initial load
-      setSession((prev) =>
-        prev
-          ? { ...prev, ...data.session, messages: prev.messages }
-          : data.session,
-      );
+      if (data.session.provider !== "kimi") {
+        setSession((prev) =>
+          prev
+            ? { ...prev, ...data.session, messages: prev.messages }
+            : data.session,
+        );
+      }
       onLoadComplete?.({
         session: data.session,
         status: data.ownership,
@@ -909,6 +945,7 @@ export function useSessionMessages(
     sessionId,
     branchId,
     pagination?.hasNewerMessages,
+    applySessionSnapshot,
     updatePersistedTimestampWatermark,
     onLoadComplete,
   ]);
@@ -1131,6 +1168,7 @@ export function useSessionMessages(
     messages,
     agentContent,
     toolUseToAgent,
+    toolUseToAgentIds,
     loading,
     session,
     setSession,
@@ -1141,6 +1179,7 @@ export function useSessionMessages(
     registerToolUseAgent,
     setAgentContent,
     setToolUseToAgent,
+    setToolUseToAgentIds,
     setMessages,
     truncateMessagesBefore,
     fetchNewMessages,

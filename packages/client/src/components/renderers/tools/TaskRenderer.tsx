@@ -1,3 +1,4 @@
+import type { SubagentMetrics, SubagentStatus } from "@yep-anywhere/shared";
 import {
   useCallback,
   useContext,
@@ -10,12 +11,19 @@ import type { ZodError } from "zod";
 import { AgentContentContext } from "../../../contexts/AgentContentContext";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
 import { useSessionMetadata } from "../../../contexts/SessionMetadataContext";
+import type { AgentContent } from "../../../hooks/useSessionMessages";
+import { useI18n } from "../../../i18n";
 import { classifyToolError } from "../../../lib/classifyToolError";
 import { isPlanProgressItem } from "../../../lib/preprocessMessages";
 import {
   type PreprocessMessagesCache,
   preprocessMessagesCached,
 } from "../../../lib/preprocessMessagesCache";
+import {
+  type SubagentStatLabels,
+  buildSubagentStatChips,
+  joinStatChips,
+} from "../../../lib/subagentStats";
 import { validateToolResult } from "../../../lib/validateToolResult";
 import type { Message } from "../../../types";
 import { RenderItemComponent } from "../../RenderItemComponent";
@@ -25,6 +33,8 @@ import type { TaskInput, TaskResult, ToolRenderer } from "./types";
 
 const MAX_PROMPT_LENGTH = 200;
 const MAX_ERROR_SUMMARY_LENGTH = 80;
+
+type OuterStatus = "pending" | "complete" | "error" | "aborted";
 
 /**
  * Extract error message from tool result.
@@ -37,17 +47,14 @@ function extractErrorMessage(
 
   let rawMessage = "";
 
-  // Handle different result shapes
   if (typeof result === "string") {
     rawMessage = result;
   } else if (typeof result === "object" && result !== null) {
-    // Check for content field (tool_result format)
     if ("content" in result) {
       const content = (result as { content: unknown }).content;
       if (typeof content === "string") {
         rawMessage = content;
       } else if (Array.isArray(content)) {
-        // Content blocks array - find text content
         for (const block of content) {
           if (
             typeof block === "object" &&
@@ -66,72 +73,182 @@ function extractErrorMessage(
 
   if (!rawMessage) return null;
 
-  // Classify the error
   const classified = classifyToolError(rawMessage);
-
-  // Create summary (truncated cleaned message)
   const summary =
     classified.cleanedMessage.length > MAX_ERROR_SUMMARY_LENGTH
       ? `${classified.cleanedMessage.slice(0, MAX_ERROR_SUMMARY_LENGTH)}...`
       : classified.cleanedMessage;
 
-  return {
-    raw: rawMessage,
-    summary,
-    label: classified.label,
-  };
+  return { raw: rawMessage, summary, label: classified.label };
 }
 
 /**
- * Format duration in ms to human readable
+ * Resolve the rich lifecycle status for a subagent card from the several
+ * signals available: the server-derived descriptor (authoritative), the live
+ * content status, and the outer tool_use/tool_result status.
+ *
+ * Never guesses "completed" from mere presence of content — an outer
+ * `pending` (tool_use without a result) with no terminal descriptor stays
+ * `running`.
  */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${(ms / 60000).toFixed(1)}m`;
+function resolveSubagentStatus(
+  descriptorStatus: SubagentStatus | undefined,
+  liveStatus: AgentContent["status"] | undefined,
+  outerStatus: OuterStatus,
+  isError: boolean,
+): SubagentStatus {
+  if (descriptorStatus) return descriptorStatus;
+  if (isError) return "failed";
+  if (outerStatus === "aborted") return "interrupted";
+  if (outerStatus === "error") return "failed";
+  if (outerStatus === "complete") {
+    if (liveStatus === "failed") return "failed";
+    return "completed";
+  }
+  // outerStatus === "pending": no tool_result yet → still running.
+  if (liveStatus === "completed") return "completed";
+  if (liveStatus === "failed") return "failed";
+  return "running";
 }
 
-/**
- * Task tool use - shows description and subagent type
- */
-function TaskToolUse({ input }: { input: TaskInput }) {
-  const [showPrompt, setShowPrompt] = useState(false);
-  const promptTruncated =
-    input.prompt.length > MAX_PROMPT_LENGTH
-      ? `${input.prompt.slice(0, MAX_PROMPT_LENGTH)}...`
-      : input.prompt;
+function isRunningStatus(status: SubagentStatus): boolean {
+  return status === "running" || status === "starting" || status === "queued";
+}
 
+/** Map a status to a CSS badge class + i18n label key. */
+function useStatusBadge(status: SubagentStatus): {
+  className: string;
+  label: string;
+} {
+  const { t } = useI18n();
+  switch (status) {
+    case "queued":
+      return { className: "badge-pending", label: t("subagentStatusQueued") };
+    case "starting":
+      return {
+        className: "badge-running",
+        label: t("subagentStatusStarting"),
+      };
+    case "running":
+      return { className: "badge-running", label: t("subagentStatusRunning") };
+    case "suspended":
+      return {
+        className: "badge-warning",
+        label: t("subagentStatusSuspended"),
+      };
+    case "interrupted":
+      return {
+        className: "badge-warning",
+        label: t("subagentStatusInterrupted"),
+      };
+    case "backgrounded":
+      return {
+        className: "badge-info",
+        label: t("subagentStatusBackgrounded"),
+      };
+    case "failed":
+      return { className: "badge-error", label: t("subagentStatusFailed") };
+    default:
+      return {
+        className: "badge-success",
+        label: t("subagentStatusCompleted"),
+      };
+  }
+}
+
+function Spinner() {
   return (
-    <div className="task-tool-use">
-      <div className="task-header">
-        <span className="task-description">{input.description}</span>
-        <span className="badge badge-info">{input.subagent_type}</span>
-        {input.model && <span className="badge">{input.model}</span>}
-      </div>
-      {input.prompt && (
-        <div className="task-prompt">
-          <button
-            type="button"
-            className="task-prompt-toggle"
-            onClick={() => setShowPrompt(!showPrompt)}
-          >
-            {showPrompt ? "Hide prompt" : "Show prompt"}
-          </button>
-          {showPrompt && (
-            <pre className="task-prompt-content">
-              <code>{showPrompt ? input.prompt : promptTruncated}</code>
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
+    <svg
+      className="spinner"
+      viewBox="0 0 16 16"
+      width="12"
+      height="12"
+      aria-hidden="true"
+    >
+      <circle
+        cx="8"
+        cy="8"
+        r="6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeDasharray="24"
+        strokeDashoffset="8"
+      />
+    </svg>
+  );
+}
+
+/** Live-ticking elapsed clock in ms, anchored on `startedAt`. Only ticks (and
+ * only returns a value) while the agent is running — a finished agent shows its
+ * measured `durationMs` from metrics instead. */
+function useLiveElapsedMs(
+  startedAt: string | undefined,
+  running: boolean,
+): number | undefined {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running || !startedAt) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running, startedAt]);
+  if (!running || !startedAt) return undefined;
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return undefined;
+  return Math.max(0, now - start);
+}
+
+function useSubagentStatLabels(): SubagentStatLabels {
+  const { t } = useI18n();
+  return useMemo(
+    () => ({
+      seconds: (count) => t("subagentStatSeconds", { count }),
+      minutesSeconds: (minutes, seconds) =>
+        t("subagentStatMinutesSeconds", { minutes, seconds }),
+      hoursMinutes: (hours, minutes) =>
+        t("subagentStatHoursMinutes", { hours, minutes }),
+      tools: (count) => t("subagentStatTools", { count }),
+      context: (tokens) => t("subagentStatContext", { tokens }),
+      total: (tokens) => t("subagentStatTotal", { tokens }),
+    }),
+    [t],
+  );
+}
+
+/** Stat chips row shared by single Agent and each swarm member. */
+function SubagentStats({
+  metrics,
+  running,
+  startedAt,
+}: {
+  metrics: SubagentMetrics | undefined;
+  running: boolean;
+  startedAt: string | undefined;
+}) {
+  const liveElapsed = useLiveElapsedMs(startedAt, running);
+  const labels = useSubagentStatLabels();
+  const chips = buildSubagentStatChips(metrics, {
+    showTotal: !running,
+    labels,
+    ...(liveElapsed !== undefined ? { elapsedMs: liveElapsed } : {}),
+  });
+  if (chips.length === 0) return null;
+  return (
+    <span className="task-stats" title={joinStatChips(chips)}>
+      {chips.map((chip) => (
+        <span key={chip.key} className={`task-stat task-stat-${chip.key}`}>
+          {chip.label}
+        </span>
+      ))}
+    </span>
   );
 }
 
 /**
- * Task nested content - renders full agent messages
+ * Nested transcript renderer — reuses the main message pipeline so subagent
+ * thinking/tool rows behave identically to the top-level transcript.
  */
-function TaskNestedContent({
+function SubagentTranscript({
   messages,
   isStreaming,
 }: {
@@ -170,309 +287,230 @@ function TaskNestedContent({
 }
 
 /**
- * Task inline renderer - shows complete Task UI with nested content
+ * A single subagent card: collapsible header (type, description, status, live
+ * stats, spinner) + expandable transcript. Drives its own lazy-load and
+ * autoscroll. Used both standalone (single `Agent`) and as an `AgentSwarm`
+ * member row.
  */
-function TaskInline({
-  input,
-  result,
+function SubagentCard({
+  agentId,
+  subagentType,
+  description,
+  outerStatus,
   isError,
-  status,
-  toolUseId,
+  errorInfo,
+  fallbackContent,
+  swarmIndex,
 }: {
-  input: TaskInput;
-  result: TaskResult | undefined;
+  /** Resolved subagent id, or undefined while unmapped (still running). */
+  agentId: string | undefined;
+  subagentType: string;
+  description: string;
+  outerStatus: OuterStatus;
   isError: boolean;
-  status: "pending" | "complete" | "error" | "aborted";
-  toolUseId?: string;
+  /** Parent tool_result error info (single-Agent failure path). */
+  errorInfo?: { raw: string; summary: string; label: string } | null;
+  /** Result content blocks to show when no live transcript is available. */
+  fallbackContent?: TaskResult["content"];
+  swarmIndex?: number;
 }) {
+  const { t } = useI18n();
   const { projectId, sessionId } = useSessionMetadata();
   const context = useContext(AgentContentContext);
-  const {
-    reportValidationError,
-    enabled: validationEnabled,
-    isToolIgnored,
-  } = useSchemaValidationContext();
 
-  // Get agentId from result, or look it up from toolUseToAgent mapping during streaming
-  // The mapping is built when we receive system/init messages with parent_tool_use_id
-  const agentId =
-    result?.agentId ??
-    (toolUseId ? context?.toolUseToAgent.get(toolUseId) : undefined);
-
-  // Get live content from context if available
   const liveContent = agentId ? context?.agentContent[agentId] : undefined;
+  const descriptor = liveContent?.descriptor;
+  const metrics = liveContent?.metrics;
+  const resolvedType =
+    liveContent?.agentType ?? descriptor?.type ?? subagentType;
 
-  // Determine if task is running
-  // The outer `status` prop (from tool_result) is the ground truth:
-  // - "pending" = tool_use sent, no result yet (task may be running)
-  // - "complete"/"error"/"aborted" = tool_result received, task is done
-  // Only check liveContent when status is "pending" (no result yet)
-  const hasTerminalResult =
-    result?.status === "completed" || result?.status === "failed";
-  const isRunning =
-    !hasTerminalResult &&
-    status === "pending" &&
-    (liveContent?.status === "running" || !liveContent?.status);
+  const status = resolveSubagentStatus(
+    descriptor?.status,
+    liveContent?.status,
+    outerStatus,
+    isError,
+  );
+  const running = isRunningStatus(status);
+  const badge = useStatusBadge(status);
 
-  // Always start collapsed - users can expand if they want to see details
   const [isExpanded, setIsExpanded] = useState(false);
   const [isLoadingContent, setIsLoadingContent] = useState(false);
 
-  // Autoscroll refs
   const contentRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const isProgrammaticScrollRef = useRef(false);
   const lastHeightRef = useRef(0);
 
-  // Scroll content container to bottom
   const scrollToBottom = useCallback((container: HTMLElement) => {
     isProgrammaticScrollRef.current = true;
     container.scrollTop = container.scrollHeight - container.clientHeight;
     lastHeightRef.current = container.scrollHeight;
-
     requestAnimationFrame(() => {
       isProgrammaticScrollRef.current = false;
     });
   }, []);
 
-  // Track scroll position - only user scrolls affect auto-scroll state
   const handleScroll = useCallback(() => {
     if (isProgrammaticScrollRef.current) return;
-
     const container = contentRef.current;
     if (!container) return;
-
-    const threshold = 100;
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    shouldAutoScrollRef.current = distanceFromBottom < threshold;
+    shouldAutoScrollRef.current = distanceFromBottom < 100;
   }, []);
 
-  // Attach scroll listener to content container
   useEffect(() => {
     const container = contentRef.current;
     if (!container || !isExpanded) return;
-
     container.addEventListener("scroll", handleScroll);
-    return () => {
-      container.removeEventListener("scroll", handleScroll);
-    };
+    return () => container.removeEventListener("scroll", handleScroll);
   }, [handleScroll, isExpanded]);
 
-  // Use ResizeObserver to auto-scroll when content height increases
   useEffect(() => {
     const container = contentRef.current;
-    if (!container || !isExpanded || !isRunning) return;
-
+    if (!container || !isExpanded || !running) return;
     lastHeightRef.current = container.scrollHeight;
-
     const resizeObserver = new ResizeObserver(() => {
       const newHeight = container.scrollHeight;
-      const heightIncreased = newHeight > lastHeightRef.current;
-
-      if (heightIncreased && shouldAutoScrollRef.current) {
+      if (newHeight > lastHeightRef.current && shouldAutoScrollRef.current) {
         scrollToBottom(container);
       } else {
         lastHeightRef.current = newHeight;
       }
     });
-
-    // Observe the container's children for size changes
-    for (const child of container.children) {
-      resizeObserver.observe(child);
-    }
-
-    // Also observe container itself
+    for (const child of container.children) resizeObserver.observe(child);
     resizeObserver.observe(container);
+    return () => resizeObserver.disconnect();
+  }, [isExpanded, running, scrollToBottom]);
 
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [isExpanded, isRunning, scrollToBottom]);
-
-  // Reset autoscroll when task starts running or expands
   useEffect(() => {
-    if (isExpanded && isRunning) {
+    if (isExpanded && running) {
       shouldAutoScrollRef.current = true;
       const container = contentRef.current;
       if (container) {
-        // Small delay to let content render
-        requestAnimationFrame(() => {
-          scrollToBottom(container);
-        });
+        requestAnimationFrame(() => scrollToBottom(container));
       }
     }
-  }, [isExpanded, isRunning, scrollToBottom]);
+  }, [isExpanded, running, scrollToBottom]);
 
-  // Track if we've initiated loading from the effect
+  // Load (and, for running agents, keep refreshing) the child transcript.
+  const loadContent = useCallback(
+    async (force: boolean) => {
+      if (!agentId || !context) return;
+      setIsLoadingContent(true);
+      try {
+        await context.loadAgentContent(projectId, sessionId, agentId, {
+          force,
+        });
+      } finally {
+        setIsLoadingContent(false);
+      }
+    },
+    [agentId, context, projectId, sessionId],
+  );
+
+  // First load on expand.
   const loadInitiatedRef = useRef(false);
-
-  // Load agent content when expanded (for running tasks that auto-expand on mount)
-  // This ensures we load the JSONL content immediately rather than waiting for user click
   useEffect(() => {
     if (!isExpanded || !agentId || !context) return;
     if (loadInitiatedRef.current) return;
-
     loadInitiatedRef.current = true;
+    void loadContent(false);
+  }, [isExpanded, agentId, context, loadContent]);
 
-    // Load the agent content from JSONL (will merge with any SSE content)
-    const loadContent = async () => {
-      setIsLoadingContent(true);
-      try {
-        await context.loadAgentContent(projectId, sessionId, agentId);
-      } finally {
-        setIsLoadingContent(false);
-      }
-    };
-
-    loadContent();
-  }, [isExpanded, agentId, context, projectId, sessionId]);
-
-  // Store validation errors for inline warning display
-  const [validationErrors, setValidationErrors] = useState<ZodError | null>(
-    null,
-  );
-
-  // Validate result schema when enabled (debug feature)
+  // While expanded and running, poll the child wire so live metrics/transcript
+  // converge (Kimi does not stream child events over ACP; the wire.jsonl on
+  // disk is the reliable live source).
   useEffect(() => {
-    if (!result || !validationEnabled) {
-      setValidationErrors(null);
-      return;
-    }
+    if (!isExpanded || !running || !agentId) return;
+    const timer = setInterval(() => void loadContent(true), 3000);
+    return () => clearInterval(timer);
+  }, [isExpanded, running, agentId, loadContent]);
 
-    const validation = validateToolResult("Task", result);
-    if (!validation.valid && validation.errors) {
-      setValidationErrors(validation.errors);
-      reportValidationError("Task", validation.errors);
-    } else {
-      setValidationErrors(null);
-    }
-  }, [result, validationEnabled, reportValidationError]);
+  const handleToggle = useCallback(() => {
+    setIsExpanded((prev) => !prev);
+  }, []);
 
-  // Determine if we should show the warning badge
-  const showValidationWarning =
-    validationEnabled && validationErrors !== null && !isToolIgnored("Task");
+  const hasLiveMessages = (liveContent?.messages.length ?? 0) > 0;
+  const hasFallback = (fallbackContent?.length ?? 0) > 0;
 
-  // Handle expand with lazy-loading
-  const handleExpand = async () => {
-    // Always lazy-load agent content if we have an agentId but no live content
-    // Note: result.content is just the summary text, not the full agent interaction
-    // The full tool calls (Glob, Read, etc.) are in the agent's JSONL file
-    const hasLiveContent =
-      liveContent?.messages && liveContent.messages.length > 0;
-
-    if (!isExpanded && agentId && context && !hasLiveContent) {
-      // Need to lazy-load content - toggle expand first so user sees loading in expanded area
-      setIsExpanded(true);
-      setIsLoadingContent(true);
-      try {
-        await context.loadAgentContent(projectId, sessionId, agentId);
-      } finally {
-        setIsLoadingContent(false);
-      }
-    } else {
-      setIsExpanded(!isExpanded);
-    }
-  };
-
-  // Extract error message if this is an error state
-  const errorInfo = isError ? extractErrorMessage(result) : null;
-
-  // Determine status badge and styling
-  const getStatusBadge = () => {
-    if (isError) {
-      // Use error label if available, otherwise generic "failed"
-      const errorLabel = errorInfo?.label ?? "failed";
-      return { class: "badge-error", text: errorLabel };
-    }
-    if (status === "aborted")
-      return { class: "badge-warning", text: "interrupted" };
-    if (isRunning) return { class: "badge-running", text: "running" };
-    if (result?.status === "completed")
-      return { class: "badge-success", text: "completed" };
-    if (result?.status === "failed")
-      return { class: "badge-error", text: "failed" };
-    return { class: "badge-pending", text: "pending" };
-  };
-
-  const statusBadge = getStatusBadge();
+  const emptyMessage = isLoadingContent
+    ? t("subagentLoadingContent")
+    : running
+      ? t("subagentWaitingActivity")
+      : t("subagentNoContent");
 
   return (
     <div
-      className={`task-inline ${isExpanded ? "expanded" : "collapsed"} status-${statusBadge.text}`}
+      className={`task-inline ${isExpanded ? "expanded" : "collapsed"} status-${status}`}
     >
-      {/* Header row */}
       <button
         type="button"
         className="task-inline-header"
-        onClick={handleExpand}
+        onClick={handleToggle}
       >
         <span className="task-expand-icon">{isExpanded ? "▼" : "▶"}</span>
-        <span className="badge badge-info task-agent-type">
-          {input.subagent_type}
-        </span>
-        <span className="task-inline-title">{input.description}</span>
-        {input.model && <span className="badge task-model">{input.model}</span>}
-        {isRunning && (
-          <>
-            <span className="task-spinner" aria-label="Running">
-              <Spinner />
-            </span>
-            {liveContent?.contextUsage && (
-              <span className="task-context-usage">
-                {liveContent.contextUsage.percentage.toFixed(0)}% context
-              </span>
-            )}
-          </>
+        {typeof swarmIndex === "number" && (
+          <span className="task-swarm-index">#{swarmIndex + 1}</span>
         )}
-        {!isRunning && (
-          <span className={`badge ${statusBadge.class}`}>
-            {statusBadge.text}
+        <span className="badge badge-info task-agent-type">{resolvedType}</span>
+        <span className="task-inline-title" title={description}>
+          {description}
+        </span>
+        {running && (
+          <span
+            className="task-spinner"
+            aria-label={t("subagentStatusRunning")}
+          >
+            <Spinner />
           </span>
         )}
-        {/* Show error summary in collapsed view */}
+        <span className={`badge ${badge.className}`}>{badge.label}</span>
+        <SubagentStats
+          metrics={metrics}
+          running={running}
+          startedAt={descriptor?.startedAt}
+        />
         {!isExpanded && errorInfo && (
           <span className="task-error-summary" title={errorInfo.raw}>
             {errorInfo.summary}
           </span>
         )}
-        {result && !isError && (
-          <span className="task-stats">
-            {formatDuration(result.totalDurationMs ?? 0)} ·{" "}
-            {(result.totalTokens ?? 0).toLocaleString()} tokens
+        {agentId && (
+          <span className="task-agent-id" title={t("subagentAgentIdLabel")}>
+            {agentId}
           </span>
-        )}
-        {showValidationWarning && validationErrors && (
-          <SchemaWarning toolName="Task" errors={validationErrors} />
         )}
       </button>
 
-      {/* Loading indicator */}
-      {isLoadingContent && (
-        <div className="task-loading">
-          <Spinner /> Loading agent content...
-        </div>
-      )}
-
-      {/* Expanded content */}
       {isExpanded && (
         <div className="task-inline-content" ref={contentRef}>
-          {/* Show error details if this is an error state */}
           {errorInfo && (
             <div className="task-error-details">
               <pre className="task-error-message">{errorInfo.raw}</pre>
             </div>
           )}
-          {/* Show live nested content if available */}
-          {!errorInfo && liveContent?.messages.length ? (
-            <TaskNestedContent
-              messages={liveContent.messages}
-              isStreaming={isRunning}
+          {status === "suspended" && (
+            <div className="task-status-note">{t("subagentSuspendedNote")}</div>
+          )}
+          {status === "backgrounded" && (
+            <div className="task-status-note">
+              {t("subagentBackgroundedNote")}
+            </div>
+          )}
+          {status === "interrupted" && !errorInfo && (
+            <div className="task-status-note">
+              {t("subagentInterruptedNote")}
+            </div>
+          )}
+          {!errorInfo && hasLiveMessages ? (
+            <SubagentTranscript
+              messages={liveContent?.messages ?? []}
+              isStreaming={running}
             />
-          ) : !errorInfo && result?.content?.length ? (
-            // Fall back to result content blocks (original behavior)
+          ) : !errorInfo && hasFallback ? (
             <div className="task-content">
-              {result.content.map((block) => (
+              {fallbackContent?.map((block) => (
                 <ContentBlockRenderer
                   key={
                     block.id ??
@@ -485,98 +523,281 @@ function TaskInline({
             </div>
           ) : !errorInfo ? (
             <div className="task-empty">
-              {isRunning ? "Waiting for agent activity..." : "No content"}
+              {isLoadingContent && <Spinner />} {emptyMessage}
             </div>
           ) : null}
         </div>
+      )}
+      {isLoadingContent && !isExpanded && (
+        <span className="sr-only">{t("subagentLoadingContent")}</span>
       )}
     </div>
   );
 }
 
-function Spinner() {
+/**
+ * AgentSwarm (or any tool_use that fanned out to multiple children): an
+ * aggregate summary header plus one independently-expandable card per member.
+ */
+function AgentSwarmInline({
+  input,
+  agentIds,
+  outerStatus,
+  isError,
+}: {
+  input: TaskInput;
+  agentIds: string[];
+  outerStatus: OuterStatus;
+  isError: boolean;
+}) {
+  const { t } = useI18n();
+  const statLabels = useSubagentStatLabels();
+  const context = useContext(AgentContentContext);
+
+  const members = agentIds.map((agentId) => {
+    const content = context?.agentContent[agentId];
+    const status = resolveSubagentStatus(
+      content?.descriptor?.status,
+      content?.status,
+      outerStatus,
+      isError,
+    );
+    return { agentId, content, status };
+  });
+
+  const runningCount = members.filter(
+    (m) =>
+      m.status === "running" ||
+      m.status === "starting" ||
+      m.status === "queued",
+  ).length;
+  const completedCount = members.filter((m) => m.status === "completed").length;
+  const failedCount = members.filter(
+    (m) => m.status === "failed" || m.status === "interrupted",
+  ).length;
+
+  // Aggregate metrics across members (sum of measured values only).
+  const aggregate = useMemo<SubagentMetrics>(() => {
+    let tools = 0;
+    let total = 0;
+    let hasTools = false;
+    let hasTotal = false;
+    for (const m of members) {
+      const metrics = m.content?.metrics;
+      if (typeof metrics?.toolUseCount === "number") {
+        tools += metrics.toolUseCount;
+        hasTools = true;
+      }
+      const usage = metrics?.usage;
+      if (usage) {
+        const t2 =
+          usage.totalTokens ??
+          (usage.inputOther ?? 0) +
+            (usage.inputCacheRead ?? 0) +
+            (usage.inputCacheCreation ?? 0) +
+            (usage.output ?? 0);
+        total += t2;
+        hasTotal = true;
+      }
+    }
+    return {
+      ...(hasTools ? { toolUseCount: tools } : {}),
+      ...(hasTotal ? { usage: { totalTokens: total } } : {}),
+    };
+  }, [members]);
+
+  const summaryChips = buildSubagentStatChips(aggregate, {
+    showTotal: true,
+    labels: statLabels,
+  });
+
   return (
-    <svg
-      className="spinner"
-      viewBox="0 0 16 16"
-      width="12"
-      height="12"
-      aria-hidden="true"
-    >
-      <circle
-        cx="8"
-        cy="8"
-        r="6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeDasharray="24"
-        strokeDashoffset="8"
-      />
-    </svg>
+    <div className="agent-swarm">
+      <div className="agent-swarm-header">
+        <span className="badge badge-info">{t("swarmLabel")}</span>
+        {input.description && (
+          <span className="agent-swarm-title" title={input.description}>
+            {input.description}
+          </span>
+        )}
+        <span className="agent-swarm-counts">
+          <span className="badge">
+            {t("swarmMembersLabel", { count: members.length })}
+          </span>
+          {runningCount > 0 && (
+            <span className="badge badge-running">
+              {t("swarmRunningLabel", { count: runningCount })}
+            </span>
+          )}
+          {completedCount > 0 && (
+            <span className="badge badge-success">
+              {t("swarmCompletedLabel", { count: completedCount })}
+            </span>
+          )}
+          {failedCount > 0 && (
+            <span className="badge badge-error">
+              {t("swarmFailedLabel", { count: failedCount })}
+            </span>
+          )}
+        </span>
+        {summaryChips.length > 0 && (
+          <span className="task-stats">
+            {summaryChips.map((chip) => (
+              <span key={chip.key} className="task-stat">
+                {chip.label}
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
+      <div className="agent-swarm-members">
+        {members.map((member, index) => (
+          <SubagentCard
+            key={member.agentId}
+            agentId={member.agentId}
+            subagentType={
+              member.content?.agentType ??
+              member.content?.descriptor?.type ??
+              input.subagent_type
+            }
+            description={
+              member.content?.descriptor?.description ??
+              `${input.description} #${index + 1}`
+            }
+            outerStatus={outerStatus}
+            isError={isError || member.status === "failed"}
+            swarmIndex={member.content?.descriptor?.swarmIndex ?? index}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
 /**
- * Task tool result - shows agent response with nested content
- * (Legacy - used when expanded in standard tool row)
+ * Task inline entry point. Routes a single-child call to {@link SubagentCard}
+ * and a multi-child (AgentSwarm) fan-out to {@link AgentSwarmInline}.
  */
-function TaskToolResult({
+function TaskInline({
+  input,
   result,
   isError,
+  status,
+  toolUseId,
 }: {
-  result: TaskResult;
+  input: TaskInput;
+  result: TaskResult | undefined;
   isError: boolean;
+  status: OuterStatus;
+  toolUseId?: string;
 }) {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const context = useContext(AgentContentContext);
+  const {
+    reportValidationError,
+    enabled: validationEnabled,
+    isToolIgnored,
+  } = useSchemaValidationContext();
 
-  if (isError) {
+  // All subagent ids produced by this tool_use (AgentSwarm → many).
+  const agentIds = useMemo<string[]>(() => {
+    const fromMulti = toolUseId
+      ? context?.toolUseToAgentIds.get(toolUseId)
+      : undefined;
+    if (fromMulti && fromMulti.length > 0) return fromMulti;
+    const single =
+      result?.agentId ??
+      (toolUseId ? context?.toolUseToAgent.get(toolUseId) : undefined);
+    return single ? [single] : [];
+  }, [toolUseId, context, result]);
+
+  const [validationErrors, setValidationErrors] = useState<ZodError | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!result || !validationEnabled) {
+      setValidationErrors(null);
+      return;
+    }
+    const validation = validateToolResult("Task", result);
+    if (!validation.valid && validation.errors) {
+      setValidationErrors(validation.errors);
+      reportValidationError("Task", validation.errors);
+    } else {
+      setValidationErrors(null);
+    }
+  }, [result, validationEnabled, reportValidationError]);
+
+  const showValidationWarning =
+    validationEnabled && validationErrors !== null && !isToolIgnored("Task");
+
+  // Multi-child fan-out (AgentSwarm).
+  if (agentIds.length > 1) {
     return (
-      <div className="task-error">
-        {typeof result === "object" && "content" in result
-          ? String(result.content)
-          : "Task failed"}
-      </div>
+      <>
+        <AgentSwarmInline
+          input={input}
+          agentIds={agentIds}
+          outerStatus={status}
+          isError={isError}
+        />
+        {showValidationWarning && validationErrors && (
+          <SchemaWarning toolName="Task" errors={validationErrors} />
+        )}
+      </>
     );
   }
 
-  if (!result) {
-    return <div className="task-empty">No result</div>;
-  }
-
-  const statusClass =
-    result.status === "completed"
-      ? "badge-success"
-      : result.status === "failed"
-        ? "badge-error"
-        : "badge-warning";
+  const errorInfo = isError ? extractErrorMessage(result) : null;
 
   return (
-    <div className="task-result">
-      <div className="task-result-header">
-        <span className={`badge ${statusClass}`}>{result.status}</span>
-        <span className="task-stats">
-          {formatDuration(result.totalDurationMs ?? 0)} &middot;{" "}
-          {(result.totalTokens ?? 0).toLocaleString()} tokens &middot;{" "}
-          {result.totalToolUseCount ?? 0} tools
-        </span>
-        <button
-          type="button"
-          className="expand-button"
-          onClick={() => setIsExpanded(!isExpanded)}
-        >
-          {isExpanded ? "Collapse" : "Expand"}
-        </button>
+    <>
+      <SubagentCard
+        agentId={agentIds[0]}
+        subagentType={input.subagent_type}
+        description={input.description}
+        outerStatus={status}
+        isError={isError}
+        errorInfo={errorInfo}
+        fallbackContent={result?.content}
+      />
+      {showValidationWarning && validationErrors && (
+        <SchemaWarning toolName="Task" errors={validationErrors} />
+      )}
+    </>
+  );
+}
+
+/**
+ * Task tool use - shows description and subagent type (collapsed tool-row use).
+ */
+function TaskToolUse({ input }: { input: TaskInput }) {
+  const [showPrompt, setShowPrompt] = useState(false);
+  const promptTruncated =
+    input.prompt.length > MAX_PROMPT_LENGTH
+      ? `${input.prompt.slice(0, MAX_PROMPT_LENGTH)}...`
+      : input.prompt;
+
+  return (
+    <div className="task-tool-use">
+      <div className="task-header">
+        <span className="task-description">{input.description}</span>
+        <span className="badge badge-info">{input.subagent_type}</span>
+        {input.model && <span className="badge">{input.model}</span>}
       </div>
-      {isExpanded && result.content && result.content.length > 0 && (
-        <div className="task-content">
-          {result.content.map((block, i) => (
-            <ContentBlockRenderer
-              key={`${result.agentId}-${i}`}
-              block={block}
-              context={{ isStreaming: false, theme: "dark" }}
-            />
-          ))}
+      {input.prompt && (
+        <div className="task-prompt">
+          <button
+            type="button"
+            className="task-prompt-toggle"
+            onClick={() => setShowPrompt(!showPrompt)}
+          >
+            {showPrompt ? "Hide prompt" : "Show prompt"}
+          </button>
+          {showPrompt && (
+            <pre className="task-prompt-content">
+              <code>{showPrompt ? input.prompt : promptTruncated}</code>
+            </pre>
+          )}
         </div>
       )}
     </div>
@@ -591,7 +812,18 @@ export const taskRenderer: ToolRenderer<TaskInput, TaskResult> = {
   },
 
   renderToolResult(result, isError, _context) {
-    return <TaskToolResult result={result as TaskResult} isError={isError} />;
+    // Standalone result rendering falls back to the inline card without live
+    // context; the inline path is the primary surface.
+    return (
+      <SubagentCard
+        agentId={(result as TaskResult | undefined)?.agentId}
+        subagentType=""
+        description=""
+        outerStatus={isError ? "error" : "complete"}
+        isError={isError}
+        fallbackContent={(result as TaskResult | undefined)?.content}
+      />
+    );
   },
 
   getUseSummary(input) {
@@ -601,13 +833,9 @@ export const taskRenderer: ToolRenderer<TaskInput, TaskResult> = {
   getResultSummary(result, isError) {
     if (isError) return "Error";
     const r = result as TaskResult;
-    return r?.status
-      ? `${r.status} (${r.totalToolUseCount} tools)`
-      : "Complete";
+    return r?.status ? `${r.status}` : "Complete";
   },
 
-  // Use inline rendering to bypass standard tool row structure
-  // This gives us full control over expand/collapse and nested content display
   renderInline(input, result, isError, status, context) {
     return (
       <TaskInline

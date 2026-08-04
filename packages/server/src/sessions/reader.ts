@@ -40,6 +40,7 @@ import {
   isCompactBoundary,
   isConversationEntry,
 } from "@yep-anywhere/shared";
+import type { SubagentDescriptor, SubagentMetrics } from "@yep-anywhere/shared";
 import {
   buildClaudeBranchView,
   collectVisibleClaudeEntries,
@@ -73,6 +74,13 @@ export interface AgentSession {
   status: AgentStatus;
   /** Agent type from meta.json (SDK 0.2.76+), e.g. "Explore", "Plan" */
   agentType?: string;
+  /**
+   * Derived run metrics (usage breakdown, tool/step counts, duration).
+   * Providers that cannot measure them omit the field.
+   */
+  metrics?: SubagentMetrics;
+  /** Rich identity + lifecycle descriptor, when the provider can supply it. */
+  descriptor?: SubagentDescriptor;
 }
 
 /**

@@ -15,16 +15,24 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
+  type AgentMapping,
+  type AgentStatus,
   type ContextCumulativeUsage,
   type KimiStepEndEvent,
+  type KimiSubagentStatus,
   type KimiToolCallEvent,
   type KimiToolResultEvent,
   type KimiWireRecord,
   SESSION_TITLE_MAX_LENGTH,
   type SessionQuestion,
+  type SubagentDescriptor,
+  type SubagentMetrics,
   type UrlProjectId,
+  deriveKimiSubagentMetrics,
   getKimiPromptText,
+  getKimiSubagentType,
   getModelContextWindow,
+  inferKimiSubagentStatus,
   isKimiLoopEventRecord,
   isKimiModelConfigRecord,
   isKimiTurnPromptRecord,
@@ -37,6 +45,7 @@ import type {
   SessionSummary,
 } from "../supervisor/types.js";
 import { convertKimiMessages } from "./normalization.js";
+import type { AgentSession as AgentSessionResult } from "./reader.js";
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -222,12 +231,16 @@ export class KimiSessionReader implements ISessionReader {
    * carries the produced agent id(s): `agent_id: agent-0` for a single Agent,
    * or `<subagent agent_id="agent-0" ...>` entries for an AgentSwarm.
    *
+   * The parent tool.result is the authoritative, non-heuristic identity source
+   * (each result lands the moment its child finishes, independent of the parent
+   * turn ending). An `AgentSwarm` call fans out to N children that all share
+   * one `toolUseId`; we emit one mapping per child, each with its `swarmIndex`,
+   * so callers can render the full fan-out instead of only the first child.
+   *
    * Kimi agent ids (`agent-0`, `agent-1`, ...) are only unique within a
    * session, so this must be scoped by sessionId — the route forwards it.
    */
-  async getAgentMappings(
-    sessionId?: string,
-  ): Promise<{ toolUseId: string; agentId: string }[]> {
+  async getAgentMappings(sessionId?: string): Promise<AgentMapping[]> {
     if (!sessionId) return [];
     const entry = await this.findSessionFile(sessionId);
     if (!entry) return [];
@@ -239,16 +252,28 @@ export class KimiSessionReader implements ISessionReader {
       return [];
     }
 
-    // Collect subagent-spawning tool calls and pair them with their results.
-    const spawnCallIds = new Set<string>();
+    // Requested subagent type per spawning tool call (from the call args).
+    const requestedTypeByCallId = new Map<string, string | undefined>();
+    // Raw tool.result output text per spawning tool call.
     const resultOutputByCallId = new Map<string, string>();
+    // Preserve tool.call order so swarmIndex fallback (per-call ordinal) is
+    // deterministic; the child's own `swarmIndex` from the result wins.
+    const spawnCallIds: string[] = [];
+
     for (const record of records) {
       if (!isKimiLoopEventRecord(record)) continue;
       const event = record.event;
       if (event.type === "tool.call") {
         const call = event as KimiToolCallEvent;
         if (call.name === "Agent" || call.name === "AgentSwarm") {
-          spawnCallIds.add(call.toolCallId);
+          if (!requestedTypeByCallId.has(call.toolCallId)) {
+            spawnCallIds.push(call.toolCallId);
+          }
+          const argType = call.args?.subagent_type;
+          requestedTypeByCallId.set(
+            call.toolCallId,
+            typeof argType === "string" ? argType : undefined,
+          );
         }
       } else if (event.type === "tool.result") {
         const res = event as KimiToolResultEvent;
@@ -259,31 +284,44 @@ export class KimiSessionReader implements ISessionReader {
       }
     }
 
-    const mappings: { toolUseId: string; agentId: string }[] = [];
+    const mappings: AgentMapping[] = [];
     for (const toolUseId of spawnCallIds) {
       const output = resultOutputByCallId.get(toolUseId);
-      if (!output) continue;
-      const agentIds = parseKimiSubagentIds(output);
-      // The client maps toolUseId -> agentId 1:1; use the first produced
-      // subagent. Full AgentSwarm fan-out (N subagents per call) is future
-      // work that needs a dedicated multi-agent renderer.
-      if (agentIds.length > 0) {
-        mappings.push({ toolUseId, agentId: agentIds[0] as string });
-      }
+      if (!output) continue; // No result yet → no authoritative identity.
+      const children = parseKimiSubagentResults(output);
+      const requestedType = requestedTypeByCallId.get(toolUseId);
+      children.forEach((child, index) => {
+        mappings.push({
+          toolUseId,
+          agentId: child.agentId,
+          ...((child.type ?? requestedType)
+            ? { agentType: child.type ?? requestedType }
+            : {}),
+          swarmIndex: child.swarmIndex ?? index,
+          ...(child.status ? { status: child.status } : {}),
+        });
+      });
     }
     return mappings;
   }
 
   /**
-   * Load a subagent transcript from `agents/<agentId>/wire.jsonl`.
+   * Load a subagent transcript from `agents/<agentId>/wire.jsonl`, along with
+   * its derived run metrics and lifecycle status.
    *
    * agentId (e.g. `agent-0`) is only unique within a session, so sessionId is
    * required to locate the owning session directory.
+   *
+   * Status resolution is authoritative: when the parent tool.result already
+   * carries a terminal outcome for this child (`status: completed|failed`, or
+   * an AgentSwarm `outcome="..."`), that wins; otherwise the child's own wire
+   * (`turn.cancel`, `step.end.finishReason`) is used. It never infers
+   * "completed" just because the transcript is non-empty.
    */
   async getAgentSession(
     agentId: string,
     sessionId?: string,
-  ): Promise<{ messages: Message[]; status: string } | null> {
+  ): Promise<AgentSessionResult | null> {
     if (!sessionId) return null;
     // Guard against path traversal: agent ids are simple slugs.
     if (!/^[\w.-]+$/.test(agentId) || agentId.includes("..")) return null;
@@ -307,7 +345,101 @@ export class KimiSessionReader implements ISessionReader {
       records,
     });
 
-    return { messages, status: inferKimiAgentStatus(records, messages) };
+    const resolved = await this.resolveSubagentFromParent(entry, agentId);
+    const detailedStatus = inferKimiSubagentStatus(records, resolved?.status);
+    const agentType = getKimiSubagentType(records) ?? resolved?.type;
+    const metrics: SubagentMetrics = deriveKimiSubagentMetrics(records);
+    const { startedAt, completedAt } = kimiSubagentTimespan(
+      records,
+      detailedStatus,
+    );
+
+    const descriptor: SubagentDescriptor = {
+      agentId,
+      parentAgentId: "main",
+      status: detailedStatus,
+      ...(resolved?.toolUseId ? { parentToolUseId: resolved.toolUseId } : {}),
+      ...(agentType ? { type: agentType } : {}),
+      ...(resolved?.description ? { description: resolved.description } : {}),
+      ...(resolved?.swarmIndex !== undefined
+        ? { swarmIndex: resolved.swarmIndex }
+        : {}),
+      ...(resolved?.runInBackground ? { runInBackground: true } : {}),
+      ...(startedAt ? { startedAt } : {}),
+      ...(completedAt ? { completedAt } : {}),
+    };
+
+    return {
+      messages,
+      status: subagentToAgentStatus(detailedStatus),
+      ...(agentType ? { agentType } : {}),
+      metrics,
+      descriptor,
+    };
+  }
+
+  /**
+   * Resolve the parent tool.call/tool.result linkage for a given child agent
+   * id from the main wire. Returns the spawning `toolUseId`, requested type,
+   * description, swarm index, and the authoritative terminal status parsed
+   * from the parent result — or undefined when no result has landed yet.
+   */
+  private async resolveSubagentFromParent(
+    entry: KimiSessionCacheEntry,
+    agentId: string,
+  ): Promise<
+    | {
+        toolUseId: string;
+        type?: string;
+        description?: string;
+        swarmIndex?: number;
+        status?: KimiSubagentStatus;
+        runInBackground?: boolean;
+      }
+    | undefined
+  > {
+    let records: KimiWireRecord[];
+    try {
+      records = parseKimiWireJsonl(await readFile(entry.filePath, "utf-8"));
+    } catch {
+      return undefined;
+    }
+
+    const callMeta = new Map<string, { type?: string; description?: string }>();
+    for (const record of records) {
+      if (!isKimiLoopEventRecord(record)) continue;
+      const event = record.event;
+      if (event.type === "tool.call") {
+        const call = event as KimiToolCallEvent;
+        if (call.name === "Agent" || call.name === "AgentSwarm") {
+          const argType = call.args?.subagent_type;
+          const argDescription = call.args?.description;
+          callMeta.set(call.toolCallId, {
+            type: typeof argType === "string" ? argType : undefined,
+            description:
+              typeof argDescription === "string" ? argDescription : undefined,
+          });
+        }
+      } else if (event.type === "tool.result") {
+        const res = event as KimiToolResultEvent;
+        const output = res.result?.output;
+        if (typeof output !== "string" || !res.toolCallId) continue;
+        const children = parseKimiSubagentResults(output);
+        const match = children.find((c) => c.agentId === agentId);
+        if (match) {
+          const meta = callMeta.get(res.toolCallId);
+          return {
+            toolUseId: res.toolCallId,
+            type: match.type ?? meta?.type,
+            description: meta?.description,
+            swarmIndex: match.swarmIndex,
+            status: match.status,
+            runInBackground: match.runInBackground,
+          };
+        }
+      }
+    }
+    return undefined;
   }
 
   async getSessionFilePath(sessionId: string): Promise<string | null> {
@@ -570,46 +702,167 @@ export class KimiSessionReader implements ISessionReader {
 }
 
 /**
- * Extract subagent ids from an Agent / AgentSwarm tool.result output.
- *
- * Single Agent result:
- *   `agent_id: agent-0\nactual_subagent_type: explore\nstatus: completed\n...`
- * AgentSwarm result:
- *   `<agent_swarm_result><subagent agent_id="agent-0" ...>...</subagent>...`
+ * A single child parsed from an Agent / AgentSwarm tool.result output, with
+ * its terminal status and (for swarms) its position.
  */
-export function parseKimiSubagentIds(output: string): string[] {
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  const add = (id: string | undefined) => {
-    if (id && !seen.has(id)) {
-      seen.add(id);
-      ids.push(id);
-    }
-  };
-
-  // AgentSwarm: one <subagent agent_id="..."> per child.
-  for (const m of output.matchAll(/<subagent[^>]*\bagent_id="([^"]+)"/g)) {
-    add(m[1]);
-  }
-  // Single Agent: leading `agent_id: <id>` line.
-  const single = output.match(/^\s*agent_id:\s*(\S+)/m);
-  if (single) add(single[1]);
-
-  return ids;
+export interface KimiSubagentResult {
+  agentId: string;
+  status?: KimiSubagentStatus;
+  type?: string;
+  swarmIndex?: number;
+  runInBackground?: boolean;
 }
 
 /**
- * Infer a subagent's status from its own wire records. History view only sees
- * terminal states: a `turn.cancel` marks an interrupted/failed run, otherwise
- * a subagent with produced content is treated as completed.
+ * Parse the child agent id(s) + terminal status from an Agent / AgentSwarm
+ * tool.result output.
+ *
+ * Single Agent result:
+ *   `agent_id: agent-0\nactual_subagent_type: explore\nstatus: completed\n...`
+ *   (background launches carry `status: running`.)
+ * AgentSwarm result:
+ *   `<agent_swarm_result><subagent agent_id="agent-0" outcome="completed"
+ *    ...>...</subagent>...`
  */
-function inferKimiAgentStatus(
-  records: KimiWireRecord[],
-  messages: Message[],
-): "pending" | "running" | "completed" | "failed" {
-  if (messages.length === 0) return "pending";
-  for (const record of records) {
-    if ((record as { type?: string }).type === "turn.cancel") return "failed";
+export function parseKimiSubagentResults(output: string): KimiSubagentResult[] {
+  const results: KimiSubagentResult[] = [];
+  const seen = new Set<string>();
+  const push = (result: KimiSubagentResult) => {
+    if (!result.agentId || seen.has(result.agentId)) return;
+    seen.add(result.agentId);
+    results.push(result);
+  };
+
+  // AgentSwarm: one <subagent agent_id="..." outcome="..." ...> per child.
+  let swarmIndex = 0;
+  for (const m of output.matchAll(/<subagent\b([^>]*)>/gi)) {
+    const attrs = m[1] ?? "";
+    const agentId = attrs.match(/\bagent_id\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!agentId) continue;
+    const outcome = attrs.match(/\boutcome\s*=\s*["']([^"']+)["']/i)?.[1];
+    const type = attrs.match(
+      /\b(?:actual_subagent_type|subagent_type|type)\s*=\s*["']([^"']+)["']/i,
+    )?.[1];
+    push({
+      agentId,
+      status: mapKimiOutcomeToStatus(outcome),
+      ...(type ? { type } : {}),
+      swarmIndex: swarmIndex++,
+    });
   }
-  return "completed";
+
+  if (results.length > 0) return results;
+
+  // Single Agent: leading `agent_id: <id>` line + `status:` + type lines.
+  const agentId = output.match(/^\s*agent_id:\s*(\S+)/m)?.[1];
+  if (agentId) {
+    const statusText = output.match(/^\s*status:\s*(\S+)/m)?.[1];
+    const type = output.match(/^\s*actual_subagent_type:\s*(\S+)/m)?.[1];
+    const runInBackground = /^\s*automatic_notification:\s*true\s*$/im.test(
+      output,
+    );
+    push({
+      agentId,
+      status: runInBackground
+        ? "backgrounded"
+        : mapKimiOutcomeToStatus(statusText),
+      ...(type ? { type } : {}),
+      ...(runInBackground ? { runInBackground: true } : {}),
+    });
+  }
+
+  return results;
+}
+
+/**
+ * @deprecated Use {@link parseKimiSubagentResults}. Kept for callers that only
+ * need the ordered id list.
+ */
+export function parseKimiSubagentIds(output: string): string[] {
+  return parseKimiSubagentResults(output).map((r) => r.agentId);
+}
+
+/** Map a Kimi tool.result `status:` / swarm `outcome=` token to a status. */
+function mapKimiOutcomeToStatus(
+  token: string | undefined,
+): KimiSubagentStatus | undefined {
+  if (!token) return undefined;
+  const normalized = token.trim().toLowerCase();
+  switch (normalized) {
+    case "completed":
+    case "success":
+    case "succeeded":
+      return "completed";
+    case "failed":
+    case "error":
+      return "failed";
+    case "cancelled":
+    case "canceled":
+    case "aborted":
+    case "interrupted":
+      return "interrupted";
+    case "timeout":
+    case "timed_out":
+      return "failed";
+    case "suspended":
+      return "suspended";
+    case "running":
+      return "running";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Compute a subagent's run timespan from its wire records. `startedAt` is the
+ * earliest record timestamp (metadata.created_at or the first `time`);
+ * `completedAt` is the latest timestamp, only reported once the run reached a
+ * terminal status (so a still-running agent has no completion time).
+ */
+function kimiSubagentTimespan(
+  records: readonly KimiWireRecord[],
+  status: KimiSubagentStatus,
+): { startedAt?: string; completedAt?: string } {
+  let first: number | undefined;
+  let last: number | undefined;
+  for (const record of records) {
+    const t =
+      typeof (record as { time?: unknown }).time === "number"
+        ? (record as { time: number }).time
+        : record.type === "metadata" &&
+            typeof (record as { created_at?: unknown }).created_at === "number"
+          ? (record as { created_at: number }).created_at
+          : undefined;
+    if (t === undefined) continue;
+    if (first === undefined || t < first) first = t;
+    if (last === undefined || t > last) last = t;
+  }
+  const terminal =
+    status === "completed" || status === "failed" || status === "interrupted";
+  return {
+    ...(first !== undefined
+      ? { startedAt: new Date(first).toISOString() }
+      : {}),
+    ...(terminal && last !== undefined
+      ? { completedAt: new Date(last).toISOString() }
+      : {}),
+  };
+}
+
+/** Collapse the rich subagent lifecycle to the coarse {@link AgentStatus}. */
+function subagentToAgentStatus(status: KimiSubagentStatus): AgentStatus {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "failed":
+    case "interrupted":
+      return "failed";
+    case "running":
+    case "starting":
+    case "suspended":
+    case "backgrounded":
+      return "running";
+    default:
+      return "pending";
+  }
 }

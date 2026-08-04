@@ -194,6 +194,11 @@ export type {
   // Agent session types
   AgentStatus,
   AgentSession,
+  AgentMapping,
+  SubagentStatus,
+  SubagentUsage,
+  SubagentMetrics,
+  SubagentDescriptor,
   // Input request types
   InputRequest,
   // Recents types
@@ -391,6 +396,9 @@ export type {
   KimiImagePart,
   KimiBlobRef,
   KimiPromptImage,
+  KimiSubagentStatus,
+  KimiSubagentUsage,
+  KimiSubagentMetrics,
 } from "./kimi-schema/types.js";
 export {
   parseKimiWireJsonl,
@@ -401,6 +409,9 @@ export {
   isKimiTurnPromptRecord,
   isKimiLoopEventRecord,
   isKimiModelConfigRecord,
+  getKimiSubagentType,
+  deriveKimiSubagentMetrics,
+  inferKimiSubagentStatus,
 } from "./kimi-schema/types.js";
 
 // Device bridge streaming types (for device bridge remote control)

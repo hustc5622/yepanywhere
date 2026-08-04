@@ -17,11 +17,18 @@ interface AgentContentContextValue {
   agentContent: AgentContentMap;
   /** Mapping from Task tool_use_id → agentId (for rendering during streaming) */
   toolUseToAgent: Map<string, string>;
+  /**
+   * Mapping from Task tool_use_id → all subagent ids it produced. A single
+   * `Agent` call is 1:1; an `AgentSwarm` call fans out to N children that
+   * share one tool_use_id. The renderer uses this to show the full fan-out.
+   */
+  toolUseToAgentIds: Map<string, string[]>;
   /** Load agent content from server (for lazy-loading completed tasks) */
   loadAgentContent: (
     projectId: string,
     sessionId: string,
     agentId: string,
+    options?: { force?: boolean },
   ) => Promise<AgentContent>;
   /** Check if content is currently being loaded for an agent */
   isLoading: (agentId: string) => boolean;
@@ -40,6 +47,8 @@ interface AgentContentProviderProps {
   setAgentContent: React.Dispatch<React.SetStateAction<AgentContentMap>>;
   /** Mapping from Task tool_use_id → agentId (for rendering during streaming) */
   toolUseToAgent: Map<string, string>;
+  /** Mapping from Task tool_use_id → all subagent ids (AgentSwarm fan-out) */
+  toolUseToAgentIds?: Map<string, string[]>;
   projectId: string;
   sessionId: string;
 }
@@ -49,6 +58,7 @@ export function AgentContentProvider({
   agentContent,
   setAgentContent,
   toolUseToAgent,
+  toolUseToAgentIds,
   projectId,
   sessionId,
 }: AgentContentProviderProps) {
@@ -66,9 +76,13 @@ export function AgentContentProvider({
       loadProjectId: string,
       loadSessionId: string,
       agentId: string,
+      options?: { force?: boolean },
     ): Promise<AgentContent> => {
-      // Check if JSONL has already been loaded for this agent
-      if (loadedAgentsRef.current.has(agentId)) {
+      const force = options?.force === true;
+      // Check if JSONL has already been loaded for this agent. A forced reload
+      // (e.g. a still-running subagent whose wire.jsonl keeps growing) bypasses
+      // the once-only cache so live metrics/transcript keep converging.
+      if (!force && loadedAgentsRef.current.has(agentId)) {
         return (
           agentContentRef.current[agentId] ?? {
             messages: [],
@@ -77,7 +91,9 @@ export function AgentContentProvider({
         );
       }
 
-      // Check if already loading
+      // Share an in-flight read even for forced refreshes. `force` bypasses the
+      // completed-result cache, not request deduplication; overlapping polls
+      // could otherwise finish out of order and regress metrics or status.
       if (loadingAgentsRef.current.has(agentId)) {
         // Wait for existing load to complete
         return new Promise((resolve) => {
@@ -142,6 +158,9 @@ export function AgentContentProvider({
             [agentId]: {
               messages: Array.from(messageMap.values()),
               status,
+              ...(data.agentType ? { agentType: data.agentType } : {}),
+              ...(data.metrics ? { metrics: data.metrics } : {}),
+              ...(data.descriptor ? { descriptor: data.descriptor } : {}),
             },
           };
         });
@@ -149,6 +168,9 @@ export function AgentContentProvider({
         return {
           messages: data.messages,
           status: data.status,
+          ...(data.agentType ? { agentType: data.agentType } : {}),
+          ...(data.metrics ? { metrics: data.metrics } : {}),
+          ...(data.descriptor ? { descriptor: data.descriptor } : {}),
         };
       } catch (error) {
         console.error(`Failed to load agent content for ${agentId}:`, error);
@@ -173,11 +195,19 @@ export function AgentContentProvider({
     () => ({
       agentContent,
       toolUseToAgent,
+      toolUseToAgentIds: toolUseToAgentIds ?? new Map(),
       loadAgentContent,
       isLoading,
       projectId,
     }),
-    [agentContent, toolUseToAgent, loadAgentContent, isLoading, projectId],
+    [
+      agentContent,
+      toolUseToAgent,
+      toolUseToAgentIds,
+      loadAgentContent,
+      isLoading,
+      projectId,
+    ],
   );
 
   return (

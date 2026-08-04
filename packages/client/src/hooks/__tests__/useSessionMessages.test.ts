@@ -66,6 +66,10 @@ function sessionResponse(
   };
 }
 
+function kimiSessionResponse(updatedAt: string, messages: Message[]) {
+  return sessionResponse(updatedAt, messages, { provider: "kimi" });
+}
+
 function codexBranchState(
   activeBranchId: string,
   branches: Array<{ id: string; parentId: string | null; isActive: boolean }>,
@@ -570,5 +574,122 @@ describe("useSessionMessages Codex snapshot refresh", () => {
     expect(result.current.messages.map((item) => item.id)).toEqual([
       "retained",
     ]);
+  });
+});
+
+describe("useSessionMessages Kimi authoritative snapshot sync", () => {
+  beforeEach(() => {
+    mockGetSession.mockReset();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("replaces live UUID copies instead of appending the full persisted history", async () => {
+    const firstUser = message("session-1-user-0", {
+      timestamp: "2026-08-04T07:25:14.291Z",
+      message: { role: "user", content: "first question" },
+    });
+    const firstAssistant = message("session-1-assistant-0", {
+      type: "assistant",
+      timestamp: "2026-08-04T07:27:51.439Z",
+      message: { role: "assistant", content: "first answer" },
+    });
+    const persistedSecondUser = message("session-1-user-1", {
+      timestamp: "2026-08-04T07:29:30.479Z",
+      message: { role: "user", content: "second question" },
+    });
+    const persistedSecondAssistant = message("session-1-assistant-1", {
+      type: "assistant",
+      timestamp: "2026-08-04T07:34:21.313Z",
+      message: { role: "assistant", content: "second answer" },
+    });
+    const persistedThirdUser = message("session-1-user-2", {
+      timestamp: "2026-08-04T07:39:41.242Z",
+      message: { role: "user", content: "third question" },
+    });
+    const persistedThirdAssistant = message("session-1-assistant-2", {
+      type: "assistant",
+      timestamp: "2026-08-04T07:55:48.416Z",
+      message: { role: "assistant", content: "third answer" },
+    });
+
+    mockGetSession.mockResolvedValueOnce(
+      kimiSessionResponse("2026-08-04T07:27:51.439Z", [
+        firstUser,
+        firstAssistant,
+      ]),
+    );
+
+    const { result } = renderHook(() =>
+      useSessionMessages({ projectId: "project-1", sessionId: "session-1" }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.handleStreamMessageEvent(
+        message("live-second-user", {
+          timestamp: "2026-08-04T07:29:30.100Z",
+          message: { role: "user", content: "second question" },
+        }),
+      );
+      result.current.handleStreamMessageEvent(
+        message("live-second-assistant", {
+          type: "assistant",
+          timestamp: "2026-08-04T07:34:21.500Z",
+          message: { role: "assistant", content: "second answer" },
+        }),
+      );
+      result.current.handleStreamMessageEvent(
+        message("live-third-user", {
+          timestamp: "2026-08-04T07:39:41.000Z",
+          message: { role: "user", content: "third question" },
+        }),
+      );
+      result.current.handleStreamMessageEvent(
+        message("live-third-assistant", {
+          type: "assistant",
+          timestamp: "2026-08-04T07:55:48.500Z",
+          message: { role: "assistant", content: "third answer" },
+        }),
+      );
+    });
+
+    expect(result.current.messages.map((item) => item.id)).toEqual([
+      "session-1-user-0",
+      "session-1-assistant-0",
+      "live-second-user",
+      "live-second-assistant",
+      "live-third-user",
+      "live-third-assistant",
+    ]);
+
+    mockGetSession.mockResolvedValueOnce(
+      kimiSessionResponse("2026-08-04T07:55:48.416Z", [
+        firstUser,
+        firstAssistant,
+        persistedSecondUser,
+        persistedSecondAssistant,
+        persistedThirdUser,
+        persistedThirdAssistant,
+      ]),
+    );
+
+    await act(async () => {
+      await result.current.fetchNewMessages();
+    });
+
+    expect(result.current.messages.map((item) => item.id)).toEqual([
+      "session-1-user-0",
+      "session-1-assistant-0",
+      "session-1-user-1",
+      "session-1-assistant-1",
+      "session-1-user-2",
+      "session-1-assistant-2",
+    ]);
+    expect(
+      result.current.messages.every((item) => item._source === "jsonl"),
+    ).toBe(true);
   });
 });

@@ -3491,6 +3491,108 @@ details[open] .collapsible__icon {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- Subagent header: compact, mobile-first stat chips ---- */
+/* Allow the header to wrap on narrow screens without hiding the description. */
+.task-inline-header {
+  flex-wrap: wrap;
+}
+
+/* Individual stat chips joined by a middot; hidden progressively on small
+   screens (later chips collapse first) rather than truncating the title. */
+.task-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-stat + .task-stat::before {
+  content: "·";
+  margin-right: 0.25rem;
+  color: var(--text-muted);
+}
+
+/* On very narrow viewports keep only the two most important chips. */
+@media (max-width: 480px) {
+  .task-stat-steps {
+    display: none;
+  }
+}
+
+.task-agent-id {
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm);
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.task-swarm-index {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-status-note {
+  padding: 0.5rem 0.75rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-style: italic;
+}
+
+.task-inline.status-interrupted,
+.task-inline.status-suspended {
+  background: rgba(255, 190, 90, 0.05);
+}
+
+/* ---- AgentSwarm fan-out ---- */
+.agent-swarm {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  margin: 0.5rem 0;
+  background: rgba(255, 255, 255, 0.015);
+  overflow: hidden;
+}
+
+.agent-swarm-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.agent-swarm-title {
+  flex: 1;
+  min-width: 8rem;
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-swarm-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+/* Members list: cap height and scroll so a large swarm never runs the page
+   off the bottom on mobile. */
+.agent-swarm-members {
+  padding: 0.25rem 0.5rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.agent-swarm-members .task-inline {
+  margin: 0.25rem 0;
+}
+
 /* ==========================================================================
    WebSearch Tool
    ========================================================================== */

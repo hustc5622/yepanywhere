@@ -1,5 +1,6 @@
 import type {
   AgentActivity,
+  AgentMapping,
   BrowserProfilesResponse,
   CodexMcpMode,
   ConnectionsResponse,
@@ -991,7 +992,7 @@ export const api = {
    * Used to find agent sessions for pending Tasks on page reload.
    */
   getAgentMappings: (projectId: string, sessionId: string) =>
-    fetchJSON<{ mappings: Array<{ toolUseId: string; agentId: string }> }>(
+    fetchJSON<{ mappings: AgentMapping[] }>(
       `/projects/${projectId}/sessions/${sessionId}/agents`,
     ),
 
