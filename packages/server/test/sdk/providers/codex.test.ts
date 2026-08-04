@@ -17,6 +17,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  CODEX_CLEAR_MCP_APP_SERVER_ARGS,
+  CODEX_FULL_MCP_APP_SERVER_ARGS,
+  CODEX_STANDARD_MCP_APP_SERVER_ARGS,
+} from "../../../src/codex/mcp-profile.js";
+import {
   CodexProvider,
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
@@ -233,12 +238,7 @@ process.stdin.on("data", (chunk) => {
             "app-server",
             "-c",
             'model_provider="openai"',
-            "--disable",
-            "apps",
-            "--disable",
-            "plugins",
-            "-c",
-            "mcp_servers.chrome-devtools.enabled=false",
+            ...CODEX_STANDARD_MCP_APP_SERVER_ARGS,
             "--listen",
             "stdio://",
           ],
@@ -261,7 +261,7 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
-    it("uses full Codex MCP profile without the cf default disable args", async () => {
+    it("uses full Codex MCP profile with all configured MCP enabled", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-"),
       );
@@ -293,6 +293,7 @@ process.stdin.on("data", (chunk) => {
             "app-server",
             "-c",
             'model_provider="openai"',
+            ...CODEX_FULL_MCP_APP_SERVER_ARGS,
             "--listen",
             "stdio://",
           ],
@@ -394,18 +395,7 @@ process.stdin.on("data", (chunk) => {
             "app-server",
             "-c",
             'model_provider="openai"',
-            "--disable",
-            "apps",
-            "--disable",
-            "plugins",
-            "-c",
-            "mcp_servers.chrome-devtools.enabled=false",
-            "-c",
-            "mcp_servers.node_repl.enabled=false",
-            "-c",
-            "mcp_servers.feishu-mcp.enabled=false",
-            "-c",
-            "mcp_servers.openaiDeveloperDocs.enabled=false",
+            ...CODEX_CLEAR_MCP_APP_SERVER_ARGS,
             "--listen",
             "stdio://",
           ],

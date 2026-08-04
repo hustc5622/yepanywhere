@@ -9,6 +9,7 @@ import {
 import type { Level as LogLevel } from "pino";
 import {
   CODEX_CLEAR_MCP_APP_SERVER_ARGS,
+  CODEX_FULL_MCP_APP_SERVER_ARGS,
   CODEX_STANDARD_MCP_APP_SERVER_ARGS,
 } from "./codex/mcp-profile.js";
 import {
@@ -414,7 +415,7 @@ export function loadConfig(): Config {
     ),
     codexBridgeFullUpstreamArgs: parseCodexBridgeUpstreamArgs(
       process.env.YEP_CODEX_BRIDGE_FULL_UPSTREAM_ARGS,
-      [],
+      DEFAULT_CODEX_BRIDGE_FULL_UPSTREAM_ARGS,
     ),
     opencodeBridgeHost:
       process.env.YEP_OPENCODE_BRIDGE_HOST ??
@@ -653,6 +654,10 @@ const DEFAULT_CODEX_BRIDGE_LIGHT_UPSTREAM_ARGS = [
 
 const DEFAULT_CODEX_BRIDGE_CLEAR_UPSTREAM_ARGS = [
   ...CODEX_CLEAR_MCP_APP_SERVER_ARGS,
+];
+
+const DEFAULT_CODEX_BRIDGE_FULL_UPSTREAM_ARGS = [
+  ...CODEX_FULL_MCP_APP_SERVER_ARGS,
 ];
 
 function parseCodexBridgeUpstreamArgs(

@@ -1,6 +1,26 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  CODEX_CLEAR_MCP_APP_SERVER_ARGS,
+  CODEX_FULL_MCP_APP_SERVER_ARGS,
+  CODEX_PROFILED_MCP_SERVER_IDS,
+  CODEX_STANDARD_MCP_APP_SERVER_ARGS,
+} from "../src/codex/mcp-profile.js";
+
+function getMcpServerEnablement(
+  args: readonly string[],
+): Record<string, boolean> {
+  const enablement: Record<string, boolean> = {};
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "-c") continue;
+    const match = args[index + 1]?.match(
+      /^mcp_servers\.(.+)\.enabled=(true|false)$/,
+    );
+    if (match) enablement[match[1]] = match[2] === "true";
+  }
+  return enablement;
+}
 
 describe("loadConfig codex paths", () => {
   afterEach(() => {
@@ -102,7 +122,7 @@ describe("loadConfig codex paths", () => {
     ]);
   });
 
-  it("uses light and clear Codex bridge upstream args by default and keeps full profile unrestricted", async () => {
+  it("uses the standard, clear, and full Codex bridge profiles by default", async () => {
     vi.stubEnv("YEP_CODEX_BRIDGE_LIGHT_UPSTREAM_ARGS", undefined);
     vi.stubEnv("YEP_CODEX_BRIDGE_CLEAR_UPSTREAM_ARGS", undefined);
     vi.stubEnv("YEP_CODEX_BRIDGE_FULL_UPSTREAM_ARGS", undefined);
@@ -112,29 +132,74 @@ describe("loadConfig codex paths", () => {
     const { loadConfig } = await import("../src/config.js");
     const config = loadConfig();
 
-    expect(config.codexBridgeLightUpstreamArgs).toEqual([
-      "--disable",
-      "apps",
-      "--disable",
-      "plugins",
-      "-c",
-      "mcp_servers.chrome-devtools.enabled=false",
+    expect(config.codexBridgeLightUpstreamArgs).toEqual(
+      CODEX_STANDARD_MCP_APP_SERVER_ARGS,
+    );
+    expect(config.codexBridgeClearUpstreamArgs).toEqual(
+      CODEX_CLEAR_MCP_APP_SERVER_ARGS,
+    );
+    expect(config.codexBridgeFullUpstreamArgs).toEqual(
+      CODEX_FULL_MCP_APP_SERVER_ARGS,
+    );
+  });
+
+  it("applies exact MCP enablement for standard, clear, and full modes", () => {
+    expect(CODEX_PROFILED_MCP_SERVER_IDS).toEqual([
+      "node_repl",
+      "feishu-mcp",
+      "chrome-devtools",
+      "computer-use",
+      "openaiDeveloperDocs",
+      "framelink-figma",
+      "minimax-openapi",
+      "sequential-thinking",
+      "ShanLing",
+      "item",
+      "server-puppeteer",
+      "web",
     ]);
-    expect(config.codexBridgeClearUpstreamArgs).toEqual([
-      "--disable",
-      "apps",
-      "--disable",
-      "plugins",
-      "-c",
-      "mcp_servers.chrome-devtools.enabled=false",
-      "-c",
-      "mcp_servers.node_repl.enabled=false",
-      "-c",
-      "mcp_servers.feishu-mcp.enabled=false",
-      "-c",
-      "mcp_servers.openaiDeveloperDocs.enabled=false",
-    ]);
-    expect(config.codexBridgeFullUpstreamArgs).toEqual([]);
+    expect(getMcpServerEnablement(CODEX_STANDARD_MCP_APP_SERVER_ARGS)).toEqual({
+      node_repl: true,
+      "feishu-mcp": true,
+      "chrome-devtools": false,
+      "computer-use": false,
+      openaiDeveloperDocs: false,
+      "framelink-figma": false,
+      "minimax-openapi": false,
+      "sequential-thinking": false,
+      ShanLing: false,
+      item: false,
+      "server-puppeteer": false,
+      web: false,
+    });
+    expect(getMcpServerEnablement(CODEX_CLEAR_MCP_APP_SERVER_ARGS)).toEqual({
+      node_repl: false,
+      "feishu-mcp": false,
+      "chrome-devtools": false,
+      "computer-use": false,
+      openaiDeveloperDocs: false,
+      "framelink-figma": false,
+      "minimax-openapi": false,
+      "sequential-thinking": false,
+      ShanLing: false,
+      item: false,
+      "server-puppeteer": false,
+      web: false,
+    });
+    expect(getMcpServerEnablement(CODEX_FULL_MCP_APP_SERVER_ARGS)).toEqual({
+      node_repl: true,
+      "feishu-mcp": true,
+      "chrome-devtools": true,
+      "computer-use": true,
+      openaiDeveloperDocs: true,
+      "framelink-figma": true,
+      "minimax-openapi": true,
+      "sequential-thinking": true,
+      ShanLing: true,
+      item: true,
+      "server-puppeteer": true,
+      web: true,
+    });
   });
 
   it("parses profile-specific Codex bridge upstream args from env", async () => {
@@ -177,21 +242,12 @@ describe("loadConfig codex paths", () => {
     const config = loadConfig();
 
     expect(config.codexBridgeLightUpstreamArgs).toEqual(["--disable", "apps"]);
-    expect(config.codexBridgeClearUpstreamArgs).toEqual([
-      "--disable",
-      "apps",
-      "--disable",
-      "plugins",
-      "-c",
-      "mcp_servers.chrome-devtools.enabled=false",
-      "-c",
-      "mcp_servers.node_repl.enabled=false",
-      "-c",
-      "mcp_servers.feishu-mcp.enabled=false",
-      "-c",
-      "mcp_servers.openaiDeveloperDocs.enabled=false",
-    ]);
-    expect(config.codexBridgeFullUpstreamArgs).toEqual([]);
+    expect(config.codexBridgeClearUpstreamArgs).toEqual(
+      CODEX_CLEAR_MCP_APP_SERVER_ARGS,
+    );
+    expect(config.codexBridgeFullUpstreamArgs).toEqual(
+      CODEX_FULL_MCP_APP_SERVER_ARGS,
+    );
   });
 
   it("uses safe OpenCode bridge defaults", async () => {

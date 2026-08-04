@@ -304,8 +304,8 @@ export const ALL_PERMISSION_MODES: readonly PermissionMode[] = [
 /**
  * Codex MCP profile for app-server-backed sessions.
  * - "clear": Matches `cf -clear` profile (apps/plugins disabled, MCP disabled).
- * - "standard": Matches `cf` light profile (apps/plugins disabled).
- * - "full": Matches `cf -mcp` full profile (load all configured MCP/apps/plugins).
+ * - "standard": Matches `cf` light profile (only Feishu and Node MCP enabled).
+ * - "full": Matches `cf -mcp` full profile (enable all configured MCP/apps/plugins).
  */
 export type CodexMcpMode = "clear" | "standard" | "full";
 
