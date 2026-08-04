@@ -121,6 +121,76 @@ describe("Process", () => {
   });
 
   describe("message queue", () => {
+    it("stays in-turn when the next resident-provider prompt is queued before the current result", async () => {
+      const queue = new MessageQueue();
+      let completeFirstTurn!: () => void;
+      let completeSecondTurn!: () => void;
+      let markFirstTurnStarted!: () => void;
+      let markSecondTurnStarted!: () => void;
+      const firstTurnGate = new Promise<void>((resolve) => {
+        completeFirstTurn = resolve;
+      });
+      const secondTurnGate = new Promise<void>((resolve) => {
+        completeSecondTurn = resolve;
+      });
+      const firstTurnStarted = new Promise<void>((resolve) => {
+        markFirstTurnStarted = resolve;
+      });
+      const secondTurnStarted = new Promise<void>((resolve) => {
+        markSecondTurnStarted = resolve;
+      });
+
+      async function* kimiLikeIterator(): AsyncGenerator<SDKMessage> {
+        const messages = queue.generator();
+        const first = await messages.next();
+        if (first.done) return;
+        markFirstTurnStarted();
+        yield first.value;
+        await firstTurnGate;
+        yield { type: "result", session_id: "sess-1" };
+
+        const second = await messages.next();
+        if (second.done) return;
+        markSecondTurnStarted();
+        yield second.value;
+        await secondTurnGate;
+        yield { type: "result", session_id: "sess-1" };
+      }
+
+      const process = new Process(kimiLikeIterator(), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        provider: "kimi",
+        idleTimeoutMs: 60_000,
+        queue,
+      });
+      const stateChanges: string[] = [];
+      process.subscribe((event) => {
+        if (event.type === "state-change") {
+          stateChanges.push(event.state.type);
+        }
+      });
+
+      process.queueMessage({ text: "first" });
+      await firstTurnStarted;
+
+      process.queueMessage({ text: "second" });
+      expect(queue.depth).toBe(1);
+      completeFirstTurn();
+
+      await secondTurnStarted;
+      expect(queue.depth).toBe(0);
+      expect(process.state.type).toBe("in-turn");
+      expect(stateChanges).not.toContain("idle");
+
+      completeSecondTurn();
+      await vi.waitFor(() => {
+        expect(process.state.type).toBe("idle");
+      });
+      await process.abort();
+    });
+
     it("queues messages and returns position", async () => {
       const iterator = createMockIterator([
         { type: "system", session_id: "sess-1" },

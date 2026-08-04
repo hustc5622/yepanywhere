@@ -1931,7 +1931,7 @@ export class Process {
               }
             }
           }
-          this.transitionToIdle();
+          this.transitionToIdle({ continueQueuedTurn: true });
         }
       }
     } catch (error) {
@@ -2020,7 +2020,9 @@ export class Process {
     this.setState({ type: "waiting-input", request });
   }
 
-  private transitionToIdle(): void {
+  private transitionToIdle(
+    options: { continueQueuedTurn?: boolean } = {},
+  ): void {
     this.clearIdleTimer();
     // Feed next deferred message before transitioning to idle
     const next = this.deferredQueue.shift();
@@ -2029,6 +2031,23 @@ export class Process {
       this.queueMessage(next.message); // stays in-turn, SDK picks it up
       return;
     }
+
+    // Resident providers such as Kimi yield the completed turn's result before
+    // advancing their MessageQueue generator. If another prompt arrived while
+    // that turn was finishing, it is already queued here and will be consumed
+    // by the very next iterator.next(). Keep the process busy across that
+    // boundary instead of briefly (and then permanently) publishing idle.
+    if (
+      options.continueQueuedTurn &&
+      this.messageQueue &&
+      this.messageQueue.depth > 0
+    ) {
+      if (this._state.type !== "in-turn") {
+        this.setState({ type: "in-turn" });
+      }
+      return;
+    }
+
     this.setState({ type: "idle", since: new Date() });
     this.startIdleTimer();
     this.processNextInQueue();
