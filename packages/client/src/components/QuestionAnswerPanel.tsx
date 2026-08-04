@@ -114,7 +114,8 @@ export function QuestionAnswerPanel({
   const [submitting, setSubmitting] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
-  const otherInputRef = useRef<HTMLInputElement>(null);
+  const otherTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const otherPasswordInputRef = useRef<HTMLInputElement>(null);
 
   const currentQuestion = questions[currentTab];
   const isLastQuestion = currentTab === questions.length - 1;
@@ -157,11 +158,13 @@ export function QuestionAnswerPanel({
 
   // Focus the "other" input when it's selected and scroll it into view
   useEffect(() => {
-    if (!isDirectInput && isOtherSelected && otherInputRef.current) {
-      otherInputRef.current.focus();
+    const otherInput =
+      otherTextareaRef.current ?? otherPasswordInputRef.current;
+    if (!isDirectInput && isOtherSelected && otherInput) {
+      otherInput.focus();
       // Scroll input into view after a short delay to allow keyboard to open
       setTimeout(() => {
-        otherInputRef.current?.scrollIntoView({
+        otherInput.scrollIntoView({
           behavior: "smooth",
           block: "center",
         });
@@ -302,6 +305,14 @@ export function QuestionAnswerPanel({
 
       // Enter behavior depends on context
       if (e.key === "Enter" && !e.shiftKey) {
+        // Confirming a CJK IME candidate also emits Enter. Android/WebKit may
+        // expose that only as legacy keyCode 229, so guard both signals.
+        if (e.isComposing || e.keyCode === 229) return;
+        // The "Other" free-text area is a multiline textarea: Enter there only
+        // inserts a newline and never submits. Free answers are submitted by
+        // clicking the submit button, so IME word-picking can never trigger
+        // an accidental submission while typing.
+        if (e.target === otherTextareaRef.current) return;
         if ((isLastQuestion && canSubmit) || (!isLastQuestion && canAdvance)) {
           e.preventDefault();
           if (isLastQuestion && canSubmit) {
@@ -495,13 +506,23 @@ export function QuestionAnswerPanel({
                 {/* Other text input */}
                 {!isDirectInput && isOtherSelected && (
                   <div className="question-other-input">
-                    <input
-                      ref={otherInputRef}
-                      type={currentQuestion.inputType ?? "text"}
-                      placeholder={t("questionPanelTypeAnswer")}
-                      value={otherTexts[currentQuestionKey] || ""}
-                      onChange={(e) => handleOtherTextChange(e.target.value)}
-                    />
+                    {currentQuestion.inputType === "password" ? (
+                      <input
+                        ref={otherPasswordInputRef}
+                        type="password"
+                        placeholder={t("questionPanelTypeAnswer")}
+                        value={otherTexts[currentQuestionKey] || ""}
+                        onChange={(e) => handleOtherTextChange(e.target.value)}
+                      />
+                    ) : (
+                      <textarea
+                        ref={otherTextareaRef}
+                        rows={3}
+                        placeholder={t("questionPanelTypeAnswer")}
+                        value={otherTexts[currentQuestionKey] || ""}
+                        onChange={(e) => handleOtherTextChange(e.target.value)}
+                      />
+                    )}
                   </div>
                 )}
               </div>

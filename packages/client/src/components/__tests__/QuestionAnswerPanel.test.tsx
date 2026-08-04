@@ -1,5 +1,6 @@
 import {
   cleanup,
+  createEvent,
   fireEvent,
   render,
   screen,
@@ -260,5 +261,100 @@ describe("QuestionAnswerPanel", () => {
         localStorage.getItem(localStorage.key(index) ?? ""),
       ).some((value) => value?.includes("do-not-store-me")),
     ).toBe(false);
+  });
+
+  it("does not submit when Enter is confirming an IME candidate", async () => {
+    const { onSubmit } = renderPanel([
+      {
+        id: "question-ime",
+        question: "Describe the change",
+        header: "Details",
+        options: [{ label: "Listed", description: "Use the listed answer" }],
+        multiSelect: false,
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "还在输入" },
+    });
+
+    fireEvent.keyDown(window, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(window, { key: "Enter", keyCode: 229 });
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "Enter" });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  });
+
+  it("lets plain Enter insert a newline in the Other textarea instead of submitting", () => {
+    const { onSubmit } = renderPanel([
+      {
+        id: "question-multiline",
+        question: "Describe the change",
+        header: "Details",
+        options: [{ label: "Listed", description: "Use the listed answer" }],
+        multiSelect: false,
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+    const textarea = screen.getByRole("textbox");
+    expect(textarea.tagName).toBe("TEXTAREA");
+    fireEvent.change(textarea, { target: { value: "第一行" } });
+
+    const enter = createEvent.keyDown(textarea, { key: "Enter" });
+    fireEvent(textarea, enter);
+
+    // Not prevented => the browser default (inserting a newline) proceeds.
+    expect(enter.defaultPrevented).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does not submit on IME candidate Enter targeted at the Other textarea", () => {
+    const { onSubmit } = renderPanel([
+      {
+        id: "question-ime-target",
+        question: "Describe the change",
+        header: "Details",
+        options: [{ label: "Listed", description: "Use the listed answer" }],
+        multiSelect: false,
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "还在输入" } });
+
+    fireEvent.keyDown(textarea, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(textarea, { key: "Enter", keyCode: 229 });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("submits the complete multi-line Other answer only via the submit button", async () => {
+    const { onSubmit } = renderPanel([
+      {
+        id: "question-multiline-submit",
+        question: "Describe the change",
+        header: "Details",
+        options: [{ label: "Listed", description: "Use the listed answer" }],
+        multiSelect: false,
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "第一行\n第二行" } });
+
+    // Enter inside the textarea must not submit, even without IME flags.
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Submit/ }));
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({
+        "question-multiline-submit": "第一行\n第二行",
+      });
+    });
   });
 });

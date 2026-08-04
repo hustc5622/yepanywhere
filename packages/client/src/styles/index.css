@@ -6123,7 +6123,8 @@ a.sidebar-nav-item {
   margin-top: 0;
 }
 
-.question-other-input input {
+.question-other-input input,
+.question-other-input textarea {
   width: 100%;
   padding: var(--space-2) var(--space-3);
   background: var(--bg-surface);
@@ -6133,12 +6134,20 @@ a.sidebar-nav-item {
   font-size: var(--font-size-base);
 }
 
-.question-other-input input:focus {
+.question-other-input textarea {
+  font-family: inherit;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.question-other-input input:focus,
+.question-other-input textarea:focus {
   outline: none;
   border-color: var(--primary-color);
 }
 
-.question-other-input input::placeholder {
+.question-other-input input::placeholder,
+.question-other-input textarea::placeholder {
   color: var(--text-muted);
 }
 
