@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
   ContentBlock,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
   SessionNotification,
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
@@ -14,6 +16,7 @@ import {
   resolveKimiImageSupport,
   toKimiAcpMode,
 } from "../../../src/sdk/providers/kimi.js";
+import type { StartSessionOptions } from "../../../src/sdk/providers/types.js";
 import type { SDKMessage } from "../../../src/sdk/types.js";
 
 function convertKimiUpdate(
@@ -114,6 +117,122 @@ describe("KimiProvider permission modes", () => {
     expect(setSessionMode).toHaveBeenLastCalledWith("session-1", "auto");
 
     session.abort();
+  });
+});
+
+function handleKimiPermissionRequest(
+  provider: KimiProvider,
+  request: RequestPermissionRequest,
+  onToolApproval: NonNullable<StartSessionOptions["onToolApproval"]>,
+): Promise<RequestPermissionResponse> {
+  return (
+    provider as unknown as {
+      handlePermissionRequest(
+        request: RequestPermissionRequest,
+        options: StartSessionOptions,
+        permissionMode: "bypassPermissions",
+        signal: AbortSignal,
+      ): Promise<RequestPermissionResponse>;
+    }
+  ).handlePermissionRequest(
+    request,
+    {
+      cwd: process.cwd(),
+      permissionMode: "bypassPermissions",
+      onToolApproval,
+    },
+    "bypassPermissions",
+    new AbortController().signal,
+  );
+}
+
+describe("KimiProvider ACP questions", () => {
+  const questionRequest: RequestPermissionRequest = {
+    sessionId: "session-1",
+    toolCall: {
+      toolCallId: "0:AskUserQuestion_23",
+      title: "AskUserQuestion",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Build and install now?" },
+        },
+      ],
+    },
+    options: [
+      {
+        kind: "allow_once",
+        name: "Build and install",
+        optionId: "q0_opt_0",
+      },
+      {
+        kind: "allow_once",
+        name: "Keep source changes only",
+        optionId: "q0_opt_1",
+      },
+      { kind: "reject_once", name: "Skip", optionId: "q0_skip" },
+    ],
+  };
+
+  it("surfaces the permission wire shape as a structured question and returns the chosen option", async () => {
+    const onToolApproval = vi.fn(async (_toolName: string, input: unknown) => ({
+      behavior: "allow" as const,
+      updatedInput: {
+        ...(input as Record<string, unknown>),
+        answers: { "question-0": "q0_opt_1" },
+      },
+    }));
+
+    await expect(
+      handleKimiPermissionRequest(
+        new KimiProvider(),
+        questionRequest,
+        onToolApproval,
+      ),
+    ).resolves.toEqual({
+      outcome: { outcome: "selected", optionId: "q0_opt_1" },
+    });
+
+    expect(onToolApproval).toHaveBeenCalledWith(
+      "AskUserQuestion",
+      expect.objectContaining({
+        questions: [
+          {
+            id: "question-0",
+            question: "Build and install now?",
+            header: "Question",
+            options: [
+              {
+                label: "Build and install",
+                description: "",
+                value: "q0_opt_0",
+              },
+              {
+                label: "Keep source changes only",
+                description: "",
+                value: "q0_opt_1",
+              },
+            ],
+            multiSelect: false,
+            custom: false,
+            required: true,
+          },
+        ],
+      }),
+      expect.objectContaining({ respectProviderDecision: true }),
+    );
+  });
+
+  it("cancels instead of silently selecting the first option when no answer is returned", async () => {
+    const onToolApproval = vi.fn(async () => ({ behavior: "allow" as const }));
+
+    await expect(
+      handleKimiPermissionRequest(
+        new KimiProvider(),
+        questionRequest,
+        onToolApproval,
+      ),
+    ).resolves.toEqual({ outcome: { outcome: "cancelled" } });
   });
 });
 

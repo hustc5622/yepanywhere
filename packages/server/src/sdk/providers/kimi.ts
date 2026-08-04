@@ -347,6 +347,128 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const KIMI_ACP_QUESTION_ID = "question-0";
+
+function isKimiAcpQuestionRequest(request: RequestPermissionRequest): boolean {
+  return request.toolCall.title?.trim().toLowerCase() === "askuserquestion";
+}
+
+function readKimiAcpQuestionText(content: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+
+  for (const item of content) {
+    const contentItem = isRecord(item) ? item : null;
+    const textContent = isRecord(contentItem?.content)
+      ? contentItem.content
+      : null;
+    if (
+      contentItem?.type === "content" &&
+      textContent?.type === "text" &&
+      typeof textContent.text === "string" &&
+      textContent.text.trim()
+    ) {
+      return textContent.text.trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Kimi carries AskUserQuestion over ACP's permission channel. The question is
+ * in toolCall.content and each answer is an allow_once PermissionOption, so
+ * translate that wire shape into Yep's provider-neutral question input.
+ */
+function buildKimiAcpQuestionInput(
+  request: RequestPermissionRequest,
+  baseInput: Record<string, unknown>,
+): Record<string, unknown> {
+  const rawInput = isRecord(request.toolCall.rawInput)
+    ? request.toolCall.rawInput
+    : null;
+  const rawQuestion = Array.isArray(rawInput?.questions)
+    ? isRecord(rawInput.questions[0])
+      ? rawInput.questions[0]
+      : null
+    : null;
+  const rawOptions = Array.isArray(rawQuestion?.options)
+    ? rawQuestion.options.map((option) => (isRecord(option) ? option : null))
+    : [];
+  const answerOptions = request.options.filter(
+    (option) => option.kind === "allow_once" || option.kind === "allow_always",
+  );
+  const questionText =
+    (typeof rawQuestion?.question === "string" && rawQuestion.question.trim()
+      ? rawQuestion.question.trim()
+      : null) ??
+    readKimiAcpQuestionText(request.toolCall.content) ??
+    "Question requires your answer";
+
+  return {
+    ...baseInput,
+    questions: [
+      {
+        id: KIMI_ACP_QUESTION_ID,
+        question: questionText,
+        header:
+          typeof rawQuestion?.header === "string" && rawQuestion.header.trim()
+            ? rawQuestion.header.trim()
+            : "Question",
+        options: answerOptions.map((option) => {
+          const rawOption = rawOptions.find(
+            (candidate) => candidate?.label === option.name,
+          );
+          return {
+            label: option.name,
+            description:
+              typeof rawOption?.description === "string"
+                ? rawOption.description
+                : "",
+            // Round-trip the opaque ACP id through QuestionAnswerPanel. The
+            // label remains user-facing while the submitted value identifies
+            // the exact PermissionOption Kimi expects.
+            value: option.optionId,
+          };
+        }),
+        // Kimi's ACP adapter currently narrows questions to one single-select
+        // choice and cannot carry a free-form "Other" answer back to Kimi.
+        multiSelect: false,
+        custom: false,
+        required: true,
+      },
+    ],
+  };
+}
+
+function getKimiAcpQuestionOptionId(
+  result: ToolApprovalResult,
+  request: RequestPermissionRequest,
+): string | null {
+  const updatedInput = isRecord(result.updatedInput)
+    ? result.updatedInput
+    : null;
+  const answers = isRecord(updatedInput?.answers) ? updatedInput.answers : null;
+  if (!answers) return null;
+
+  const candidates = Object.values(answers).flatMap((answer) =>
+    typeof answer === "string"
+      ? [answer]
+      : Array.isArray(answer)
+        ? answer.filter((value): value is string => typeof value === "string")
+        : [],
+  );
+
+  for (const candidate of candidates) {
+    const option = request.options.find(
+      (item) =>
+        item.optionId === candidate ||
+        (item.name === candidate &&
+          (item.kind === "allow_once" || item.kind === "allow_always")),
+    );
+    if (option) return option.optionId;
+  }
+  return null;
+}
+
 /**
  * Kimi's ACP adapter uses either the original tool name or a human-readable
  * description as `title`. Prefer an exact name, then combine distinctive
@@ -881,7 +1003,7 @@ export class KimiProvider implements AgentProvider {
     const kind = toolCall.kind ?? "other";
 
     const toolName = this.mapKindToToolName(kind, toolCall.title ?? undefined);
-    const toolInput = {
+    const baseToolInput = {
       kind,
       title: toolCall.title,
       locations: toolCall.locations,
@@ -892,6 +1014,10 @@ export class KimiProvider implements AgentProvider {
       // future work; allow/deny maps to approve/reject below.
       options: request.options,
     };
+    const toolInput =
+      toolName === "AskUserQuestion"
+        ? buildKimiAcpQuestionInput(request, baseToolInput)
+        : baseToolInput;
 
     this.log.debug(
       { toolName, toolInput },
@@ -954,6 +1080,18 @@ export class KimiProvider implements AgentProvider {
     request: RequestPermissionRequest,
   ): RequestPermissionResponse {
     if (result.behavior === "allow") {
+      if (isKimiAcpQuestionRequest(request)) {
+        const optionId = getKimiAcpQuestionOptionId(result, request);
+        if (optionId) {
+          return { outcome: { outcome: "selected", optionId } };
+        }
+        this.log.warn(
+          { toolCallId: request.toolCall.toolCallId },
+          "Kimi question approval did not contain a matching answer",
+        );
+        return { outcome: { outcome: "cancelled" } };
+      }
+
       const allowOnceOption = request.options.find(
         (o) => o.kind === "allow_once",
       );
