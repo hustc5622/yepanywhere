@@ -44,6 +44,28 @@ function renderPanel(
   return { onSubmit, ...view };
 }
 
+function replaceScrollIntoView(
+  value: typeof Element.prototype.scrollIntoView | undefined,
+): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    Element.prototype,
+    "scrollIntoView",
+  );
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    configurable: true,
+    writable: true,
+    value,
+  });
+
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(Element.prototype, "scrollIntoView", descriptor);
+    } else {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  };
+}
+
 describe("QuestionAnswerPanel", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -149,6 +171,59 @@ describe("QuestionAnswerPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Other/ }));
 
     expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("");
+  });
+
+  it("does not require scrollIntoView to be implemented", () => {
+    vi.useFakeTimers();
+    const restoreScrollIntoView = replaceScrollIntoView(undefined);
+
+    try {
+      renderPanel([
+        {
+          id: "question-no-scroll",
+          question: "Choose one",
+          header: "Choice",
+          options: [{ label: "Listed", description: "A listed choice" }],
+          multiSelect: false,
+        },
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+
+      expect(() => vi.advanceTimersByTime(100)).not.toThrow();
+    } finally {
+      cleanup();
+      restoreScrollIntoView();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels pending Other scrolling when the panel unmounts", () => {
+    vi.useFakeTimers();
+    const scrollIntoView = vi.fn();
+    const restoreScrollIntoView = replaceScrollIntoView(scrollIntoView);
+
+    try {
+      const { unmount } = renderPanel([
+        {
+          id: "question-unmounted-scroll",
+          question: "Choose one",
+          header: "Choice",
+          options: [{ label: "Listed", description: "A listed choice" }],
+          multiSelect: false,
+        },
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+      unmount();
+      vi.advanceTimersByTime(100);
+
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+      restoreScrollIntoView();
+      vi.useRealTimers();
+    }
   });
 
   it("submits provider values and typed MCP form fields", async () => {

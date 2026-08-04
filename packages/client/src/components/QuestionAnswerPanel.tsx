@@ -163,12 +163,16 @@ export function QuestionAnswerPanel({
     if (!isDirectInput && isOtherSelected && otherInput) {
       otherInput.focus();
       // Scroll input into view after a short delay to allow keyboard to open
-      setTimeout(() => {
-        otherInput.scrollIntoView({
+      const timeout = setTimeout(() => {
+        const currentOtherInput =
+          otherTextareaRef.current ?? otherPasswordInputRef.current;
+        currentOtherInput?.scrollIntoView?.({
           behavior: "smooth",
           block: "center",
         });
       }, 100);
+
+      return () => clearTimeout(timeout);
     }
   }, [isDirectInput, isOtherSelected]);
 
