@@ -345,7 +345,18 @@ export function DevelopmentSettings() {
                 <button
                   type="button"
                   className="settings-button"
-                  onClick={() => void handleStartDeployment("server")}
+                  onClick={() =>
+                    void handleStartDeployment("server", {
+                      // A server deploy always rebuilds/restarts 8022. Include
+                      // the selected bridge sidecars so they restart onto the
+                      // same freshly built bundle instead of keeping the old
+                      // JavaScript loaded in memory.
+                      restartTargets: {
+                        codexBridge: restartTargets.codexBridge,
+                        opencodeBridge: restartTargets.opencodeBridge,
+                      },
+                    })
+                  }
                   disabled={!deployStatus?.available || deployRunning}
                 >
                   {startingAction === "server"

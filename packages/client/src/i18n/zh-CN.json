@@ -844,7 +844,7 @@
   "deploymentStagedVersion": "已构建包：",
   "deploymentRefresh": "刷新",
   "deploymentServerTitle": "服务端 Bundle",
-  "deploymentServerDescription": "通过 scripts/deploy.sh --server-only 构建、重启并校验服务端 bundle。",
+  "deploymentServerDescription": "通过 scripts/deploy.sh --server-only 构建、重启并校验服务端 bundle；勾选的 4510/4520 bridge 会一并重启并加载这份新构建。",
   "deploymentDevServerDescription": "需要热更新时，可替换 8022 为 dev 模式；之后前端 HMR，后端源码变更会自动重启。",
   "deploymentSkipChecks": "跳过 lint/typecheck",
   "deploymentRedeployServer": "重新部署服务端",

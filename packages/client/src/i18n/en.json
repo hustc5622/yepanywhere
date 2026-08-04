@@ -844,7 +844,7 @@
   "deploymentStagedVersion": "Staged bundle:",
   "deploymentRefresh": "Refresh",
   "deploymentServerTitle": "Server Bundle",
-  "deploymentServerDescription": "Build, restart, and verify the server bundle with scripts/deploy.sh --server-only.",
+  "deploymentServerDescription": "Build, restart, and verify the server bundle with scripts/deploy.sh --server-only. Selected 4510/4520 bridges restart onto the same newly built bundle.",
   "deploymentDevServerDescription": "For hot reload, replace 8022 with dev mode; frontend HMR is enabled and backend source changes restart automatically.",
   "deploymentSkipChecks": "Skip lint/typecheck",
   "deploymentRedeployServer": "Redeploy Server",

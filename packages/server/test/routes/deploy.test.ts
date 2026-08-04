@@ -80,6 +80,22 @@ describe("deploy route argument mapping", () => {
     ]);
   });
 
+  it("can rebuild the server bundle and restart selected bridge sidecars", () => {
+    expect(
+      buildDeployArgs({
+        action: "server",
+        restartTargets: {
+          codexBridge: true,
+          opencodeBridge: true,
+        },
+      }).args,
+    ).toEqual([
+      "--server-only",
+      "--restart-codex-bridge",
+      "--restart-opencode-bridge",
+    ]);
+  });
+
   it("rejects selected-services restart without any selected service", () => {
     expect(() =>
       buildDeployArgs({
