@@ -80,7 +80,8 @@ export function AboutSettings() {
   }, [refetchVersionFresh, refreshDeploymentStatus, restarting]);
 
   useEffect(() => {
-    void refreshDeploymentStatus();
+    // 挂载即主动 git fetch origin，满足“别的电脑 push 到 origin 后，本机打开设置页即能检测到 GitHub 有新版本”。
+    void refreshDeploymentStatus(true);
   }, [refreshDeploymentStatus]);
 
   const handleCheckUpdates = useCallback(async () => {

@@ -19,7 +19,9 @@
 #
 # Assumes:
 #   - Global `yepanywhere` command is pnpm-linked to dist/npm-package
-#     (one-time: `pnpm link --global` from repo root).
+#     (one-time: `cd dist/npm-package && pnpm link --global`).
+#     注意：必须从 dist/npm-package 执行，仓库根的 package.json 没有 bin 字段，
+#     从根目录 link 不会生成 yepanywhere 可执行文件。
 #   - You want to keep the relay process and frp tunnel running. This script
 #     only touches the yepanywhere server itself.
 #
@@ -434,7 +436,8 @@ if $DO_RESTART; then
       err "Codex bridge port ${CODEX_BRIDGE_PORT} is still in use; cannot start sidecar."
       exit 1
     fi
-    start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL"
+    start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL" ||
+      warn "Codex bridge sidecar 启动失败，继续（Web/API 服务仍可用）。"
   fi
 
   if $START_CLAUDE_BRIDGE_AFTER_STOP; then
@@ -443,7 +446,8 @@ if $DO_RESTART; then
       err "Claude bridge port ${CLAUDE_BRIDGE_PORT} is still in use; cannot start sidecar."
       exit 1
     fi
-    start_claude_bridge_sidecar "$CLAUDE_BRIDGE_PORT" "$CLAUDE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
+    start_claude_bridge_sidecar "$CLAUDE_BRIDGE_PORT" "$CLAUDE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL" ||
+      warn "Claude bridge sidecar 启动失败，继续（Web/API 服务仍可用）。"
   fi
 
   log "启动 yepanywhere ..."
@@ -527,7 +531,8 @@ if ! $DO_RESTART && $RESTART_CODEX_BRIDGE; then
     exit 1
   fi
 
-  start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL"
+  start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL" ||
+    warn "Codex bridge sidecar 启动失败，继续（Web/API 服务仍可用）。"
 fi
 
 if ! $DO_RESTART && $RESTART_CLAUDE_BRIDGE; then
@@ -557,7 +562,8 @@ if ! $DO_RESTART && $RESTART_CLAUDE_BRIDGE; then
     exit 1
   fi
 
-  start_claude_bridge_sidecar "$CLAUDE_BRIDGE_PORT" "$CLAUDE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL"
+  start_claude_bridge_sidecar "$CLAUDE_BRIDGE_PORT" "$CLAUDE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL" ||
+    warn "Claude bridge sidecar 启动失败，继续（Web/API 服务仍可用）。"
 fi
 
 log "Done."

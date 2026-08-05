@@ -225,66 +225,77 @@ export async function startGitPullAndDeploy(
         },
       );
 
-      // 在“重启服务”之前先把成功状态落盘。因为下一步会杀掉当前 Node 进程，
-      // 若不在重启前写入 succeeded，进程死亡后 finally 来不及执行，状态将永远停在 running。
+      // 在“重启服务”之前先把构建成功的 succeeded 落盘（作为基线）。
       logStream.write("\n==> 构建完成，准备重启服务\nDeploy complete.\n");
       finish("succeeded");
       await writeRecord();
 
-      // 步骤 6/6: 重启服务（独立 try，重启异常不影响已记录的 succeeded 状态）
+      // 步骤 6/6: 重启服务。
+      // 关键：重启（launchctl kickstart -k / Stop-Process）会杀掉当前（生产）Node 进程，
+      // 因此必须用 DETACHED 子进程跑重启+探活，否则父进程死亡会导致普通 spawn 的
+      // close 事件永不触发，job 永远卡在 succeeded/running（假阴性）。
+      // restart-and-report.mjs 独立存活于父进程之外，重启后再次探活 /api/version，
+      // 并在失败（重启命令非零退出 / 探活超时）时把 job 改写为 failed。父进程 finally
+      // 不会再覆盖（此时 job.status 已是 succeeded，若包装器写了 failed 则以其为准）。
       try {
-        logStream.write("\n==> 步骤 5/5: 重启服务\n");
-        if (process.platform === "win32") {
-          const deployPs1 = path.join(repoRoot, "scripts", "deploy.ps1");
-          if (fs.existsSync(deployPs1)) {
-            logStream.write("使用 deploy.ps1 重启生产模式 (Windows)...\n");
-            await runStep(
-              "restart-prod",
-              "powershell",
-              [
+        logStream.write("\n==> 步骤 5/5: 重启服务 (detached)\n");
+        const prodPort = Number(
+          process.env.YEP_DEPLOY_PORT || process.env.PORT || 8022,
+        );
+        const wrapper = path.join(
+          repoRoot,
+          "scripts",
+          "restart-and-report.mjs",
+        );
+        const restartCmdArgs =
+          process.platform === "win32"
+            ? [
+                "powershell",
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                deployPs1,
+                path.join(repoRoot, "scripts", "deploy.ps1"),
                 "--restart-only",
-              ],
-              { cwd: repoRoot, timeout: 180000 },
-            );
-          } else {
-            throw new Error("未找到重启脚本 scripts/deploy.ps1");
-          }
-        } else {
-          const yepScript = path.join(repoRoot, "yep.sh");
-          if (fs.existsSync(yepScript)) {
-            logStream.write("使用 yep.sh 重启生产模式...\n");
-            await runStep("restart-prod", "bash", [yepScript, "restart-prod"], {
-              cwd: repoRoot,
-              timeout: 180000,
-            });
-          } else {
-            const deployScript = path.join(
-              repoRoot,
-              "scripts",
-              "redeploy-server.sh",
-            );
-            if (fs.existsSync(deployScript)) {
-              logStream.write("使用 redeploy-server.sh 重启...\n");
-              await runStep("redeploy", deployScript, ["--restart-only"], {
-                cwd: repoRoot,
-                timeout: 180000,
-              });
-            } else {
-              throw new Error("未找到重启脚本");
-            }
-          }
-        }
+              ]
+            : [
+                "bash",
+                path.join(repoRoot, "scripts", "yep.sh"),
+                "restart-prod",
+              ];
+
+        // 用独立 fd 写重启输出，避免父进程 logStream.end() 关闭 fd 后子进程丢失 stdout。
+        const restartLogFd = fs.openSync(logPath, "a");
+        const restartChild = spawn(
+          process.execPath,
+          [
+            wrapper,
+            path.join(jobsDir, `${id}.json`),
+            String(prodPort),
+            repoRoot,
+            ...restartCmdArgs,
+          ],
+          {
+            cwd: repoRoot,
+            detached: true,
+            env: cleanEnv(),
+            stdio: ["ignore", restartLogFd, restartLogFd],
+          },
+        );
+        restartChild.unref();
+        logStream.write(
+          `已 detached 启动重启包装进程 (pid=${restartChild.pid})，将自行探活并更新 job 状态。\n`,
+        );
+        logStream.write(
+          "若重启或探活失败，job 将被标记为 failed；否则保持 succeeded。\n",
+        );
+        // 不 await：包装进程在后台完成重启+探活，结果直接写盘，不受父进程被重启杀掉影响。
       } catch (restartErr) {
         const msg =
           restartErr instanceof Error ? restartErr.message : String(restartErr);
-        logStream.write(
-          `\n==> 警告: 重启命令执行异常（部署产物已构建成功）: ${msg}\n`,
-        );
+        logStream.write(`\n==> 错误: 无法启动重启进程: ${msg}\n`);
+        finish("failed", `重启进程启动失败: ${msg}`);
+        await writeRecord();
       }
     } catch (error) {
       // 捕获 runStep 抛出的真实错误（含命令输出），写入 errorReason 供前端展示。

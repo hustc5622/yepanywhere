@@ -323,7 +323,14 @@ reload_agent() {
   fi
   launchctl bootout "$USER_DOMAIN/$label" >/dev/null 2>&1 || true
   launchctl bootout "$USER_DOMAIN" "$plist" >/dev/null 2>&1 || true
-  launchctl bootstrap "$USER_DOMAIN" "$plist"
+  # 显式检测 bootstrap 失败：launchd 用户域状态损坏（如多次失败 bootstrap 后报
+  # "Input/output error"）或 plist 非法都会让 bootstrap 退出非 0。必须让错误冒泡，
+  # 否则上层 yep.sh/deploy.sh 会误以为 LaunchAgent 已加载，造成"假成功"。
+  if ! launchctl bootstrap "$USER_DOMAIN" "$plist" 2>/tmp/yep-bootstrap-err.log; then
+    err "launchctl bootstrap 失败（label=$label）。常见原因：launchd 用户域状态损坏或 plist 非法。"
+    [ -s /tmp/yep-bootstrap-err.log ] && err "$(cat /tmp/yep-bootstrap-err.log)"
+    return 1
+  fi
   launchctl enable "$USER_DOMAIN/$label"
   launchctl kickstart -k "$USER_DOMAIN/$label"
 }
