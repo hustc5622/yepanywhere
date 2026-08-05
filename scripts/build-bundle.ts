@@ -96,6 +96,57 @@ function error(message: string): void {
   console.error(`[build-bundle] ERROR: ${message}`);
 }
 
+// If node_modules is out of sync with pnpm-lock.yaml (e.g. after a git pull that
+// added dependencies, or a partial/interrupted install), the client build fails
+// with cryptic TS2307 "Cannot find module" errors for mermaid/tiptap/lowlight/
+// tiptap-markdown. Detect the most common missing packages up front and
+// self-heal with `pnpm install`, so a rebuild never dies on a missing
+// dependency. This runs identically on Windows (deploy.ps1) and macOS
+// (deploy.sh) because both delegate the build to `pnpm build:bundle`.
+function ensureWorkspaceDependencies(): void {
+  // Each entry is a list of candidate paths; a sentinel passes if ANY candidate
+  // exists. This lets `vite` be satisfied from packages/client/node_modules/.bin
+  // (where pnpm links it, since it is a client-only dependency) or from the
+  // repo-root .bin (in case of shamefully-hoist).
+  const sentinelGroups: string[][] = [
+    // Client heavy optional deps that frequently go missing after an
+    // interrupted install.
+    ["packages/client/node_modules/mermaid"],
+    ["packages/client/node_modules/@tiptap/react"],
+    ["packages/client/node_modules/lowlight"],
+    ["packages/client/node_modules/tiptap-markdown"],
+    // Dev toolchain binaries required by lint/typecheck/build.
+    ["node_modules/.bin/biome"],
+    ["node_modules/.bin/tsc"],
+    ["node_modules/.bin/vite", "packages/client/node_modules/.bin/vite"],
+    ["node_modules/.bin/tsx"],
+  ];
+
+  const missing = sentinelGroups
+    .filter(
+      (group) => !group.some((p) => fs.existsSync(path.join(ROOT_DIR, p))),
+    )
+    .map((group) => group[0]);
+
+  if (missing.length === 0) return;
+
+  log(
+    `Workspace dependencies look out of sync (${missing.length} sentinel package(s)/tool(s) missing from node_modules, e.g. ${path.basename(missing[0])}). Restoring with \`pnpm install --force\` before building...`,
+  );
+  try {
+    // --force re-links everything even when pnpm's .modules.yaml state claims
+    // node_modules is up to date (the classic stale-state left by an
+    // interrupted install where symlinks are gone but pnpm thinks they exist).
+    execStep("pnpm install --force");
+  } catch (err) {
+    error(
+      "Automatic `pnpm install --force` failed. Run `pnpm install --force` manually " +
+        "in a normal terminal (the environment may block file operations), then retry the build.",
+    );
+    throw err;
+  }
+}
+
 function execStep(
   command: string,
   cwd?: string,
@@ -124,6 +175,9 @@ function step(name: string, fn: () => void): void {
     throw err;
   }
 }
+
+// Make sure workspace dependencies are installed before compiling anything.
+ensureWorkspaceDependencies();
 
 // Clean previous build artifacts
 step("Clean previous builds", () => {

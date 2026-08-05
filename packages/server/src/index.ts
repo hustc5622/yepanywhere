@@ -77,6 +77,7 @@ import {
   EventBus,
   FileWatcher,
   FocusedSessionWatchManager,
+  ProjectFileWatchManager,
   SourceWatcher,
 } from "./watcher/index.js";
 
@@ -627,6 +628,8 @@ async function startServer() {
     }),
   });
 
+  const projectFileWatchManager = new ProjectFileWatchManager({ scanner });
+
   // Set service references for graceful shutdown
   supervisorForShutdown = supervisor;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
@@ -682,6 +685,7 @@ async function startServer() {
     connectedBrowsers: connectedBrowsersService,
     browserProfileService,
     focusedSessionWatchManager,
+    projectFileWatchManager,
     deviceBridgeService,
     terminalService,
   });

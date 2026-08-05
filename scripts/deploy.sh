@@ -660,6 +660,71 @@ sync_server_launchagent_env_if_needed() {
   scripts/install-launchagents.sh --server-only
 }
 
+# Verify the dev toolchain and the client's heavy optional deps are linked.
+ensure_dependencies() {
+  local bins=(biome tsc tsx)
+  local b found
+  for b in "${bins[@]}"; do
+    found=false
+    for ext in "" ".cmd" ".ps1"; do
+      if [[ -e "$REPO_ROOT/node_modules/.bin/$b$ext" ]]; then found=true; break; fi
+    done
+    if ! $found; then return 1; fi
+  done
+  # `vite` is a dependency of packages/client, so its binary is linked into
+  # that workspace package's .bin, not the repo-root .bin (pnpm does not hoist
+  # a non-root dependency's binary unless shamefully-hoist is enabled). Accept
+  # it from either location so the check matches how node_modules is actually laid out.
+  local vite_ok=false
+  for ext in "" ".cmd" ".ps1"; do
+    if [[ -e "$REPO_ROOT/node_modules/.bin/vite$ext" || -e "$REPO_ROOT/packages/client/node_modules/.bin/vite$ext" ]]; then
+      vite_ok=true; break
+    fi
+  done
+  $vite_ok || return 1
+  local client_nm="$REPO_ROOT/packages/client/node_modules"
+  local d
+  for d in mermaid "@tiptap/react" lowlight tiptap-markdown; do
+    [[ -e "$client_nm/$d" ]] || return 1
+  done
+  return 0
+}
+
+# Self-heal a broken/out-of-sync node_modules before lint or build. If pnpm
+# cannot complete the install (interrupted, or the environment blocks file
+# operations), fail loudly with actionable guidance instead of a downstream
+# "command not found" error.
+ensure_deps_or_install() {
+  if ensure_dependencies; then return 0; fi
+  warn "node_modules is incomplete or out of sync with pnpm-lock.yaml."
+  warn "Restoring dependencies with 'pnpm install --force' (re-links everything) ..."
+  # --force makes pnpm re-link ALL packages even when its state file
+  # (.modules.yaml) claims node_modules is already up to date. That stale
+  # state is exactly what an interrupted install leaves behind: the symlinks
+  # are gone but pnpm still thinks they exist, so a plain `pnpm install`
+  # prints "Already up to date" and links nothing.
+  if pnpm install --force; then
+    :
+  else
+    warn "'pnpm install --force' failed; retrying with 'pnpm install' ..."
+    if ! pnpm install; then
+      err "Dependency restore failed. pnpm could not finish installation"
+      err "(commonly because the install was interrupted, or the environment"
+      err "blocks file operations). Please restore manually in a normal"
+      err "terminal, then re-run this deploy/rebuild:"
+      err "    pnpm install --force"
+      exit 1
+    fi
+  fi
+  if ! ensure_dependencies; then
+    err "Dependencies are still missing after 'pnpm install --force'."
+    err "Run the following manually in a normal terminal, then retry:"
+    err "    pnpm install --force"
+    exit 1
+  fi
+  log "Dependencies restored."
+}
+
 if [[ $# -eq 0 ]]; then
   if [[ -t 0 ]]; then
     configure_interactive
@@ -799,6 +864,7 @@ log "Checking local media deploy prerequisites ..."
 check_local_media_preflight
 
 if $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || $DO_CLAUDE_BRIDGE; }; then
+  ensure_deps_or_install
   log "Running preflight checks ..."
   pnpm lint
   pnpm typecheck

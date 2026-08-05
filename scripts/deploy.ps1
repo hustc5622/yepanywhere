@@ -204,6 +204,75 @@ function Assert-LastExitCode($commandName) {
   }
 }
 
+# Verify the dev toolchain and the client's heavy optional deps are linked.
+# Returns $true only when everything needed by lint/build is present.
+function Test-DepsOk {
+  $bins = @("biome", "tsc", "tsx")
+  foreach ($b in $bins) {
+    $found = (Test-Path (Join-Path $RepoRoot "node_modules/.bin/$b.cmd")) -or
+             (Test-Path (Join-Path $RepoRoot "node_modules/.bin/$b.ps1")) -or
+             (Test-Path (Join-Path $RepoRoot "node_modules/.bin/$b"))
+    if (-not $found) { return $false }
+  }
+  # `vite` is a dependency of packages/client, so its binary is linked into
+  # that workspace package's .bin, not the repo-root .bin (pnpm does not hoist
+  # a non-root dependency's binary unless shamefully-hoist is enabled). Accept
+  # it from either location so the check matches how node_modules is actually laid out.
+  $viteOk = (Test-Path (Join-Path $RepoRoot "node_modules/.bin/vite")) -or
+            (Test-Path (Join-Path $RepoRoot "node_modules/.bin/vite.cmd")) -or
+            (Test-Path (Join-Path $RepoRoot "node_modules/.bin/vite.ps1")) -or
+            (Test-Path (Join-Path $RepoRoot "packages/client/node_modules/.bin/vite")) -or
+            (Test-Path (Join-Path $RepoRoot "packages/client/node_modules/.bin/vite.cmd")) -or
+            (Test-Path (Join-Path $RepoRoot "packages/client/node_modules/.bin/vite.ps1"))
+  if (-not $viteOk) { return $false }
+  $clientNm = Join-Path $RepoRoot "packages/client/node_modules"
+  foreach ($d in @("mermaid", "@tiptap/react", "lowlight", "tiptap-markdown")) {
+    if (-not (Test-Path (Join-Path $clientNm $d))) { return $false }
+  }
+  return $true
+}
+
+# Self-heal a broken/out-of-sync node_modules before lint or build. If pnpm
+# cannot complete the install (e.g. the environment blocks file operations or
+# the install was interrupted), fail loudly with actionable guidance instead of
+# letting a downstream "command not found" error confuse the user.
+function Ensure-Dependencies {
+  if (Test-DepsOk) { return }
+  warn "node_modules is incomplete or out of sync with pnpm-lock.yaml."
+  warn "Restoring dependencies with 'pnpm install --force' (re-links everything) ..."
+  Push-Location $RepoRoot
+  try {
+    # --force makes pnpm re-link ALL packages even when its state file
+    # (.modules.yaml) claims node_modules is already up to date. That stale
+    # state is exactly what an interrupted install leaves behind: the symlinks
+    # are gone but pnpm still thinks they exist, so a plain `pnpm install`
+    # prints "Already up to date" and links nothing.
+    & pnpm install --force
+    if ($LASTEXITCODE -ne 0) {
+      warn "'pnpm install --force' failed; falling back to 'pnpm install' ..."
+      & pnpm install
+    }
+    if ($LASTEXITCODE -ne 0) {
+      err "Dependency restore failed. pnpm could not finish installation"
+      err "(commonly because the install was interrupted, or the environment"
+      err "blocks file deletion/operations). Please restore manually in a"
+      err "normal terminal, then re-run this deploy/rebuild:"
+      err "    pnpm install --force"
+      err "    pnpm win:rebuild   # or: powershell scripts/yep.ps1 rebuild"
+      exit 1
+    }
+  } finally {
+    Pop-Location
+  }
+  if (-not (Test-DepsOk)) {
+    err "Dependencies are still missing after 'pnpm install --force'."
+    err "Run the following manually in a normal terminal, then retry:"
+    err "    pnpm install --force"
+    exit 1
+  }
+  log "Dependencies restored."
+}
+
 function Test-BundleRuntime {
   Push-Location (Join-Path $RepoRoot "dist/npm-package")
   $previousErrorActionPreference = $ErrorActionPreference
@@ -227,6 +296,11 @@ dim "restart:             $DO_RESTART"
 dim "checks:              $RUN_CHECKS"
 if ($DO_APK) { warn "APK build is not supported on the Windows toolchain; skipping."; $DO_APK = $false }
 
+# ----- dependency self-heal (before any lint/typecheck/build) -----
+if ($DO_BUILD -or ($RUN_CHECKS -and ($DO_SERVER -or $DO_CODEX_BRIDGE -or $DO_CLAUDE_BRIDGE))) {
+  Ensure-Dependencies
+}
+
 # ----- preflight checks -----
 if ($RUN_CHECKS -and ($DO_SERVER -or $DO_CODEX_BRIDGE -or $DO_CLAUDE_BRIDGE)) {
   log "Running preflight checks ..."
@@ -238,6 +312,24 @@ if ($RUN_CHECKS -and ($DO_SERVER -or $DO_CODEX_BRIDGE -or $DO_CLAUDE_BRIDGE)) {
     Assert-LastExitCode "pnpm typecheck"
   } finally {
     Pop-Location
+  }
+}
+
+# Stop a running production server BEFORE reinstalling its runtime deps.
+# `npm ci` below must replace dist/npm-package/node_modules; on Windows a live
+# server holds file locks on those modules and npm ci fails with EPERM (-4048).
+# The restart section further down starts the freshly built server.
+if ($DO_BUILD -and $DO_RESTART) {
+  $preBuildPids = Get-ListeningPids $ServerPort
+  if ($preBuildPids.Count -gt 0) {
+    log "Stopping running yepanywhere on port $ServerPort before rebuild (releases file locks for npm ci) ..."
+    Stop-Pids $preBuildPids "server"
+    Wait-PortReleased $ServerPort | Out-Null
+    if ((Get-ListeningPids $ServerPort).Count -gt 0) {
+      warn "Port $ServerPort still in use; sending hard kill before npm ci."
+      Stop-Pids (Get-ListeningPids $ServerPort) "server"
+      Wait-PortReleased $ServerPort | Out-Null
+    }
   }
 }
 

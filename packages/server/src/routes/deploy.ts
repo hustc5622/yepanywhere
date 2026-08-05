@@ -760,11 +760,22 @@ async function getLocalGitVersion(
 
 async function getGithubVersion(
   repoRoot?: string,
+  fresh = false,
 ): Promise<GitVersionInfo | null> {
   if (!repoRoot) return null;
+  if (fresh) {
+    // Best-effort refresh of the local remote-tracking ref so that an
+    // explicit "Check Updates" reflects a push made from another machine.
+    // Any failure (offline, auth, no remote) falls back to the cached
+    // origin/main so the call never hard-fails.
+    await execFileAsync("git", ["fetch", "origin"], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      timeout: 15000,
+    }).catch(() => undefined);
+  }
   try {
-    // Try to get origin/main info without fetching first
-    // This reads the last known state from local git cache
+    // Reads the (now possibly updated) local git cache for origin/main
     return getGitVersionInfo(repoRoot, "origin/main");
   } catch {
     return null;
@@ -812,10 +823,6 @@ async function getStableVersion(
   } catch {
     return null;
   }
-}
-
-function compareVersionDates(date1: string, date2: string): number {
-  return new Date(date1).getTime() - new Date(date2).getTime();
 }
 
 function getAdbPath(): string {
@@ -871,6 +878,7 @@ async function getAdbStatus(): Promise<DeploymentStatusResponse["adb"]> {
 
 async function buildStatus(
   options?: DeployRoutesOptions,
+  fresh = false,
 ): Promise<DeploymentStatusResponse> {
   const availability = getDeploymentAvailability(options);
   const [adb, packageVersion, stagedBuild] = await Promise.all([
@@ -890,26 +898,26 @@ async function buildStatus(
   // Get Git version information
   const [localGitVersion, githubVersion, stableVersion] = await Promise.all([
     getLocalGitVersion(availability.repoRoot),
-    getGithubVersion(availability.repoRoot),
+    getGithubVersion(availability.repoRoot, fresh),
     getStableVersion(availability.repoRoot),
   ]);
 
-  // Check if updates are available
+  // Check if updates are available.
+  // Compare commit hashes (not dates) against the deployed build baseline
+  // (stableVersion = dist/npm-package/build-info.json). Date comparison was
+  // fragile (rebases/amended commits, clock skew) and could never reflect a
+  // push from another machine because origin/main was never fetched.
   let hasLocalUpdate = false;
   let hasGithubUpdate = false;
 
   if (stableVersion && localGitVersion) {
     hasLocalUpdate =
-      compareVersionDates(
-        localGitVersion.commitDate,
-        stableVersion.commitDate,
-      ) > 0;
+      localGitVersion.commitHashFull !== stableVersion.commitHashFull;
   }
 
   if (stableVersion && githubVersion) {
     hasGithubUpdate =
-      compareVersionDates(githubVersion.commitDate, stableVersion.commitDate) >
-      0;
+      githubVersion.commitHashFull !== stableVersion.commitHashFull;
   }
 
   return {
@@ -1058,7 +1066,9 @@ export function createDeployRoutes(options?: DeployRoutesOptions): Hono {
   const routes = new Hono();
 
   routes.get("/status", async (c) => {
-    return c.json(await buildStatus(options));
+    const fresh =
+      c.req.query("fresh") === "1" || c.req.query("fresh") === "true";
+    return c.json(await buildStatus(options, fresh));
   });
 
   routes.get("/jobs/:id", async (c) => {

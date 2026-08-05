@@ -22,6 +22,7 @@ import { SessionMessagesSkeleton } from "../components/Skeleton";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
 import { Modal } from "../components/ui/Modal";
 import { AgentContentProvider } from "../contexts/AgentContentContext";
+import { FileTabOpenerContext } from "../contexts/FileTabOpenerContext";
 import { SessionMetadataProvider } from "../contexts/SessionMetadataContext";
 import {
   StreamingMarkdownProvider,
@@ -1542,583 +1543,589 @@ function SessionPageContent({
   );
 
   return (
-    <div
-      className={
-        isWideScreen
-          ? "main-content-wrapper session-main-wrapper"
-          : "main-content-mobile"
-      }
-    >
+    <FileTabOpenerContext.Provider value={{ openFileTab: openOrFocusFileTab }}>
       <div
         className={
           isWideScreen
-            ? "main-content-constrained"
-            : "main-content-mobile-inner"
+            ? "main-content-wrapper session-main-wrapper"
+            : "main-content-mobile"
         }
       >
-        <header className="session-header">
-          <div className="session-header-inner">
-            <div className="session-header-left">
-              {/* Sidebar toggle - on mobile: opens sidebar, on desktop: collapses/expands */}
-              {/* Hide on desktop when collapsed (sidebar has its own toggle) */}
-              {!(isWideScreen && isSidebarCollapsed) && (
-                <button
-                  type="button"
-                  className="sidebar-toggle"
-                  onClick={isWideScreen ? toggleSidebar : openSidebar}
-                  title={
-                    isWideScreen
-                      ? t("sessionToggleSidebar")
-                      : t("sessionOpenSidebar")
-                  }
-                  aria-label={
-                    isWideScreen
-                      ? t("sessionToggleSidebar")
-                      : t("sessionOpenSidebar")
-                  }
-                >
-                  <SidebarIcon />
-                </button>
-              )}
-              {/* Project breadcrumb */}
-              {project?.name && (
-                <Link
-                  to={`${basePath}/sessions?project=${projectId}`}
-                  className="project-breadcrumb"
-                  title={project.name}
-                >
-                  {project.name.length > 12
-                    ? `${project.name.slice(0, 12)}...`
-                    : project.name}
-                </Link>
-              )}
-              <div className="session-title-row">
-                {isStarred && (
-                  <svg
-                    className="star-indicator-inline"
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    role="img"
-                    aria-label={t("sessionStarredLabel")}
-                  >
-                    <title>{t("sessionStarredLabel")}</title>
-                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                  </svg>
-                )}
-                {loading ? (
-                  <span className="session-title-skeleton" />
-                ) : isEditingTitle ? (
-                  <input
-                    ref={renameInputRef}
-                    type="text"
-                    className="session-title-input"
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    onKeyDown={handleTitleKeyDown}
-                    onBlur={handleTitleBlur}
-                    disabled={isRenaming}
-                  />
-                ) : (
-                  <>
-                    <button
-                      ref={titleButtonRef}
-                      type="button"
-                      className="session-title session-title-dropdown-trigger"
-                      onClick={() => setShowRecentSessions(!showRecentSessions)}
-                      title={session?.fullTitle ?? displayTitle}
-                    >
-                      <span className="session-title-text">{displayTitle}</span>
-                      <svg
-                        className="session-title-chevron"
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <polyline points="6 9 12 15 18 9" />
-                      </svg>
-                    </button>
-                    <RecentSessionsDropdown
-                      currentSessionId={sessionId}
-                      isOpen={showRecentSessions}
-                      onClose={() => setShowRecentSessions(false)}
-                      onNavigate={() => setShowRecentSessions(false)}
-                      triggerRef={titleButtonRef}
-                      basePath={basePath}
-                    />
-                  </>
-                )}
-                {!loading && isArchived && (
-                  <span className="archived-badge">
-                    {t("sessionArchivedBadge")}
-                  </span>
-                )}
-                {!loading && (
-                  <SessionMenu
-                    sessionId={sessionId}
-                    projectId={projectId}
-                    isStarred={isStarred}
-                    isArchived={isArchived}
-                    hasUnread={hasUnread}
-                    provider={session?.provider}
-                    processId={
-                      status.owner === "self" ? status.processId : undefined
-                    }
-                    canArchive={canArchive}
-                    archiveBlockReason={archiveBlockReason}
-                    onToggleStar={handleToggleStar}
-                    onToggleArchive={handleToggleArchive}
-                    onToggleRead={handleToggleRead}
-                    onRename={handleStartEditingTitle}
-                    onClone={(newSessionId) => {
-                      navigate(
-                        `${basePath}/projects/${projectId}/sessions/${newSessionId}`,
-                      );
-                    }}
-                    onTerminate={handleTerminate}
-                    sharingConfigured={sharingConfigured}
-                    onShare={handleShare}
-                    useFixedPositioning
-                    useEllipsisIcon
-                  />
-                )}
-              </div>
-            </div>
-            <div className="session-header-right">
-              {!isWideScreen && (
-                <button
-                  type="button"
-                  className="session-inspector-toggle"
-                  onClick={() => setInspectorOpen(true)}
-                  title={t("sessionInspectorOpen")}
-                  aria-label={t("sessionInspectorOpen")}
-                >
-                  <SessionOutlineIcon />
-                </button>
-              )}
-              {!loading && session && (
-                <button
-                  type="button"
-                  className="session-info-button"
-                  onClick={() => setShowProcessInfoModal(true)}
-                  title={t("sessionViewInfo")}
-                  aria-label={t("sessionViewInfo")}
-                >
-                  <SessionInfoIcon />
-                </button>
-              )}
-            </div>
-          </div>
-        </header>
-
-        {/* Process Info Modal */}
-        {showProcessInfoModal && session && (
-          <ProcessInfoModal
-            sessionId={actualSessionId}
-            provider={session.provider}
-            model={session.model}
-            status={status}
-            processState={processState}
-            contextUsage={session.contextUsage}
-            originator={session.originator}
-            cliVersion={session.cliVersion}
-            sessionSource={session.source}
-            approvalPolicy={session.approvalPolicy}
-            sandboxPolicy={session.sandboxPolicy}
-            createdAt={session.createdAt}
-            sessionStreamConnected={sessionUpdatesConnected}
-            lastSessionEventAt={lastStreamActivityAt}
-            onClose={() => setShowProcessInfoModal(false)}
-          />
-        )}
-
-        {/* Model Switch Modal */}
-        {showModelSwitchModal &&
-          status.owner === "self" &&
-          status.processId && (
-            <ModelSwitchModal
-              processId={status.processId}
-              currentModel={session?.model}
-              onModelChanged={handleModelChanged}
-              onClose={() => setShowModelSwitchModal(false)}
-            />
-          )}
-
-        {status.owner === "external" && (
-          <div className="external-session-warning">
-            {t("sessionExternalWarning")}
-          </div>
-        )}
-
-        {hasPendingToolCalls && (
-          <div className="external-session-warning pending-tool-warning">
-            {t("sessionPendingElsewhereWarning")}
-          </div>
-        )}
-
         <div
-          className="editor-tabbar"
-          role="tablist"
-          aria-label={t("editorTabs" as never)}
+          className={
+            isWideScreen
+              ? "main-content-constrained"
+              : "main-content-mobile-inner"
+          }
         >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "chat"}
-            className={`editor-tab${activeTab === "chat" ? " is-active" : ""}`}
-            onClick={() => setActiveTab("chat")}
-          >
-            <span className="editor-tab-label">
-              {t("editorTabChat" as never)}
-            </span>
-          </button>
-          {openFileTabs.map((p) => (
-            <div
-              key={p}
-              role="tab"
-              aria-selected={activeTab === p}
-              tabIndex={0}
-              className={`editor-tab editor-tab--file${activeTab === p ? " is-active" : ""}${dirtyTabs.has(p) ? " is-dirty" : ""}`}
-            >
-              <button
-                type="button"
-                className="editor-tab-main"
-                onClick={() => setActiveTab(p)}
-                title={p}
-              >
-                <TabFileIcon />
-                <span className="editor-tab-label">{p.split("/").pop()}</span>
-                {dirtyTabs.has(p) && (
-                  <span className="editor-tab-dot" aria-hidden="true">
-                    ●
-                  </span>
-                )}
-              </button>
-              <button
-                type="button"
-                className="editor-tab-close"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  requestCloseTab(p);
-                }}
-                aria-label={t("editorClose" as never)}
-                title={t("editorClose" as never)}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-        <div className="session-workbench-body">
-          <div
-            className={`chat-panel${activeTab === "chat" ? " is-active" : ""}`}
-          >
-            <main className="session-messages">
-              {loading ? (
-                <SessionMessagesSkeleton />
-              ) : (
-                <SessionMetadataProvider
-                  projectId={projectId}
-                  projectPath={project?.path ?? null}
-                  sessionId={sessionId}
-                >
-                  <AgentContentProvider
-                    agentContent={agentContent}
-                    setAgentContent={setAgentContent}
-                    toolUseToAgent={toolUseToAgent}
-                    projectId={projectId}
-                    sessionId={sessionId}
+          <header className="session-header">
+            <div className="session-header-inner">
+              <div className="session-header-left">
+                {/* Sidebar toggle - on mobile: opens sidebar, on desktop: collapses/expands */}
+                {/* Hide on desktop when collapsed (sidebar has its own toggle) */}
+                {!(isWideScreen && isSidebarCollapsed) && (
+                  <button
+                    type="button"
+                    className="sidebar-toggle"
+                    onClick={isWideScreen ? toggleSidebar : openSidebar}
+                    title={
+                      isWideScreen
+                        ? t("sessionToggleSidebar")
+                        : t("sessionOpenSidebar")
+                    }
+                    aria-label={
+                      isWideScreen
+                        ? t("sessionToggleSidebar")
+                        : t("sessionOpenSidebar")
+                    }
                   >
-                    <MessageList
-                      messages={messages}
-                      preprocessedItems={renderItems}
-                      provider={session?.provider}
-                      isProcessing={
-                        status.owner === "self" && processState === "in-turn"
-                      }
-                      isCompacting={isCompacting}
-                      scrollTrigger={scrollTrigger}
-                      pendingMessages={pendingMessages}
-                      deferredMessages={deferredMessages}
-                      onCancelDeferred={(tempId) =>
-                        api.cancelDeferredMessage(sessionId, tempId)
-                      }
-                      markdownAugments={markdownAugments}
-                      activeToolApproval={activeToolApproval}
-                      hasOlderMessages={pagination?.hasOlderMessages}
-                      hasNewerMessages={pagination?.hasNewerMessages}
-                      loadingOlder={loadingOlder}
-                      loadingNewer={loadingNewer}
-                      loadingTargetMessage={loadingTargetMessage}
-                      onLoadOlderMessages={loadOlderMessages}
-                      onLoadNewerMessages={loadNewerMessages}
-                      onLoadTargetMessage={loadTargetMessageWindow}
-                      onEditUserPrompt={
-                        !isViewingHistoricalBranch &&
-                        (session?.provider === "claude" ||
-                          session?.provider === "codex" ||
-                          !session?.provider)
-                          ? handleEditUserPrompt
-                          : undefined
-                      }
-                      onSelectBranch={handleSelectBranch}
-                      focusBranchId={pendingBranchFocusId}
-                      onBranchFocused={handleBranchFocused}
-                      targetMessageId={targetMessageId}
-                      onTargetFocused={handleTargetFocused}
-                    />
-                  </AgentContentProvider>
-                </SessionMetadataProvider>
-              )}
-            </main>
-
-            <footer className="session-input">
-              <div
-                className={`session-connection-bar session-connection-${sessionConnectionStatus}`}
-              />
-              <div className="session-input-inner">
-                {/* User question panel */}
-                {pendingInputRequest &&
-                  pendingInputRequest.sessionId === actualSessionId &&
-                  isAskUserQuestion && (
-                    <QuestionAnswerPanel
-                      request={pendingInputRequest}
-                      sessionId={actualSessionId}
-                      onSubmit={handleQuestionSubmit}
-                      onDeny={handleDeny}
-                      readOnly={isPersistedInputRequest}
-                    />
+                    <SidebarIcon />
+                  </button>
+                )}
+                {/* Project breadcrumb */}
+                {project?.name && (
+                  <Link
+                    to={`${basePath}/sessions?project=${projectId}`}
+                    className="project-breadcrumb"
+                    title={project.name}
+                  >
+                    {project.name.length > 12
+                      ? `${project.name.slice(0, 12)}...`
+                      : project.name}
+                  </Link>
+                )}
+                <div className="session-title-row">
+                  {isStarred && (
+                    <svg
+                      className="star-indicator-inline"
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      role="img"
+                      aria-label={t("sessionStarredLabel")}
+                    >
+                      <title>{t("sessionStarredLabel")}</title>
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                    </svg>
                   )}
-
-                {/* Tool approval: show panel + always-visible toolbar */}
-                {pendingInputRequest &&
-                  pendingInputRequest.sessionId === actualSessionId &&
-                  !isAskUserQuestion && (
+                  {loading ? (
+                    <span className="session-title-skeleton" />
+                  ) : isEditingTitle ? (
+                    <input
+                      ref={renameInputRef}
+                      type="text"
+                      className="session-title-input"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={handleTitleKeyDown}
+                      onBlur={handleTitleBlur}
+                      disabled={isRenaming}
+                    />
+                  ) : (
                     <>
-                      <ToolApprovalPanel
-                        request={pendingInputRequest}
-                        sessionId={actualSessionId}
-                        agentName={approvalAgentName}
-                        onApprove={handleApprove}
-                        onDeny={handleDeny}
-                        onApproveAcceptEdits={handleApproveAcceptEdits}
-                        onApproveForSession={handleApproveForSession}
-                        onApproveAlways={handleApproveAlways}
-                        onDenyWithFeedback={handleDenyWithFeedback}
-                        collapsed={approvalCollapsed}
-                        onCollapsedChange={setApprovalCollapsed}
-                      />
-                      <MessageInputToolbar
-                        mode={permissionMode}
-                        onModeChange={setPermissionMode}
-                        isHeld={holdModeEnabled ? isHeld : undefined}
-                        onHoldChange={holdModeEnabled ? setHold : undefined}
-                        supportsPermissionMode={supportsPermissionMode}
-                        supportsThinkingToggle={supportsThinkingToggle}
-                        contextUsage={session?.contextUsage}
-                        projectId={projectId}
-                        sessionId={actualSessionId}
-                        isRunning={status.owner === "self"}
-                        isThinking={processState === "in-turn"}
-                        onStop={handleAbort}
-                        pendingApproval={
-                          approvalCollapsed
-                            ? {
-                                type: "tool-approval",
-                                onExpand: () => setApprovalCollapsed(false),
-                              }
-                            : undefined
+                      <button
+                        ref={titleButtonRef}
+                        type="button"
+                        className="session-title session-title-dropdown-trigger"
+                        onClick={() =>
+                          setShowRecentSessions(!showRecentSessions)
                         }
+                        title={session?.fullTitle ?? displayTitle}
+                      >
+                        <span className="session-title-text">
+                          {displayTitle}
+                        </span>
+                        <svg
+                          className="session-title-chevron"
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                      </button>
+                      <RecentSessionsDropdown
+                        currentSessionId={sessionId}
+                        isOpen={showRecentSessions}
+                        onClose={() => setShowRecentSessions(false)}
+                        onNavigate={() => setShowRecentSessions(false)}
+                        triggerRef={titleButtonRef}
+                        basePath={basePath}
                       />
                     </>
                   )}
-
-                {/* Edit/rewind banner: shown while editing a past message */}
-                {editRewind && (
-                  <div
-                    className="edit-rewind-banner"
-                    data-testid="edit-rewind-banner"
-                  >
-                    <span className="edit-rewind-banner-text">
-                      {t("sessionEditingFromHere")}
+                  {!loading && isArchived && (
+                    <span className="archived-badge">
+                      {t("sessionArchivedBadge")}
                     </span>
-                    <button
-                      type="button"
-                      className="edit-rewind-banner-cancel"
-                      onClick={handleCancelEdit}
-                    >
-                      {t("actionCancel")}
-                    </button>
-                  </div>
+                  )}
+                  {!loading && (
+                    <SessionMenu
+                      sessionId={sessionId}
+                      projectId={projectId}
+                      isStarred={isStarred}
+                      isArchived={isArchived}
+                      hasUnread={hasUnread}
+                      provider={session?.provider}
+                      processId={
+                        status.owner === "self" ? status.processId : undefined
+                      }
+                      canArchive={canArchive}
+                      archiveBlockReason={archiveBlockReason}
+                      onToggleStar={handleToggleStar}
+                      onToggleArchive={handleToggleArchive}
+                      onToggleRead={handleToggleRead}
+                      onRename={handleStartEditingTitle}
+                      onClone={(newSessionId) => {
+                        navigate(
+                          `${basePath}/projects/${projectId}/sessions/${newSessionId}`,
+                        );
+                      }}
+                      onTerminate={handleTerminate}
+                      sharingConfigured={sharingConfigured}
+                      onShare={handleShare}
+                      useFixedPositioning
+                      useEllipsisIcon
+                    />
+                  )}
+                </div>
+              </div>
+              <div className="session-header-right">
+                {!isWideScreen && (
+                  <button
+                    type="button"
+                    className="session-inspector-toggle"
+                    onClick={() => setInspectorOpen(true)}
+                    title={t("sessionInspectorOpen")}
+                    aria-label={t("sessionInspectorOpen")}
+                  >
+                    <SessionOutlineIcon />
+                  </button>
                 )}
+                {!loading && session && (
+                  <button
+                    type="button"
+                    className="session-info-button"
+                    onClick={() => setShowProcessInfoModal(true)}
+                    title={t("sessionViewInfo")}
+                    aria-label={t("sessionViewInfo")}
+                  >
+                    <SessionInfoIcon />
+                  </button>
+                )}
+              </div>
+            </div>
+          </header>
 
-                {/* No pending approval: show full message input */}
-                {!(
-                  pendingInputRequest &&
-                  pendingInputRequest.sessionId === actualSessionId &&
-                  !isAskUserQuestion
-                ) && (
-                  <MessageInput
-                    onSend={handleSend}
-                    onQueue={
-                      status.owner !== "none" && processState !== "idle"
-                        ? handleQueue
-                        : undefined
-                    }
-                    placeholder={
-                      status.owner === "external"
-                        ? t("sessionPlaceholderExternal")
-                        : processState === "idle"
-                          ? t("sessionPlaceholderResume")
-                          : t("sessionPlaceholderQueue")
-                    }
-                    mode={permissionMode}
-                    onModeChange={setPermissionMode}
-                    isHeld={holdModeEnabled ? isHeld : undefined}
-                    onHoldChange={holdModeEnabled ? setHold : undefined}
-                    supportsPermissionMode={supportsPermissionMode}
-                    supportsThinkingToggle={supportsThinkingToggle}
-                    isRunning={status.owner === "self"}
-                    isThinking={processState === "in-turn"}
-                    onStop={handleAbort}
-                    draftKey={`draft-message-${sessionId}`}
-                    onDraftControlsReady={handleDraftControlsReady}
-                    collapsed={
-                      !!(
-                        pendingInputRequest &&
-                        pendingInputRequest.sessionId === actualSessionId
-                      )
-                    }
-                    contextUsage={session?.contextUsage}
-                    projectId={projectId}
-                    sessionId={sessionId}
-                    attachments={attachments}
-                    onAttach={handleAttach}
-                    onRemoveAttachment={handleRemoveAttachment}
-                    uploadProgress={uploadProgress}
-                    commandPrefix={commandPrefix}
-                    commandLabel={commandLabel}
-                    commands={activeCommands}
-                    showCommandButton={showCommandButton}
-                    commandButtons={commandButtons}
-                    onCustomCommand={handleCustomCommand}
-                  />
-                )}
-              </div>
-            </footer>
-          </div>
-          {openFileTabs.map((p) => (
-            <div
-              key={p}
-              className={`file-panel${activeTab === p ? " is-active" : ""}`}
-            >
-              <FileEditor
-                projectId={projectId}
-                filePath={p}
-                onClose={() => requestCloseTab(p)}
-                onDirtyChange={(d) => handleTabDirty(p, d)}
-                onSaveRef={(fn) => updateSaveHandler(p, fn)}
+          {/* Process Info Modal */}
+          {showProcessInfoModal && session && (
+            <ProcessInfoModal
+              sessionId={actualSessionId}
+              provider={session.provider}
+              model={session.model}
+              status={status}
+              processState={processState}
+              contextUsage={session.contextUsage}
+              originator={session.originator}
+              cliVersion={session.cliVersion}
+              sessionSource={session.source}
+              approvalPolicy={session.approvalPolicy}
+              sandboxPolicy={session.sandboxPolicy}
+              createdAt={session.createdAt}
+              sessionStreamConnected={sessionUpdatesConnected}
+              lastSessionEventAt={lastStreamActivityAt}
+              onClose={() => setShowProcessInfoModal(false)}
+            />
+          )}
+
+          {/* Model Switch Modal */}
+          {showModelSwitchModal &&
+            status.owner === "self" &&
+            status.processId && (
+              <ModelSwitchModal
+                processId={status.processId}
+                currentModel={session?.model}
+                onModelChanged={handleModelChanged}
+                onClose={() => setShowModelSwitchModal(false)}
               />
+            )}
+
+          {status.owner === "external" && (
+            <div className="external-session-warning">
+              {t("sessionExternalWarning")}
             </div>
-          ))}
-        </div>
-        {pendingCloseTab && (
-          <Modal
-            title={t("editorUnsavedConfirmTitle" as never)}
-            onClose={() => setPendingCloseTab(null)}
+          )}
+
+          {hasPendingToolCalls && (
+            <div className="external-session-warning pending-tool-warning">
+              {t("sessionPendingElsewhereWarning")}
+            </div>
+          )}
+
+          <div
+            className="editor-tabbar"
+            role="tablist"
+            aria-label={t("editorTabs" as never)}
           >
-            <div className="unsaved-confirm">
-              <p>
-                {t("editorUnsavedConfirmBody" as never, {
-                  name: pendingCloseTab.split("/").pop() || pendingCloseTab,
-                })}
-              </p>
-              <div className="unsaved-confirm-actions">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "chat"}
+              className={`editor-tab${activeTab === "chat" ? " is-active" : ""}`}
+              onClick={() => setActiveTab("chat")}
+            >
+              <span className="editor-tab-label">
+                {t("editorTabChat" as never)}
+              </span>
+            </button>
+            {openFileTabs.map((p) => (
+              <div
+                key={p}
+                role="tab"
+                aria-selected={activeTab === p}
+                tabIndex={0}
+                className={`editor-tab editor-tab--file${activeTab === p ? " is-active" : ""}${dirtyTabs.has(p) ? " is-dirty" : ""}`}
+              >
                 <button
                   type="button"
-                  className="btn btn-primary"
-                  onClick={() => confirmCloseTab(true)}
+                  className="editor-tab-main"
+                  onClick={() => setActiveTab(p)}
+                  title={p}
                 >
-                  {t("editorSaveAndClose" as never)}
+                  <TabFileIcon />
+                  <span className="editor-tab-label">{p.split("/").pop()}</span>
+                  {dirtyTabs.has(p) && (
+                    <span className="editor-tab-dot" aria-hidden="true">
+                      ●
+                    </span>
+                  )}
                 </button>
                 <button
                   type="button"
-                  className="btn btn-secondary"
-                  onClick={() => confirmCloseTab(false)}
+                  className="editor-tab-close"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    requestCloseTab(p);
+                  }}
+                  aria-label={t("editorClose" as never)}
+                  title={t("editorClose" as never)}
                 >
-                  {t("editorCloseWithoutSave" as never)}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => setPendingCloseTab(null)}
-                >
-                  {t("editorCancel" as never)}
+                  ×
                 </button>
               </div>
+            ))}
+          </div>
+          <div className="session-workbench-body">
+            <div
+              className={`chat-panel${activeTab === "chat" ? " is-active" : ""}`}
+            >
+              <main className="session-messages">
+                {loading ? (
+                  <SessionMessagesSkeleton />
+                ) : (
+                  <SessionMetadataProvider
+                    projectId={projectId}
+                    projectPath={project?.path ?? null}
+                    sessionId={sessionId}
+                  >
+                    <AgentContentProvider
+                      agentContent={agentContent}
+                      setAgentContent={setAgentContent}
+                      toolUseToAgent={toolUseToAgent}
+                      projectId={projectId}
+                      sessionId={sessionId}
+                    >
+                      <MessageList
+                        messages={messages}
+                        preprocessedItems={renderItems}
+                        provider={session?.provider}
+                        isProcessing={
+                          status.owner === "self" && processState === "in-turn"
+                        }
+                        isCompacting={isCompacting}
+                        scrollTrigger={scrollTrigger}
+                        pendingMessages={pendingMessages}
+                        deferredMessages={deferredMessages}
+                        onCancelDeferred={(tempId) =>
+                          api.cancelDeferredMessage(sessionId, tempId)
+                        }
+                        markdownAugments={markdownAugments}
+                        activeToolApproval={activeToolApproval}
+                        hasOlderMessages={pagination?.hasOlderMessages}
+                        hasNewerMessages={pagination?.hasNewerMessages}
+                        loadingOlder={loadingOlder}
+                        loadingNewer={loadingNewer}
+                        loadingTargetMessage={loadingTargetMessage}
+                        onLoadOlderMessages={loadOlderMessages}
+                        onLoadNewerMessages={loadNewerMessages}
+                        onLoadTargetMessage={loadTargetMessageWindow}
+                        onEditUserPrompt={
+                          !isViewingHistoricalBranch &&
+                          (session?.provider === "claude" ||
+                            session?.provider === "codex" ||
+                            !session?.provider)
+                            ? handleEditUserPrompt
+                            : undefined
+                        }
+                        onSelectBranch={handleSelectBranch}
+                        focusBranchId={pendingBranchFocusId}
+                        onBranchFocused={handleBranchFocused}
+                        targetMessageId={targetMessageId}
+                        onTargetFocused={handleTargetFocused}
+                      />
+                    </AgentContentProvider>
+                  </SessionMetadataProvider>
+                )}
+              </main>
+
+              <footer className="session-input">
+                <div
+                  className={`session-connection-bar session-connection-${sessionConnectionStatus}`}
+                />
+                <div className="session-input-inner">
+                  {/* User question panel */}
+                  {pendingInputRequest &&
+                    pendingInputRequest.sessionId === actualSessionId &&
+                    isAskUserQuestion && (
+                      <QuestionAnswerPanel
+                        request={pendingInputRequest}
+                        sessionId={actualSessionId}
+                        onSubmit={handleQuestionSubmit}
+                        onDeny={handleDeny}
+                        readOnly={isPersistedInputRequest}
+                      />
+                    )}
+
+                  {/* Tool approval: show panel + always-visible toolbar */}
+                  {pendingInputRequest &&
+                    pendingInputRequest.sessionId === actualSessionId &&
+                    !isAskUserQuestion && (
+                      <>
+                        <ToolApprovalPanel
+                          request={pendingInputRequest}
+                          sessionId={actualSessionId}
+                          agentName={approvalAgentName}
+                          onApprove={handleApprove}
+                          onDeny={handleDeny}
+                          onApproveAcceptEdits={handleApproveAcceptEdits}
+                          onApproveForSession={handleApproveForSession}
+                          onApproveAlways={handleApproveAlways}
+                          onDenyWithFeedback={handleDenyWithFeedback}
+                          collapsed={approvalCollapsed}
+                          onCollapsedChange={setApprovalCollapsed}
+                        />
+                        <MessageInputToolbar
+                          mode={permissionMode}
+                          onModeChange={setPermissionMode}
+                          isHeld={holdModeEnabled ? isHeld : undefined}
+                          onHoldChange={holdModeEnabled ? setHold : undefined}
+                          supportsPermissionMode={supportsPermissionMode}
+                          supportsThinkingToggle={supportsThinkingToggle}
+                          contextUsage={session?.contextUsage}
+                          projectId={projectId}
+                          sessionId={actualSessionId}
+                          isRunning={status.owner === "self"}
+                          isThinking={processState === "in-turn"}
+                          onStop={handleAbort}
+                          pendingApproval={
+                            approvalCollapsed
+                              ? {
+                                  type: "tool-approval",
+                                  onExpand: () => setApprovalCollapsed(false),
+                                }
+                              : undefined
+                          }
+                        />
+                      </>
+                    )}
+
+                  {/* Edit/rewind banner: shown while editing a past message */}
+                  {editRewind && (
+                    <div
+                      className="edit-rewind-banner"
+                      data-testid="edit-rewind-banner"
+                    >
+                      <span className="edit-rewind-banner-text">
+                        {t("sessionEditingFromHere")}
+                      </span>
+                      <button
+                        type="button"
+                        className="edit-rewind-banner-cancel"
+                        onClick={handleCancelEdit}
+                      >
+                        {t("actionCancel")}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* No pending approval: show full message input */}
+                  {!(
+                    pendingInputRequest &&
+                    pendingInputRequest.sessionId === actualSessionId &&
+                    !isAskUserQuestion
+                  ) && (
+                    <MessageInput
+                      onSend={handleSend}
+                      onQueue={
+                        status.owner !== "none" && processState !== "idle"
+                          ? handleQueue
+                          : undefined
+                      }
+                      placeholder={
+                        status.owner === "external"
+                          ? t("sessionPlaceholderExternal")
+                          : processState === "idle"
+                            ? t("sessionPlaceholderResume")
+                            : t("sessionPlaceholderQueue")
+                      }
+                      mode={permissionMode}
+                      onModeChange={setPermissionMode}
+                      isHeld={holdModeEnabled ? isHeld : undefined}
+                      onHoldChange={holdModeEnabled ? setHold : undefined}
+                      supportsPermissionMode={supportsPermissionMode}
+                      supportsThinkingToggle={supportsThinkingToggle}
+                      isRunning={status.owner === "self"}
+                      isThinking={processState === "in-turn"}
+                      onStop={handleAbort}
+                      draftKey={`draft-message-${sessionId}`}
+                      onDraftControlsReady={handleDraftControlsReady}
+                      collapsed={
+                        !!(
+                          pendingInputRequest &&
+                          pendingInputRequest.sessionId === actualSessionId
+                        )
+                      }
+                      contextUsage={session?.contextUsage}
+                      projectId={projectId}
+                      sessionId={sessionId}
+                      attachments={attachments}
+                      onAttach={handleAttach}
+                      onRemoveAttachment={handleRemoveAttachment}
+                      uploadProgress={uploadProgress}
+                      commandPrefix={commandPrefix}
+                      commandLabel={commandLabel}
+                      commands={activeCommands}
+                      showCommandButton={showCommandButton}
+                      commandButtons={commandButtons}
+                      onCustomCommand={handleCustomCommand}
+                    />
+                  )}
+                </div>
+              </footer>
             </div>
-          </Modal>
+            {openFileTabs.map((p) => (
+              <div
+                key={p}
+                className={`file-panel${activeTab === p ? " is-active" : ""}`}
+              >
+                <FileEditor
+                  projectId={projectId}
+                  filePath={p}
+                  onClose={() => requestCloseTab(p)}
+                  onDirtyChange={(d) => handleTabDirty(p, d)}
+                  onSaveRef={(fn) => updateSaveHandler(p, fn)}
+                />
+              </div>
+            ))}
+          </div>
+          {pendingCloseTab && (
+            <Modal
+              title={t("editorUnsavedConfirmTitle" as never)}
+              onClose={() => setPendingCloseTab(null)}
+            >
+              <div className="unsaved-confirm">
+                <p>
+                  {t("editorUnsavedConfirmBody" as never, {
+                    name: pendingCloseTab.split("/").pop() || pendingCloseTab,
+                  })}
+                </p>
+                <div className="unsaved-confirm-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => confirmCloseTab(true)}
+                  >
+                    {t("editorSaveAndClose" as never)}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => confirmCloseTab(false)}
+                  >
+                    {t("editorCloseWithoutSave" as never)}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => setPendingCloseTab(null)}
+                  >
+                    {t("editorCancel" as never)}
+                  </button>
+                </div>
+              </div>
+            </Modal>
+          )}
+        </div>
+        {isWideScreen ? (
+          <SessionInspector
+            presentation="sidebar"
+            inspectorWidth={inspector.width}
+            onResizeStart={() => inspector.setIsResizing(true)}
+            onResize={inspector.setWidth}
+            onResizeEnd={() => inspector.setIsResizing(false)}
+            messages={messages}
+            userQuestions={session?.userQuestions}
+            markdownAugments={markdownAugments}
+            activeToolApproval={activeToolApproval}
+            projectId={projectId}
+            sessionId={actualSessionId}
+            provider={session?.provider}
+            model={session?.model}
+            reasoningEffort={session?.reasoningEffort}
+            serviceTier={session?.serviceTier}
+            basePath={basePath}
+            status={status}
+            processState={processState}
+            onSelectMessage={handleInspectorSelectMessage}
+            onOpenFile={(path) => openOrFocusFileTab(path)}
+            processId={status.owner === "self" ? status.processId : undefined}
+            providers={providers}
+          />
+        ) : (
+          <SessionInspector
+            presentation="drawer"
+            isOpen={isInspectorOpen}
+            onClose={() => setInspectorOpen(false)}
+            messages={messages}
+            userQuestions={session?.userQuestions}
+            markdownAugments={markdownAugments}
+            activeToolApproval={activeToolApproval}
+            projectId={projectId}
+            sessionId={actualSessionId}
+            provider={session?.provider}
+            model={session?.model}
+            reasoningEffort={session?.reasoningEffort}
+            serviceTier={session?.serviceTier}
+            basePath={basePath}
+            status={status}
+            processState={processState}
+            onSelectMessage={handleInspectorSelectMessage}
+            onOpenFile={(path) => openOrFocusFileTab(path)}
+            processId={status.owner === "self" ? status.processId : undefined}
+            providers={providers}
+          />
         )}
       </div>
-      {isWideScreen ? (
-        <SessionInspector
-          presentation="sidebar"
-          inspectorWidth={inspector.width}
-          onResizeStart={() => inspector.setIsResizing(true)}
-          onResize={inspector.setWidth}
-          onResizeEnd={() => inspector.setIsResizing(false)}
-          messages={messages}
-          userQuestions={session?.userQuestions}
-          markdownAugments={markdownAugments}
-          activeToolApproval={activeToolApproval}
-          projectId={projectId}
-          sessionId={actualSessionId}
-          provider={session?.provider}
-          model={session?.model}
-          reasoningEffort={session?.reasoningEffort}
-          serviceTier={session?.serviceTier}
-          basePath={basePath}
-          status={status}
-          processState={processState}
-          onSelectMessage={handleInspectorSelectMessage}
-          onOpenFile={(path) => openOrFocusFileTab(path)}
-          processId={status.owner === "self" ? status.processId : undefined}
-          providers={providers}
-        />
-      ) : (
-        <SessionInspector
-          presentation="drawer"
-          isOpen={isInspectorOpen}
-          onClose={() => setInspectorOpen(false)}
-          messages={messages}
-          userQuestions={session?.userQuestions}
-          markdownAugments={markdownAugments}
-          activeToolApproval={activeToolApproval}
-          projectId={projectId}
-          sessionId={actualSessionId}
-          provider={session?.provider}
-          model={session?.model}
-          reasoningEffort={session?.reasoningEffort}
-          serviceTier={session?.serviceTier}
-          basePath={basePath}
-          status={status}
-          processState={processState}
-          onSelectMessage={handleInspectorSelectMessage}
-          onOpenFile={(path) => openOrFocusFileTab(path)}
-          processId={status.owner === "self" ? status.processId : undefined}
-          providers={providers}
-        />
-      )}
-    </div>
+    </FileTabOpenerContext.Provider>
   );
 }
 

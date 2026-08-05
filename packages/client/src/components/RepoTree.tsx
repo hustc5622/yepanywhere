@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ProjectBrowseEntry, ProjectBrowseResponse } from "../api/client";
 import { api } from "../api/client";
+import { useProjectFileWatch } from "../hooks/useProjectFileWatch";
 import { useI18n } from "../i18n";
 import { FILE_ICONS_V2, FolderIconV2 } from "./FileTypeIcons";
 
@@ -228,6 +229,18 @@ export function RepoTree({ projectId, onOpenFile }: RepoTreeProps) {
     },
     [onOpenFile, loadDir],
   );
+
+  // Refresh every currently-visible directory (root + expanded) in real time
+  // when the project repository changes.
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const refreshVisible = useCallback(() => {
+    loadDir("");
+    for (const dirPath of expandedRef.current) {
+      loadDir(dirPath);
+    }
+  }, [loadDir]);
+  useProjectFileWatch(projectId, refreshVisible);
 
   const root = dirs[""];
 

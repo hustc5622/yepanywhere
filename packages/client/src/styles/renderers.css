@@ -3689,6 +3689,10 @@ pre.code-highlighter-plain code {
   border-radius: 0;
 }
 
+.file-page-content .file-editor {
+  height: 100%;
+}
+
 /* Mobile adjustments */
 @media (max-width: 600px) {
   .file-viewer-header {

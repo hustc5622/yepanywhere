@@ -51,19 +51,22 @@ export function AboutSettings() {
       .catch(() => {});
   }, []);
 
-  const refreshDeploymentStatus = useCallback(async () => {
-    if (!deploymentCapable) return;
+  const refreshDeploymentStatus = useCallback(
+    async (fresh = false) => {
+      if (!deploymentCapable) return;
 
-    setDeploymentLoading(true);
-    try {
-      setDeploymentStatus(await api.getDeploymentStatus());
-      setDeploymentError(null);
-    } catch (err) {
-      setDeploymentError(getErrorMessage(err));
-    } finally {
-      setDeploymentLoading(false);
-    }
-  }, [deploymentCapable]);
+      setDeploymentLoading(true);
+      try {
+        setDeploymentStatus(await api.getDeploymentStatus(fresh));
+        setDeploymentError(null);
+      } catch (err) {
+        setDeploymentError(getErrorMessage(err));
+      } finally {
+        setDeploymentLoading(false);
+      }
+    },
+    [deploymentCapable],
+  );
 
   // When activity bus reconnects after restart, clear restarting state
   useEffect(() => {
@@ -83,7 +86,7 @@ export function AboutSettings() {
   const handleCheckUpdates = useCallback(async () => {
     await Promise.allSettled([
       refetchVersionFresh(),
-      refreshDeploymentStatus(),
+      refreshDeploymentStatus(true),
     ]);
   }, [refetchVersionFresh, refreshDeploymentStatus]);
 

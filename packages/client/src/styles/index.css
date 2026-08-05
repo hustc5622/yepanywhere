@@ -13606,6 +13606,58 @@ button.context-usage-indicator--button:focus-visible {
   cursor: ew-resize;
 }
 
+/* ---- Task lists (GFM - [ ] / [x]) ---- */
+.tiptap-editor ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.25rem;
+  margin: 0.5rem 0;
+}
+.tiptap-editor ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.tiptap-editor ul[data-type="taskList"] li > label {
+  margin-top: 0.2rem;
+  flex: 0 0 auto;
+}
+.tiptap-editor ul[data-type="taskList"] li > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tiptap-editor ul[data-type="taskList"] input[type="checkbox"] {
+  cursor: pointer;
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent, #58a6ff);
+}
+
+/* ---- Code block language label (D2) ---- */
+.tiptap-editor pre {
+  position: relative;
+}
+.tiptap-editor pre[data-language]::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 0.4rem;
+  right: 0.7rem;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg-secondary) 80%, transparent);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  pointer-events: none;
+  text-transform: lowercase;
+}
+
+/* ---- Markdown images: keep within the editor width (D3) ---- */
+.tiptap-editor img {
+  max-width: 100%;
+  height: auto;
+}
+
 /* ---- Selection ---- */
 .tiptap-editor ::selection {
   background: color-mix(in srgb, var(--accent, #58a6ff) 30%, transparent);

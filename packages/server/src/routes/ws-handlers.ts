@@ -41,7 +41,11 @@ import {
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type { TerminalService } from "../terminal/TerminalService.js";
 import type { UploadManager } from "../uploads/manager.js";
-import type { EventBus, FocusedSessionWatchManager } from "../watcher/index.js";
+import type {
+  EventBus,
+  FocusedSessionWatchManager,
+  ProjectFileWatchManager,
+} from "../watcher/index.js";
 import {
   decodeFrameToParsedMessage,
   routeClientMessageSafely,
@@ -121,6 +125,8 @@ export interface WsHandlerDeps {
   browserProfileService?: BrowserProfileService;
   /** Focused session watch manager for per-session targeted file watching (optional) */
   focusedSessionWatchManager?: FocusedSessionWatchManager;
+  /** Per-project repository file watcher for real-time repo tree updates (optional) */
+  projectFileWatchManager?: ProjectFileWatchManager;
   /** Emulator bridge service for Android emulator streaming (optional) */
   deviceBridgeService?: DeviceBridgeService;
   /** Terminal service for remote shell sessions (optional) */
@@ -495,6 +501,73 @@ export function handleSessionWatchSubscribe(
 }
 
 /**
+ * Handle a project-repo file-change subscription.
+ * Subscribes to recursive file-change events for a project's working
+ * directory so the client can refresh its repository file tree in real time.
+ */
+export function handleProjectFilesSubscribe(
+  subscriptions: Map<string, () => void>,
+  msg: WireSubscribe,
+  send: SendFn,
+  projectFileWatchManager?: ProjectFileWatchManager,
+): void {
+  const { subscriptionId, projectId } = msg;
+
+  if (!projectFileWatchManager) {
+    send({
+      type: "response",
+      id: subscriptionId,
+      status: 503,
+      body: { error: "Project file watch service unavailable" },
+    });
+    return;
+  }
+
+  if (!projectId) {
+    send({
+      type: "response",
+      id: subscriptionId,
+      status: 400,
+      body: { error: "projectId required for project-files channel" },
+    });
+    return;
+  }
+
+  let eventId = 0;
+  const sendEvent = (eventType: string, data: unknown) => {
+    send({
+      type: "event",
+      subscriptionId,
+      eventType,
+      eventId: String(eventId++),
+      data,
+    });
+  };
+
+  sendEvent("connected", { timestamp: new Date().toISOString() });
+
+  const heartbeatInterval = setInterval(() => {
+    sendEvent("heartbeat", { timestamp: new Date().toISOString() });
+  }, 30_000);
+
+  const cleanupWatch = projectFileWatchManager.subscribe(
+    projectId as UrlProjectId,
+    (event) => {
+      sendEvent("project-files-changed", event);
+    },
+  );
+
+  subscriptions.set(subscriptionId, () => {
+    clearInterval(heartbeatInterval);
+    cleanupWatch();
+  });
+
+  getLogger().debug(
+    `[WS] Subscribed to project-files ${projectId} (${subscriptionId})`,
+  );
+}
+
+/**
  * Handle a subscribe message.
  */
 export function handleSubscribe(
@@ -506,6 +579,7 @@ export function handleSubscribe(
   focusedSessionWatchManager?: FocusedSessionWatchManager,
   connectedBrowsers?: ConnectedBrowsersService,
   browserProfileService?: BrowserProfileService,
+  projectFileWatchManager?: ProjectFileWatchManager,
 ): void {
   const { subscriptionId, channel } = msg;
 
@@ -541,6 +615,15 @@ export function handleSubscribe(
         msg,
         send,
         focusedSessionWatchManager,
+      );
+      break;
+
+    case "project-files":
+      handleProjectFilesSubscribe(
+        subscriptions,
+        msg,
+        send,
+        projectFileWatchManager,
       );
       break;
 
@@ -894,6 +977,7 @@ export async function handleMessage(
           deps.focusedSessionWatchManager,
           deps.connectedBrowsers,
           deps.browserProfileService,
+          deps.projectFileWatchManager,
         ),
       onUnsubscribe: async (unsubscribeMsg) =>
         handleUnsubscribe(subscriptions, unsubscribeMsg),

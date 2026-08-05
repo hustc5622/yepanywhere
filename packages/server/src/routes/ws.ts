@@ -11,7 +11,11 @@ import type {
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type { TerminalService } from "../terminal/TerminalService.js";
 import type { UploadManager } from "../uploads/manager.js";
-import type { EventBus, FocusedSessionWatchManager } from "../watcher/index.js";
+import type {
+  EventBus,
+  FocusedSessionWatchManager,
+  ProjectFileWatchManager,
+} from "../watcher/index.js";
 import {
   type ConnectionState,
   type WSAdapter,
@@ -53,6 +57,8 @@ export interface WsRoutesDeps {
   browserProfileService?: BrowserProfileService;
   /** Focused session watch manager for per-session targeted file watching (optional) */
   focusedSessionWatchManager?: FocusedSessionWatchManager;
+  /** Per-project repository file watcher for real-time repo tree updates (optional) */
+  projectFileWatchManager?: ProjectFileWatchManager;
   /** Emulator bridge service for Android emulator streaming (optional) */
   deviceBridgeService?: DeviceBridgeService;
   /** Terminal service for remote shell sessions (optional) */
@@ -83,6 +89,7 @@ export function createWsRoutes(
     connectedBrowsers,
     browserProfileService,
     focusedSessionWatchManager,
+    projectFileWatchManager,
     deviceBridgeService,
     terminalService,
   } = deps;
@@ -98,6 +105,7 @@ export function createWsRoutes(
     connectedBrowsers,
     browserProfileService,
     focusedSessionWatchManager,
+    projectFileWatchManager,
     deviceBridgeService,
     terminalService,
   };

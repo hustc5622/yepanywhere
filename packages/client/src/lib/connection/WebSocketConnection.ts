@@ -238,6 +238,13 @@ export class WebSocketConnection implements Connection {
     return this.protocol.subscribeSessionWatch(sessionId, handlers, options);
   }
 
+  subscribeProjectFiles(
+    projectId: string,
+    handlers: StreamHandlers,
+  ): Subscription {
+    return this.protocol.subscribeProjectFiles(projectId, handlers);
+  }
+
   async upload(
     projectId: string,
     sessionId: string,

@@ -4,6 +4,7 @@ import {
   type ProjectBrowseResponse,
   api,
 } from "../api/client";
+import { useProjectFileWatch } from "../hooks/useProjectFileWatch";
 import { useI18n } from "../i18n";
 
 type ExplorerPresentation = "sidebar" | "drawer";
@@ -67,6 +68,12 @@ export const RepoExplorer = memo(function RepoExplorer({
   useEffect(() => {
     load("");
   }, [load]);
+
+  // Refresh the current directory in real time when the project repo changes.
+  const refreshCurrent = useCallback(() => {
+    load(currentPath);
+  }, [load, currentPath]);
+  useProjectFileWatch(projectId, refreshCurrent);
 
   const enter = useCallback(
     (entry: ProjectBrowseEntry) => {
