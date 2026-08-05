@@ -206,13 +206,23 @@ export function AboutSettings() {
     }
   }, []);
 
-  // Handler for "Update to Local" button
+  // Handler for "Update to Local" button.
+  // skipChecks:true because for self-hosted production updates the deploy
+  // script's biome:check / typecheck preflight is a development-time gate and
+  // shouldn't block end users from picking up local fixes (it also runs on the
+  // build machine before release, so the artifact already passed those checks).
+  // The git-pull-update path is left unchanged — its preflight also covers
+  // real environment checks (native push, session title, local media) that
+  // should not be skipped.
   const handleUpdateToLocal = useCallback(async () => {
     setRestarting(true);
     setDeploymentError(null);
     setDeploymentSuccess(null);
     try {
-      const { job } = await api.startDeployment({ action: "server" });
+      const { job } = await api.startDeployment({
+        action: "server",
+        skipChecks: true,
+      });
       setRestartJobId(job.id);
       setDeploymentStatus((current) =>
         current ? { ...current, currentJob: job } : current,

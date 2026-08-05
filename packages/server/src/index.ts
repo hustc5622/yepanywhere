@@ -188,19 +188,19 @@ async function gracefulShutdown(signal: string): Promise<void> {
     }
   }
 
-    if (sessionArchiveServiceForShutdown) {
-      try {
-        sessionArchiveServiceForShutdown.stopDailyScheduler();
-        console.log("[Shutdown] Session archive scheduler stopped");
-      } catch (error) {
-        console.error(
-          "[Shutdown] Error stopping session archive scheduler:",
-          error,
-        );
-      }
+  if (sessionArchiveServiceForShutdown) {
+    try {
+      sessionArchiveServiceForShutdown.stopDailyScheduler();
+      console.log("[Shutdown] Session archive scheduler stopped");
+    } catch (error) {
+      console.error(
+        "[Shutdown] Error stopping session archive scheduler:",
+        error,
+      );
     }
+  }
 
-    closeCodexCorrelationDebugLogger();
+  closeCodexCorrelationDebugLogger();
   console.log("[Shutdown] Cleanup complete, exiting");
   process.exit(0);
 }
@@ -254,9 +254,7 @@ interface CodexSemver {
   patch: number;
 }
 
-function parseCodexSemver(
-  raw: string | undefined,
-): CodexSemver | null {
+function parseCodexSemver(raw: string | undefined): CodexSemver | null {
   if (!raw) return null;
   const match = raw.match(/(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?/);
   if (!match) return null;
@@ -615,7 +613,7 @@ async function startServer() {
     );
   }
 
-    // Create the app first (without WebSocket support initially)
+  // Create the app first (without WebSocket support initially)
   // We'll add WebSocket routes after setting up WebSocket support
   const { app, supervisor, scanner } = createApp({
     realSdk,
@@ -651,8 +649,8 @@ async function startServer() {
     serverSettingsService,
     sharingService,
     deviceBridgeService,
-      codexBridgeService,
-      sessionTitleGeneration: config.sessionTitleGeneration,
+    codexBridgeService,
+    sessionTitleGeneration: config.sessionTitleGeneration,
     modelInfoService,
     enabledProviders: config.enabledProviders,
     voiceInputEnabled: config.voiceInputEnabled,
@@ -678,9 +676,9 @@ async function startServer() {
   supervisorForShutdown = supervisor;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
   codexBridgeForShutdown = codexBridgeService ?? null;
-    sessionArchiveServiceForShutdown = sessionArchiveService;
+  sessionArchiveServiceForShutdown = sessionArchiveService;
 
-    // Set up debug context for maintenance server
+  // Set up debug context for maintenance server
   setDebugContext({
     supervisor,
     claudeSessionsDir: config.claudeSessionsDir,
