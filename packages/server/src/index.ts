@@ -77,7 +77,7 @@ import {
   EventBus,
   FileWatcher,
   FocusedSessionWatchManager,
-  ProjectWatchManager,
+  ProjectFileWatchManager,
   SourceWatcher,
 } from "./watcher/index.js";
 
@@ -123,7 +123,6 @@ let deviceBridgeForShutdown: DeviceBridgeService | null = null;
 let codexBridgeForShutdown: CodexBridgeController | null = null;
 let terminalServiceForShutdown: TerminalService | null = null;
 let sessionArchiveServiceForShutdown: SessionArchiveService | null = null;
-let projectWatchManagerForShutdown: ProjectWatchManager | null = null;
 let isShuttingDown = false;
 
 /**
@@ -189,28 +188,19 @@ async function gracefulShutdown(signal: string): Promise<void> {
     }
   }
 
-  if (sessionArchiveServiceForShutdown) {
-    try {
-      sessionArchiveServiceForShutdown.stopDailyScheduler();
-      console.log("[Shutdown] Session archive scheduler stopped");
-    } catch (error) {
-      console.error(
-        "[Shutdown] Error stopping session archive scheduler:",
-        error,
-      );
+    if (sessionArchiveServiceForShutdown) {
+      try {
+        sessionArchiveServiceForShutdown.stopDailyScheduler();
+        console.log("[Shutdown] Session archive scheduler stopped");
+      } catch (error) {
+        console.error(
+          "[Shutdown] Error stopping session archive scheduler:",
+          error,
+        );
+      }
     }
-  }
 
-  if (projectWatchManagerForShutdown) {
-    try {
-      projectWatchManagerForShutdown.dispose();
-      console.log("[Shutdown] Project watch manager stopped");
-    } catch (error) {
-      console.error("[Shutdown] Error stopping project watch manager:", error);
-    }
-  }
-
-  closeCodexCorrelationDebugLogger();
+    closeCodexCorrelationDebugLogger();
   console.log("[Shutdown] Cleanup complete, exiting");
   process.exit(0);
 }
@@ -581,11 +571,7 @@ async function startServer() {
     );
   }
 
-  // Watches project working directories so the frontend repository tree
-  // receives project-file-changed events and stays in sync with disk.
-  const projectWatchManager = new ProjectWatchManager({ eventBus });
-
-  // Create the app first (without WebSocket support initially)
+    // Create the app first (without WebSocket support initially)
   // We'll add WebSocket routes after setting up WebSocket support
   const { app, supervisor, scanner } = createApp({
     realSdk,
@@ -621,9 +607,8 @@ async function startServer() {
     serverSettingsService,
     sharingService,
     deviceBridgeService,
-    codexBridgeService,
-    projectWatchManager,
-    sessionTitleGeneration: config.sessionTitleGeneration,
+      codexBridgeService,
+      sessionTitleGeneration: config.sessionTitleGeneration,
     modelInfoService,
     enabledProviders: config.enabledProviders,
     voiceInputEnabled: config.voiceInputEnabled,
@@ -643,14 +628,15 @@ async function startServer() {
     }),
   });
 
+  const projectFileWatchManager = new ProjectFileWatchManager({ scanner });
+
   // Set service references for graceful shutdown
   supervisorForShutdown = supervisor;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
   codexBridgeForShutdown = codexBridgeService ?? null;
-  sessionArchiveServiceForShutdown = sessionArchiveService;
-  projectWatchManagerForShutdown = projectWatchManager;
+    sessionArchiveServiceForShutdown = sessionArchiveService;
 
-  // Set up debug context for maintenance server
+    // Set up debug context for maintenance server
   setDebugContext({
     supervisor,
     claudeSessionsDir: config.claudeSessionsDir,
@@ -699,6 +685,7 @@ async function startServer() {
     connectedBrowsers: connectedBrowsersService,
     browserProfileService,
     focusedSessionWatchManager,
+    projectFileWatchManager,
     deviceBridgeService,
     terminalService,
   });

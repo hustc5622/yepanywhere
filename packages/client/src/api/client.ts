@@ -738,8 +738,10 @@ export const api = {
       method: "POST",
     }),
 
-  getDeploymentStatus: () =>
-    fetchJSON<DeploymentStatusResponse>("/deploy/status"),
+  getDeploymentStatus: (fresh = false) =>
+    fetchJSON<DeploymentStatusResponse>(
+      fresh ? "/deploy/status?fresh=1" : "/deploy/status",
+    ),
 
   startDeployment: (request: StartDeploymentRequest) =>
     fetchJSON<{ job: DeploymentJob }>("/deploy/jobs", {

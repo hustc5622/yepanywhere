@@ -99,6 +99,13 @@ export class DirectConnection implements Connection {
     throw new Error("Use WebSocket subscriptions");
   }
 
+  subscribeProjectFiles(
+    _projectId: string,
+    _handlers: StreamHandlers,
+  ): Subscription {
+    throw new Error("Use WebSocket subscriptions");
+  }
+
   /**
    * Upload a file via WebSocket.
    */

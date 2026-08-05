@@ -183,35 +183,60 @@ export class CodexBridgeService implements CodexBridgeController {
     this.server = server;
     this.wss = wss;
 
+    let settled = false;
     await new Promise<void>((resolve) => {
-      const onError = (error: Error) => {
+      const onStartError = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
         this.lastError = error.message;
         this.listening = false;
         this.server = null;
         this.wss = null;
-        wss.close();
+        cleanup();
+        try {
+          wss.close();
+        } catch {
+          // ignore close errors during failed startup
+        }
+        try {
+          server.close();
+        } catch {
+          // ignore close errors during failed startup
+        }
         console.warn(
           `[CodexBridge] Failed to listen on ws://${this.host}:${this.port}: ${error.message}`,
         );
-        cleanup();
         resolve();
       };
       const onListening = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
         this.listening = true;
         this.lastError = null;
+        cleanup();
+        // Keep a long-lived handler so later wss errors do not crash the process.
+        wss.on("error", (error) => {
+          this.lastError = error.message;
+          console.warn(`[CodexBridge] WebSocketServer error: ${error.message}`);
+        });
         console.log(
           `[CodexBridge] Listening on ws://${this.host}:${this.port}`,
         );
-        cleanup();
         resolve();
       };
       const cleanup = () => {
-        server.off("error", onError);
+        server.off("error", onStartError);
         server.off("listening", onListening);
+        wss.off("error", onStartError);
       };
 
-      server.once("error", onError);
+      server.once("error", onStartError);
       server.once("listening", onListening);
+      wss.once("error", onStartError);
       server.listen(this.port, this.host);
     });
 

@@ -12,12 +12,9 @@ import { computeEditAugment } from "../augments/edit-augments.js";
 import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
 import { highlightFile } from "../highlighting/index.js";
 import type { ProjectScanner } from "../projects/scanner.js";
-import type { ProjectWatchManager } from "../watcher/index.js";
 
 export interface FilesDeps {
   scanner: ProjectScanner;
-  /** Optional: starts/keeps alive a watcher for the project dir so the tree refreshes. */
-  projectWatchManager?: ProjectWatchManager;
 }
 
 /** A single entry returned by the project directory browser. */
@@ -540,12 +537,6 @@ export function createFilesRoutes(deps: FilesDeps): Hono {
     if (!project) {
       return c.json({ error: "Project not found" }, 404);
     }
-
-    // Keep a filesystem watcher alive for this project so the frontend
-    // repository tree receives project-file-changed events and stays in sync
-    // with the real filesystem. Safe to call on every browse (ref-counted /
-    // idle-reaped by the manager).
-    deps.projectWatchManager?.ensureWatching(projectId, project.path);
 
     const projectRoot = project.path;
 

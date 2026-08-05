@@ -24,5 +24,10 @@ export type {
   FocusedSessionWatchEvent,
   FocusedSessionWatchManagerOptions,
 } from "./FocusedSessionWatchManager.js";
-export { ProjectWatchManager } from "./ProjectWatchManager.js";
-export type { ProjectWatchManagerOptions } from "./ProjectWatchManager.js";
+export { ProjectFileWatchManager } from "./ProjectFileWatchManager.js";
+export type {
+  ProjectFileChangeEvent,
+  ProjectFileChangeDetail,
+  ProjectFileWatchManagerOptions,
+  ProjectFileChangeSource,
+} from "./ProjectFileWatchManager.js";

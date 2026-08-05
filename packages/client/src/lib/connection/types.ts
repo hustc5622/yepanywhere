@@ -189,6 +189,19 @@ export interface Connection {
   ): Subscription;
 
   /**
+   * Subscribe to recursive file-change events for a project's working
+   * directory, so the repository file tree can refresh in real time.
+   *
+   * @param projectId - Project ID (URL-encoded format)
+   * @param handlers - Event callbacks (eventType "project-files-changed")
+   * @returns Subscription handle with close() method
+   */
+  subscribeProjectFiles(
+    projectId: string,
+    handlers: StreamHandlers,
+  ): Subscription;
+
+  /**
    * Upload a file to a session.
    *
    * @param projectId - Project ID (URL-encoded format)

@@ -4,8 +4,7 @@ import {
   type ProjectBrowseResponse,
   api,
 } from "../api/client";
-import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
-import { useProjectFileChanges } from "../hooks/useProjectFileChanges";
+import { useProjectFileWatch } from "../hooks/useProjectFileWatch";
 import { useI18n } from "../i18n";
 
 type ExplorerPresentation = "sidebar" | "drawer";
@@ -70,20 +69,11 @@ export const RepoExplorer = memo(function RepoExplorer({
     load("");
   }, [load]);
 
-  // Refresh the currently-viewed directory. Re-fetching the whole tree is
-  // unnecessary since this view shows a single directory at a time.
+  // Refresh the current directory in real time when the project repo changes.
   const refreshCurrent = useCallback(() => {
     load(currentPath);
   }, [load, currentPath]);
-
-  // Coalesce bursts of filesystem events into a single refresh.
-  const debouncedRefreshCurrent = useDebouncedCallback(refreshCurrent, 400);
-
-  // When the project's working directory changes on disk, refresh the view.
-  const handleProjectFileChanged = useCallback(() => {
-    debouncedRefreshCurrent();
-  }, [debouncedRefreshCurrent]);
-  useProjectFileChanges(projectId, handleProjectFileChanged);
+  useProjectFileWatch(projectId, refreshCurrent);
 
   const enter = useCallback(
     (entry: ProjectBrowseEntry) => {

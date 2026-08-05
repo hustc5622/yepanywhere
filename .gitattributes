@@ -1,0 +1,3 @@
+# Normalize all text files to LF on checkout/commit for cross-platform consistency.
+# Prevents biome formatter (default lineEnding=lf) from flagging CRLF files.
+* text=auto eol=lf

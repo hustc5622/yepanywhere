@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useFileTabOpener } from "../../contexts/FileTabOpenerContext";
 import { useOptionalSessionMetadata } from "../../contexts/SessionMetadataContext";
 import { useStreamingMarkdownContext } from "../../contexts/StreamingMarkdownContext";
 import { useStreamingMarkdown } from "../../hooks/useStreamingMarkdown";
@@ -32,10 +33,12 @@ function getProjectRelativePath(
   filePath: string,
   projectPath: string | null | undefined,
 ): string | null {
-  const root = projectPath?.replace(/\/+$/, "");
+  // Normalize Windows backslashes so comparison works cross-platform.
+  const normPath = filePath?.replace(/\\/g, "/");
+  const root = projectPath?.replace(/\\/g, "/").replace(/\/+$/, "");
   if (!root) return null;
-  if (!filePath.startsWith(`${root}/`)) return null;
-  return filePath.slice(root.length + 1);
+  if (!normPath.startsWith(`${root}/`)) return null;
+  return normPath.slice(root.length + 1);
 }
 
 function isModifiedClick(e: React.MouseEvent): boolean {
@@ -149,6 +152,7 @@ export const TextBlock = memo(function TextBlock({
   );
   const blockRef = useRef<HTMLDivElement | null>(null);
   const sessionMetadata = useOptionalSessionMetadata();
+  const fileTabOpener = useFileTabOpener();
 
   // Streaming markdown hook for server-rendered content
   const streamingMarkdown = useStreamingMarkdown();
@@ -241,12 +245,20 @@ export const TextBlock = memo(function TextBlock({
         return;
       }
 
+      // Unified entry: open the file in the same editor tab used by the
+      // project repo explorer (Win/Mac consistent). Falls back to the old
+      // modal when no tab opener is available (e.g. archive/inbox pages).
+      if (fileTabOpener) {
+        fileTabOpener.openFileTab(relativePath);
+        return;
+      }
+
       setFileModal({
         filePath: relativePath,
         lineNumber: localFileTarget.lineNumber,
       });
     },
-    [handleLocalMediaClick, sessionMetadata],
+    [handleLocalMediaClick, sessionMetadata, fileTabOpener],
   );
 
   const showStreamingContent = isStreaming && useStreamingContent;

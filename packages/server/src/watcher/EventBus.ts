@@ -62,24 +62,6 @@ export interface BackendReloadedEvent {
   timestamp: string;
 }
 
-/**
- * Event emitted when a file or directory inside a project's working directory
- * changes (create / modify / delete). Produced by ProjectWatchManager and
- * broadcast to the frontend over the activity stream so the repository tree
- * can refresh itself. Carries the project id so clients can filter by project.
- */
-export interface ProjectFileChangedEvent {
-  type: "project-file-changed";
-  /** Base64url-encoded project path (UrlProjectId format). */
-  projectId: UrlProjectId;
-  /** Absolute path on disk. */
-  path: string;
-  /** Path relative to the project root. */
-  relativePath: string;
-  changeType: FileChangeType;
-  timestamp: string;
-}
-
 /** Event emitted when a session is marked as seen (for cross-tab/device sync) */
 export interface SessionSeenEvent {
   type: "session-seen";
@@ -245,7 +227,6 @@ export interface BrowserTabDisconnectedEvent {
 /** Union of all event types that can be emitted through the bus */
 export type BusEvent =
   | FileChangeEvent
-  | ProjectFileChangedEvent
   | SessionStatusEvent
   | SessionCreatedEvent
   | SourceChangeEvent

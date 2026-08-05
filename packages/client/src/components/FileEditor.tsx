@@ -2,6 +2,7 @@ import type { FileContentResponse } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useI18n } from "../i18n";
+import { emitProjectFilesChanged } from "../lib/projectFileWatch";
 import { FileViewer } from "./FileViewer";
 import { MarkdownRichEditor, type SaveState } from "./MarkdownRichEditor";
 
@@ -150,6 +151,7 @@ function TextFileEditor({
     setSaveError(null);
     try {
       await api.updateFile(projectId, filePath, draft);
+      emitProjectFilesChanged(projectId);
       setOriginal(draft);
       setSavedFlash(true);
       setPreviewVersion((v) => v + 1);

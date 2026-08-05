@@ -1,14 +1,24 @@
+// @tiptap/core is now a direct dependency (see package.json) so we can import
+// Node / Extension / mergeAttributes for defining table sub-nodes
+// (TableRow, TableCell, TableHeader) and the code-block language-label
+// extension that @tiptap/extension-table@2.27.2 fails to bundle.
+import { Extension, Node, mergeAttributes } from "@tiptap/core";
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
+import type { Fragment, NodeType, Schema } from "@tiptap/pm/model";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { type Editor, EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { common, createLowlight } from "lowlight";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "tiptap-markdown";
 import { api } from "../api/client";
 import { useI18n } from "../i18n";
+import { apiPath } from "../lib/apiPath";
+import { emitProjectFilesChanged } from "../lib/projectFileWatch";
 
 /**
  * Save state surfaced to the parent for the dirty / saving / saved / error
@@ -190,6 +200,303 @@ function isMarkdownPath(filePath: string): boolean {
   return ext === "md" || ext === "markdown";
 }
 
+// ---------------------------------------------------------------------------
+// Markdown image proxy (D3): rewrite relative image sources to the project
+// raw-file API so locally-referenced images (./img.png, ../x/y.png, /img.png)
+// load inside the editor. Network (http/https), data: and blob: URLs pass
+// through untouched, and the stored markdown keeps the original relative path
+// (so files stay portable when saved).
+// ---------------------------------------------------------------------------
+
+function resolveImageDisplaySrc(
+  src: string,
+  projectId: string,
+  filePath: string,
+): string {
+  if (!src) return src;
+  if (/^(https?:|data:|blob:)/i.test(src)) return src;
+  const baseDir = filePath.includes("/")
+    ? filePath.replace(/\/[^/]*$/, "")
+    : "";
+  let rel = src;
+  if (rel.startsWith("/")) {
+    // Project-root relative (strip leading slash).
+    rel = rel.slice(1);
+  } else if (baseDir) {
+    // Relative to the markdown file's own directory.
+    rel = `${baseDir}/${rel}`;
+  }
+  // Normalize "." and ".." segments (POSIX-style; project paths are
+  // forward-slash even on Windows).
+  const parts = rel.split("/");
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
+      else out.push("..");
+    } else {
+      out.push(part);
+    }
+  }
+  const normalized = out.join("/");
+  return apiPath(
+    `/projects/${projectId}/files/raw?path=${encodeURIComponent(normalized)}`,
+  );
+}
+
+/**
+ * Dynamically import optional Tiptap extensions. Returns null if the package
+ * is not installed (pnpm install hasn't been run yet), allowing graceful
+ * degradation — the editor works without tables/task-lists until the deps are
+ * installed.
+ *
+ * NOTE: @tiptap/extension-table@2.27.2 only ships the `Table` extension in
+ * its dist bundle.  TableRow / TableCell / TableHeader (and the convenience
+ * `TableKit` re-export) are missing from the build even though they exist in
+ * the upstream source.  We re-create them here from the official source so
+ * that `tableRow` node type exists when Table's content expression
+ * `tableRow+` is validated during schema creation.
+ */
+async function loadOptionalExtensions() {
+  let Table: typeof import("@tiptap/extension-table")["default"] | null = null;
+  let TaskList: typeof import("@tiptap/extension-task-list")["default"] | null =
+    null;
+  let TaskItem: typeof import("@tiptap/extension-task-item")["default"] | null =
+    null;
+
+  try {
+    const tableMod = await import("@tiptap/extension-table");
+    Table = tableMod.default;
+  } catch {
+    // @tiptap/extension-table not installed yet — degrade gracefully
+  }
+
+  try {
+    TaskList = (await import("@tiptap/extension-task-list")).default;
+    TaskItem = (await import("@tiptap/extension-task-item")).default;
+  } catch {
+    // @tiptap/extension-task-list not installed yet — degrade gracefully
+  }
+
+  // --- TableRow / TableCell / TableHeader (from official tiptap source) ---
+  // Only defined when Table is available; otherwise null.
+  let TableRowExt: ReturnType<typeof Node.create> | null = null;
+  let TableCellExt: ReturnType<typeof Node.create> | null = null;
+  let TableHeaderExt: ReturnType<typeof Node.create> | null = null;
+
+  if (Table) {
+    // Helper: parse column width from <colgroup><col> or colwidth attribute.
+    function parseColwidth(element: HTMLElement): number[] | null {
+      const colwidth = element.getAttribute("colwidth");
+      if (colwidth) {
+        return colwidth.split(",").map((w) => Number.parseInt(w, 10));
+      }
+      const row = element.parentElement;
+      const table = row?.closest("table");
+      if (!row || !table) return null;
+      const cellIndex = Array.from(row.children).indexOf(element);
+      const width = table
+        .querySelectorAll("colgroup > col")
+        [cellIndex]?.getAttribute("width");
+      return width ? [Number.parseInt(width, 10)] : null;
+    }
+
+    // Helper: check if a <td>/<th> is effectively empty.
+    function isEmptyCellElement(el: HTMLElement): boolean {
+      if (el.children.length > 0) return false;
+      return (el.textContent ?? "").replace(/[ \t\r\n\f]+/g, "") === "";
+    }
+
+    // Helper: create a minimal block+ fragment for empty cell backfill.
+    function fillEmptyCellContent(cellType: NodeType | undefined) {
+      if (!cellType) {
+        throw new Error(
+          "[tiptap error]: table cell/header node type is not registered.",
+        );
+      }
+      const filled = cellType.createAndFill();
+      if (!filled) {
+        throw new Error(
+          `[tiptap error]: "${cellType.name}" has no default content to backfill.`,
+        );
+      }
+      return filled.content;
+    }
+
+    TableRowExt = Node.create({
+      name: "tableRow",
+      content: "(tableCell | tableHeader)*",
+      tableRole: "row",
+      parseHTML: () => [{ tag: "tr" }],
+      renderHTML({ HTMLAttributes }) {
+        return ["tr", mergeAttributes({}, HTMLAttributes), 0];
+      },
+    });
+
+    TableCellExt = Node.create({
+      name: "tableCell",
+      content: "block+",
+      addAttributes() {
+        return {
+          colspan: { default: 1 },
+          rowspan: { default: 1 },
+          colwidth: { default: null, parseHTML: parseColwidth },
+          align: {
+            default: null,
+            parseHTML: (el: HTMLElement) => {
+              const v = (
+                el.style.textAlign ||
+                "" ||
+                el.getAttribute("align") ||
+                ""
+              )
+                .trim()
+                .toLowerCase();
+              if (v === "left" || v === "right" || v === "center") return v;
+              return null;
+            },
+            renderHTML: (attrs: { align?: string | null }) =>
+              attrs.align ? { style: `text-align: ${attrs.align}` } : {},
+          },
+        };
+      },
+      tableRole: "cell",
+      isolating: true,
+      parseHTML() {
+        return [
+          {
+            tag: "td",
+            getAttrs: (node: HTMLElement | string) =>
+              typeof node === "object" && isEmptyCellElement(node) ? {} : false,
+            getContent: (_node, schema) =>
+              fillEmptyCellContent(schema.nodes.tableCell),
+          },
+          { tag: "td" },
+        ];
+      },
+      renderHTML({ HTMLAttributes }) {
+        return ["td", mergeAttributes({}, HTMLAttributes), 0];
+      },
+    });
+
+    TableHeaderExt = Node.create({
+      name: "tableHeader",
+      content: "block+",
+      addAttributes() {
+        return {
+          colspan: { default: 1 },
+          rowspan: { default: 1 },
+          colwidth: { default: null, parseHTML: parseColwidth },
+          align: {
+            default: null,
+            parseHTML: (el: HTMLElement) => {
+              const v = (
+                el.style.textAlign ||
+                "" ||
+                el.getAttribute("align") ||
+                ""
+              )
+                .trim()
+                .toLowerCase();
+              if (v === "left" || v === "right" || v === "center") return v;
+              return null;
+            },
+            renderHTML: (attrs: { align?: string | null }) =>
+              attrs.align ? { style: `text-align: ${attrs.align}` } : {},
+          },
+        };
+      },
+      tableRole: "header_cell",
+      isolating: true,
+      parseHTML() {
+        return [
+          {
+            tag: "th",
+            getAttrs: (node: HTMLElement | string) =>
+              typeof node === "object" && isEmptyCellElement(node) ? {} : false,
+            getContent: (_node, schema) =>
+              fillEmptyCellContent(schema.nodes.tableHeader),
+          },
+          { tag: "th" },
+        ];
+      },
+      renderHTML({ HTMLAttributes }) {
+        return ["th", mergeAttributes({}, HTMLAttributes), 0];
+      },
+    });
+  }
+
+  return {
+    Table,
+    TableRowExt,
+    TableCellExt,
+    TableHeaderExt,
+    TaskList,
+    TaskItem,
+  };
+}
+
+/** Cached promise so we only attempt the dynamic imports once. */
+let _optionalExtPromise: ReturnType<typeof loadOptionalExtensions> | null =
+  null;
+
+function getOptionalExtensions() {
+  if (!_optionalExtPromise) {
+    _optionalExtPromise = loadOptionalExtensions();
+  }
+  return _optionalExtPromise;
+}
+
+function createImageExtension(toDisplaySrc: (src: string) => string) {
+  return Image.extend({
+    name: "image",
+    renderHTML({ HTMLAttributes }) {
+      const src = (HTMLAttributes.src as string) ?? "";
+      const displaySrc = toDisplaySrc(src);
+      return ["img", { ...HTMLAttributes, src: displaySrc }];
+    },
+  }).configure({ inline: false, allowBase64: true });
+}
+
+// ---------------------------------------------------------------------------
+// Code block language label (D2): tag each code block <pre> with its language
+// via a node decoration (adds an attribute only, never touches document
+// content) so CSS can render a small language badge like VS Code.
+// ---------------------------------------------------------------------------
+
+// Code block language label (D2): tag each code block <pre> with its
+// language via a node decoration (adds a data-language attribute only, never
+// touches document content) so CSS can render a small language badge like VS
+// Code. Implemented as a proper Tiptap extension (now that @tiptap/core is a
+// direct dependency) — it wraps a ProseMirror decoration plugin.
+const codeBlockLangLabel = Extension.create({
+  name: "codeBlockLangLabel",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey("codeBlockLangLabel"),
+        props: {
+          decorations(state) {
+            const { doc } = state;
+            const decorations: Decoration[] = [];
+            doc.descendants((node, pos) => {
+              if (node.type.name === "codeBlock" && node.attrs.language) {
+                decorations.push(
+                  Decoration.node(pos, pos + node.nodeSize, {
+                    "data-language": node.attrs.language as string,
+                  }),
+                );
+              }
+            });
+            return DecorationSet.create(doc, decorations);
+          },
+        },
+      }),
+    ];
+  },
+});
+
 /**
  * MarkdownRichEditor — a Tiptap-based WYSIWYG markdown editor.
  *
@@ -241,6 +548,23 @@ export function MarkdownRichEditor({
     };
   }, [projectId, filePath]);
 
+  // Optional GFM extensions (table / task-list). Dynamically imported so the
+  // editor can start even if the packages aren't installed yet; once they
+  // resolve we re-mount the inner editor with the full extension set.
+  const [optionalExts, setOptionalExts] = useState<Awaited<
+    ReturnType<typeof loadOptionalExtensions>
+  > | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOptionalExtensions().then((exts) => {
+      if (!cancelled) setOptionalExts(exts);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   if (!isMarkdownPath(filePath)) {
     return (
       <div className="markdown-rich-editor-state">
@@ -269,10 +593,11 @@ export function MarkdownRichEditor({
 
   return (
     <MarkdownRichEditorInner
-      key={filePath}
+      key={`${filePath}::${optionalExts ? "exts" : "no-exts"}`}
       projectId={projectId}
       filePath={filePath}
       initialMarkdown={loadedMarkdown}
+      optionalExts={optionalExts}
       onSaveStateChange={onSaveStateChange}
       onSaveRef={onSaveRef}
     />
@@ -281,6 +606,7 @@ export function MarkdownRichEditor({
 
 interface InnerProps extends MarkdownRichEditorProps {
   initialMarkdown: string;
+  optionalExts: Awaited<ReturnType<typeof loadOptionalExtensions>> | null;
 }
 
 function MarkdownRichEditorInner({
@@ -289,8 +615,19 @@ function MarkdownRichEditorInner({
   initialMarkdown,
   onSaveStateChange,
   onSaveRef,
+  optionalExts,
 }: InnerProps) {
   const { t } = useI18n();
+
+  // Proxied image extension: rewrites relative image sources to the project
+  // raw-file API at render time (D3). Recreated when the file changes.
+  const imageExtension = useMemo(
+    () =>
+      createImageExtension((src) =>
+        resolveImageDisplaySrc(src, projectId, filePath),
+      ),
+    [projectId, filePath],
+  );
 
   // Split the loaded file into YAML frontmatter + markdown body so the
   // metadata block isn't mis-parsed as headings or rendered as prose.
@@ -427,6 +764,7 @@ function MarkdownRichEditorInner({
     const work = (async () => {
       try {
         await api.updateFile(projectId, filePath, markdown);
+        emitProjectFilesChanged(projectId);
         savedMarkdownRef.current = markdown;
         emitState({ kind: "saved" });
         // Flash a "saved" badge for 1.5s then return to idle. We do not
@@ -467,10 +805,40 @@ function MarkdownRichEditorInner({
         linkOnPaste: true,
         HTMLAttributes: { rel: "noopener noreferrer", target: "_blank" },
       }),
-      Image.configure({ inline: false, allowBase64: true }),
+      imageExtension,
       Placeholder.configure({
         placeholder: t("markdownEditorPlaceholder" as never),
       }),
+      // GFM tables + task lists (D2). Dynamically imported — if the
+      // packages aren't installed yet these are null and skipped.
+      // tiptap-markdown ships built-in parsers for these node names, so
+      // registering the official extensions is all that's needed for
+      // markdown <-> ProseMirror round-tripping.
+      //
+      // NOTE: @tiptap/extension-table@2.27.2 only bundles the `Table`
+      // node.  We re-create TableRow / TableCell / TableHeader from the
+      // upstream source (see loadOptionalExtensions) so that ProseMirror's
+      // schema validation for `tableRow+` succeeds.
+      ...(optionalExts?.Table &&
+      optionalExts.TableRowExt &&
+      optionalExts.TableCellExt &&
+      optionalExts.TableHeaderExt
+        ? [
+            optionalExts.TableRowExt,
+            optionalExts.TableCellExt,
+            optionalExts.TableHeaderExt,
+            optionalExts.Table.configure({ resizable: true }),
+          ]
+        : []),
+      ...(optionalExts?.TaskList
+        ? optionalExts.TaskItem
+          ? [
+              optionalExts.TaskList,
+              optionalExts.TaskItem.configure({ nested: true }),
+            ]
+          : [optionalExts.TaskList]
+        : []),
+      codeBlockLangLabel,
       // tiptap-markdown: register last so it observes the full schema.
       // `breaks: true` so a single Enter produces a hard line break, like
       // VS Code's markdown preview.

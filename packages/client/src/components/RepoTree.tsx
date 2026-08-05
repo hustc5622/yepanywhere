@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ProjectBrowseEntry, ProjectBrowseResponse } from "../api/client";
 import { api } from "../api/client";
-import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
-import { useProjectFileChanges } from "../hooks/useProjectFileChanges";
+import { useProjectFileWatch } from "../hooks/useProjectFileWatch";
 import { useI18n } from "../i18n";
 import { FILE_ICONS_V2, FolderIconV2 } from "./FileTypeIcons";
 
@@ -208,28 +207,6 @@ export function RepoTree({ projectId, onOpenFile }: RepoTreeProps) {
     loadDir("");
   }, [loadDir]);
 
-  // Keep a live ref of which directories are currently loaded so we can
-  // re-fetch exactly the visible ones when the filesystem changes.
-  const dirsRef = useRef(dirs);
-  useEffect(() => {
-    dirsRef.current = dirs;
-  }, [dirs]);
-
-  // Re-fetch every currently-loaded directory (root + any expanded dirs).
-  const refreshVisible = useCallback(() => {
-    for (const relPath of Object.keys(dirsRef.current)) {
-      loadDir(relPath);
-    }
-  }, [loadDir]);
-
-  // Coalesce bursts of filesystem events into a single refresh.
-  const debouncedRefreshVisible = useDebouncedCallback(refreshVisible, 400);
-
-  // When the project's working directory changes on disk, refresh the tree.
-  // The backend only emits events for projects the frontend is browsing, and
-  // this hook filters by projectId, so we just refresh all visible dirs.
-  useProjectFileChanges(projectId, debouncedRefreshVisible);
-
   const toggle = useCallback(
     (entry: ProjectBrowseEntry) => {
       if (entry.type !== "dir") {
@@ -252,6 +229,18 @@ export function RepoTree({ projectId, onOpenFile }: RepoTreeProps) {
     },
     [onOpenFile, loadDir],
   );
+
+  // Refresh every currently-visible directory (root + expanded) in real time
+  // when the project repository changes.
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const refreshVisible = useCallback(() => {
+    loadDir("");
+    for (const dirPath of expandedRef.current) {
+      loadDir(dirPath);
+    }
+  }, [loadDir]);
+  useProjectFileWatch(projectId, refreshVisible);
 
   const root = dirs[""];
 

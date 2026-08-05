@@ -236,6 +236,16 @@ function getCandidateRepoRoots(explicit?: string): string[] {
   ]);
 }
 
+/**
+ * The deploy entrypoint differs per platform:
+ *   - macOS / Linux: the bash script `scripts/deploy.sh`
+ *   - Windows: the PowerShell script `scripts/deploy.ps1`
+ * Both expose the same CLI flags so the API contract is unchanged.
+ */
+function deployScriptName(): string {
+  return process.platform === "win32" ? "deploy.ps1" : "deploy.sh";
+}
+
 export function getDeploymentAvailability(options?: DeployRoutesOptions): {
   available: boolean;
   reason?: string;
@@ -243,7 +253,7 @@ export function getDeploymentAvailability(options?: DeployRoutesOptions): {
   scriptPath?: string;
 } {
   for (const repoRoot of getCandidateRepoRoots(options?.repoRoot)) {
-    const scriptPath = path.join(repoRoot, "scripts", "deploy.sh");
+    const scriptPath = path.join(repoRoot, "scripts", deployScriptName());
     if (fs.existsSync(scriptPath)) {
       return {
         available: true,
@@ -255,8 +265,7 @@ export function getDeploymentAvailability(options?: DeployRoutesOptions): {
 
   return {
     available: false,
-    reason:
-      "scripts/deploy.sh was not found. Set YEP_DEPLOY_REPO_ROOT to the repository root to enable remote deploy actions.",
+    reason: `scripts/${deployScriptName()} was not found. Set YEP_DEPLOY_REPO_ROOT to the repository root to enable remote deploy actions.`,
   };
 }
 
@@ -751,11 +760,22 @@ async function getLocalGitVersion(
 
 async function getGithubVersion(
   repoRoot?: string,
+  fresh = false,
 ): Promise<GitVersionInfo | null> {
   if (!repoRoot) return null;
+  if (fresh) {
+    // Best-effort refresh of the local remote-tracking ref so that an
+    // explicit "Check Updates" reflects a push made from another machine.
+    // Any failure (offline, auth, no remote) falls back to the cached
+    // origin/main so the call never hard-fails.
+    await execFileAsync("git", ["fetch", "origin"], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      timeout: 15000,
+    }).catch(() => undefined);
+  }
   try {
-    // Try to get origin/main info without fetching first
-    // This reads the last known state from local git cache
+    // Reads the (now possibly updated) local git cache for origin/main
     return getGitVersionInfo(repoRoot, "origin/main");
   } catch {
     return null;
@@ -803,10 +823,6 @@ async function getStableVersion(
   } catch {
     return null;
   }
-}
-
-function compareVersionDates(date1: string, date2: string): number {
-  return new Date(date1).getTime() - new Date(date2).getTime();
 }
 
 function getAdbPath(): string {
@@ -862,6 +878,7 @@ async function getAdbStatus(): Promise<DeploymentStatusResponse["adb"]> {
 
 async function buildStatus(
   options?: DeployRoutesOptions,
+  fresh = false,
 ): Promise<DeploymentStatusResponse> {
   const availability = getDeploymentAvailability(options);
   const [adb, packageVersion, stagedBuild] = await Promise.all([
@@ -881,26 +898,26 @@ async function buildStatus(
   // Get Git version information
   const [localGitVersion, githubVersion, stableVersion] = await Promise.all([
     getLocalGitVersion(availability.repoRoot),
-    getGithubVersion(availability.repoRoot),
+    getGithubVersion(availability.repoRoot, fresh),
     getStableVersion(availability.repoRoot),
   ]);
 
-  // Check if updates are available
+  // Check if updates are available.
+  // Compare commit hashes (not dates) against the deployed build baseline
+  // (stableVersion = dist/npm-package/build-info.json). Date comparison was
+  // fragile (rebases/amended commits, clock skew) and could never reflect a
+  // push from another machine because origin/main was never fetched.
   let hasLocalUpdate = false;
   let hasGithubUpdate = false;
 
   if (stableVersion && localGitVersion) {
     hasLocalUpdate =
-      compareVersionDates(
-        localGitVersion.commitDate,
-        stableVersion.commitDate,
-      ) > 0;
+      localGitVersion.commitHashFull !== stableVersion.commitHashFull;
   }
 
   if (stableVersion && githubVersion) {
     hasGithubUpdate =
-      compareVersionDates(githubVersion.commitDate, stableVersion.commitDate) >
-      0;
+      githubVersion.commitHashFull !== stableVersion.commitHashFull;
   }
 
   return {
@@ -955,7 +972,14 @@ export async function startDeploymentJob(
   const id = randomUUID();
   const now = new Date().toISOString();
   const logPath = path.join(getLogsDir(options?.dataDir), `${id}.log`);
-  const command = ["scripts/deploy.sh", ...args].map(quoteCommandArg).join(" ");
+  const command = [
+    process.platform === "win32"
+      ? `powershell -File scripts/${deployScriptName()}`
+      : `scripts/${deployScriptName()}`,
+    ...args,
+  ]
+    .map(quoteCommandArg)
+    .join(" ");
   await fsp.writeFile(
     logPath,
     `$ ${command}\nstartedAt=${now}\nrepoRoot=${availability.repoRoot}\n\n`,
@@ -974,7 +998,24 @@ export async function startDeploymentJob(
   await writeJobRecord(options?.dataDir, record);
 
   const logFd = fs.openSync(logPath, "a");
-  const child = spawn(availability.scriptPath, args, {
+
+  // On Windows the deploy entrypoint is a PowerShell script, so we must invoke
+  // powershell explicitly. On POSIX we exec the script directly.
+  const spawnCommand =
+    process.platform === "win32" ? "powershell" : availability.scriptPath;
+  const spawnArgs =
+    process.platform === "win32"
+      ? [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          availability.scriptPath,
+          ...args,
+        ]
+      : args;
+
+  const child = spawn(spawnCommand, spawnArgs, {
     cwd: availability.repoRoot,
     detached: true,
     // 剥离 WorkBuddy 安全删除守卫，避免 vite build 在 emptyDir 时卡在 trash 确认。
@@ -1025,7 +1066,9 @@ export function createDeployRoutes(options?: DeployRoutesOptions): Hono {
   const routes = new Hono();
 
   routes.get("/status", async (c) => {
-    return c.json(await buildStatus(options));
+    const fresh =
+      c.req.query("fresh") === "1" || c.req.query("fresh") === "true";
+    return c.json(await buildStatus(options, fresh));
   });
 
   routes.get("/jobs/:id", async (c) => {
