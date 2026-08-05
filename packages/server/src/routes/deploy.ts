@@ -974,6 +974,25 @@ export async function startDeploymentJob(
   }
 
   const { action, args } = buildDeployArgs(input);
+
+  // 开发模式（pnpm dev / NODE_ENV !== "production"）：生产重启依赖 launchd / 8022，
+  // 在 dev 下既无意义又会在 launchd 用户域损坏时令更新失败。本地更新（server）仍构建
+  // 生产 bundle，但跳过 prod 重启（由 tsx watch 自动重载源码）；纯重启（server-restart）
+  // 在 dev 下没有可重启的生产服务，直接给出清晰错误。
+  const isProduction = process.env.NODE_ENV === "production";
+  if (!isProduction) {
+    if (action.id === "server") {
+      if (!args.includes("--server-only")) args.push("--server-only");
+      if (!args.includes("--server-build-only"))
+        args.push("--server-build-only");
+    } else if (action.id === "server-restart") {
+      throw new Error(
+        "重启生产服务仅在生产模式可用（当前为开发模式 pnpm dev）。" +
+          "开发模式由 tsx watch 自动重载，无需手动重启生产服务。",
+      );
+    }
+  }
+
   await ensureDeployDirs(options?.dataDir);
 
   const id = randomUUID();

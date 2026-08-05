@@ -237,59 +237,72 @@ export async function startGitPullAndDeploy(
       // restart-and-report.mjs 独立存活于父进程之外，重启后再次探活 /api/version，
       // 并在失败（重启命令非零退出 / 探活超时）时把 job 改写为 failed。父进程 finally
       // 不会再覆盖（此时 job.status 已是 succeeded，若包装器写了 failed 则以其为准）。
+      const isProduction = process.env.NODE_ENV === "production";
       try {
-        logStream.write("\n==> 步骤 5/5: 重启服务 (detached)\n");
-        const prodPort = Number(
-          process.env.YEP_DEPLOY_PORT || process.env.PORT || 8022,
-        );
-        const wrapper = path.join(
-          repoRoot,
-          "scripts",
-          "restart-and-report.mjs",
-        );
-        const restartCmdArgs =
-          process.platform === "win32"
-            ? [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                path.join(repoRoot, "scripts", "deploy.ps1"),
-                "--restart-only",
-              ]
-            : [
-                "bash",
-                path.join(repoRoot, "scripts", "yep.sh"),
-                "restart-prod",
-              ];
-
-        // 用独立 fd 写重启输出，避免父进程 logStream.end() 关闭 fd 后子进程丢失 stdout。
-        const restartLogFd = fs.openSync(logPath, "a");
-        const restartChild = spawn(
-          process.execPath,
-          [
-            wrapper,
-            path.join(jobsDir, `${id}.json`),
-            String(prodPort),
+        if (!isProduction) {
+          // 开发模式（pnpm dev，tsx watch 自动重载）：生产重启依赖 launchd / 8022，
+          // 在 dev 下既无意义，又会在 launchd 用户域损坏时直接令更新失败。源码变更
+          // 会被 tsx watch 自动重载，因此构建完成后直接成功，不执行 prod 重启 + 探活。
+          logStream.write(
+            "\n==> 开发模式（NODE_ENV!==production）：跳过生产服务重启。\n" +
+              "开发服务器由 tsx watch 自动重载源码变更，无需重启 8022 生产服务；\n" +
+              "构建产物已就绪，job 标记为 succeeded。\n",
+          );
+        } else {
+          logStream.write("\n==> 步骤 5/5: 重启生产服务 (detached)\n");
+          // 探活端口必须与重启目标端口一致：生产默认 8022，可用 YEP_DEPLOY_PORT 覆盖。
+          // 注意：绝不能使用 process.env.PORT——那是“当前正在运行的 dev 服务端口”
+          // (如 3400)，用它探活会探测到 dev 服务而误判成功，且与 8022 重启目标错位。
+          const prodPort = Number(process.env.YEP_DEPLOY_PORT || 8022);
+          const wrapper = path.join(
             repoRoot,
-            ...restartCmdArgs,
-          ],
-          {
-            cwd: repoRoot,
-            detached: true,
-            env: cleanEnv(),
-            stdio: ["ignore", restartLogFd, restartLogFd],
-          },
-        );
-        restartChild.unref();
-        logStream.write(
-          `已 detached 启动重启包装进程 (pid=${restartChild.pid})，将自行探活并更新 job 状态。\n`,
-        );
-        logStream.write(
-          "若重启或探活失败，job 将被标记为 failed；否则保持 succeeded。\n",
-        );
-        // 不 await：包装进程在后台完成重启+探活，结果直接写盘，不受父进程被重启杀掉影响。
+            "scripts",
+            "restart-and-report.mjs",
+          );
+          const restartCmdArgs =
+            process.platform === "win32"
+              ? [
+                  "powershell",
+                  "-NoProfile",
+                  "-ExecutionPolicy",
+                  "Bypass",
+                  "-File",
+                  path.join(repoRoot, "scripts", "deploy.ps1"),
+                  "--restart-only",
+                ]
+              : [
+                  "bash",
+                  path.join(repoRoot, "scripts", "redeploy-server.sh"),
+                  "--restart-only",
+                ];
+
+          // 用独立 fd 写重启输出，避免父进程 logStream.end() 关闭 fd 后子进程丢失 stdout。
+          const restartLogFd = fs.openSync(logPath, "a");
+          const restartChild = spawn(
+            process.execPath,
+            [
+              wrapper,
+              path.join(jobsDir, `${id}.json`),
+              String(prodPort),
+              repoRoot,
+              ...restartCmdArgs,
+            ],
+            {
+              cwd: repoRoot,
+              detached: true,
+              env: cleanEnv(),
+              stdio: ["ignore", restartLogFd, restartLogFd],
+            },
+          );
+          restartChild.unref();
+          logStream.write(
+            `已 detached 启动重启包装进程 (pid=${restartChild.pid})，将自行探活 ${prodPort} 并更新 job 状态。\n`,
+          );
+          logStream.write(
+            "若重启或探活失败，job 将被标记为 failed；否则保持 succeeded。\n",
+          );
+          // 不 await：包装进程在后台完成重启+探活，结果直接写盘，不受父进程被重启杀掉影响。
+        }
       } catch (restartErr) {
         const msg =
           restartErr instanceof Error ? restartErr.message : String(restartErr);
