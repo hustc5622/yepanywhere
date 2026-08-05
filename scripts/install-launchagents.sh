@@ -327,7 +327,9 @@ reload_agent() {
   # "Input/output error"）或 plist 非法都会让 bootstrap 退出非 0。必须让错误冒泡，
   # 否则上层 yep.sh/deploy.sh 会误以为 LaunchAgent 已加载，造成"假成功"。
   if ! launchctl bootstrap "$USER_DOMAIN" "$plist" 2>/tmp/yep-bootstrap-err.log; then
-    err "launchctl bootstrap 失败（label=$label）。常见原因：launchd 用户域状态损坏或 plist 非法。"
+    # 注：${label:-} 而非 $label —— bash 在 set -u 下、local 变量于失败分支内引用时
+    # 偶发报 "unbound variable"，会掩盖下方真实 launchd 错误，故用安全默认。
+    err "launchctl bootstrap 失败（label=${label:-}）。常见原因：launchd 用户域状态损坏或 plist 非法。"
     [ -s /tmp/yep-bootstrap-err.log ] && err "$(cat /tmp/yep-bootstrap-err.log)"
     return 1
   fi

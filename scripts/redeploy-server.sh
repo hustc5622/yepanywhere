@@ -75,7 +75,7 @@ CODEX_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.
 CLAUDE_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_CLAUDE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.claude-bridge}"
 for arg in "$@"; do
   case "$arg" in
-    --restart)    DO_BUILD=false ;;
+    --restart|--restart-only) DO_BUILD=false ;;
     --no-restart) DO_RESTART=false ;;
     --preserve-codex-bridge)
       USE_CODEX_BRIDGE_SIDECAR=true
