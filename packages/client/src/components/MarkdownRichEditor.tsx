@@ -267,7 +267,36 @@ async function loadOptionalExtensions() {
 
   try {
     const tableMod = await import("@tiptap/extension-table");
-    Table = tableMod.default;
+    const BaseTable = tableMod.default;
+    // @tiptap/extension-table emits `style="width: 0px"` for tables whose
+    // columns have no stored widths — exactly the case for tables parsed
+    // from markdown (GFM tables carry no col widths). That inline 0-width
+    // overrides our CSS `width: 100%` and, paired with `table-layout: fixed`,
+    // collapses the table to zero width whenever the editor's HTML is
+    // serialized/re-hydrated (getHTML, copy, export). The live editor is
+    // unaffected because it renders via the TableView NodeView, but the
+    // serialized HTML must stay consistent with the server-rendered preview
+    // (single rendering backend). Drop the bogus 0-width and let CSS drive
+    // layout.
+    Table = BaseTable.extend({
+      // @tiptap/extension-table's default renderHTML emits
+      // `style="width: 0px"` for tables whose columns have no stored widths
+      // (exactly the case for GFM tables parsed from markdown). That inline
+      // 0-width overrides our CSS `width: 100%` and, paired with
+      // `table-layout: fixed`, collapses the table to zero width whenever the
+      // editor's HTML is serialized/re-hydrated (getHTML, copy, export). The
+      // live editor is unaffected (it renders via the TableView NodeView), but
+      // the serialized HTML must stay consistent with the server-rendered
+      // preview (single rendering backend). Emit a clean <table> and let CSS
+      // drive layout — the TableView rebuilds the colgroup for the live DOM.
+      renderHTML({ HTMLAttributes }) {
+        return [
+          "table",
+          mergeAttributes(this.options.HTMLAttributes, HTMLAttributes),
+          ["tbody", 0],
+        ];
+      },
+    });
   } catch {
     // @tiptap/extension-table not installed yet — degrade gracefully
   }
