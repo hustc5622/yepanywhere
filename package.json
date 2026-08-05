@@ -73,7 +73,7 @@
   },
   "yepAnywhere": {
     "codexCli": {
-      "expectedVersion": "0.142.1"
+      "expectedVersion": "0.144.1"
     }
   },
   "dependencies": {},

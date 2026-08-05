@@ -248,10 +248,41 @@ if (cliInfo.found) {
   );
 }
 
-function parseCodexVersion(raw: string | undefined): string | null {
+interface CodexSemver {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+function parseCodexSemver(
+  raw: string | undefined,
+): CodexSemver | null {
   if (!raw) return null;
-  const match = raw.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
-  return match ? match[0] : null;
+  const match = raw.match(/(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?/);
+  if (!match) return null;
+  return {
+    major: Number.parseInt(match[1] ?? "0", 10),
+    minor: Number.parseInt(match[2] ?? "0", 10),
+    patch: Number.parseInt(match[3] ?? "0", 10),
+  };
+}
+
+function formatCodexSemver(v: CodexSemver): string {
+  return `${v.major}.${v.minor}.${v.patch}`;
+}
+
+/**
+ * Whether a running Codex CLI version should trigger the startup warning.
+ *
+ * Patch-level drift (0.142.1 -> 0.142.2) is tolerated: patch releases are
+ * expected to stay backward compatible. We warn on major/minor drift because
+ * that is where the app-server protocol can change incompatibly.
+ */
+function isCodexVersionWorthWarning(
+  expected: CodexSemver,
+  actual: CodexSemver,
+): boolean {
+  return expected.major !== actual.major || expected.minor !== actual.minor;
 }
 
 function readExpectedCodexVersionFromPackageJson(): string | null {
@@ -297,23 +328,36 @@ async function warnIfCodexVersionMismatch(): Promise<void> {
     return;
   }
 
-  const expected = parseCodexVersion(expectedRaw) ?? expectedRaw;
+  const expected = parseCodexSemver(expectedRaw);
+  if (!expected) {
+    return;
+  }
+
   const codexInfo = await detectCodexCli();
   if (!codexInfo.found || !codexInfo.version) {
     return;
   }
 
-  const actual = parseCodexVersion(codexInfo.version) ?? codexInfo.version;
-  if (actual === expected) {
+  const actual = parseCodexSemver(codexInfo.version);
+  if (!actual) {
+    return;
+  }
+
+  if (!isCodexVersionWorthWarning(expected, actual)) {
+    // Patch-level drift is tolerated; nothing to warn about.
     return;
   }
 
   console.warn(
-    `[Codex] Version mismatch: expected ${expected} (package.json yepAnywhere.codexCli.expectedVersion), detected ${actual}. Codex behavior may be unpredictable until versions align.`,
+    `[Codex] CLI version differs from the pinned value: expected ${formatCodexSemver(expected)} (package.json yepAnywhere.codexCli.expectedVersion), running ${formatCodexSemver(actual)}. The Codex app-server protocol may have changed; run \`pnpm codex:protocol:update\` to refresh the vendored protocol types and the version pin.`,
   );
 }
 
-await warnIfCodexVersionMismatch();
+// Only meaningful when the Codex bridge is actually in use; skip the spawn
+// (and the noise) when the bridge is disabled.
+if (config.codexBridgeMode !== "disabled") {
+  await warnIfCodexVersionMismatch();
+}
 
 // Create the real SDK
 const realSdk = new RealClaudeSDK();

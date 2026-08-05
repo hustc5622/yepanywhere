@@ -2,9 +2,13 @@
 /**
  * Regenerate checked-in Codex app-server protocol subset used by the provider.
  *
+ * Also keeps package.json `yepAnywhere.codexCli.expectedVersion` in sync with
+ * the locally installed `codex` CLI, so the startup version check stays
+ * accurate after a codex upgrade.
+ *
  * Usage:
- *   pnpm codex:protocol:update
- *   pnpm codex:protocol:check
+ *   pnpm codex:protocol:update   # refresh subset + sync version pin
+ *   pnpm codex:protocol:check    # verify subset + pin are up to date (CI)
  */
 
 import { spawnSync } from "node:child_process";
@@ -120,6 +124,40 @@ function runCodex(args) {
   if (stderr) {
     console.warn(stderr);
   }
+}
+
+// --- Codex CLI version pin (package.json yepAnywhere.codexCli.expectedVersion) ---
+// The vendored protocol subset is generated from the locally installed `codex`,
+// so the pin should track that same version. `update` refreshes it; `check`
+// fails when it has drifted (e.g. codex auto-updated but nobody re-ran update).
+
+const PACKAGE_JSON_PATH = join(REPO_ROOT, "package.json");
+const EXPECTED_VERSION_RE = /("expectedVersion"\s*:\s*")([^"]+)(")/;
+
+function detectCodexVersion() {
+  const result = spawnSync("codex", ["--version"], {
+    cwd: REPO_ROOT,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) return null;
+  const out = (result.stdout ?? "").trim();
+  const match = out.match(/(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?/);
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null;
+}
+
+function readExpectedCodexVersion() {
+  if (!existsSync(PACKAGE_JSON_PATH)) return null;
+  const match = readFileSync(PACKAGE_JSON_PATH, "utf-8").match(
+    EXPECTED_VERSION_RE,
+  );
+  return match ? match[2] : null;
+}
+
+function writeExpectedCodexVersion(version) {
+  const raw = readFileSync(PACKAGE_JSON_PATH, "utf-8");
+  const updated = raw.replace(EXPECTED_VERSION_RE, `$1${version}$3`);
+  writeFileSync(PACKAGE_JSON_PATH, updated, "utf-8");
 }
 
 function listFilesRecursively(root) {
@@ -314,11 +352,19 @@ function main() {
       const subsetIndexChanged =
         currentSubsetIndex !== generatedSubsetIndexContent;
 
+      const expectedVersion = readExpectedCodexVersion();
+      const detectedVersion = detectCodexVersion();
+      const pinMismatch =
+        expectedVersion != null &&
+        detectedVersion != null &&
+        expectedVersion !== detectedVersion;
+
       const hasDiff =
         subsetDiff.added.length > 0 ||
         subsetDiff.removed.length > 0 ||
         subsetDiff.changed.length > 0 ||
-        subsetIndexChanged;
+        subsetIndexChanged ||
+        pinMismatch;
 
       if (hasDiff) {
         console.error("Codex protocol subset artifacts are out of date.");
@@ -326,6 +372,11 @@ function main() {
         if (subsetIndexChanged) {
           console.log("subset index:");
           console.log("  ~ index.ts");
+        }
+        if (pinMismatch) {
+          console.error(
+            `Codex CLI version pin mismatch: package.json expects ${expectedVersion}, detected ${detectedVersion}.`,
+          );
         }
         console.error("Run `pnpm codex:protocol:update` to refresh.");
         process.exit(1);
@@ -337,6 +388,15 @@ function main() {
 
     writeSubsetArtifacts(generatedTypesDir, SUBSET_ROOT, SUBSET_INDEX_FILE);
     const subsetCount = listFilesRecursively(SUBSET_ROOT).length;
+
+    const detectedVersion = detectCodexVersion();
+    if (detectedVersion) {
+      const currentVersion = readExpectedCodexVersion();
+      if (currentVersion !== detectedVersion) {
+        writeExpectedCodexVersion(detectedVersion);
+        console.log(`Updated Codex CLI version pin to ${detectedVersion}.`);
+      }
+    }
 
     console.log(
       `Updated Codex protocol subset artifacts (${subsetCount} files).`,
