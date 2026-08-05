@@ -1534,6 +1534,102 @@ describe("OpenCodeBridgeService", () => {
     await bridge.shutdown();
   });
 
+  it("lowers only top-level Anthropic tool schema composition for Bedrock", async () => {
+    let forwardedBody: Record<string, unknown> | undefined;
+    const upstream = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/global/event") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write("\n");
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/messages") {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        forwardedBody = JSON.parse(
+          Buffer.concat(chunks).toString("utf8"),
+        ) as Record<string, unknown>;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ type: "message", content: [] }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const upstreamUrl = await listen(upstream);
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: upstreamUrl,
+      gatewayConfig: {
+        apiKey: "test-key",
+        apiBase: `${upstreamUrl}/v1`,
+      },
+    });
+
+    await bridge.start();
+    const response = await fetch(
+      `http://127.0.0.1:${bridgePort}/gateway/v1/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-8-fast",
+          tools: [
+            {
+              name: "feishu-mcp_update-doc",
+              input_schema: {
+                type: "object",
+                properties: {
+                  docID: { type: "string" },
+                  src_block_ids: {
+                    oneOf: [
+                      { type: "string" },
+                      { type: "array", items: { type: "string" } },
+                    ],
+                  },
+                },
+                required: ["docID"],
+                anyOf: [
+                  {
+                    properties: { command: { type: "string" } },
+                    required: ["command"],
+                  },
+                  {
+                    properties: { mode: { type: "string" } },
+                    required: ["mode"],
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const tools = forwardedBody?.tools as Array<{
+      input_schema: Record<string, unknown>;
+    }>;
+    expect(tools[0]?.input_schema).not.toHaveProperty("anyOf");
+    expect(tools[0]?.input_schema).not.toHaveProperty("oneOf");
+    expect(tools[0]?.input_schema).not.toHaveProperty("allOf");
+    expect(tools[0]?.input_schema).toMatchObject({
+      type: "object",
+      required: ["docID"],
+      properties: {
+        command: { type: "string" },
+        mode: { type: "string" },
+        src_block_ids: { oneOf: expect.any(Array) },
+      },
+    });
+    await bridge.shutdown();
+  });
+
   it("forwards the selected OpenCode reasoning variant to the Yep API", async () => {
     let forwardedBody: Record<string, unknown> | undefined;
     const upstream = createServer(async (req, res) => {
@@ -1720,6 +1816,46 @@ describe("OpenCodeBridgeService", () => {
       opencodeServerRunning: false,
       opencodeServerPid: null,
     });
+  });
+
+  it("routes a managed user-configured gateway through the listening bridge", async () => {
+    vi.stubEnv("LLM_API_KEY", undefined);
+    vi.stubEnv("LLM_API_BASE", undefined);
+    vi.stubEnv("LLM_SUB_MODULE", undefined);
+    const opencodePath = await writeFakeOpenCodeExecutable();
+    const bridgePort = await getFreePort();
+    let startPort = await getFreePort();
+    while (startPort === bridgePort) startPort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodePath,
+      opencodeStartPort: startPort,
+      gatewayConfig: {
+        apiKey: "bridge-key",
+        apiBase: "https://api.ohmyrouter.com/v1",
+        subModule: "claude-code-internal",
+      },
+    });
+
+    await bridge.start();
+    const url = await (
+      bridge as unknown as {
+        ensureOpenCodeServerUrl: () => Promise<string>;
+      }
+    ).ensureOpenCodeServerUrl();
+
+    await expect(
+      fetch(`${url}/test/env`).then((response) => response.json()),
+    ).resolves.toMatchObject({
+      llmApiKey: "bridge-key",
+      llmApiBase: `http://127.0.0.1:${bridgePort}/gateway/v1`,
+      llmSubModule: "claude-code-internal",
+    });
+
+    await bridge.shutdown();
   });
 
   it("reports a clear managed OpenCode start error", async () => {
@@ -3307,7 +3443,7 @@ describe("OpenCodeBridgeService", () => {
   });
 });
 
-describe("OpenCodeBridgeService OpenAI-compatible gateway proxy", () => {
+describe("OpenCodeBridgeService model gateway proxy", () => {
   interface GatedUpstream {
     url: string;
     releaseTail: () => void;
@@ -3341,13 +3477,13 @@ describe("OpenCodeBridgeService OpenAI-compatible gateway proxy", () => {
     const proxy = createServer((req, res) => {
       void (
         bridge as unknown as {
-          proxyOpenAICompatibleRequest: (
+          proxyGatewayRequest: (
             req: typeof req,
             res: typeof res,
             url: URL,
           ) => Promise<void>;
         }
-      ).proxyOpenAICompatibleRequest(req, res, requestUrl(req));
+      ).proxyGatewayRequest(req, res, requestUrl(req));
     });
     return listen(proxy);
   }

@@ -272,7 +272,7 @@ interface OpenCodeBridgeLifecycle {
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
-const OPENAI_GATEWAY_PATH_PREFIX = "/gateway/v1";
+const GATEWAY_PATH_PREFIX = "/gateway/v1";
 const EXTERNAL_DECISION_CONFIRM_TIMEOUT_MS = 30_000;
 /**
  * Freshness window for reconciliations triggered by inbound bridge HTTP reads.
@@ -1068,8 +1068,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     }
 
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url.pathname.startsWith(`${OPENAI_GATEWAY_PATH_PREFIX}/`)) {
-      await this.proxyOpenAICompatibleRequest(req, res, url);
+    if (url.pathname.startsWith(`${GATEWAY_PATH_PREFIX}/`)) {
+      await this.proxyGatewayRequest(req, res, url);
       return;
     }
     const parts = url.pathname
@@ -3088,7 +3088,12 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       env: {
         // Attached CLI sessions consume the user's normal opencode.json, so
         // keep its environment references available in this shared server.
-        ...buildUserConfiguredOpenCodeEnv(process.env, this.gatewayConfig),
+        ...buildUserConfiguredOpenCodeEnv(process.env, this.gatewayConfig, {
+          gatewayProxyBaseURL:
+            this.gatewayConfig && this.listening
+              ? `http://${this.host}:${this.port}${GATEWAY_PATH_PREFIX}`
+              : undefined,
+        }),
         // Runtime config patches for Yep-created managed models reference this
         // stable env name. The shared server must expose it just like the old
         // per-session server did.
@@ -3160,7 +3165,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     return url;
   }
 
-  private async proxyOpenAICompatibleRequest(
+  private async proxyGatewayRequest(
     req: IncomingMessage,
     res: ServerResponse,
     url: URL,
@@ -3168,14 +3173,18 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     const gateway = this.gatewayConfig;
     if (!gateway) {
       writeJson(res, 503, {
-        error: "OpenAI-compatible gateway is not configured",
+        error: "OpenCode model gateway is not configured",
       });
       return;
     }
 
-    const suffix = url.pathname.slice(OPENAI_GATEWAY_PATH_PREFIX.length);
+    const suffix = url.pathname.slice(GATEWAY_PATH_PREFIX.length);
     const upstreamUrl = `${gateway.apiBase}${suffix}${url.search}`;
     const requestBody = await readRequestBody(req);
+    const forwardedBody = sanitizeAnthropicGatewayToolSchemas(
+      requestBody,
+      suffix,
+    );
     const headers = new Headers();
     for (const [name, value] of Object.entries(req.headers)) {
       if (
@@ -3196,10 +3205,11 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       console.log(
         "[OpenCodeBridge gateway]",
         JSON.stringify({
-          ...summarizeOpenAICompatibleBody(requestBody),
+          ...summarizeGatewayBody(forwardedBody.body),
           method: req.method,
           path: suffix,
           hasAuthorization: headers.has("authorization"),
+          sanitizedToolSchemas: forwardedBody.sanitizedToolSchemas,
           subModule: headers.get("x-sub-module"),
         }),
       );
@@ -3210,7 +3220,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         method: req.method,
         headers,
         body:
-          requestBody.length > 0 ? requestBody.toString("utf-8") : undefined,
+          forwardedBody.body.length > 0
+            ? forwardedBody.body.toString("utf-8")
+            : undefined,
       });
 
       const contentType =
@@ -3222,7 +3234,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       // body; every other model is streamed through untouched so first-byte
       // latency and memory stay proportional to the payload instead of the
       // whole completion.
-      const model = readModelFromBody(requestBody);
+      const model = readModelFromBody(forwardedBody.body);
       if (gatewayResponseNeedsBuffering(model)) {
         const responseBody = Buffer.from(await upstream.arrayBuffer());
         res.writeHead(upstream.status, { "content-type": contentType });
@@ -3262,7 +3274,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       }
     } catch (error) {
       writeJson(res, 502, {
-        error: `OpenAI-compatible gateway request failed: ${error instanceof Error ? error.message : String(error)}`,
+        error: `OpenCode model gateway request failed: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
   }
@@ -3308,7 +3320,7 @@ function readModelFromBody(body: Buffer): string | undefined {
   }
 }
 
-function summarizeOpenAICompatibleBody(body: Buffer): Record<string, unknown> {
+function summarizeGatewayBody(body: Buffer): Record<string, unknown> {
   try {
     const parsed = JSON.parse(body.toString("utf-8")) as Record<
       string,
@@ -3326,6 +3338,85 @@ function summarizeOpenAICompatibleBody(body: Buffer): Record<string, unknown> {
   } catch {
     return { invalidJsonBody: true };
   }
+}
+
+interface SanitizedGatewayBody {
+  body: Buffer;
+  sanitizedToolSchemas: number;
+}
+
+/**
+ * Bedrock rejects custom-tool input schemas whose root contains `anyOf`,
+ * `oneOf`, or `allOf`. OpenCode still owns the original schema and validates
+ * tool arguments locally, so the transport copy can safely lower only those
+ * root combiners while preserving nested property schemas.
+ */
+function sanitizeAnthropicGatewayToolSchemas(
+  body: Buffer,
+  suffix: string,
+): SanitizedGatewayBody {
+  if (body.length === 0 || !suffix.endsWith("/messages")) {
+    return { body, sanitizedToolSchemas: 0 };
+  }
+
+  try {
+    const parsed = asRecord(JSON.parse(body.toString("utf-8")));
+    if (!parsed || !Array.isArray(parsed.tools)) {
+      return { body, sanitizedToolSchemas: 0 };
+    }
+
+    let sanitizedToolSchemas = 0;
+    const tools = parsed.tools.map((value) => {
+      const tool = asRecord(value);
+      const inputSchema = asRecord(tool?.input_schema);
+      if (!tool || !inputSchema) return value;
+
+      const lowered = lowerTopLevelToolSchemaComposition(inputSchema);
+      if (lowered === inputSchema) return value;
+      sanitizedToolSchemas += 1;
+      return { ...tool, input_schema: lowered };
+    });
+
+    if (sanitizedToolSchemas === 0) {
+      return { body, sanitizedToolSchemas: 0 };
+    }
+    return {
+      body: Buffer.from(JSON.stringify({ ...parsed, tools })),
+      sanitizedToolSchemas,
+    };
+  } catch {
+    return { body, sanitizedToolSchemas: 0 };
+  }
+}
+
+function lowerTopLevelToolSchemaComposition(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const compositionKeys = ["anyOf", "oneOf", "allOf"] as const;
+  if (!compositionKeys.some((key) => Array.isArray(schema[key]))) {
+    return schema;
+  }
+
+  const properties = { ...(asRecord(schema.properties) ?? {}) };
+  for (const key of compositionKeys) {
+    const members = schema[key];
+    if (!Array.isArray(members)) continue;
+    for (const member of members) {
+      const memberProperties = asRecord(asRecord(member)?.properties);
+      if (!memberProperties) continue;
+      for (const [name, property] of Object.entries(memberProperties)) {
+        if (!(name in properties)) properties[name] = property;
+      }
+    }
+  }
+
+  const lowered: Record<string, unknown> = {
+    ...schema,
+    type: "object",
+    properties,
+  };
+  for (const key of compositionKeys) delete lowered[key];
+  return lowered;
 }
 
 class YepApiClient {

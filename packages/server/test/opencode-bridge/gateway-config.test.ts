@@ -348,4 +348,34 @@ describe("OpenCode gateway configuration", () => {
     expect(env.LLM_API_BASE).toBe("https://user.example/v1");
     expect(env.LLM_SUB_MODULE).toBe("user-module");
   });
+
+  it("routes matching user-configured gateway aliases through the local bridge", () => {
+    const env = buildUserConfiguredOpenCodeEnv(
+      {
+        OPENCODE_LLM_API_BASE: "https://api.ohmyrouter.com/v1/",
+        LLM_API_BASE: "https://api.ohmyrouter.com/v1",
+      },
+      {
+        apiKey: "dedicated-key",
+        apiBase: "https://api.ohmyrouter.com/v1",
+      },
+      { gatewayProxyBaseURL: "http://127.0.0.1:4520/gateway/v1" },
+    );
+
+    expect(env.OPENCODE_LLM_API_BASE).toBe("http://127.0.0.1:4520/gateway/v1");
+    expect(env.LLM_API_BASE).toBe("http://127.0.0.1:4520/gateway/v1");
+  });
+
+  it("does not proxy an unrelated explicit user gateway alias", () => {
+    const env = buildUserConfiguredOpenCodeEnv(
+      { LLM_API_BASE: "https://user.example/v1" },
+      {
+        apiKey: "dedicated-key",
+        apiBase: "https://api.ohmyrouter.com/v1",
+      },
+      { gatewayProxyBaseURL: "http://127.0.0.1:4520/gateway/v1" },
+    );
+
+    expect(env.LLM_API_BASE).toBe("https://user.example/v1");
+  });
 });

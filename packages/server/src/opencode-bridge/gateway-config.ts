@@ -16,6 +16,16 @@ export interface ManagedOpenCodeGatewayOverlayOptions {
   sessionConfig: OpenCodeSessionConfig;
 }
 
+export interface UserConfiguredOpenCodeEnvOptions {
+  /**
+   * Local bridge URL that forwards requests to the configured gateway. User
+   * configs commonly reference `LLM_API_BASE`; routing that alias through the
+   * bridge lets Yep apply transport compatibility fixes without rewriting the
+   * user's opencode.json.
+   */
+  gatewayProxyBaseURL?: string;
+}
+
 type Env = NodeJS.ProcessEnv;
 
 const DEFAULT_API_BASE = "https://api.ohmyrouter.com";
@@ -352,12 +362,32 @@ export function buildManagedOpenCodeConfig(
 export function buildUserConfiguredOpenCodeEnv(
   baseEnv: Env,
   config?: OpenCodeGatewayConfig | null,
+  options: UserConfiguredOpenCodeEnvOptions = {},
 ): Env {
   const env: Env = { ...baseEnv };
   if (!config) return env;
 
   if (!clean(env.LLM_API_KEY)) env.LLM_API_KEY = config.apiKey;
-  if (!clean(env.LLM_API_BASE)) env.LLM_API_BASE = config.apiBase;
+  const legacyApiBase = clean(env.LLM_API_BASE);
+  const gatewayProxyBaseURL = clean(options.gatewayProxyBaseURL);
+  if (!legacyApiBase) {
+    env.LLM_API_BASE = gatewayProxyBaseURL ?? config.apiBase;
+  } else if (
+    gatewayProxyBaseURL &&
+    withV1Path(legacyApiBase) === config.apiBase
+  ) {
+    // Only replace a legacy alias that already points at this gateway. An
+    // unrelated explicit LLM_API_BASE remains user-owned and is preserved.
+    env.LLM_API_BASE = gatewayProxyBaseURL;
+  }
+  const dedicatedApiBase = clean(env.OPENCODE_LLM_API_BASE);
+  if (
+    gatewayProxyBaseURL &&
+    dedicatedApiBase &&
+    withV1Path(dedicatedApiBase) === config.apiBase
+  ) {
+    env.OPENCODE_LLM_API_BASE = gatewayProxyBaseURL;
+  }
   if (!clean(env.LLM_SUB_MODULE) && config.subModule) {
     env.LLM_SUB_MODULE = config.subModule;
   }
