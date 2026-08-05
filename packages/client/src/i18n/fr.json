@@ -913,6 +913,7 @@
   "repoEmpty": "Aucun fichier dans ce répertoire",
   "repoError": "Impossible de lire ce répertoire",
   "repoOpen": "Afficher/masquer le panneau dépôt",
+  "repoRefresh": "Actualiser",
   "editorTabs": "Fichiers et discussion",
   "editorTabChat": "Discussion",
   "editorPreview": "Aperçu",

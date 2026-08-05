@@ -61,16 +61,6 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes("node_modules")) return;
           if (id.includes("/@xterm/")) return "vendor-xterm";
-          if (id.includes("/react/") || id.includes("/react-dom/")) {
-            return "vendor-react";
-          }
-          if (
-            id.includes("/react-router/") ||
-            id.includes("/react-router-dom/")
-          ) {
-            return "vendor-router";
-          }
-          if (id.includes("/zod/")) return "vendor-zod";
           // Heavy, on-demand-only preview libraries: keep them out of the
           // eager vendor chunk so they load lazily when a file is opened.
           if (

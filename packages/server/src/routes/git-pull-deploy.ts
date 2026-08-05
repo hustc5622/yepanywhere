@@ -184,12 +184,25 @@ export async function startGitPullAndDeploy(
         { cwd: repoRoot, timeout: 600000 },
       );
 
-      // 步骤 4/5: 构建服务端 bundle
+      // 步骤 4/6: 构建服务端 bundle
       await runStep(
-        "步骤 4/5: 构建服务端 (pnpm build:bundle)",
+        "步骤 4/6: 构建服务端 (pnpm build:bundle)",
         "pnpm",
         ["build:bundle"],
         { cwd: repoRoot, timeout: 600000 },
+      );
+
+      // 步骤 5/6: 安装运行时依赖。build:bundle 只生成部署包结构，不安装依赖；
+      // 必须执行 npm ci 否则 dist/npm-package 内的 node_modules 可能缺失或陈旧，
+      // 导致生产模式启动报 ERR_MODULE_NOT_FOUND。
+      await runStep(
+        "步骤 5/6: 安装运行时依赖 (npm ci --omit=dev)",
+        "npm",
+        ["ci", "--omit=dev", "--no-audit", "--no-fund"],
+        {
+          cwd: path.join(repoRoot, "dist", "npm-package"),
+          timeout: 600000,
+        },
       );
 
       // 在“重启服务”之前先把成功状态落盘。因为下一步会杀掉当前 Node 进程，
@@ -198,9 +211,9 @@ export async function startGitPullAndDeploy(
       finish("succeeded");
       await writeRecord();
 
-      // 步骤 5/5: 重启服务（独立 try，重启异常不影响已记录的 succeeded 状态）
+      // 步骤 6/6: 重启服务（独立 try，重启异常不影响已记录的 succeeded 状态）
       try {
-        logStream.write("\n==> 步骤 5/5: 重启服务\n");
+        logStream.write("\n==> 步骤 6/6: 重启服务\n");
         const yepScript = path.join(repoRoot, "yep.sh");
         if (fs.existsSync(yepScript)) {
           logStream.write("使用 yep.sh 重启生产模式...\n");

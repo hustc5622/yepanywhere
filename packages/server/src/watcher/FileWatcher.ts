@@ -297,6 +297,10 @@ export class FileWatcher {
         return this.parseGeminiFileType(relativePath);
       case "codex":
         return this.parseCodexFileType(relativePath);
+      case "project":
+        // Project working directories are watched only to surface file-tree
+        // changes to the frontend; the raw file type is irrelevant here.
+        return "other";
     }
   }
 

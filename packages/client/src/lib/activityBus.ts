@@ -113,6 +113,18 @@ export interface SourceChangeEvent {
   timestamp: string;
 }
 
+/** Event emitted when a file/dir inside a project's working dir changes. */
+export interface ProjectFileChangedEvent {
+  type: "project-file-changed";
+  projectId: UrlProjectId;
+  /** Absolute path on disk. */
+  path: string;
+  /** Path relative to the project root. */
+  relativePath: string;
+  changeType: FileChangeType;
+  timestamp: string;
+}
+
 export interface WorkerActivityEvent {
   type: "worker-activity-changed";
   activeWorkers: number;
@@ -160,6 +172,8 @@ interface ActivityEventMap {
   "browser-tab-disconnected": BrowserTabDisconnectedEvent;
   // Dev mode events
   "source-change": SourceChangeEvent;
+  // Project repository tree refresh
+  "project-file-changed": ProjectFileChangedEvent;
   "backend-reloaded": undefined;
   "worker-activity-changed": WorkerActivityEvent;
   reconnect: undefined;
@@ -378,6 +392,7 @@ class ActivityBus {
       "browser-tab-connected",
       "browser-tab-disconnected",
       "source-change",
+      "project-file-changed",
       "backend-reloaded",
       "worker-activity-changed",
       "reconnect",

@@ -113,7 +113,7 @@ import type { ISessionReader } from "./sessions/types.js";
 import { ExternalSessionTracker } from "./supervisor/ExternalSessionTracker.js";
 import { Supervisor } from "./supervisor/Supervisor.js";
 import type { Project, SessionSummary } from "./supervisor/types.js";
-import type { EventBus } from "./watcher/index.js";
+import type { EventBus, ProjectWatchManager } from "./watcher/index.js";
 import { LifecycleWebhookService } from "./webhooks/LifecycleWebhookService.js";
 
 export interface AppOptions {
@@ -126,6 +126,8 @@ export interface AppOptions {
   defaultPermissionMode?: PermissionMode;
   /** EventBus for file change events */
   eventBus?: EventBus;
+  /** Watches project working dirs and emits project-file-changed events. */
+  projectWatchManager?: ProjectWatchManager;
   /** WebSocket upgrader from @hono/node-ws (optional) */
   upgradeWebSocket?: UploadDeps["upgradeWebSocket"];
   /** NotificationService for tracking session read state */
@@ -990,7 +992,13 @@ export function createApp(options: AppOptions): AppResult {
   }
 
   // Files routes (file browser)
-  app.route("/api/projects", createFilesRoutes({ scanner }));
+  app.route(
+    "/api/projects",
+    createFilesRoutes({
+      scanner,
+      projectWatchManager: options.projectWatchManager,
+    }),
+  );
 
   // Server-side filesystem browser (folder picker for remote / mobile web)
   app.route("/api/filesystem", createFsBrowseRoutes());

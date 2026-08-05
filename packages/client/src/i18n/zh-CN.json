@@ -1029,6 +1029,7 @@
   "repoEmpty": "此目录没有文件",
   "repoError": "无法读取该目录",
   "repoOpen": "切换仓库面板",
+  "repoRefresh": "刷新",
   "editorTabs": "文件与对话",
   "editorTabChat": "对话",
   "editorPreview": "预览",

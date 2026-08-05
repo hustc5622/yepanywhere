@@ -77,6 +77,7 @@ import {
   EventBus,
   FileWatcher,
   FocusedSessionWatchManager,
+  ProjectWatchManager,
   SourceWatcher,
 } from "./watcher/index.js";
 
@@ -122,6 +123,7 @@ let deviceBridgeForShutdown: DeviceBridgeService | null = null;
 let codexBridgeForShutdown: CodexBridgeController | null = null;
 let terminalServiceForShutdown: TerminalService | null = null;
 let sessionArchiveServiceForShutdown: SessionArchiveService | null = null;
+let projectWatchManagerForShutdown: ProjectWatchManager | null = null;
 let isShuttingDown = false;
 
 /**
@@ -196,6 +198,15 @@ async function gracefulShutdown(signal: string): Promise<void> {
         "[Shutdown] Error stopping session archive scheduler:",
         error,
       );
+    }
+  }
+
+  if (projectWatchManagerForShutdown) {
+    try {
+      projectWatchManagerForShutdown.dispose();
+      console.log("[Shutdown] Project watch manager stopped");
+    } catch (error) {
+      console.error("[Shutdown] Error stopping project watch manager:", error);
     }
   }
 
@@ -570,6 +581,10 @@ async function startServer() {
     );
   }
 
+  // Watches project working directories so the frontend repository tree
+  // receives project-file-changed events and stays in sync with disk.
+  const projectWatchManager = new ProjectWatchManager({ eventBus });
+
   // Create the app first (without WebSocket support initially)
   // We'll add WebSocket routes after setting up WebSocket support
   const { app, supervisor, scanner } = createApp({
@@ -607,6 +622,7 @@ async function startServer() {
     sharingService,
     deviceBridgeService,
     codexBridgeService,
+    projectWatchManager,
     sessionTitleGeneration: config.sessionTitleGeneration,
     modelInfoService,
     enabledProviders: config.enabledProviders,
@@ -632,6 +648,7 @@ async function startServer() {
   deviceBridgeForShutdown = deviceBridgeService ?? null;
   codexBridgeForShutdown = codexBridgeService ?? null;
   sessionArchiveServiceForShutdown = sessionArchiveService;
+  projectWatchManagerForShutdown = projectWatchManager;
 
   // Set up debug context for maintenance server
   setDebugContext({

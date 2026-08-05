@@ -1645,6 +1645,31 @@ h2 {
   min-width: 0;
 }
 
+.repo-tree-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 8px 2px;
+}
+
+.repo-tree-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+}
+
+.repo-tree-refresh:hover {
+  background: var(--hover-bg, rgba(127, 127, 127, 0.15));
+  color: var(--text-primary, #111);
+}
+
 .repo-tree-list {
   list-style: none;
   margin: 0;
@@ -12477,6 +12502,24 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .repo-explorer-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.repo-explorer-refresh {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  padding: var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+}
+
+.repo-explorer-refresh:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
 }

@@ -912,6 +912,7 @@
   "repoEmpty": "このディレクトリにファイルはありません",
   "repoError": "このディレクトリを読み取れません",
   "repoOpen": "リポジトリパネルを切り替え",
+  "repoRefresh": "更新",
   "editorTabs": "ファイルとチャット",
   "editorTabChat": "チャット",
   "editorPreview": "プレビュー",

@@ -1029,6 +1029,7 @@
   "repoEmpty": "No files in this directory",
   "repoError": "Unable to read this directory",
   "repoOpen": "Toggle repository panel",
+  "repoRefresh": "Refresh",
   "editorTabs": "Files & Chat",
   "editorTabChat": "Chat",
   "editorPreview": "Preview",

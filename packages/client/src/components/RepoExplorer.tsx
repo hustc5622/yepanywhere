@@ -4,6 +4,8 @@ import {
   type ProjectBrowseResponse,
   api,
 } from "../api/client";
+import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
+import { useProjectFileChanges } from "../hooks/useProjectFileChanges";
 import { useI18n } from "../i18n";
 
 type ExplorerPresentation = "sidebar" | "drawer";
@@ -68,6 +70,21 @@ export const RepoExplorer = memo(function RepoExplorer({
     load("");
   }, [load]);
 
+  // Refresh the currently-viewed directory. Re-fetching the whole tree is
+  // unnecessary since this view shows a single directory at a time.
+  const refreshCurrent = useCallback(() => {
+    load(currentPath);
+  }, [load, currentPath]);
+
+  // Coalesce bursts of filesystem events into a single refresh.
+  const debouncedRefreshCurrent = useDebouncedCallback(refreshCurrent, 400);
+
+  // When the project's working directory changes on disk, refresh the view.
+  const handleProjectFileChanged = useCallback(() => {
+    debouncedRefreshCurrent();
+  }, [debouncedRefreshCurrent]);
+  useProjectFileChanges(projectId, handleProjectFileChanged);
+
   const enter = useCallback(
     (entry: ProjectBrowseEntry) => {
       if (entry.type === "dir") {
@@ -105,6 +122,15 @@ export const RepoExplorer = memo(function RepoExplorer({
             <CloseIcon />
           </button>
         )}
+        <button
+          type="button"
+          className="repo-explorer-refresh"
+          onClick={refreshCurrent}
+          aria-label={t("repoRefresh" as never)}
+          title={t("repoRefresh" as never)}
+        >
+          <RefreshIcon />
+        </button>
       </div>
 
       <div className="repo-explorer-body">
@@ -270,6 +296,25 @@ function FileIcon() {
     >
       <path d="M14 3v5h5" />
       <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <polyline points="21 3 21 9 15 9" />
     </svg>
   );
 }

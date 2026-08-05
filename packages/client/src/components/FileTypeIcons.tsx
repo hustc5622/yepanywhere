@@ -3,34 +3,34 @@
 // crisp at any size; markdown uses a filled document with a bold "MD" label so
 // it's instantly recognizable and distinct from the outline FileText icons.
 
-import type React from "react";
 import {
+  AudioLines,
+  Binary,
+  Boxes,
+  Cpu,
+  Database,
+  FileArchive,
+  FileCode2,
+  FileImage,
+  FileJson,
+  FileText,
+  Film,
   Folder,
   FolderOpen,
-  FileText,
-  FileCode2,
-  FileJson,
-  FileImage,
-  FileArchive,
-  Settings2,
-  Package,
-  Lock,
-  KeyRound,
   GitBranch,
-  Boxes,
-  Database,
-  Wrench,
-  ScrollText,
-  Table2,
-  Presentation,
-  AudioLines,
-  Film,
-  Binary,
-  Network,
-  Type,
+  KeyRound,
+  Lock,
   Map as MapIcon,
-  Cpu,
+  Network,
+  Package,
+  Presentation,
+  ScrollText,
+  Settings2,
+  Table2,
+  Type,
+  Wrench,
 } from "lucide-react";
+import type React from "react";
 
 export const ICON_SIZE = 16;
 
@@ -98,10 +98,14 @@ type LucideIcon = React.ComponentType<{
 
 /** Colored lucide glyph factory. */
 function make(color: string, Icon: LucideIcon, strokeWidth = 2) {
-  return () => <Icon size={ICON_SIZE} color={color} strokeWidth={strokeWidth} />;
+  return () => (
+    <Icon size={ICON_SIZE} color={color} strokeWidth={strokeWidth} />
+  );
 }
 
-export function FolderIconV2({ isOpen }: { isOpen?: boolean }): React.JSX.Element {
+export function FolderIconV2({
+  isOpen,
+}: { isOpen?: boolean }): React.JSX.Element {
   const Icon = isOpen ? FolderOpen : Folder;
   return <Icon size={ICON_SIZE} color={ICON_COLORS.folder} strokeWidth={2} />;
 }

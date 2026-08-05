@@ -912,6 +912,7 @@
   "repoEmpty": "No hay archivos en este directorio",
   "repoError": "No se puede leer este directorio",
   "repoOpen": "Mostrar/ocultar panel del repositorio",
+  "repoRefresh": "Actualizar",
   "editorTabs": "Archivos y chat",
   "editorTabChat": "Chat",
   "editorPreview": "Vista previa",

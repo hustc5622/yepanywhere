@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ProjectBrowseEntry, ProjectBrowseResponse } from "../api/client";
 import { api } from "../api/client";
+import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
+import { useProjectFileChanges } from "../hooks/useProjectFileChanges";
 import { useI18n } from "../i18n";
 import { FILE_ICONS_V2, FolderIconV2 } from "./FileTypeIcons";
 
@@ -206,6 +208,28 @@ export function RepoTree({ projectId, onOpenFile }: RepoTreeProps) {
     loadDir("");
   }, [loadDir]);
 
+  // Keep a live ref of which directories are currently loaded so we can
+  // re-fetch exactly the visible ones when the filesystem changes.
+  const dirsRef = useRef(dirs);
+  useEffect(() => {
+    dirsRef.current = dirs;
+  }, [dirs]);
+
+  // Re-fetch every currently-loaded directory (root + any expanded dirs).
+  const refreshVisible = useCallback(() => {
+    for (const relPath of Object.keys(dirsRef.current)) {
+      loadDir(relPath);
+    }
+  }, [loadDir]);
+
+  // Coalesce bursts of filesystem events into a single refresh.
+  const debouncedRefreshVisible = useDebouncedCallback(refreshVisible, 400);
+
+  // When the project's working directory changes on disk, refresh the tree.
+  // The backend only emits events for projects the frontend is browsing, and
+  // this hook filters by projectId, so we just refresh all visible dirs.
+  useProjectFileChanges(projectId, debouncedRefreshVisible);
+
   const toggle = useCallback(
     (entry: ProjectBrowseEntry) => {
       if (entry.type !== "dir") {
@@ -233,6 +257,17 @@ export function RepoTree({ projectId, onOpenFile }: RepoTreeProps) {
 
   return (
     <div className="repo-tree">
+      <div className="repo-tree-toolbar">
+        <button
+          type="button"
+          className="repo-tree-refresh"
+          onClick={refreshVisible}
+          title={t("repoRefresh" as never)}
+          aria-label={t("repoRefresh" as never)}
+        >
+          <RefreshIcon />
+        </button>
+      </div>
       {!root ? (
         <div className="repo-tree-loading">{t("repoLoading" as never)}</div>
       ) : root.error ? (
@@ -334,4 +369,24 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Small circular-arrow refresh glyph used by the repository tree toolbar. */
+function RefreshIcon(): React.ReactElement {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <polyline points="21 3 21 9 15 9" />
+    </svg>
+  );
 }

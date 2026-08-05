@@ -2418,8 +2418,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     ) {
       return c.json(
         {
-          error:
-            "At least title, archived, starred, or model must be provided",
+          error: "At least title, archived, starred, or model must be provided",
         },
         400,
       );
