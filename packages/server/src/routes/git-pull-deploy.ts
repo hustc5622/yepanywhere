@@ -6,9 +6,25 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import type {
   DeployRoutesOptions,
+  DeploymentActionId,
   DeploymentJob,
   DeploymentJobStatus,
 } from "./deploy.js";
+
+/**
+ * `startGitPullAndDeploy` 的两种模式：
+ *   - "github"：拉取 origin/main + pnpm install + build + bundle + npm ci + restart。
+ *     适用于 UI 的"更新到 GitHub 最新版本"按钮。
+ *   - "local"：跳过 git pull 与 pnpm install，仅 build + bundle + npm ci + restart。
+ *     适用于 UI 的"更新到本地最新版本"按钮——直接用工作树里已经存在的代码构建。
+ *
+ * 为什么需要 local 模式：旧实现走 `spawn("powershell", ["-File", "scripts/deploy.ps1", ...])`
+ * 让 PowerShell 子进程跑完整 build，但该 spawn 在 Windows 上会在 0.6 秒内 false-succeeded
+ * 退出（PowerShell host 进程与 Node.js spawn 跟踪的生命周期不匹配），导致 UI 看到"成功"
+ * 但 dist/npm-package/build-info.json 仍是旧版本。改为在 Node 进程内直接调 runStep 跑
+ * 全部 build 步骤，可彻底绕开该坑，Windows / macOS 行为也完全一致。
+ */
+export type GitPullMode = "github" | "local";
 
 /**
  * 构造用于子进程的安全环境：剥离 WorkBuddy 的“安全删除守卫”注入。
@@ -42,11 +58,16 @@ export function cleanEnv(): NodeJS.ProcessEnv {
 }
 
 /**
- * Helper function to execute git pull and build deployment
+ * Helper function to execute git pull and build deployment.
+ *
+ * @param mode - "github" 走完整 git pull + install + build + restart；
+ *               "local" 跳过 git pull 和 pnpm install，仅 build + bundle + npm ci + restart。
  */
 export async function startGitPullAndDeploy(
   options: DeployRoutesOptions | undefined,
   repoRoot: string,
+  mode: GitPullMode = "github",
+  action: DeploymentActionId = "git-pull-update",
 ): Promise<DeploymentJob> {
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -66,10 +87,19 @@ export async function startGitPullAndDeploy(
 
   const job: DeploymentJob = {
     id,
-    action: "git-pull-update",
+    action,
     args: [],
-    command: "git pull && pnpm install && pnpm build && restart",
+    command:
+      mode === "github"
+        ? "git pull && pnpm install && pnpm build && pnpm build:bundle && npm ci && restart"
+        : "pnpm build && pnpm build:bundle && npm ci && restart",
     status: "running",
+    // 记录服务器自身 PID：整个 build 由本进程（Node）在进程内驱动，
+    // 只要服务器还活着，build 就在进行。hydrateJob 的"僵尸任务"检测
+    // （status=running 但 pid 进程不存在）据此能正确判断任务仍在运行，
+    // 不会误判为 failed。若服务器在 build 中途被杀，下次读取时 pid 进程
+    // 已不存在，才会被判定为 failed——这正是期望行为。
+    pid: process.pid,
     startedAt: now,
     updatedAt: now,
   };
@@ -106,7 +136,16 @@ export async function startGitPullAndDeploy(
   ): Promise<void> => {
     return new Promise((resolve, reject) => {
       logStream.write(`\n==> ${label}\n`);
-      const child = spawn(cmd, args, { cwd: opts.cwd, env: cleanEnv() });
+      // Windows 上 pnpm / npm 是 .cmd 脚本，裸 spawn("pnpm") 会因无法定位 .cmd
+      // 而 ENOENT 失败；必须用 shell:true 让 cmd.exe 解析。git 是真实 .exe，无需 shell。
+      // macOS / Linux 下 pnpm/npm 为真实二进制，shell 与否均可，这里仅在 win32 启用。
+      const useShell =
+        process.platform === "win32" && (cmd === "pnpm" || cmd === "npm");
+      const child = spawn(cmd, args, {
+        cwd: opts.cwd,
+        env: cleanEnv(),
+        shell: useShell,
+      });
       let out = "";
       const onData = (d: Buffer) => {
         const s = d.toString();
@@ -143,12 +182,28 @@ export async function startGitPullAndDeploy(
   // Run git pull + build + deploy asynchronously
   (async () => {
     try {
-      logStream.write("==> Git Pull 更新开始\n");
+      logStream.write("==> 更新开始\n");
       logStream.write(`时间: ${now}\n`);
-      logStream.write(`仓库: ${repoRoot}\n\n`);
+      logStream.write(`仓库: ${repoRoot}\n`);
+      logStream.write(
+        `模式: ${mode === "github" ? "github (git pull + build + restart)" : "local (build only, skip git pull/install)"}\n\n`,
+      );
 
-      // 预检：检查工作树是否存在“已跟踪文件”的改动。若有，git pull 会失败或
-      // 产生意外的 merge，导致更新静默卡死。这里提前以明确原因失败。
+      // 步骤编号：github 模式 = pull/install/build/bundle/npm ci/restart 共 6 步；
+      // local 模式跳过 pull 与 install，仅 build/bundle/npm ci/restart 共 4 步。
+      const isLocal = mode === "local";
+      const totalSteps = isLocal ? 4 : 6;
+      const stepBuild = isLocal ? 1 : 3;
+      const stepBundle = isLocal ? 2 : 4;
+      const stepNpmCi = isLocal ? 3 : 5;
+      const stepRestart = isLocal ? 4 : 6;
+
+      // 预检：检查工作树是否存在"已跟踪文件"的改动。
+      //  - github 模式：git pull 遇到脏树会失败或产生意外 merge，导致更新静默卡死，
+      //    因此脏树时提前以明确原因失败。
+      //  - local 模式：不做 git pull，本就是"用当前工作树构建"——脏树（含未提交改动）
+      //    正是用户想要的"本地最新"，不应拦截。仅在脏树时打警告，提示 build-info.json
+      //    记录的 commit 哈希不包含这些未提交改动。
       // 仅检查已跟踪文件（忽略未跟踪文件，如本地配置），Windows/Mac 通用。
       const { stdout: statusOut } = await execFileAsync(
         "git",
@@ -158,65 +213,85 @@ export async function startGitPullAndDeploy(
       const trackedChanges = statusOut
         .split("\n")
         .filter((line) => line.trim() && !line.startsWith("??")).length;
-      if (trackedChanges > 0) {
+      if (mode === "github" && trackedChanges > 0) {
         throw new Error(
-          "工作树存在未提交的修改（已跟踪文件），无法安全执行 git pull。请先提交或暂存本地改动后再更新。",
+          "工作树存在未提交的修改（已跟踪文件），无法安全执行 git pull 更新。请先提交或暂存本地改动后再更新。",
+        );
+      }
+      if (isLocal && trackedChanges > 0) {
+        logStream.write(
+          `警告: 工作树存在 ${trackedChanges} 处未提交改动，将直接构建当前工作树。build-info.json 记录的 commit 哈希不包含这些未提交改动。\n`,
         );
       }
 
-      // 步骤 1/5: Git pull（拉取 GitHub 最新代码到本地仓库）
-      await runStep(
-        "步骤 1/5: 执行 git pull",
-        "git",
-        ["pull", "origin", "main"],
-        {
-          cwd: repoRoot,
-          timeout: 120000,
-        },
-      );
-
-      // 步骤 2/5: 安装依赖。依赖已就绪（node_modules/.pnpm 与 lockfile 都在）则跳过，
-      // 避免服务进程内偶发的 pnpm 长耗时/超时把更新卡死。
-      const nodeModulesPnpm = path.join(repoRoot, "node_modules", ".pnpm");
-      const lockPath = path.join(repoRoot, "pnpm-lock.yaml");
-      const needInstall =
-        !fs.existsSync(nodeModulesPnpm) || !fs.existsSync(lockPath);
-      if (needInstall) {
-        logStream.write("\n==> 步骤 2/5: 安装依赖 (pnpm install)\n");
+      // 步骤 1/6 (github): Git pull。local 模式跳过，但显式打日志。
+      if (mode === "github") {
         await runStep(
-          "步骤 2/5: pnpm install",
-          "pnpm",
-          ["install", "--prefer-offline"],
+          `步骤 1/${totalSteps}: 执行 git pull`,
+          "git",
+          ["pull", "origin", "main"],
           {
             cwd: repoRoot,
-            timeout: 600000,
+            timeout: 120000,
           },
         );
       } else {
-        logStream.write("\n==> 步骤 2/5: 依赖已就绪，跳过 pnpm install\n");
+        logStream.write(
+          "\n==> 跳过 git pull（local 模式，直接使用工作树当前代码构建）\n",
+        );
       }
 
-      // 步骤 3/5: 构建客户端（前端）
+      // 步骤 2/5: 安装依赖。依赖已就绪（node_modules/.pnpm 与 lockfile 都在）则跳过，
+      // 避免服务进程内偶发的 pnpm 长耗时/超时把更新卡死。
+      // local 模式：完全跳过——本地模式意味着用户已经主动在仓库上工作，依赖应处于就绪状态。
+      if (mode === "github") {
+        const nodeModulesPnpm = path.join(repoRoot, "node_modules", ".pnpm");
+        const lockPath = path.join(repoRoot, "pnpm-lock.yaml");
+        const needInstall =
+          !fs.existsSync(nodeModulesPnpm) || !fs.existsSync(lockPath);
+        if (needInstall) {
+          logStream.write(
+            `\n==> 步骤 2/${totalSteps}: 安装依赖 (pnpm install)\n`,
+          );
+          await runStep(
+            `步骤 2/${totalSteps}: pnpm install`,
+            "pnpm",
+            ["install", "--prefer-offline"],
+            {
+              cwd: repoRoot,
+              timeout: 600000,
+            },
+          );
+        } else {
+          logStream.write(
+            `\n==> 步骤 2/${totalSteps}: 依赖已就绪，跳过 pnpm install\n`,
+          );
+        }
+      } else {
+        logStream.write("\n==> 跳过 pnpm install（local 模式）\n");
+      }
+
+      // 步骤 N: 构建客户端（前端）
       await runStep(
-        "步骤 3/5: 构建客户端 (pnpm --filter client build)",
+        `步骤 ${stepBuild}/${totalSteps}: 构建客户端 (pnpm --filter client build)`,
         "pnpm",
         ["--filter", "client", "build"],
         { cwd: repoRoot, timeout: 600000 },
       );
 
-      // 步骤 4/6: 构建服务端 bundle
+      // 步骤 N: 构建服务端 bundle
       await runStep(
-        "步骤 4/6: 构建服务端 (pnpm build:bundle)",
+        `步骤 ${stepBundle}/${totalSteps}: 构建服务端 (pnpm build:bundle)`,
         "pnpm",
         ["build:bundle"],
         { cwd: repoRoot, timeout: 600000 },
       );
 
-      // 步骤 5/6: 安装运行时依赖。build:bundle 只生成部署包结构，不安装依赖；
+      // 步骤 N: 安装运行时依赖。build:bundle 只生成部署包结构，不安装依赖；
       // 必须执行 npm ci 否则 dist/npm-package 内的 node_modules 可能缺失或陈旧，
       // 导致生产模式启动报 ERR_MODULE_NOT_FOUND。
       await runStep(
-        "步骤 5/6: 安装运行时依赖 (npm ci --omit=dev)",
+        `步骤 ${stepNpmCi}/${totalSteps}: 安装运行时依赖 (npm ci --omit=dev)`,
         "npm",
         ["ci", "--omit=dev", "--no-audit", "--no-fund"],
         {
@@ -249,7 +324,9 @@ export async function startGitPullAndDeploy(
               "构建产物已就绪，job 标记为 succeeded。\n",
           );
         } else {
-          logStream.write("\n==> 步骤 5/5: 重启生产服务 (detached)\n");
+          logStream.write(
+            `\n==> 步骤 ${stepRestart}/${totalSteps}: 重启生产服务 (detached)\n`,
+          );
           // 探活端口必须与重启目标端口一致：生产默认 8022，可用 YEP_DEPLOY_PORT 覆盖。
           // 注意：绝不能使用 process.env.PORT——那是“当前正在运行的 dev 服务端口”
           // (如 3400)，用它探活会探测到 dev 服务而误判成功，且与 8022 重启目标错位。

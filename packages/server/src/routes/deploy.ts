@@ -8,7 +8,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
-import { cleanEnv, startGitPullAndDeploy } from "./git-pull-deploy.js";
+import {
+  type GitPullMode,
+  cleanEnv,
+  startGitPullAndDeploy,
+} from "./git-pull-deploy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -968,24 +972,47 @@ export async function startDeploymentJob(
     throw error;
   }
 
-  // Handle git-pull-update action separately
+  // In-process update actions. These run entirely inside the server (Node)
+  // process via `startGitPullAndDeploy` and never spawn scripts/deploy.{sh,ps1}
+  // or PowerShell — that path was unreliable on Windows (the spawned
+  // powershell.exe would exit 0 within ~0.6s without actually running the
+  // 450-line deploy.ps1, marking the job as "succeeded" while
+  // dist/npm-package/build-info.json stayed at the old commit). Routing
+  // "server" (update to local) and "server-restart" through the same
+  // in-process runner keeps Windows / macOS behaviour identical and
+  // eliminates the false-success bug.
   if (input.action === "git-pull-update") {
-    return await startGitPullAndDeploy(options, availability.repoRoot);
+    return await startGitPullAndDeploy(
+      options,
+      availability.repoRoot,
+      "github",
+      input.action,
+    );
+  }
+  if (input.action === "server" || input.action === "server-restart") {
+    const mode: GitPullMode = "local";
+    // "server" and "server-restart" both go through the local-build path:
+    //  - server: full build + restart, intended for "update to local latest".
+    //  - server-restart: build is redundant but idempotent; avoids depending
+    //    on the legacy PowerShell spawn for the UI's "restart" button.
+    return await startGitPullAndDeploy(
+      options,
+      availability.repoRoot,
+      mode,
+      input.action,
+    );
   }
 
   const { action, args } = buildDeployArgs(input);
 
   // 开发模式（pnpm dev / NODE_ENV !== "production"）：生产重启依赖 launchd / 8022，
-  // 在 dev 下既无意义又会在 launchd 用户域损坏时令更新失败。本地更新（server）仍构建
-  // 生产 bundle，但跳过 prod 重启（由 tsx watch 自动重载源码）；纯重启（server-restart）
-  // 在 dev 下没有可重启的生产服务，直接给出清晰错误。
+  // 在 dev 下既无意义又会在 launchd 用户域损坏时令更新失败。其它 dev 模式下的
+  // action（server-build / full / apk*）仍走 shell 脚本路径，但 dev 下要把
+  // build-only 路径与"什么也不做"对齐。
   const isProduction = process.env.NODE_ENV === "production";
   if (!isProduction) {
-    if (action.id === "server") {
-      if (!args.includes("--server-only")) args.push("--server-only");
-      if (!args.includes("--server-build-only"))
-        args.push("--server-build-only");
-    } else if (action.id === "server-restart") {
+    if (action.id === "server-restart") {
+      // 已在上方被 in-process 路径拦截；这里只是兜底，实际不可达。
       throw new Error(
         "重启生产服务仅在生产模式可用（当前为开发模式 pnpm dev）。" +
           "开发模式由 tsx watch 自动重载，无需手动重启生产服务。",
