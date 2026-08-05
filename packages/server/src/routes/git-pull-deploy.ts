@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import type {
   DeployRoutesOptions,
   DeploymentJob,
@@ -16,6 +17,8 @@ import type {
  * fs.rmSync，守卫会尝试把文件挪进回收站（spawnSync genie-trash），在非交互
  * 环境下超时导致构建失败。更新/构建流程本就是无人值守的，必须绕开它。
  */
+const execFileAsync = promisify(execFile);
+
 export function cleanEnv(): NodeJS.ProcessEnv {
   const env: Record<string, string | undefined> = { ...process.env };
   if (typeof env.NODE_OPTIONS === "string" && env.NODE_OPTIONS.length > 0) {
@@ -143,6 +146,23 @@ export async function startGitPullAndDeploy(
       logStream.write("==> Git Pull 更新开始\n");
       logStream.write(`时间: ${now}\n`);
       logStream.write(`仓库: ${repoRoot}\n\n`);
+
+      // 预检：检查工作树是否存在“已跟踪文件”的改动。若有，git pull 会失败或
+      // 产生意外的 merge，导致更新静默卡死。这里提前以明确原因失败。
+      // 仅检查已跟踪文件（忽略未跟踪文件，如本地配置），Windows/Mac 通用。
+      const { stdout: statusOut } = await execFileAsync(
+        "git",
+        ["status", "--porcelain"],
+        { cwd: repoRoot, encoding: "utf-8" },
+      ).catch(() => ({ stdout: "" }));
+      const trackedChanges = statusOut
+        .split("\n")
+        .filter((line) => line.trim() && !line.startsWith("??")).length;
+      if (trackedChanges > 0) {
+        throw new Error(
+          "工作树存在未提交的修改（已跟踪文件），无法安全执行 git pull。请先提交或暂存本地改动后再更新。",
+        );
+      }
 
       // 步骤 1/5: Git pull（拉取 GitHub 最新代码到本地仓库）
       await runStep(

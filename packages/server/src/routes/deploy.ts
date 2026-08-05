@@ -253,8 +253,15 @@ export function getDeploymentAvailability(options?: DeployRoutesOptions): {
   scriptPath?: string;
 } {
   for (const repoRoot of getCandidateRepoRoots(options?.repoRoot)) {
+    if (!repoRoot) continue;
     const scriptPath = path.join(repoRoot, "scripts", deployScriptName());
-    if (fs.existsSync(scriptPath)) {
+    const gitDir = path.join(repoRoot, ".git");
+    // Require both the deploy script and a .git directory so deployment is only
+    // advertised when the server runs inside an actual git checkout — not a
+    // stray scripts/ folder copied elsewhere (e.g. an out-of-repo npm install,
+    // which cannot git pull). Works on Windows (.git may be a dir or file) and
+    // macOS/Linux alike.
+    if (fs.existsSync(scriptPath) && fs.existsSync(gitDir)) {
       return {
         available: true,
         repoRoot,
@@ -265,7 +272,7 @@ export function getDeploymentAvailability(options?: DeployRoutesOptions): {
 
   return {
     available: false,
-    reason: `scripts/${deployScriptName()} was not found. Set YEP_DEPLOY_REPO_ROOT to the repository root to enable remote deploy actions.`,
+    reason: `scripts/${deployScriptName()} was not found inside a git repository. Run the server from the repository root, or set YEP_DEPLOY_REPO_ROOT to the repository root to enable remote deploy actions.`,
   };
 }
 
