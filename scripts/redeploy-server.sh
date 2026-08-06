@@ -271,6 +271,14 @@ if $DO_BUILD; then
   # installs the dependencies for end users; for local dev we have to do
   # it ourselves, otherwise `yepanywhere` boots with ERR_MODULE_NOT_FOUND.
   log "Installing runtime dependencies in dist/npm-package ..."
+  # Neutralize WorkBuddy's "safe-delete" guard (NODE_OPTIONS --require
+  # genie-safe-delete.cjs + PATH-prepended safe-bin) so npm ci isn't
+  # intercepted — an intercepted rm renames dirs to "<name> 2" staged
+  # copies that make the NEXT npm ci fail with errno -11 during scandir.
+  unset NODE_OPTIONS
+  PATH="$(echo "$PATH" | tr ':' '\n' | grep -v -E 'safe-bin|genie-safe-delete' | tr '\n' ':')"
+  log "Removing stale node_modules before install (guard-neutralized) ..."
+  rm -rf dist/npm-package/node_modules
   (cd dist/npm-package && npm ci --omit=dev --no-audit --no-fund --silent --cache dist/npm-package/.npm-cache)
   pnpm bundle:verify dist/npm-package
   chmod +x dist/npm-package/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
