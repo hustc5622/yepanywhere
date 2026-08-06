@@ -57,6 +57,194 @@ const EVENT_RETRY_DELAY_MS = 1_000;
 
 const MANAGED_MARKER_ENV = "YEP_MANAGED_OPENCODE";
 const MANAGED_SERVER_PORT_ENV = "YEP_MANAGED_OPENCODE_SERVER_PORT";
+const ANTHROPIC_PROVIDER_PACKAGE = "@ai-sdk/anthropic";
+const SCHEMA_SANITIZER_MARKER = Symbol("yepAnthropicSchemaSanitizer");
+
+type FetchLike = (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => Promise<Response>;
+
+interface OpenCodeProviderConfig {
+  npm?: string;
+  options?: Record<string, unknown>;
+  models?: Record<string, { api?: { npm?: string } }>;
+}
+
+interface OpenCodeConfig {
+  provider?: Record<string, OpenCodeProviderConfig>;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Bedrock-compatible Anthropic gateways reject custom-tool schemas with a
+ * top-level composition keyword. Keep OpenCode's original schema for local
+ * argument validation and lower only the serialized transport copy.
+ */
+function lowerTopLevelToolSchemaComposition(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const compositionKeys = ["anyOf", "oneOf", "allOf"] as const;
+  if (!compositionKeys.some((key) => Array.isArray(schema[key]))) {
+    return schema;
+  }
+
+  const properties = { ...(asRecord(schema.properties) ?? {}) };
+  for (const key of compositionKeys) {
+    const members = schema[key];
+    if (!Array.isArray(members)) continue;
+    for (const member of members) {
+      const memberProperties = asRecord(asRecord(member)?.properties);
+      if (!memberProperties) continue;
+      for (const [name, property] of Object.entries(memberProperties)) {
+        if (!(name in properties)) properties[name] = property;
+      }
+    }
+  }
+
+  const lowered: Record<string, unknown> = {
+    ...schema,
+    type: "object",
+    properties,
+  };
+  for (const key of compositionKeys) delete lowered[key];
+  return lowered;
+}
+
+function sanitizeAnthropicRequestBody(body: string): string | undefined {
+  try {
+    const parsed = asRecord(JSON.parse(body));
+    if (!parsed || !Array.isArray(parsed.tools)) return undefined;
+
+    let changed = false;
+    const tools = parsed.tools.map((value) => {
+      const tool = asRecord(value);
+      const inputSchema = asRecord(tool?.input_schema);
+      if (!tool || !inputSchema) return value;
+
+      const lowered = lowerTopLevelToolSchemaComposition(inputSchema);
+      if (lowered === inputSchema) return value;
+      changed = true;
+      return { ...tool, input_schema: lowered };
+    });
+    return changed ? JSON.stringify({ ...parsed, tools }) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function requestUrl(input: Parameters<typeof fetch>[0]): string | undefined {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return undefined;
+}
+
+function isAnthropicMessagesRequest(
+  input: Parameters<typeof fetch>[0],
+): boolean {
+  const rawUrl = requestUrl(input);
+  if (!rawUrl) return false;
+  try {
+    return new URL(rawUrl).pathname.endsWith("/messages");
+  } catch {
+    return false;
+  }
+}
+
+function bodyText(body: BodyInit | null | undefined): string | undefined {
+  if (typeof body === "string") return body;
+  if (body instanceof Uint8Array) return new TextDecoder().decode(body);
+  if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
+  return undefined;
+}
+
+function sanitizedHeaders(
+  headers: HeadersInit | undefined,
+): Headers | undefined {
+  if (!headers) return undefined;
+  const next = new Headers(headers);
+  next.delete("content-length");
+  return next;
+}
+
+function wrapAnthropicFetch(fetchImpl: FetchLike): FetchLike {
+  if (
+    (fetchImpl as FetchLike & { [SCHEMA_SANITIZER_MARKER]?: boolean })[
+      SCHEMA_SANITIZER_MARKER
+    ]
+  ) {
+    return fetchImpl;
+  }
+
+  const wrapped: FetchLike = async (input, init) => {
+    if (!isAnthropicMessagesRequest(input)) return fetchImpl(input, init);
+
+    const inlineBody = bodyText(init?.body);
+    if (inlineBody !== undefined) {
+      const body = sanitizeAnthropicRequestBody(inlineBody);
+      if (body !== undefined) {
+        return fetchImpl(input, {
+          ...init,
+          body,
+          headers: sanitizedHeaders(init?.headers),
+        });
+      }
+      return fetchImpl(input, init);
+    }
+
+    if (typeof Request !== "undefined" && input instanceof Request) {
+      const requestBody = await input.clone().text();
+      const body = sanitizeAnthropicRequestBody(requestBody);
+      if (body !== undefined) {
+        const headers = new Headers(input.headers);
+        headers.delete("content-length");
+        return fetchImpl(new Request(input, { body, headers }), init);
+      }
+    }
+    return fetchImpl(input, init);
+  };
+  Object.defineProperty(wrapped, SCHEMA_SANITIZER_MARKER, { value: true });
+  return wrapped;
+}
+
+function usesAnthropicSdk(
+  providerId: string,
+  provider: OpenCodeProviderConfig,
+): boolean {
+  return (
+    providerId === "anthropic" ||
+    provider.npm === ANTHROPIC_PROVIDER_PACKAGE ||
+    Object.values(provider.models ?? {}).some(
+      (model) => model.api?.npm === ANTHROPIC_PROVIDER_PACKAGE,
+    )
+  );
+}
+
+async function applyAnthropicSchemaCompatibility(
+  config: OpenCodeConfig,
+): Promise<void> {
+  for (const [providerId, provider] of Object.entries(config.provider ?? {})) {
+    if (!usesAnthropicSdk(providerId, provider)) continue;
+    const options = provider.options ?? {};
+    const configuredFetch = options.fetch;
+    const fetchImpl =
+      typeof configuredFetch === "function"
+        ? (configuredFetch as FetchLike)
+        : (globalThis.fetch.bind(globalThis) as FetchLike);
+    provider.options = {
+      ...options,
+      fetch: wrapAnthropicFetch(fetchImpl),
+    };
+  }
+}
 
 function readCliOption(args: string[], name: string): string | undefined {
   const directIndex = args.indexOf(name);
@@ -143,9 +331,14 @@ export const YepBridge = async (input: {
   directory: string;
 }) => {
   const isManagedServer = consumeManagedServerMarker();
-  if (isManagedServer || process.env.YEP_OPENCODE_PLUGIN_DISABLE === "1") {
+  if (process.env.YEP_OPENCODE_PLUGIN_DISABLE === "1") {
     return {};
   }
+
+  const compatibilityHooks = {
+    config: applyAnthropicSchemaCompatibility,
+  };
+  if (isManagedServer) return compatibilityHooks;
 
   const instanceId = `oc-${Date.now().toString(36)}-${Math.random()
     .toString(36)
@@ -374,6 +567,7 @@ export const YepBridge = async (input: {
   void postJson("/external/instances", { instanceId, directory });
 
   return {
+    ...compatibilityHooks,
     event: async ({
       event,
     }: {

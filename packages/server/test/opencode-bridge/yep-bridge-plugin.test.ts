@@ -24,7 +24,8 @@ describe("Yep OpenCode bridge plugin", () => {
 
     const hooks = await YepBridge({ client: {}, directory: "/repo" });
 
-    expect(hooks).toEqual({});
+    expect(hooks).toHaveProperty("config");
+    expect(hooks).not.toHaveProperty("event");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(process.env.YEP_MANAGED_OPENCODE).toBeUndefined();
     expect(process.env.YEP_MANAGED_OPENCODE_SERVER_PORT).toBeUndefined();
@@ -90,9 +91,97 @@ describe("Yep OpenCode bridge plugin", () => {
 
     const hooks = await YepBridge({ client: {}, directory: "/repo" });
 
-    expect(hooks).toEqual({});
+    expect(hooks).toHaveProperty("config");
+    expect(hooks).not.toHaveProperty("event");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(process.env.YEP_MANAGED_OPENCODE).toBeUndefined();
+  });
+
+  it("sanitizes top-level tool composition for every Anthropic SDK channel", async () => {
+    setOpenCodeArgv("serve", "--port", "4521");
+    vi.stubEnv("YEP_MANAGED_OPENCODE", "1");
+    vi.stubEnv("YEP_MANAGED_OPENCODE_SERVER_PORT", "4521");
+    vi.stubEnv("YEP_OPENCODE_PLUGIN_DISABLE", "");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const hooks = await YepBridge({ client: {}, directory: "/repo" });
+    if (!("config" in hooks) || !hooks.config) {
+      throw new Error("Expected the OpenCode config hook to be enabled");
+    }
+    const config = {
+      provider: {
+        mafia: {
+          npm: "@ai-sdk/anthropic",
+          options: { baseURL: "https://api.appintheloop.com/v1" },
+        },
+        gemini: {
+          npm: "@ai-sdk/openai-compatible",
+          options: { baseURL: "https://generativelanguage.googleapis.com/v1" },
+        },
+      },
+    };
+    await hooks.config(config);
+
+    const mafiaFetch = config.provider.mafia.options.fetch;
+    expect(mafiaFetch).toBeTypeOf("function");
+    expect(config.provider.gemini.options).not.toHaveProperty("fetch");
+
+    await mafiaFetch("https://api.appintheloop.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": "999",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-5",
+        tools: [
+          {
+            name: "feishu-mcp_update-doc",
+            input_schema: {
+              anyOf: [
+                {
+                  type: "object",
+                  properties: {
+                    command: { type: "string" },
+                  },
+                },
+                {
+                  type: "object",
+                  properties: {
+                    mode: { type: "string" },
+                  },
+                },
+              ],
+              properties: {
+                selection: {
+                  oneOf: [{ type: "string" }, { type: "number" }],
+                },
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const forwarded = JSON.parse(String(init.body));
+    const schema = forwarded.tools[0].input_schema;
+    expect(schema).not.toHaveProperty("anyOf");
+    expect(schema).toMatchObject({
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        mode: { type: "string" },
+        selection: {
+          oneOf: [{ type: "string" }, { type: "number" }],
+        },
+      },
+    });
+    expect(new Headers(init.headers).has("content-length")).toBe(false);
   });
 
   it("does not block an awaited event hook while the bridge is unavailable", async () => {
