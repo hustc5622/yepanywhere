@@ -325,24 +325,38 @@ export async function startGitPullAndDeploy(
           { cwd: npmPackageDir, timeout: 600000 },
         );
 
-      await cleanNodeModules().catch((e) => {
+      if (process.platform === "win32") {
+        // Windows：运行中的 8022 服务对 dist/npm-package/node_modules（如 bcrypt
+        // 的原生 .node）持有「强制文件锁」，进程内 fs.rmSync / npm ci 会直接
+        // EPERM -4048 失败——这正是「更新到本地/GitHub 在 Windows 失效」的根因。
+        // build:bundle 阶段已刻意保留 node_modules（见 scripts/build-bundle.ts），
+        // 因此进程内构建本身可成功；只有 npm ci（删除并重装 node_modules）需要
+        // 锁释放。故此处跳过进程内安装，改由下方 detached 的 win-update-build.mjs
+        // 在「先停止 8022 释放锁」之后再跑 npm ci（server-restart 模式传
+        // runNpmCi=0 跳过安装）。模型与 macOS 的 restart-and-report.mjs 一致。
         logStream.write(
-          `\n==> 预清理 node_modules 警告: ${e instanceof Error ? e.message : String(e)}\n`,
+          "\n==> Windows：跳过进程内 npm ci（避免 EPERM 文件锁），改由 detached 包装器在安装前先停止服务释放锁。\n",
         );
-      });
-      try {
-        await npmCiRun();
-      } catch (npmErr) {
-        const npmMsg =
-          npmErr instanceof Error ? npmErr.message : String(npmErr);
-        if (/errno -11|Unknown system error -11/.test(npmMsg)) {
+      } else {
+        await cleanNodeModules().catch((e) => {
           logStream.write(
-            "\n==> npm ci 触发 errno -11，疑似残留的守卫暂存目录；清理 node_modules 后重试一次。\n",
+            `\n==> 预清理 node_modules 警告: ${e instanceof Error ? e.message : String(e)}\n`,
           );
-          await cleanNodeModules().catch(() => undefined);
+        });
+        try {
           await npmCiRun();
-        } else {
-          throw npmErr;
+        } catch (npmErr) {
+          const npmMsg =
+            npmErr instanceof Error ? npmErr.message : String(npmErr);
+          if (/errno -11|Unknown system error -11/.test(npmMsg)) {
+            logStream.write(
+              "\n==> npm ci 触发 errno -11，疑似残留的守卫暂存目录；清理 node_modules 后重试一次。\n",
+            );
+            await cleanNodeModules().catch(() => undefined);
+            await npmCiRun();
+          } else {
+            throw npmErr;
+          }
         }
       }
 
@@ -359,6 +373,7 @@ export async function startGitPullAndDeploy(
       // 并在失败（重启命令非零退出 / 探活超时）时把 job 改写为 failed。父进程 finally
       // 不会再覆盖（此时 job.status 已是 succeeded，若包装器写了 failed 则以其为准）。
       const isProduction = process.env.NODE_ENV === "production";
+      const isWindows = process.platform === "win32";
       try {
         if (!isProduction) {
           // 开发模式（pnpm dev，tsx watch 自动重载）：生产重启依赖 launchd / 8022，
@@ -369,6 +384,60 @@ export async function startGitPullAndDeploy(
               "开发服务器由 tsx watch 自动重载源码变更，无需重启 8022 生产服务；\n" +
               "构建产物已就绪，job 标记为 succeeded。\n",
           );
+          if (isWindows) {
+            // Windows 开发模式：进程内 npm ci 已跳过（避免 EPERM），运行时依赖
+            // 将在后续「生产更新」路径中完成安装，不影响当前 dev 构建验证。
+            logStream.write(
+              "（Windows 开发模式：进程内 npm ci 已跳过，运行时依赖将在生产更新路径安装。）\n",
+            );
+          }
+        } else if (isWindows) {
+          // Windows 生产模式：服务持有 dist/npm-package/node_modules 的强制文件锁，
+          // 进程内重启 = 自杀且无锁释放，npm ci 会因锁 EPERM 失败。故 detached 一个
+          // 独立进程 win-update-build.mjs：先停止 8022 释放锁 → 清 node_modules →
+          // npm ci（runNpmCi=0 时跳过，用于 server-restart）→ deploy.ps1 --restart-only
+          // 重启 → 探活 /api/version → 写最终 job 状态。该包装进程独立于父进程，
+          // 即使 8022 被其停止也不会中断；父进程 finally 不会再覆盖状态。
+          logStream.write(
+            `\n==> 步骤 ${stepRestart}/${totalSteps}: 重启生产服务 (Windows detached win-update-build.mjs)\n`,
+          );
+          const prodPort = Number(process.env.YEP_DEPLOY_PORT || 8022);
+          // server-restart 仅重启、不重装运行时依赖；github / 本地更新需 npm ci。
+          const runNpmCi = action === "server-restart" ? "0" : "1";
+          const winWrapper = path.join(
+            repoRoot,
+            "scripts",
+            "win-update-build.mjs",
+          );
+          // 用独立 fd 写重启输出，避免父进程 logStream.end() 关闭 fd 后子进程丢失 stdout。
+          const restartLogFd = fs.openSync(logPath, "a");
+          const restartChild = spawn(
+            process.execPath,
+            [
+              winWrapper,
+              path.join(jobsDir, `${id}.json`),
+              String(prodPort),
+              repoRoot,
+              npmPackageDir,
+              path.join(repoRoot, "scripts", "deploy.ps1"),
+              runNpmCi,
+            ],
+            {
+              cwd: repoRoot,
+              detached: true,
+              env: cleanEnv(),
+              stdio: ["ignore", restartLogFd, restartLogFd],
+            },
+          );
+          restartChild.unref();
+          logStream.write(
+            `已 detached 启动 Windows 更新包装进程 (pid=${restartChild.pid})，` +
+              `将停止服务→安装依赖→重启→探活 ${prodPort}（runNpmCi=${runNpmCi}）。\n`,
+          );
+          logStream.write(
+            "若 npm ci / 重启 / 探活失败，job 将被标记为 failed；否则保持 succeeded。\n",
+          );
+          // 不 await：包装进程在后台完成安装+重启+探活，结果直接写盘，不受父进程被重启杀掉影响。
         } else {
           logStream.write(
             `\n==> 步骤 ${stepRestart}/${totalSteps}: 重启生产服务 (detached)\n`,
@@ -382,22 +451,11 @@ export async function startGitPullAndDeploy(
             "scripts",
             "restart-and-report.mjs",
           );
-          const restartCmdArgs =
-            process.platform === "win32"
-              ? [
-                  "powershell",
-                  "-NoProfile",
-                  "-ExecutionPolicy",
-                  "Bypass",
-                  "-File",
-                  path.join(repoRoot, "scripts", "deploy.ps1"),
-                  "--restart-only",
-                ]
-              : [
-                  "bash",
-                  path.join(repoRoot, "scripts", "redeploy-server.sh"),
-                  "--restart-only",
-                ];
+          const restartCmdArgs = [
+            "bash",
+            path.join(repoRoot, "scripts", "redeploy-server.sh"),
+            "--restart-only",
+          ];
 
           // 用独立 fd 写重启输出，避免父进程 logStream.end() 关闭 fd 后子进程丢失 stdout。
           const restartLogFd = fs.openSync(logPath, "a");
