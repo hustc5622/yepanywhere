@@ -20,12 +20,18 @@
       alias: "mini",
       label: "43.226.60.75:61874",
       origin: "http://43.226.60.75:61874"
+    },
+    {
+      alias: "home",
+      label: "47.95.254.240:5750",
+      origin: "http://47.95.254.240:5750"
     }
   ];
   var DEFAULT_TCP_ORIGIN = TCP_NODES[0].origin;
   var SEEDED_NODE_HISTORY = [
     DEFAULT_TCP_ORIGIN,
-    TCP_NODES[1].origin
+    TCP_NODES[1].origin,
+    TCP_NODES[2].origin
   ];
   var DEPRECATED_DEFAULT_TCP_ORIGINS = [
     "http://123.56.106.49:37160"

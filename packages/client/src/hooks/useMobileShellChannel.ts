@@ -18,6 +18,11 @@ export const MOBILE_SHELL_NODES: MobileShellNode[] = [
     label: "43.226.60.75:61874",
     origin: "http://43.226.60.75:61874",
   },
+  {
+    alias: "home",
+    label: "47.95.254.240:5750",
+    origin: "http://47.95.254.240:5750",
+  },
 ];
 
 export function formatMobileShellNodeLabel(
