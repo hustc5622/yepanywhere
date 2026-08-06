@@ -15,6 +15,10 @@ on:
       - 'packages/desktop/**'
       - 'packages/shared/**'
       - '.github/workflows/desktop-ci.yml'
+  # The paths filter means a fix landing elsewhere in the repo never re-runs
+  # this workflow, so a stale failure can sit on main indefinitely. It also has
+  # a known-flaky macOS bundling step. Both need a manual trigger.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -186,6 +190,7 @@ jobs:
 
       # --- Build Tauri app ---
       - name: Build Tauri app
+        id: build_tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -213,11 +218,14 @@ jobs:
             ${{ matrix.platform == 'windows-latest' && secrets.AZURE_CLIENT_SECRET != '' && '--config ''{"bundle":{"windows":{"signCommand":"trusted-signing-cli -e https://eus.codesigning.azure.net -a kylegraehl -c yep-profile %1"}}}''' || '' }}
 
       # --- Diagnose flaky DMG bundling ---
+      # Scoped to the build step itself. A bare `failure()` also fires for
+      # checkout, install or lint failures, and then confidently reports them as
+      # "not a code problem" — which sends whoever reads the log the wrong way.
       - name: Check for flaky DMG bundling failure
-        if: failure() && matrix.platform == 'macos-latest'
+        if: failure() && steps.build_tauri.outcome == 'failure' && matrix.platform == 'macos-latest'
         run: |
           echo ""
-          echo "::error::macOS DMG bundling failed. This is likely the known flaky hdiutil issue on GitHub Actions runners (not a code problem). Re-run this job: gh run rerun ${{ github.run_id }} --failed"
+          echo "::error::macOS DMG bundling may have hit the known flaky hdiutil issue on GitHub Actions runners. Check the Tauri build log above before assuming it is flaky; if it is, re-run: gh run rerun ${{ github.run_id }} --failed"
           echo ""
 
       # --- Linux AppImage (built separately) ---
