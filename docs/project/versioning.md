@@ -1,6 +1,6 @@
 # 版本治理方案（Yep Anywhere fork 发行线）
 
-状态：**阶段 1–4 已实施**（见 §12 进度）。决策已定：§2.3 取 A（不发 npm），§2.4 取 A（基线 `0.5.0`）。阶段 5–8 尚未实施。
+状态：**阶段 1–5 已实施**（见 §12 进度）。决策已定：§2.3 取 A（不发 npm），§2.4 取 A（基线 `0.5.0`）。阶段 6–8 尚未实施。
 
 > 注意：`releaseChannel` 门控（阶段 4）要**重新部署**后才在运行中的服务上生效。线上包 `0.4.29-a08854d03b6c-*` 是改造前构建的，仍会上报 `updateAvailable: true`。
 
@@ -197,7 +197,7 @@ Desktop 版本分散在三处（package.json / Cargo.toml / tauri.conf.json）�
 
 8. 部署后模式（`--base-url`）：以子进程调用 `scripts/verify-deploy.mjs`，由它比对 `/api/version`、`/build-info.json` 与本地 `build-info.json` 的 `buildId`。不重复实现该逻辑。
 
-已知的当前行为：在首次 `version:bump` 之前，第 2 项必然失败（根 `0.4.29` vs CHANGELOG `0.4.28`）。这是 §11 描述的既有漂移，不是脚本缺陷；执行首次 bump 后转绿。
+~~已知的当前行为：在首次 `version:bump` 之前，第 2 项必然失败（根 `0.4.29` vs CHANGELOG `0.4.28`）。~~ 首次 bump 已执行，五项校验现已全部通过。
 
 ---
 
@@ -307,9 +307,9 @@ AGENTS.md 只放长期规则，不放逐版本内容。拟在「发布」小节�
 当前存在的漂移需要先收敛，否则新机制第一次运行就会失败：
 
 1. ~~补齐 CHANGELOG~~ **已完成**：`v0.4.28`→HEAD 的 278 个提交已按主题汇总写入 `[Unreleased]`，并在章节顶部注明 `0.4.29` 是未正式定版的中间状态（因此不单独开 `## [0.4.29]` 章节）。
-2. **待执行**：决策已定（§2.4 → `0.5.0`），执行首次 `pnpm version:bump minor`。这一步会把 `[Unreleased]` 定版为 `## [0.5.0] - <当日>`，并消除第 2 项 check 的漂移。
+2. ~~执行首次 `pnpm version:bump minor`~~ **已完成**：`0.4.29` → `0.5.0`，`[Unreleased]` 定版为 `## [0.5.0] - 2026-08-06`，并补入 backfill 写成之后才落地的提交（release channel 门控、权限模式持久化、Codex MCP 启动修复、Anthropic 网关 schema 修复、mobile home 节点）。第 2 项 check 的漂移已消除。
 3. ~~修掉 `build-bundle.ts` 的硬编码回退~~ **已完成**：缺 `NPM_VERSION` 时读根 `package.json`，读不到或格式非法则报错退出，不再静默产出 `0.4.8`。
-4. **待执行**：创建 `ya-v0.5.0` tag 作为 fork 发行线起点。
+4. ~~创建 `ya-v0.5.0` tag~~ **已完成**：annotated tag，指向 `719358fea`。已验证 `publish.yml` 的 `v*.*.*` 触发器不匹配 `ya-v*`，推送后未产生 npm 发布 run。
 
 ---
 
@@ -322,7 +322,7 @@ AGENTS.md 只放长期规则，不放逐版本内容。拟在「发布」小节�
 | 2 | 补齐 CHANGELOG，修 `build-bundle.ts` 回退 | 低 | ✅ 已完成 |
 | 3 | 实现 `scripts/version.ts` 三个子命令 | 低，新增文件 | ✅ 已完成 |
 | 4 | `releaseChannel` 第一步（跳过 upstream 更新检查） | 中，触及 server/build | ✅ 已完成 |
-| 5 | 首次 `version:bump minor` + `ya-v0.5.0` tag | 决策已定后执行 | ⬜ 未开始 |
+| 5 | 首次 `version:bump minor` + `ya-v0.5.0` tag | 决策已定后执行 | ✅ 已完成 |
 | 6 | `redeploy-server.sh` 部署门禁 + 部署记录 | 中，影响部署流程 | ⬜ 未开始 |
 | 7 | 新增 `ya-v*` GitHub Release workflow | 低 | ⬜ 未开始 |
 | 8 | 客户端 channel 展示（可选） | 低 | ⬜ 未开始 |
