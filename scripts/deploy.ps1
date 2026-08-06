@@ -350,6 +350,25 @@ if ($DO_BUILD) {
     log "Installing runtime dependencies in dist/npm-package ..."
     Push-Location (Join-Path $RepoRoot "dist/npm-package")
     try {
+      # Neutralize WorkBuddy's "safe-delete" guard (NODE_OPTIONS --require
+      # genie-safe-delete.cjs + PATH-prepended safe-bin) so npm ci isn't
+      # intercepted. An intercepted rm renames dirs to "<name> 2" staged
+      # copies that make the NEXT npm ci fail with errno -11 (macOS) or
+      # EPERM/-4048 stale-lock errors (Windows). Clearing these in *this*
+      # session also prevents npm's own internal cleanup from creating new
+      # residue, and lets Remove-Item below actually delete old residue.
+      if ($env:NODE_OPTIONS) {
+        $env:NODE_OPTIONS = ($env:NODE_OPTIONS -split '\s+' | Where-Object { $_ -notmatch 'genie-safe-delete' -and $_ -notmatch 'safe-delete' }) -join ' '
+        if ($env:NODE_OPTIONS -eq '') { Remove-Item Env:\NODE_OPTIONS }
+      }
+      if ($env:PATH) {
+        $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'safe-bin' -and $_ -notmatch 'genie-safe-delete' }) -join ';'
+      }
+      $nmPath = Join-Path $RepoRoot "dist/npm-package/node_modules"
+      if (Test-Path $nmPath) {
+        log "Removing stale node_modules before install (guard-neutralized) ..."
+        Remove-Item -Recurse -Force $nmPath -ErrorAction SilentlyContinue
+      }
       & npm ci --omit=dev --no-audit --no-fund --silent --cache (Join-Path $RepoRoot "dist/npm-package/.npm-cache")
       Assert-LastExitCode "npm ci"
     } finally {

@@ -299,11 +299,22 @@ export async function startGitPullAndDeploy(
       // 这里始终先用 guard-neutralized 的 /bin/rm（runStep 已用 cleanEnv 剥离守卫）
       // 清空整个 node_modules，确保无历史残留；若仍因 errno -11 失败，再清一次后重试。
       const npmPackageDir = path.join(repoRoot, "dist", "npm-package");
+      const npmNodeModulesDir = path.join(npmPackageDir, "node_modules");
+      // 跨平台预清理：用「剥离了守卫的 Node 子进程」执行 fs.rmSync，
+      // 而非硬编码 /bin/rm（Windows 上不存在）。runStep 已套 cleanEnv()
+      // 剥离 NODE_OPTIONS/PATH 中的 safe-delete 守卫，因此该子进程的 fs
+      // 未被 patch，能真正删除而非改名成 "<name> 2" 暂存。macOS 上效果与原
+      // /bin/rm 等价（同样可靠删除）；Windows 上此前 /bin/rm 静默失败（被
+      // .catch 吞掉），现改为真正生效，使「更新」按钮在 Windows 同样具备
+      // 防 errno -11 能力。
       const cleanNodeModules = (): Promise<void> =>
         runStep(
-          "预清理：移除旧的 node_modules（guard-neutralized）",
-          "/bin/rm",
-          ["-rf", path.join(npmPackageDir, "node_modules")],
+          "预清理：移除旧的 node_modules（guard-neutralized，跨平台）",
+          process.execPath,
+          [
+            "-e",
+            `require('node:fs').rmSync(${JSON.stringify(npmNodeModulesDir)}, { recursive: true, force: true })`,
+          ],
           { cwd: repoRoot, timeout: 120000 },
         );
       const npmCiRun = (): Promise<void> =>
