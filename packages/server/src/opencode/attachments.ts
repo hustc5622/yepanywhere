@@ -1,5 +1,28 @@
 const MAX_URL_LABEL_LENGTH = 256;
 const YEP_UPLOAD_METADATA_MARKER = "\n\nUser uploaded files:\n";
+const OPENCODE_NATIVE_ATTACHMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+
+/**
+ * Return the canonical MIME type when an upload is safe to forward as an
+ * OpenCode-native model attachment. Other uploads remain available through
+ * the local path that MessageQueue includes in the user prompt.
+ */
+export function normalizeOpenCodeNativeAttachmentMime(
+  mimeType: string | undefined,
+): string | undefined {
+  const normalized = mimeType?.split(";", 1)[0]?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  const canonical = normalized === "image/jpg" ? "image/jpeg" : normalized;
+  return OPENCODE_NATIVE_ATTACHMENT_MIME_TYPES.has(canonical)
+    ? canonical
+    : undefined;
+}
 
 /** Whether a user prompt already contains Yep's renderable upload metadata. */
 export function hasYepUploadMetadata(text: string | undefined): boolean {

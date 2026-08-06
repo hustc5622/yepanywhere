@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Keep JSON and other non-media OpenCode uploads on the tool-readable local-path flow instead of forwarding unsupported MIME types as native model attachments
+
 ## [2026.8.0] - 2026-08-06
 
 > Backfilled summary covering the ~278 commits between `v0.4.28` and the start of

@@ -62,6 +62,7 @@ import type {
 import {
   getOpenCodeAttachmentLabel,
   hasYepUploadMetadataForFile,
+  normalizeOpenCodeNativeAttachmentMime,
 } from "../../opencode/attachments.js";
 import { formatOpenCodeError } from "../../opencode/error.js";
 import {
@@ -3457,20 +3458,27 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   /**
-   * Convert Yep uploads and legacy inline image blocks into OpenCode-native
-   * file parts. OpenCode resolves local file URLs and forwards their bytes to
-   * multimodal models; a path embedded in prompt text does not do that.
+   * Convert model-supported Yep uploads and legacy inline image blocks into
+   * OpenCode-native file parts. MessageQueue already includes every upload's
+   * local path in the prompt, so text and other non-media files stay readable
+   * through tools without being rejected by model attachment adapters.
    */
   private buildOpenCodeFileParts(
     message: QueuedUserMessage,
   ): OpenCodeFilePartInput[] {
-    const parts: OpenCodeFilePartInput[] = (message.attachments ?? []).map(
-      (attachment) => ({
-        type: "file",
-        mime: attachment.mimeType || "application/octet-stream",
-        filename: attachment.originalName || attachment.name,
-        url: pathToFileURL(attachment.path).href,
-      }),
+    const parts: OpenCodeFilePartInput[] = (message.attachments ?? []).flatMap(
+      (attachment) => {
+        const mime = normalizeOpenCodeNativeAttachmentMime(attachment.mimeType);
+        if (!mime) return [];
+        return [
+          {
+            type: "file",
+            mime,
+            filename: attachment.originalName || attachment.name,
+            url: pathToFileURL(attachment.path).href,
+          },
+        ];
+      },
     );
 
     const content = message.message.content;
@@ -3478,10 +3486,14 @@ export class OpenCodeProvider implements AgentProvider {
 
     for (const block of content) {
       if (block.type !== "image" || block.source.type !== "base64") continue;
+      const mime = normalizeOpenCodeNativeAttachmentMime(
+        block.source.media_type || "image/png",
+      );
+      if (!mime?.startsWith("image/")) continue;
       parts.push({
         type: "file",
-        mime: block.source.media_type || "image/png",
-        url: `data:${block.source.media_type || "image/png"};base64,${block.source.data}`,
+        mime,
+        url: `data:${mime};base64,${block.source.data}`,
       });
     }
 

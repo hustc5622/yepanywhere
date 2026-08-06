@@ -947,8 +947,8 @@ custom-openai/glm-5.2
     );
   });
 
-  it("preserves uploads and builds OpenCode-native file parts", async () => {
-    const attachment = {
+  it("keeps non-media uploads path-only and builds supported native file parts", async () => {
+    const imageAttachment = {
       id: "file-1",
       originalName: "screen shot.png",
       name: "file-1_screen shot.png",
@@ -956,16 +956,42 @@ custom-openai/glm-5.2
       mimeType: "image/png",
       path: "/uploads/screen shot.png",
     };
+    const jsonAttachment = {
+      id: "file-2",
+      originalName: "request.json",
+      name: "file-2_request.json",
+      size: 2_048,
+      mimeType: "application/json",
+      path: "/uploads/request.json",
+    };
+    const pdfAttachment = {
+      id: "file-3",
+      originalName: "spec.pdf",
+      name: "file-3_spec.pdf",
+      size: 4_096,
+      mimeType: "Application/PDF; charset=binary",
+      path: "/uploads/spec.pdf",
+    };
     const queue = new MessageQueue({ preserveAttachments: true });
     queue.push({
       text: "describe these images",
-      attachments: [attachment],
+      attachments: [imageAttachment, jsonAttachment, pdfAttachment],
       images: ["data:image/jpeg;base64,AQID"],
     });
 
     const queued = (await queue.generator().next()).value;
-    expect(queued?.attachments).toEqual([attachment]);
+    expect(queued?.attachments).toEqual([
+      imageAttachment,
+      jsonAttachment,
+      pdfAttachment,
+    ]);
     if (!queued) throw new Error("Expected the queued OpenCode message");
+    const queuedText = Array.isArray(queued.message.content)
+      ? queued.message.content.find((part) => part.type === "text")?.text
+      : queued.message.content;
+    expect(queuedText).toContain(
+      "- request.json (2.0 KB, application/json): /uploads/request.json",
+    );
 
     const provider = new OpenCodeProvider();
     const methods = provider as unknown as {
@@ -994,7 +1020,13 @@ custom-openai/glm-5.2
         type: "file",
         mime: "image/png",
         filename: "screen shot.png",
-        url: pathToFileURL(attachment.path).href,
+        url: pathToFileURL(imageAttachment.path).href,
+      },
+      {
+        type: "file",
+        mime: "application/pdf",
+        filename: "spec.pdf",
+        url: pathToFileURL(pdfAttachment.path).href,
       },
       {
         type: "file",
