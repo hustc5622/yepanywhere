@@ -47,7 +47,7 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/ya-v}" >> $GITHUB_OUTPUT
 
       - name: Verify release metadata
-        run: pnpm version:check --tag "${GITHUB_REF#refs/tags/}"
+        run: pnpm version:check --profile tag --tag "${GITHUB_REF#refs/tags/}"
 
       - name: Build bundle
         run: pnpm build:bundle
@@ -56,7 +56,7 @@ jobs:
           YEP_RELEASE_CHANNEL: fork
 
       - name: Verify bundle version matches the tag
-        run: pnpm version:check --build-info dist/npm-package/build-info.json
+        run: pnpm version:check --profile tag --build-info dist/npm-package/build-info.json
 
       - name: Package bundle
         run: |

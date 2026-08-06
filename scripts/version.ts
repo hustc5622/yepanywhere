@@ -424,10 +424,21 @@ interface CheckResult {
   detail?: string;
 }
 
+/**
+ * `release` and `local` both run before a tag exists. `tag` runs from the
+ * release workflow, i.e. after the tag has been pushed — so the two checks that
+ * assert "this version is not tagged yet" would fail by construction and are
+ * dropped.
+ */
+type CheckProfile = "release" | "local" | "tag";
+const CHECK_PROFILES: readonly string[] = ["release", "local", "tag"];
+
 function commandCheck(argv: string[]): number {
-  const profile = readOption(argv, "--profile") ?? "release";
-  if (profile !== "release" && profile !== "local") {
-    console.error(`Unknown --profile ${profile} (expected: release | local)`);
+  const profile = (readOption(argv, "--profile") ?? "release") as CheckProfile;
+  if (!CHECK_PROFILES.includes(profile)) {
+    console.error(
+      `Unknown --profile ${profile} (expected: ${CHECK_PROFILES.join(" | ")})`,
+    );
     return 2;
   }
   const tag = readOption(argv, "--tag");
@@ -469,15 +480,18 @@ function commandCheck(argv: string[]): number {
     });
   }
 
-  // 4. root version is ahead of the last fork tag
+  // 4. root version is ahead of the last fork tag.
+  //    Skipped under the tag profile: the newest tag is the one being released.
   const forkTag = latestForkTag();
-  results.push({
-    ok: forkTag === null || compareSemver(rootSemver, forkTag.version) > 0,
-    label: `root version is ahead of the last ${TAG_PREFIX}* tag`,
-    detail: forkTag
-      ? `${rootVersion} vs ${forkTag.tag}`
-      : `no ${TAG_PREFIX}* tag yet`,
-  });
+  if (profile !== "tag") {
+    results.push({
+      ok: forkTag === null || compareSemver(rootSemver, forkTag.version) > 0,
+      label: `root version is ahead of the last ${TAG_PREFIX}* tag`,
+      detail: forkTag
+        ? `${rootVersion} vs ${forkTag.tag}`
+        : `no ${TAG_PREFIX}* tag yet`,
+    });
+  }
 
   // 5. explicit tag matches the root version
   if (tag) {
@@ -577,7 +591,9 @@ Commands:
     --dry-run                Print the plan without writing files
 
   check                      Assert release/deploy readiness (non-zero on failure)
-    --profile <release|local>  Check set (default: release)
+    --profile <release|local|tag>  Check set (default: release)
+                             release = before tagging; local = deploy gate;
+                             tag = from the release workflow, after the tag exists
     --tag <${TAG_PREFIX}X.Y.Z>          Assert the tag matches the root version
     --build-info <path>      Assert a built bundle matches the root version
     --base-url <url>         Also run scripts/verify-deploy.mjs

@@ -198,7 +198,7 @@ Desktop 版本分散在三处（package.json / Cargo.toml / tauri.conf.json）�
 
 ### 6.3 `version:check`
 
-退出码非 0 即失败。`--profile release`（默认）跑全部适用项，`--profile local` 只跑第 1、2、4 项，供 §7 的部署门禁调用。校验项：
+退出码非 0 即失败。三种 profile：`release`（默认，打 tag 之前跑全部适用项）、`local`（部署门禁，只跑第 1、2、4 项，供 §7 调用）、`tag`（`release.yml` 在 tag 推送后调用，跳过第 4、6 项——触发它的正是那个 tag，这两项必然失败）。校验项：
 
 1. 根版本是三段数字，格式合法。
 2. CHANGELOG 最新已定版章节 == 根版本。
