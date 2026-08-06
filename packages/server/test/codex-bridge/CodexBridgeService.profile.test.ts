@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { CodexBridgeService } from "../../src/codex-bridge/CodexBridgeService.js";
+import { getCodexMcpAppServerArgs } from "../../src/codex/mcp-profile.js";
+
+const CONFIGURED_MCP_SERVERS = ["node_repl", "lark", "web"];
 
 describe("CodexBridgeService managed upstream profiles", () => {
   let bridge: CodexBridgeService | null = null;
@@ -69,19 +72,19 @@ describe("CodexBridgeService managed upstream profiles", () => {
       expect(args).toHaveLength(3);
       expect(args[0]).toEqual([
         "app-server",
-        "--clear-profile",
+        ...getCodexMcpAppServerArgs("clear", ["--clear-profile"]),
         "--listen",
         expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/),
       ]);
       expect(args[1]).toEqual([
         "app-server",
-        "--light-profile",
+        ...getCodexMcpAppServerArgs("standard", ["--light-profile"]),
         "--listen",
         expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/),
       ]);
       expect(args[2]).toEqual([
         "app-server",
-        "--full-profile",
+        ...getCodexMcpAppServerArgs("full", ["--full-profile"]),
         "--listen",
         expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/),
       ]);
@@ -111,6 +114,91 @@ describe("CodexBridgeService managed upstream profiles", () => {
       });
       expect(status.upstreams.light.url).not.toBe(status.upstreams.full.url);
       expect(status.upstreams.clear.url).not.toBe(status.upstreams.light.url);
+
+      clearClient.send(JSON.stringify({ method: "initialized" }));
+      lightClient.send(JSON.stringify({ method: "initialized" }));
+      fullClient.send(JSON.stringify({ method: "initialized" }));
+
+      const clearRequest = await sendAndReceive(clearClient, {
+        jsonrpc: "2.0",
+        id: 101,
+        method: "thread/start",
+        params: { config: { preserved: true } },
+      });
+      const lightRequest = await sendAndReceive(lightClient, {
+        jsonrpc: "2.0",
+        id: 102,
+        method: "thread/start",
+        params: {},
+      });
+      const fullRequest = await sendAndReceive(fullClient, {
+        jsonrpc: "2.0",
+        id: 103,
+        method: "thread/resume",
+        params: { threadId: "thread-existing" },
+      });
+      const forkRequest = await sendAndReceive(lightClient, {
+        jsonrpc: "2.0",
+        id: 104,
+        method: "thread/fork",
+        params: { threadId: "thread-existing" },
+      });
+      expect(clearRequest.params).toMatchObject({
+        config: {
+          preserved: true,
+          mcp_servers: {
+            lark: { command: "fake-mcp", enabled: false },
+            node_repl: { command: "fake-mcp", enabled: false },
+            web: { command: "fake-mcp", enabled: false },
+          },
+        },
+      });
+      expect(lightRequest.params).toMatchObject({
+        config: {
+          mcp_servers: {
+            lark: { enabled: true },
+            node_repl: { enabled: true },
+            web: { enabled: false },
+          },
+        },
+      });
+      expect(fullRequest.params).toMatchObject({
+        config: {
+          mcp_servers: {
+            lark: { enabled: true },
+            node_repl: { enabled: true },
+            web: { enabled: true },
+          },
+        },
+      });
+      expect(forkRequest.params).toMatchObject({
+        config: {
+          mcp_servers: {
+            lark: { enabled: true },
+            node_repl: { enabled: true },
+            web: { enabled: false },
+          },
+        },
+      });
+
+      const batchedRequest = await sendAndReceive(fallbackClient, [
+        { method: "initialized" },
+        {
+          jsonrpc: "2.0",
+          id: 105,
+          method: "thread/start",
+          params: { cwd: "/tmp/batched-codex-project" },
+        },
+      ]);
+      expect(batchedRequest.params).toMatchObject({
+        config: {
+          mcp_servers: {
+            lark: { enabled: true },
+            node_repl: { enabled: true },
+            web: { enabled: false },
+          },
+        },
+      });
     } finally {
       lightClient.close();
       fullClient.close();
@@ -140,8 +228,60 @@ const listenUrl = new URL(args[listenIndex + 1]);
 const server = createServer();
 const wss = new WebSocketServer({ server });
 wss.on("connection", (ws) => {
-  ws.on("message", (data, isBinary) => {
-    ws.send(data, { binary: isBinary });
+  let initialized = false;
+  const handle = (message) => {
+    if (message.method === "initialized") {
+      initialized = true;
+      return;
+    }
+    if (message.method === "config/read") {
+      if (!initialized) {
+        ws.send(JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32600, message: "Not initialized" },
+        }));
+        return;
+      }
+      ws.send(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          config: {
+            mcp_servers: Object.fromEntries(
+              ${JSON.stringify(CONFIGURED_MCP_SERVERS)}.map((name) => [
+                name,
+                { command: "fake-mcp", args: [name], enabled: true },
+              ]),
+            ),
+          },
+          origins: {},
+        },
+      }));
+      return;
+    }
+    if (message.method === "thread/read") {
+      ws.send(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          thread: {
+            id: message.params.threadId,
+            cwd: "/tmp/fake-codex-project",
+          },
+        },
+      }));
+      return;
+    }
+    ws.send(JSON.stringify(message));
+  };
+  ws.on("message", (data) => {
+    const envelope = JSON.parse(data.toString());
+    if (Array.isArray(envelope)) {
+      for (const message of envelope) handle(message);
+      return;
+    }
+    handle(envelope);
   });
 });
 
@@ -194,6 +334,23 @@ async function connect(
     const ws = new WebSocket(url, { headers });
     ws.once("open", () => resolve(ws));
     ws.once("error", reject);
+  });
+}
+
+async function sendAndReceive(
+  ws: WebSocket,
+  message: unknown,
+): Promise<{ params?: unknown }> {
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("Timed out waiting for echoed bridge request")),
+      5000,
+    );
+    ws.once("message", (data) => {
+      clearTimeout(timeout);
+      resolve(JSON.parse(data.toString()) as { params?: unknown });
+    });
+    ws.send(JSON.stringify(message));
   });
 }
 

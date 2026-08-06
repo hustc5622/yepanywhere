@@ -33,8 +33,26 @@ describe("CodexBridgeService", () => {
       upstreamSocket = ws;
       upstreamSockets.push(ws);
       ws.on("message", (data, isBinary) => {
+        const message = JSON.parse(data.toString()) as JsonRpcMessage;
+        if (message.method === "config/read") {
+          ws.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                config: {
+                  mcp_servers: {
+                    node_repl: { command: "fake-mcp", enabled: true },
+                  },
+                },
+                origins: {},
+              },
+            }),
+          );
+          return;
+        }
         upstreamIsBinaryFlags.push(isBinary);
-        upstreamMessages.push(JSON.parse(data.toString()) as JsonRpcMessage);
+        upstreamMessages.push(message);
       });
     });
     await listen(upstreamServer, upstreamPort);

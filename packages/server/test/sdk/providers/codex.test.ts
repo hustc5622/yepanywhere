@@ -16,11 +16,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-  CODEX_CLEAR_MCP_APP_SERVER_ARGS,
-  CODEX_FULL_MCP_APP_SERVER_ARGS,
-  CODEX_STANDARD_MCP_APP_SERVER_ARGS,
-} from "../../../src/codex/mcp-profile.js";
+import { getCodexMcpAppServerArgs } from "../../../src/codex/mcp-profile.js";
 import {
   CodexProvider,
   type CodexProviderConfig,
@@ -96,6 +92,11 @@ describe("CodexProvider", () => {
         fakeCodexPath,
         `#!/usr/bin/env node
 const fs = require("node:fs");
+const argv = process.argv.slice(2);
+if (argv[0] === "app-server" && process.env.CODEX_FAKE_APP_SERVER_ERROR) {
+  process.stderr.write(process.env.CODEX_FAKE_APP_SERVER_ERROR + "\\n");
+  process.exit(1);
+}
 let buffer = "";
 
 function send(id, result) {
@@ -105,6 +106,19 @@ function send(id, result) {
 function handle(message) {
   if (message.method === "initialize") {
     send(message.id, { userAgent: "fake-codex" });
+    return;
+  }
+  if (message.method === "config/read") {
+    const names = JSON.parse(process.env.CODEX_FAKE_MCP_SERVERS || "[]");
+    send(message.id, {
+      config: {
+        mcp_servers: Object.fromEntries(names.map((name) => [
+          name,
+          { command: "fake-mcp", args: [name], enabled: true },
+        ])),
+      },
+      origins: {},
+    });
     return;
   }
   if (message.method === "thread/rollback") {
@@ -206,6 +220,43 @@ process.stdin.on("data", (chunk) => {
       ).toBe(true);
     });
 
+    it("includes captured app-server stderr in startup errors", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-error-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const previousError = process.env.CODEX_FAKE_APP_SERVER_ERROR;
+      process.env.CODEX_FAKE_APP_SERVER_ERROR =
+        "invalid transport in `mcp_servers.node_repl`";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        const session = await provider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "hello" },
+        });
+        const messages: Array<{ type?: string; error?: string }> = [];
+        for await (const message of session.iterator) {
+          messages.push(message as { type?: string; error?: string });
+          if (message.type === "error") break;
+        }
+
+        expect(messages.at(-1)).toMatchObject({
+          type: "error",
+          error: expect.stringContaining(
+            "invalid transport in `mcp_servers.node_repl`",
+          ),
+        });
+      } finally {
+        if (previousError === undefined) {
+          Reflect.deleteProperty(process.env, "CODEX_FAKE_APP_SERVER_ERROR");
+        } else {
+          process.env.CODEX_FAKE_APP_SERVER_ERROR = previousError;
+        }
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("passes modelProvider separately and ignores provider names as model", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-"),
@@ -213,10 +264,13 @@ process.stdin.on("data", (chunk) => {
       const fakeCodexPath = writeFakeCodexAppServer(tempDir);
       const capturePath = join(tempDir, "capture.json");
       const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMcpServers = process.env.CODEX_FAKE_MCP_SERVERS;
+      const configuredMcpServers = ["node_repl", "lark", "web"];
       let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
         null;
 
       process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MCP_SERVERS = JSON.stringify(configuredMcpServers);
 
       try {
         const provider = new CodexProvider({ codexPath: fakeCodexPath });
@@ -238,7 +292,7 @@ process.stdin.on("data", (chunk) => {
             "app-server",
             "-c",
             'model_provider="openai"',
-            ...CODEX_STANDARD_MCP_APP_SERVER_ARGS,
+            ...getCodexMcpAppServerArgs("standard"),
             "--listen",
             "stdio://",
           ],
@@ -248,6 +302,13 @@ process.stdin.on("data", (chunk) => {
             model: null,
             modelProvider: "openai",
             cwd: tempDir,
+            config: {
+              mcp_servers: {
+                lark: { command: "fake-mcp", enabled: true },
+                node_repl: { command: "fake-mcp", enabled: true },
+                web: { command: "fake-mcp", enabled: false },
+              },
+            },
           },
         });
       } finally {
@@ -256,6 +317,11 @@ process.stdin.on("data", (chunk) => {
           process.env.CODEX_FAKE_CAPTURE = undefined;
         } else {
           process.env.CODEX_FAKE_CAPTURE = previousCapturePath;
+        }
+        if (previousMcpServers === undefined) {
+          Reflect.deleteProperty(process.env, "CODEX_FAKE_MCP_SERVERS");
+        } else {
+          process.env.CODEX_FAKE_MCP_SERVERS = previousMcpServers;
         }
         rmSync(tempDir, { recursive: true, force: true });
       }
@@ -268,10 +334,13 @@ process.stdin.on("data", (chunk) => {
       const fakeCodexPath = writeFakeCodexAppServer(tempDir);
       const capturePath = join(tempDir, "capture.json");
       const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMcpServers = process.env.CODEX_FAKE_MCP_SERVERS;
+      const configuredMcpServers = ["node_repl", "lark", "web"];
       let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
         null;
 
       process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MCP_SERVERS = JSON.stringify(configuredMcpServers);
 
       try {
         const provider = new CodexProvider({ codexPath: fakeCodexPath });
@@ -293,7 +362,7 @@ process.stdin.on("data", (chunk) => {
             "app-server",
             "-c",
             'model_provider="openai"',
-            ...CODEX_FULL_MCP_APP_SERVER_ARGS,
+            ...getCodexMcpAppServerArgs("full"),
             "--listen",
             "stdio://",
           ],
@@ -302,6 +371,13 @@ process.stdin.on("data", (chunk) => {
             model: null,
             modelProvider: "openai",
             cwd: tempDir,
+            config: {
+              mcp_servers: {
+                lark: { enabled: true },
+                node_repl: { enabled: true },
+                web: { enabled: true },
+              },
+            },
           },
         });
       } finally {
@@ -310,6 +386,11 @@ process.stdin.on("data", (chunk) => {
           process.env.CODEX_FAKE_CAPTURE = undefined;
         } else {
           process.env.CODEX_FAKE_CAPTURE = previousCapturePath;
+        }
+        if (previousMcpServers === undefined) {
+          Reflect.deleteProperty(process.env, "CODEX_FAKE_MCP_SERVERS");
+        } else {
+          process.env.CODEX_FAKE_MCP_SERVERS = previousMcpServers;
         }
         rmSync(tempDir, { recursive: true, force: true });
       }
@@ -370,10 +451,13 @@ process.stdin.on("data", (chunk) => {
       const fakeCodexPath = writeFakeCodexAppServer(tempDir);
       const capturePath = join(tempDir, "capture.json");
       const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMcpServers = process.env.CODEX_FAKE_MCP_SERVERS;
+      const configuredMcpServers = ["node_repl", "lark", "web"];
       let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
         null;
 
       process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MCP_SERVERS = JSON.stringify(configuredMcpServers);
 
       try {
         const provider = new CodexProvider({ codexPath: fakeCodexPath });
@@ -395,7 +479,7 @@ process.stdin.on("data", (chunk) => {
             "app-server",
             "-c",
             'model_provider="openai"',
-            ...CODEX_CLEAR_MCP_APP_SERVER_ARGS,
+            ...getCodexMcpAppServerArgs("clear"),
             "--listen",
             "stdio://",
           ],
@@ -404,6 +488,13 @@ process.stdin.on("data", (chunk) => {
             model: null,
             modelProvider: "openai",
             cwd: tempDir,
+            config: {
+              mcp_servers: {
+                lark: { enabled: false },
+                node_repl: { enabled: false },
+                web: { enabled: false },
+              },
+            },
           },
         });
       } finally {
@@ -412,6 +503,11 @@ process.stdin.on("data", (chunk) => {
           process.env.CODEX_FAKE_CAPTURE = undefined;
         } else {
           process.env.CODEX_FAKE_CAPTURE = previousCapturePath;
+        }
+        if (previousMcpServers === undefined) {
+          Reflect.deleteProperty(process.env, "CODEX_FAKE_MCP_SERVERS");
+        } else {
+          process.env.CODEX_FAKE_MCP_SERVERS = previousMcpServers;
         }
         rmSync(tempDir, { recursive: true, force: true });
       }

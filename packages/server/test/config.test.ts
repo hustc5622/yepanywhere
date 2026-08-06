@@ -4,23 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CODEX_CLEAR_MCP_APP_SERVER_ARGS,
   CODEX_FULL_MCP_APP_SERVER_ARGS,
-  CODEX_PROFILED_MCP_SERVER_IDS,
   CODEX_STANDARD_MCP_APP_SERVER_ARGS,
+  type CodexMcpConfigEntry,
+  getCodexMcpAppServerArgs,
+  getCodexMcpConfigEntries,
+  getCodexMcpThreadConfig,
+  resolveCodexMcpThreadProfile,
 } from "../src/codex/mcp-profile.js";
-
-function getMcpServerEnablement(
-  args: readonly string[],
-): Record<string, boolean> {
-  const enablement: Record<string, boolean> = {};
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== "-c") continue;
-    const match = args[index + 1]?.match(
-      /^mcp_servers\.(.+)\.enabled=(true|false)$/,
-    );
-    if (match) enablement[match[1]] = match[2] === "true";
-  }
-  return enablement;
-}
 
 describe("loadConfig codex paths", () => {
   afterEach(() => {
@@ -143,63 +133,138 @@ describe("loadConfig codex paths", () => {
     );
   });
 
-  it("applies exact MCP enablement for standard, clear, and full modes", () => {
-    expect(CODEX_PROFILED_MCP_SERVER_IDS).toEqual([
+  it("applies MCP enablement only to discovered servers", () => {
+    const configuredServerIds = [
       "node_repl",
+      "lark",
       "feishu-mcp",
       "chrome-devtools",
-      "computer-use",
-      "openaiDeveloperDocs",
-      "framelink-figma",
-      "minimax-openapi",
-      "sequential-thinking",
-      "ShanLing",
-      "item",
-      "server-puppeteer",
-      "web",
+      "custom.server",
+    ];
+    const entries: CodexMcpConfigEntry[] = configuredServerIds.map((name) => ({
+      name,
+      transport: {
+        type: "stdio",
+        command: "fake-mcp",
+      },
+    }));
+
+    const standard = getCodexMcpThreadConfig("standard", entries).mcp_servers;
+    const clear = getCodexMcpThreadConfig("clear", entries).mcp_servers;
+    const full = getCodexMcpThreadConfig("full", entries).mcp_servers;
+
+    expect(
+      Object.fromEntries(
+        Object.entries(standard).map(([name, config]) => [
+          name,
+          config.enabled,
+        ]),
+      ),
+    ).toEqual({
+      node_repl: true,
+      lark: true,
+      "feishu-mcp": true,
+      "chrome-devtools": false,
+      "custom.server": false,
+    });
+    expect(
+      Object.values(clear).every((config) => config.enabled === false),
+    ).toBe(true);
+    expect(Object.values(full).every((config) => config.enabled === true)).toBe(
+      true,
+    );
+    expect(standard["chrome-devtools"]).toMatchObject({
+      command: "fake-mcp",
+      enabled: false,
+    });
+    expect(standard["chrome-devtools"]).not.toHaveProperty("args");
+    expect(standard.web).toBeUndefined();
+  });
+
+  it("extracts only MCP transports from effective Codex config", () => {
+    expect(
+      getCodexMcpConfigEntries({
+        mcp_servers: {
+          local: {
+            command: "npx",
+            args: ["-y", "local-mcp"],
+            env: { SECRET: "do-not-copy" },
+          },
+          remote: {
+            url: "https://mcp.example.test",
+            http_headers: { Authorization: "do-not-copy" },
+          },
+        },
+      }),
+    ).toEqual([
+      { name: "local", transport: { type: "stdio", command: "npx" } },
+      {
+        name: "remote",
+        transport: {
+          type: "streamable_http",
+          url: "https://mcp.example.test",
+        },
+      },
     ]);
-    expect(getMcpServerEnablement(CODEX_STANDARD_MCP_APP_SERVER_ARGS)).toEqual({
-      node_repl: true,
-      "feishu-mcp": true,
-      "chrome-devtools": false,
-      "computer-use": false,
-      openaiDeveloperDocs: false,
-      "framelink-figma": false,
-      "minimax-openapi": false,
-      "sequential-thinking": false,
-      ShanLing: false,
-      item: false,
-      "server-puppeteer": false,
-      web: false,
+  });
+
+  it("merges client MCP fields while keeping the selected profile authoritative", () => {
+    const resolved = resolveCodexMcpThreadProfile(
+      "standard",
+      {
+        mcp_servers: {
+          node_repl: { command: "/base/node-repl", args: ["--base"] },
+          "project.custom": { url: "https://base.example.test" },
+        },
+      },
+      {
+        mcp_servers: {
+          node_repl: { args: ["--client"], enabled: false },
+          client_only: {
+            command: "/client/mcp",
+            env: { CLIENT_VALUE: "kept" },
+            enabled: true,
+          },
+        },
+      },
+    );
+
+    expect(resolved.configuredServerIds).toEqual([
+      "client_only",
+      "node_repl",
+      "project.custom",
+    ]);
+    expect(resolved.threadConfig.mcp_servers).toEqual({
+      client_only: {
+        command: "/client/mcp",
+        env: { CLIENT_VALUE: "kept" },
+        enabled: false,
+      },
+      node_repl: {
+        command: "/base/node-repl",
+        args: ["--client"],
+        enabled: true,
+      },
+      "project.custom": {
+        url: "https://base.example.test",
+        enabled: false,
+      },
     });
-    expect(getMcpServerEnablement(CODEX_CLEAR_MCP_APP_SERVER_ARGS)).toEqual({
-      node_repl: false,
-      "feishu-mcp": false,
-      "chrome-devtools": false,
-      "computer-use": false,
-      openaiDeveloperDocs: false,
-      "framelink-figma": false,
-      "minimax-openapi": false,
-      "sequential-thinking": false,
-      ShanLing: false,
-      item: false,
-      "server-puppeteer": false,
-      web: false,
-    });
-    expect(getMcpServerEnablement(CODEX_FULL_MCP_APP_SERVER_ARGS)).toEqual({
-      node_repl: true,
-      "feishu-mcp": true,
-      "chrome-devtools": true,
-      "computer-use": true,
-      openaiDeveloperDocs: true,
-      "framelink-figma": true,
-      "minimax-openapi": true,
-      "sequential-thinking": true,
-      ShanLing: true,
-      item: true,
-      "server-puppeteer": true,
-      web: true,
-    });
+  });
+
+  it("removes stale MCP enablement from custom bridge args", () => {
+    expect(
+      getCodexMcpAppServerArgs("clear", [
+        "--disable",
+        "apps",
+        "-c",
+        "mcp_servers.missing.enabled=false",
+        "--config",
+        "mcp_servers.also-missing.enabled=true",
+        "-c",
+        'model_provider="openai"',
+      ]),
+    ).toEqual(["--disable", "apps", "-c", 'model_provider="openai"']);
   });
 
   it("parses profile-specific Codex bridge upstream args from env", async () => {

@@ -148,6 +148,8 @@ const INITIAL_RECONCILE_DELAYS_MS = [1000, 3000] as const;
  * fork creation, and lineage metadata persistence have all completed.
  */
 const DEFAULT_OPENCODE_FORK_SESSION_ID_TIMEOUT_MS = 60_000;
+/** Includes MCP discovery and app-server thread initialization. */
+const CODEX_SESSION_ID_TIMEOUT_MS = 30_000;
 
 export interface SupervisorOptions {
   /** Agent provider interface (preferred for new code) */
@@ -673,17 +675,21 @@ export class Supervisor {
     const isForkedResume =
       activeProvider.name === "opencode" &&
       Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
+    const requiresStrictSessionId =
+      isForkedResume || activeProvider.name === "codex";
 
     // Wait for the real session ID from the provider before registering
     if (!resumeSessionId || isForkedResume) {
       let resolvedSessionId: string;
       try {
-        resolvedSessionId = await process.waitForSessionId(
-          isForkedResume ? this.opencodeForkSessionIdTimeoutMs : 5000,
-          {
-            strict: isForkedResume,
-          },
-        );
+        const sessionIdTimeoutMs = isForkedResume
+          ? this.opencodeForkSessionIdTimeoutMs
+          : activeProvider.name === "codex"
+            ? CODEX_SESSION_ID_TIMEOUT_MS
+            : 5000;
+        resolvedSessionId = await process.waitForSessionId(sessionIdTimeoutMs, {
+          strict: requiresStrictSessionId,
+        });
       } catch (error) {
         await process.abort();
         throw error;

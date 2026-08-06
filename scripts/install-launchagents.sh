@@ -17,6 +17,7 @@ SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
 SERVER_ALLOWED_IMAGE_PATHS="${ALLOWED_IMAGE_PATHS:-/tmp,$HOME/Downloads}"
 BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
 BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${BRIDGE_PORT}}}"
+CODEX_CLI_PATH="${YEP_CODEX_PATH:-${CODEX_PATH:-}}"
 OPENCODE_BRIDGE_PORT="${YEP_OPENCODE_BRIDGE_PORT:-${OPENCODE_BRIDGE_PORT:-4520}}"
 OPENCODE_BRIDGE_URL="${YEP_OPENCODE_BRIDGE_CONTROL_URL:-${OPENCODE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${OPENCODE_BRIDGE_PORT}}}"
 OPENCODE_SERVER_HOST="${YEP_OPENCODE_HOST:-127.0.0.1}"
@@ -81,6 +82,7 @@ Environment overrides:
                                Optional external OpenCode server URL observed by the bridge
   YEP_LAUNCHD_NODE             Absolute node binary path
   YEP_LAUNCHD_PATH             PATH stored in the LaunchAgent environment
+  YEP_CODEX_PATH               Absolute Codex CLI path stored for server/bridge detection
   YEP_LAUNCHD_LOG_DIR          LaunchAgent stdout/stderr log directory
   YEP_FCM_SERVICE_ACCOUNT_FILE Firebase service account JSON path for Android native push
   YEP_FCM_SERVICE_ACCOUNT_JSON Raw Firebase service account JSON for Android native push
@@ -162,6 +164,11 @@ if [[ -z "$NODE_BIN" || ! -x "$NODE_BIN" ]]; then
   exit 1
 fi
 
+if [[ -n "$CODEX_CLI_PATH" && ( "$CODEX_CLI_PATH" != /* || ! -x "$CODEX_CLI_PATH" ) ]]; then
+  err "YEP_CODEX_PATH/CODEX_PATH must be an absolute executable path: $CODEX_CLI_PATH"
+  exit 1
+fi
+
 if [[ ! -f "$CLI_JS" ]]; then
   err "Expected bundled CLI at $CLI_JS, but it does not exist."
   err "Run scripts/deploy.sh --server-only once to build dist/npm-package, then retry."
@@ -189,12 +196,44 @@ OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
 chmod +x "$CLI_JS" 2>/dev/null || true
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
 
-LAUNCHD_PATH="${YEP_LAUNCHD_PATH:-${PATH:-/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin}}"
 NODE_DIR="$(dirname "$NODE_BIN")"
-case ":$LAUNCHD_PATH:" in
-  *":$NODE_DIR:"*) ;;
-  *) LAUNCHD_PATH="$NODE_DIR:$LAUNCHD_PATH" ;;
-esac
+
+normalize_launchd_path() {
+  local raw_path="$1"
+  local filter_transient="$2"
+  local normalized="$NODE_DIR"
+  local entry
+  local entries=()
+
+  IFS=':' read -r -a entries <<<"$raw_path"
+  for entry in "${entries[@]}"; do
+    [[ -z "$entry" || "$entry" == "$NODE_DIR" ]] && continue
+    if [[ "$filter_transient" == "true" ]]; then
+      case "$entry" in
+        "$HOME/.codex/tmp/"*|*/codex-path|/var/run/com.apple.security.cryptexd/codex.system/bootstrap/*|/pkg/env/global/bin)
+          continue
+          ;;
+      esac
+    fi
+    case ":$normalized:" in
+      *":$entry:"*) ;;
+      *) normalized="$normalized:$entry" ;;
+    esac
+  done
+
+  printf '%s' "$normalized"
+}
+
+DEFAULT_LAUNCHD_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if [[ -n "${YEP_LAUNCHD_PATH:-}" ]]; then
+  # An explicit override is authoritative; only deduplicate it and pin the
+  # selected Node runtime first so child `node`/`npx` calls match ProgramArguments.
+  LAUNCHD_PATH="$(normalize_launchd_path "$YEP_LAUNCHD_PATH" false)"
+else
+  # Deploys are often launched from Codex itself. Do not persist Codex's
+  # per-process wrapper directories into a long-lived LaunchAgent plist.
+  LAUNCHD_PATH="$(normalize_launchd_path "${PATH:-$DEFAULT_LAUNCHD_PATH}" true)"
+fi
 
 xml_escape() {
   local value="$1"
@@ -281,12 +320,18 @@ append_server_recovery_policy() {
 
 write_bridge_plist() {
   local plist="$LAUNCH_AGENTS_DIR/$BRIDGE_LABEL.plist"
-  write_header "$plist" "$BRIDGE_LABEL" "$LOG_DIR/codex-bridge-launchd.out.log" "$LOG_DIR/codex-bridge-launchd.err.log"
-  append_env "$plist" \
-    "NODE_ENV" "production" \
-    "PATH" "$LAUNCHD_PATH" \
-    "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT" \
+  local env_args=(
+    "NODE_ENV" "production"
+    "PATH" "$LAUNCHD_PATH"
+    "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT"
     "YEP_CODEX_BRIDGE_PORT" "$BRIDGE_PORT"
+  )
+  if [[ -n "$CODEX_CLI_PATH" ]]; then
+    env_args+=("YEP_CODEX_PATH" "$CODEX_CLI_PATH")
+  fi
+
+  write_header "$plist" "$BRIDGE_LABEL" "$LOG_DIR/codex-bridge-launchd.out.log" "$LOG_DIR/codex-bridge-launchd.err.log"
+  append_env "$plist" "${env_args[@]}"
   append_program_arguments "$plist" "$NODE_BIN" "$CLI_JS" "--codex-bridge-only"
   echo "$plist"
 }
@@ -338,6 +383,9 @@ write_server_plist() {
     "YEP_OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_PORT"
     "YEP_OPENCODE_SERVER_START_PORT" "$OPENCODE_SERVER_START_PORT"
   )
+  if [[ -n "$CODEX_CLI_PATH" ]]; then
+    env_args+=("YEP_CODEX_PATH" "$CODEX_CLI_PATH")
+  fi
   if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
     env_args+=("YEP_OPENCODE_BRIDGE_UPSTREAM_URL" "$OPENCODE_BRIDGE_UPSTREAM_URL")
   fi

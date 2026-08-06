@@ -14,6 +14,10 @@ import {
   terminateProcessGroup,
   writeJson,
 } from "../bridge-common/util.js";
+import {
+  getCodexMcpAppServerArgs,
+  resolveCodexMcpThreadProfile,
+} from "../codex/mcp-profile.js";
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
@@ -77,11 +81,15 @@ interface BridgeConnection {
   upstream: WebSocket | null;
   downstreamQueue: QueuedFrame[];
   pendingClientRequests: Map<string, ClientRequestRecord>;
+  pendingInternalRequests: Map<string, PendingInternalRequest>;
   pendingServerRequests: Map<string, PendingServerRequest>;
   resolvedServerRequestIds: Set<string>;
   threadIds: Set<string>;
   downstreamAttached: boolean;
   closed: boolean;
+  upstreamReady: Promise<void> | null;
+  clientFrameChain: Promise<void>;
+  nextInternalRequestId: number;
 }
 
 interface QueuedFrame {
@@ -92,6 +100,13 @@ interface QueuedFrame {
 interface ForwardedFrame {
   data: RawData;
   isBinary: boolean;
+}
+
+interface PendingInternalRequest {
+  method: string;
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
 }
 
 interface PendingServerRequest {
@@ -177,6 +192,18 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const MAX_MCP_STARTUP_EVENTS = 50;
 const MAX_RESOLVED_SERVER_REQUEST_IDS = 1_000;
 const CODEX_USAGE_CACHE_TTL_MS = 30_000;
+const MAX_UPSTREAM_STDERR_LENGTH = 64 * 1024;
+const INTERNAL_REQUEST_TIMEOUT_MS = 10_000;
+
+function isMcpThreadLifecycleMethod(
+  method: string | undefined,
+): method is "thread/start" | "thread/resume" | "thread/fork" {
+  return (
+    method === "thread/start" ||
+    method === "thread/resume" ||
+    method === "thread/fork"
+  );
+}
 
 interface CodexBridgeUpstreamState {
   process: ChildProcess | null;
@@ -647,11 +674,15 @@ export class CodexBridgeService implements CodexBridgeController {
       upstream: null,
       downstreamQueue: [],
       pendingClientRequests: new Map(),
+      pendingInternalRequests: new Map(),
       pendingServerRequests: new Map(),
       resolvedServerRequestIds: new Set(),
       threadIds: new Set(),
       downstreamAttached: true,
       closed: false,
+      upstreamReady: null,
+      clientFrameChain: Promise.resolve(),
+      nextInternalRequestId: 1,
     };
     this.connections.set(connection.id, connection);
     console.log(
@@ -659,17 +690,23 @@ export class CodexBridgeService implements CodexBridgeController {
     );
 
     downstream.on("message", (data, isBinary) => {
-      const forwardedFrame = this.observeClientData(connection, data, isBinary);
-      if (!forwardedFrame) return;
-      if (connection.upstream?.readyState === WebSocket.OPEN) {
-        sendFrame(
-          connection.upstream,
-          forwardedFrame.data,
-          forwardedFrame.isBinary,
-        );
-      } else {
-        connection.downstreamQueue.push(forwardedFrame);
-      }
+      connection.clientFrameChain = connection.clientFrameChain
+        .then(() => this.forwardClientFrame(connection, data, isBinary))
+        .catch((error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.lastError = message;
+          console.warn(
+            `[CodexBridge] Client frame failed connection=${connection.id}: ${message}`,
+          );
+          if (connection.downstream.readyState === WebSocket.OPEN) {
+            connection.downstream.close(
+              1011,
+              "Failed to apply Codex MCP profile",
+            );
+          }
+          this.closeConnection(connection, "client-frame-error");
+        });
     });
     downstream.on("close", () =>
       this.handleDownstreamClosed(connection, "client"),
@@ -679,7 +716,9 @@ export class CodexBridgeService implements CodexBridgeController {
       this.handleDownstreamClosed(connection, "client-error");
     });
 
-    this.connectUpstream(connection).catch((error: unknown) => {
+    const upstreamReady = this.connectUpstream(connection);
+    connection.upstreamReady = upstreamReady;
+    upstreamReady.catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.lastError = message;
       console.warn(`[CodexBridge] Upstream connection failed: ${message}`);
@@ -688,6 +727,33 @@ export class CodexBridgeService implements CodexBridgeController {
       }
       this.closeConnection(connection, "upstream-connect-error");
     });
+  }
+
+  private async forwardClientFrame(
+    connection: BridgeConnection,
+    data: RawData,
+    isBinary: boolean,
+  ): Promise<void> {
+    if (connection.closed) return;
+    const forwardedFrame = await this.observeClientData(
+      connection,
+      data,
+      isBinary,
+    );
+    if (!forwardedFrame || connection.closed) return;
+    this.sendClientFrameToUpstream(connection, forwardedFrame);
+  }
+
+  private sendClientFrameToUpstream(
+    connection: BridgeConnection,
+    frame: ForwardedFrame,
+  ): void {
+    if (connection.closed) return;
+    if (connection.upstream?.readyState === WebSocket.OPEN) {
+      sendFrame(connection.upstream, frame.data, frame.isBinary);
+    } else {
+      connection.downstreamQueue.push(frame);
+    }
   }
 
   private async connectUpstream(connection: BridgeConnection): Promise<void> {
@@ -764,6 +830,7 @@ export class CodexBridgeService implements CodexBridgeController {
     if (
       connection.downstreamQueue.length > 0 ||
       connection.pendingClientRequests.size > 0 ||
+      connection.pendingInternalRequests.size > 0 ||
       connection.pendingServerRequests.size > 0
     ) {
       return true;
@@ -794,6 +861,15 @@ export class CodexBridgeService implements CodexBridgeController {
     connection.closed = true;
 
     this.connections.delete(connection.id);
+    for (const pending of connection.pendingInternalRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(
+        new Error(
+          `Codex bridge connection closed during ${pending.method}: ${reason}`,
+        ),
+      );
+    }
+    connection.pendingInternalRequests.clear();
     for (const pending of connection.pendingServerRequests.values()) {
       this.resolvePendingRequest(pending, reason);
     }
@@ -829,16 +905,40 @@ export class CodexBridgeService implements CodexBridgeController {
     this.schedulePersist();
   }
 
-  private observeClientData(
+  private async observeClientData(
     connection: BridgeConnection,
     data: RawData,
     isBinary: boolean,
-  ): ForwardedFrame | null {
+  ): Promise<ForwardedFrame | null> {
     const envelope = parseJsonRpcEnvelope(data);
     if (!envelope) return { data, isBinary };
 
     const messagesToForward: JsonRpcMessage[] = [];
-    for (const message of envelope.messages) {
+    let modified = false;
+    let flushedPrefix = false;
+    for (const originalMessage of envelope.messages) {
+      if (
+        isMcpThreadLifecycleMethod(originalMessage.method) &&
+        messagesToForward.length > 0
+      ) {
+        // config/read must run after earlier protocol messages such as
+        // `initialized`. Flush a batch prefix first and rely on WebSocket
+        // ordering before issuing the internal request.
+        const prefixFrame = serializeJsonRpcEnvelope(
+          envelope.isBatch,
+          messagesToForward,
+        );
+        if (prefixFrame) {
+          this.sendClientFrameToUpstream(connection, prefixFrame);
+        }
+        messagesToForward.length = 0;
+        flushedPrefix = true;
+      }
+      const message = await this.applyMcpProfileToClientMessage(
+        connection,
+        originalMessage,
+      );
+      if (message !== originalMessage) modified = true;
       if (message.method && message.id !== undefined) {
         connection.pendingClientRequests.set(idKey(message.id), {
           method: message.method,
@@ -866,10 +966,138 @@ export class CodexBridgeService implements CodexBridgeController {
       messagesToForward.push(message);
     }
 
-    if (messagesToForward.length === envelope.messages.length) {
+    if (messagesToForward.length === 0) return null;
+    if (
+      !modified &&
+      !flushedPrefix &&
+      messagesToForward.length === envelope.messages.length
+    ) {
       return { data, isBinary };
     }
     return serializeJsonRpcEnvelope(envelope.isBatch, messagesToForward);
+  }
+
+  private async applyMcpProfileToClientMessage(
+    connection: BridgeConnection,
+    message: JsonRpcMessage,
+  ): Promise<JsonRpcMessage> {
+    if (!isMcpThreadLifecycleMethod(message.method)) {
+      return message;
+    }
+
+    const params = asRecord(message.params) ?? {};
+    const existingConfig = asRecord(params.config) ?? {};
+    const cwd = await this.resolveMcpConfigCwd(
+      connection,
+      message.method,
+      params,
+    );
+    const configReadResult = asRecord(
+      await this.requestUpstream(connection, "config/read", {
+        includeLayers: false,
+        ...(cwd ? { cwd } : {}),
+      }),
+    );
+    if (!configReadResult || !("config" in configReadResult)) {
+      throw new Error("Codex config/read returned no effective config");
+    }
+    const mcpMode =
+      connection.profile === "light" ? "standard" : connection.profile;
+    const mcpProfile = resolveCodexMcpThreadProfile(
+      mcpMode,
+      configReadResult.config,
+      existingConfig,
+    );
+    return {
+      ...message,
+      params: {
+        ...params,
+        config: {
+          ...existingConfig,
+          mcp_servers: mcpProfile.threadConfig.mcp_servers,
+        },
+      },
+    };
+  }
+
+  private async resolveMcpConfigCwd(
+    connection: BridgeConnection,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<string | undefined> {
+    const explicitCwd = getString(params.cwd);
+    if (explicitCwd) return explicitCwd;
+
+    const threadId = getString(params.threadId) ?? getString(params.thread_id);
+    if (!threadId) return undefined;
+    const known = this.sessions.get(threadId);
+    if (known?.projectPathKnown) return known.projectPath;
+    if (method === "thread/start") return undefined;
+
+    // Resume/fork requests from some Codex clients omit cwd. Resolve it from
+    // persisted thread metadata so project-level MCP config is still applied.
+    try {
+      const threadRead = asRecord(
+        await this.requestUpstream(connection, "thread/read", {
+          threadId,
+          includeTurns: false,
+        }),
+      );
+      return getString(asRecord(threadRead?.thread)?.cwd);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.debug(
+        `[CodexBridge] Could not resolve MCP cwd for ${method} thread=${threadId}: ${message}`,
+      );
+      return undefined;
+    }
+  }
+
+  private async requestUpstream(
+    connection: BridgeConnection,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    if (connection.upstreamReady) await connection.upstreamReady;
+    if (connection.closed) {
+      throw new Error("Codex bridge connection closed");
+    }
+    const upstream = connection.upstream;
+    if (!upstream || upstream.readyState !== WebSocket.OPEN) {
+      throw new Error("Codex app-server connection is not ready");
+    }
+
+    const id = `yep-internal:${connection.id}:${connection.nextInternalRequestId++}`;
+    return await new Promise<unknown>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        connection.pendingInternalRequests.delete(idKey(id));
+        reject(
+          new Error(
+            `Timed out waiting for Codex app-server ${method} after ${INTERNAL_REQUEST_TIMEOUT_MS}ms`,
+          ),
+        );
+      }, INTERNAL_REQUEST_TIMEOUT_MS);
+      connection.pendingInternalRequests.set(idKey(id), {
+        method,
+        resolve,
+        reject,
+        timeout,
+      });
+      try {
+        upstream.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method,
+            params,
+          }),
+        );
+      } catch (error) {
+        clearTimeout(timeout);
+        connection.pendingInternalRequests.delete(idKey(id));
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
   private observeServerData(
@@ -883,7 +1111,32 @@ export class CodexBridgeService implements CodexBridgeController {
       return { data, isBinary };
     }
 
+    const messagesToForward: JsonRpcMessage[] = [];
+    let modified = false;
     for (const message of messages) {
+      if (!message.method && message.id !== undefined) {
+        const key = idKey(message.id);
+        const internal = connection.pendingInternalRequests.get(key);
+        if (internal) {
+          modified = true;
+          clearTimeout(internal.timeout);
+          connection.pendingInternalRequests.delete(key);
+          const error = asRecord(message.error);
+          if (error) {
+            internal.reject(
+              new Error(
+                getString(error.message) ??
+                  `Codex app-server ${internal.method} failed`,
+              ),
+            );
+          } else {
+            internal.resolve(message.result);
+          }
+          continue;
+        }
+      }
+
+      messagesToForward.push(message);
       if (message.method && message.id !== undefined) {
         this.recordServerRequest(connection, message);
         continue;
@@ -906,7 +1159,9 @@ export class CodexBridgeService implements CodexBridgeController {
         }
       }
     }
-    return { data, isBinary };
+    if (!modified) return { data, isBinary };
+    if (messagesToForward.length === 0) return null;
+    return serializeJsonRpcEnvelope(envelope.isBatch, messagesToForward);
   }
 
   private handleClientRequestResponse(
@@ -1986,10 +2241,14 @@ export class CodexBridgeService implements CodexBridgeController {
     }
 
     const startPort = this.upstreamStartPort ?? this.port + 1;
+    const state = this.getUpstreamState(profile);
+    const mcpMode = profile === "light" ? "standard" : profile;
+    const args = getCodexMcpAppServerArgs(
+      mcpMode,
+      this.upstreamArgsByProfile[profile],
+    );
     const port = await this.findAvailableManagedPort(startPort);
     const url = `ws://127.0.0.1:${port}`;
-    const state = this.getUpstreamState(profile);
-    const args = this.upstreamArgsByProfile[profile];
     const spawnArgs = ["app-server", ...args, "--listen", url];
     console.log(
       `[CodexBridge] Starting managed Codex app-server profile=${profile} path=${codexPath} args=${JSON.stringify(spawnArgs)}`,
@@ -2001,6 +2260,7 @@ export class CodexBridgeService implements CodexBridgeController {
     });
     state.process = child;
     state.url = url;
+    let upstreamStderr = "";
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8").trim();
@@ -2008,7 +2268,12 @@ export class CodexBridgeService implements CodexBridgeController {
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8").trim();
-      if (text) console.debug(`[CodexBridge upstream:${profile}] ${text}`);
+      if (text) {
+        upstreamStderr = `${upstreamStderr}${text}\n`.slice(
+          -MAX_UPSTREAM_STDERR_LENGTH,
+        );
+        console.debug(`[CodexBridge upstream:${profile}] ${text}`);
+      }
     });
     child.once("exit", (code, signal) => {
       this.reservedUpstreamPorts.delete(port);
@@ -2034,7 +2299,12 @@ export class CodexBridgeService implements CodexBridgeController {
           process.kill(process.platform !== "win32" ? -child.pid : child.pid);
         } catch {}
       }
-      throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      const stderr = upstreamStderr.trim();
+      throw new Error(
+        `${message}${stderr ? `\nCodex app-server stderr:\n${stderr}` : ""}`,
+        { cause: error },
+      );
     }
 
     console.log(
@@ -2068,7 +2338,11 @@ export class CodexBridgeService implements CodexBridgeController {
   ): CodexBridgeUpstreamState {
     let state = this.upstreams.get(profile);
     if (!state) {
-      state = { process: null, url: null, startPromise: null };
+      state = {
+        process: null,
+        url: null,
+        startPromise: null,
+      };
       this.upstreams.set(profile, state);
     }
     return state;

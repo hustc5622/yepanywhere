@@ -30,6 +30,27 @@ function createOpenCodeTestProvider(
   };
 }
 
+function createCodexTestProvider(
+  startSession: AgentProvider["startSession"],
+): AgentProvider {
+  return {
+    name: "codex",
+    displayName: "Codex",
+    supportsPermissionMode: true,
+    supportsThinkingToggle: true,
+    supportsSlashCommands: false,
+    isInstalled: async () => true,
+    isAuthenticated: async () => true,
+    getAuthStatus: async () => ({
+      installed: true,
+      authenticated: true,
+      enabled: true,
+    }),
+    startSession,
+    getAvailableModels: async () => [],
+  };
+}
+
 describe("Supervisor", () => {
   let mockSdk: MockClaudeSDK;
   let supervisor: Supervisor;
@@ -81,6 +102,36 @@ describe("Supervisor", () => {
 
       // The message was queued
       expect(process.queueDepth).toBeGreaterThanOrEqual(0);
+    });
+
+    it("rejects a Codex initialization error without registering a temporary session", async () => {
+      let aborted = false;
+      const providerSupervisor = new Supervisor({
+        provider: createCodexTestProvider(async () => {
+          async function* iterator() {
+            yield {
+              type: "error",
+              error:
+                "Codex app-server exited (code=1)\nCodex app-server stderr:\ninvalid transport in `mcp_servers.node_repl`",
+            };
+          }
+
+          return {
+            iterator: iterator(),
+            queue: new MessageQueue(),
+            abort: () => {
+              aborted = true;
+            },
+          };
+        }),
+        idleTimeoutMs: 100,
+      });
+
+      await expect(
+        providerSupervisor.startSession("/tmp/test", { text: "hi" }),
+      ).rejects.toThrow("invalid transport in `mcp_servers.node_repl`");
+      expect(aborted).toBe(true);
+      expect(providerSupervisor.getAllProcesses()).toHaveLength(0);
     });
   });
 

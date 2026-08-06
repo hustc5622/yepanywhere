@@ -1,5 +1,5 @@
 import { exec, execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import * as os from "node:os";
 import { promisify } from "node:util";
 
@@ -33,8 +33,9 @@ export interface CodexCliInfo {
  * Detect the Codex CLI installation.
  *
  * Checks:
- * 1. PATH via `which codex`
- * 2. Common installation locations (cargo, local bin, etc.)
+ * 1. Explicit YEP_CODEX_PATH/CODEX_PATH overrides
+ * 2. PATH via `which codex`
+ * 3. Common installation locations (NVM, cargo, local bin, etc.)
  *
  * @returns Information about the CLI installation
  */
@@ -57,8 +58,7 @@ export async function detectCodexCli(): Promise<CodexCliInfo> {
  * Common Codex CLI installation paths (checked after PATH lookup).
  * Includes the Codex desktop app's sandbox-bin location.
  */
-export function getCodexCommonPaths(): string[] {
-  const home = os.homedir();
+export function getCodexCommonPaths(home = os.homedir()): string[] {
   const ext = isWindows ? ".exe" : "";
   const sep = isWindows ? "\\" : "/";
   return isWindows
@@ -71,17 +71,40 @@ export function getCodexCommonPaths(): string[] {
     : [
         `${home}/.codex/.sandbox-bin/codex`,
         `${home}/.local/bin/codex`,
+        ...getNvmCodexPaths(home),
         "/usr/local/bin/codex",
         `${home}/.cargo/bin/codex`,
         `${home}/.codex/bin/codex`,
       ];
 }
 
+function getNvmCodexPaths(home: string): string[] {
+  const versionsRoot = `${home}/.nvm/versions/node`;
+  try {
+    return readdirSync(versionsRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((left, right) =>
+        right.localeCompare(left, undefined, { numeric: true }),
+      )
+      .map((version) => `${versionsRoot}/${version}/bin/codex`);
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Find the Codex CLI path by checking PATH first, then common locations.
+ * Find the Codex CLI path from an explicit override, PATH, or common locations.
  * Returns the path if found, null otherwise.
  */
 export async function findCodexCliPath(): Promise<string | null> {
+  for (const explicitPath of [
+    process.env.YEP_CODEX_PATH,
+    process.env.CODEX_PATH,
+  ]) {
+    if (explicitPath && existsSync(explicitPath)) return explicitPath;
+  }
+
   try {
     const { stdout } = await execAsync(whichCommand("codex"), {
       encoding: "utf-8",

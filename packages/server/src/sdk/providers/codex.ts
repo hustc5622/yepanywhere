@@ -27,7 +27,10 @@ import {
   normalizeCodexImageGenerationRecord,
   summarizeCodexImageGenerationResult,
 } from "../../codex/image-generation.js";
-import { getCodexMcpAppServerArgs } from "../../codex/mcp-profile.js";
+import {
+  getCodexMcpAppServerArgs,
+  resolveCodexMcpThreadProfile,
+} from "../../codex/mcp-profile.js";
 import {
   type CodexToolCallContext,
   canonicalizeCodexToolName,
@@ -144,6 +147,7 @@ const MODEL_LIST_TIMEOUT_MS = 15000;
 const APP_SERVER_INIT_REQUEST_ID = 1;
 const APP_SERVER_MODEL_LIST_REQUEST_ID = 2;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
+const MAX_APP_SERVER_STDERR_LENGTH = 64 * 1024;
 /** Max characters of live command output kept for the streaming preview. */
 const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL_PROVIDER = DEFAULT_CODEX_MODEL_SOURCE;
@@ -507,6 +511,8 @@ type AppServerRequestHandler = (
 class CodexAppServerClient {
   private process: ChildProcess | null = null;
   private stdoutBuffer = "";
+  private stderrBuffer = "";
+  private closeError: Error | null = null;
 
   /** OS PID of the spawned app-server child process */
   get pid(): number | undefined {
@@ -573,6 +579,9 @@ class CodexAppServerClient {
     child.stderr?.on("data", (chunk: Buffer) => {
       const stderr = chunk.toString("utf-8").trim();
       if (stderr) {
+        this.stderrBuffer = `${this.stderrBuffer}${stderr}\n`.slice(
+          -MAX_APP_SERVER_STDERR_LENGTH,
+        );
         log.debug({ stderr }, "codex app-server stderr");
       }
     });
@@ -596,7 +605,7 @@ class CodexAppServerClient {
       };
       const onError = (error: Error) => {
         child.off("spawn", onSpawn);
-        reject(error);
+        reject(this.closeError ?? error);
       };
       child.once("spawn", onSpawn);
       child.once("error", onError);
@@ -688,7 +697,7 @@ class CodexAppServerClient {
 
   async request<T>(method: string, params?: unknown): Promise<T> {
     if (this.closed) {
-      throw new Error("Codex app-server client is closed");
+      throw this.closeError ?? new Error("Codex app-server client is closed");
     }
 
     const id = this.nextRequestId++;
@@ -727,6 +736,7 @@ class CodexAppServerClient {
     this.closed = true;
 
     const closeError = new Error("Codex app-server client closed");
+    this.closeError = closeError;
     for (const pending of this.pendingRequests.values()) {
       pending.reject(closeError);
     }
@@ -741,9 +751,17 @@ class CodexAppServerClient {
   private handleProcessClose(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    const capturedStderr = this.stderrBuffer.trim();
+    const processError = capturedStderr
+      ? new Error(
+          `${error.message}\nCodex app-server stderr:\n${capturedStderr}`,
+          { cause: error },
+        )
+      : error;
+    this.closeError = processError;
 
     for (const pending of this.pendingRequests.values()) {
-      pending.reject(error);
+      pending.reject(processError);
     }
     this.pendingRequests.clear();
 
@@ -751,11 +769,11 @@ class CodexAppServerClient {
     this.notifications.push({
       method: "error",
       params: {
-        error: { message: error.message },
+        error: { message: processError.message },
         willRetry: false,
       },
     });
-    this.notifications.close(error);
+    this.notifications.close(processError);
     this.process = null;
   }
 
@@ -950,6 +968,7 @@ export class CodexProvider implements AgentProvider {
   ): Promise<AppServerModel[]> {
     const codexCommand = await this.resolveCodexCommand();
     const sourceArgs = getCodexModelSourceRegistry().buildAppServerArgs(source);
+    const codexEnv = this.getCodexEnv();
     return new Promise((resolve, reject) => {
       const child = spawn(
         codexCommand,
@@ -963,7 +982,7 @@ export class CodexProvider implements AgentProvider {
         {
           detached: process.platform !== "win32",
           stdio: ["pipe", "pipe", "pipe"],
-          env: this.getCodexEnv(),
+          env: codexEnv,
           shell: process.platform === "win32",
         },
       );
@@ -1339,16 +1358,8 @@ export class CodexProvider implements AgentProvider {
     const modelSource = registry.require(
       options.codexModelProvider ?? DEFAULT_CODEX_MODEL_PROVIDER,
     );
-    const appServer = new CodexAppServerClient(
-      codexCommand,
-      options.cwd,
-      this.getCodexEnv(),
-      [
-        ...registry.buildAppServerArgs(modelSource),
-        ...getCodexMcpAppServerArgs(options.codexMcpMode),
-      ],
-    );
-    setActiveClient(appServer);
+    const codexEnv = this.getCodexEnv();
+    let appServer: CodexAppServerClient | undefined;
 
     let sessionId = options.resumeSessionId ?? "";
     const usageByTurnId = new Map<string, TokenUsageSnapshot>();
@@ -1365,11 +1376,21 @@ export class CodexProvider implements AgentProvider {
       return message;
     };
 
-    appServer.setServerRequestHandler(async (request) => {
-      return await this.handleServerRequestApproval(request, options, signal);
-    });
-
     try {
+      appServer = new CodexAppServerClient(
+        codexCommand,
+        options.cwd,
+        codexEnv,
+        [
+          ...registry.buildAppServerArgs(modelSource),
+          ...getCodexMcpAppServerArgs(options.codexMcpMode),
+        ],
+      );
+      setActiveClient(appServer);
+      appServer.setServerRequestHandler(async (request) => {
+        return await this.handleServerRequestApproval(request, options, signal);
+      });
+
       await appServer.connect();
 
       await appServer.request<{ userAgent: string }>("initialize", {
@@ -1380,6 +1401,21 @@ export class CodexProvider implements AgentProvider {
         capabilities: null,
       });
       appServer.notify("initialized");
+
+      // Read the same app-server's effective config for this cwd. This is both
+      // substantially faster than spawning `codex mcp list --json` and keeps
+      // project-level .codex/config.toml layers aligned with the thread.
+      const configRead = await appServer.request<{ config?: unknown }>(
+        "config/read",
+        {
+          includeLayers: false,
+          cwd: options.cwd,
+        },
+      );
+      const mcpProfile = resolveCodexMcpThreadProfile(
+        options.codexMcpMode,
+        configRead.config,
+      );
 
       const policy = this.mapPermissionModeToThreadPolicy(
         options.permissionMode,
@@ -1403,6 +1439,7 @@ export class CodexProvider implements AgentProvider {
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
+        config: mcpProfile.threadConfig,
       };
       const threadStartParams: ThreadStartParams = {
         model: requestedModel,
@@ -1410,6 +1447,7 @@ export class CodexProvider implements AgentProvider {
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
+        config: mcpProfile.threadConfig,
       };
       const threadResult: ThreadResumeResponse | ThreadStartResponse =
         options.resumeSessionId
@@ -1628,7 +1666,14 @@ export class CodexProvider implements AgentProvider {
         } as SDKMessage);
       }
     } catch (error) {
-      log.error({ error }, "Error in codex app-server session");
+      log.error(
+        {
+          err: error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          errorStack: error instanceof Error ? error.stack : undefined,
+        },
+        "Error in codex app-server session",
+      );
       if (!signal.aborted) {
         yield logMessage({
           type: "error",
@@ -1638,7 +1683,7 @@ export class CodexProvider implements AgentProvider {
       }
     } finally {
       runtimeState.activeTurnId = null;
-      appServer.close();
+      appServer?.close();
     }
 
     yield logMessage({
