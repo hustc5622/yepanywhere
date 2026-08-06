@@ -20,6 +20,7 @@ describe("GET /version", () => {
   afterEach(() => {
     global.fetch = originalFetch;
     vi.unstubAllEnvs();
+    vi.doUnmock("node:child_process");
   });
 
   function mockFetch(
@@ -29,6 +30,30 @@ describe("GET /version", () => {
     ) => Response | Promise<Response>,
   ) {
     global.fetch = vi.fn(handler) as unknown as typeof fetch;
+  }
+
+  /**
+   * Pin `git describe --tags --always` for the next dynamic import. Only `exec`
+   * is replaced; build-info.ts reaches for `execFile` and must keep working.
+   */
+  function stubGitDescribe(describe: string) {
+    vi.doMock("node:child_process", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:child_process")>(
+          "node:child_process",
+        );
+      return {
+        ...actual,
+        exec: (
+          _command: string,
+          _options: unknown,
+          callback: (
+            error: Error | null,
+            result: { stdout: string; stderr: string },
+          ) => void,
+        ) => callback(null, { stdout: `${describe}\n`, stderr: "" }),
+      };
+    });
   }
 
   it("parses version from update server 200 response", async () => {
@@ -304,14 +329,26 @@ describe("GET /version", () => {
 
     it("reports an update on the upstream channel", async () => {
       vi.stubEnv("YEP_RELEASE_CHANNEL", "upstream");
-      mockFetch(() => new Response(JSON.stringify({ version: "99.0.0" })));
+      // The workspace package.json carries the 0.0.1 placeholder, so the route
+      // derives its version from `git describe --tags --always`. A shallow CI
+      // checkout has no tags, leaving a bare commit SHA that isNewerSemver
+      // cannot parse. Pin it so this asserts the channel gate rather than the
+      // checkout depth of whoever runs the suite.
+      stubGitDescribe("v1.0.0");
+      let fetchCount = 0;
+      mockFetch(() => {
+        fetchCount++;
+        return new Response(JSON.stringify({ version: "99.0.0" }));
+      });
 
       const { createVersionRoutes } = await importVersion();
       const routes = createVersionRoutes();
       const res = await routes.request("/");
       const json = await res.json();
 
+      expect(fetchCount).toBe(1);
       expect(json.build.releaseChannel).toBe("upstream");
+      expect(json.current).toBe("1.0.0");
       expect(json.latest).toBe("99.0.0");
       expect(json.updateAvailable).toBe(true);
     });
