@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"log"
 
-	"github.com/kzahel/yepanywhere/device-bridge/internal/device"
+	"github.com/hustc5622/yepanywhere/device-bridge/internal/device"
 )
 
 // InputHandler translates browser touch/key events to device control calls.

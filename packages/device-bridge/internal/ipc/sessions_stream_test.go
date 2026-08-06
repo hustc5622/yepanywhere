@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kzahel/yepanywhere/device-bridge/internal/device"
+	"github.com/hustc5622/yepanywhere/device-bridge/internal/device"
 )
 
 type streamTestDevice struct {

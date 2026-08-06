@@ -6146,8 +6146,8 @@ const file_emulator_controller_proto_rawDesc = "" +
 	"\x0egetDisplayMode\x12\x16.google.protobuf.Empty\x1a&.android.emulation.control.DisplayMode\"\x00\x12R\n" +
 	"\x0esetDisplayMode\x12&.android.emulation.control.DisplayMode\x1a\x16.google.protobuf.Empty\"\x00\x12N\n" +
 	"\fsetXrOptions\x12$.android.emulation.control.XrOptions\x1a\x16.google.protobuf.Empty\"\x00\x12N\n" +
-	"\fgetXrOptions\x12\x16.google.protobuf.Empty\x1a$.android.emulation.control.XrOptions\"\x00Bd\n" +
-	"\x1ccom.android.emulator.controlP\x01Z<github.com/kzahel/yepanywhere/device-bridge/proto/emulatorpb\xa2\x02\x03AECb\x06proto3"
+	"\fgetXrOptions\x12\x16.google.protobuf.Empty\x1a$.android.emulation.control.XrOptions\"\x00Bg\n" +
+	"\x1ccom.android.emulator.controlP\x01Z?github.com/hustc5622/yepanywhere/device-bridge/proto/emulatorpb\xa2\x02\x03AECb\x06proto3"
 
 var (
 	file_emulator_controller_proto_rawDescOnce sync.Once

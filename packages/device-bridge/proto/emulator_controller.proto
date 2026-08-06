@@ -26,7 +26,7 @@ syntax = "proto3";
 option java_multiple_files = true;
 option java_package = "com.android.emulator.control";
 option objc_class_prefix = "AEC";
-option go_package = "github.com/kzahel/yepanywhere/device-bridge/proto/emulatorpb";
+option go_package = "github.com/hustc5622/yepanywhere/device-bridge/proto/emulatorpb";
 
 package android.emulation.control;
 import "google/protobuf/empty.proto";

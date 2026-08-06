@@ -1,6 +1,6 @@
 package emulator
 
-import "github.com/kzahel/yepanywhere/device-bridge/internal/device"
+import "github.com/hustc5622/yepanywhere/device-bridge/internal/device"
 
 // Frame aliases the shared device frame type.
 type Frame = device.Frame
