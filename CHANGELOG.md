@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-06
+
 > Backfilled summary covering the ~278 commits between `v0.4.28` and the start of
 > the independent fork release line. The `0.4.29` recorded in `package.json`
 > during this period was an intermediate working version that was never formally
@@ -28,9 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browsable project path picker and project-filtered session shortcuts
 - Sidebar session bulk actions, project activity, and git status summaries
 - Codex account usage display on the new-session form
+- Independent fork release line: builds carry a release channel and no longer offer upstream releases as updates
+- Mobile shell preset for the home node
 
 ### Changed
 - Approvals are driven through native ACP session modes, with provider-specific permission modes surfaced in the new session form
+- The selected permission mode is remembered per session, survives provider restarts, and can be changed while a session is idle
 - Session state machine and rewind accuracy realigned with upstream part coverage
 - Transcript rendering reworked: live exec output, MCP cells, warnings, markdown details blocks, web tool outputs, and the AskUserQuestion UI
 - Change signals are pushed rather than polled, removing polling latency
@@ -42,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session titles are retried, backfilled, and preserved across boilerplate events
 - OpenCode provider startup hardened; spurious change events no longer emitted
 - Codex MCP profile compatibility across different launch environments
+- Codex sessions no longer fail to start when the local MCP configuration does not match Yep's expected server list
+- Anthropic-compatible gateways no longer reject tool calls over schemas Bedrock cannot accept
 - Codex model source and live messages preserved across resume and snapshot refresh
 - Server LaunchAgent restarts after crashes
 
