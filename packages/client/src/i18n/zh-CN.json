@@ -271,7 +271,7 @@
   "newSessionClaudePermissionTitle": "Claude 权限模式",
   "newSessionClaudePermissionDescription": "通过 Claude Code 生效；自动模式会由 Claude 判断权限请求。",
   "newSessionCodexPermissionTitle": "Codex 访问权限",
-  "newSessionCodexPermissionDescription": "与上方 MCP 配置相互独立；Yep 当前默认使用 cf 兼容策略。",
+  "newSessionCodexPermissionDescription": "权限策略与 MCP 配置相互独立；Yep 默认使用 cf 兼容策略。",
   "newSessionOpenCodePermissionTitle": "OpenCode 工具审批",
   "newSessionOpenCodePermissionDescription": "作为当前会话的工具规则生效；OpenCode 不提供操作系统级 sandbox。",
   "newSessionGeminiPermissionTitle": "Gemini 工具审批",

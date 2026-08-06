@@ -4371,7 +4371,7 @@ a.sidebar-nav-item {
   background: var(--bg-surface);
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   width: 100%;
-  max-width: 500px;
+  max-width: 560px;
   max-height: 80vh;
   overflow-y: auto;
   animation: slideUp 0.2s ease-out;
@@ -4390,9 +4390,10 @@ a.sidebar-nav-item {
 
 .mode-selector-header {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-3) var(--space-4);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -4402,23 +4403,31 @@ a.sidebar-nav-item {
   color: var(--text-primary);
 }
 
+.mode-selector-subtitle {
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 .mode-selector-options {
   display: flex;
   flex-direction: column;
-  padding: var(--space-2) 0;
+  gap: var(--space-2);
+  padding: var(--space-3);
 }
 
 .mode-selector-option {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3);
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   cursor: pointer;
   text-align: left;
   width: 100%;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .mode-selector-option:hover {
@@ -4426,12 +4435,26 @@ a.sidebar-nav-item {
 }
 
 .mode-selector-option.selected {
-  background: rgba(217, 119, 87, 0.08);
+  border-color: color-mix(in srgb, var(--app-yep-green) 55%, transparent);
+  background: color-mix(in srgb, var(--app-yep-green) 9%, transparent);
+}
+
+.mode-selector-option > .mode-dot {
+  margin-top: 0.35rem;
+}
+
+.mode-selector-option-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .mode-selector-label {
-  flex: 1;
   font-size: var(--font-size-base);
+  font-weight: 500;
+  line-height: 1.35;
   color: var(--text-primary);
 }
 
@@ -4439,19 +4462,20 @@ a.sidebar-nav-item {
   color: var(--app-yep-green);
   display: flex;
   align-items: center;
+  align-self: center;
+  flex-shrink: 0;
 }
 
 .mode-selector-description {
   font-size: var(--font-size-xs);
+  line-height: 1.45;
   color: var(--text-muted);
-  margin-left: auto;
-  margin-right: var(--space-2);
 }
 
 .mode-selector-divider {
   height: 1px;
   background: var(--border-subtle);
-  margin: var(--space-2) var(--space-4);
+  margin: var(--space-1) 0;
 }
 
 /* Container for relative positioning of desktop dropdown */
@@ -4470,20 +4494,20 @@ a.sidebar-nav-item {
     display: block;
     position: absolute;
     bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 0;
     margin-bottom: var(--space-2);
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    min-width: 220px;
+    width: min(380px, calc(100vw - 32px));
+    overflow: hidden;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     z-index: 100;
     animation: dropdownFadeIn 0.15s ease-out;
   }
 
   .mode-selector-dropdown .mode-selector-options {
-    padding: var(--space-1) 0;
+    padding: var(--space-2);
   }
 
   .mode-selector-dropdown .mode-selector-option {
@@ -4491,17 +4515,17 @@ a.sidebar-nav-item {
   }
 
   .mode-selector-dropdown .mode-selector-divider {
-    margin: var(--space-1) var(--space-3);
+    margin: var(--space-1) 0;
   }
 
   @keyframes dropdownFadeIn {
     from {
       opacity: 0;
-      transform: translateX(-50%) translateY(4px);
+      transform: translateY(4px);
     }
     to {
       opacity: 1;
-      transform: translateX(-50%) translateY(0);
+      transform: translateY(0);
     }
   }
 

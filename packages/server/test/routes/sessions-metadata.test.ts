@@ -188,6 +188,61 @@ function createSummary(): SessionSummary {
 }
 
 describe("Sessions metadata route", () => {
+  it("persists live and idle permission-mode changes", async () => {
+    const testDir = join(tmpdir(), `session-mode-route-${randomUUID()}`);
+    const metadata = new SessionMetadataService({ dataDir: testDir });
+    const setPermissionMode = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        permissionMode: "plan",
+        modeVersion: 4,
+      })
+      .mockResolvedValueOnce({ ok: false });
+
+    try {
+      await metadata.initialize();
+      const routes = createSessionsRoutes({
+        supervisor: {} as SessionsDeps["supervisor"],
+        runtimeController: {
+          setPermissionMode,
+        } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+        scanner: {} as SessionsDeps["scanner"],
+        readerFactory: vi.fn(),
+        sessionMetadataService: metadata,
+      });
+
+      const liveResponse = await routes.request("/sessions/sess-1/mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "plan" }),
+      });
+      expect(liveResponse.status).toBe(200);
+      await expect(liveResponse.json()).resolves.toEqual({
+        permissionMode: "plan",
+        modeVersion: 4,
+      });
+      expect(metadata.getPermissionMode("sess-1")).toBe("plan");
+
+      const idleResponse = await routes.request("/sessions/sess-1/mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "bypassPermissions" }),
+      });
+      expect(idleResponse.status).toBe(200);
+      await expect(idleResponse.json()).resolves.toEqual({
+        permissionMode: "bypassPermissions",
+        modeVersion: 0,
+      });
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+      expect(reloaded.getPermissionMode("sess-1")).toBe("bypassPermissions");
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("loads the durable session when a URL still contains its temporary ID", async () => {
     const testDir = join(tmpdir(), `session-alias-route-${randomUUID()}`);
     const project = createProject();
@@ -213,6 +268,7 @@ describe("Sessions metadata route", () => {
     try {
       await metadata.initialize();
       await metadata.remapSessionId("temporary-id", "durable-id");
+      await metadata.setPermissionMode("temporary-id", "bypassPermissions");
 
       const routes = createSessionsRoutes({
         supervisor: {} as SessionsDeps["supervisor"],
@@ -237,6 +293,8 @@ describe("Sessions metadata route", () => {
       await expect(response.json()).resolves.toMatchObject({
         session: { id: "durable-id", model: "claude-sonnet-5" },
         messages: [],
+        permissionMode: "bypassPermissions",
+        modeVersion: 0,
       });
       expect(getSession).toHaveBeenCalledWith(
         "durable-id",

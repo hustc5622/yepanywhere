@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import {
   ALL_CODEX_MCP_MODES,
+  ALL_PERMISSION_MODES,
   type CodexMcpMode,
   type ContextCompactEvent,
   type ContextCumulativeUsage,
@@ -583,6 +584,47 @@ export interface SessionsDeps {
   sessionArchiveService?: SessionArchiveService;
   /** Claude projects directory, used to synthesize file-change invalidation events after moves. */
   claudeProjectsDir?: string;
+}
+
+function getSessionPermissionModeState(
+  deps: SessionsDeps,
+  sessionId: string,
+  process:
+    | {
+        permissionMode?: PermissionMode;
+        modeVersion?: number;
+      }
+    | null
+    | undefined,
+): { permissionMode?: PermissionMode; modeVersion?: number } {
+  const processMode = process?.permissionMode;
+  const permissionMode =
+    processMode ?? deps.sessionMetadataService?.getPermissionMode?.(sessionId);
+  if (!permissionMode) return {};
+
+  return {
+    permissionMode,
+    modeVersion: processMode ? (process?.modeVersion ?? 0) : 0,
+  };
+}
+
+async function persistSessionPermissionMode(
+  deps: SessionsDeps,
+  sessionId: string,
+  permissionMode: PermissionMode | undefined,
+): Promise<void> {
+  if (!permissionMode) return;
+  await deps.sessionMetadataService?.setPermissionMode?.(
+    sessionId,
+    permissionMode,
+  );
+}
+
+function isPermissionMode(value: unknown): value is PermissionMode {
+  return (
+    typeof value === "string" &&
+    ALL_PERMISSION_MODES.includes(value as PermissionMode)
+  );
 }
 
 type BridgeSessionView = Awaited<
@@ -1541,6 +1583,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       runtime,
       pendingInputRequest: activePendingInputRequest,
       slashCommands,
+      ...getSessionPermissionModeState(deps, sessionId, process),
     });
   });
 
@@ -1953,6 +1996,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           runtime,
           pendingInputRequest: activePendingInputRequest,
           slashCommands,
+          ...getSessionPermissionModeState(deps, sessionId, process),
         });
       }
       if (bridgedSession) {
@@ -1985,6 +2029,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           runtime,
           pendingInputRequest: activePendingInputRequest,
           slashCommands,
+          ...getSessionPermissionModeState(deps, sessionId, process),
         });
       }
       return c.json({ error: "Session not found" }, 404);
@@ -2113,6 +2158,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       runtime,
       pendingInputRequest,
       slashCommands,
+      ...getSessionPermissionModeState(deps, sessionId, process),
       ...(paginationInfo && { pagination: paginationInfo }),
     });
   });
@@ -2192,12 +2238,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: parsedReasoningEffort.error }, 400);
     }
 
+    if (body.mode !== undefined && !isPermissionMode(body.mode)) {
+      return c.json({ error: "Invalid permission mode" }, 400);
+    }
+    const effectivePermissionMode = body.mode;
+
     const userMessage: UserMessage = {
       text: body.message,
       images: body.images,
       documents: body.documents,
       attachments: body.attachments,
-      mode: body.mode,
+      mode: effectivePermissionMode,
       tempId: body.tempId,
     };
 
@@ -2249,7 +2300,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const result = await runtimeController.startSession({
       projectPath: project.path,
       message: userMessage,
-      permissionMode: body.mode,
+      permissionMode: effectivePermissionMode,
       modelSettings: {
         model,
         thinking,
@@ -2315,6 +2366,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         );
       }
     }
+    await persistSessionPermissionMode(
+      deps,
+      result.sessionId,
+      result.permissionMode,
+    );
     await recordYepSessionOrigin(deps, result.sessionId, project);
 
     return c.json({
@@ -2369,6 +2425,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     );
     if (parsedReasoningEffort.error) {
       return c.json({ error: parsedReasoningEffort.error }, 400);
+    }
+
+    if (body.mode !== undefined && !isPermissionMode(body.mode)) {
+      return c.json({ error: "Invalid permission mode" }, 400);
     }
 
     // Convert thinking option to SDK config
@@ -2475,6 +2535,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         );
       }
     }
+    await persistSessionPermissionMode(
+      deps,
+      result.sessionId,
+      result.permissionMode,
+    );
     await recordYepSessionOrigin(deps, result.sessionId, project);
 
     return c.json({
@@ -2573,12 +2638,18 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: parsedReasoningEffort.error }, 400);
     }
 
+    if (body.mode !== undefined && !isPermissionMode(body.mode)) {
+      return c.json({ error: "Invalid permission mode" }, 400);
+    }
+    const effectivePermissionMode =
+      body.mode ?? deps.sessionMetadataService?.getPermissionMode?.(sessionId);
+
     const userMessage: UserMessage = {
       text: body.message,
       images: body.images,
       documents: body.documents,
       attachments: body.attachments,
-      mode: body.mode,
+      mode: effectivePermissionMode,
       tempId: body.tempId,
     };
 
@@ -2768,7 +2839,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       sessionId,
       projectPath: project.path,
       message: userMessage,
-      permissionMode: body.mode,
+      permissionMode: effectivePermissionMode,
       modelSettings: {
         model,
         thinking,
@@ -2838,6 +2909,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Check if request was queued
     if (isQueuedResponse(result)) {
+      await persistSessionPermissionMode(
+        deps,
+        sessionId,
+        effectivePermissionMode,
+      );
       getLogger().info(
         {
           event: "session_resume_queued",
@@ -2853,6 +2929,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     const actualSessionId = result.sessionId ?? sessionId;
+
+    await persistSessionPermissionMode(
+      deps,
+      actualSessionId,
+      result.permissionMode ?? effectivePermissionMode,
+    );
 
     if (deps.sessionMetadataService && actualSessionId !== sessionId) {
       if (providerName) {
@@ -2945,12 +3027,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: parsedReasoningEffort.error }, 400);
     }
 
+    if (body.mode !== undefined && !isPermissionMode(body.mode)) {
+      return c.json({ error: "Invalid permission mode" }, 400);
+    }
+    const effectivePermissionMode =
+      body.mode ??
+      process.permissionMode ??
+      deps.sessionMetadataService?.getPermissionMode?.(sessionId);
+
     const userMessage: UserMessage = {
       text: body.message,
       images: body.images,
       documents: body.documents,
       attachments: body.attachments,
-      mode: body.mode,
+      mode: effectivePermissionMode,
       tempId: body.tempId,
     };
 
@@ -3015,7 +3105,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       sessionId,
       projectPath: process.projectPath,
       message: userMessage,
-      permissionMode: body.mode,
+      permissionMode: effectivePermissionMode,
       modelSettings: {
         model,
         thinking,
@@ -3058,6 +3148,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       ); // 410 Gone - process is no longer available
     }
 
+    await persistSessionPermissionMode(
+      deps,
+      sessionId,
+      effectivePermissionMode,
+    );
+
     recordOpenCodeContextWindowOverride(deps, {
       provider: providerName,
       model: opencodeConfig?.model ?? model,
@@ -3099,8 +3195,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const sessionId = c.req.param("sessionId");
     const body = await c.req.json<{ mode: PermissionMode }>();
 
-    if (!body.mode) {
-      return c.json({ error: "mode is required" }, 400);
+    if (!isPermissionMode(body.mode)) {
+      return c.json({ error: "Invalid or missing permission mode" }, 400);
     }
 
     // The provider is updated before the local mode is published, so a
@@ -3132,12 +3228,22 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       );
     }
     if (!modeResult.ok) {
-      return c.json({ error: "No active process for session" }, 404);
+      if (!deps.sessionMetadataService) {
+        return c.json({ error: "No active process for session" }, 404);
+      }
+      await persistSessionPermissionMode(deps, sessionId, body.mode);
+      return c.json({
+        permissionMode: body.mode,
+        modeVersion: 0,
+      });
     }
 
+    const confirmedMode = modeResult.permissionMode ?? body.mode;
+    await persistSessionPermissionMode(deps, sessionId, confirmedMode);
+
     return c.json({
-      permissionMode: modeResult.permissionMode,
-      modeVersion: modeResult.modeVersion,
+      permissionMode: confirmedMode,
+      modeVersion: modeResult.modeVersion ?? 0,
     });
   });
 
@@ -3313,10 +3419,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // approval, so it is reported without failing the response.
     if (isApproveAcceptEdits && process) {
       try {
-        await runtimeController.setPermissionMode({
+        const modeResult = await runtimeController.setPermissionMode({
           sessionId,
           mode: "acceptEdits",
         });
+        await persistSessionPermissionMode(
+          deps,
+          sessionId,
+          modeResult.permissionMode ?? "acceptEdits",
+        );
       } catch (error) {
         getLogger().warn(
           {

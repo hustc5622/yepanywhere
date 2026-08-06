@@ -18,7 +18,7 @@ import {
 } from "../lib/mergeMessages";
 import { isMobileShellDocument } from "../lib/nativePushBridge";
 import { getProvider } from "../providers/registry";
-import type { Message, Session, SessionStatus } from "../types";
+import type { Message, PermissionMode, Session, SessionStatus } from "../types";
 
 /** Content from a subagent (Task tool) */
 export interface AgentContent {
@@ -50,6 +50,8 @@ export interface StreamingMessageUpdate {
 export interface SessionLoadResult {
   session: Session;
   status: SessionStatus;
+  permissionMode?: PermissionMode;
+  modeVersion?: number;
   pendingInputRequest?: unknown;
   slashCommands?: Array<{
     name: string;
@@ -711,6 +713,8 @@ export function useSessionMessages(
           onLoadComplete?.({
             session: data.session,
             status: data.ownership,
+            permissionMode: data.permissionMode,
+            modeVersion: data.modeVersion,
             pendingInputRequest: data.pendingInputRequest,
             slashCommands: data.slashCommands,
           });
@@ -934,6 +938,8 @@ export function useSessionMessages(
       onLoadComplete?.({
         session: data.session,
         status: data.ownership,
+        permissionMode: data.permissionMode,
+        modeVersion: data.modeVersion,
         pendingInputRequest: data.pendingInputRequest,
         slashCommands: data.slashCommands,
       });
@@ -999,6 +1005,8 @@ export function useSessionMessages(
         onLoadComplete?.({
           session: data.session,
           status: data.ownership,
+          permissionMode: data.permissionMode,
+          modeVersion: data.modeVersion,
           pendingInputRequest: data.pendingInputRequest,
           slashCommands: data.slashCommands,
         });
@@ -1115,6 +1123,8 @@ export function useSessionMessages(
         onLoadComplete?.({
           session: data.session,
           status: data.ownership,
+          permissionMode: data.permissionMode,
+          modeVersion: data.modeVersion,
           pendingInputRequest: data.pendingInputRequest,
           slashCommands: data.slashCommands,
         });

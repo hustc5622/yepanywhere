@@ -1,5 +1,5 @@
 import { DEFAULT_PERMISSION_MODE } from "@yep-anywhere/shared";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { PermissionMode, SessionStatus } from "../types";
 
@@ -12,7 +12,7 @@ export interface UseSessionPermissionModeResult {
   modeVersion: number;
   /** Apply a server-confirmed mode + version (ignored if the version is stale). */
   applyServerModeUpdate: (mode: PermissionMode, version: number) => void;
-  /** Update the UI mode and, when a process is active, sync it to the server. */
+  /** Update the UI mode and sync or persist it on the server. */
   setPermissionMode: (mode: PermissionMode) => Promise<void>;
 }
 
@@ -27,16 +27,22 @@ export interface UseSessionPermissionModeResult {
 export function useSessionPermissionMode(
   sessionId: string,
   statusOwner: SessionStatus["owner"],
+  initialMode: PermissionMode = DEFAULT_PERMISSION_MODE,
+  initialModeVersion = 0,
 ): UseSessionPermissionModeResult {
   // localMode is UI-selected, serverMode is confirmed by server
-  const [localMode, setLocalMode] = useState<PermissionMode>(
-    DEFAULT_PERMISSION_MODE,
-  );
-  const [serverMode, setServerMode] = useState<PermissionMode>(
-    DEFAULT_PERMISSION_MODE,
-  );
-  const [modeVersion, setModeVersion] = useState<number>(0);
-  const lastKnownModeVersionRef = useRef<number>(0);
+  const [localMode, setLocalMode] = useState<PermissionMode>(initialMode);
+  const [serverMode, setServerMode] = useState<PermissionMode>(initialMode);
+  const [modeVersion, setModeVersion] = useState<number>(initialModeVersion);
+  const lastKnownModeVersionRef = useRef<number>(initialModeVersion);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a route-level session change must reset the mode even when both sessions share the same initial values
+  useEffect(() => {
+    lastKnownModeVersionRef.current = initialModeVersion;
+    setLocalMode(initialMode);
+    setServerMode(initialMode);
+    setModeVersion(initialModeVersion);
+  }, [initialMode, initialModeVersion, sessionId]);
 
   // Apply server mode update only if version is >= our last known version.
   // This syncs both local and server mode to the confirmed value.
@@ -52,19 +58,24 @@ export function useSessionPermissionMode(
     [],
   );
 
-  // Update local mode (UI selection) and sync to server if process is active
+  // Update local mode (UI selection) and sync or persist it on the server.
   const setPermissionMode = useCallback(
     async (mode: PermissionMode) => {
       setLocalMode(mode);
 
-      // If there's an active process, immediately sync to server
-      if (statusOwner === "self" || statusOwner === "external") {
+      // Active Yep processes apply the mode immediately. Idle sessions still
+      // call the endpoint so the selection is durable across server restarts.
+      if (statusOwner === "self" || statusOwner === "none") {
         try {
           const result = await api.setPermissionMode(sessionId, mode);
           // Update server-confirmed mode
-          if (result.modeVersion >= lastKnownModeVersionRef.current) {
+          if (
+            statusOwner === "none" ||
+            result.modeVersion >= lastKnownModeVersionRef.current
+          ) {
             lastKnownModeVersionRef.current = result.modeVersion;
             setServerMode(result.permissionMode);
+            setLocalMode(result.permissionMode);
             setModeVersion(result.modeVersion);
           }
         } catch (err) {

@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type {
   CodexMcpMode,
   OpenCodeSessionConfig,
+  PermissionMode,
   ProviderName,
   SessionCreatedBy,
   UrlProjectId,
@@ -46,6 +47,8 @@ export interface SessionMetadata {
   codexModelProvider?: string;
   /** Managed OpenCode provider/model settings used to resume the session. */
   opencodeConfig?: OpenCodeSessionConfig;
+  /** Last permission/session mode selected for this session. */
+  permissionMode?: PermissionMode;
   /** Whether Yep created this session, or it was discovered from an external client. */
   createdBy?: SessionCreatedBy;
 }
@@ -300,6 +303,19 @@ export class SessionMetadataService {
     await this.save();
   }
 
+  /** Persist the mode independently from the lifetime of a provider process. */
+  async setPermissionMode(
+    sessionId: string,
+    permissionMode: PermissionMode | undefined,
+  ): Promise<void> {
+    if (this.getPermissionMode(sessionId) === permissionMode) return;
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      permissionMode,
+    }));
+    await this.save();
+  }
+
   /**
    * Get the provider for a session.
    * Returns undefined if the provider was never explicitly saved.
@@ -347,6 +363,10 @@ export class SessionMetadataService {
 
   getOpenCodeConfig(sessionId: string): OpenCodeSessionConfig | undefined {
     return this.getMetadata(sessionId)?.opencodeConfig;
+  }
+
+  getPermissionMode(sessionId: string): PermissionMode | undefined {
+    return this.getMetadata(sessionId)?.permissionMode;
   }
 
   /**
@@ -465,6 +485,9 @@ export class SessionMetadataService {
     }
     if (updated.opencodeConfig) {
       cleaned.opencodeConfig = updated.opencodeConfig;
+    }
+    if (updated.permissionMode) {
+      cleaned.permissionMode = updated.permissionMode;
     }
     if (updated.createdBy) cleaned.createdBy = updated.createdBy;
     if (updated.projectId) cleaned.projectId = updated.projectId;

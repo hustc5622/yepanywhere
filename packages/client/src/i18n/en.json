@@ -271,7 +271,7 @@
   "newSessionClaudePermissionTitle": "Claude Permission Mode",
   "newSessionClaudePermissionDescription": "Applied through Claude Code. Auto mode lets Claude classify approval requests.",
   "newSessionCodexPermissionTitle": "Codex Access",
-  "newSessionCodexPermissionDescription": "Separate from the MCP profile above. Yep currently defaults to the cf-compatible policy.",
+  "newSessionCodexPermissionDescription": "This access policy is independent of the MCP profile. Yep defaults to the cf-compatible policy.",
   "newSessionOpenCodePermissionTitle": "OpenCode Tool Approvals",
   "newSessionOpenCodePermissionDescription": "Applied as per-session tool rules. OpenCode does not provide an OS sandbox.",
   "newSessionGeminiPermissionTitle": "Gemini Tool Approvals",

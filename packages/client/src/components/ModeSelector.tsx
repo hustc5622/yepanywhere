@@ -4,6 +4,7 @@ import {
 } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useProviderPermissionModeConfig } from "../hooks/useProviderPermissionModeConfig";
 import { useI18n } from "../i18n";
 import type { PermissionMode } from "../types";
 
@@ -47,23 +48,12 @@ export function ModeSelector({
   permissionModes,
 }: ModeSelectorProps) {
   const { t } = useI18n();
-  const genericModeLabels: Record<PermissionMode, string> = {
-    auto: t("modeAutoLabel"),
-    default: t("modeDefaultLabel"),
-    acceptEdits: t("modeAcceptEditsLabel"),
-    plan: t("modePlanLabel"),
-    bypassPermissions: t("modeBypassPermissionsLabel"),
-  };
-  const modeLabels: Record<PermissionMode, string> =
-    provider === "kimi"
-      ? {
-          ...genericModeLabels,
-          default: t("modeKimiDefaultLabel"),
-          plan: t("modeKimiPlanLabel"),
-          auto: t("modeKimiAutoLabel"),
-          bypassPermissions: t("modeKimiYoloLabel"),
-        }
-      : genericModeLabels;
+  const {
+    labels: modeLabels,
+    descriptions: modeDescriptions,
+    title: modeSelectorTitle,
+    description: modeSelectorDescription,
+  } = useProviderPermissionModeConfig(provider);
   const visibleModes = permissionModes ?? MODE_ORDER;
   const [isOpen, setIsOpen] = useState(false);
   const [isDesktop, setIsDesktop] = useState(
@@ -184,13 +174,15 @@ export function ModeSelector({
           aria-pressed={isHeld}
         >
           <span className="mode-dot mode-hold" />
-          <span className="mode-selector-label">
-            {isHeld ? t("modeResume" as never) : t("modeHold" as never)}
-          </span>
-          <span className="mode-selector-description">
-            {isHeld
-              ? t("modeContinueExecution" as never)
-              : t("modePauseExecution" as never)}
+          <span className="mode-selector-option-copy">
+            <span className="mode-selector-label">
+              {isHeld ? t("modeResume" as never) : t("modeHold" as never)}
+            </span>
+            <span className="mode-selector-description">
+              {isHeld
+                ? t("modeContinueExecution" as never)
+                : t("modePauseExecution" as never)}
+            </span>
           </span>
           {isHeld && (
             <span className="mode-selector-check" aria-hidden="true">
@@ -225,7 +217,12 @@ export function ModeSelector({
           aria-pressed={!isHeld && mode === m}
         >
           <span className={`mode-dot mode-${m}`} />
-          <span className="mode-selector-label">{modeLabels[m]}</span>
+          <span className="mode-selector-option-copy">
+            <span className="mode-selector-label">{modeLabels[m]}</span>
+            <span className="mode-selector-description">
+              {modeDescriptions[m]}
+            </span>
+          </span>
           {!isHeld && mode === m && (
             <span className="mode-selector-check" aria-hidden="true">
               <svg
@@ -248,6 +245,17 @@ export function ModeSelector({
     </>
   );
 
+  const selectorHeader = (
+    <div className="mode-selector-header">
+      <span className="mode-selector-title">{modeSelectorTitle}</span>
+      {modeSelectorDescription && (
+        <span className="mode-selector-subtitle">
+          {modeSelectorDescription}
+        </span>
+      )}
+    </div>
+  );
+
   // Mobile: bottom sheet with overlay (portaled)
   const mobileSheet =
     isOpen && !isDesktop
@@ -264,11 +272,7 @@ export function ModeSelector({
               tabIndex={-1}
               aria-label={t("modeSelectLabel" as never)}
             >
-              <div className="mode-selector-header">
-                <span className="mode-selector-title">
-                  {t("modeSessionTitle" as never)}
-                </span>
-              </div>
+              {selectorHeader}
               <div className="mode-selector-options">{optionsContent}</div>
             </div>
           </div>,
@@ -285,6 +289,7 @@ export function ModeSelector({
         tabIndex={-1}
         aria-label={t("modeSelectLabel" as never)}
       >
+        {selectorHeader}
         <div className="mode-selector-options">{optionsContent}</div>
       </div>
     ) : null;

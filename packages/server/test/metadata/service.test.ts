@@ -187,6 +187,30 @@ describe("SessionMetadataService", () => {
     });
   });
 
+  describe("setPermissionMode", () => {
+    it("persists a session mode across service restarts", async () => {
+      await service.initialize();
+      await service.setPermissionMode("session-1", "bypassPermissions");
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+
+      expect(reloaded.getPermissionMode("session-1")).toBe("bypassPermissions");
+    });
+
+    it("clears the mode without removing other metadata", async () => {
+      await service.initialize();
+      await service.setTitle("session-1", "Keep me");
+      await service.setPermissionMode("session-1", "plan");
+
+      await service.setPermissionMode("session-1", undefined);
+
+      expect(service.getMetadata("session-1")).toEqual({
+        customTitle: "Keep me",
+      });
+    });
+  });
+
   describe("setAiTitle", () => {
     it("sets AI title for a session", async () => {
       await service.initialize();
@@ -327,6 +351,7 @@ describe("SessionMetadataService", () => {
       await service.initialize();
       await service.setProvider("temporary-id", "codex");
       await service.setCodexMcpMode("temporary-id", "standard");
+      await service.setPermissionMode("temporary-id", "bypassPermissions");
       await service.setCreatedBy("temporary-id", "yep");
 
       await service.remapSessionId("temporary-id", "durable-id");
@@ -334,6 +359,7 @@ describe("SessionMetadataService", () => {
       expect(service.getMetadata("durable-id")).toEqual({
         provider: "codex",
         codexMcpMode: "standard",
+        permissionMode: "bypassPermissions",
         createdBy: "yep",
       });
       expect(service.getMetadata("temporary-id")).toEqual(

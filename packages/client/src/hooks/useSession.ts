@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { getMessageId } from "../lib/mergeMessages";
 import { type AgentTask, findAgentTasks } from "../lib/pendingTasks";
+import { normalizeProviderPermissionMode } from "../lib/providerPermissionModes";
 import { extractSessionIdFromFileEvent } from "../lib/sessionFile";
 import { generateUUID } from "../lib/uuid";
 import type {
@@ -451,7 +452,7 @@ function extractUserMessageText(
 export function useSession(
   projectId: string,
   sessionId: string,
-  initialStatus?: { owner: "self"; processId: string },
+  initialStatus?: Extract<SessionStatus, { owner: "self" }>,
   streamingMarkdownCallbacks?: StreamingMarkdownCallbacks,
   branchId?: string,
 ) {
@@ -530,7 +531,12 @@ export function useSession(
     modeVersion,
     applyServerModeUpdate,
     setPermissionMode,
-  } = useSessionPermissionMode(sessionId, status.owner);
+  } = useSessionPermissionMode(
+    sessionId,
+    status.owner,
+    initialStatus?.permissionMode,
+    initialStatus?.modeVersion,
+  );
   // Track whether we've already processed a stream "connected" event in this mount.
   // For Codex providers, the first connected-event catch-up fetch can duplicate
   // freshly streamed messages because JSONL and stream IDs are not yet aligned.
@@ -581,17 +587,22 @@ export function useSession(
         return result.status;
       });
 
-      // Sync permission mode from server if owned
-      if (
-        result.status.owner === "self" &&
-        result.status.permissionMode &&
-        result.status.modeVersion !== undefined
-      ) {
-        applyServerModeUpdate(
-          result.status.permissionMode,
-          result.status.modeVersion,
-        );
-      }
+      // Restore the live process mode when owned, otherwise the durable
+      // per-session mode. Older servers do not return the top-level fields,
+      // so use the provider's native default as a compatibility fallback.
+      const restoredPermissionMode =
+        result.permissionMode ??
+        (result.status.owner === "self"
+          ? result.status.permissionMode
+          : undefined) ??
+        normalizeProviderPermissionMode(result.session.provider, undefined);
+      const restoredModeVersion =
+        result.modeVersion ??
+        (result.status.owner === "self"
+          ? result.status.modeVersion
+          : undefined) ??
+        0;
+      applyServerModeUpdate(restoredPermissionMode, restoredModeVersion);
       // Set pending input request from API response immediately. This also
       // clears stale prompts after another client already approved/denied them.
       setPendingInputRequest(

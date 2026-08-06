@@ -39,6 +39,7 @@ import {
   getModelSetting,
   useModelSettings,
 } from "../hooks/useModelSettings";
+import { useProviderPermissionModeConfig } from "../hooks/useProviderPermissionModeConfig";
 import {
   getAvailableProviders,
   getDefaultProvider,
@@ -466,104 +467,12 @@ export function NewSessionForm({
   const selectedProviderInfo = providers.find(
     (provider) => provider.name === selectedProvider,
   );
-  const genericModeLabels: Record<PermissionMode, string> = {
-    auto: t("modeAutoLabel"),
-    default: t("modeDefaultLabel"),
-    acceptEdits: t("modeAcceptEditsLabel"),
-    plan: t("modePlanLabel"),
-    bypassPermissions: t("modeBypassPermissionsLabel"),
-  };
-  const genericModeDescriptions: Record<PermissionMode, string> = {
-    auto: t("modeAutoDescription"),
-    default: t("modeDefaultDescription"),
-    acceptEdits: t("modeAcceptEditsDescription"),
-    plan: t("modePlanDescription"),
-    bypassPermissions: t("modeBypassPermissionsDescription"),
-  };
-  const modeLabels: Record<PermissionMode, string> = {
-    ...genericModeLabels,
-    ...(selectedProvider === "kimi"
-      ? {
-          default: t("modeKimiDefaultLabel"),
-          plan: t("modeKimiPlanLabel"),
-          auto: t("modeKimiAutoLabel"),
-          bypassPermissions: t("modeKimiYoloLabel"),
-        }
-      : selectedProvider === "codex"
-        ? {
-            auto: t("modeCodexCfLabel"),
-            plan: t("modeCodexReadOnlyLabel"),
-            bypassPermissions: t("modeCodexFullAccessLabel"),
-          }
-        : selectedProvider === "opencode"
-          ? {
-              default: t("modeOpenCodeAskLabel"),
-              acceptEdits: t("modeOpenCodeEditLabel"),
-              bypassPermissions: t("modeOpenCodeAllowAllLabel"),
-            }
-          : selectedProvider === "gemini-acp"
-            ? {
-                default: t("modeGeminiAskLabel"),
-                acceptEdits: t("modeGeminiEditLabel"),
-                bypassPermissions: t("modeGeminiAllowAllLabel"),
-              }
-            : {}),
-  };
-  const modeDescriptions: Record<PermissionMode, string> = {
-    ...genericModeDescriptions,
-    ...(selectedProvider === "kimi"
-      ? {
-          default: t("modeKimiDefaultDescription"),
-          plan: t("modeKimiPlanDescription"),
-          auto: t("modeKimiAutoDescription"),
-          bypassPermissions: t("modeKimiYoloDescription"),
-        }
-      : selectedProvider === "codex"
-        ? {
-            auto: t("modeCodexCfDescription"),
-            plan: t("modeCodexReadOnlyDescription"),
-            bypassPermissions: t("modeCodexFullAccessDescription"),
-          }
-        : selectedProvider === "opencode"
-          ? {
-              default: t("modeOpenCodeAskDescription"),
-              acceptEdits: t("modeOpenCodeEditDescription"),
-              bypassPermissions: t("modeOpenCodeAllowAllDescription"),
-            }
-          : selectedProvider === "gemini-acp"
-            ? {
-                default: t("modeGeminiAskDescription"),
-                acceptEdits: t("modeGeminiEditDescription"),
-                bypassPermissions: t("modeGeminiAllowAllDescription"),
-              }
-            : {}),
-  };
-  const permissionModeTitle =
-    selectedProvider === "kimi"
-      ? t("newSessionKimiPermissionTitle")
-      : selectedProvider === "codex"
-        ? t("newSessionCodexPermissionTitle")
-        : selectedProvider === "opencode"
-          ? t("newSessionOpenCodePermissionTitle")
-          : selectedProvider === "gemini-acp"
-            ? t("newSessionGeminiPermissionTitle")
-            : selectedProvider === "claude" ||
-                selectedProvider === "claude-ollama"
-              ? t("newSessionClaudePermissionTitle")
-              : t("newSessionModeTitle");
-  const permissionModeDescription =
-    selectedProvider === "kimi"
-      ? t("newSessionKimiPermissionDescription")
-      : selectedProvider === "codex"
-        ? t("newSessionCodexPermissionDescription")
-        : selectedProvider === "opencode"
-          ? t("newSessionOpenCodePermissionDescription")
-          : selectedProvider === "gemini-acp"
-            ? t("newSessionGeminiPermissionDescription")
-            : selectedProvider === "claude" ||
-                selectedProvider === "claude-ollama"
-              ? t("newSessionClaudePermissionDescription")
-              : null;
+  const {
+    labels: modeLabels,
+    descriptions: modeDescriptions,
+    title: permissionModeTitle,
+    description: permissionModeDescription,
+  } = useProviderPermissionModeConfig(selectedProvider);
   const codexMcpModeLabels: Record<CodexMcpMode, string> = {
     clear: t("newSessionCodexMcpClearLabel"),
     standard: t("newSessionCodexMcpStandardLabel"),
@@ -1407,6 +1316,8 @@ export function NewSessionForm({
     try {
       let sessionId: string;
       let processId: string;
+      let initialPermissionMode = mode;
+      let initialModeVersion = 0;
       const uploadedFiles: UploadedFile[] = [];
 
       // Get model and thinking settings
@@ -1439,6 +1350,8 @@ export function NewSessionForm({
         sessionStartOutcomePending = false;
         sessionId = createResult.sessionId;
         processId = createResult.processId;
+        initialPermissionMode = createResult.permissionMode;
+        initialModeVersion = createResult.modeVersion;
 
         // Step 2: Upload files to the real session folder
         for (const pendingFile of pendingFiles) {
@@ -1493,6 +1406,8 @@ export function NewSessionForm({
         sessionStartOutcomePending = false;
         sessionId = result.sessionId;
         processId = result.processId;
+        initialPermissionMode = result.permissionMode;
+        initialModeVersion = result.modeVersion;
       }
 
       // Clean up preview URLs
@@ -1508,7 +1423,12 @@ export function NewSessionForm({
       // Also pass initial message as optimistic title (session name = first message)
       // Pass provider so provider-specific controls can render immediately
       const navigationState: SessionNavigationState = {
-        initialStatus: { owner: "self", processId },
+        initialStatus: {
+          owner: "self",
+          processId,
+          permissionMode: initialPermissionMode,
+          modeVersion: initialModeVersion,
+        },
         initialTitle: trimmedMessage,
         initialProvider: selectedProvider ?? undefined,
       };

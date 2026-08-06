@@ -15,6 +15,15 @@ afterEach(() => {
 });
 
 describe("useSessionPermissionMode", () => {
+  it("uses the mode returned while navigating from new-session setup", () => {
+    const { result } = renderHook(() =>
+      useSessionPermissionMode("ses_1", "self", "bypassPermissions", 3),
+    );
+
+    expect(result.current.permissionMode).toBe("bypassPermissions");
+    expect(result.current.modeVersion).toBe(3);
+  });
+
   it("applies server updates monotonically by version", () => {
     const { result } = renderHook(() =>
       useSessionPermissionMode("ses_1", "none"),
@@ -30,7 +39,11 @@ describe("useSessionPermissionMode", () => {
     expect(result.current.modeVersion).toBe(2);
   });
 
-  it("updates local mode without hitting the server when unowned", async () => {
+  it("persists the selected mode when the session is idle", async () => {
+    setPermissionModeMock.mockResolvedValue({
+      permissionMode: "plan",
+      modeVersion: 0,
+    });
     const { result } = renderHook(() =>
       useSessionPermissionMode("ses_1", "none"),
     );
@@ -40,7 +53,8 @@ describe("useSessionPermissionMode", () => {
     });
 
     expect(result.current.permissionMode).toBe("plan");
-    expect(setPermissionModeMock).not.toHaveBeenCalled();
+    expect(setPermissionModeMock).toHaveBeenCalledWith("ses_1", "plan");
+    expect(result.current.serverMode).toBe("plan");
   });
 
   it("syncs to the server and adopts the confirmed version when owned", async () => {

@@ -949,6 +949,8 @@ export const api = {
       messages: Message[];
       ownership: SessionStatus;
       runtime?: SessionRuntime;
+      permissionMode?: PermissionMode;
+      modeVersion?: number;
       pendingInputRequest?: InputRequest | null;
       slashCommands?: SlashCommand[] | null;
       pagination?: PaginationInfo;
@@ -964,6 +966,8 @@ export const api = {
       session: Session;
       ownership: SessionStatus;
       runtime?: SessionRuntime;
+      permissionMode?: PermissionMode;
+      modeVersion?: number;
       pendingInputRequest?: InputRequest | null;
       slashCommands?: SlashCommand[] | null;
     }>(`/projects/${projectId}/sessions/${sessionId}/metadata`),
