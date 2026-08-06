@@ -445,8 +445,13 @@ step("Generate package.json for npm", () => {
   );
 
   // Create a new package.json for publishing
+  // The bare `yepanywhere` name belongs to the upstream release line, which we
+  // have no publish rights to and do not want to shadow. Scoping the name means
+  // an accidental `npm publish` from this fork cannot land on upstream's
+  // package. The bin names are deliberately unchanged — redeploy-server.sh
+  // invokes `yepanywhere --codex-bridge-only` and friends.
   const npmPackageJson: Record<string, unknown> = {
-    name: "yepanywhere",
+    name: "@hustc5622/yepanywhere",
     version: NPM_VERSION,
     description: "A mobile-first supervisor for Claude Code agents",
     type: "module",
@@ -479,11 +484,11 @@ step("Generate package.json for npm", () => {
     ),
     repository: {
       type: "git",
-      url: "git+https://github.com/kzahel/yepanywhere.git",
+      url: "git+https://github.com/hustc5622/yepanywhere.git",
     },
-    homepage: "https://github.com/kzahel/yepanywhere#readme",
+    homepage: "https://github.com/hustc5622/yepanywhere#readme",
     bugs: {
-      url: "https://github.com/kzahel/yepanywhere/issues",
+      url: "https://github.com/hustc5622/yepanywhere/issues",
     },
     keywords: ["claude", "ai", "agent", "supervisor", "mobile"],
     license: "MIT",
@@ -499,7 +504,7 @@ step("Generate package.json for npm", () => {
     `${JSON.stringify(npmPackageJson, null, 2)}\n`,
   );
 
-  log("  Package name: yepanywhere");
+  log(`  Package name: ${npmPackageJson.name}`);
   log(`  Version: ${NPM_VERSION}`);
   log(`  Release channel: ${RELEASE_CHANNEL}`);
   log(
@@ -524,8 +529,10 @@ A mobile-first supervisor for Claude Code agents.
 
 ## Installation
 
+This build is not published to a registry. Install it from a checkout:
+
 \`\`\`bash
-npm install -g yepanywhere
+npm install -g ./dist/npm-package
 \`\`\`
 
 ## Usage

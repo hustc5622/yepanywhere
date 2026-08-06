@@ -152,7 +152,7 @@ EXAMPLES:
   yepanywhere --opencode-bridge-only
 
 DOCUMENTATION:
-  For full documentation, see: https://github.com/kzahel/yepanywhere
+  For full documentation, see: https://github.com/hustc5622/yepanywhere
 
 DATA DIRECTORY:
   Default: ~/.yep-anywhere/

@@ -1,17 +1,22 @@
-name: Publish to npm
+name: Release
+
+# This fork does not publish to npm. The `yepanywhere` package name belongs to
+# the upstream release line, so a release here means: validate, build the
+# bundle, and attach it to a GitHub Release on this repository.
+#
+# Triggered by `ya-v*` only. The bare `v*` namespace is reserved for upstream
+# and is deliberately not wired to anything. See docs/project/versioning.md.
 
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'ya-v*'
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # For creating GitHub releases
-      id-token: write  # Required for OIDC token (trusted publishing)
-      attestations: write  # Required for npm provenance
+      contents: write # For creating GitHub releases
 
     steps:
       - name: Checkout code
@@ -20,8 +25,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          node-version-file: '.nvmrc'
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -40,33 +44,24 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF#refs/tags/ya-v}" >> $GITHUB_OUTPUT
 
-      - name: Verify changelog has entry for version
-        run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
-          if ! grep -q "## \[${VERSION}\]" CHANGELOG.md; then
-            echo "Error: CHANGELOG.md does not contain an entry for version ${VERSION}"
-            echo "Please add a '## [${VERSION}]' section to CHANGELOG.md before releasing."
-            exit 1
-          fi
-          echo "Changelog entry found for version ${VERSION}"
+      - name: Verify release metadata
+        run: pnpm version:check --tag "${GITHUB_REF#refs/tags/}"
 
-      - name: Build bundle for npm
+      - name: Build bundle
         run: pnpm build:bundle
         env:
           NPM_VERSION: ${{ steps.version.outputs.VERSION }}
+          YEP_RELEASE_CHANNEL: fork
 
-      - name: Verify package contents
-        run: |
-          cd dist/npm-package
-          npm pack --dry-run
-          echo "Package contents verified"
+      - name: Verify bundle version matches the tag
+        run: pnpm version:check --build-info dist/npm-package/build-info.json
 
-      - name: Publish to npm
+      - name: Package bundle
         run: |
-          cd dist/npm-package
-          npm publish --provenance --access public
+          cd dist
+          tar -czf "yepanywhere-${{ steps.version.outputs.VERSION }}.tgz" npm-package
 
       - name: Extract changelog for release notes
         run: |
@@ -78,7 +73,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: v${{ steps.version.outputs.VERSION }}
+          name: ya-v${{ steps.version.outputs.VERSION }}
           body_path: /tmp/release-notes.md
+          files: dist/yepanywhere-${{ steps.version.outputs.VERSION }}.tgz
           draft: false
           prerelease: false

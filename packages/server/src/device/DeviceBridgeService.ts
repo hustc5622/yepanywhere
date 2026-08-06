@@ -17,16 +17,28 @@ import type {
   RTCIceCandidateInit,
 } from "@yep-anywhere/shared";
 import { WebSocket } from "ws";
+import { getRuntimeBuildInfo } from "../build-info.js";
 import { isNewerSemver } from "../utils/semver.js";
 
 /** Fallback bridge version if update server is unreachable. */
 const BRIDGE_VERSION_FALLBACK = "0.0.1";
 
-/** Update server endpoint for bridge version. */
+/** Update server endpoint for bridge version. Upstream release line only. */
 const BRIDGE_VERSION_URL = "https://updates.yepanywhere.com/bridge/version";
 
-/** GitHub repo for downloading bridge binaries. */
-const BRIDGE_REPO = "kzahel/yepanywhere";
+/**
+ * GitHub repo that hosts the `bridge-v*` releases we download binaries from.
+ *
+ * Defaults to this repository. Pointing it at upstream would download and
+ * execute a binary built from a different project's source, which is not a
+ * fallback but a supply-chain hazard. Override with YEP_BRIDGE_REPO when
+ * serving binaries from somewhere else.
+ */
+const DEFAULT_BRIDGE_REPO = "hustc5622/yepanywhere";
+
+function getBridgeRepo(): string {
+  return process.env.YEP_BRIDGE_REPO?.trim() || DEFAULT_BRIDGE_REPO;
+}
 
 /** Cached bridge version from update server (5 minute TTL). */
 let cachedBridgeVersion: { version: string; timestamp: number } | null = null;
@@ -35,12 +47,24 @@ const BRIDGE_VERSION_CACHE_TTL_MS = 5 * 60 * 1000;
 async function getBridgeVersion(options?: {
   forceRefresh?: boolean;
 }): Promise<string> {
+  const pinnedVersion = process.env.YEP_BRIDGE_VERSION?.trim();
+  if (pinnedVersion) return pinnedVersion;
+
   if (
     !options?.forceRefresh &&
     cachedBridgeVersion &&
     Date.now() - cachedBridgeVersion.timestamp < BRIDGE_VERSION_CACHE_TTL_MS
   ) {
     return cachedBridgeVersion.version;
+  }
+
+  // The public update service only tracks the upstream release line. Asking it
+  // from a fork build returns upstream's bridge version, which we would then
+  // try to fetch from our own repo under a tag that does not exist there. Same
+  // gate as routes/version.ts — see docs/project/versioning.md.
+  const { releaseChannel } = await getRuntimeBuildInfo();
+  if (releaseChannel !== "upstream") {
+    return BRIDGE_VERSION_FALLBACK;
   }
 
   try {
@@ -420,7 +444,7 @@ export class DeviceBridgeService {
   ): Promise<string> {
     const kindLabel = options?.kindLabel ?? name;
     const bridgeVersion = await getBridgeVersion({ forceRefresh: true });
-    const url = `https://github.com/${BRIDGE_REPO}/releases/download/bridge-v${bridgeVersion}/${name}`;
+    const url = `https://github.com/${getBridgeRepo()}/releases/download/bridge-v${bridgeVersion}/${name}`;
     const destDir = path.dirname(destPath);
     fs.mkdirSync(destDir, { recursive: true });
 
