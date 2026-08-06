@@ -10,7 +10,7 @@
  * belongs to upstream.
  *
  *   version:status  read-only report of version / changelog / tag / runtime
- *   version:bump    patch|minor|major -> package.json + CHANGELOG (no commit, no tag)
+ *   version:bump    advance to the next calendar version (no commit, no tag)
  *   version:check   assertions; non-zero exit means "not fit to release/deploy"
  */
 
@@ -65,22 +65,30 @@ function compareSemver(a: Semver, b: Semver): number {
   return a.major - b.major || a.minor - b.minor || a.patch - b.patch;
 }
 
-function bumpSemver(version: Semver, kind: BumpKind): Semver {
-  switch (kind) {
-    case "major":
-      return { major: version.major + 1, minor: 0, patch: 0 };
-    case "minor":
-      return { major: version.major, minor: version.minor + 1, patch: 0 };
-    case "patch":
-      return {
-        major: version.major,
-        minor: version.minor,
-        patch: version.patch + 1,
-      };
-  }
+/**
+ * Versions are calendar-based: `YYYY.M.N`, where N restarts each month.
+ *
+ * This is deliberately not SemVer. A fork that ships to one operator has no
+ * external API contract, so "is this a minor or a patch" was a judgement call
+ * with no consumer — while the numbers themselves kept colliding with
+ * upstream's, which is still on 0.x. `2026.8.0` can never be confused with an
+ * upstream release, and it is still three numeric segments, so npm, Tauri and
+ * isNewerSemver keep working unchanged.
+ *
+ * A useful side effect: a calendar version always sorts above upstream's, so
+ * even if the release-channel gate were to fail open, the public update service
+ * could never advertise an upstream build as "newer".
+ */
+function nextCalendarVersion(current: Semver | null, today: Date): Semver {
+  const year = today.getFullYear();
+  const month = today.getMonth() + 1;
+  const sameMonth = current?.major === year && current?.minor === month;
+  return {
+    major: year,
+    minor: month,
+    patch: sameMonth ? current.patch + 1 : 0,
+  };
 }
-
-type BumpKind = "major" | "minor" | "patch";
 
 // ------------------------------------------------------------------ manifest
 
@@ -306,7 +314,7 @@ async function commandStatus(argv: string[]): Promise<number> {
 
   if (rootSemver === null) {
     console.log(
-      `  ${red("✗")} root version ${rootVersion} is not valid SemVer`,
+      `  ${red("✗")} root version ${rootVersion} is not a well-formed version`,
     );
   } else if (drifted) {
     console.log(
@@ -344,21 +352,11 @@ async function commandStatus(argv: string[]): Promise<number> {
 
 function commandBump(argv: string[]): number {
   const dryRun = argv.includes("--dry-run");
-  const kind = argv.find((arg): arg is BumpKind =>
-    ["major", "minor", "patch"].includes(arg),
-  );
-
-  if (!kind) {
-    console.error("Usage: version:bump <patch|minor|major> [--dry-run]");
-    return 2;
-  }
 
   const rootVersion = readRootVersion();
+  // A non-calendar current version is not an error: the first bump after
+  // switching schemes reads 0.5.0 here and simply starts the calendar line.
   const rootSemver = parseSemver(rootVersion);
-  if (!rootSemver) {
-    console.error(red(`Root version ${rootVersion} is not valid SemVer.`));
-    return 1;
-  }
 
   const source = fs.readFileSync(CHANGELOG, "utf-8");
   const sections = readChangelogSections(source);
@@ -379,7 +377,7 @@ function commandBump(argv: string[]): number {
     return 1;
   }
 
-  const next = formatSemver(bumpSemver(rootSemver, kind));
+  const next = formatSemver(nextCalendarVersion(rootSemver, new Date()));
   const today = localToday();
 
   const existing = listForkTags().find((t) => formatSemver(t.version) === next);
@@ -393,7 +391,7 @@ function commandBump(argv: string[]): number {
     `## [Unreleased]\n\n## [${next}] - ${today}`,
   );
 
-  console.log(`${bold("bump")}  ${rootVersion} -> ${green(next)}  (${kind})`);
+  console.log(`${bold("bump")}  ${rootVersion} -> ${green(next)}  (calendar)`);
   console.log(
     `      CHANGELOG: [Unreleased] -> [${next}] - ${today}, fresh [Unreleased] inserted above`,
   );
@@ -440,10 +438,10 @@ function commandCheck(argv: string[]): number {
   const rootVersion = readRootVersion();
   const rootSemver = parseSemver(rootVersion);
 
-  // 1. root version is valid SemVer
+  // 1. root version parses as three numeric segments
   results.push({
     ok: rootSemver !== null,
-    label: "root package.json version is valid SemVer",
+    label: "root package.json version is well formed",
     detail: rootVersion,
   });
 
@@ -574,7 +572,8 @@ Commands:
   status                     Report version, changelog, tag and runtime state
     --base-url <url>         Server to probe (default: ${DEFAULT_BASE_URL})
 
-  bump <patch|minor|major>   Advance the product version and close [Unreleased]
+  bump                       Advance to the next calendar version (YYYY.M.N)
+                             and close [Unreleased]
     --dry-run                Print the plan without writing files
 
   check                      Assert release/deploy readiness (non-zero on failure)

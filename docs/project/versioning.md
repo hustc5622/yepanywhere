@@ -1,6 +1,8 @@
 # 版本治理方案（Yep Anywhere fork 发行线）
 
-状态：**阶段 1–5 已实施**（见 §12 进度）。决策已定：§2.3 取 A（不发 npm），§2.4 取 A（基线 `0.5.0`）。阶段 6–8 尚未实施。
+状态：**阶段 1–5、7 已实施**（见 §12 进度）。阶段 6、8 尚未实施。
+
+> **2026-08-06 方案变更**：版本号从 SemVer 改为 **CalVer `YYYY.M.N`**（见 §4），首个版本为 `2026.8.0`。§2.4 关于 `0.5.0` 基线的决策就此作废——同日打出的 `ya-v0.5.0` 未经部署即被 `ya-v2026.8.0` 取代。同时与 upstream 的运行时耦合已切断（见 §14），`publish.yml` 被 `release.yml` 取代，只响应 `ya-v*` 且不发 npm。
 
 > 注意：`releaseChannel` 门控（阶段 4）要**重新部署**后才在运行中的服务上生效。线上包 `0.4.29-a08854d03b6c-*` 是改造前构建的，仍会上报 `updateAvailable: true`。
 
@@ -74,9 +76,11 @@ fork 发行线有三种选择：
 - **B**：fork 发布到独立 npm 包名（如 `@hustc5622/yepanywhere`）。需要额外维护包名与安装文档。
 - **C**：完全不用 CI 发布，只靠 `scripts/deploy.sh` 本地部署。tag 仅作为版本标记。
 
-按 A 执行。`ya-v*` workflow 属阶段 7，尚未实施；在此之前 fork 的发布动作是「打 tag + 本地部署」。
+按 A 执行。**已于 2026-08-06 落地**：`publish.yml` 被删除，取而代之的 `.github/workflows/release.yml` 只由 `ya-v*` 触发，跑 lint/typecheck/test + `version:check` + 构建，把 bundle 附到本仓库的 GitHub Release，**不执行 `npm publish`**。构建产物包名同时改为 `@hustc5622/yepanywhere`（`scripts/build-bundle.ts`），因此即使误执行发布也不可能落到 upstream 的包名上。这同时完成了原阶段 7。
 
-### 2.4 版本号基线（**已决策：A → `0.5.0`**）
+### 2.4 版本号基线（~~已决策：A → `0.5.0`~~ **已作废，见 §4**）
+
+> 本节的三个选项都建立在「继续用 SemVer」的前提上。2026-08-06 改用 CalVer 后该前提不成立，`0.5.0` 基线随之作废。保留此节仅为记录当时的推理。
 
 fork 与 upstream 的版本号会在数字上重叠（例如两条线都可能出现 `0.8.0`）。有 channel 标识后这只是可读性问题，但仍需选一个起点：
 
@@ -84,14 +88,14 @@ fork 与 upstream 的版本号会在数字上重叠（例如两条线都可能�
 - **B**：跳到 upstream 尚未到达的号段（如 `0.10.0`）以降低歧义。代价：仍会被 upstream 追上，且数字含义变得随意。
 - **C**：fork 独立使用 `1.x`。代价：`1.0.0` 在 SemVer 语义中表示对外契约稳定，与现状不符。
 
-按 A 执行：首次 `pnpm version:bump minor` 会把 `0.4.29` 推到 `0.5.0`，随后打 `ya-v0.5.0`。About 页面把版本展示为 `0.5.0 (fork)`（属阶段 8）。
+~~按 A 执行：首次 `pnpm version:bump minor` 会把 `0.4.29` 推到 `0.5.0`，随后打 `ya-v0.5.0`。~~ 实际执行结果见 §11。About 页面把版本展示为 `2026.8.0 (fork)`（属阶段 8）。
 
 
 ---
 
 ## 3. “更新”的定义
 
-不按 commit 提升 SemVer。定义如下：
+不按 commit 提升版本号。定义如下：
 
 > 每一次包含新代码或新行为的正式部署、安装包交付或公开发布，都必须使用一个高于上一次正式部署的新版本号。
 
@@ -112,16 +116,24 @@ fork 与 upstream 的版本号会在数字上重叠（例如两条线都可能�
 
 ---
 
-## 4. SemVer 规模规则（0.x 阶段）
+## 4. 版本号规则（CalVer）
 
-| 类型 | 示例 | 版本变化 |
-| ---- | ---- | ---- |
-| Patch | Bug 修复、provider 兼容性修复、性能优化、日志完善、依赖安全更新 | `0.5.0 → 0.5.1` |
-| Minor | 新 provider、新页面、新工作流、新协议能力、明显的功能集合 | `0.5.1 → 0.6.0` |
-| Breaking Minor | 0.x 阶段的数据/API/配置不兼容调整，必须附迁移说明 | `0.5.x → 0.6.0` |
-| Major | 产品进入稳定契约，或 1.x 之后的不兼容变化 | `0.x → 1.0.0` |
+格式 **`YYYY.M.N`**：年、月、当月序号（从 0 起）。
 
-判断顺序：先看是否破坏兼容（数据格式、API、配置、协议）→ 再看是否新增用户可见能力 → 否则 patch。
+| 场景 | 变化 |
+| ---- | ---- |
+| 当月首次发版 | `2026.7.3 → 2026.8.0` |
+| 当月再次发版 | `2026.8.0 → 2026.8.1` |
+
+`pnpm version:bump` 不接受参数，直接按当天日期算出下一个版本 —— 没有需要判断的东西。
+
+**为什么不用 SemVer**：SemVer 的 major/minor/patch 表达的是对外 API 兼容承诺。本仓库是单一运维者的自用部署，不对外提供包或 API，这个区分没有消费者，却每次发版都要做一次判断。同时 0.x 号段与 upstream 持续重叠（upstream 已发布 npm `0.5.0`～`0.7.0`），数字本身无法区分两条线。
+
+CalVer 一次解决两件事：判断成本归零；`2026.8.0` 不可能与 upstream 的版本混淆。
+
+仍然是三段数字，所以 npm、Tauri、`isNewerSemver` 全部照常工作，无需改动任何解析逻辑。附带好处：日历版本永远排在 upstream 的 `0.x` 之上，即使 §10 的 channel 门控失效，公共更新服务也不可能把 upstream 构建判定为「更新」。
+
+不再有「破坏性变更」的版本表达。协议层面的兼容边界由 `RESUME_PROTOCOL_VERSION` 单独承担（见 §5）。
 
 ---
 
@@ -170,14 +182,17 @@ Desktop 版本分散在三处（package.json / Cargo.toml / tauri.conf.json）�
 - 若本地服务在跑：`GET {base}/api/version` 的 `current` / `build.buildId` / `resumeProtocolVersion`
 - 判定结论：`需要提升版本` / `可直接重启` / `版本与 CHANGELOG 漂移`
 
-### 6.2 `version:bump <patch|minor|major>`
+### 6.2 `version:bump`
 
-- 读取根版本，计算新版本。
+**不接受版本类型参数**。按当天日期计算下一个 CalVer（见 §4）：当月已发过则序号 +1，否则 `YYYY.M.0`。
+
 - 拒绝执行的前提条件：`[Unreleased]` 为空（说明变更没有记录）。
 - 写入根 `package.json.version`。
-- 把 `## [Unreleased]` 定版为 `## [X.Y.Z] - YYYY-MM-DD`，并在其上重新插入空的 `## [Unreleased]`。
+- 把 `## [Unreleased]` 定版为 `## [YYYY.M.N] - YYYY-MM-DD`，并在其上重新插入空的 `## [Unreleased]`。
 - **不**自动 `git commit`，**不**自动打 tag。人工检查后再提交。
 - 输出下一步提示（`version:check` → commit → deploy → tag）。
+
+当前版本不是 CalVer 格式时不报错，直接开始日历线——这正是 `0.5.0 → 2026.8.0` 迁移所依赖的行为。
 
 可选参数：`--dry-run`。
 
@@ -185,7 +200,7 @@ Desktop 版本分散在三处（package.json / Cargo.toml / tauri.conf.json）�
 
 退出码非 0 即失败。`--profile release`（默认）跑全部适用项，`--profile local` 只跑第 1、2、4 项，供 §7 的部署门禁调用。校验项：
 
-1. 根版本是合法 SemVer。
+1. 根版本是三段数字，格式合法。
 2. CHANGELOG 最新已定版章节 == 根版本。
 3. `[Unreleased]` 下没有遗留条目（仅 release profile）。
 4. 根版本 > 上一个 `ya-v*` tag 的版本（无 tag 时视为通过）。
@@ -243,7 +258,7 @@ Desktop 版本分散在三处（package.json / Cargo.toml / tauri.conf.json）�
 `version:bump` 时自动转为：
 
 ```markdown
-## [0.5.0] - 2026-08-06
+## [2026.8.0] - 2026-08-06
 ```
 
 分类沿用 Keep a Changelog：`Added` / `Changed` / `Deprecated` / `Removed` / `Fixed` / `Security`。
@@ -270,7 +285,7 @@ AGENTS.md 只放长期规则，不放逐版本内容。拟在「发布」小节�
 
 **第一步（必须，成本最低）——✅ 已实施**：build metadata 增加 `releaseChannel`。`version.ts` 在 channel 不为 `upstream` 时**完全跳过**公共更新服务，返回 `latest: null`、`updateAvailable: false`。这一步立即消除错误更新提示，且不需要自建更新服务。
 
-**第二步（可选）**：`/api/version` 响应体新增顶层 `releaseChannel` 字段，客户端 `AboutSettings.tsx` 展示 `0.5.0 (fork)`，并把「检查更新」入口在 fork channel 下替换为指向 origin GitHub Release 的链接。
+**第二步（可选）**：`/api/version` 响应体新增顶层 `releaseChannel` 字段，客户端 `AboutSettings.tsx` 展示 `2026.8.0 (fork)`，并把「检查更新」入口在 fork channel 下替换为指向 origin GitHub Release 的链接。
 
 > 注：channel 已经通过 `build.releaseChannel` 出现在 `/api/version` 响应里（`VersionInfo.build` 是完整的 `RuntimeBuildInfo`），所以第二步只剩纯 UI 工作，不需要再改服务端契约。
 
@@ -307,9 +322,9 @@ AGENTS.md 只放长期规则，不放逐版本内容。拟在「发布」小节�
 当前存在的漂移需要先收敛，否则新机制第一次运行就会失败：
 
 1. ~~补齐 CHANGELOG~~ **已完成**：`v0.4.28`→HEAD 的 278 个提交已按主题汇总写入 `[Unreleased]`，并在章节顶部注明 `0.4.29` 是未正式定版的中间状态（因此不单独开 `## [0.4.29]` 章节）。
-2. ~~执行首次 `pnpm version:bump minor`~~ **已完成**：`0.4.29` → `0.5.0`，`[Unreleased]` 定版为 `## [0.5.0] - 2026-08-06`，并补入 backfill 写成之后才落地的提交（release channel 门控、权限模式持久化、Codex MCP 启动修复、Anthropic 网关 schema 修复、mobile home 节点）。第 2 项 check 的漂移已消除。
+2. ~~执行首次 `pnpm version:bump minor`~~ **已完成并随后改用 CalVer**：先 `0.4.29 → 0.5.0`，同日改版本方案后再定为 `2026.8.0`，`[Unreleased]` 定版为 `## [2026.8.0] - 2026-08-06`。backfill 写成之后才落地的提交（release channel 门控、权限模式持久化、Codex MCP 启动修复、Anthropic 网关 schema 修复、mobile home 节点、upstream 解耦）已补入。第 2 项 check 的漂移已消除。
 3. ~~修掉 `build-bundle.ts` 的硬编码回退~~ **已完成**：缺 `NPM_VERSION` 时读根 `package.json`，读不到或格式非法则报错退出，不再静默产出 `0.4.8`。
-4. ~~创建 `ya-v0.5.0` tag~~ **已完成**：annotated tag，指向 `719358fea`。已验证 `publish.yml` 的 `v*.*.*` 触发器不匹配 `ya-v*`，推送后未产生 npm 发布 run。
+4. ~~创建 `ya-v0.5.0` tag~~ **已完成，最终为 `ya-v2026.8.0`**：annotated tag。`ya-v0.5.0` 未经部署即被取代，已从本地与 origin 删除。`release.yml` 只响应 `ya-v*`，裸 `v*` 不再触发任何 workflow。
 
 ---
 
@@ -317,25 +332,49 @@ AGENTS.md 只放长期规则，不放逐版本内容。拟在「发布」小节�
 
 | 阶段 | 内容 | 影响面 | 状态 |
 | ---- | ---- | ---- | ---- |
-| 0 | 确认 §2.3 npm 策略、§2.4 版本基线 | 决策 | ✅ A / `0.5.0` |
+| 0 | 确认 §2.3 npm 策略、§2.4 版本基线 | 决策 | ✅ A / 版本方案后改为 CalVer（§4） |
 | 1 | 本文档落地 + AGENTS.md 规则 | 文档 | ✅ 已完成 |
 | 2 | 补齐 CHANGELOG，修 `build-bundle.ts` 回退 | 低 | ✅ 已完成 |
 | 3 | 实现 `scripts/version.ts` 三个子命令 | 低，新增文件 | ✅ 已完成 |
 | 4 | `releaseChannel` 第一步（跳过 upstream 更新检查） | 中，触及 server/build | ✅ 已完成 |
-| 5 | 首次 `version:bump minor` + `ya-v0.5.0` tag | 决策已定后执行 | ✅ 已完成 |
+| 5 | 首次 `version:bump` + `ya-v2026.8.0` tag | 决策已定后执行 | ✅ 已完成 |
 | 6 | `redeploy-server.sh` 部署门禁 + 部署记录 | 中，影响部署流程 | ⬜ 未开始 |
-| 7 | 新增 `ya-v*` GitHub Release workflow | 低 | ⬜ 未开始 |
+| 7 | `ya-v*` GitHub Release workflow（`release.yml`） | 低 | ✅ 已完成 |
 | 8 | 客户端 channel 展示（可选） | 低 | ⬜ 未开始 |
+| 9 | 切断与 upstream 的运行时耦合（§14） | 中，触及 server/desktop/CI | ✅ 已完成 |
 
 阶段 6 建议先以 warn-only 模式跑一段时间，确认没有误报后再改为硬失败。
 
-阶段 4 优先于阶段 5：先关掉错误的 upstream 更新提示，再正式定版，避免 `0.5.0` 上线后立刻被 upstream 的 `0.7.0` 判定为「有更新」。
+阶段 4 优先于阶段 5：先关掉错误的 upstream 更新提示，再正式定版。改用 CalVer 后这一顺序不再关键——日历版本天然高于 upstream 的 `0.x`——但 channel 门控仍是第一道防线。
 
 ---
 
 ## 13. 风险
 
 - **部署门禁误报**：dirty 工作树在开发机上是常态，若把 dirty 当作“内容变化”会频繁拦截。建议门禁只在正式部署路径生效，并保留 `--allow-version-reuse`。
-- **npm 包名冲突**：若误推 `v*` tag，`publish.yml` 会尝试以 `yepanywhere` 名义发布。实施时应在 workflow 中增加仓库归属校验（`github.repository == 'kzahel/yepanywhere'`）作为兜底。
-- **与 upstream 后续同步**：一旦 fork 独立编号，未来 merge upstream 时 `package.json.version` 会冲突。约定：版本号冲突一律以 fork 值为准，并在 merge 说明中记录同步到的 upstream 版本。
+- ~~**npm 包名冲突**~~ **已结构性解决**：`publish.yml` 已删除，`release.yml` 只响应 `ya-v*` 且不执行 `npm publish`；构建产物包名为 `@hustc5622/yepanywhere`。裸 `v*` tag 现在不触发任何 workflow。
+- **与 upstream 后续同步**：一旦 fork 独立编号，未来 merge upstream 时 `package.json.version` 会冲突。约定：版本号冲突一律以 fork 值为准，并在 merge 说明中记录同步到的 upstream 版本。改用 CalVer 后冲突必然发生（两边格式都不同），按此约定处理即可。
 - **CHANGELOG 回填质量**：278 个提交的汇总条目必然粗糙。这是可接受的一次性代价，不要为此阻塞机制落地。
+
+---
+
+## 14. 与 upstream 的解耦（2026-08-06）
+
+本仓库已与 `kzahel/yepanywhere` 分叉出大量二开内容，视为独立项目。以下运行时与发布层耦合已切断：
+
+| 位置 | 原状态 | 现状态 |
+| ---- | ---- | ---- |
+| `DeviceBridgeService.ts` | 从 upstream releases 下载并执行 sidecar 二进制 | 默认本仓库，`YEP_BRIDGE_REPO` 可覆盖；版本查询纳入 channel 门控，`YEP_BRIDGE_VERSION` 可钉版本 |
+| `packages/desktop` Tauri updater | 指向 upstream 更新服务，且用 upstream 公钥验签 | 整体移除（配置、插件注册、Cargo 依赖、capability、JS 依赖） |
+| `.github/workflows/publish.yml` | `v*.*.*` 触发，发布 npm 包 `yepanywhere` | 删除，改为 `release.yml`（`ya-v*`，不发 npm） |
+| `scripts/build-bundle.ts` | 包名 `yepanywhere`，repository/homepage/bugs 指向 upstream | `@hustc5622/yepanywhere`，元数据指向 origin |
+| `AboutSettings.tsx` | 「报告问题」跳 upstream issue | 指向 origin |
+| `packages/device-bridge` Go 模块 | `github.com/kzahel/yepanywhere/device-bridge` | `github.com/hustc5622/...`；`.pb.go` 的 rawDesc 长度前缀同步修正 |
+
+**未处理（有意保留）**：
+
+- workspace 内部包名 `@yep-anywhere/*` 与根包名 `yep-anywhere`：全部 `private: true`，从不发布，与 upstream 无命名冲突。改名涉及 235 个文件、276 处 import，纯风险无收益。
+- App identifier `com.yepanywhere.*`：改动会让已安装的 App 变成新应用，需重装且丢失本地数据。
+- `upstream` remote 与本地残留的 `v0.5.0`～`v0.7.0` tag：无分支跟踪，保留用于对比参考。注意它们不在 HEAD 祖先链上，`git describe` 仍解析到 `v0.4.28`。
+- `desktop-ci.yml` 中 upstream 作者的 Apple / Azure 签名身份：fork 无对应凭据，桌面端签名流程本就不可用。
+- `site/` 下的域名、博客与作者信息：属于 upstream 的站点内容，本仓库不部署该站点。

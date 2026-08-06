@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-08-06
+## [2026.8.0] - 2026-08-06
 
 > Backfilled summary covering the ~278 commits between `v0.4.28` and the start of
 > the independent fork release line. The `0.4.29` recorded in `package.json`
@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mobile shell preset for the home node
 
 ### Changed
+- Version numbers are calendar-based (`YYYY.M.N`), replacing SemVer; they can no longer be confused with an upstream release
+- Device bridge binaries are fetched from this repository rather than upstream's releases, and can be redirected with `YEP_BRIDGE_REPO`
 - Approvals are driven through native ACP session modes, with provider-specific permission modes surfaced in the new session form
 - The selected permission mode is remembered per session, survives provider restarts, and can be changed while a session is idle
 - Session state machine and rewind accuracy realigned with upstream part coverage
@@ -51,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Anthropic-compatible gateways no longer reject tool calls over schemas Bedrock cannot accept
 - Codex model source and live messages preserved across resume and snapshot refresh
 - Server LaunchAgent restarts after crashes
+
+### Removed
+- Desktop auto-updater, which pointed at upstream's update service and verified against upstream's signing key — upstream builds could install over this fork, and this fork can never sign an update of its own
 
 ## [0.4.28] - 2026-04-16
 

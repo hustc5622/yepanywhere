@@ -15,8 +15,23 @@ describe("DeviceBridgeService", () => {
   const originalUseApkForEmulator =
     process.env.DEVICE_BRIDGE_USE_APK_FOR_EMULATOR;
 
+  /**
+   * Load the service against a specific release channel.
+   *
+   * Both the build info and the bridge version are cached in module scope, so
+   * the channel has to be set before the module is first evaluated — hence the
+   * reset plus dynamic import rather than a bare stubEnv.
+   */
+  async function importServiceOnChannel(channel: string) {
+    vi.stubEnv("YEP_RELEASE_CHANNEL", channel);
+    vi.resetModules();
+    const mod = await import("../../src/device/DeviceBridgeService.js");
+    return mod.DeviceBridgeService;
+  }
+
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     global.fetch = originalFetch;
     if (originalUseApkForEmulator === undefined) {
       process.env.DEVICE_BRIDGE_USE_APK_FOR_EMULATOR = undefined;
@@ -174,7 +189,11 @@ describe("DeviceBridgeService", () => {
   });
 
   it("reports update-available for stale managed binaries", async () => {
-    const service = new DeviceBridgeService({
+    // The bridge update service only tracks the upstream release line, so this
+    // contract is only exercised on that channel.
+    const DeviceBridgeServiceOnUpstream =
+      await importServiceOnChannel("upstream");
+    const service = new DeviceBridgeServiceOnUpstream({
       adbPath: "adb",
       dataDir: "/tmp/yep-anywhere-test",
     });
@@ -208,7 +227,9 @@ describe("DeviceBridgeService", () => {
   });
 
   it("reports update-available when managed binary version probe fails", async () => {
-    const service = new DeviceBridgeService({
+    const DeviceBridgeServiceOnUpstream =
+      await importServiceOnChannel("upstream");
+    const service = new DeviceBridgeServiceOnUpstream({
       adbPath: "adb",
       dataDir: "/tmp/yep-anywhere-test",
     });
@@ -240,6 +261,45 @@ describe("DeviceBridgeService", () => {
       latestVersion: "0.2.0",
     });
   });
+
+  for (const channel of ["fork", "dev"] as const) {
+    it(`does not contact the upstream bridge update service on the ${channel} channel`, async () => {
+      // Asking it from a fork build returns upstream's bridge version, which we
+      // would then try to download from our own repo under a tag that does not
+      // exist there.
+      const DeviceBridgeServiceOnChannel =
+        await importServiceOnChannel(channel);
+      const service = new DeviceBridgeServiceOnChannel({
+        adbPath: "adb",
+        dataDir: "/tmp/yep-anywhere-test",
+      });
+      const shim = service as unknown as DeviceBridgeServiceTestShim & {
+        findBinaryCandidate: () => {
+          path: string;
+          source: "prod" | "dev";
+        } | null;
+      };
+
+      shim.findBinaryCandidate = vi.fn().mockReturnValue({
+        path: "/tmp/yep-anywhere-test/bin/device-bridge-darwin-arm64",
+        source: "prod",
+      });
+      shim.getInstalledBinaryVersion = vi.fn().mockResolvedValue("0.1.0");
+
+      let fetchCount = 0;
+      global.fetch = vi.fn(() => {
+        fetchCount++;
+        return Promise.resolve(
+          new Response(JSON.stringify({ version: "99.0.0" }), { status: 200 }),
+        );
+      }) as unknown as typeof fetch;
+
+      const status = await service.getBridgeStatus();
+
+      expect(fetchCount).toBe(0);
+      expect(status.latestVersion).toBe("0.0.1");
+    });
+  }
 
   it("restarts a running managed sidecar after downloading updates", async () => {
     const service = new DeviceBridgeService({

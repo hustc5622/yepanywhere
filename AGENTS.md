@@ -145,17 +145,21 @@ curl -X PUT http://localhost:3401/log/level -d '{"console": "debug"}'
 
 ## 发布
 
-本仓库是 upstream（`kzahel/yepanywhere`）的**独立 fork 发行线**。主产品 tag 使用 `ya-v*`；裸 `v*` 命名空间保留给 upstream，本仓库不再创建。
+本仓库源自 `kzahel/yepanywhere`，但已二开到视为**独立项目**的程度，按独立发行线管理。主产品 tag 使用 `ya-v*`；裸 `v*` 命名空间属于 upstream，本仓库不创建，也不再被任何 workflow 响应。
 
-凡会进入正式部署产物的功能、修复或兼容性变更，开发时必须更新 `CHANGELOG.md` 的 `[Unreleased]`；正式部署或发布前必须按 SemVer 提升根 `package.json` 版本，并确保版本号、CHANGELOG、release tag 与构建产物一致。开发和临时验证不需要提升版本，靠 `buildId` 区分。
+版本号是 **CalVer `YYYY.M.N`**（年.月.当月序号），不是 SemVer——不需要判断 patch/minor/major。
+
+凡会进入正式部署产物的功能、修复或兼容性变更，开发时必须更新 `CHANGELOG.md` 的 `[Unreleased]`；正式部署或发布前必须提升根 `package.json` 版本，并确保版本号、CHANGELOG、release tag 与构建产物一致。开发和临时验证不需要提升版本，靠 `buildId` 区分。
 
 - `pnpm version:status` 查看版本 / CHANGELOG / tag / 运行时的当前状态
-- `pnpm version:bump <patch|minor|major>` 提升版本并把 `[Unreleased]` 定版（不自动 commit、不自动打 tag）
+- `pnpm version:bump` 提升到下一个日历版本并把 `[Unreleased]` 定版（无参数；不自动 commit、不自动打 tag）
 - `pnpm version:check` 发布前校验，退出码非 0 即不可发布
 
 详见 `docs/project/versioning.md`。
 
-npm 包名 `yepanywhere` 属于 upstream 发行线，fork 不发 npm。`publish.yml` 仍由 `v*.*.*` 触发，本仓库不推这类 tag。
+本仓库不发 npm。`ya-v*` tag 触发 `.github/workflows/release.yml`：跑校验与构建，把 bundle 附到本仓库的 GitHub Release。构建产物包名是 `@hustc5622/yepanywhere`，与 upstream 的 `yepanywhere` 无关。
+
+不要新增指向 upstream（`kzahel/yepanywhere`、`updates.yepanywhere.com`）的运行时依赖——已切断的耦合点见 `docs/project/versioning.md` §14。
 
 网站部署和 package 发布分开。推送 `main` 不会部署网站；网站部署使用 `site-v*` tag 或手动 workflow。见 `site/RELEASING.md`。
 
