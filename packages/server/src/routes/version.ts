@@ -248,9 +248,18 @@ export function createVersionRoutes(options?: VersionRouteOptions): Hono {
     // For dev versions like "v0.1.7-3-g050bfd2", extract base version "v0.1.7"
     // to compare against the update server.
     const baseVersion = current.split("-")[0] || current;
-    const latest = await getLatestVersion(baseVersion, options?.installId, {
-      forceRefresh: fresh,
-    });
+
+    // The public update service only knows the upstream release line. Asking it
+    // about a fork build gets back upstream's newest version, which is usually
+    // numerically higher and would prompt the user to "update" by installing
+    // upstream over their fork. isNewerSemver drops pre-release/build suffixes,
+    // so no version-string trick can express this — the channel has to gate it.
+    const isUpstreamChannel = build.releaseChannel === "upstream";
+    const latest = isUpstreamChannel
+      ? await getLatestVersion(baseVersion, options?.installId, {
+          forceRefresh: fresh,
+        })
+      : null;
     const updateAvailable = latest ? isNewerSemver(baseVersion, latest) : false;
 
     const info: VersionInfo = {

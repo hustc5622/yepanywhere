@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> Backfilled summary covering the ~278 commits between `v0.4.28` and the start of
+> the independent fork release line. The `0.4.29` recorded in `package.json`
+> during this period was an intermediate working version that was never formally
+> released, so it has no section of its own. Entries below are a thematic
+> summary rather than a per-commit reconstruction. See
+> `docs/project/versioning.md` for the release model.
+
+### Added
+- Multi-provider sessions: OpenCode, Codex and Kimi CLI (over ACP) alongside Claude, with provider-neutral session branches
+- Per-session model source selection, provider-prefixed model grouping, and model reasoning variants
+- SSH remote executors, relay host picker, remote terminal, and remote Claude project support
+- Device bridge: app-server bridge sidecar, session inspector, and bridge turn health indicators
+- Global conversation search and in-session message search
+- Subagent sessions, transcripts, and swarm details rendered inline
+- Multimodal image input, native file part uploads, and inline comments with image assets
+- Context window breakdown modal backed by a persisted window cache
+- Actionable approve/deny directly on pending-input notifications
+- Interactive deploy flow and a dev hot-reload deploy action
+- Browsable project path picker and project-filtered session shortcuts
+- Sidebar session bulk actions, project activity, and git status summaries
+- Codex account usage display on the new-session form
+
+### Changed
+- Approvals are driven through native ACP session modes, with provider-specific permission modes surfaced in the new session form
+- Session state machine and rewind accuracy realigned with upstream part coverage
+- Transcript rendering reworked: live exec output, MCP cells, warnings, markdown details blocks, web tool outputs, and the AskUserQuestion UI
+- Change signals are pushed rather than polled, removing polling latency
+- Session message list is virtualized; git status, session stats, summaries and deterministic text rendering are now cached
+- WebSocket frames are compressed
+- Desktop layout widened with collapsible side panels
+
+### Fixed
+- Session titles are retried, backfilled, and preserved across boilerplate events
+- OpenCode provider startup hardened; spurious change events no longer emitted
+- Codex MCP profile compatibility across different launch environments
+- Codex model source and live messages preserved across resume and snapshot refresh
+- Server LaunchAgent restarts after crashes
+
 ## [0.4.28] - 2026-04-16
 
 ### Changed

@@ -56,8 +56,58 @@ process.once("exit", () => {
   }
 });
 
-// Version for npm package - set via NPM_VERSION env var (from git tag in CI) or fallback
-const NPM_VERSION = process.env.NPM_VERSION || "0.4.8";
+// Version for the bundle. Normally supplied via NPM_VERSION (release tag in CI,
+// root package.json in redeploy-server.sh). When absent we read the root
+// package.json rather than falling back to a hardcoded string: a stale constant
+// silently produces a bundle that misreports its own version, which then
+// defeats every downstream version check. Failing loudly is the point.
+function resolveBundleVersion(): string {
+  const fromEnv = process.env.NPM_VERSION?.trim();
+  if (fromEnv) return fromEnv;
+
+  const rootPackageJson = path.join(ROOT_DIR, "package.json");
+  let version: unknown;
+  try {
+    version = JSON.parse(fs.readFileSync(rootPackageJson, "utf-8")).version;
+  } catch (error) {
+    console.error(
+      `Failed to read a version from ${rootPackageJson}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    console.error(
+      "Set NPM_VERSION explicitly, or repair the root package.json.",
+    );
+    process.exit(1);
+  }
+
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+/.test(version)) {
+    console.error(
+      `Root package.json has no usable "version" (got: ${JSON.stringify(version)}).`,
+    );
+    console.error(
+      "Set NPM_VERSION explicitly, or repair the root package.json.",
+    );
+    process.exit(1);
+  }
+
+  return version;
+}
+
+const NPM_VERSION = resolveBundleVersion();
+
+// Which release line this bundle belongs to. This repository is the fork line,
+// so that is the default; YEP_RELEASE_CHANNEL exists for the rare case of
+// building an upstream-channel artifact. An unrecognised value is a typo that
+// would silently re-enable upstream update prompts, so reject it outright.
+const RELEASE_CHANNELS = ["upstream", "fork", "dev"];
+const RELEASE_CHANNEL = process.env.YEP_RELEASE_CHANNEL ?? "fork";
+if (!RELEASE_CHANNELS.includes(RELEASE_CHANNEL)) {
+  console.error(
+    `Unknown YEP_RELEASE_CHANNEL "${RELEASE_CHANNEL}" (expected: ${RELEASE_CHANNELS.join(" | ")}).`,
+  );
+  process.exit(1);
+}
 const BUILD_DATE = process.env.YEP_BUILD_DATE || new Date().toISOString();
 
 function commandOutput(command: string): string | null {
@@ -94,6 +144,7 @@ function createBuildInfo() {
     schemaVersion: 1,
     buildId: `${NPM_VERSION}-${shortCommit}-${compactDate}`,
     version: NPM_VERSION,
+    releaseChannel: RELEASE_CHANNEL,
     gitDescribe: gitDescribe ?? null,
     gitCommit: gitCommit ?? null,
     gitBranch: gitBranch ?? null,
@@ -450,6 +501,7 @@ step("Generate package.json for npm", () => {
 
   log("  Package name: yepanywhere");
   log(`  Version: ${NPM_VERSION}`);
+  log(`  Release channel: ${RELEASE_CHANNEL}`);
   log(
     `  Staged at: ${path.relative(ROOT_DIR, path.join(STAGING_DIR, "package.json"))}`,
   );

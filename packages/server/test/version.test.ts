@@ -11,10 +11,15 @@ describe("GET /version", () => {
 
   beforeEach(() => {
     vi.resetModules();
+    // These cases characterise the update-server contract, which only applies
+    // to the upstream release line. Fork and dev builds skip it entirely — see
+    // the "release channel gating" block below.
+    vi.stubEnv("YEP_RELEASE_CHANNEL", "upstream");
   });
 
   afterEach(() => {
     global.fetch = originalFetch;
+    vi.unstubAllEnvs();
   });
 
   function mockFetch(
@@ -227,5 +232,88 @@ describe("GET /version", () => {
 
     expect(capabilities).toContain("deviceBridge-download");
     expect(capabilities).not.toContain("deviceBridge-update");
+  });
+
+  describe("release channel gating", () => {
+    // The public update service only knows upstream versions. A fork build that
+    // asked it would be told to "update" to whatever upstream released last,
+    // which means installing upstream over the fork.
+    for (const channel of ["fork", "dev"] as const) {
+      it(`does not contact the update server on the ${channel} channel`, async () => {
+        vi.stubEnv("YEP_RELEASE_CHANNEL", channel);
+        let fetchCount = 0;
+        mockFetch(() => {
+          fetchCount++;
+          return new Response(JSON.stringify({ version: "99.0.0" }));
+        });
+
+        const { createVersionRoutes } = await importVersion();
+        const routes = createVersionRoutes({ installId: "test-id" });
+        const res = await routes.request("/");
+        const json = await res.json();
+
+        expect(fetchCount).toBe(0);
+        expect(json.latest).toBeNull();
+        expect(json.updateAvailable).toBe(false);
+        expect(json.build.releaseChannel).toBe(channel);
+      });
+
+      it(`still skips the update server on ${channel} when fresh=1 is forced`, async () => {
+        vi.stubEnv("YEP_RELEASE_CHANNEL", channel);
+        let fetchCount = 0;
+        mockFetch(() => {
+          fetchCount++;
+          return new Response(JSON.stringify({ version: "99.0.0" }));
+        });
+
+        const { createVersionRoutes } = await importVersion();
+        const routes = createVersionRoutes();
+        const res = await routes.request("/?fresh=1");
+        const json = await res.json();
+
+        expect(fetchCount).toBe(0);
+        expect(json.updateAvailable).toBe(false);
+      });
+    }
+
+    it("defaults to the dev channel when YEP_RELEASE_CHANNEL is unset", async () => {
+      vi.stubEnv("YEP_RELEASE_CHANNEL", undefined);
+      mockFetch(() => new Response(JSON.stringify({ version: "99.0.0" })));
+
+      const { createVersionRoutes } = await importVersion();
+      const routes = createVersionRoutes();
+      const res = await routes.request("/");
+      const json = await res.json();
+
+      expect(json.build.releaseChannel).toBe("dev");
+      expect(json.updateAvailable).toBe(false);
+    });
+
+    it("ignores an unrecognised channel rather than trusting it", async () => {
+      vi.stubEnv("YEP_RELEASE_CHANNEL", "not-a-channel");
+      mockFetch(() => new Response(JSON.stringify({ version: "99.0.0" })));
+
+      const { createVersionRoutes } = await importVersion();
+      const routes = createVersionRoutes();
+      const res = await routes.request("/");
+      const json = await res.json();
+
+      expect(json.build.releaseChannel).toBe("dev");
+      expect(json.updateAvailable).toBe(false);
+    });
+
+    it("reports an update on the upstream channel", async () => {
+      vi.stubEnv("YEP_RELEASE_CHANNEL", "upstream");
+      mockFetch(() => new Response(JSON.stringify({ version: "99.0.0" })));
+
+      const { createVersionRoutes } = await importVersion();
+      const routes = createVersionRoutes();
+      const res = await routes.request("/");
+      const json = await res.json();
+
+      expect(json.build.releaseChannel).toBe("upstream");
+      expect(json.latest).toBe("99.0.0");
+      expect(json.updateAvailable).toBe(true);
+    });
   });
 });
