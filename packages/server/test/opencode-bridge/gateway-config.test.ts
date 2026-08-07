@@ -185,6 +185,72 @@ describe("OpenCode gateway configuration", () => {
     ).toEqual({ context: 1_000_000, output: 128_000 });
   });
 
+  it("declares OpenCode input modalities when managed attachments are enabled", () => {
+    const env = buildManagedOpenCodeEnv(
+      {},
+      {
+        apiKey: "opencode-key",
+        apiBase: "https://gateway.example/v1",
+      },
+      {
+        sessionConfig: {
+          model: "claude-opus-5",
+          requestProtocol: "anthropic",
+          capabilities: { attachment: true },
+        },
+      },
+    );
+    const content = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      provider?: Record<
+        string,
+        { models?: Record<string, Record<string, unknown>> }
+      >;
+    };
+
+    expect(
+      content.provider?.["yep-anthropic"]?.models?.["claude-opus-5"],
+    ).toMatchObject({
+      attachment: true,
+      modalities: {
+        input: ["text", "image", "pdf"],
+        output: ["text"],
+      },
+    });
+  });
+
+  it("preserves explicit advanced OpenCode modalities", () => {
+    const env = buildManagedOpenCodeEnv(
+      {},
+      {
+        apiKey: "opencode-key",
+        apiBase: "https://gateway.example/v1",
+      },
+      {
+        sessionConfig: {
+          model: "claude-opus-5",
+          requestProtocol: "anthropic",
+          capabilities: { attachment: true },
+          advanced: {
+            model: {
+              modalities: { input: ["text", "image"], output: ["text"] },
+            },
+          },
+        },
+      },
+    );
+    const content = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      provider?: Record<
+        string,
+        { models?: Record<string, Record<string, unknown>> }
+      >;
+    };
+
+    expect(
+      content.provider?.["yep-anthropic"]?.models?.["claude-opus-5"]
+        ?.modalities,
+    ).toEqual({ input: ["text", "image"], output: ["text"] });
+  });
+
   it("builds an isolated OpenAI-compatible provider for the selected model", () => {
     const env = buildManagedOpenCodeEnv(
       {

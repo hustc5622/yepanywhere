@@ -31,6 +31,10 @@ type Env = NodeJS.ProcessEnv;
 const DEFAULT_API_BASE = "https://api.ohmyrouter.com";
 const OHMYROUTER_SUB_MODULE = "claude-code-internal";
 const OPENCODE_GATEWAY_API_KEY_ENV = "YEP_OPENCODE_LLM_API_KEY";
+const OPENCODE_NATIVE_ATTACHMENT_MODALITIES = {
+  input: ["text", "image", "pdf"],
+  output: ["text"],
+} as const;
 const MANAGED_PROVIDER_IDS: Record<OpenCodeRequestProtocol, string> = {
   "openai-compatible": "yep-openai-compatible",
   anthropic: "yep-anthropic",
@@ -301,6 +305,16 @@ function buildManagedModelConfig(
   if (limits) managed.limit = limits;
   if (capabilities?.attachment !== undefined) {
     managed.attachment = capabilities.attachment;
+  }
+  // Current OpenCode filters file parts against `modalities.input`; its legacy
+  // `attachment` flag alone only controls catalog/UI metadata. Translate Yep's
+  // existing attachment toggle unless the advanced model patch already made
+  // an explicit modality choice.
+  if (
+    capabilities?.attachment === true &&
+    !Object.hasOwn(advancedModel, "modalities")
+  ) {
+    managed.modalities = OPENCODE_NATIVE_ATTACHMENT_MODALITIES;
   }
   if (capabilities?.reasoning !== undefined) {
     managed.reasoning = capabilities.reasoning;

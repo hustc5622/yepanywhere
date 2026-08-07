@@ -68,7 +68,18 @@ type FetchLike = (
 interface OpenCodeProviderConfig {
   npm?: string;
   options?: Record<string, unknown>;
-  models?: Record<string, { api?: { npm?: string } }>;
+  models?: Record<
+    string,
+    {
+      attachment?: boolean;
+      api?: { npm?: string };
+      provider?: { npm?: string };
+      modalities?: {
+        input?: string[];
+        output?: string[];
+      };
+    }
+  >;
 }
 
 interface OpenCodeConfig {
@@ -223,16 +234,40 @@ function usesAnthropicSdk(
     providerId === "anthropic" ||
     provider.npm === ANTHROPIC_PROVIDER_PACKAGE ||
     Object.values(provider.models ?? {}).some(
-      (model) => model.api?.npm === ANTHROPIC_PROVIDER_PACKAGE,
+      (model) =>
+        model.api?.npm === ANTHROPIC_PROVIDER_PACKAGE ||
+        model.provider?.npm === ANTHROPIC_PROVIDER_PACKAGE,
     )
   );
 }
 
-async function applyAnthropicSchemaCompatibility(
+/**
+ * OpenCode gates native file parts on `modalities.input`, not on the legacy
+ * `attachment` flag. Preserve explicit modality declarations, but translate
+ * the old Anthropic attachment shorthand in memory so images reach the SDK
+ * instead of becoming OpenCode's "model does not support image input" text.
+ */
+function applyAnthropicAttachmentCompatibility(
+  provider: OpenCodeProviderConfig,
+): void {
+  for (const model of Object.values(provider.models ?? {})) {
+    if (model.attachment !== true || model.modalities?.input !== undefined) {
+      continue;
+    }
+    model.modalities = {
+      ...model.modalities,
+      input: ["text", "image", "pdf"],
+      output: model.modalities?.output ?? ["text"],
+    };
+  }
+}
+
+async function applyAnthropicCompatibility(
   config: OpenCodeConfig,
 ): Promise<void> {
   for (const [providerId, provider] of Object.entries(config.provider ?? {})) {
     if (!usesAnthropicSdk(providerId, provider)) continue;
+    applyAnthropicAttachmentCompatibility(provider);
     const options = provider.options ?? {};
     const configuredFetch = options.fetch;
     const fetchImpl =
@@ -336,7 +371,7 @@ export const YepBridge = async (input: {
   }
 
   const compatibilityHooks = {
-    config: applyAnthropicSchemaCompatibility,
+    config: applyAnthropicCompatibility,
   };
   if (isManagedServer) return compatibilityHooks;
 

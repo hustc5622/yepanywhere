@@ -184,6 +184,58 @@ describe("Yep OpenCode bridge plugin", () => {
     expect(new Headers(init.headers).has("content-length")).toBe(false);
   });
 
+  it("translates legacy Anthropic attachment flags into input modalities", async () => {
+    setOpenCodeArgv("serve", "--port", "4521");
+    vi.stubEnv("YEP_MANAGED_OPENCODE", "1");
+    vi.stubEnv("YEP_MANAGED_OPENCODE_SERVER_PORT", "4521");
+    vi.stubEnv("YEP_OPENCODE_PLUGIN_DISABLE", "");
+    vi.stubGlobal("fetch", vi.fn());
+
+    const hooks = await YepBridge({ client: {}, directory: "/repo" });
+    if (!("config" in hooks) || !hooks.config) {
+      throw new Error("Expected the OpenCode config hook to be enabled");
+    }
+    const config = {
+      provider: {
+        mafia: {
+          npm: "@ai-sdk/anthropic",
+          models: {
+            "claude-opus-5": {
+              attachment: true,
+            },
+            "claude-text-only": {
+              attachment: false,
+            },
+            "claude-explicit": {
+              attachment: true,
+              modalities: {
+                input: ["text"],
+                output: ["text"],
+              },
+            },
+          },
+        },
+      },
+    };
+
+    await hooks.config(config);
+
+    expect(config.provider.mafia.models["claude-opus-5"]).toMatchObject({
+      attachment: true,
+      modalities: {
+        input: ["text", "image", "pdf"],
+        output: ["text"],
+      },
+    });
+    expect(config.provider.mafia.models["claude-text-only"]).not.toHaveProperty(
+      "modalities",
+    );
+    expect(config.provider.mafia.models["claude-explicit"].modalities).toEqual({
+      input: ["text"],
+      output: ["text"],
+    });
+  });
+
   it("does not block an awaited event hook while the bridge is unavailable", async () => {
     setOpenCodeArgv("run", "hello");
     vi.stubEnv("YEP_MANAGED_OPENCODE", "");

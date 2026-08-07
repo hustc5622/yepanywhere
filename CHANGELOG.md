@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Keep JSON and other non-media OpenCode uploads on the tool-readable local-path flow instead of forwarding unsupported MIME types as native model attachments
+- Preserve image/PDF input for Anthropic OpenCode models that use the legacy `attachment: true` capability by emitting the `modalities` declaration required by current OpenCode
 
 ## [2026.8.0] - 2026-08-06
 
