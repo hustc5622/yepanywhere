@@ -1,8 +1,27 @@
 import type { QueuedUserMessage, UserMessage } from "./types.js";
 
+export const MANAGED_ATTACHMENT_MARKER = "[managed attachment]";
+
+const MANAGED_UPLOAD_LINE_PATTERN =
+  /^- ([\p{L}\p{N} ._()+@-]{1,160}) \(((?:0|[1-9]\d*)(?:\.\d)? (?:B|KB|MB|GB)), ([A-Za-z0-9!#$&^_.+/-]{1,120})\): [^\r\n]+$/u;
+
+export interface UserPromptProjection {
+  /** Provider-only prompt; may contain server-local managed paths. */
+  internalPrompt: string;
+  /** Boundary-safe prompt for history, SSE, logs, and public SDK events. */
+  publicPrompt: string;
+}
+
+/** Keep the internal/public pair off the enumerable provider wire payload. */
+const queuedPromptProjections = new WeakMap<object, UserPromptProjection>();
+
 export interface MessageQueueOptions {
   /** Preserve structured uploads for providers that support native file parts. */
   preserveAttachments?: boolean;
+  /** Preserve ordered skill/mention inputs for the Codex app-server adapter. */
+  preserveCodexInputs?: boolean;
+  /** Preserve the opaque optimistic-client ID for provider correlation. */
+  preserveClientMetadata?: boolean;
 }
 
 /**
@@ -72,6 +91,168 @@ function detectImageMediaType(base64Data: string): string {
 
   // Default to PNG if detection fails
   return "image/png";
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function safeAttachmentLabel(value: string): string {
+  const leaf = value.split(/[\\/]/).at(-1) ?? value;
+  return (
+    leaf
+      .replace(/[^\p{L}\p{N} ._()+@-]+/gu, "_")
+      .trim()
+      .slice(0, 160) || "attachment"
+  );
+}
+
+function safeMimeLabel(value: string): string {
+  return (
+    value
+      .replace(/[^A-Za-z0-9!#$&^_.+/-]+/g, "_")
+      .trim()
+      .slice(0, 120) || "unknown"
+  );
+}
+
+/** Construct provider-only and public views from one structured message. */
+export function buildUserPromptProjection(
+  message: Pick<UserMessage, "text" | "attachments" | "documents">,
+): UserPromptProjection {
+  let internalPrompt = message.text;
+  let publicPrompt = message.text;
+
+  if (message.attachments?.length) {
+    const internalLines = message.attachments.map((file) => {
+      const name = safeAttachmentLabel(file.originalName || file.name);
+      const mimeType = safeMimeLabel(file.mimeType);
+      return `- ${name} (${formatSize(file.size)}, ${mimeType}): ${file.path}`;
+    });
+    const publicLines = message.attachments.map((file) => {
+      const name = safeAttachmentLabel(file.originalName || file.name);
+      const mimeType = safeMimeLabel(file.mimeType);
+      return `- ${name} (${formatSize(file.size)}, ${mimeType}): ${MANAGED_ATTACHMENT_MARKER}`;
+    });
+    internalPrompt += `\n\nUser uploaded files:\n${internalLines.join("\n")}`;
+    publicPrompt += `\n\nUser uploaded files:\n${publicLines.join("\n")}`;
+  }
+
+  if (message.documents?.length) {
+    internalPrompt += `\n\nAttached documents: ${message.documents.join(", ")}`;
+    publicPrompt += `\n\nAttached documents: ${message.documents
+      .map(() => MANAGED_ATTACHMENT_MARKER)
+      .join(", ")}`;
+  }
+
+  return { internalPrompt, publicPrompt };
+}
+
+function extractQueuedText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const direct = message as { text?: unknown };
+  if (typeof direct.text === "string") return direct.text;
+
+  const content = (message as { message?: { content?: unknown } }).message
+    ?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (typeof block === "string") return block;
+      if (!block || typeof block !== "object") return "";
+      const record = block as { type?: unknown; text?: unknown };
+      return record.type === "text" && typeof record.text === "string"
+        ? record.text
+        : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Sanitize only MessageQueue's fixed managed-attachment sections. Ordinary
+ * user prose and unrelated path-like strings remain byte-for-byte intact.
+ */
+export function sanitizeManagedAttachmentPrompt(text: string): string {
+  const uploadMarker = "\n\nUser uploaded files:\n";
+  const documentMarker = "\n\nAttached documents: ";
+  const uploadIndex = text.lastIndexOf(uploadMarker);
+  if (uploadIndex >= 0) {
+    const uploadStart = uploadIndex + uploadMarker.length;
+    const documentIndex = text.indexOf(documentMarker, uploadStart);
+    const uploadEnd = documentIndex >= 0 ? documentIndex : text.length;
+    const safeLines = text
+      .slice(uploadStart, uploadEnd)
+      .split("\n")
+      .flatMap((line) => {
+        const match = MANAGED_UPLOAD_LINE_PATTERN.exec(line);
+        if (!match?.[1] || !match[2] || !match[3]) return [];
+        const name = safeAttachmentLabel(match[1]);
+        const mimeType = safeMimeLabel(match[3]);
+        return [
+          `- ${name} (${match[2]}, ${mimeType}): ${MANAGED_ATTACHMENT_MARKER}`,
+        ];
+      });
+    return `${text.slice(0, uploadIndex)}${uploadMarker}${safeLines.join("\n")}${
+      documentIndex >= 0 ? `${documentMarker}${MANAGED_ATTACHMENT_MARKER}` : ""
+    }`;
+  }
+
+  const documentIndex = text.lastIndexOf(documentMarker);
+  if (documentIndex < 0) return text;
+  return `${text.slice(0, documentIndex)}${documentMarker}${MANAGED_ATTACHMENT_MARKER}`;
+}
+
+/** Read the internal/public pair, reconstructing it after shallow clones. */
+export function getUserPromptProjection(
+  message: unknown,
+): UserPromptProjection {
+  if (message && typeof message === "object") {
+    const queued = queuedPromptProjections.get(message);
+    if (queued) return queued;
+
+    const raw = message as Partial<UserMessage>;
+    if (typeof raw.text === "string") {
+      return buildUserPromptProjection({
+        text: raw.text,
+        attachments: raw.attachments,
+        documents: raw.documents,
+      });
+    }
+  }
+
+  const internalPrompt = extractQueuedText(message);
+  if (message && typeof message === "object") {
+    const attachments = (message as Partial<QueuedUserMessage>).attachments;
+    const uploadSection = "\n\nUser uploaded files:\n";
+    const uploadIndex = internalPrompt.lastIndexOf(uploadSection);
+    if (attachments?.length && uploadIndex >= 0) {
+      const documentIndex = internalPrompt.indexOf(
+        "\n\nAttached documents: ",
+        uploadIndex + uploadSection.length,
+      );
+      const publicPrompt = buildUserPromptProjection({
+        text: internalPrompt.slice(0, uploadIndex),
+        attachments,
+      }).publicPrompt;
+      return {
+        internalPrompt,
+        publicPrompt:
+          documentIndex >= 0
+            ? `${publicPrompt}\n\nAttached documents: ${MANAGED_ATTACHMENT_MARKER}`
+            : publicPrompt,
+      };
+    }
+  }
+  return {
+    internalPrompt,
+    publicPrompt: sanitizeManagedAttachmentPrompt(internalPrompt),
+  };
 }
 
 /**
@@ -148,34 +329,18 @@ export class MessageQueue {
   }
 
   /**
-   * Format file size in human-readable form.
-   */
-  private formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024)
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  }
-
-  /**
    * Convert a UserMessage to the provider-neutral wire format.
    */
   private toSDKMessage(msg: UserMessage): QueuedUserMessage {
-    let text = msg.text;
+    const projection = buildUserPromptProjection(msg);
     const attachments =
       this.options.preserveAttachments && msg.attachments?.length
         ? [...msg.attachments]
         : undefined;
-
-    // Append attachment paths for agent to access via Read tool
-    if (msg.attachments?.length) {
-      const lines = msg.attachments.map(
-        (f) =>
-          `- ${f.originalName} (${this.formatSize(f.size)}, ${f.mimeType}): ${f.path}`,
-      );
-      text += `\n\nUser uploaded files:\n${lines.join("\n")}`;
-    }
+    const codexInputs =
+      this.options.preserveCodexInputs && msg.codexInputs?.length
+        ? msg.codexInputs.map((input) => ({ ...input }))
+        : undefined;
 
     // If message has images or documents, use array content format
     if (msg.images?.length || msg.documents?.length) {
@@ -185,7 +350,7 @@ export class MessageQueue {
             type: "image";
             source: { type: "base64"; media_type: string; data: string };
           }
-      > = [{ type: "text", text }];
+      > = [{ type: "text", text: projection.internalPrompt }];
 
       // Add images as base64 content blocks
       for (const image of msg.images ?? []) {
@@ -203,36 +368,39 @@ export class MessageQueue {
         });
       }
 
-      // Documents would need similar handling
-      // For now, we'll just include them in text
-      if (msg.documents?.length) {
-        content[0] = {
-          type: "text",
-          text: `${text}\n\nAttached documents: ${msg.documents.join(", ")}`,
-        };
-      }
-
-      return {
+      const queuedMessage: QueuedUserMessage = {
         type: "user",
         uuid: msg.uuid, // Pass UUID so SDK uses the same one we emitted via SSE
+        ...(this.options.preserveClientMetadata && msg.tempId
+          ? { tempId: msg.tempId }
+          : {}),
         ...(attachments && { attachments }),
+        ...(codexInputs && { codexInputs }),
         message: {
           role: "user",
           content,
         },
       };
+      queuedPromptProjections.set(queuedMessage, projection);
+      return queuedMessage;
     }
 
     // Simple text message
-    return {
+    const queuedMessage: QueuedUserMessage = {
       type: "user",
       uuid: msg.uuid, // Pass UUID so SDK uses the same one we emitted via SSE
+      ...(this.options.preserveClientMetadata && msg.tempId
+        ? { tempId: msg.tempId }
+        : {}),
       ...(attachments && { attachments }),
+      ...(codexInputs && { codexInputs }),
       message: {
         role: "user",
-        content: text,
+        content: projection.internalPrompt,
       },
     };
+    queuedPromptProjections.set(queuedMessage, projection);
+    return queuedMessage;
   }
 
   /**

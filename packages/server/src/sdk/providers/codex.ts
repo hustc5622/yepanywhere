@@ -60,7 +60,7 @@ import { getDataDir } from "../../config.js";
 import { getLogger } from "../../logging/logger.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
 import { logSDKMessage } from "../messageLogger.js";
-import { MessageQueue } from "../messageQueue.js";
+import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
   SDKMessage,
   TimestampedSDKMessage,
@@ -1801,14 +1801,16 @@ export class CodexProvider implements AgentProvider {
           break;
         }
 
-        let userPrompt = this.extractTextFromMessage(message);
-        if (!userPrompt) {
+        let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
+        if (!internalPrompt) {
           continue;
         }
 
         // Prepend global instructions to the first message of new sessions
         if (isFirstMessage && options.globalInstructions) {
-          userPrompt = `[Global context]\n${options.globalInstructions}\n\n---\n\n${userPrompt}`;
+          const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+          internalPrompt = `${prefix}${internalPrompt}`;
+          publicPrompt = `${prefix}${publicPrompt}`;
           isFirstMessage = false;
         } else {
           isFirstMessage = false;
@@ -1821,7 +1823,7 @@ export class CodexProvider implements AgentProvider {
           session_id: sessionId,
           message: {
             role: "user",
-            content: userPrompt,
+            content: publicPrompt,
           },
         } as SDKMessage);
         logSdkCorrelationDebug(sessionId, userMessage, {
@@ -1834,7 +1836,7 @@ export class CodexProvider implements AgentProvider {
         const turnStartParams: TurnStartParams = {
           threadId: sessionId,
           clientUserMessageId: message.uuid,
-          input: [{ type: "text", text: userPrompt, text_elements: [] }],
+          input: [{ type: "text", text: internalPrompt, text_elements: [] }],
           effort: this.mapEffortToReasoningEffort(
             options.reasoningEffort,
             options.effort,

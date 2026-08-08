@@ -677,7 +677,7 @@ export class Supervisor {
     processHolder.process = process;
 
     // Add the initial user message to history with the same UUID we passed to provider.
-    process.addInitialUserMessage(message.text, messageUuid, message.tempId);
+    process.addInitialUserMessage(message, messageUuid, message.tempId);
 
     const isForkedResume =
       activeProvider.name === "opencode" &&

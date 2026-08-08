@@ -13,7 +13,11 @@ import type {
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
-import type { MessageQueue } from "../sdk/messageQueue.js";
+import { sanitizeSDKMessageForPublic } from "../sdk/messageLogger.js";
+import {
+  type MessageQueue,
+  buildUserPromptProjection,
+} from "../sdk/messageQueue.js";
 import type {
   PermissionMode,
   SDKMessage,
@@ -154,6 +158,9 @@ export class Process {
    */
   private currentBucket: SDKMessage[] = [];
   private previousBucket: SDKMessage[] = [];
+  /** UUID-keyed public prompts used to replace provider echoes losslessly. */
+  private publicUserPrompts = new Map<string, string>();
+  private static readonly MAX_PUBLIC_USER_PROMPTS = 256;
   private bucketSwapTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly BUCKET_SWAP_INTERVAL_MS = 15_000;
 
@@ -982,55 +989,58 @@ export class Process {
     } as TimestampedSDKMessage<T>;
   }
 
+  private rememberPublicUserPrompt(uuid: string, publicPrompt: string): void {
+    this.publicUserPrompts.delete(uuid);
+    this.publicUserPrompts.set(uuid, publicPrompt);
+    while (this.publicUserPrompts.size > Process.MAX_PUBLIC_USER_PROMPTS) {
+      const oldest = this.publicUserPrompts.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.publicUserPrompts.delete(oldest);
+    }
+  }
+
+  private projectProviderMessageForPublic(message: SDKMessage): SDKMessage {
+    const safeMessage = sanitizeSDKMessageForPublic(message) as SDKMessage;
+    if (safeMessage.type !== "user" || !safeMessage.uuid) return safeMessage;
+    const publicPrompt = this.publicUserPrompts.get(safeMessage.uuid);
+    if (!publicPrompt) return safeMessage;
+    return {
+      ...safeMessage,
+      message: {
+        ...safeMessage.message,
+        role: safeMessage.message?.role ?? "user",
+        content: publicPrompt,
+      },
+    };
+  }
+
   /**
    * Add initial user message to history without queuing to SDK.
    * Used for real SDK sessions where the initial message is passed directly
    * to the SDK but needs to be in history for SSE replay to late-joining clients.
    *
-   * @param text - The message text
+   * @param message - Structured input used to construct the public view
    * @param uuid - The UUID to use (should match what was passed to SDK)
    * @param tempId - Optional client temp ID for optimistic UI tracking
    */
-  addInitialUserMessage(text: string, uuid: string, tempId?: string): void {
+  addInitialUserMessage(
+    message: UserMessage | string,
+    uuid: string,
+    tempId?: string,
+  ): void {
+    const publicPrompt = buildUserPromptProjection(
+      typeof message === "string" ? { text: message } : message,
+    ).publicPrompt;
+    this.rememberPublicUserPrompt(uuid, publicPrompt);
     const sdkMessage = this.withTimestamp({
       type: "user",
       uuid,
       tempId,
-      message: { role: "user", content: text },
+      message: { role: "user", content: publicPrompt },
     } as SDKMessage);
 
     this.currentBucket.push(sdkMessage);
     this.emit({ type: "message", message: sdkMessage });
-  }
-
-  /**
-   * Format file size for display.
-   */
-  private formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024)
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  }
-
-  /**
-   * Build user message content that matches what MessageQueue sends to the SDK.
-   * This ensures SSE/history messages can be deduplicated against JSONL.
-   */
-  private buildUserMessageContent(message: UserMessage): string {
-    let text = message.text;
-
-    // Append attachment paths (same format as MessageQueue.toSDKMessage)
-    if (message.attachments?.length) {
-      const lines = message.attachments.map(
-        (f) =>
-          `- ${f.originalName} (${this.formatSize(f.size)}, ${f.mimeType}): ${f.path}`,
-      );
-      text += `\n\nUser uploaded files:\n${lines.join("\n")}`;
-    }
-
-    return text;
   }
 
   /**
@@ -1072,16 +1082,14 @@ export class Process {
     // Create user message with UUID - this UUID will be used by both SSE and SDK
     const uuid = randomUUID();
     const messageWithUuid: UserMessage = { ...message, uuid };
-
-    // Build content that matches what the SDK will write to JSONL.
-    // This ensures SSE/history messages can be deduplicated against JSONL.
-    const content = this.buildUserMessageContent(message);
+    const { internalPrompt, publicPrompt } =
+      buildUserPromptProjection(messageWithUuid);
 
     const sdkMessage = this.withTimestamp({
       type: "user",
       uuid,
       tempId: message.tempId,
-      message: { role: "user", content },
+      message: { role: "user", content: publicPrompt },
     } as SDKMessage);
 
     if (this.messageQueue) {
@@ -1089,9 +1097,10 @@ export class Process {
       if (this._state.type === "in-turn" && this.steerFn) {
         const steerMessage: UserMessage = {
           ...messageWithUuid,
-          // Mirror MessageQueue's attachment expansion for steer payloads.
-          text: content,
+          // The provider receives managed paths; the public echo never does.
+          text: internalPrompt,
           attachments: undefined,
+          documents: undefined,
         };
         try {
           const steered = await this.steerFn(steerMessage);
@@ -1143,7 +1152,7 @@ export class Process {
     }
 
     // Legacy behavior for mock SDK
-    this.legacyQueue.push(message);
+    this.legacyQueue.push(messageWithUuid);
     this.publishOptimisticUserMessage(sdkMessage);
     if (this._state.type === "idle") {
       this.processNextInQueue();
@@ -1153,6 +1162,13 @@ export class Process {
 
   private publishOptimisticUserMessage(message: TimestampedSDKMessage): void {
     if (!shouldEmitMessage(message)) return;
+
+    if (message.type === "user" && message.uuid) {
+      const content = message.message?.content;
+      if (typeof content === "string") {
+        this.rememberPublicUserPrompt(message.uuid, content);
+      }
+    }
 
     // Add to history for SSE replay to late-joining clients. The provider echo
     // uses the same UUID and is deduplicated when JSONL is merged later.
@@ -1766,7 +1782,9 @@ export class Process {
           break;
         }
 
-        const message = this.withTimestamp(result.value);
+        const message = this.projectProviderMessageForPublic(
+          this.withTimestamp(result.value),
+        ) as TimestampedSDKMessage;
         this._lastMessageTime = new Date();
 
         const isProviderOutput =

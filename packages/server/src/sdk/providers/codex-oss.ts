@@ -25,7 +25,7 @@ import {
 } from "../../codex/normalization.js";
 import { getLogger } from "../../logging/logger.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
-import { MessageQueue } from "../messageQueue.js";
+import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type { SDKMessage } from "../types.js";
 import type {
   AgentProvider,
@@ -358,12 +358,14 @@ export class CodexOSSProvider implements AgentProvider {
     for await (const message of messageGen) {
       if (signal.aborted) break;
 
-      let userPrompt = this.extractTextFromMessage(message);
-      if (!userPrompt) continue;
+      let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
+      if (!internalPrompt) continue;
 
       // Prepend global instructions to the first message of new sessions
       if (isFirstNewMessage && options.globalInstructions) {
-        userPrompt = `[Global context]\n${options.globalInstructions}\n\n---\n\n${userPrompt}`;
+        const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+        internalPrompt = `${prefix}${internalPrompt}`;
+        publicPrompt = `${prefix}${publicPrompt}`;
       }
       isFirstNewMessage = false;
 
@@ -373,7 +375,7 @@ export class CodexOSSProvider implements AgentProvider {
         type: "user",
         uuid: message.uuid,
         session_id: currentSessionId || `pending-${Date.now()}`,
-        message: { role: "user", content: userPrompt },
+        message: { role: "user", content: publicPrompt },
       } as SDKMessage;
 
       // Increment turn number and reset accumulators for this new turn
@@ -385,7 +387,7 @@ export class CodexOSSProvider implements AgentProvider {
       const isFirstTurn = turnNumber === 1 && !options.resumeSessionId;
       const args = isFirstTurn
         ? this.buildFirstTurnArgs(options)
-        : this.buildResumeTurnArgs(options, currentSessionId, userPrompt);
+        : this.buildResumeTurnArgs(options, currentSessionId, internalPrompt);
 
       // Spawn codex process
       let codexProcess: ChildProcess;
@@ -413,7 +415,7 @@ export class CodexOSSProvider implements AgentProvider {
         // For first turn, send prompt via stdin
         // For resume, prompt is passed as argument
         if (isFirstTurn && codexProcess.stdin) {
-          codexProcess.stdin.write(userPrompt);
+          codexProcess.stdin.write(internalPrompt);
           codexProcess.stdin.end();
         } else if (codexProcess.stdin) {
           codexProcess.stdin.end();
@@ -981,42 +983,6 @@ export class CodexOSSProvider implements AgentProvider {
       default:
         return [];
     }
-  }
-
-  /**
-   * Extract text from user message.
-   */
-  private extractTextFromMessage(message: unknown): string {
-    if (!message || typeof message !== "object") return "";
-
-    const userMsg = message as { text?: string };
-    if (typeof userMsg.text === "string") return userMsg.text;
-
-    const sdkMsg = message as { message?: { content?: string | unknown[] } };
-    const content = sdkMsg.message?.content;
-
-    if (typeof content === "string") return content;
-
-    if (Array.isArray(content)) {
-      return content
-        .map((block: unknown) => {
-          if (typeof block === "string") return block;
-          if (
-            typeof block === "object" &&
-            block !== null &&
-            "type" in block &&
-            (block as { type: string }).type === "text" &&
-            "text" in block
-          ) {
-            return (block as { text: string }).text;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-
-    return "";
   }
 
   /**

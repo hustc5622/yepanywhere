@@ -619,6 +619,12 @@ describe("KimiProvider prompt blocks", () => {
   it("falls back to a resource_link when an image cannot be read", async () => {
     const provider = new KimiProvider();
     const missing = join(tmpdir(), "kimi-missing-image.png");
+    const warn = vi.fn();
+    (
+      provider as unknown as {
+        log: { warn: typeof warn };
+      }
+    ).log = { warn };
 
     const blocks = await buildKimiPromptBlocks(
       provider,
@@ -640,6 +646,11 @@ describe("KimiProvider prompt blocks", () => {
         mimeType: "image/png",
       },
     ]);
+    expect(warn).toHaveBeenCalledWith(
+      { errorCode: "ENOENT" },
+      "Failed to read image attachment for Kimi prompt",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(missing);
   });
 
   it("does not send the same image twice when it arrives inline and as an upload", async () => {

@@ -38,7 +38,7 @@ import { normalizeKimiToolInput } from "../../kimi/tool-input.js";
 import { getLogger } from "../../logging/logger.js";
 import { whichCommand } from "../cli-detection.js";
 const execAsync = promisify(exec);
-import { MessageQueue } from "../messageQueue.js";
+import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
   CanUseTool,
   PermissionMode,
@@ -897,10 +897,12 @@ export class KimiProvider implements AgentProvider {
       for await (const message of messageGen) {
         if (signal.aborted) break;
 
-        let userText = this.extractTextFromMessage(message);
+        let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
 
         if (isFirstNewMessage && options.globalInstructions) {
-          userText = `[Global context]\n${options.globalInstructions}\n\n---\n\n${userText}`;
+          const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+          internalPrompt = `${prefix}${internalPrompt}`;
+          publicPrompt = `${prefix}${publicPrompt}`;
         }
         isFirstNewMessage = false;
 
@@ -909,19 +911,22 @@ export class KimiProvider implements AgentProvider {
           type: "user",
           uuid: userUuid,
           session_id: sessionId,
-          message: { role: "user", content: userText },
+          message: { role: "user", content: publicPrompt },
         } as SDKMessage;
 
         updateQueue.length = 0;
 
-        const promptBlocks = await this.buildPromptBlocks(message, userText);
+        const promptBlocks = await this.buildPromptBlocks(
+          message,
+          internalPrompt,
+        );
         const imageBlockCount = promptBlocks.filter(
           (b) => b.type === "image",
         ).length;
         const promptStart = Date.now();
         this.log.debug(
           {
-            textLength: userText.length,
+            textLength: internalPrompt.length,
             blockCount: promptBlocks.length,
             imageBlocks: imageBlockCount,
             resourceLinks: promptBlocks.filter(
@@ -1501,8 +1506,14 @@ export class KimiProvider implements AgentProvider {
           continue;
         } catch (err) {
           // Fall through to a resource_link so the path still reaches Kimi.
+          const errorCode =
+            isRecord(err) &&
+            typeof err.code === "string" &&
+            /^[A-Z0-9_]{1,32}$/.test(err.code)
+              ? err.code
+              : undefined;
           this.log.warn(
-            { err, path },
+            { errorCode },
             "Failed to read image attachment for Kimi prompt",
           );
         }
@@ -1517,48 +1528,6 @@ export class KimiProvider implements AgentProvider {
     }
 
     return blocks;
-  }
-
-  /**
-   * Extract text content from a user message.
-   */
-  private extractTextFromMessage(message: unknown): string {
-    if (!message || typeof message !== "object") {
-      return "";
-    }
-
-    const userMsg = message as { text?: string };
-    if (typeof userMsg.text === "string") {
-      return userMsg.text;
-    }
-
-    const sdkMsg = message as { message?: { content?: string | unknown[] } };
-    const content = sdkMsg.message?.content;
-
-    if (typeof content === "string") {
-      return content;
-    }
-
-    if (Array.isArray(content)) {
-      return content
-        .map((block: unknown) => {
-          if (typeof block === "string") return block;
-          if (
-            typeof block === "object" &&
-            block !== null &&
-            "type" in block &&
-            (block as { type: string }).type === "text" &&
-            "text" in block
-          ) {
-            return (block as { text: string }).text;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-
-    return "";
   }
 
   /**

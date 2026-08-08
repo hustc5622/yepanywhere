@@ -71,7 +71,7 @@ import {
   normalizeOpenCodeQuestions,
 } from "../../opencode/questions.js";
 import { whichCommand } from "../cli-detection.js";
-import { MessageQueue } from "../messageQueue.js";
+import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
   QueuedUserMessage,
   SDKMessage,
@@ -1125,13 +1125,14 @@ export class OpenCodeProvider implements AgentProvider {
       for await (const message of messageGen) {
         if (signal.aborted) break;
 
-        // Extract text from the user message
-        let userPrompt = this.extractTextFromMessage(message);
+        let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
         const fileParts = this.buildOpenCodeFileParts(message);
 
         // Prepend global instructions to the first message of new sessions
         if (isFirstNewMessage && options.globalInstructions) {
-          userPrompt = `[Global context]\n${options.globalInstructions}\n\n---\n\n${userPrompt}`;
+          const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+          internalPrompt = `${prefix}${internalPrompt}`;
+          publicPrompt = `${prefix}${publicPrompt}`;
         }
         isFirstNewMessage = false;
 
@@ -1142,7 +1143,7 @@ export class OpenCodeProvider implements AgentProvider {
           session_id: sessionId,
           message: {
             role: "user",
-            content: userPrompt,
+            content: publicPrompt,
           },
         } as SDKMessage;
 
@@ -1151,7 +1152,7 @@ export class OpenCodeProvider implements AgentProvider {
           baseUrl,
           opencodeSessionId,
           sessionId,
-          userPrompt,
+          internalPrompt,
           signal,
           options.onToolApproval,
           runtimeRef.currentModel,
@@ -3949,27 +3950,6 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     return false;
-  }
-
-  /**
-   * Extract text content from a user message.
-   */
-  private extractTextFromMessage(message: QueuedUserMessage): string {
-    const content = message.message?.content;
-    if (typeof content === "string") {
-      return content;
-    }
-    if (Array.isArray(content)) {
-      // Extract text from content blocks
-      return content
-        .filter(
-          (block): block is { type: "text"; text: string } =>
-            typeof block === "object" && block.type === "text",
-        )
-        .map((block) => block.text)
-        .join("\n");
-    }
-    return "";
   }
 
   /**

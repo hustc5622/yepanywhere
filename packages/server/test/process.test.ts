@@ -265,6 +265,64 @@ describe("Process", () => {
       await process.abort();
     });
 
+    it("steers with internal paths while publishing only the safe projection", async () => {
+      let resolveIterator: () => void;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () =>
+          new Promise((resolve) => {
+            resolveIterator = () => resolve({ done: true, value: undefined });
+          }),
+      };
+      const steerFn = vi.fn(async () => true);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+        steerFn,
+      });
+      const emitted: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emitted.push(event.message);
+      });
+
+      await process.queueMessage({
+        text: "inspect",
+        attachments: [
+          {
+            id: "steer-file",
+            originalName: "report.pdf",
+            size: 1024,
+            mimeType: "application/pdf",
+            path: "/private/provider/steer/report.pdf",
+          },
+        ],
+        documents: ["/private/provider/steer/notes.txt"],
+      });
+
+      expect(steerFn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining("/private/provider/steer/report.pdf"),
+          attachments: undefined,
+          documents: undefined,
+        }),
+      );
+      const providerMessage = steerFn.mock.calls[0]?.[0];
+      expect(providerMessage?.text).toContain(
+        "/private/provider/steer/notes.txt",
+      );
+      const publicProjection = JSON.stringify({
+        emitted,
+        history: process.getMessageHistory(),
+      });
+      expect(publicProjection).toContain("[managed attachment]");
+      expect(publicProjection).not.toContain("/private/provider/steer");
+
+      resolveIterator?.();
+      await process.abort();
+    });
+
     it("falls back to queue when steerFn returns false", async () => {
       let resolveIterator: () => void;
       const iterator: AsyncIterator<SDKMessage> = {
@@ -1338,7 +1396,7 @@ describe("Process", () => {
       expect(userEmits).toHaveLength(1);
     });
 
-    it("should include attachment info in user message content", async () => {
+    it("publishes attachment metadata without server paths in history and SSE", async () => {
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },
       ]);
@@ -1350,6 +1408,10 @@ describe("Process", () => {
         sessionId: "sess-1",
         idleTimeoutMs: 100,
         queue,
+      });
+      const emittedMessages: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emittedMessages.push(event.message);
       });
 
       // Queue a user message with attachments
@@ -1377,10 +1439,153 @@ describe("Process", () => {
       expect(content).toContain("screenshot.png");
       expect(content).toContain("1.0 KB");
       expect(content).toContain("image/png");
-      expect(content).toContain("/uploads/screenshot.png");
+      expect(content).toContain("[managed attachment]");
+      expect(content).not.toContain("/uploads/screenshot.png");
+      expect(JSON.stringify(emittedMessages)).not.toContain(
+        "/uploads/screenshot.png",
+      );
     });
 
-    it("should produce identical content format as MessageQueue for deduplication", async () => {
+    it("publishes a safe initial attachment projection", async () => {
+      const iterator = createMockIterator([
+        { type: "system", subtype: "init", session_id: "sess-1" },
+      ]);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+      });
+
+      process.addInitialUserMessage(
+        {
+          text: "Review this",
+          attachments: [
+            {
+              id: "file-initial",
+              originalName: "report.pdf",
+              size: 2048,
+              mimeType: "application/pdf",
+              path: "/private/uploads/report.pdf",
+            },
+          ],
+        },
+        "initial-user-1",
+      );
+
+      const publicProjection = JSON.stringify(process.getMessageHistory());
+      expect(publicProjection).toContain("report.pdf");
+      expect(publicProjection).toContain("[managed attachment]");
+      expect(publicProjection).not.toContain("/private/uploads/report.pdf");
+    });
+
+    it("replaces a provider echo with the UUID-matched public prompt", async () => {
+      let emitProviderEcho: ((message: SDKMessage) => void) | undefined;
+      async function* providerIterator(): AsyncIterator<SDKMessage> {
+        yield { type: "system", subtype: "init", session_id: "sess-echo" };
+        const echo = await new Promise<SDKMessage>((resolve) => {
+          emitProviderEcho = resolve;
+        });
+        yield echo;
+      }
+      const process = new Process(providerIterator(), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-echo",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+      });
+      const emitted: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emitted.push(event.message);
+      });
+
+      await process.queueMessage({
+        text: "Inspect",
+        attachments: [
+          {
+            id: "echo-file",
+            originalName: "echo.pdf",
+            size: 1024,
+            mimeType: "application/pdf",
+            path: "/private/provider-only/echo.pdf",
+          },
+        ],
+      });
+      const optimistic = emitted.find((message) => message.type === "user");
+      if (!optimistic?.uuid) throw new Error("expected optimistic user UUID");
+      await vi.waitFor(() => expect(emitProviderEcho).toBeTypeOf("function"));
+      emitProviderEcho?.({
+        type: "user",
+        uuid: optimistic.uuid,
+        message: {
+          role: "user",
+          content:
+            "Inspect\n\nUser uploaded files:\n- echo.pdf (1.0 KB, application/pdf): /private/provider-only/echo.pdf",
+        },
+      });
+      await vi.waitFor(() => {
+        expect(
+          emitted.filter((message) => message.type === "user"),
+        ).toHaveLength(2);
+      });
+
+      expect(JSON.stringify(emitted)).not.toContain("/private/provider-only");
+      expect(JSON.stringify(process.getMessageHistory())).not.toContain(
+        "/private/provider-only",
+      );
+      expect(emitted.at(-1)?.message?.content).toContain(
+        "[managed attachment]",
+      );
+    });
+
+    it("keeps structured Codex paths out of public history and SSE", async () => {
+      const iterator = createMockIterator([
+        { type: "system", subtype: "init", session_id: "sess-1" },
+      ]);
+      const queue = new MessageQueue({ preserveCodexInputs: true });
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue,
+      });
+      const emitted: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emitted.push(event.message);
+      });
+
+      await process.queueMessage({
+        text: "$skill-creator inspect",
+        codexInputs: [
+          {
+            type: "skill",
+            name: "skill-creator",
+            path: "/private/workspace/.codex/skills/skill-creator/SKILL.md",
+          },
+        ],
+      });
+
+      const publicProjection = JSON.stringify({
+        history: process.getMessageHistory(),
+        emitted,
+      });
+      expect(publicProjection).not.toContain("codexInputs");
+      expect(publicProjection).not.toContain("/private/workspace");
+
+      const queued = await queue.generator().next();
+      expect(queued.value?.codexInputs).toEqual([
+        {
+          type: "skill",
+          name: "skill-creator",
+          path: "/private/workspace/.codex/skills/skill-creator/SKILL.md",
+        },
+      ]);
+    });
+
+    it("deduplicates by UUID even though public and internal prompts differ", async () => {
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },
       ]);
@@ -1426,8 +1631,10 @@ describe("Process", () => {
       const sdkMessage = await gen.next();
       const sdkContent = sdkMessage.value?.message?.content as string;
 
-      // Both should produce identical content for deduplication to work
-      expect(historyContent).toBe(sdkContent);
+      expect(historyContent).not.toBe(sdkContent);
+      expect(historyContent).not.toContain("/uploads/");
+      expect(sdkContent).toContain("/uploads/screenshot.png");
+      expect(process.getMessageHistory()[0]?.uuid).toBe(sdkMessage.value?.uuid);
     });
   });
 

@@ -39,7 +39,7 @@ const GEMINI_MODELS: ModelInfo[] = [
 /** Preview models (require previewFeatures enabled in ~/.gemini/settings.json) */
 const GEMINI_PREVIEW_MODELS: ModelInfo[] = [];
 import { parseGeminiEvent } from "@yep-anywhere/shared";
-import { MessageQueue } from "../messageQueue.js";
+import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type { SDKMessage } from "../types.js";
 import type {
   AgentProvider,
@@ -224,8 +224,7 @@ export class GeminiProvider implements AgentProvider {
     for await (const message of messageGen) {
       if (signal.aborted) break;
 
-      // Extract text from the user message
-      let userPrompt = this.extractTextFromMessage(message);
+      let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
 
       // Prepend global instructions to the first message of new sessions
       if (
@@ -233,7 +232,9 @@ export class GeminiProvider implements AgentProvider {
         !options.resumeSessionId &&
         options.globalInstructions
       ) {
-        userPrompt = `[Global context]\n${options.globalInstructions}\n\n---\n\n${userPrompt}`;
+        const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+        internalPrompt = `${prefix}${internalPrompt}`;
+        publicPrompt = `${prefix}${publicPrompt}`;
       }
 
       // Emit user message with UUID from queue to enable deduplication
@@ -244,7 +245,7 @@ export class GeminiProvider implements AgentProvider {
         session_id: currentSessionId,
         message: {
           role: "user",
-          content: userPrompt,
+          content: publicPrompt,
         },
       } as SDKMessage;
 
@@ -268,7 +269,7 @@ export class GeminiProvider implements AgentProvider {
       // For now, we assume auto-approve is the default in agentic mode
 
       // Add the prompt
-      args.push(userPrompt);
+      args.push(internalPrompt);
 
       // Spawn the gemini process
       let geminiProcess: ChildProcess;
@@ -543,52 +544,6 @@ export class GeminiProvider implements AgentProvider {
     }
 
     return null;
-  }
-
-  /**
-   * Extract text content from a user message.
-   */
-  private extractTextFromMessage(message: unknown): string {
-    if (!message || typeof message !== "object") {
-      return "";
-    }
-
-    // Handle UserMessage format
-    const userMsg = message as { text?: string };
-    if (typeof userMsg.text === "string") {
-      return userMsg.text;
-    }
-
-    // Handle SDK message format
-    const sdkMsg = message as {
-      message?: { content?: string | unknown[] };
-    };
-    const content = sdkMsg.message?.content;
-
-    if (typeof content === "string") {
-      return content;
-    }
-
-    if (Array.isArray(content)) {
-      return content
-        .map((block: unknown) => {
-          if (typeof block === "string") return block;
-          if (
-            typeof block === "object" &&
-            block !== null &&
-            "type" in block &&
-            (block as { type: string }).type === "text" &&
-            "text" in block
-          ) {
-            return (block as { text: string }).text;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-
-    return "";
   }
 
   /**

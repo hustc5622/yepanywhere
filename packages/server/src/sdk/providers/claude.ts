@@ -19,7 +19,10 @@ import {
   type SlashCommand,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
-import { logSDKMessage } from "../messageLogger.js";
+import {
+  logSDKMessage,
+  sanitizeSDKMessageForPublic,
+} from "../messageLogger.js";
 import { MessageQueue } from "../messageQueue.js";
 import { getRemoteSessionStorageMode } from "../remote-executor-config.js";
 import {
@@ -847,7 +850,9 @@ export class ClaudeProvider implements AgentProvider {
         sessionId =
           (message as { session_id?: string }).session_id ?? sessionId;
         logSDKMessage(sessionId, message, { provider: "claude" });
-        const converted = this.convertMessage(message);
+        const converted = sanitizeSDKMessageForPublic(
+          this.convertMessage(message),
+        ) as SDKMessage;
 
         if (converted.type === "result" && sessionId !== "unknown") {
           const sync = await materializeRemoteSessionFile({

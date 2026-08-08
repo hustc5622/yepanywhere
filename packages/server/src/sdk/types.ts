@@ -82,12 +82,19 @@ export type TimestampedSDKMessage<T extends SDKMessage = SDKMessage> = T & {
   timestamp: string;
 };
 
+/** Exact structured Codex app-server user inputs retained across queue/steer. */
+export type CodexStructuredUserInput =
+  | { type: "skill"; name: string; path: string }
+  | { type: "mention"; name: string; path: string };
+
 export interface UserMessage {
   text: string;
   images?: string[]; // base64 or file paths
   documents?: string[];
   /** File attachments with paths for agent to access via Read tool */
   attachments?: UploadedFile[];
+  /** Ordered provider-native Codex skill/mention inputs. */
+  codexInputs?: CodexStructuredUserInput[];
   mode?: PermissionMode;
   /** UUID to use for this message. If not provided, SDK will generate one. */
   uuid?: string;
@@ -105,12 +112,16 @@ export interface UserMessage {
 export interface QueuedUserMessage {
   type: "user";
   uuid?: string;
+  /** Provider-internal client correlation, retained only when enabled. */
+  tempId?: string;
   /**
    * Structured uploads retained for providers with native file-part support.
    * MessageQueue only includes this field when explicitly configured so SDKs
    * that validate their input shape do not receive provider-specific metadata.
    */
   attachments?: UploadedFile[];
+  /** Structured Codex input items, retained only when enabled. */
+  codexInputs?: CodexStructuredUserInput[];
   message: {
     role: "user";
     content:
