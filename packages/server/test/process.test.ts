@@ -172,10 +172,10 @@ describe("Process", () => {
         }
       });
 
-      process.queueMessage({ text: "first" });
+      await process.queueMessage({ text: "first" });
       await firstTurnStarted;
 
-      process.queueMessage({ text: "second" });
+      await process.queueMessage({ text: "second" });
       expect(queue.depth).toBe(1);
       completeFirstTurn();
 
@@ -203,8 +203,8 @@ describe("Process", () => {
         idleTimeoutMs: 100,
       });
 
-      const result1 = process.queueMessage({ text: "first" });
-      const result2 = process.queueMessage({ text: "second" });
+      const result1 = await process.queueMessage({ text: "first" });
+      const result2 = await process.queueMessage({ text: "second" });
 
       expect(result1.success).toBe(true);
       expect(result1.position).toBe(1);
@@ -224,10 +224,13 @@ describe("Process", () => {
         idleTimeoutMs: 100,
       });
 
-      process.queueMessage({ text: "first" });
-      process.queueMessage({ text: "second" });
+      const admissions = [
+        process.queueMessage({ text: "first" }),
+        process.queueMessage({ text: "second" }),
+      ];
 
       expect(process.queueDepth).toBe(2);
+      await Promise.all(admissions);
     });
 
     it("prefers steerFn for in-turn messages when available", async () => {
@@ -250,7 +253,7 @@ describe("Process", () => {
         steerFn,
       });
 
-      const result = process.queueMessage({ text: "steer me" });
+      const result = await process.queueMessage({ text: "steer me" });
 
       expect(result.success).toBe(true);
       expect(result.position).toBe(0);
@@ -282,18 +285,112 @@ describe("Process", () => {
         steerFn,
       });
 
-      const result = process.queueMessage({ text: "fallback me" });
+      const result = await process.queueMessage({ text: "fallback me" });
       expect(result.success).toBe(true);
-      expect(result.position).toBe(0);
-
-      // steerFn returns a resolved promise, then .then() pushes to queue —
-      // need 2 microtask ticks for both to settle
-      await Promise.resolve();
-      await Promise.resolve();
+      expect(result.position).toBe(1);
       expect(process.queueDepth).toBe(1);
 
       // Let the iterator complete so abort() doesn't hang
       resolveIterator?.();
+      await process.abort();
+    });
+
+    it("publishes an optimistic user event only after steering accepts it", async () => {
+      let resolveIterator: () => void;
+      let resolveSteer: (accepted: boolean) => void;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () =>
+          new Promise((resolve) => {
+            resolveIterator = () => resolve({ done: true, value: undefined });
+          }),
+      };
+      const steerFn = vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveSteer = resolve;
+          }),
+      );
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+        steerFn,
+      });
+      const userMessages: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message" && event.message.type === "user") {
+          userMessages.push(event.message);
+        }
+      });
+
+      const admission = process.queueMessage({ text: "steer me" });
+      expect(userMessages).toHaveLength(0);
+      resolveSteer?.(true);
+
+      await expect(admission).resolves.toMatchObject({
+        success: true,
+        position: 0,
+      });
+      expect(userMessages).toHaveLength(1);
+
+      resolveIterator?.();
+      await process.abort();
+    });
+
+    it("rejects a steer fallback when the process terminates in flight", async () => {
+      let resolveSteer: (accepted: boolean) => void;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () => new Promise(() => undefined),
+      };
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+        steerFn: () =>
+          new Promise<boolean>((resolve) => {
+            resolveSteer = resolve;
+          }),
+      });
+
+      const admission = process.queueMessage({ text: "do not lose me" });
+      process.terminate("test termination");
+      resolveSteer?.(false);
+
+      await expect(admission).resolves.toMatchObject({
+        success: false,
+        error: "Process provider is no longer accepting messages",
+      });
+      expect(
+        process
+          .getMessageHistory()
+          .filter((message) => message.type === "user"),
+      ).toHaveLength(0);
+    });
+
+    it("rejects messages after the provider iterator ends", async () => {
+      const endedIterator: AsyncIterator<SDKMessage> = {
+        next: async () => ({ done: true, value: undefined }),
+      };
+      const queue = new MessageQueue();
+      const process = new Process(endedIterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue,
+      });
+
+      await vi.waitFor(() => expect(queue.isClosed).toBe(true));
+      await expect(
+        process.queueMessage({ text: "too late" }),
+      ).resolves.toMatchObject({
+        success: false,
+        error: "Process provider is no longer accepting messages",
+      });
       await process.abort();
     });
   });
@@ -649,7 +746,9 @@ describe("Process", () => {
     });
 
     it("queues deny feedback as follow-up message for Codex approvals", async () => {
-      const iterator = createMockIterator([]);
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () => new Promise(() => undefined),
+      };
       const process = new Process(iterator, {
         projectPath: "/test",
         projectId: "proj-1",
@@ -682,6 +781,7 @@ describe("Process", () => {
       expect(result.message).toBe("edit src/foo.ts instead");
       expect(result.interrupt).toBe(false);
       expect(process.queueDepth).toBe(1);
+      process.terminate("test complete");
     });
 
     it("does not queue deny feedback follow-up for non-Codex providers", async () => {
@@ -1173,7 +1273,7 @@ describe("Process", () => {
       });
 
       // Queue a user message
-      process.queueMessage({ text: "test message" });
+      await process.queueMessage({ text: "test message" });
 
       // User message SHOULD be in history for replay to late-joining clients.
       // Client-side deduplication (mergeStreamMessage, mergeJSONLMessages) handles
@@ -1199,7 +1299,7 @@ describe("Process", () => {
       });
 
       // Queue a user message
-      process.queueMessage({ text: "test message" });
+      await process.queueMessage({ text: "test message" });
 
       // User message SHOULD be in history (mock SDK needs replay)
       const userMessages = process
@@ -1231,7 +1331,7 @@ describe("Process", () => {
       });
 
       // Queue a user message
-      process.queueMessage({ text: "test message" });
+      await process.queueMessage({ text: "test message" });
 
       // Message should still be emitted for live stream subscribers
       const userEmits = emittedMessages.filter((m) => m.type === "user");
@@ -1253,7 +1353,7 @@ describe("Process", () => {
       });
 
       // Queue a user message with attachments
-      process.queueMessage({
+      await process.queueMessage({
         text: "Here is a screenshot",
         attachments: [
           {
@@ -1315,7 +1415,7 @@ describe("Process", () => {
       };
 
       // Queue the message through Process
-      process.queueMessage(testMessage);
+      await process.queueMessage(testMessage);
 
       // Get what Process put in history
       const historyContent = process.getMessageHistory()[0]?.message
@@ -1369,7 +1469,7 @@ describe("Process", () => {
       });
 
       // Now queueMessage should return an error
-      const result = process.queueMessage({ text: "should fail" });
+      const result = await process.queueMessage({ text: "should fail" });
 
       expect(result.success).toBe(false);
       expect(result.error).toContain("terminated");
@@ -1630,7 +1730,7 @@ describe("Process", () => {
       process.setHold(true);
 
       // Should still be able to queue messages
-      const result = process.queueMessage({ text: "Hello while held" });
+      const result = await process.queueMessage({ text: "Hello while held" });
       expect(result.success).toBe(true);
       expect(result.position).toBe(1);
     });

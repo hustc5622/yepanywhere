@@ -710,13 +710,13 @@ export class Supervisor {
   /**
    * Start a session using the legacy mock SDK.
    */
-  private startLegacySession(
+  private async startLegacySession(
     projectPath: string,
     projectId: UrlProjectId,
     message: UserMessage,
     resumeSessionId?: string,
     permissionMode?: PermissionMode,
-  ): Process {
+  ): Promise<Process> {
     // sdk is guaranteed to exist here (checked in startSession)
     if (!this.sdk) {
       throw new Error("sdk is not available");
@@ -745,7 +745,11 @@ export class Supervisor {
     this.registerProcess(process, !resumeSessionId);
 
     // Queue the initial message
-    process.queueMessage(message);
+    const admission = await process.queueMessage(message);
+    if (!admission.success) {
+      this.unregisterProcess(process);
+      throw new Error(admission.error ?? "Failed to admit initial message");
+    }
 
     return process;
   }
@@ -852,7 +856,7 @@ export class Supervisor {
           }
           // Queue message to existing process (if we didn't fall through to restart)
           if (!existingProcess.isTerminated) {
-            const result = existingProcess.queueMessage(message);
+            const result = await existingProcess.queueMessage(message);
             if (result.success) {
               return existingProcess;
             }
@@ -1062,7 +1066,7 @@ export class Supervisor {
       await process.syncPermissionMode(permissionMode);
     }
 
-    const result = process.queueMessage(message);
+    const result = await process.queueMessage(message);
     if (result.success) {
       return { success: true, process, restarted: false };
     }

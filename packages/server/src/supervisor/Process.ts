@@ -34,6 +34,12 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from "./types.js";
 
 type Listener = (event: ProcessEvent) => void;
 
+export interface ProcessQueueMessageResult {
+  success: boolean;
+  position?: number;
+  error?: string;
+}
+
 /**
  * IMPORTANT: Never filter out messages by type before emitting to SSE!
  *
@@ -136,6 +142,7 @@ export class Process {
   private idleTimer: NodeJS.Timeout | null = null;
   private idleTimeoutMs: number;
   private iteratorDone = false;
+  private acceptingMessages = true;
 
   /** Set synchronously when transport/spawn fails to prevent race with queueMessage */
   private transportFailed = false;
@@ -747,6 +754,7 @@ export class Process {
 
     this.clearIdleTimer();
     this.stopBucketSwapTimer();
+    this.closeMessageQueue("process_terminated");
     this.iteratorDone = true;
 
     // Wake up hold wait if held (so processMessages loop can exit)
@@ -1032,11 +1040,7 @@ export class Process {
    *
    * @returns Object with success status and queue position or error
    */
-  queueMessage(message: UserMessage): {
-    success: boolean;
-    position?: number;
-    error?: string;
-  } {
+  async queueMessage(message: UserMessage): Promise<ProcessQueueMessageResult> {
     // Check if process is terminated or transport failed
     if (this._state.type === "terminated") {
       return {
@@ -1051,6 +1055,17 @@ export class Process {
       return {
         success: false,
         error: "Process transport failed",
+      };
+    }
+    if (
+      this.messageQueue &&
+      (!this.acceptingMessages ||
+        this.iteratorDone ||
+        this.messageQueue.isClosed)
+    ) {
+      return {
+        success: false,
+        error: "Process provider is no longer accepting messages",
       };
     }
 
@@ -1069,33 +1084,6 @@ export class Process {
       message: { role: "user", content },
     } as SDKMessage);
 
-    // Add to history for SSE replay to late-joining clients.
-    // The client-side deduplication (mergeSSEMessage, mergeJSONLMessages) handles
-    // any duplicates when JSONL is later fetched. This is especially important
-    // for the two-phase flow (createSession + queueMessage) where the client
-    // may connect before the JSONL is written.
-    if (shouldEmitMessage(sdkMessage)) {
-      // Check for duplicates in both buckets before adding
-      // This prevents duplicates if the provider echoes the message back with the same UUID
-      const isDuplicate =
-        this.currentBucket.some((m) => m.uuid && m.uuid === sdkMessage.uuid) ||
-        this.previousBucket.some((m) => m.uuid && m.uuid === sdkMessage.uuid);
-      if (!isDuplicate) {
-        this.currentBucket.push(sdkMessage);
-      }
-    }
-
-    // Emit to current SSE subscribers so other clients see it immediately
-    // Include the session ID so client can associate it correctly
-    // The provider will echo this message back, but if we ensure UUIDs match,
-    // the client will merge them.
-    if (shouldEmitMessage(sdkMessage)) {
-      this.emit({
-        type: "message",
-        message: { ...sdkMessage, session_id: this._sessionId },
-      });
-    }
-
     if (this.messageQueue) {
       // If provider supports in-turn steering, prefer that over queue-after-turn behavior.
       if (this._state.type === "in-turn" && this.steerFn) {
@@ -1105,45 +1093,79 @@ export class Process {
           text: content,
           attachments: undefined,
         };
-        void this.steerFn(steerMessage)
-          .then((steered) => {
-            if (!steered) {
-              this.messageQueue?.push(messageWithUuid);
-            }
-          })
-          .catch((error) => {
-            const log = getLogger();
-            log.warn(
-              {
-                event: "process_steer_failed",
-                sessionId: this._sessionId,
-                processId: this.id,
-                provider: this.provider,
-                error: error instanceof Error ? error.message : String(error),
-              },
-              "Steer failed; falling back to queued message",
-            );
-            this.messageQueue?.push(messageWithUuid);
-          });
-        return { success: true, position: 0 };
+        try {
+          const steered = await this.steerFn(steerMessage);
+          if (steered) {
+            this.publishOptimisticUserMessage(sdkMessage);
+            return { success: true, position: 0 };
+          }
+        } catch (error) {
+          getLogger().warn(
+            {
+              event: "process_steer_failed",
+              sessionId: this._sessionId,
+              processId: this.id,
+              provider: this.provider,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "Steer failed; falling back to queued message",
+          );
+        }
       }
 
-      // Transition to running if we were idle
+      // Steering may have completed after the provider exited. Re-check the
+      // resident queue before acknowledging or publishing an optimistic echo.
+      if (
+        !this.acceptingMessages ||
+        this.iteratorDone ||
+        this.messageQueue.isClosed
+      ) {
+        return {
+          success: false,
+          error: "Process provider is no longer accepting messages",
+        };
+      }
+      const position = this.messageQueue.push(messageWithUuid);
+      if (position === -1) {
+        return {
+          success: false,
+          error: "Process provider is no longer accepting messages",
+        };
+      }
+
+      // Transition to running only after the resident queue accepted the input.
       if (this._state.type === "idle") {
         this.clearIdleTimer();
         this.setState({ type: "in-turn" });
       }
-      // Pass message with UUID so SDK uses the same UUID we emitted via SSE
-      const position = this.messageQueue.push(messageWithUuid);
+      this.publishOptimisticUserMessage(sdkMessage);
       return { success: true, position };
     }
 
     // Legacy behavior for mock SDK
     this.legacyQueue.push(message);
+    this.publishOptimisticUserMessage(sdkMessage);
     if (this._state.type === "idle") {
       this.processNextInQueue();
     }
     return { success: true, position: this.legacyQueue.length };
+  }
+
+  private publishOptimisticUserMessage(message: TimestampedSDKMessage): void {
+    if (!shouldEmitMessage(message)) return;
+
+    // Add to history for SSE replay to late-joining clients. The provider echo
+    // uses the same UUID and is deduplicated when JSONL is merged later.
+    const isDuplicate =
+      this.currentBucket.some((item) => item.uuid === message.uuid) ||
+      this.previousBucket.some((item) => item.uuid === message.uuid);
+    if (!isDuplicate) {
+      this.currentBucket.push(message);
+    }
+    this.emit({
+      type: "message",
+      message: { ...message, session_id: this._sessionId },
+    });
   }
 
   /**
@@ -1591,19 +1613,30 @@ export class Process {
     // Codex app-server decline decisions do not currently include a rejection
     // reason in-protocol. Queue the feedback as a follow-up user message.
     if (response === "deny" && trimmedFeedback && this.provider === "codex") {
-      const queued = this.queueMessage({
+      void this.queueMessage({
         text: `I denied that request. Instead: ${trimmedFeedback}`,
-      });
-      if (!queued.success) {
-        getLogger().warn(
-          {
-            sessionId: this._sessionId,
-            processId: this.id,
-            error: queued.error,
-          },
-          "Failed to queue Codex deny feedback follow-up message",
-        );
-      }
+      })
+        .then((queued) => {
+          if (queued.success) return;
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: queued.error,
+            },
+            "Failed to queue Codex deny feedback follow-up message",
+          );
+        })
+        .catch((error) => {
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "Codex deny feedback follow-up admission rejected unexpectedly",
+          );
+        });
     }
 
     // Emit the next pending approval, or transition to running if none left
@@ -1654,6 +1687,7 @@ export class Process {
   async abort(): Promise<void> {
     this.clearIdleTimer();
     this.stopBucketSwapTimer();
+    this.closeMessageQueue("process_aborted");
 
     // Call the SDK's abort function if available
     if (this.abortFn) {
@@ -1704,6 +1738,7 @@ export class Process {
 
         if (result.done) {
           this.iteratorDone = true;
+          this.closeMessageQueue("provider_iterator_done");
           if (this.startupId && !this.firstProviderMessageLogged) {
             getLogger().warn(
               {
@@ -1937,6 +1972,8 @@ export class Process {
     } catch (error) {
       const err = error as Error;
       const log = getLogger();
+      this.iteratorDone = true;
+      this.closeMessageQueue("provider_iterator_error");
 
       log.error(
         {
@@ -2028,7 +2065,33 @@ export class Process {
     const next = this.deferredQueue.shift();
     if (next) {
       this.emitDeferredQueueChange();
-      this.queueMessage(next.message); // stays in-turn, SDK picks it up
+      void this.queueMessage(next.message)
+        .then((result) => {
+          if (result.success || this._state.type === "terminated") return;
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: result.error,
+            },
+            "Failed to queue deferred message after turn completion",
+          );
+          this.setState({ type: "idle", since: new Date() });
+          this.startIdleTimer();
+        })
+        .catch((error) => {
+          if (this._state.type === "terminated") return;
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "Deferred message admission rejected unexpectedly",
+          );
+          this.setState({ type: "idle", since: new Date() });
+          this.startIdleTimer();
+        });
       return;
     }
 
@@ -2051,6 +2114,25 @@ export class Process {
     this.setState({ type: "idle", since: new Date() });
     this.startIdleTimer();
     this.processNextInQueue();
+  }
+
+  private closeMessageQueue(reason: string): void {
+    if (!this.messageQueue) return;
+    this.acceptingMessages = false;
+    const discarded = this.messageQueue.close();
+    if (discarded === 0) return;
+    getLogger().warn(
+      {
+        event: "process_message_queue_discarded",
+        sessionId: this._sessionId,
+        processId: this.id,
+        projectId: this.projectId,
+        provider: this.provider,
+        reason,
+        discardedCount: discarded,
+      },
+      "Discarded messages after the resident provider queue closed",
+    );
   }
 
   /**
