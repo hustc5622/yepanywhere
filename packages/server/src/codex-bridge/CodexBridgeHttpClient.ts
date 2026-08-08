@@ -4,6 +4,7 @@ import {
   type BridgePollEntry,
   type BridgePollState,
 } from "../bridge-common/BridgeHttpClient.js";
+import type { BridgePendingInputBinding } from "../bridge-common/types.js";
 import { isLiveBridgeSession } from "./session-state.js";
 import type {
   CodexBridgeController,
@@ -32,6 +33,21 @@ export class CodexBridgeHttpClient
   >
   implements CodexBridgeController
 {
+  async bindPendingInputInteraction(
+    sessionId: string,
+    requestId: string,
+    binding: BridgePendingInputBinding,
+  ): Promise<boolean> {
+    const data = await this.fetchJson<{ bound?: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/input-binding`,
+      {
+        method: "POST",
+        body: JSON.stringify({ requestId, ...binding }),
+      },
+    );
+    return data?.bound ?? false;
+  }
+
   async getUsage(
     options: CodexUsageRequestOptions = {},
   ): Promise<CodexUsageResponse> {
@@ -122,6 +138,7 @@ export class CodexBridgeHttpClient
           serviceTier: session.serviceTier,
           activity: session.activity,
           pendingInputType: session.pendingInputType,
+          pendingInputRequestId: view.pendingInputRequestId,
           active: isLiveBridgeSession(session),
           lastTurnStatus: session.lastTurnStatus,
           lastErrorMessage: session.lastErrorMessage,

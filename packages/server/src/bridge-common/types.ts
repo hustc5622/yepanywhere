@@ -26,6 +26,32 @@ export type BridgeInputResponse =
   | "approve_always"
   | "deny";
 
+/** Actor identity already authenticated by the central interaction broker. */
+export interface BridgeInputResolutionActor {
+  id: string;
+  displayName?: string;
+  channel: "yep" | "feishu" | "provider" | "system";
+}
+
+/**
+ * Proof that a bridge response has already won the central broker CAS.
+ *
+ * `operationVersion` is the claimed (`answering`) version, not the version
+ * originally rendered by a client. Sidecars use this proof to reject direct
+ * or replayed responses that bypass the broker.
+ */
+export interface BridgeInputResolutionContext {
+  operationId: string;
+  operationVersion: number;
+  actor: BridgeInputResolutionActor;
+}
+
+/** Broker identity bound to a pending bridge request before it is answerable. */
+export type BridgePendingInputBinding = Pick<
+  BridgeInputResolutionContext,
+  "operationId" | "operationVersion"
+>;
+
 /** Fields shared by every bridge-tracked session, regardless of provider. */
 export interface BridgeSessionBase {
   id: string;
@@ -52,6 +78,8 @@ export interface BridgeSessionView {
   projectName: string;
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
+  /** Transport-local id of the currently projected queue head, if any. */
+  pendingInputRequestId?: string;
   /**
    * The sidecar's own liveness verdict, i.e. exactly what
    * `GET /sessions/:id/active` would answer for this session.
@@ -107,10 +135,17 @@ export interface BridgeController<
   getSessionView(sessionId: string): MaybePromise<BridgeSessionView | null>;
   isSessionActive(sessionId: string): MaybePromise<boolean>;
   getPendingInputRequest(sessionId: string): MaybePromise<InputRequest | null>;
+  /** Bind the central broker operation to the provider request. */
+  bindPendingInputInteraction?(
+    sessionId: string,
+    requestId: string,
+    binding: BridgePendingInputBinding,
+  ): MaybePromise<boolean>;
   respondToInput(
     sessionId: string,
     requestId: string,
     response: BridgeInputResponse,
     answers?: UserQuestionAnswers,
+    context?: BridgeInputResolutionContext,
   ): MaybePromise<boolean>;
 }

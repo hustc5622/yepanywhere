@@ -7,6 +7,7 @@ import type {
   UrlProjectId,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import { ensureRuntimeToken } from "../runtime/token.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
 import {
@@ -16,6 +17,7 @@ import {
 } from "./session-state.js";
 import type {
   BridgeController,
+  BridgeInputResolutionContext,
   BridgeInputResponse,
   BridgeSessionBase,
   BridgeSessionView,
@@ -26,6 +28,10 @@ export interface BridgeHttpClientOptions {
   baseUrl: string;
   eventBus?: EventBus;
   pollIntervalMs?: number;
+  /** Optional bearer credential for a non-loopback sidecar control plane. */
+  authToken?: string;
+  /** Existing runtime token file used when no explicit bearer is configured. */
+  authTokenFile?: string;
 }
 
 /** State remembered between polls to diff lifecycle changes per session. */
@@ -33,6 +39,7 @@ export interface BridgePollState {
   projectId: UrlProjectId;
   activity?: AgentActivity;
   pendingInputType?: PendingInputType;
+  pendingInputRequestId?: string;
   active: boolean;
   /** Terminal status of the most recent turn (bridge-reported). */
   lastTurnStatus?: SessionLastTurnStatus;
@@ -98,6 +105,9 @@ export abstract class BridgeHttpClient<
 {
   protected readonly baseUrl: string;
   protected readonly eventBus?: EventBus;
+  private authToken?: string;
+  private readonly authTokenFile?: string;
+  private authTokenPromise?: Promise<string>;
   private readonly pollIntervalMs: number;
   private pollTimer: NodeJS.Timeout | null = null;
   private polling = false;
@@ -117,6 +127,8 @@ export abstract class BridgeHttpClient<
   constructor(options: BridgeHttpClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.eventBus = options.eventBus;
+    this.authToken = options.authToken?.trim() || undefined;
+    this.authTokenFile = options.authTokenFile;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
@@ -183,8 +195,12 @@ export abstract class BridgeHttpClient<
     const run = async (): Promise<void> => {
       while (!abort.signal.aborted) {
         try {
+          const authorization = await this.authorizationHeader();
           const response = await fetch(`${this.baseUrl}/events`, {
-            headers: { accept: "text/event-stream" },
+            headers: {
+              accept: "text/event-stream",
+              ...(authorization ? { authorization } : {}),
+            },
             signal: abort.signal,
           });
           if (response.ok && response.body) {
@@ -292,12 +308,13 @@ export abstract class BridgeHttpClient<
     requestId: string,
     response: BridgeInputResponse,
     answers?: UserQuestionAnswers,
+    context?: BridgeInputResolutionContext,
   ): Promise<boolean> {
     const data = await this.fetchJson<{ accepted?: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/input`,
       {
         method: "POST",
-        body: JSON.stringify({ requestId, response, answers }),
+        body: JSON.stringify({ requestId, response, answers, ...context }),
       },
     );
     return data?.accepted ?? false;
@@ -308,6 +325,7 @@ export abstract class BridgeHttpClient<
     init?: RequestInit,
   ): Promise<T | null> {
     try {
+      const authorization = await this.authorizationHeader();
       const response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
         headers: {
@@ -316,6 +334,7 @@ export abstract class BridgeHttpClient<
           // calls back to the main server (which would loop through the
           // bridge fallback in /api/sessions/:id/input).
           "x-yep-anywhere": "true",
+          ...(authorization ? { authorization } : {}),
           ...init?.headers,
         },
       });
@@ -324,6 +343,14 @@ export abstract class BridgeHttpClient<
     } catch {
       return null;
     }
+  }
+
+  private async authorizationHeader(): Promise<string | undefined> {
+    if (!this.authToken && this.authTokenFile) {
+      this.authTokenPromise ??= ensureRuntimeToken(this.authTokenFile);
+      this.authToken = await this.authTokenPromise;
+    }
+    return this.authToken ? `Bearer ${this.authToken}` : undefined;
   }
 
   /**
@@ -429,6 +456,7 @@ export abstract class BridgeHttpClient<
       !previous ||
       previous.activity !== state.activity ||
       previous.pendingInputType !== state.pendingInputType ||
+      previous.pendingInputRequestId !== state.pendingInputRequestId ||
       previous.lastTurnStatus !== state.lastTurnStatus ||
       previous.lastErrorMessage !== state.lastErrorMessage ||
       !retryStatusEquals(previous.retryStatus, state.retryStatus)

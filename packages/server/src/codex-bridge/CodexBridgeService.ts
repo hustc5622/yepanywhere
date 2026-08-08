@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
@@ -6,6 +7,10 @@ import { basename, dirname } from "node:path";
 import type { UrlProjectId, UserQuestionAnswers } from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
 import { BridgeEventNotifier } from "../bridge-common/BridgeEventNotifier.js";
+import type {
+  BridgeInputResolutionContext,
+  BridgePendingInputBinding,
+} from "../bridge-common/types.js";
 import {
   asRecord,
   findAvailablePort,
@@ -22,6 +27,7 @@ import {
 } from "../codex/mcp-profile.js";
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { encodeProjectId } from "../projects/paths.js";
+import { ensureRuntimeToken } from "../runtime/token.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
 import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type { SessionSummary } from "../supervisor/types.js";
@@ -79,6 +85,10 @@ interface CodexBridgeServiceOptions {
   /** Test/custom adapter override. Production derives JSONL from statePath. */
   eventStore?: CodexEventStore;
   eventStorePath?: string;
+  /** Bearer accepted when the bridge is exposed beyond loopback. */
+  authToken?: string;
+  /** Shared runtime control token used by the main-server sidecar client. */
+  authTokenFile?: string;
 }
 
 interface ClientRequestRecord {
@@ -204,6 +214,11 @@ interface PersistedSessionRecord {
   emitted: boolean;
 }
 
+interface PendingInputBinding extends BridgePendingInputBinding {
+  sessionId: string;
+  requestId: string;
+}
+
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const MAX_MCP_STARTUP_EVENTS = 50;
 const MAX_RESOLVED_SERVER_REQUEST_IDS = 1_000;
@@ -264,6 +279,14 @@ export class CodexBridgeService implements CodexBridgeController {
   private usageRequest: Promise<CodexUsageResponse> | null = null;
   private readonly statePath?: string;
   private readonly eventStore: CodexEventStore;
+  private readonly remoteAuthToken?: string;
+  private controlToken?: string;
+  private readonly authTokenFile?: string;
+  private readonly requiresAuthentication: boolean;
+  private readonly pendingInputBindings = new Map<
+    string,
+    PendingInputBinding
+  >();
   private readonly eventTasks = new Set<Promise<void>>();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   /** Serializes atomic writes so concurrent state changes cannot race on .tmp. */
@@ -291,10 +314,34 @@ export class CodexBridgeService implements CodexBridgeController {
       eventStorePath: options.eventStorePath,
       statePath: options.statePath,
     });
+    this.remoteAuthToken = options.authToken?.trim() || undefined;
+    this.authTokenFile = options.authTokenFile;
+    this.requiresAuthentication = !isLocalAddress(this.host);
   }
 
   async start(): Promise<void> {
     if (!this.enabled || this.server) {
+      return;
+    }
+
+    if (this.authTokenFile) {
+      try {
+        this.controlToken = await ensureRuntimeToken(this.authTokenFile);
+      } catch {
+        this.listening = false;
+        this.lastError = "Codex bridge bearer authentication is unavailable";
+        return;
+      }
+    }
+
+    if (
+      this.requiresAuthentication &&
+      !this.remoteAuthToken &&
+      !this.controlToken
+    ) {
+      this.listening = false;
+      this.lastError =
+        "Refusing non-loopback Codex bridge without explicit bearer authentication";
       return;
     }
 
@@ -455,6 +502,7 @@ export class CodexBridgeService implements CodexBridgeController {
         projectName: session.projectName,
         activity: session.activity,
         pendingInputType: session.pendingInputType,
+        pendingInputRequestId: this.getPendingInputRequest(session.id)?.id,
         // Published so the main server can answer liveness for a whole list
         // from this snapshot instead of probing /active per session.
         active: isLiveBridgeSession(session),
@@ -481,6 +529,7 @@ export class CodexBridgeService implements CodexBridgeController {
       projectName: session.projectName,
       activity: session.activity,
       pendingInputType: session.pendingInputType,
+      pendingInputRequestId: this.getPendingInputRequest(session.id)?.id,
       active: isLiveBridgeSession(session),
     };
   }
@@ -505,11 +554,49 @@ export class CodexBridgeService implements CodexBridgeController {
     };
   }
 
+  bindPendingInputInteraction(
+    sessionId: string,
+    requestId: string,
+    binding: BridgePendingInputBinding,
+  ): boolean {
+    const pending = this.pendingByInputId.get(requestId);
+    if (
+      !pending ||
+      (pending.threadId !== sessionId &&
+        this.getTopLevelSessionId(pending.threadId) !== sessionId) ||
+      !isValidOperationId(binding.operationId) ||
+      !Number.isSafeInteger(binding.operationVersion) ||
+      binding.operationVersion < 0
+    ) {
+      return false;
+    }
+
+    const existing = this.pendingInputBindings.get(requestId);
+    // The main server may restart while the sidecar/provider request remains
+    // live. A newly authenticated operation may therefore replace the old
+    // operation id; versions within one operation must stay monotonic.
+    if (
+      existing &&
+      existing.operationId === binding.operationId &&
+      binding.operationVersion < existing.operationVersion
+    ) {
+      return false;
+    }
+    this.pendingInputBindings.set(requestId, {
+      sessionId,
+      requestId,
+      operationId: binding.operationId,
+      operationVersion: binding.operationVersion,
+    });
+    return true;
+  }
+
   respondToInput(
     sessionId: string,
     requestId: string,
     response: CodexBridgeInputResponse,
     answers?: UserQuestionAnswers,
+    context?: BridgeInputResolutionContext,
   ): boolean {
     const pending = this.pendingByInputId.get(requestId);
     if (
@@ -533,6 +620,10 @@ export class CodexBridgeService implements CodexBridgeController {
         const validation = validateQuestionAnswers(request, answers);
         if (!validation.valid) return false;
       }
+    }
+
+    if (context && !this.consumePendingInputBinding(pending, context)) {
+      return false;
     }
 
     const result = buildCodexInteractiveResponse(
@@ -566,6 +657,23 @@ export class CodexBridgeService implements CodexBridgeController {
         this.resolveLogicalRequest(pending, "yep");
       }
     });
+    return true;
+  }
+
+  private consumePendingInputBinding(
+    pending: PendingServerRequest,
+    context: BridgeInputResolutionContext,
+  ): boolean {
+    const binding = this.pendingInputBindings.get(pending.inputId);
+    if (
+      !binding ||
+      binding.operationId !== context.operationId ||
+      context.operationVersion !== binding.operationVersion + 1 ||
+      !isValidResolutionActor(context.actor)
+    ) {
+      return false;
+    }
+    this.pendingInputBindings.delete(pending.inputId);
     return true;
   }
 
@@ -603,6 +711,11 @@ export class CodexBridgeService implements CodexBridgeController {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
+    if (!this.isAuthorizedRequest(req)) {
+      writeBridgeHttpError(res, 401, "bridge_unauthorized", "Unauthorized");
+      return;
+    }
+
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const pathParts = url.pathname
       .split("/")
@@ -666,15 +779,86 @@ export class CodexBridgeService implements CodexBridgeController {
         });
         return;
       }
+      if (
+        req.method === "POST" &&
+        (pathParts[2] === "input-binding" || pathParts[2] === "input")
+      ) {
+        if (!this.hasValidControlBearer(req)) {
+          writeBridgeHttpError(
+            res,
+            401,
+            "bridge_control_unauthorized",
+            "Unauthorized",
+          );
+          return;
+        }
+        if (
+          req.headers.origin !== undefined ||
+          readSingleHeader(req, "x-yep-anywhere") !== "true"
+        ) {
+          writeBridgeHttpError(
+            res,
+            403,
+            "bridge_control_forbidden",
+            "Forbidden",
+          );
+          return;
+        }
+      }
+      if (req.method === "POST" && pathParts[2] === "input-binding") {
+        const body = await readJsonBody(req);
+        const requestId = readBodyString(body, "requestId");
+        const operationId = readBodyString(body, "operationId");
+        const operationVersion = body?.operationVersion;
+        if (
+          !requestId ||
+          !operationId ||
+          !isValidOperationId(operationId) ||
+          !Number.isSafeInteger(operationVersion) ||
+          (operationVersion as number) < 0
+        ) {
+          writeBridgeHttpError(
+            res,
+            409,
+            "interaction_identity_invalid",
+            "Interaction identity is invalid",
+          );
+          return;
+        }
+        if (!this.pendingByInputId.has(requestId)) {
+          writeBridgeHttpError(
+            res,
+            404,
+            "interaction_not_found",
+            "Pending interaction not found",
+          );
+          return;
+        }
+        const bound = this.bindPendingInputInteraction(sessionId, requestId, {
+          operationId,
+          operationVersion: operationVersion as number,
+        });
+        if (!bound) {
+          writeBridgeHttpError(
+            res,
+            409,
+            "interaction_binding_conflict",
+            "Interaction binding is stale or conflicts with the pending request",
+          );
+          return;
+        }
+        writeJson(res, 200, { bound: true });
+        return;
+      }
       if (req.method === "POST" && pathParts[2] === "input") {
         const body = await readJsonBody(req);
-        const requestId =
-          body && typeof body.requestId === "string" ? body.requestId : null;
+        const requestId = readBodyString(body, "requestId");
         const response = parseBridgeInputResponse(body?.response);
         const answers =
           body && typeof body.answers === "object" && body.answers !== null
             ? (body.answers as UserQuestionAnswers)
             : undefined;
+        const context = parseInputResolutionContext(body);
 
         if (!requestId || !response) {
           writeJson(res, 400, {
@@ -682,15 +866,41 @@ export class CodexBridgeService implements CodexBridgeController {
           });
           return;
         }
-
-        writeJson(res, 200, {
-          accepted: this.respondToInput(
-            sessionId,
-            requestId,
-            response,
-            answers,
-          ),
-        });
+        if (!context) {
+          writeBridgeHttpError(
+            res,
+            409,
+            "interaction_identity_required",
+            "A broker operation identity, claimed version, and actor are required",
+          );
+          return;
+        }
+        if (!this.pendingByInputId.has(requestId)) {
+          writeBridgeHttpError(
+            res,
+            404,
+            "interaction_not_found",
+            "Pending interaction not found",
+          );
+          return;
+        }
+        const accepted = this.respondToInput(
+          sessionId,
+          requestId,
+          response,
+          answers,
+          context,
+        );
+        if (!accepted) {
+          writeBridgeHttpError(
+            res,
+            409,
+            "interaction_resolution_conflict",
+            "Interaction is stale, already resolved, or rejected",
+          );
+          return;
+        }
+        writeJson(res, 200, { accepted: true });
         return;
       }
     }
@@ -698,10 +908,28 @@ export class CodexBridgeService implements CodexBridgeController {
     writeJson(res, 404, { error: "Not found" });
   }
 
+  private isAuthorizedRequest(req: IncomingMessage): boolean {
+    if (this.requiresAuthentication) return this.hasValidBearer(req);
+    return isLocalAddress(req.socket.remoteAddress ?? "");
+  }
+
+  private hasValidBearer(req: IncomingMessage): boolean {
+    return (
+      bearerTokenMatches(req.headers.authorization, this.controlToken) ||
+      bearerTokenMatches(req.headers.authorization, this.remoteAuthToken)
+    );
+  }
+
+  private hasValidControlBearer(req: IncomingMessage): boolean {
+    return bearerTokenMatches(
+      req.headers.authorization,
+      this.controlToken ?? this.remoteAuthToken,
+    );
+  }
+
   private handleConnection(downstream: WebSocket, req: IncomingMessage): void {
-    const remoteAddress = req.socket.remoteAddress ?? "";
-    if (!isLocalAddress(remoteAddress)) {
-      downstream.close(1008, "Codex bridge only accepts local connections");
+    if (!this.isAuthorizedRequest(req)) {
+      downstream.close(1008, "Codex bridge authentication required");
       return;
     }
 
@@ -1704,6 +1932,7 @@ export class CodexBridgeService implements CodexBridgeController {
       pending.autoResolutionTimer = undefined;
     }
     this.pendingByInputId.delete(pending.inputId);
+    this.pendingInputBindings.delete(pending.inputId);
     pending.connection.pendingServerRequests.delete(pending.requestKey);
     const ids = this.pendingIdsByThread.get(pending.threadId);
     if (ids) {
@@ -2604,6 +2833,98 @@ function parseBridgeInputResponse(
     value === "deny"
     ? value
     : null;
+}
+
+function bearerTokenMatches(
+  authorization: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (!authorization || !expected) return false;
+  const match = /^Bearer\s+([^\s]+)$/i.exec(authorization);
+  if (!match) return false;
+  const supplied = Buffer.from(match[1] as string, "utf8");
+  const wanted = Buffer.from(expected, "utf8");
+  return supplied.length === wanted.length && timingSafeEqual(supplied, wanted);
+}
+
+function readSingleHeader(
+  req: IncomingMessage,
+  name: string,
+): string | undefined {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function writeBridgeHttpError(
+  res: ServerResponse,
+  status: 401 | 403 | 404 | 409 | 500,
+  code: string,
+  error: string,
+): void {
+  writeJson(res, status, { error, code });
+}
+
+function readBodyString(
+  body: Record<string, unknown> | null,
+  key: string,
+): string | null {
+  const value = body?.[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function isValidOperationId(value: string): boolean {
+  return /^int_[A-Za-z0-9_-]{16,124}$/.test(value);
+}
+
+function isValidResolutionActor(
+  actor: BridgeInputResolutionContext["actor"],
+): boolean {
+  return (
+    actor.id.length > 0 &&
+    actor.id.length <= 512 &&
+    (actor.displayName === undefined || actor.displayName.length <= 512) &&
+    (actor.channel === "yep" ||
+      actor.channel === "feishu" ||
+      actor.channel === "provider" ||
+      actor.channel === "system")
+  );
+}
+
+function parseInputResolutionContext(
+  body: Record<string, unknown> | null,
+): BridgeInputResolutionContext | null {
+  const operationId = readBodyString(body, "operationId");
+  const operationVersion = body?.operationVersion;
+  const actorRecord = asRecord(body?.actor);
+  const actorId = getString(actorRecord?.id)?.trim();
+  const displayName = getString(actorRecord?.displayName)?.trim();
+  const channel = getString(actorRecord?.channel);
+  if (
+    !operationId ||
+    !isValidOperationId(operationId) ||
+    !Number.isSafeInteger(operationVersion) ||
+    (operationVersion as number) < 1 ||
+    !actorId ||
+    actorId.length > 512 ||
+    (displayName?.length ?? 0) > 512 ||
+    (channel !== "yep" &&
+      channel !== "feishu" &&
+      channel !== "provider" &&
+      channel !== "system")
+  ) {
+    return null;
+  }
+  return {
+    operationId,
+    operationVersion: operationVersion as number,
+    actor: {
+      id: actorId,
+      ...(displayName ? { displayName } : {}),
+      channel,
+    },
+  };
 }
 
 function sendFrame(ws: WebSocket, data: RawData, isBinary: boolean): void {

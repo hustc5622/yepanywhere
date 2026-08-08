@@ -20,6 +20,8 @@ import {
 } from "../../src/codex-events/index.js";
 import type { EventBus } from "../../src/watcher/index.js";
 
+const BRIDGE_CONTROL_TOKEN = "codex-bridge-control-test-token";
+
 describe("CodexBridgeService", () => {
   let upstreamServer: Server;
   let upstreamWss: WebSocketServer;
@@ -85,6 +87,7 @@ describe("CodexBridgeService", () => {
       upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
       eventBus,
       eventStore,
+      authToken: BRIDGE_CONTROL_TOKEN,
     });
     await bridge.start();
   });
@@ -93,6 +96,65 @@ describe("CodexBridgeService", () => {
     await bridge.shutdown();
     await closeWebSocketServer(upstreamWss);
     await closeServer(upstreamServer);
+  });
+
+  it("refuses a non-loopback bind without bearer authentication", async () => {
+    const insecure = new CodexBridgeService({
+      enabled: true,
+      host: "0.0.0.0",
+      port: await findAvailablePort(),
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+    });
+    try {
+      await insecure.start();
+      expect(insecure.getStatus()).toMatchObject({
+        listening: false,
+        lastError: expect.stringContaining("Refusing non-loopback"),
+      });
+    } finally {
+      await insecure.shutdown();
+    }
+  });
+
+  it("requires the configured bearer on non-loopback requests", async () => {
+    const port = await findAvailablePort();
+    const secured = new CodexBridgeService({
+      enabled: true,
+      host: "0.0.0.0",
+      port,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      authToken: BRIDGE_CONTROL_TOKEN,
+    });
+    try {
+      await secured.start();
+      expect(secured.getStatus().listening).toBe(true);
+
+      const unauthenticated = await fetch(`http://127.0.0.1:${port}/status`);
+      expect(unauthenticated.status).toBe(401);
+      const wrongToken = await fetch(`http://127.0.0.1:${port}/status`, {
+        headers: { authorization: "Bearer definitely-wrong" },
+      });
+      expect(wrongToken.status).toBe(401);
+      const authenticated = await fetch(`http://127.0.0.1:${port}/status`, {
+        headers: { authorization: `Bearer ${BRIDGE_CONTROL_TOKEN}` },
+      });
+      expect(authenticated.status).toBe(200);
+
+      const rejectedSocket = new WebSocket(`ws://127.0.0.1:${port}`);
+      await waitForClose(rejectedSocket);
+      expect(secured.getStatus().connectionCount).toBe(0);
+      const authenticatedSocket = new WebSocket(`ws://127.0.0.1:${port}`, {
+        headers: { authorization: `Bearer ${BRIDGE_CONTROL_TOKEN}` },
+      });
+      await new Promise<void>((resolve, reject) => {
+        authenticatedSocket.once("open", resolve);
+        authenticatedSocket.once("error", reject);
+      });
+      await waitFor(() => secured.getStatus().connectionCount === 1);
+      authenticatedSocket.close();
+    } finally {
+      await secured.shutdown();
+    }
   });
 
   it("proxies JSON-RPC and records thread sessions", async () => {
@@ -1462,7 +1524,12 @@ describe("CodexBridgeService", () => {
       });
 
       const beforeResponseCount = upstreamMessages.length;
-      const response = await fetchJson<{ accepted: boolean }>(
+      const controlHeaders = {
+        authorization: `Bearer ${BRIDGE_CONTROL_TOKEN}`,
+        "content-type": "application/json",
+        "x-yep-anywhere": "true",
+      };
+      const unauthenticated = await fetch(
         `${baseUrl}/sessions/thread-http/input`,
         {
           method: "POST",
@@ -1472,7 +1539,90 @@ describe("CodexBridgeService", () => {
           }),
         },
       );
-      expect(response.accepted).toBe(true);
+      expect(unauthenticated.status).toBe(401);
+
+      const legacy = await fetch(`${baseUrl}/sessions/thread-http/input`, {
+        method: "POST",
+        headers: controlHeaders,
+        body: JSON.stringify({
+          requestId: pending.request?.id,
+          response: "approve",
+        }),
+      });
+      expect(legacy.status).toBe(409);
+      await expect(legacy.json()).resolves.toMatchObject({
+        code: "interaction_identity_required",
+      });
+      expect(upstreamMessages).toHaveLength(beforeResponseCount);
+
+      const operationId = "int_12345678-1234-4234-8234-123456789abc";
+      const csrfAttempt = await fetch(
+        `${baseUrl}/sessions/thread-http/input-binding`,
+        {
+          method: "POST",
+          headers: { ...controlHeaders, origin: "https://attacker.test" },
+          body: JSON.stringify({
+            requestId: pending.request?.id,
+            operationId,
+            operationVersion: 4,
+          }),
+        },
+      );
+      expect(csrfAttempt.status).toBe(403);
+
+      const binding = await fetchJson<{ bound: boolean }>(
+        `${baseUrl}/sessions/thread-http/input-binding`,
+        {
+          method: "POST",
+          headers: controlHeaders,
+          body: JSON.stringify({
+            requestId: pending.request?.id,
+            operationId,
+            operationVersion: 4,
+          }),
+        },
+      );
+      expect(binding.bound).toBe(true);
+
+      const staleResolution = await fetch(
+        `${baseUrl}/sessions/thread-http/input`,
+        {
+          method: "POST",
+          headers: controlHeaders,
+          body: JSON.stringify({
+            requestId: pending.request?.id,
+            response: "approve",
+            operationId,
+            operationVersion: 4,
+            actor: { id: "replayed-user", channel: "yep" },
+          }),
+        },
+      );
+      expect(staleResolution.status).toBe(409);
+      expect(upstreamMessages).toHaveLength(beforeResponseCount);
+
+      const resolutionBody = JSON.stringify({
+        requestId: pending.request?.id,
+        response: "approve",
+        operationId,
+        operationVersion: 5,
+        actor: { id: "yep-test-user", channel: "yep" },
+      });
+      const [firstResolution, racedResolution] = await Promise.all([
+        fetch(`${baseUrl}/sessions/thread-http/input`, {
+          method: "POST",
+          headers: controlHeaders,
+          body: resolutionBody,
+        }),
+        fetch(`${baseUrl}/sessions/thread-http/input`, {
+          method: "POST",
+          headers: controlHeaders,
+          body: resolutionBody,
+        }),
+      ]);
+      expect([firstResolution.status, racedResolution.status].sort()).toEqual([
+        200, 404,
+      ]);
       await waitFor(() => upstreamMessages.length === beforeResponseCount + 1);
       expect(upstreamMessages.at(-1)).toMatchObject({
         id: "approval-http",

@@ -349,6 +349,8 @@ const codexBridgeService: CodexBridgeController | undefined =
       ? new CodexBridgeHttpClient({
           baseUrl: config.codexBridgeControlUrl,
           eventBus,
+          authToken: config.desktopAuthToken,
+          authTokenFile: config.runtimeTokenFile,
         })
       : new CodexBridgeService({
           enabled: config.codexBridgeEnabled,
@@ -360,6 +362,8 @@ const codexBridgeService: CodexBridgeController | undefined =
           clearUpstreamArgs: config.codexBridgeClearUpstreamArgs,
           fullUpstreamArgs: config.codexBridgeFullUpstreamArgs,
           eventBus,
+          authToken: config.desktopAuthToken,
+          authTokenFile: config.runtimeTokenFile,
           statePath: path.join(config.dataDir, "codex-bridge", "sessions.json"),
         });
 console.log(
