@@ -426,11 +426,10 @@ export class EmbeddedRuntimeController implements RuntimeController {
   ): Promise<RuntimeSessionSubscription | null> {
     if (options?.signal?.aborted) return null;
     const process = this.supervisor.getProcessForSession(sessionId);
-    if (!process) return null;
 
     const replay = this.eventStore
       ? await this.eventStore.replay({
-          processId: process.id,
+          ...(process ? { processId: process.id } : { sessionId }),
           afterSeq: options?.afterSeq,
         })
       : [];
@@ -444,6 +443,61 @@ export class EmbeddedRuntimeController implements RuntimeController {
     let journalReplayed = false;
 
     if (options?.signal?.aborted) return null;
+
+    // After a web/runtime restart there is no live Process to attach to, but a
+    // durable turn terminal is still authoritative. Replaying it lets every
+    // shell converge on the same final state instead of treating an already
+    // finished task as unrecoverable. Resident providers can stay idle after a
+    // turn terminal, so the journal may not have a transport-level `complete`.
+    if (!process) {
+      const transportCompleteIndex = replayRecords.findIndex(
+        (record) => record.type === "complete",
+      );
+      const turnTerminal =
+        transportCompleteIndex < 0
+          ? this.findAuthoritativeTurnTerminal(replayRecords)
+          : null;
+      if (transportCompleteIndex < 0 && !turnTerminal) return null;
+      const terminalRecords =
+        transportCompleteIndex >= 0
+          ? replayRecords.slice(0, transportCompleteIndex + 1)
+          : replayRecords;
+      let closed = false;
+      emit("connected", {
+        processId: terminalRecords.at(-1)?.processId,
+        sessionId,
+        state: "idle",
+        replayOnly: true,
+      });
+      for (const record of terminalRecords) {
+        // A historical process completion is terminal only when there is no
+        // newer live process. The active-process branch intentionally omits it.
+        if (closed) continue;
+        emit(
+          record.type,
+          record.type === "message" &&
+            record.data !== null &&
+            typeof record.data === "object"
+            ? { ...record.data, isReplay: true }
+            : record.data,
+        );
+      }
+      if (transportCompleteIndex < 0 && turnTerminal) {
+        // This closes only the replay transport. The correlated result/error
+        // above remains the sole authority for the turn outcome.
+        emit("complete", {
+          timestamp: turnTerminal.timestamp,
+          replayOnly: true,
+          synthetic: true,
+          reason: "journal-turn-terminal",
+        });
+      }
+      return {
+        cleanup: () => {
+          closed = true;
+        },
+      };
+    }
 
     const subscription = createSessionSubscription(
       process,
@@ -580,15 +634,94 @@ export class EmbeddedRuntimeController implements RuntimeController {
     return record.type !== "complete";
   }
 
-  private getRecordMessageId(record: RuntimeEventRecord): string | null {
-    if (
-      record.type !== "message" ||
-      record.data === null ||
-      typeof record.data !== "object"
-    ) {
-      return null;
+  private findAuthoritativeTurnTerminal(
+    records: RuntimeEventRecord[],
+  ): RuntimeEventRecord | null {
+    let latestTurnId: string | undefined;
+    for (const record of records) {
+      const message = this.getRecordMessage(record);
+      const turnId = message ? this.getMessageTurnId(message) : undefined;
+      if (turnId) latestTurnId = turnId;
     }
-    const message = record.data as { uuid?: unknown; id?: unknown };
+    if (!latestTurnId) return null;
+
+    let terminal: RuntimeEventRecord | null = null;
+    let terminalIndex = -1;
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      if (!record) continue;
+      const message = this.getRecordMessage(record);
+      if (
+        !message ||
+        this.getMessageTurnId(message) !== latestTurnId ||
+        !this.isAuthoritativeTurnTerminalMessage(message)
+      ) {
+        continue;
+      }
+      terminal = record;
+      terminalIndex = index;
+    }
+    if (!terminal) return null;
+
+    // A later unscoped user/delta or active status can be a new turn whose
+    // terminal was never journaled. Do not let the prior turn close it.
+    for (const record of records.slice(terminalIndex + 1)) {
+      const message = this.getRecordMessage(record);
+      if (message) {
+        const turnId = this.getMessageTurnId(message);
+        if (!turnId && message.type !== "result") return null;
+      }
+      if (
+        record.type === "status" &&
+        record.data !== null &&
+        typeof record.data === "object"
+      ) {
+        const state = (record.data as { state?: unknown }).state;
+        if (
+          state === "in-turn" ||
+          state === "waiting-input" ||
+          state === "hold"
+        ) {
+          return null;
+        }
+      }
+    }
+    return terminal;
+  }
+
+  private getRecordMessage(
+    record: RuntimeEventRecord,
+  ): Record<string, unknown> | null {
+    return record.type === "message" &&
+      record.data !== null &&
+      typeof record.data === "object" &&
+      !Array.isArray(record.data)
+      ? (record.data as Record<string, unknown>)
+      : null;
+  }
+
+  private getMessageTurnId(
+    message: Record<string, unknown>,
+  ): string | undefined {
+    if (typeof message.turnId === "string" && message.turnId) {
+      return message.turnId;
+    }
+    return typeof message.codexTurnId === "string" && message.codexTurnId
+      ? message.codexTurnId
+      : undefined;
+  }
+
+  private isAuthoritativeTurnTerminalMessage(
+    message: Record<string, unknown>,
+  ): boolean {
+    if (message.type === "result") return true;
+    if (message.type === "error") return message.willRetry === false;
+    return message.type === "system" && message.subtype === "turn_complete";
+  }
+
+  private getRecordMessageId(record: RuntimeEventRecord): string | null {
+    const message = this.getRecordMessage(record);
+    if (!message) return null;
     if (typeof message.uuid === "string") return message.uuid;
     return typeof message.id === "string" ? message.id : null;
   }

@@ -384,10 +384,12 @@ export class HttpRuntimeController implements RuntimeController {
     options?: RuntimeSessionSubscriptionOptions,
   ): Promise<RuntimeSessionSubscription | null> {
     if (options?.signal?.aborted) return null;
-    if (!(await this.getProcessForSession(sessionId))) return null;
-    if (options?.signal?.aborted) return null;
 
+    // The runtime, not the replaceable HTTP shell, is authoritative for both
+    // live processes and its durable journal. A process preflight here would
+    // suppress the finite replay-only subscription after completion.
     const token = await this.getToken();
+    if (options?.signal?.aborted) return null;
     const controller = new AbortController();
     const abortFromCaller = () => controller.abort();
     options?.signal?.addEventListener("abort", abortFromCaller, { once: true });

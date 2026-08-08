@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
 import { EmbeddedRuntimeController } from "../../src/runtime/EmbeddedRuntimeController.js";
@@ -5,8 +9,12 @@ import {
   HttpRuntimeController,
   type RuntimeFetch,
 } from "../../src/runtime/HttpRuntimeController.js";
+import { RuntimeEventStore } from "../../src/runtime/RuntimeEventStore.js";
 import { createRuntimeControlApp } from "../../src/runtime/control-server.js";
-import type { RuntimeController } from "../../src/runtime/types.js";
+import type {
+  RuntimeController,
+  RuntimeSessionEventEmitter,
+} from "../../src/runtime/types.js";
 import { MessageQueue } from "../../src/sdk/messageQueue.js";
 import { MockClaudeSDK } from "../../src/sdk/mock.js";
 import type {
@@ -54,15 +62,25 @@ function createLongRunningProvider(): AgentProvider {
 
 describe("HttpRuntimeController", () => {
   const supervisors: Supervisor[] = [];
+  const eventDirs: string[] = [];
 
-  function createHarness() {
+  function createHarness(options?: {
+    maxWorkers?: number;
+    eventStore?: RuntimeEventStore;
+  }) {
     const supervisor = new Supervisor({
       provider: createLongRunningProvider(),
       idleTimeoutMs: 100,
+      idlePreemptThresholdMs: 60_000,
+      maxWorkers: options?.maxWorkers,
     });
     supervisors.push(supervisor);
     const eventBus = new EventBus();
-    const embedded = new EmbeddedRuntimeController(supervisor, eventBus);
+    const embedded = new EmbeddedRuntimeController(
+      supervisor,
+      eventBus,
+      options?.eventStore,
+    );
     const app = createRuntimeControlApp({
       controller: embedded,
       token: "runtime-test-token",
@@ -74,7 +92,7 @@ describe("HttpRuntimeController", () => {
       token: "runtime-test-token",
       fetch,
     });
-    return { app, controller, eventBus };
+    return { app, controller, embedded, eventBus };
   }
 
   afterEach(async () => {
@@ -87,8 +105,51 @@ describe("HttpRuntimeController", () => {
         );
       }),
     );
+    await Promise.all(
+      eventDirs
+        .splice(0)
+        .map((eventsDir) => rm(eventsDir, { recursive: true, force: true })),
+    );
     vi.restoreAllMocks();
   });
+
+  async function collectOfflineEvents(
+    controller: RuntimeController,
+    sessionId: string,
+    options?: Parameters<RuntimeController["subscribeSession"]>[2],
+  ): Promise<Array<{ type: string; data: unknown }>> {
+    const events: Array<{ type: string; data: unknown }> = [];
+    let resolveComplete: (() => void) | undefined;
+    const completed = new Promise<void>((resolve) => {
+      resolveComplete = resolve;
+    });
+    const emit: RuntimeSessionEventEmitter = (type, data) => {
+      events.push({ type, data });
+      if (type === "complete") resolveComplete?.();
+    };
+    const subscription = await controller.subscribeSession(
+      sessionId,
+      emit,
+      options,
+    );
+    expect(subscription).not.toBeNull();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        completed,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("offline runtime replay did not complete")),
+            1_000,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    subscription?.cleanup();
+    return events;
+  }
 
   it("rejects unauthenticated control requests", async () => {
     const { app } = createHarness();
@@ -230,6 +291,130 @@ describe("HttpRuntimeController", () => {
       sessionId,
     });
     await controller.shutdown();
+  });
+
+  it("matches embedded bounded replay for an offline result, error and completion", async () => {
+    const eventsDir = path.join(
+      tmpdir(),
+      `http-runtime-offline-replay-${randomUUID()}`,
+    );
+    eventDirs.push(eventsDir);
+    const sessionId = "offline-session";
+    const firstStore = new RuntimeEventStore({ eventsDir });
+    await firstStore.append({
+      processId: "older-process",
+      sessionId,
+      type: "message",
+      data: { type: "result", uuid: "older-result", is_error: false },
+      timestamp: "2026-08-08T00:00:00.000Z",
+    });
+    await firstStore.append({
+      processId: "older-process",
+      sessionId,
+      type: "complete",
+      data: { timestamp: "2026-08-08T00:00:01.000Z" },
+      timestamp: "2026-08-08T00:00:01.000Z",
+    });
+    await firstStore.append({
+      processId: "offline-process",
+      sessionId,
+      type: "message",
+      data: {
+        type: "user",
+        uuid: "already-delivered",
+        turnId: "offline-turn",
+      },
+      timestamp: "2026-08-08T00:01:00.000Z",
+    });
+    await firstStore.append({
+      processId: "offline-process",
+      sessionId,
+      type: "message",
+      data: {
+        type: "result",
+        uuid: "offline-result",
+        turnId: "offline-turn",
+        is_error: true,
+      },
+      timestamp: "2026-08-08T00:01:01.000Z",
+    });
+    await firstStore.append({
+      processId: "offline-process",
+      sessionId,
+      type: "error",
+      data: { message: "offline failure" },
+      timestamp: "2026-08-08T00:01:02.000Z",
+    });
+    await firstStore.append({
+      processId: "offline-process",
+      sessionId: "different-session",
+      type: "message",
+      data: { type: "result", uuid: "must-not-cross-session" },
+      timestamp: "2026-08-08T00:02:00.000Z",
+    });
+    await firstStore.flush();
+
+    const eventStore = new RuntimeEventStore({ eventsDir });
+    const { controller, embedded } = createHarness({ eventStore });
+    const options = { afterSeq: 1 };
+    const embeddedEvents = await collectOfflineEvents(
+      embedded,
+      sessionId,
+      options,
+    );
+    const httpEvents = await collectOfflineEvents(
+      controller,
+      sessionId,
+      options,
+    );
+
+    expect(httpEvents).toEqual(embeddedEvents);
+    expect(httpEvents).toEqual([
+      {
+        type: "connected",
+        data: {
+          processId: "offline-process",
+          sessionId,
+          state: "idle",
+          replayOnly: true,
+        },
+      },
+      {
+        type: "message",
+        data: {
+          type: "result",
+          uuid: "offline-result",
+          turnId: "offline-turn",
+          is_error: true,
+          isReplay: true,
+        },
+      },
+      { type: "error", data: { message: "offline failure" } },
+      {
+        type: "complete",
+        data: {
+          timestamp: "2026-08-08T00:01:01.000Z",
+          replayOnly: true,
+          synthetic: true,
+          reason: "journal-turn-terminal",
+        },
+      },
+    ]);
+  });
+
+  it("returns null for an offline session with no durable events", async () => {
+    const eventsDir = path.join(
+      tmpdir(),
+      `http-runtime-empty-replay-${randomUUID()}`,
+    );
+    eventDirs.push(eventsDir);
+    const { controller } = createHarness({
+      eventStore: new RuntimeEventStore({ eventsDir }),
+    });
+
+    await expect(
+      controller.subscribeSession("missing-session", vi.fn()),
+    ).resolves.toBeNull();
   });
 
   it("keeps worker state when the web/API app facade is recreated", async () => {
