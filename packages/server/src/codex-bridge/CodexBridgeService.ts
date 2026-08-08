@@ -14,6 +14,8 @@ import {
   terminateProcessGroup,
   writeJson,
 } from "../bridge-common/util.js";
+import type { CodexEventStore } from "../codex-events/index.js";
+import { classifyCodexError } from "../codex/error-taxonomy.js";
 import {
   getCodexMcpAppServerArgs,
   resolveCodexMcpThreadProfile,
@@ -24,6 +26,13 @@ import { findCodexCliPath } from "../sdk/cli-detection.js";
 import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
+import {
+  type CodexBridgeClientRequestScope,
+  CodexBridgeEventPersistenceError,
+  CodexBridgeEventSpine,
+  createCodexBridgeEventIdentity,
+  createCodexBridgeEventStore,
+} from "./CodexBridgeEventSpine.js";
 import { readCodexUsage } from "./CodexUsageService.js";
 import {
   type CodexInteractiveMethod,
@@ -67,11 +76,15 @@ interface CodexBridgeServiceOptions {
    * this JSON file (metadata only; live connection state is rebuilt).
    */
   statePath?: string;
+  /** Test/custom adapter override. Production derives JSONL from statePath. */
+  eventStore?: CodexEventStore;
+  eventStorePath?: string;
 }
 
 interface ClientRequestRecord {
   method: string;
   params?: unknown;
+  eventScope: CodexBridgeClientRequestScope;
 }
 
 interface BridgeConnection {
@@ -87,8 +100,10 @@ interface BridgeConnection {
   threadIds: Set<string>;
   downstreamAttached: boolean;
   closed: boolean;
+  eventSpine: CodexBridgeEventSpine;
   upstreamReady: Promise<void> | null;
   clientFrameChain: Promise<void>;
+  serverFrameChain: Promise<void>;
   nextInternalRequestId: number;
 }
 
@@ -123,6 +138,7 @@ interface PendingServerRequest {
   pendingInputType: "tool-approval" | "user-question";
   connection: BridgeConnection;
   createdAt: string;
+  eventSessionId: string;
   autoResolutionDeadline?: number;
   autoResolutionTimer?: ReturnType<typeof setTimeout>;
 }
@@ -247,6 +263,8 @@ export class CodexBridgeService implements CodexBridgeController {
   } | null = null;
   private usageRequest: Promise<CodexUsageResponse> | null = null;
   private readonly statePath?: string;
+  private readonly eventStore: CodexEventStore;
+  private readonly eventTasks = new Set<Promise<void>>();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   /** Serializes atomic writes so concurrent state changes cannot race on .tmp. */
   private persistChain: Promise<void> = Promise.resolve();
@@ -268,6 +286,11 @@ export class CodexBridgeService implements CodexBridgeController {
     this.startupTimeoutMs =
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.statePath = options.statePath;
+    this.eventStore = createCodexBridgeEventStore({
+      store: options.eventStore,
+      eventStorePath: options.eventStorePath,
+      statePath: options.statePath,
+    });
   }
 
   async start(): Promise<void> {
@@ -336,6 +359,8 @@ export class CodexBridgeService implements CodexBridgeController {
       this.closeConnection(connection, "shutdown");
     }
     this.connections.clear();
+
+    await Promise.allSettled(Array.from(this.eventTasks));
 
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
@@ -496,7 +521,8 @@ export class CodexBridgeService implements CodexBridgeController {
     }
     if (
       !pending.connection.upstream ||
-      pending.connection.upstream.readyState !== WebSocket.OPEN
+      pending.connection.upstream.readyState !== WebSocket.OPEN ||
+      pending.connection.resolvedServerRequestIds.has(pending.rpcKey)
     ) {
       return false;
     }
@@ -519,14 +545,27 @@ export class CodexBridgeService implements CodexBridgeController {
       id: pending.rpcId,
       result,
     };
-    try {
-      pending.connection.upstream.send(JSON.stringify(message));
-    } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
-      return false;
-    }
+    const upstream = pending.connection.upstream;
     this.markLogicalRequestResolved(pending);
-    this.resolveLogicalRequest(pending, "yep");
+    this.enqueueFrameTask(pending.connection, "client", async () => {
+      try {
+        await pending.connection.eventSpine.observeServerRequestResolution(
+          message,
+          {
+            method: pending.method,
+            sessionId: pending.eventSessionId,
+          },
+        );
+        if (
+          !pending.connection.closed &&
+          upstream.readyState === WebSocket.OPEN
+        ) {
+          upstream.send(JSON.stringify(message));
+        }
+      } finally {
+        this.resolveLogicalRequest(pending, "yep");
+      }
+    });
     return true;
   }
 
@@ -667,8 +706,13 @@ export class CodexBridgeService implements CodexBridgeController {
     }
 
     const profile = parseMcpProfile(req.url, req.headers.authorization);
+    const connectionId = this.nextConnectionId++;
+    const eventIdentity = createCodexBridgeEventIdentity({
+      connectionId,
+      profile,
+    });
     const connection: BridgeConnection = {
-      id: this.nextConnectionId++,
+      id: connectionId,
       profile,
       downstream,
       upstream: null,
@@ -680,8 +724,16 @@ export class CodexBridgeService implements CodexBridgeController {
       threadIds: new Set(),
       downstreamAttached: true,
       closed: false,
+      eventSpine: new CodexBridgeEventSpine({
+        store: this.eventStore,
+        ...eventIdentity,
+        onPersistenceError: (stage) => {
+          this.lastError = `Codex event spine ${stage} persistence failed`;
+        },
+      }),
       upstreamReady: null,
       clientFrameChain: Promise.resolve(),
+      serverFrameChain: Promise.resolve(),
       nextInternalRequestId: 1,
     };
     this.connections.set(connection.id, connection);
@@ -690,23 +742,9 @@ export class CodexBridgeService implements CodexBridgeController {
     );
 
     downstream.on("message", (data, isBinary) => {
-      connection.clientFrameChain = connection.clientFrameChain
-        .then(() => this.forwardClientFrame(connection, data, isBinary))
-        .catch((error: unknown) => {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          this.lastError = message;
-          console.warn(
-            `[CodexBridge] Client frame failed connection=${connection.id}: ${message}`,
-          );
-          if (connection.downstream.readyState === WebSocket.OPEN) {
-            connection.downstream.close(
-              1011,
-              "Failed to apply Codex MCP profile",
-            );
-          }
-          this.closeConnection(connection, "client-frame-error");
-        });
+      this.enqueueFrameTask(connection, "client", () =>
+        this.forwardClientFrame(connection, data, isBinary),
+      );
     });
     downstream.on("close", () =>
       this.handleDownstreamClosed(connection, "client"),
@@ -782,21 +820,26 @@ export class CodexBridgeService implements CodexBridgeController {
       });
 
       upstream.on("message", (data, isBinary) => {
-        const forwardedFrame = this.observeServerData(
-          connection,
-          data,
-          isBinary,
-        );
-        if (connection.downstream.readyState === WebSocket.OPEN) {
-          if (forwardedFrame) {
+        this.enqueueFrameTask(connection, "server", async () => {
+          if (connection.closed) return;
+          const forwardedFrame = await this.observeServerData(
+            connection,
+            data,
+            isBinary,
+          );
+          if (
+            !connection.closed &&
+            connection.downstream.readyState === WebSocket.OPEN &&
+            forwardedFrame
+          ) {
             sendFrame(
               connection.downstream,
               forwardedFrame.data,
               forwardedFrame.isBinary,
             );
           }
-        }
-        this.maybeCloseDetachedConnection(connection, "server-frame");
+          this.maybeCloseDetachedConnection(connection, "server-frame");
+        });
       });
 
       upstream.on("close", () => this.closeConnection(connection, "upstream"));
@@ -905,6 +948,46 @@ export class CodexBridgeService implements CodexBridgeController {
     this.schedulePersist();
   }
 
+  private enqueueFrameTask(
+    connection: BridgeConnection,
+    direction: "client" | "server",
+    operation: () => Promise<void>,
+  ): void {
+    const previous =
+      direction === "client"
+        ? connection.clientFrameChain
+        : connection.serverFrameChain;
+    const task = previous.then(operation).catch((error: unknown) => {
+      if (error instanceof CodexBridgeEventPersistenceError) {
+        this.lastError = `Codex event spine ${error.stage} persistence failed`;
+        console.warn(
+          `[CodexBridge] Event spine persistence failed stage=${error.stage} connection=${connection.id}; closing connection`,
+        );
+        if (connection.downstream.readyState === WebSocket.OPEN) {
+          connection.downstream.close(1011, "Codex event persistence failed");
+        }
+        if (connection.upstream?.readyState === WebSocket.OPEN) {
+          connection.upstream.close(1011, "Codex event persistence failed");
+        }
+        this.closeConnection(connection, "event-spine-persistence-error");
+        return;
+      }
+      const diagnostic = classifyCodexError(error);
+      this.lastError = diagnostic.publicMessage;
+      console.warn(
+        `[CodexBridge] ${direction} frame processing failed connection=${connection.id} code=${diagnostic.code} category=${diagnostic.category} retryable=${String(diagnostic.retryable)}`,
+      );
+      this.closeConnection(connection, `${direction}-frame-error`);
+    });
+    if (direction === "client") {
+      connection.clientFrameChain = task;
+    } else {
+      connection.serverFrameChain = task;
+    }
+    this.eventTasks.add(task);
+    void task.then(() => this.eventTasks.delete(task));
+  }
+
   private async observeClientData(
     connection: BridgeConnection,
     data: RawData,
@@ -940,9 +1023,16 @@ export class CodexBridgeService implements CodexBridgeController {
       );
       if (message !== originalMessage) modified = true;
       if (message.method && message.id !== undefined) {
+        const eventScope =
+          await connection.eventSpine.observeClientRequest(message);
+        if (!eventScope) {
+          messagesToForward.push(message);
+          continue;
+        }
         connection.pendingClientRequests.set(idKey(message.id), {
           method: message.method,
           params: message.params,
+          eventScope,
         });
         messagesToForward.push(message);
         continue;
@@ -958,6 +1048,7 @@ export class CodexBridgeService implements CodexBridgeController {
         if (alreadyResolved) {
           continue;
         }
+        await connection.eventSpine.observeServerRequestResolution(message);
         if (pending) {
           this.markLogicalRequestResolved(pending, connection);
           this.resolveLogicalRequest(pending, "tui");
@@ -1100,11 +1191,11 @@ export class CodexBridgeService implements CodexBridgeController {
     });
   }
 
-  private observeServerData(
+  private async observeServerData(
     connection: BridgeConnection,
     data: RawData,
     isBinary: boolean,
-  ): ForwardedFrame | null {
+  ): Promise<ForwardedFrame | null> {
     const envelope = parseJsonRpcEnvelope(data);
     const messages = envelope?.messages;
     if (!messages) {
@@ -1138,24 +1229,41 @@ export class CodexBridgeService implements CodexBridgeController {
 
       messagesToForward.push(message);
       if (message.method && message.id !== undefined) {
-        this.recordServerRequest(connection, message);
+        const eventSessionId =
+          await connection.eventSpine.observeServerRequest(message);
+        if (!connection.closed) {
+          this.recordServerRequest(
+            connection,
+            message,
+            eventSessionId ?? undefined,
+          );
+        }
         continue;
       }
 
       if (message.method) {
-        this.handleServerNotification(
-          connection,
-          message.method,
-          message.params,
-        );
+        await connection.eventSpine.observeServerNotification(message);
+        if (!connection.closed) {
+          this.handleServerNotification(
+            connection,
+            message.method,
+            message.params,
+          );
+        }
         continue;
       }
 
       if (message.id !== undefined) {
         const request = connection.pendingClientRequests.get(idKey(message.id));
         if (request) {
+          await connection.eventSpine.observeClientResponse(
+            message,
+            request.eventScope,
+          );
           connection.pendingClientRequests.delete(idKey(message.id));
-          this.handleClientRequestResponse(connection, request, message);
+          if (!connection.closed) {
+            this.handleClientRequestResponse(connection, request, message);
+          }
         }
       }
     }
@@ -1497,6 +1605,7 @@ export class CodexBridgeService implements CodexBridgeController {
   private recordServerRequest(
     connection: BridgeConnection,
     message: JsonRpcMessage,
+    eventSessionId?: string,
   ): void {
     if (message.id === undefined || !message.method) return;
     if (!isCodexInteractiveMethod(message.method)) return;
@@ -1538,6 +1647,7 @@ export class CodexBridgeService implements CodexBridgeController {
       pendingInputType: view.pendingInputType,
       connection,
       createdAt,
+      eventSessionId: eventSessionId ?? threadId,
     };
 
     connection.pendingServerRequests.set(requestKey, pending);

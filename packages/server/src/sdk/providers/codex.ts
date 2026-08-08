@@ -6,13 +6,28 @@
  */
 
 import { type ChildProcess, exec, spawn } from "node:child_process";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { ModelInfo } from "@yep-anywhere/shared";
+import {
+  CODEX_EVENT_RUNTIME_IDENTITY,
+  type CodexEventEnvelope,
+  CodexEventIngress,
+  type CodexEventProjectionMode,
+  type CodexEventRolloutConfig,
+  type CodexEventStore,
+  InMemoryCodexEventStore,
+  JsonlCodexEventStore,
+  classifyCodexNotification,
+  codexEventRolloutConfigFromEnv,
+  resolveCodexEventProjectionMode,
+} from "../../codex-events/index.js";
 import {
   isCodexCorrelationDebugEnabled,
   logCodexCorrelationDebug,
   summarizeCodexNormalizedMessage,
 } from "../../codex/correlationDebugLogger.js";
+import { classifyCodexError } from "../../codex/error-taxonomy.js";
 import {
   type CodexFileChangeStatus,
   type NormalizedCodexFileChange,
@@ -41,6 +56,7 @@ import {
   normalizeCodexToolOutputWithContext,
   parseCodexToolArguments,
 } from "../../codex/normalization.js";
+import { getDataDir } from "../../config.js";
 import { getLogger } from "../../logging/logger.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
 import { logSDKMessage } from "../messageLogger.js";
@@ -276,6 +292,8 @@ interface JsonRpcResponse {
 interface JsonRpcNotification {
   method: string;
   params?: unknown;
+  emittedAtMs?: number;
+  canonicalEvent?: CodexEventEnvelope;
 }
 
 interface TurnPlanUpdatedNotificationParams {
@@ -431,6 +449,8 @@ export interface CodexProviderConfig {
   baseUrl?: string;
   /** API key override (normally read from ~/.codex/auth.json) */
   apiKey?: string;
+  /** Canonical event-spine rollout/store overrides. */
+  eventSpine?: CodexEventRolloutConfig;
 }
 
 class AsyncQueue<T> {
@@ -502,11 +522,39 @@ class AsyncQueue<T> {
       this.waiters.push(waiter);
     });
   }
+
+  drain(): T[] {
+    return this.items.splice(0, this.items.length);
+  }
 }
 
 type AppServerRequestHandler = (
   request: JsonRpcServerRequest,
 ) => Promise<unknown>;
+
+interface AppServerRequestMetadata {
+  clientMessageId?: string;
+}
+
+interface AppServerEventObserver {
+  onClientRequest(input: {
+    requestId: JsonRpcId;
+    method: string;
+    params?: unknown;
+    metadata?: AppServerRequestMetadata;
+  }): Promise<void>;
+  onClientResponse(input: {
+    requestId: JsonRpcId;
+    method: string;
+    result?: unknown;
+    error?: unknown;
+    metadata?: AppServerRequestMetadata;
+  }): Promise<void>;
+  onServerRequest(request: JsonRpcServerRequest): Promise<void>;
+  onServerNotification(
+    notification: JsonRpcNotification,
+  ): Promise<CodexEventEnvelope>;
+}
 
 class CodexAppServerClient {
   private process: ChildProcess | null = null;
@@ -529,10 +577,15 @@ class CodexAppServerClient {
     {
       resolve: (result: unknown) => void;
       reject: (error: Error) => void;
+      method: string;
+      params?: unknown;
+      metadata?: AppServerRequestMetadata;
     }
   >();
   private readonly notifications = new AsyncQueue<JsonRpcNotification>();
   private onServerRequest: AppServerRequestHandler | null = null;
+  private eventObserver: AppServerEventObserver | null = null;
+  private inboundObservationTail: Promise<void> = Promise.resolve();
   private closed = false;
 
   constructor(
@@ -544,6 +597,30 @@ class CodexAppServerClient {
 
   setServerRequestHandler(handler: AppServerRequestHandler): void {
     this.onServerRequest = handler;
+  }
+
+  async setEventObserver(observer: AppServerEventObserver): Promise<void> {
+    await this.inboundObservationTail;
+    this.eventObserver = observer;
+    const buffered = this.notifications.drain();
+    if (buffered.length === 0) return;
+    const canonicalizeBuffered = async () => {
+      for (const notification of buffered) {
+        const canonicalEvent =
+          await observer.onServerNotification(notification);
+        this.notifications.push({ ...notification, canonicalEvent });
+      }
+    };
+    this.inboundObservationTail = this.inboundObservationTail
+      .then(canonicalizeBuffered)
+      .catch((error: unknown) => {
+        this.handleProcessClose(
+          error instanceof Error
+            ? error
+            : new Error("Codex app-server event observation failed"),
+        );
+      });
+    await this.inboundObservationTail;
   }
 
   async connect(): Promise<void> {
@@ -634,11 +711,31 @@ class CodexAppServerClient {
           method,
           params: message.params,
         };
-        this.handleServerRequest(request);
+        const observer = this.eventObserver;
+        this.enqueueInboundObservation(async () => {
+          await observer?.onServerRequest(request);
+          this.handleServerRequest(request);
+        });
         return;
       }
 
-      this.notifications.push({ method, params: message.params });
+      const notification: JsonRpcNotification = {
+        method,
+        params: message.params,
+        ...(typeof message.emittedAtMs === "number" &&
+        Number.isFinite(message.emittedAtMs)
+          ? { emittedAtMs: message.emittedAtMs }
+          : {}),
+      };
+      const observer = this.eventObserver;
+      this.enqueueInboundObservation(async () => {
+        const canonicalEvent =
+          await observer?.onServerNotification(notification);
+        this.notifications.push({
+          ...notification,
+          ...(canonicalEvent ? { canonicalEvent } : {}),
+        });
+      });
       return;
     }
 
@@ -649,16 +746,42 @@ class CodexAppServerClient {
       if (!pending) {
         return;
       }
-      this.pendingRequests.delete(id);
-
-      if (message.error && typeof message.error === "object") {
-        const error = message.error as JsonRpcError;
-        pending.reject(new Error(error.message ?? "JSON-RPC request failed"));
-        return;
-      }
-
-      pending.resolve(message.result);
+      const observer = this.eventObserver;
+      this.enqueueInboundObservation(async () => {
+        if (this.pendingRequests.get(id) !== pending) return;
+        this.pendingRequests.delete(id);
+        if (message.error && typeof message.error === "object") {
+          const error = message.error as JsonRpcError;
+          await observer?.onClientResponse({
+            requestId: id,
+            method: pending.method,
+            error,
+            ...(pending.metadata ? { metadata: pending.metadata } : {}),
+          });
+          pending.reject(new Error(error.message ?? "JSON-RPC request failed"));
+          return;
+        }
+        await observer?.onClientResponse({
+          requestId: id,
+          method: pending.method,
+          result: message.result,
+          ...(pending.metadata ? { metadata: pending.metadata } : {}),
+        });
+        pending.resolve(message.result);
+      });
     }
+  }
+
+  private enqueueInboundObservation(operation: () => Promise<void>): void {
+    this.inboundObservationTail = this.inboundObservationTail
+      .then(operation)
+      .catch((error: unknown) => {
+        this.handleProcessClose(
+          error instanceof Error
+            ? error
+            : new Error("Codex app-server event observation failed"),
+        );
+      });
   }
 
   private handleServerRequest(request: JsonRpcServerRequest): void {
@@ -696,16 +819,33 @@ class CodexAppServerClient {
   }
 
   async request<T>(method: string, params?: unknown): Promise<T> {
+    return (await this.requestTracked<T>(method, params)).result;
+  }
+
+  async requestTracked<T>(
+    method: string,
+    params?: unknown,
+    metadata?: AppServerRequestMetadata,
+  ): Promise<{ requestId: JsonRpcId; result: T }> {
     if (this.closed) {
       throw this.closeError ?? new Error("Codex app-server client is closed");
     }
 
     const id = this.nextRequestId++;
+    await this.eventObserver?.onClientRequest({
+      requestId: id,
+      method,
+      params,
+      ...(metadata ? { metadata } : {}),
+    });
 
     const resultPromise = new Promise<T>((resolve, reject) => {
       this.pendingRequests.set(id, {
         resolve: (result) => resolve(result as T),
         reject,
+        method,
+        params,
+        ...(metadata ? { metadata } : {}),
       });
     });
 
@@ -716,7 +856,7 @@ class CodexAppServerClient {
       params,
     });
 
-    return await resultPromise;
+    return { requestId: id, result: await resultPromise };
   }
 
   notify(method: string, params?: unknown): void {
@@ -809,6 +949,8 @@ export class CodexProvider implements AgentProvider {
   readonly supportsSlashCommands = false;
 
   private readonly config: CodexProviderConfig;
+  private readonly eventSpineConfig: CodexEventRolloutConfig;
+  private readonly eventStore: CodexEventStore;
   /** Per-source model list cache (keyed by Codex model source id). */
   private readonly modelCacheBySource = new Map<
     string,
@@ -817,6 +959,23 @@ export class CodexProvider implements AgentProvider {
 
   constructor(config: CodexProviderConfig = {}) {
     this.config = config;
+    this.eventSpineConfig = {
+      ...codexEventRolloutConfigFromEnv(),
+      ...config.eventSpine,
+    };
+    this.eventStore =
+      config.eventSpine?.store ??
+      (this.eventSpineConfig.durableStorePath
+        ? new JsonlCodexEventStore({
+            filePath: this.eventSpineConfig.durableStorePath,
+            onCorruptLine: ({ lineNumber, reason }) => {
+              log.warn(
+                { lineNumber, reason },
+                "Skipped malformed canonical Codex event-store line",
+              );
+            },
+          })
+        : new InMemoryCodexEventStore());
   }
 
   /**
@@ -1362,11 +1521,15 @@ export class CodexProvider implements AgentProvider {
     let appServer: CodexAppServerClient | undefined;
 
     let sessionId = options.resumeSessionId ?? "";
+    let eventIngress: CodexEventIngress | null = null;
+    let projectionMode: CodexEventProjectionMode = "shadow";
     const usageByTurnId = new Map<string, TokenUsageSnapshot>();
     const customToolContexts = new Map<string, CodexToolCallContext>();
+    const shadowToolContexts = new Map<string, CodexToolCallContext>();
     // Accumulated live stdout/stderr per command item (itemId-turnId), so the
     // UI can stream command output like the Codex TUI does.
     const commandOutputBuffers = new Map<string, string>();
+    const shadowCommandOutputBuffers = new Map<string, string>();
     const logMessage = (message: SDKMessage): SDKMessage => {
       const messageSessionId =
         typeof (message as { session_id?: unknown }).session_id === "string"
@@ -1388,7 +1551,31 @@ export class CodexProvider implements AgentProvider {
       );
       setActiveClient(appServer);
       appServer.setServerRequestHandler(async (request) => {
-        return await this.handleServerRequestApproval(request, options, signal);
+        const ingress = eventIngress;
+        try {
+          const result = await this.handleServerRequestApproval(
+            request,
+            options,
+            signal,
+          );
+          if (ingress) {
+            await ingress.ingestServerRequestResolution({
+              requestId: request.id,
+              method: request.method,
+              result,
+            });
+          }
+          return result;
+        } catch (error) {
+          if (ingress) {
+            await ingress.ingestServerRequestResolution({
+              requestId: request.id,
+              method: request.method,
+              error,
+            });
+          }
+          throw error;
+        }
       });
 
       await appServer.connect();
@@ -1449,19 +1636,84 @@ export class CodexProvider implements AgentProvider {
         sandbox: policy.sandbox,
         config: mcpProfile.threadConfig,
       };
+      const threadExchange = options.resumeSessionId
+        ? await appServer.requestTracked<ThreadResumeResponse>(
+            "thread/resume",
+            threadResumeParams,
+          )
+        : await appServer.requestTracked<ThreadStartResponse>(
+            "thread/start",
+            threadStartParams,
+          );
       const threadResult: ThreadResumeResponse | ThreadStartResponse =
-        options.resumeSessionId
-          ? await appServer.request<ThreadResumeResponse>(
-              "thread/resume",
-              threadResumeParams,
-            )
-          : await appServer.request<ThreadStartResponse>(
-              "thread/start",
-              threadStartParams,
-            );
+        threadExchange.result;
+      const threadMethod = options.resumeSessionId
+        ? ("thread/resume" as const)
+        : ("thread/start" as const);
+      const threadParams = options.resumeSessionId
+        ? threadResumeParams
+        : threadStartParams;
 
       sessionId = threadResult.thread.id;
       runtimeState.threadId = sessionId;
+
+      projectionMode = resolveCodexEventProjectionMode(
+        {
+          sessionId,
+          accountId: options.codexEventAccountId,
+        },
+        this.eventSpineConfig,
+      );
+      eventIngress = await CodexEventIngress.create({
+        store: this.eventStore,
+        runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+        sessionId,
+        ...(options.codexEventProjectId
+          ? { projectId: options.codexEventProjectId }
+          : {}),
+        ...(options.codexEventAccountId
+          ? { accountId: options.codexEventAccountId }
+          : {}),
+      });
+      const activeEventIngress = eventIngress;
+      await activeEventIngress.ingestClientExchange({
+        requestId: threadExchange.requestId,
+        method: threadMethod,
+        params: threadParams,
+        result: threadResult,
+      });
+      await appServer.setEventObserver({
+        onClientRequest: async (input) => {
+          await activeEventIngress.ingestClientRequest({
+            requestId: input.requestId,
+            method: input.method,
+            params: input.params,
+            ...(input.metadata?.clientMessageId
+              ? { clientMessageId: input.metadata.clientMessageId }
+              : {}),
+          });
+        },
+        onClientResponse: async (input) => {
+          await activeEventIngress.ingestClientResponse({
+            requestId: input.requestId,
+            method: input.method,
+            ...(input.result === undefined ? {} : { result: input.result }),
+            ...(input.error === undefined ? {} : { error: input.error }),
+            ...(input.metadata?.clientMessageId
+              ? { clientMessageId: input.metadata.clientMessageId }
+              : {}),
+          });
+        },
+        onServerRequest: async (request) => {
+          await activeEventIngress.ingestServerRequest({
+            requestId: request.id,
+            method: request.method,
+            params: request.params,
+          });
+        },
+        onServerNotification: async (notification) =>
+          await activeEventIngress.ingestNotification(notification),
+      });
 
       const rollbackNumTurns = this.normalizeRollbackNumTurns(
         options.rollbackNumTurns,
@@ -1510,6 +1762,8 @@ export class CodexProvider implements AgentProvider {
           approvalPolicy: policy.approvalPolicy,
           sandbox: policy.sandbox,
           codexMcpMode: options.codexMcpMode ?? "standard",
+          codexEventProjectionMode: projectionMode,
+          codexEventConnectionId: eventIngress.connectionId,
           policyOverrides: {
             approvalPolicy: CODEX_POLICY_OVERRIDES.approvalPolicy,
             sandbox: CODEX_POLICY_OVERRIDES.sandbox,
@@ -1579,6 +1833,7 @@ export class CodexProvider implements AgentProvider {
 
         const turnStartParams: TurnStartParams = {
           threadId: sessionId,
+          clientUserMessageId: message.uuid,
           input: [{ type: "text", text: userPrompt, text_elements: [] }],
           effort: this.mapEffortToReasoningEffort(
             options.reasoningEffort,
@@ -1586,10 +1841,13 @@ export class CodexProvider implements AgentProvider {
             options.thinking,
           ),
         };
-        const turnResult = await appServer.request<TurnStartResponse>(
-          "turn/start",
-          turnStartParams,
-        );
+        const turnResult = (
+          await appServer.requestTracked<TurnStartResponse>(
+            "turn/start",
+            turnStartParams,
+            message.uuid ? { clientMessageId: message.uuid } : undefined,
+          )
+        ).result;
 
         const activeTurnId = turnResult.turn.id;
         runtimeState.activeTurnId = activeTurnId;
@@ -1618,28 +1876,96 @@ export class CodexProvider implements AgentProvider {
         let emittedTurnError = false;
 
         while (!turnComplete && !signal.aborted) {
-          const notification = await appServer.nextNotification(signal);
+          const rawNotification = await appServer.nextNotification(signal);
+          const canonicalEvent =
+            rawNotification.canonicalEvent ??
+            (await activeEventIngress.ingestNotification(rawNotification));
+          const canonicalNotification =
+            activeEventIngress.notificationFromEvent(canonicalEvent);
 
-          if (notification.method === "thread/tokenUsage/updated") {
-            const usage = this.extractTurnUsage(notification.params);
+          if (canonicalNotification.method === "thread/tokenUsage/updated") {
+            const usage = this.extractTurnUsage(canonicalNotification.params);
             if (usage) {
               usageByTurnId.set(usage.turnId, usage.snapshot);
             }
           }
 
-          const messages = this.convertNotificationToSDKMessages(
-            notification,
-            sessionId,
-            usageByTurnId,
-            customToolContexts,
-            commandOutputBuffers,
-          );
+          let messages: SDKMessage[];
+          if (projectionMode === "legacy") {
+            messages = this.convertNotificationToSDKMessages(
+              rawNotification,
+              sessionId,
+              usageByTurnId,
+              customToolContexts,
+              commandOutputBuffers,
+            );
+          } else {
+            const canonicalMessages = this.convertNotificationToSDKMessages(
+              canonicalNotification,
+              sessionId,
+              usageByTurnId,
+              projectionMode === "primary"
+                ? customToolContexts
+                : shadowToolContexts,
+              projectionMode === "primary"
+                ? commandOutputBuffers
+                : shadowCommandOutputBuffers,
+              projectionMode === "primary",
+              true,
+            );
+            const legacyMessages = this.convertNotificationToSDKMessages(
+              rawNotification,
+              sessionId,
+              usageByTurnId,
+              projectionMode === "shadow"
+                ? customToolContexts
+                : shadowToolContexts,
+              projectionMode === "shadow"
+                ? commandOutputBuffers
+                : shadowCommandOutputBuffers,
+              projectionMode === "shadow",
+              false,
+            );
+            const parity = activeEventIngress.recordProjectionParity(
+              canonicalEvent,
+              legacyMessages,
+              canonicalMessages,
+            );
+            if (
+              parity.lastMismatch?.eventId === canonicalEvent.eventId &&
+              parity.mismatched > 0
+            ) {
+              log.warn(
+                {
+                  sessionId,
+                  method: parity.lastMismatch.method,
+                  eventId: canonicalEvent.eventId,
+                  projectionMode,
+                  legacyHash: parity.lastMismatch.legacyHash,
+                  canonicalHash: parity.lastMismatch.canonicalHash,
+                  mismatchCount: parity.mismatched,
+                  comparedCount: parity.compared,
+                },
+                "Canonical Codex projection differs from legacy projection",
+              );
+            }
+            messages =
+              projectionMode === "primary"
+                ? this.attachCanonicalCodexItem(
+                    canonicalMessages,
+                    canonicalEvent,
+                    sessionId,
+                  )
+                : legacyMessages;
+          }
           for (const msg of messages) {
             yield logMessage(msg);
           }
 
-          if (this.isTurnTerminalNotification(notification, activeTurnId)) {
-            if (notification.method === "error") {
+          if (
+            this.isTurnTerminalNotification(canonicalNotification, activeTurnId)
+          ) {
+            if (canonicalNotification.method === "error") {
               emittedTurnError = true;
             }
             turnComplete = true;
@@ -1653,10 +1979,14 @@ export class CodexProvider implements AgentProvider {
           turnResult.turn.status === "failed" &&
           turnResult.turn.error?.message
         ) {
+          const codexError = classifyCodexError(turnResult.turn.error, {
+            correlationId: activeTurnId,
+          });
           yield logMessage({
             type: "error",
             session_id: sessionId,
-            error: turnResult.turn.error.message,
+            error: codexError.publicMessage,
+            codexError,
           } as SDKMessage);
         }
 
@@ -1666,11 +1996,12 @@ export class CodexProvider implements AgentProvider {
         } as SDKMessage);
       }
     } catch (error) {
+      const codexError = classifyCodexError(error);
       log.error(
         {
-          err: error,
-          errorMessage: error instanceof Error ? error.message : String(error),
-          errorStack: error instanceof Error ? error.stack : undefined,
+          code: codexError.code,
+          category: codexError.category,
+          retryable: codexError.retryable,
         },
         "Error in codex app-server session",
       );
@@ -1678,7 +2009,8 @@ export class CodexProvider implements AgentProvider {
         yield logMessage({
           type: "error",
           session_id: sessionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: codexError.publicMessage,
+          codexError,
         } as SDKMessage);
       }
     } finally {
@@ -2007,6 +2339,8 @@ export class CodexProvider implements AgentProvider {
     usageByTurnId: Map<string, TokenUsageSnapshot>,
     customToolContexts: Map<string, CodexToolCallContext> = new Map(),
     commandOutputBuffers: Map<string, string> = new Map(),
+    emitProjectionDiagnostics = true,
+    emitUnknownCompatibilityMessage = false,
   ): SDKMessage[] {
     switch (notification.method) {
       case "turn/completed": {
@@ -2038,23 +2372,55 @@ export class CodexProvider implements AgentProvider {
           phase: "completed",
           sourceEvent: notification.method,
         });
+        if (params?.turn.status === "failed") {
+          const codexError = classifyCodexError(
+            params.turn.error ?? notification.params,
+            turnId ? { correlationId: turnId } : {},
+          );
+          return [
+            {
+              type: "error",
+              session_id: sessionId,
+              error: codexError.publicMessage,
+              codexError,
+              ...(turnId ? { turnId } : {}),
+            } as SDKMessage,
+            message,
+          ];
+        }
         return [message];
       }
 
       case "error": {
         const params = this.asErrorNotification(notification.params);
-        const errorMessage = params?.error.message;
-        const message =
-          (typeof errorMessage === "string" && errorMessage) ||
-          (typeof (notification.params as { message?: unknown })?.message ===
-          "string"
-            ? (notification.params as { message: string }).message
-            : "Codex turn failed");
+        const codexError = classifyCodexError(
+          params ?? notification.params,
+          params?.turnId ? { correlationId: params.turnId } : {},
+        );
+
+        if (params?.willRetry) {
+          return [
+            {
+              type: "system",
+              subtype: "warning",
+              session_id: sessionId,
+              warning: codexError.publicMessage,
+              codexError,
+              willRetry: true,
+              threadId: params.threadId,
+              turnId: params.turnId,
+            } as SDKMessage,
+          ];
+        }
 
         const errorEvent = {
           type: "error",
           session_id: sessionId,
-          error: message,
+          error: codexError.publicMessage,
+          codexError,
+          willRetry: false,
+          threadId: params?.threadId,
+          turnId: params?.turnId,
         } as SDKMessage;
         logSdkCorrelationDebug(sessionId, errorEvent, {
           eventKind: "error",
@@ -2236,9 +2602,98 @@ export class CodexProvider implements AgentProvider {
         return [];
       }
 
-      default:
+      default: {
+        const classification = classifyCodexNotification(notification.method);
+        if (!classification.known) {
+          if (emitProjectionDiagnostics) {
+            log.warn(
+              { sessionId },
+              "Recorded unknown Codex notification for compatibility",
+            );
+          }
+          return emitUnknownCompatibilityMessage
+            ? [
+                withCodexTimestamp({
+                  type: "system",
+                  subtype: "warning",
+                  session_id: sessionId,
+                  content:
+                    "Codex sent a newer event; Yep preserved it but this version cannot display its details yet.",
+                  warningKind: "unknown_codex_notification",
+                } as SDKMessage),
+              ]
+            : [];
+        }
+        if (emitProjectionDiagnostics) {
+          log.debug(
+            {
+              sessionId,
+              method: notification.method,
+              domain: classification.domain,
+              disposition: classification.disposition,
+            },
+            "Canonical Codex notification recorded without a legacy UI projection",
+          );
+        }
         return [];
+      }
     }
+  }
+
+  private attachCanonicalCodexItem(
+    messages: SDKMessage[],
+    event: CodexEventEnvelope,
+    sessionId: string,
+  ): SDKMessage[] {
+    if (event.method !== "item/started" && event.method !== "item/completed") {
+      return messages;
+    }
+    const payload =
+      event.payload.data &&
+      typeof event.payload.data === "object" &&
+      !Array.isArray(event.payload.data)
+        ? (event.payload.data as Record<string, unknown>)
+        : null;
+    const item =
+      payload?.item &&
+      typeof payload.item === "object" &&
+      !Array.isArray(payload.item)
+        ? (payload.item as Record<string, unknown>)
+        : null;
+    if (!item || typeof item.type !== "string") return messages;
+
+    const extensions = {
+      codexThreadItem: structuredClone(item),
+      codexThreadItemLifecycle:
+        event.method === "item/completed"
+          ? ("completed" as const)
+          : ("started" as const),
+      ...(event.threadId ? { codexThreadId: event.threadId } : {}),
+      ...(event.turnId ? { codexTurnId: event.turnId } : {}),
+      codexEventSequence: event.sequence,
+      codexRawReasoningAllowed: false,
+    };
+    if (messages.length === 0) {
+      return [
+        withCodexTimestamp(
+          {
+            type: "system",
+            subtype: "codex_native_item",
+            session_id: sessionId,
+            uuid: `codex-native-${event.itemId ?? event.eventId}-${event.sequence}`,
+            ...extensions,
+          } as SDKMessage,
+          new Date(event.receivedAtMs).toISOString(),
+        ),
+      ];
+    }
+    return messages.map(
+      (message) =>
+        ({
+          ...message,
+          ...extensions,
+        }) as SDKMessage,
+    );
   }
 
   private convertRawResponseItemToSDKMessages(
@@ -3366,4 +3821,13 @@ export class CodexProvider implements AgentProvider {
 /**
  * Default Codex provider instance.
  */
-export const codexProvider = new CodexProvider();
+export const codexProvider = new CodexProvider({
+  eventSpine: {
+    // The process-wide provider is the production path. Keep ad-hoc provider
+    // instances in-memory for tests/embedders, while making the real path
+    // restart-safe without requiring an opt-in environment variable.
+    durableStorePath:
+      process.env.YEP_CODEX_EVENT_STORE_PATH?.trim() ||
+      join(getDataDir(), "codex-events", "events.jsonl"),
+  },
+});

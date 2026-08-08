@@ -16,6 +16,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { InMemoryCodexEventStore } from "../../../src/codex-events/index.js";
 import { getCodexMcpAppServerArgs } from "../../../src/codex/mcp-profile.js";
 import {
   CodexProvider,
@@ -103,7 +104,35 @@ function send(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
 }
 
+function notify(method, params, emittedAtMs) {
+  process.stdout.write(
+    JSON.stringify({ jsonrpc: "2.0", method, params, emittedAtMs }) + "\\n",
+  );
+}
+
+function request(id, method, params) {
+  process.stdout.write(
+    JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\\n",
+  );
+}
+
 function handle(message) {
+  if (!message.method && message.id === "approval-event-spine") {
+    notify(
+      "turn/completed",
+      {
+        threadId: "thread-new",
+        turn: {
+          id: "turn-rewrite",
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+      1003,
+    );
+    return;
+  }
   if (message.method === "initialize") {
     send(message.id, { userAgent: "fake-codex" });
     return;
@@ -128,14 +157,62 @@ function handle(message) {
     return;
   }
   if (message.method === "turn/start") {
+    const eventMode = process.env.CODEX_FAKE_EVENT_MODE === "1";
     send(message.id, {
       turn: {
         id: "turn-rewrite",
-        status: "completed",
+        status: eventMode ? "inProgress" : "completed",
         items: [],
         error: null,
       },
     });
+    if (eventMode) {
+      notify(
+        "turn/started",
+        {
+          threadId: "thread-new",
+          turn: { id: "turn-rewrite", status: "inProgress", items: [] },
+        },
+        1000,
+      );
+      notify(
+        "item/completed",
+        {
+          threadId: "thread-new",
+          turnId: "turn-rewrite",
+          item: {
+            id: "agent-event-spine",
+            type: "agentMessage",
+            text: "event spine reply",
+            phase: "final_answer",
+          },
+        },
+        1001,
+      );
+      notify(
+        "future/provider-event",
+        {
+          threadId: "thread-new",
+          turnId: "turn-rewrite",
+          authorization: "Bearer must-not-be-persisted",
+        },
+        1002,
+      );
+      request(
+        "approval-event-spine",
+        "item/commandExecution/requestApproval",
+        {
+          threadId: "thread-new",
+          turnId: "turn-rewrite",
+          itemId: "command-event-spine",
+          command: "pwd",
+          cwd: "/tmp",
+          reason: "synthetic approval",
+          availableDecisions: ["accept", "decline"],
+          authorization: "Bearer approval-must-not-be-persisted",
+        },
+      );
+    }
     return;
   }
   if (message.method !== "thread/start" && message.method !== "thread/resume") {
@@ -220,7 +297,7 @@ process.stdin.on("data", (chunk) => {
       ).toBe(true);
     });
 
-    it("includes captured app-server stderr in startup errors", async () => {
+    it("classifies startup stderr without exposing it in public errors", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-error-"),
       );
@@ -235,18 +312,24 @@ process.stdin.on("data", (chunk) => {
           cwd: tempDir,
           initialMessage: { text: "hello" },
         });
-        const messages: Array<{ type?: string; error?: string }> = [];
+        const messages: Array<Record<string, unknown>> = [];
         for await (const message of session.iterator) {
-          messages.push(message as { type?: string; error?: string });
+          messages.push(message as unknown as Record<string, unknown>);
           if (message.type === "error") break;
         }
 
         expect(messages.at(-1)).toMatchObject({
           type: "error",
-          error: expect.stringContaining(
-            "invalid transport in `mcp_servers.node_repl`",
-          ),
+          error:
+            "The Codex process exited unexpectedly before the task completed.",
+          codexError: expect.objectContaining({
+            code: "CODEX_PROCESS_EXITED",
+            category: "process_exit",
+          }),
         });
+        expect(JSON.stringify(messages.at(-1))).not.toContain(
+          "invalid transport in `mcp_servers.node_repl`",
+        );
       } finally {
         if (previousError === undefined) {
           Reflect.deleteProperty(process.env, "CODEX_FAKE_APP_SERVER_ERROR");
@@ -391,6 +474,159 @@ process.stdin.on("data", (chunk) => {
           Reflect.deleteProperty(process.env, "CODEX_FAKE_MCP_SERVERS");
         } else {
           process.env.CODEX_FAKE_MCP_SERVERS = previousMcpServers;
+        }
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("persists and projects direct-provider events without changing MCP or permission thread config", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-event-ingress-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMcpServers = process.env.CODEX_FAKE_MCP_SERVERS;
+      const previousEventMode = process.env.CODEX_FAKE_EVENT_MODE;
+      const eventStore = new InMemoryCodexEventStore();
+      const onToolApproval = vi.fn(async () => ({
+        behavior: "allow" as const,
+      }));
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MCP_SERVERS = JSON.stringify([
+        "node_repl",
+        "lark",
+        "web",
+      ]);
+      process.env.CODEX_FAKE_EVENT_MODE = "1";
+
+      try {
+        const provider = new CodexProvider({
+          codexPath: fakeCodexPath,
+          eventSpine: { defaultMode: "primary", store: eventStore },
+        });
+        session = await provider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "event spine", uuid: "message-event-spine" },
+          permissionMode: "plan",
+          codexEventAccountId: "account-event-spine",
+          codexEventProjectId: "project-event-spine",
+          onToolApproval,
+        });
+
+        const output: unknown[] = [];
+        for await (const item of session.iterator) {
+          output.push(item);
+          if (item.type === "result") break;
+        }
+
+        expect(JSON.parse(readFileSync(capturePath, "utf8"))).toMatchObject({
+          method: "thread/start",
+          params: {
+            approvalPolicy: "on-request",
+            sandbox: "read-only",
+            config: {
+              mcp_servers: {
+                lark: { command: "fake-mcp", enabled: true },
+                node_repl: { command: "fake-mcp", enabled: true },
+                web: { command: "fake-mcp", enabled: false },
+              },
+            },
+          },
+        });
+        const events = await eventStore.replay({ sessionId: "thread-new" });
+        expect(
+          events.map(({ method, direction }) => ({ method, direction })),
+        ).toEqual([
+          { method: "thread/start", direction: "client_request" },
+          { method: "thread/start", direction: "client_response" },
+          { method: "turn/start", direction: "client_request" },
+          { method: "turn/start", direction: "client_response" },
+          { method: "turn/started", direction: "server_notification" },
+          { method: "item/completed", direction: "server_notification" },
+          {
+            method: "future/provider-event",
+            direction: "server_notification",
+          },
+          {
+            method: "item/commandExecution/requestApproval",
+            direction: "server_request",
+          },
+          {
+            method: "item/commandExecution/requestApproval",
+            direction: "client_response",
+          },
+          { method: "turn/completed", direction: "server_notification" },
+        ]);
+        expect(
+          events.every((event) => event.runtime.profile === "stable"),
+        ).toBe(true);
+        expect(events[2]).toMatchObject({
+          method: "turn/start",
+          direction: "client_request",
+          clientMessageId: "message-event-spine",
+          accountId: "account-event-spine",
+          projectId: "project-event-spine",
+        });
+        expect(events[3]).toMatchObject({
+          method: "turn/start",
+          direction: "client_response",
+          clientMessageId: "message-event-spine",
+          turnId: "turn-rewrite",
+          correlationId: events[2]?.correlationId,
+        });
+        expect(output).toContainEqual(
+          expect.objectContaining({
+            type: "assistant",
+            codexThreadItemLifecycle: "completed",
+            codexThreadId: "thread-new",
+            codexTurnId: "turn-rewrite",
+            codexEventSequence: 6,
+            codexRawReasoningAllowed: false,
+            codexThreadItem: expect.objectContaining({
+              id: "agent-event-spine",
+              type: "agentMessage",
+              text: "event spine reply",
+            }),
+          }),
+        );
+        expect(output).toContainEqual(
+          expect.objectContaining({
+            type: "system",
+            subtype: "warning",
+            warningKind: "unknown_codex_notification",
+          }),
+        );
+        expect(onToolApproval).toHaveBeenCalledWith(
+          "Bash",
+          expect.objectContaining({
+            threadId: "thread-new",
+            turnId: "turn-rewrite",
+            itemId: "command-event-spine",
+          }),
+          expect.objectContaining({ signal: expect.any(AbortSignal) }),
+        );
+        expect(JSON.stringify(events)).not.toContain("must-not-be-persisted");
+        expect(JSON.stringify(output)).not.toContain("future/provider-event");
+      } finally {
+        session?.abort();
+        if (previousCapturePath === undefined) {
+          Reflect.deleteProperty(process.env, "CODEX_FAKE_CAPTURE");
+        } else {
+          process.env.CODEX_FAKE_CAPTURE = previousCapturePath;
+        }
+        if (previousMcpServers === undefined) {
+          Reflect.deleteProperty(process.env, "CODEX_FAKE_MCP_SERVERS");
+        } else {
+          process.env.CODEX_FAKE_MCP_SERVERS = previousMcpServers;
+        }
+        if (previousEventMode === undefined) {
+          Reflect.deleteProperty(process.env, "CODEX_FAKE_EVENT_MODE");
+        } else {
+          process.env.CODEX_FAKE_EVENT_MODE = previousEventMode;
         }
         rmSync(tempDir, { recursive: true, force: true });
       }
@@ -1022,9 +1258,51 @@ describe("CodexProvider Event Normalization", () => {
     expect(messages[0]).toMatchObject({
       type: "error",
       session_id: "session-1",
-      error:
-        "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+      error: "The Codex usage quota or context budget has been reached.",
+      codexError: expect.objectContaining({
+        code: "CODEX_QUOTA_EXCEEDED",
+        category: "quota",
+      }),
+      willRetry: false,
     });
+    expect(JSON.stringify(messages[0])).not.toContain("chatgpt.com");
+  });
+
+  it("keeps retrying Codex errors non-terminal", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "error",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          willRetry: true,
+          error: {
+            message: "service unavailable at /private/secret",
+            codexErrorInfo: "serverOverloaded",
+          },
+        },
+      },
+      "session-1",
+      new Map(),
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "system",
+        subtype: "warning",
+        willRetry: true,
+        codexError: expect.objectContaining({ category: "overloaded" }),
+      }),
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("/private/secret");
   });
 
   it("streams raw code-mode exec calls and their results", () => {
@@ -1391,6 +1669,27 @@ describe("CodexProvider Event Normalization", () => {
       new Map(),
     );
     expect(empty).toEqual([]);
+  });
+
+  it("keeps unknown notifications invisible in the legacy projection", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    expect(
+      provider.convertNotificationToSDKMessages(
+        {
+          method: "future/provider-event",
+          params: { authorization: "must-not-be-projected" },
+        },
+        "session-1",
+        new Map(),
+      ),
+    ).toEqual([]);
   });
 });
 

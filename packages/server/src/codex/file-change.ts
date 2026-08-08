@@ -1,3 +1,5 @@
+import { containsSensitiveText } from "../codex-events/redaction.js";
+
 export type CodexFileChangeKind = "add" | "delete" | "update";
 
 export type CodexFileChangeStatus =
@@ -116,6 +118,72 @@ export function normalizeCodexFileChanges(
     left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
   return changes;
+}
+
+/**
+ * Public projection shared by live app-server events and persisted rollout
+ * normalization. Provider-internal paths remain available to execution code,
+ * while public transcripts receive only bounded relative paths and redacted
+ * diffs.
+ */
+export function publicCodexFileChanges(
+  value: unknown,
+): NormalizedCodexFileChange[] {
+  const pathSafeValue = Array.isArray(value)
+    ? value.map((entry) => {
+        const change = isRecord(entry) ? entry : undefined;
+        return change &&
+          typeof change.path !== "string" &&
+          typeof change.pathFingerprint === "string"
+          ? { ...change, path: "[path hidden]" }
+          : entry;
+      })
+    : value;
+
+  return normalizeCodexFileChanges(pathSafeValue)
+    .slice(0, 200)
+    .map((change) => ({
+      path: publicCodexFilePath(change.path),
+      kind: change.kind,
+      ...(change.diff
+        ? {
+            diff:
+              containsSensitiveText(change.diff) ||
+              containsSensitiveText(change.diff.replace(/^[+\- ]/gm, ""))
+                ? "[REDACTED:secret-diff]"
+                : redactAbsolutePaths(change.diff).slice(0, 64 * 1024),
+          }
+        : {}),
+    }));
+}
+
+export function publicCodexFilePath(value: string): string {
+  const normalized = value.trim().replaceAll("\\", "/");
+  const components = normalized.split("/");
+  if (
+    !normalized ||
+    normalized.includes("\0") ||
+    normalized.startsWith("/") ||
+    normalized.startsWith("file://") ||
+    /^[A-Za-z]:\//.test(normalized) ||
+    components.some((component) => component === "..")
+  ) {
+    return "[path hidden]";
+  }
+  return normalized.slice(0, 2_048);
+}
+
+function redactAbsolutePaths(value: string): string {
+  return value
+    .replace(/file:\/\/\/[^\s]+/gi, "[path hidden]")
+    .replace(
+      /(^|[\s([{"'`=])\/(?:[^/\s]+\/)*[^/\s)\]}"'`,;]+/gm,
+      "$1[path hidden]",
+    )
+    .replace(
+      /(^|[\s([{"'`=])[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gm,
+      "$1[path hidden]",
+    );
 }
 
 export function buildCodexEditInput(

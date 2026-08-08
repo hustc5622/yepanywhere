@@ -19,8 +19,24 @@ import type {
   ContextCompactEvent,
   ContextCumulativeUsage,
 } from "./context-status.js";
+import type {
+  GeneratedArtifactManifest,
+  GeneratedArtifactWarning,
+} from "./generated-artifact.js";
 import type { UrlProjectId } from "./projectId.js";
 import type { PermissionMode, ProviderName } from "./types.js";
+
+/** Safe persisted semantics for a canonical Codex server request. */
+export interface CodexPersistedInteraction {
+  method: string;
+  status: "open" | "resolved" | "failed";
+  requestId?: string;
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
+  sequence: number;
+  resolvedSequence?: number;
+}
 
 // =============================================================================
 // App Message Extensions
@@ -127,6 +143,29 @@ export interface AppMessageExtensions {
    * Values map to Codex protocol MessagePhase: "commentary" or "final_answer".
    */
   codexMessagePhase?: "commentary" | "final_answer";
+
+  /**
+   * Optional native app-server item projection. Live and persisted adapters use
+   * the same shape so the client can feed both through one render selector.
+   */
+  codexThreadItem?: {
+    type: string;
+    id?: string;
+    [key: string]: unknown;
+  };
+  codexThreadItemLifecycle?: "started" | "completed";
+  codexThreadId?: string;
+  codexTurnId?: string;
+  codexEventSequence?: number;
+  codexRawReasoningAllowed?: boolean;
+  /** Policy-checked, Yep-managed artifacts. Never contains a local path. */
+  codexGeneratedArtifacts?: GeneratedArtifactManifest[];
+  /** Fixed reason codes only; raw filenames/paths/errors are excluded. */
+  codexGeneratedArtifactWarnings?: GeneratedArtifactWarning[];
+  /** Safe request identity/status only; request bodies and answers are omitted. */
+  codexInteraction?: CodexPersistedInteraction;
+  /** True when a durable canonical journal enriched a REST refresh row. */
+  codexCanonicalRefresh?: boolean;
 
   /**
    * Allow any additional fields from JSONL.

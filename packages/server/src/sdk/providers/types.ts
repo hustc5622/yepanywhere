@@ -78,6 +78,10 @@ export interface StartSessionOptions {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
   codexModelProvider?: string;
+  /** Optional stable account key for per-account Codex event-spine rollout. */
+  codexEventAccountId?: string;
+  /** Optional stable project key recorded on canonical Codex event envelopes. */
+  codexEventProjectId?: string;
   /** Managed provider/model configuration consumed by OpenCode. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Tool approval callback */
