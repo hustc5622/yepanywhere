@@ -24,6 +24,7 @@ import type {
   GeneratedArtifactWarning,
 } from "./generated-artifact.js";
 import type { UrlProjectId } from "./projectId.js";
+import type { InteractionOperation } from "./render-items.js";
 import type { PermissionMode, ProviderName } from "./types.js";
 
 /** Safe persisted semantics for a canonical Codex server request. */
@@ -988,6 +989,14 @@ export interface AgentMapping {
  */
 export interface InputRequest {
   id: string;
+  /**
+   * Provider-native identity shared by multiple server transports observing
+   * the same request. Unlike `id`, this must not contain a bridge connection
+   * id or another transport-local prefix.
+   */
+  providerRequestId?: string;
+  /** Provider-native method paired with `providerRequestId`. */
+  providerRequestMethod?: string;
   sessionId: string;
   type: "tool-approval" | "question" | "choice";
   prompt: string;
@@ -1000,6 +1009,12 @@ export interface InputRequest {
    * provider JSONL owned by another process, so they are display-only.
    */
   source?: "process" | "codex-bridge" | "opencode-bridge" | "persisted";
+  /**
+   * Server-authoritative interaction identity and CAS version. This contains
+   * only the safe public projection; answers and provider-private payloads are
+   * never embedded here.
+   */
+  interaction?: InteractionOperation;
 }
 
 // =============================================================================
