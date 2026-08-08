@@ -32,6 +32,8 @@ import {
   SessionContentIndexService,
   SessionIndexService,
 } from "./indexes/index.js";
+import { InteractionBroker } from "./interactions/InteractionBroker.js";
+import type { SessionInteractionService } from "./interactions/SessionInteractionService.js";
 import {
   getLogFilePath,
   initLogger,
@@ -134,6 +136,9 @@ let opencodeSessionChangeMonitorForShutdown: OpenCodeSessionChangeMonitor | null
   null;
 let terminalServiceForShutdown: TerminalService | null = null;
 let sessionArchiveServiceForShutdown: SessionArchiveService | null = null;
+let sessionInteractionServiceForShutdown: SessionInteractionService | null =
+  null;
+let interactionBrokerForShutdown: InteractionBroker | null = null;
 let isShuttingDown = false;
 
 /**
@@ -191,6 +196,11 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
       console.error("[Shutdown] Error shutting down OpenCode bridge:", error);
     }
   }
+
+  sessionInteractionServiceForShutdown?.dispose();
+  sessionInteractionServiceForShutdown = null;
+  interactionBrokerForShutdown?.shutdown();
+  interactionBrokerForShutdown = null;
 
   if (opencodeSessionChangeMonitorForShutdown) {
     try {
@@ -536,6 +546,7 @@ const modelInfoService = new ModelInfoService({ dataDir: config.dataDir });
 const sessionArchiveService = new SessionArchiveService({
   dataDir: config.dataDir,
 });
+const interactionBroker = new InteractionBroker({ dataDir: config.dataDir });
 
 async function startServer() {
   let tlsOptions: { key: Buffer; cert: Buffer } | undefined;
@@ -563,6 +574,8 @@ async function startServer() {
   await sessionIndexService.initialize();
   await sessionContentIndexService.initialize();
   await sessionArchiveService.initialize();
+  await interactionBroker.initialize();
+  interactionBrokerForShutdown = interactionBroker;
   await pushService.initialize();
   await nativePushService.initialize();
   await browserProfileService.initialize();
@@ -762,7 +775,13 @@ async function startServer() {
     console.log("[AgentRuntime] mode=embedded");
   }
 
-  const { app, supervisor, runtimeController, scanner } = createApp({
+  const {
+    app,
+    supervisor,
+    runtimeController,
+    sessionInteractionService,
+    scanner,
+  } = createApp({
     projectsDir: config.claudeProjectsDir,
     idleTimeoutMs: config.idleTimeoutMs,
     defaultPermissionMode: config.defaultPermissionMode,
@@ -808,6 +827,7 @@ async function startServer() {
     allowedLocalFilePaths: config.allowedLocalFilePaths,
     basePath: config.basePath,
     runtimeController: configuredRuntimeController,
+    interactionBroker,
   });
 
   const opencodeProviderEnabled =
@@ -884,6 +904,7 @@ async function startServer() {
 
   // Set service references for graceful shutdown
   runtimeControllerForShutdown = runtimeController;
+  sessionInteractionServiceForShutdown = sessionInteractionService;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
   codexBridgeForShutdown = codexBridgeService ?? null;
   opencodeBridgeForShutdown = opencodeBridgeService;
