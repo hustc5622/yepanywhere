@@ -82,7 +82,8 @@ function detectImageMediaType(base64Data: string): string {
  */
 export class MessageQueue {
   private queue: UserMessage[] = [];
-  private waiting: ((msg: UserMessage) => void) | null = null;
+  private waiting: ((msg: UserMessage | null) => void) | null = null;
+  private closed = false;
 
   constructor(private readonly options: MessageQueueOptions = {}) {}
 
@@ -91,9 +92,10 @@ export class MessageQueue {
    * If the generator is waiting for a message, resolves immediately.
    * Otherwise, adds to the queue.
    *
-   * @returns The new queue depth (0 if resolved immediately)
+   * @returns The new queue depth (0 if resolved immediately, -1 if closed)
    */
   push(message: UserMessage): number {
+    if (this.closed) return -1;
     if (this.waiting) {
       this.waiting(message);
       this.waiting = null;
@@ -110,6 +112,7 @@ export class MessageQueue {
   async *generator(): AsyncGenerator<QueuedUserMessage> {
     while (true) {
       const message = await this.next();
+      if (!message) return;
       yield this.toSDKMessage(message);
     }
   }
@@ -118,13 +121,30 @@ export class MessageQueue {
    * Get the next message from the queue.
    * If the queue is empty, returns a promise that resolves when push() is called.
    */
-  private next(): Promise<UserMessage> {
+  private next(): Promise<UserMessage | null> {
     const queued = this.queue.shift();
     if (queued) return Promise.resolve(queued);
+    if (this.closed) return Promise.resolve(null);
 
     return new Promise((resolve) => {
       this.waiting = resolve;
     });
+  }
+
+  /**
+   * Permanently stop this resident-provider queue and discard input that can no
+   * longer be consumed. Returns the number of discarded messages.
+   */
+  close(): number {
+    if (this.closed) return 0;
+    this.closed = true;
+    const discarded = this.queue.length;
+    this.queue = [];
+    if (this.waiting) {
+      this.waiting(null);
+      this.waiting = null;
+    }
+    return discarded;
   }
 
   /**
@@ -227,5 +247,9 @@ export class MessageQueue {
    */
   get isWaiting(): boolean {
     return this.waiting !== null;
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
   }
 }
