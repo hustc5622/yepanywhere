@@ -1229,6 +1229,26 @@ export class Supervisor {
       if (event.type === "complete") {
         this.unregisterProcess(process);
       } else if (event.type === "session-id-changed") {
+        const oldOwner = this.sessionToProcess.get(event.oldSessionId);
+        const newOwner = this.sessionToProcess.get(event.newSessionId);
+        if (
+          this.processes.get(process.id) !== process ||
+          oldOwner !== process.id ||
+          (newOwner !== undefined && newOwner !== process.id)
+        ) {
+          getLogger().warn(
+            {
+              event: "session_id_mapping_stale_update_ignored",
+              oldSessionId: event.oldSessionId,
+              newSessionId: event.newSessionId,
+              processId: process.id,
+              oldOwner: oldOwner ?? null,
+              newOwner: newOwner ?? null,
+            },
+            "Ignored a stale session ID mapping update from a replaced process",
+          );
+          return;
+        }
         // Update session→process mapping when temp ID is replaced by real ID from SDK
         // This is critical for ExternalSessionTracker to correctly identify owned sessions
         const log = getLogger();

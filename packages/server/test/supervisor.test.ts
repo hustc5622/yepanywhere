@@ -671,6 +671,79 @@ describe("Supervisor", () => {
       const found = supervisor.getProcessForSession("unknown-session");
       expect(found).toBeUndefined();
     });
+
+    it("ignores a late durable-id claim when another process already owns it", async () => {
+      const starts: Array<{
+        releaseInit: () => void;
+        stop: () => void;
+      }> = [];
+      const provider = createCodexTestProvider(async () => {
+        let releaseInit = () => undefined;
+        let stop = () => undefined;
+        const initGate = new Promise<void>((resolve) => {
+          releaseInit = resolve;
+        });
+        const stopGate = new Promise<void>((resolve) => {
+          stop = resolve;
+        });
+        starts.push({ releaseInit, stop });
+
+        async function* iterator() {
+          await initGate;
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: "durable-session",
+          };
+          await stopGate;
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: stop,
+        };
+      });
+      const providerSupervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+      });
+
+      const first = await providerSupervisor.resumeSession(
+        "temporary-first",
+        "/tmp/test",
+        { text: "first" },
+      );
+      const second = await providerSupervisor.resumeSession(
+        "temporary-second",
+        "/tmp/test",
+        { text: "second" },
+      );
+      if (!("id" in first) || !("id" in second)) {
+        throw new Error("expected immediate processes");
+      }
+
+      starts[1]?.releaseInit();
+      await vi.waitFor(() => {
+        expect(
+          providerSupervisor.getProcessForSession("durable-session")?.id,
+        ).toBe(second.id);
+      });
+
+      starts[0]?.releaseInit();
+      await vi.waitFor(() => {
+        expect(first.sessionId).toBe("durable-session");
+      });
+      expect(
+        providerSupervisor.getProcessForSession("durable-session")?.id,
+      ).toBe(second.id);
+      expect(
+        providerSupervisor.getProcessForSession("temporary-first")?.id,
+      ).toBe(first.id);
+
+      await providerSupervisor.abortProcess(first.id);
+      await providerSupervisor.abortProcess(second.id);
+    });
   });
 
   describe("getProcessInfoList", () => {
