@@ -1727,7 +1727,7 @@ describe("CodexBridgeService", () => {
       const acceptedPersistent = bridge.respondToInput(
         "thread-c",
         firstPending?.id ?? "",
-        "approve_accept_edits",
+        "approve_always",
       );
       expect(acceptedPersistent).toBe(true);
       await waitFor(

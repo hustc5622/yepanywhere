@@ -52,6 +52,9 @@ describe("Codex bridge interactive protocol", () => {
         toolInput: {
           allowPartialSubmission: true,
           autoResolutionMs: 60_000,
+          threadId: "thread-question",
+          turnId: "turn-question",
+          itemId: "item-question",
           questions: [
             {
               id: "scope",
@@ -158,6 +161,8 @@ describe("Codex bridge interactive protocol", () => {
         prompt: "Configure deployment",
         toolInput: {
           allowPartialSubmission: false,
+          threadId: "thread-form",
+          turnId: "turn-form",
           questions: [
             {
               id: "environment",
@@ -327,6 +332,154 @@ describe("Codex bridge interactive protocol", () => {
       permissions: params.permissions,
       scope: "session",
     });
+    expect(
+      buildCodexInteractiveResponse(
+        "item/permissions/requestApproval",
+        params,
+        "approve_always",
+      ),
+    ).toEqual({
+      permissions: params.permissions,
+      scope: "session",
+    });
+  });
+
+  it.each(["approve_for_session", "approve_always"] as const)(
+    "maps command %s to an offered acceptForSession decision",
+    (response) => {
+      expect(
+        buildCodexInteractiveResponse(
+          "item/commandExecution/requestApproval",
+          {
+            availableDecisions: ["accept", "acceptForSession", "cancel"],
+          },
+          response,
+        ),
+      ).toEqual({ decision: "acceptForSession" });
+    },
+  );
+
+  it.each([
+    [
+      "approve_for_session",
+      {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: ["git", "status"],
+        },
+      },
+      "acceptForSession",
+    ],
+    [
+      "approve_always",
+      {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: ["git", "status"],
+        },
+      },
+      {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: ["git", "status"],
+        },
+      },
+    ],
+    [
+      "approve_for_session",
+      {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: {
+            host: "example.com",
+            action: "allow",
+          },
+        },
+      },
+      "acceptForSession",
+    ],
+    [
+      "approve_always",
+      {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: {
+            host: "example.com",
+            action: "allow",
+          },
+        },
+      },
+      {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: {
+            host: "example.com",
+            action: "allow",
+          },
+        },
+      },
+    ],
+  ] as const)(
+    "keeps command %s distinct when a structured amendment is offered",
+    (response, offeredDecision, expectedDecision) => {
+      expect(
+        buildCodexInteractiveResponse(
+          "item/commandExecution/requestApproval",
+          {
+            availableDecisions: [
+              "accept",
+              "acceptForSession",
+              offeredDecision,
+              "cancel",
+            ],
+            proposedExecpolicyAmendment: ["must", "not", "be", "inferred"],
+          },
+          response,
+        ),
+      ).toEqual({ decision: expectedDecision });
+    },
+  );
+
+  it("does not infer command persistence from proposed amendments", () => {
+    for (const availableDecisions of [undefined, ["accept", "cancel"]]) {
+      expect(
+        buildCodexInteractiveResponse(
+          "item/commandExecution/requestApproval",
+          {
+            availableDecisions,
+            proposedExecpolicyAmendment: ["git", "status"],
+            proposedNetworkPolicyAmendments: [
+              { host: "example.com", action: "allow" },
+            ],
+          },
+          "approve_always",
+        ),
+      ).toEqual({ decision: "accept" });
+    }
+  });
+
+  it.each(["approve_for_session", "approve_always"] as const)(
+    "maps file %s to acceptForSession",
+    (response) => {
+      expect(
+        buildCodexInteractiveResponse(
+          "item/fileChange/requestApproval",
+          {},
+          response,
+        ),
+      ).toEqual({ decision: "acceptForSession" });
+    },
+  );
+
+  it("maps deny to decline because the bridge has no cancel variant", () => {
+    expect(
+      buildCodexInteractiveResponse(
+        "item/commandExecution/requestApproval",
+        { availableDecisions: ["decline", "cancel"] },
+        "deny",
+      ),
+    ).toEqual({ decision: "decline" });
+    expect(
+      buildCodexInteractiveResponse(
+        "item/fileChange/requestApproval",
+        {},
+        "deny",
+      ),
+    ).toEqual({ decision: "decline" });
   });
 
   it("includes connection identity in pending IDs", () => {
