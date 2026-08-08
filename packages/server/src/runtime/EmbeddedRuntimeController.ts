@@ -34,9 +34,9 @@ import {
   type RuntimeQueueStatus,
   type RuntimeReplayOptions,
   type RuntimeSessionEventEmitter,
+  type RuntimeSessionStartResponse,
   type RuntimeSessionSubscription,
   type RuntimeSessionSubscriptionOptions,
-  type RuntimeStartResponse,
   type RuntimeStatus,
   type RuntimeWorkerActivity,
   type StartRuntimeSessionRequest,
@@ -206,12 +206,13 @@ export class EmbeddedRuntimeController implements RuntimeController {
 
   async startSession(
     input: StartRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     const result = await this.supervisor.startSession(
       input.projectPath,
       input.message,
       input.permissionMode,
       input.modelSettings,
+      input.requireImmediate ? { requireImmediate: true } : undefined,
     );
     if ("id" in result) await this.ensureJournalSubscription(result.sessionId);
     return this.toStartResponse(result);
@@ -219,11 +220,12 @@ export class EmbeddedRuntimeController implements RuntimeController {
 
   async createSession(
     input: CreateRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     const result = await this.supervisor.createSession(
       input.projectPath,
       input.permissionMode,
       input.modelSettings,
+      input.requireImmediate ? { requireImmediate: true } : undefined,
     );
     if ("id" in result) await this.ensureJournalSubscription(result.sessionId);
     return this.toStartResponse(result);
@@ -231,13 +233,14 @@ export class EmbeddedRuntimeController implements RuntimeController {
 
   async resumeSession(
     input: ResumeRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     const result = await this.supervisor.resumeSession(
       input.sessionId,
       input.projectPath,
       input.message,
       input.permissionMode,
       input.modelSettings,
+      input.requireImmediate ? { requireImmediate: true } : undefined,
     );
     if ("id" in result) await this.ensureJournalSubscription(result.sessionId);
     return this.toStartResponse(result);
@@ -252,6 +255,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       input.message,
       input.permissionMode,
       input.modelSettings,
+      input.requireImmediate ? { requireImmediate: true } : undefined,
     );
     if (!result.success) return result;
     await this.ensureJournalSubscription(result.process.sessionId);
@@ -264,7 +268,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
 
   private toStartResponse(
     result: Awaited<ReturnType<Supervisor["startSession"]>>,
-  ): RuntimeStartResponse {
+  ): RuntimeSessionStartResponse {
     if (!("id" in result)) return result;
     return {
       id: result.id,

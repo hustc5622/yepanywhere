@@ -220,6 +220,43 @@ describe("HttpRuntimeController", () => {
     );
   });
 
+  it("round-trips immediate admission without entering the external runtime queue", async () => {
+    const { controller } = createHarness({ maxWorkers: 1 });
+    await controller.start();
+
+    await controller.startSession({
+      projectPath: "/tmp/http-runtime-immediate-one",
+      message: { text: "one" },
+    });
+    await expect(
+      controller.startSession({
+        projectPath: "/tmp/http-runtime-immediate-two",
+        message: { text: "must not queue" },
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+    await expect(
+      controller.createSession({
+        projectPath: "/tmp/http-runtime-immediate-create",
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+    await expect(
+      controller.resumeSession({
+        sessionId: "existing-http-thread",
+        projectPath: "/tmp/http-runtime-immediate-resume",
+        message: { text: "must not queue as a resume" },
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+
+    await expect(controller.getQueueStatus()).resolves.toMatchObject({
+      activeWorkers: 1,
+      queueLength: 0,
+    });
+    await expect(controller.listProcesses()).resolves.toHaveLength(1);
+  });
+
   it("forwards lifecycle, state and queue operations over HTTP", async () => {
     const { controller } = createHarness();
     await controller.start();

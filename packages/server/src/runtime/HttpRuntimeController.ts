@@ -26,9 +26,9 @@ import type {
   RuntimeQueueStatus,
   RuntimeReplayOptions,
   RuntimeSessionEventEmitter,
+  RuntimeSessionStartResponse,
   RuntimeSessionSubscription,
   RuntimeSessionSubscriptionOptions,
-  RuntimeStartResponse,
   RuntimeStatus,
   RuntimeWorkerActivity,
   StartRuntimeSessionRequest,
@@ -201,7 +201,7 @@ export class HttpRuntimeController implements RuntimeController {
 
   async startSession(
     input: StartRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     return this.request("/sessions", {
       method: "POST",
       body: JSON.stringify(input),
@@ -210,7 +210,7 @@ export class HttpRuntimeController implements RuntimeController {
 
   async createSession(
     input: CreateRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     return this.request("/sessions", {
       method: "POST",
       body: JSON.stringify(input),
@@ -219,7 +219,7 @@ export class HttpRuntimeController implements RuntimeController {
 
   async resumeSession(
     input: ResumeRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     const { sessionId, ...body } = input;
     return this.request(`/sessions/${encode(sessionId)}/resume`, {
       method: "POST",

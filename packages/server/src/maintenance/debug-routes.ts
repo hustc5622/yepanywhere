@@ -704,7 +704,9 @@ async function handleCreate(
     if ("error" in result) {
       sendJson(res, 503, {
         error: result.error,
-        maxQueueSize: result.maxQueueSize,
+        ...(result.error === "queue_full"
+          ? { maxQueueSize: result.maxQueueSize }
+          : {}),
       });
       return;
     }

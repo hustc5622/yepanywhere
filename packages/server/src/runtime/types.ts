@@ -10,6 +10,7 @@ import type {
 } from "@yep-anywhere/shared";
 import type { SDKMessage, UserMessage } from "../sdk/types.js";
 import type {
+  ImmediateStartUnavailableResponse,
   ModelSettings,
   QueueFullResponse,
 } from "../supervisor/Supervisor.js";
@@ -20,7 +21,7 @@ import type {
 import type { ProcessInfo } from "../supervisor/types.js";
 import type { BusEvent } from "../watcher/index.js";
 
-export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 3;
+export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 4;
 
 export type RuntimeMode = "embedded" | "external";
 
@@ -36,6 +37,11 @@ export type RuntimeStartResponse =
   | RuntimeStartedProcess
   | QueuedResponse
   | QueueFullResponse;
+
+/** Response for start/resume requests that opt into immediate admission. */
+export type RuntimeSessionStartResponse =
+  | RuntimeStartResponse
+  | ImmediateStartUnavailableResponse;
 
 export type RuntimeQueueMessageResponse =
   | {
@@ -122,12 +128,16 @@ export interface StartRuntimeSessionRequest {
   message: UserMessage;
   permissionMode?: PermissionMode;
   modelSettings?: ModelSettings;
+  /** Reject atomically instead of admitting this request to the worker queue. */
+  requireImmediate?: boolean;
 }
 
 export interface CreateRuntimeSessionRequest {
   projectPath: string;
   permissionMode?: PermissionMode;
   modelSettings?: ModelSettings;
+  /** Reject atomically instead of queueing this create-only request. */
+  requireImmediate?: boolean;
 }
 
 export interface ResumeRuntimeSessionRequest {
@@ -136,6 +146,8 @@ export interface ResumeRuntimeSessionRequest {
   message: UserMessage;
   permissionMode?: PermissionMode;
   modelSettings?: ModelSettings;
+  /** Reject atomically instead of admitting this resume to the worker queue. */
+  requireImmediate?: boolean;
 }
 
 export interface QueueRuntimeMessageRequest {
@@ -144,6 +156,8 @@ export interface QueueRuntimeMessageRequest {
   message: UserMessage;
   permissionMode?: PermissionMode;
   modelSettings?: ModelSettings;
+  /** Reject if this message would require a queued process restart. */
+  requireImmediate?: boolean;
 }
 
 export interface RuntimeInputResponseRequest {
@@ -192,13 +206,13 @@ export interface RuntimeController {
 
   startSession(
     input: StartRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse>;
+  ): Promise<RuntimeSessionStartResponse>;
   createSession(
     input: CreateRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse>;
+  ): Promise<RuntimeSessionStartResponse>;
   resumeSession(
     input: ResumeRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse>;
+  ): Promise<RuntimeSessionStartResponse>;
   queueMessage(
     input: QueueRuntimeMessageRequest,
   ): Promise<RuntimeQueueMessageResponse>;

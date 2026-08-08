@@ -141,6 +141,42 @@ describe("EmbeddedRuntimeController", () => {
     });
   });
 
+  it("rejects immediate-only starts before embedded queue admission", async () => {
+    const controller = createController({ maxWorkers: 1, maxQueueSize: 4 });
+
+    await controller.startSession({
+      projectPath: "/tmp/runtime-immediate-one",
+      message: { text: "one" },
+    });
+    await expect(
+      controller.startSession({
+        projectPath: "/tmp/runtime-immediate-two",
+        message: { text: "must not queue" },
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+    await expect(
+      controller.createSession({
+        projectPath: "/tmp/runtime-immediate-create",
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+    await expect(
+      controller.resumeSession({
+        sessionId: "existing-runtime-thread",
+        projectPath: "/tmp/runtime-immediate-resume",
+        message: { text: "must not queue as a resume" },
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+
+    await expect(controller.getQueueStatus()).resolves.toMatchObject({
+      activeWorkers: 1,
+      queueLength: 0,
+    });
+    await expect(controller.listProcesses()).resolves.toHaveLength(1);
+  });
+
   it("forwards live session controls through structured methods", async () => {
     const controller = createController();
     const started = await controller.startSession({
