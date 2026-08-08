@@ -18,7 +18,8 @@
       "packages/desktop",
       "packages/mobile",
       "packages/server/generated/codex-app-server",
-      "packages/server/src/sdk/providers/codex-protocol/generated"
+      "packages/server/src/sdk/providers/codex-protocol/generated",
+      "packages/server/src/sdk/providers/codex-protocol/schema"
     ]
   },
   "formatter": {

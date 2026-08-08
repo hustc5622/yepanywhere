@@ -1,0 +1,335 @@
+{
+  "registryVersion": 1,
+  "serverRequests": {
+    "account/chatgptAuthTokens/refresh": {
+      "stability": "stable",
+      "classification": "auth_host"
+    },
+    "applyPatchApproval": {
+      "stability": "stable",
+      "classification": "legacy_approval"
+    },
+    "attestation/generate": {
+      "stability": "stable",
+      "classification": "attestation_host"
+    },
+    "currentTime/read": {
+      "stability": "experimental",
+      "classification": "clock_host"
+    },
+    "execCommandApproval": {
+      "stability": "stable",
+      "classification": "legacy_approval"
+    },
+    "item/commandExecution/requestApproval": {
+      "stability": "stable",
+      "classification": "command_approval"
+    },
+    "item/fileChange/requestApproval": {
+      "stability": "stable",
+      "classification": "file_approval"
+    },
+    "item/permissions/requestApproval": {
+      "stability": "stable",
+      "classification": "permission_approval"
+    },
+    "item/tool/call": {
+      "stability": "stable",
+      "classification": "dynamic_tool_host"
+    },
+    "item/tool/requestUserInput": {
+      "stability": "stable",
+      "classification": "user_input"
+    },
+    "mcpServer/elicitation/request": {
+      "stability": "stable",
+      "classification": "mcp_elicitation"
+    }
+  },
+  "serverNotifications": {
+    "account/login/completed": {
+      "stability": "stable",
+      "classification": "account"
+    },
+    "account/rateLimits/updated": {
+      "stability": "stable",
+      "classification": "account"
+    },
+    "account/updated": { "stability": "stable", "classification": "account" },
+    "app/list/updated": {
+      "stability": "stable",
+      "classification": "application_catalog"
+    },
+    "command/exec/outputDelta": {
+      "stability": "stable",
+      "classification": "command_output"
+    },
+    "configWarning": { "stability": "stable", "classification": "warning" },
+    "deprecationNotice": { "stability": "stable", "classification": "warning" },
+    "error": { "stability": "stable", "classification": "terminal_error" },
+    "externalAgentConfig/import/completed": {
+      "stability": "stable",
+      "classification": "external_import"
+    },
+    "externalAgentConfig/import/progress": {
+      "stability": "stable",
+      "classification": "external_import"
+    },
+    "fs/changed": { "stability": "stable", "classification": "filesystem" },
+    "fuzzyFileSearch/sessionCompleted": {
+      "stability": "stable",
+      "classification": "file_search"
+    },
+    "fuzzyFileSearch/sessionUpdated": {
+      "stability": "stable",
+      "classification": "file_search"
+    },
+    "guardianWarning": { "stability": "stable", "classification": "warning" },
+    "hook/completed": { "stability": "stable", "classification": "hook" },
+    "hook/started": { "stability": "stable", "classification": "hook" },
+    "item/agentMessage/delta": {
+      "stability": "stable",
+      "classification": "assistant_delta"
+    },
+    "item/autoApprovalReview/completed": {
+      "stability": "stable",
+      "classification": "approval_review"
+    },
+    "item/autoApprovalReview/started": {
+      "stability": "stable",
+      "classification": "approval_review"
+    },
+    "item/commandExecution/outputDelta": {
+      "stability": "stable",
+      "classification": "command_output"
+    },
+    "item/commandExecution/terminalInteraction": {
+      "stability": "stable",
+      "classification": "terminal_interaction"
+    },
+    "item/completed": {
+      "stability": "stable",
+      "classification": "item_lifecycle"
+    },
+    "item/fileChange/outputDelta": {
+      "stability": "stable",
+      "classification": "file_change"
+    },
+    "item/fileChange/patchUpdated": {
+      "stability": "stable",
+      "classification": "file_change"
+    },
+    "item/mcpToolCall/progress": {
+      "stability": "stable",
+      "classification": "mcp_progress"
+    },
+    "item/plan/delta": {
+      "stability": "stable",
+      "classification": "plan_delta"
+    },
+    "item/reasoning/summaryPartAdded": {
+      "stability": "stable",
+      "classification": "reasoning_summary"
+    },
+    "item/reasoning/summaryTextDelta": {
+      "stability": "stable",
+      "classification": "reasoning_summary"
+    },
+    "item/reasoning/textDelta": {
+      "stability": "stable",
+      "classification": "raw_reasoning"
+    },
+    "item/started": {
+      "stability": "stable",
+      "classification": "item_lifecycle"
+    },
+    "mcpServer/oauthLogin/completed": {
+      "stability": "stable",
+      "classification": "mcp_lifecycle"
+    },
+    "mcpServer/startupStatus/updated": {
+      "stability": "stable",
+      "classification": "mcp_lifecycle"
+    },
+    "model/rerouted": { "stability": "stable", "classification": "model" },
+    "model/safetyBuffering/updated": {
+      "stability": "stable",
+      "classification": "model_safety"
+    },
+    "model/verification": { "stability": "stable", "classification": "model" },
+    "process/exited": { "stability": "stable", "classification": "process" },
+    "process/outputDelta": {
+      "stability": "stable",
+      "classification": "process"
+    },
+    "rawResponse/completed": {
+      "stability": "stable",
+      "classification": "raw_response"
+    },
+    "rawResponseItem/completed": {
+      "stability": "stable",
+      "classification": "raw_response_item"
+    },
+    "remoteControl/status/changed": {
+      "stability": "stable",
+      "classification": "remote_control"
+    },
+    "serverRequest/resolved": {
+      "stability": "stable",
+      "classification": "interaction_lifecycle"
+    },
+    "skills/changed": { "stability": "stable", "classification": "skills" },
+    "thread/archived": {
+      "stability": "stable",
+      "classification": "thread_lifecycle"
+    },
+    "thread/closed": {
+      "stability": "stable",
+      "classification": "thread_lifecycle"
+    },
+    "thread/compacted": {
+      "stability": "stable",
+      "classification": "compaction"
+    },
+    "thread/deleted": {
+      "stability": "stable",
+      "classification": "thread_lifecycle"
+    },
+    "thread/environment/connected": {
+      "stability": "stable",
+      "classification": "environment"
+    },
+    "thread/environment/disconnected": {
+      "stability": "stable",
+      "classification": "environment"
+    },
+    "thread/goal/cleared": { "stability": "stable", "classification": "goal" },
+    "thread/goal/updated": { "stability": "stable", "classification": "goal" },
+    "thread/name/updated": {
+      "stability": "stable",
+      "classification": "thread_metadata"
+    },
+    "thread/realtime/closed": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/error": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/itemAdded": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/outputAudio/delta": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/sdp": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/started": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/transcript/delta": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/transcript/done": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/settings/updated": {
+      "stability": "stable",
+      "classification": "thread_settings"
+    },
+    "thread/started": {
+      "stability": "stable",
+      "classification": "thread_lifecycle"
+    },
+    "thread/status/changed": {
+      "stability": "stable",
+      "classification": "thread_lifecycle"
+    },
+    "thread/tokenUsage/updated": {
+      "stability": "stable",
+      "classification": "usage"
+    },
+    "thread/unarchived": {
+      "stability": "stable",
+      "classification": "thread_lifecycle"
+    },
+    "turn/completed": {
+      "stability": "stable",
+      "classification": "turn_lifecycle"
+    },
+    "turn/diff/updated": { "stability": "stable", "classification": "diff" },
+    "turn/moderationMetadata": {
+      "stability": "stable",
+      "classification": "moderation"
+    },
+    "turn/plan/updated": { "stability": "stable", "classification": "plan" },
+    "turn/started": {
+      "stability": "stable",
+      "classification": "turn_lifecycle"
+    },
+    "warning": { "stability": "stable", "classification": "warning" },
+    "windows/worldWritableWarning": {
+      "stability": "stable",
+      "classification": "warning"
+    },
+    "windowsSandbox/setupCompleted": {
+      "stability": "stable",
+      "classification": "sandbox"
+    }
+  },
+  "threadItems": {
+    "agentMessage": {
+      "stability": "stable",
+      "classification": "assistant_message"
+    },
+    "collabAgentToolCall": {
+      "stability": "stable",
+      "classification": "collaboration"
+    },
+    "commandExecution": { "stability": "stable", "classification": "command" },
+    "contextCompaction": {
+      "stability": "stable",
+      "classification": "compaction"
+    },
+    "dynamicToolCall": {
+      "stability": "stable",
+      "classification": "dynamic_tool"
+    },
+    "enteredReviewMode": { "stability": "stable", "classification": "review" },
+    "exitedReviewMode": { "stability": "stable", "classification": "review" },
+    "fileChange": { "stability": "stable", "classification": "file_change" },
+    "hookPrompt": { "stability": "stable", "classification": "hook" },
+    "imageGeneration": { "stability": "stable", "classification": "image" },
+    "imageView": { "stability": "stable", "classification": "image" },
+    "mcpToolCall": { "stability": "stable", "classification": "mcp_tool" },
+    "plan": { "stability": "stable", "classification": "plan" },
+    "reasoning": { "stability": "stable", "classification": "reasoning" },
+    "sleep": { "stability": "stable", "classification": "wait" },
+    "subAgentActivity": {
+      "stability": "stable",
+      "classification": "collaboration"
+    },
+    "userMessage": { "stability": "stable", "classification": "user_message" },
+    "webSearch": { "stability": "stable", "classification": "web_search" }
+  },
+  "userInputs": {
+    "audio": { "stability": "stable", "classification": "remote_media" },
+    "image": { "stability": "stable", "classification": "remote_media" },
+    "localAudio": { "stability": "stable", "classification": "local_media" },
+    "localImage": { "stability": "stable", "classification": "local_media" },
+    "mention": {
+      "stability": "stable",
+      "classification": "structured_context"
+    },
+    "skill": { "stability": "stable", "classification": "structured_context" },
+    "text": { "stability": "stable", "classification": "text" }
+  }
+}
