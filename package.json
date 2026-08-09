@@ -8,6 +8,7 @@
     "codex:protocol:update": "node scripts/update-codex-protocol.mjs",
     "codex:protocol:check": "node scripts/update-codex-protocol.mjs --check",
     "codex:protocol:test": "corepack pnpm --filter @yep-anywhere/server test -- test/sdk/providers/codex-protocol.test.ts",
+    "feishu:migration:preflight": "node scripts/feishu-migration-preflight.mjs",
     "benchmark:ohmyrouter": "tsx scripts/benchmark-ohmyrouter.ts",
     "version:status": "tsx scripts/version.ts status",
     "version:bump": "tsx scripts/version.ts bump",
