@@ -44,9 +44,12 @@ import {
   isCodexFileChangeError,
   normalizeCodexFileChangeStatus,
   normalizeCodexFileChanges,
+  publicCodexFileChanges,
+  publicCodexFilePath,
 } from "../../codex/file-change.js";
 import {
   buildCodexImageGenerationResultText,
+  isCodexImageGenerationRecord,
   normalizeCodexImageGenerationRecord,
   summarizeCodexImageGenerationResult,
 } from "../../codex/image-generation.js";
@@ -66,6 +69,11 @@ import {
 } from "../../codex/normalization.js";
 import { getDataDir } from "../../config.js";
 import { getLogger } from "../../logging/logger.js";
+import { encodeProjectId } from "../../projects/paths.js";
+import {
+  GeneratedArtifactMaterializer,
+  UploadManager,
+} from "../../uploads/index.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
 import { logSDKMessage } from "../messageLogger.js";
 import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
@@ -477,6 +485,8 @@ export interface CodexProviderConfig {
   apiKey?: string;
   /** Canonical event-spine rollout/store overrides. */
   eventSpine?: CodexEventRolloutConfig;
+  /** Managed generated-artifact storage override for tests and embedders. */
+  generatedArtifactUploadManager?: UploadManager;
 }
 
 class AsyncQueue<T> {
@@ -1936,6 +1946,30 @@ export class CodexProvider implements AgentProvider {
     // UI can stream command output like the Codex TUI does.
     const commandOutputBuffers = new Map<string, string>();
     const shadowCommandOutputBuffers = new Map<string, string>();
+    let generatedArtifactRuntime:
+      | {
+          uploadManager: UploadManager;
+          materializer: GeneratedArtifactMaterializer;
+        }
+      | undefined;
+    const getGeneratedArtifactRuntime = async () => {
+      if (generatedArtifactRuntime) return generatedArtifactRuntime;
+      const uploadManager =
+        this.config.generatedArtifactUploadManager ?? new UploadManager();
+      generatedArtifactRuntime = {
+        uploadManager,
+        materializer: new GeneratedArtifactMaterializer({ uploadManager }),
+      };
+      await uploadManager
+        .cleanupExpiredTaskAttachments({ limit: 25 })
+        .catch(() => {
+          log.warn(
+            { sessionId: sessionId || undefined },
+            "Generated artifact retention cleanup failed safely",
+          );
+        });
+      return generatedArtifactRuntime;
+    };
     const logMessage = (message: SDKMessage): SDKMessage => {
       const messageSessionId =
         typeof (message as { session_id?: unknown }).session_id === "string"
@@ -2596,6 +2630,63 @@ export class CodexProvider implements AgentProvider {
                     sessionId,
                   )
                 : legacyMessages;
+          }
+          if (
+            canonicalEvent.method === "item/completed" &&
+            canonicalEvent.threadId &&
+            canonicalEvent.turnId
+          ) {
+            const materializationItem =
+              selectCanonicalGeneratedArtifactSourceItem(
+                rawNotification,
+                canonicalEvent,
+              );
+            if (materializationItem) {
+              const { materializer } = await getGeneratedArtifactRuntime();
+              const generated = await materializer.materialize(
+                {
+                  lifecycle: "completed",
+                  item: materializationItem,
+                  threadId: canonicalEvent.threadId,
+                  turnId: canonicalEvent.turnId,
+                  replay: canonicalEvent.source.replay,
+                },
+                {
+                  projectId:
+                    options.codexEventProjectId ?? encodeProjectId(options.cwd),
+                  sessionId,
+                  taskId: message.uuid ?? activeTurnId,
+                  workspaceRoot: options.cwd,
+                  threadId: canonicalEvent.threadId,
+                  turnId: canonicalEvent.turnId,
+                  canonicalEventId: canonicalEvent.eventId,
+                  canonicalEventSequence: canonicalEvent.sequence,
+                },
+              );
+              if (
+                generated.artifacts.length > 0 ||
+                generated.warnings.length > 0
+              ) {
+                messages = this.attachCanonicalCodexItem(
+                  messages,
+                  canonicalEvent,
+                  sessionId,
+                ).map(
+                  (sdkMessage) =>
+                    ({
+                      ...sdkMessage,
+                      ...(generated.artifacts.length > 0
+                        ? { codexGeneratedArtifacts: generated.artifacts }
+                        : {}),
+                      ...(generated.warnings.length > 0
+                        ? {
+                            codexGeneratedArtifactWarnings: generated.warnings,
+                          }
+                        : {}),
+                    }) as SDKMessage,
+                );
+              }
+            }
           }
           for (const msg of messages) {
             yield logMessage(msg);
@@ -3631,22 +3722,12 @@ export class CodexProvider implements AgentProvider {
     if (event.method !== "item/started" && event.method !== "item/completed") {
       return messages;
     }
-    const payload =
-      event.payload.data &&
-      typeof event.payload.data === "object" &&
-      !Array.isArray(event.payload.data)
-        ? (event.payload.data as Record<string, unknown>)
-        : null;
-    const item =
-      payload?.item &&
-      typeof payload.item === "object" &&
-      !Array.isArray(payload.item)
-        ? (payload.item as Record<string, unknown>)
-        : null;
+    const payload = asRecord(event.payload.data);
+    const item = asRecord(payload?.item);
     if (!item || typeof item.type !== "string") return messages;
 
     const extensions = {
-      codexThreadItem: structuredClone(item),
+      codexThreadItem: publicCodexThreadItem(item),
       codexThreadItemLifecycle:
         event.method === "item/completed"
           ? ("completed" as const)
@@ -3944,6 +4025,7 @@ export class CodexProvider implements AgentProvider {
         const image = normalizeCodexImageGenerationRecord(itemRecord, {
           defaultStatus: "completed",
         });
+        const publicUrl = publicCodexImageUrl(image.url);
 
         return {
           id,
@@ -3952,9 +4034,12 @@ export class CodexProvider implements AgentProvider {
           ...(image.revisedPrompt
             ? { revised_prompt: image.revisedPrompt }
             : {}),
-          ...(image.result ? { result: image.result } : {}),
-          ...(image.path ? { path: image.path } : {}),
-          ...(image.url ? { url: image.url } : {}),
+          ...(image.result && !isLocalImagePathValue(image.result)
+            ? { result: image.result }
+            : {}),
+          // Provider-local paths are materialization hints, not client
+          // capabilities. Only the managed artifact manifest is public.
+          ...(publicUrl ? { url: publicUrl } : {}),
         };
       }
 
@@ -4332,7 +4417,8 @@ export class CodexProvider implements AgentProvider {
       }
 
       case "file_change": {
-        const editInput = buildCodexEditInput(item.changes);
+        const publicChanges = publicCodexFileChanges(item.changes);
+        const editInput = buildCodexEditInput(publicChanges);
 
         const toolUseMessage = withCodexTimestamp(
           {
@@ -4378,7 +4464,7 @@ export class CodexProvider implements AgentProvider {
                     type: "tool_result",
                     tool_use_id: item.id,
                     content: formatCodexFileChangeResult(
-                      item.changes,
+                      publicChanges,
                       item.status,
                     ),
                     ...(isCodexFileChangeError(item.status)
@@ -4569,6 +4655,7 @@ export class CodexProvider implements AgentProvider {
 
       case "image_view": {
         // Represent as a ViewImage tool_use + tool_result pair
+        const publicPath = publicCodexFilePath(item.path);
         const toolUseMessage = withCodexTimestamp(
           {
             type: "assistant",
@@ -4581,7 +4668,7 @@ export class CodexProvider implements AgentProvider {
                   type: "tool_use",
                   id: item.id,
                   name: "ViewImage",
-                  input: { path: item.path },
+                  input: { path: publicPath },
                 },
               ],
             },
@@ -4609,7 +4696,7 @@ export class CodexProvider implements AgentProvider {
                   {
                     type: "tool_result",
                     tool_use_id: item.id,
-                    content: `Viewed image: ${item.path}`,
+                    content: `Viewed image: ${publicPath}`,
                   },
                 ],
               },
@@ -4952,6 +5039,101 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function publicCodexThreadItem(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  const clone = structuredClone(item);
+  if (clone.type === "fileChange" || clone.type === "file_change") {
+    return {
+      ...clone,
+      changes: publicCodexFileChanges(clone.changes),
+    };
+  }
+  if (clone.type === "imageView" || clone.type === "image_view") {
+    return {
+      ...clone,
+      ...(typeof clone.path === "string"
+        ? { path: publicCodexFilePath(clone.path) }
+        : {}),
+    };
+  }
+  if (!isCodexImageGenerationRecord(clone)) return clone;
+  return Object.fromEntries(
+    Object.entries(clone).filter(
+      ([key]) =>
+        key !== "savedPath" &&
+        key !== "saved_path" &&
+        key !== "path" &&
+        key !== "result",
+    ),
+  );
+}
+
+function isLocalImagePathValue(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("file://") ||
+    /^[A-Za-z]:[\\/]/.test(trimmed)
+  );
+}
+
+function publicCodexImageUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return undefined;
+    }
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The canonical envelope proves that this is the completed item for the
+ * active thread/turn. Materialization still uses the matching live payload so
+ * a valid inline image is not destroyed by bounded journal redaction.
+ */
+function selectCanonicalGeneratedArtifactSourceItem(
+  notification: JsonRpcNotification,
+  event: CodexEventEnvelope,
+): Record<string, unknown> | null {
+  if (
+    notification.method !== "item/completed" ||
+    event.method !== "item/completed" ||
+    event.source.replay === true ||
+    !event.threadId ||
+    !event.turnId
+  ) {
+    return null;
+  }
+  const livePayload = asRecord(notification.params);
+  const canonicalPayload = asRecord(event.payload.data);
+  const liveItem = asRecord(livePayload?.item);
+  const canonicalItem = asRecord(canonicalPayload?.item);
+  if (
+    !liveItem ||
+    !canonicalItem ||
+    livePayload?.threadId !== event.threadId ||
+    livePayload?.turnId !== event.turnId ||
+    liveItem.id !== canonicalItem.id ||
+    (event.itemId !== undefined && liveItem.id !== event.itemId) ||
+    liveItem.type !== canonicalItem.type ||
+    liveItem.status !== "completed" ||
+    canonicalItem.status !== "completed" ||
+    (liveItem.type !== "imageGeneration" && liveItem.type !== "fileChange")
+  ) {
+    return null;
+  }
+  return liveItem;
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   type ContextCumulativeUsage,
   type ContextStatusResponse,
   type ContextUsage,
+  type GeneratedArtifactManifest,
   type OpenCodeModelLimits,
   type ProviderName,
   type UrlProjectId,
@@ -100,6 +101,7 @@ import type {
   Project,
   SessionSummary,
 } from "../supervisor/types.js";
+import { UploadManager } from "../uploads/index.js";
 import type { EventBus } from "../watcher/index.js";
 function isCodexProviderName(
   provider: ProviderName | string | undefined,
@@ -146,6 +148,11 @@ export interface SessionsDeps {
   codexBridgeService?: CodexBridgeController;
   /** Ordered, independently sequenced canonical journals for persisted refresh. */
   codexEventStoreSources?: readonly CodexEventStoreSource[];
+  /** Reads restart-safe generated manifests from the managed upload root. */
+  generatedArtifactUploadManager?: Pick<
+    UploadManager,
+    "listReplayableGeneratedArtifacts"
+  >;
   /** OpenCode bridge for OpenCode CLI sessions. */
   opencodeBridgeService?: OpenCodeBridgeController;
   /** Physical cold-archive service for moving old provider JSONL files away from hot scan paths. */
@@ -685,6 +692,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const codexEventStoreSources = normalizeCodexEventStoreSources(
     deps.codexEventStoreSources ?? [],
   );
+  const generatedArtifactUploadManager =
+    deps.generatedArtifactUploadManager ?? new UploadManager();
   const runtimeController =
     deps.runtimeController ?? new EmbeddedRuntimeController(deps.supervisor);
   const sessionInteractionService =
@@ -1297,6 +1306,21 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           sessionId,
         );
         if (selected) {
+          let generatedArtifacts: GeneratedArtifactManifest[] = [];
+          try {
+            generatedArtifacts =
+              await generatedArtifactUploadManager.listReplayableGeneratedArtifacts(
+                { projectId: project.id, sessionId },
+                selected.events,
+              );
+          } catch {
+            // Artifact recovery is fail-closed and must not suppress the rest
+            // of the canonical refresh projection.
+            getLogger().warn(
+              { sessionId },
+              "Canonical Codex generated artifacts unavailable on refresh",
+            );
+          }
           const overlay = overlayCanonicalCodexSessionMessages(
             sessionId,
             session.messages,
@@ -1304,6 +1328,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             {
               appendUnmatched: afterMessageId === undefined,
               ...(afterMessageId === undefined ? {} : { afterMessageId }),
+              generatedArtifacts,
             },
           );
           session = { ...session, messages: overlay.messages };
