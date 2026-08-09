@@ -2,12 +2,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InteractionOperation } from "@yep-anywhere/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createApp } from "../../src/app.js";
 import { FeishuBindingStore } from "../../src/channels/feishu/binding-store.js";
 import { FeishuDurableInbox } from "../../src/channels/feishu/inbox.js";
 import { FeishuOperationStore } from "../../src/channels/feishu/operation-store.js";
 import { FeishuChannelService } from "../../src/channels/feishu/service.js";
 import { createFeishuChannelRoutes } from "../../src/routes/feishu-channel.js";
+import { MockClaudeSDK } from "../../src/sdk/mock.js";
 
 describe("Feishu channel routes", () => {
   const dataDirs: string[] = [];
@@ -319,6 +321,31 @@ describe("Feishu channel routes", () => {
     ]) {
       expect(body).not.toContain(sensitive);
     }
+  });
+
+  it("mounts protected controls and passes the opaque inbox resolver through createApp", async () => {
+    const dataDir = await createDataDir(dataDirs);
+    const service = new FeishuChannelService({ dataDir });
+    const inbox = new FeishuDurableInbox({ dataDir });
+    await Promise.all([service.initialize(), inbox.initialize()]);
+    const findByTempId = vi.spyOn(inbox, "findByTempId");
+    const { app } = createApp({
+      sdk: new MockClaudeSDK(),
+      projectsDir: join(dataDir, "projects"),
+      dataDir,
+      feishuChannelService: service,
+      feishuInbox: inbox,
+    });
+
+    const doctor = await app.request("/api/channels/feishu/doctor");
+    expect(doctor.status).toBe(200);
+
+    const unknownReference = "feishu-ffffffffffffffffffffffffffffffff";
+    const locate = await app.request(
+      `/api/sessions/${unknownReference}/locate`,
+    );
+    expect(locate.status).toBe(404);
+    expect(findByTempId).toHaveBeenCalledWith(unknownReference);
   });
 });
 
