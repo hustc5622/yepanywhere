@@ -330,8 +330,7 @@ describe("normalizeSession", () => {
       {
         type: "input_image",
         mime_type: "image/png",
-        file_path: `${blobsDir}/${hash}`,
-        image_url: `/api/local-image?path=${encodeURIComponent(`${blobsDir}/${hash}`)}`,
+        managed_attachment: "[managed attachment]",
       },
       {
         type: "input_image",
@@ -658,8 +657,13 @@ describe("normalizeSession", () => {
 
     const normalized = normalizeSession(mockSession);
     expect(normalized.messages[0]?.message?.content).toEqual([
-      { type: "text", text: prompt },
+      {
+        type: "text",
+        text: prompt.replace("/uploads/screenshot.png", "[managed attachment]"),
+      },
     ]);
+    expect(JSON.stringify(normalized)).not.toContain("/uploads/screenshot.png");
+    expect(prompt).toContain("/uploads/screenshot.png");
   });
 
   it("marks a persisted legacy OpenCode text response as completed", () => {

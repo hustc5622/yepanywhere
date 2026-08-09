@@ -55,3 +55,30 @@ describe("Codex patch lifecycle session schema", () => {
     });
   });
 });
+
+describe("Codex local media session schema", () => {
+  it("retains pinned input_audio rollout blocks for public normalization", () => {
+    const raw = {
+      timestamp: "2026-08-08T01:00:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: '<audio name=[Audio #1] path="/test/private/voice.wav">',
+          },
+          {
+            type: "input_audio",
+            audio_url: "data:audio/wav;base64,YXVkaW8=",
+          },
+          { type: "input_text", text: "</audio>" },
+        ],
+      },
+    } as const;
+
+    expect(CodexSessionEntrySchema.parse(raw)).toEqual(raw);
+    expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+  });
+});

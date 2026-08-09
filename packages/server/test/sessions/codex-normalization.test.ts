@@ -2089,6 +2089,48 @@ describe("Codex Normalization", () => {
   });
 });
 
+describe("Codex public prompt projection", () => {
+  it("keeps managed media paths out of normalized user content without mutating rollout", () => {
+    const uploadPath = "/test/runtime/uploads/report.pdf";
+    const imagePath = "/test/runtime/media/shot.png";
+    const prompt = `Review /workspace/project/README.md\n\nUser uploaded files:\n- report.pdf (2.0 KB, application/pdf): ${uploadPath}`;
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: prompt },
+            {
+              type: "input_text",
+              text: `<image name=[Image #1] path="${imagePath}">`,
+            },
+            {
+              type: "input_image",
+              file_path: imagePath,
+              mime_type: "image/png",
+              image_url: "data:image/png;base64,AAAA",
+            },
+            { type: "input_text", text: "</image>" },
+          ],
+        },
+      },
+    ];
+    const original = structuredClone(entries);
+
+    const normalized = normalizeSession(buildLoadedSession(entries));
+    const serialized = JSON.stringify(normalized);
+
+    expect(serialized).toContain("[managed attachment]");
+    expect(serialized).toContain("/workspace/project/README.md");
+    expect(serialized).not.toContain(uploadPath);
+    expect(serialized).not.toContain(imagePath);
+    expect(entries).toEqual(original);
+  });
+});
+
 describe("computeCodexRollbackNumTurns", () => {
   const entries: CodexSessionEntry[] = [
     codexUserMessage("q1", 1),
@@ -2177,5 +2219,22 @@ describe("computeCodexRollbackNumTurns", () => {
     expect(computeCodexRollbackNumTurns(branchState, { prompt: "same" })).toBe(
       1,
     );
+  });
+
+  it("matches a public managed-attachment prompt against raw branch history", () => {
+    const path = "/test/runtime/uploads/report.pdf";
+    const rawPrompt = `Review\n\nUser uploaded files:\n- report.pdf (1.0 KB, application/pdf): ${path}`;
+    const publicPrompt = rawPrompt.replace(path, "[managed attachment]");
+    const { branchState } = buildCodexBranchView(
+      [codexUserMessage(rawPrompt, 1), codexAssistantMessage("answer", 2)],
+      "s",
+    );
+
+    expect(
+      computeCodexRollbackNumTurns(branchState, {
+        prompt: publicPrompt,
+        timestamp: "2024-01-01T00:00:01Z",
+      }),
+    ).toBe(1);
   });
 });

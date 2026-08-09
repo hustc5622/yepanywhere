@@ -46,6 +46,7 @@ import {
   collectVisibleClaudeEntries,
 } from "./claude-messages.js";
 import { buildDag } from "./dag.js";
+import { sanitizePublicUserPrompt } from "./public-user-prompt.js";
 
 export interface ClaudeSessionReaderOptions {
   sessionDir: string;
@@ -361,7 +362,10 @@ export class ClaudeSessionReader implements ISessionReader {
       }
 
       const firstUserMessage = this.findFirstUserMessage(messages);
-      const fullTitle = firstUserMessage || null;
+      const publicFirstUserMessage = firstUserMessage
+        ? sanitizePublicUserPrompt(firstUserMessage)
+        : null;
+      const fullTitle = publicFirstUserMessage || null;
       const model = this.extractModel(conversationMessages);
       const activeBranchMessages = activeBranch.map((node) => node.raw);
       const userQuestions = this.extractUserQuestions(activeBranchMessages);
@@ -395,7 +399,7 @@ export class ClaudeSessionReader implements ISessionReader {
       return {
         id: sessionId,
         projectId,
-        title: this.extractTitle(firstUserMessage),
+        title: this.extractTitle(publicFirstUserMessage),
         fullTitle,
         createdAt: stats.birthtime.toISOString(),
         updatedAt:

@@ -4,6 +4,7 @@ import type {
   CodexSessionEntry,
 } from "@yep-anywhere/shared";
 import { isCodexTurnAbortedNoticeText } from "./codex-turn-aborted.js";
+import { sanitizeCodexPublicUserPrompt } from "./public-user-prompt.js";
 import {
   isSessionSetupText,
   isSyntheticUserPromptText,
@@ -403,19 +404,26 @@ export function computeCodexRollbackNumTurns(
   const activePath = orderedActivePath(branchState);
   if (activePath.length === 0) return null;
 
-  const targetPrompt = target.prompt.trim();
+  const targetPrompt = sanitizeCodexPublicUserPrompt(target.prompt).trim();
   if (!targetPrompt) return null;
 
   const promptMatches = branchState.branches.filter(
-    (branch) => branch.prompt.trim() === targetPrompt,
+    (branch) =>
+      sanitizeCodexPublicUserPrompt(branch.prompt).trim() === targetPrompt,
   );
-  if (promptMatches.length === 0) return null;
 
   const timestampMatches = target.timestamp
-    ? promptMatches.filter((branch) => branch.createdAt === target.timestamp)
+    ? branchState.branches.filter(
+        (branch) => branch.createdAt === target.timestamp,
+      )
     : [];
   const candidates =
-    timestampMatches.length > 0 ? timestampMatches : promptMatches;
+    timestampMatches.length === 1
+      ? timestampMatches
+      : timestampMatches.length > 1
+        ? timestampMatches.filter((branch) => promptMatches.includes(branch))
+        : promptMatches;
+  if (candidates.length === 0) return null;
 
   // Prefer a candidate on the active path; otherwise take the most recent.
   const activeIds = new Map(activePath.map((node, index) => [node.id, index]));

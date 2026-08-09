@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -887,6 +887,53 @@ describe("CodexSessionReader - OSS Support", () => {
       "test-project" as UrlProjectId,
     );
     expect(summary?.messageCount).toBe(1);
+  });
+
+  it("keeps legacy event summaries and questions free of managed paths", async () => {
+    const sessionId = "legacy-managed-summary";
+    const now = "2026-08-08T00:00:00.000Z";
+    const managedPath = "/test/runtime/uploads/legacy-summary.pdf";
+    const ordinaryPath = "/workspace/project/README.md";
+    const prompt = `Review ${ordinaryPath}\n\nUser uploaded files:\n- legacy-summary.pdf (5.0 KB, application/pdf): ${managedPath}`;
+    const sessionPath = join(testDir, `${sessionId}.jsonl`);
+    await writeFile(
+      sessionPath,
+      `${[
+        {
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            id: sessionId,
+            cwd: "/test/project",
+            timestamp: now,
+            model_provider: "openai",
+          },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-08-08T00:00:01.000Z",
+          payload: { type: "user_message", message: prompt },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n")}\n`,
+    );
+
+    const summary = await reader.getSessionSummary(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+    const summaries = await reader.listSessions("test-project" as UrlProjectId);
+    for (const projected of [
+      summary,
+      summaries.find((item) => item.id === sessionId),
+    ]) {
+      const serialized = JSON.stringify(projected);
+      expect(serialized).not.toContain(managedPath);
+      expect(serialized).toContain("[managed attachment]");
+      expect(serialized).toContain(ordinaryPath);
+    }
+    expect(await readFile(sessionPath, "utf8")).toContain(managedPath);
   });
 
   it("hides Codex rollout entries removed by thread_rolled_back markers", async () => {
