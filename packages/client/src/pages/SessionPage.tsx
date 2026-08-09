@@ -11,7 +11,15 @@ import {
   useParams,
   useSearchParams,
 } from "react-router-dom";
-import { api, isQueuedResumeSessionResponse } from "../api/client";
+import {
+  type CodexStructuredUserInput,
+  api,
+  isQueuedResumeSessionResponse,
+} from "../api/client";
+import {
+  type CodexSkillOption,
+  CodexSkillPicker,
+} from "../components/CodexSkillPicker";
 import { MessageInput, type UploadProgress } from "../components/MessageInput";
 import { MessageInputToolbar } from "../components/MessageInputToolbar";
 import { MessageList } from "../components/MessageList";
@@ -109,6 +117,24 @@ function isCodexAppServerProvider(
   provider: ProviderName | string | undefined | null,
 ): provider is "codex" {
   return provider === "codex";
+}
+
+export function buildCodexSkillInputs(
+  provider: ProviderName | string | undefined | null,
+  skill: CodexSkillOption | null,
+): CodexStructuredUserInput[] | undefined {
+  if (!isCodexAppServerProvider(provider) || !skill) return undefined;
+  return [{ type: "skill", name: skill.name, path: skill.path }];
+}
+
+export function remainingCodexSkillAfterSuccessfulSend(
+  current: CodexSkillOption | null,
+  sent: CodexSkillOption | null,
+): CodexSkillOption | null {
+  if (sent && current?.name === sent.name && current.path === sent.path) {
+    return null;
+  }
+  return current;
 }
 
 function getApprovalAgentName(
@@ -302,6 +328,21 @@ function SessionPageContent({
   // Effective provider for immediate display before session data loads
   const effectiveProvider = session?.provider ?? initialProvider;
   const approvalAgentName = getApprovalAgentName(effectiveProvider);
+  const [selectedCodexSkill, setSelectedCodexSkill] =
+    useState<CodexSkillOption | null>(null);
+  useEffect(() => {
+    if (effectiveProvider && !isCodexAppServerProvider(effectiveProvider)) {
+      setSelectedCodexSkill(null);
+    }
+  }, [effectiveProvider]);
+  const clearCodexSkillAfterSuccessfulSend = useCallback(
+    (sent: CodexSkillOption | null) => {
+      setSelectedCodexSkill((current) =>
+        remainingCodexSkillAfterSuccessfulSend(current, sent),
+      );
+    },
+    [],
+  );
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
   const draftControlsRef = useRef<DraftControls | null>(null);
@@ -712,6 +753,11 @@ function SessionPageContent({
   });
 
   const handleSend = async (text: string) => {
+    const selectedCodexSkillAtSend = selectedCodexSkill;
+    const codexInputs = buildCodexSkillInputs(
+      effectiveProvider,
+      selectedCodexSkillAtSend,
+    );
     // Add to pending queue and get tempId to pass to server
     const tempId = addPendingMessage(text);
     let historicalEditPostAttempted = false;
@@ -755,6 +801,7 @@ function SessionPageContent({
           reasoningEffort: session?.reasoningEffort,
           provider: effectiveProvider,
           executor: session?.executor,
+          codexInputs,
         };
         const attachmentsArg =
           currentAttachments.length > 0 ? currentAttachments : undefined;
@@ -902,6 +949,7 @@ function SessionPageContent({
             `Editing historical messages is not supported for ${effectiveProvider ?? "this provider"}`,
           );
         }
+        clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
         return;
       }
 
@@ -924,6 +972,7 @@ function SessionPageContent({
             reasoningEffort: session?.reasoningEffort,
             provider: effectiveProvider,
             executor: session?.executor,
+            codexInputs,
           },
           currentAttachments.length > 0 ? currentAttachments : undefined,
           tempId,
@@ -934,6 +983,7 @@ function SessionPageContent({
           });
           setProcessState("idle");
           draftControlsRef.current?.clearDraft();
+          clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
           showToast(
             `Request queued at position ${result.position}. It has not started yet.`,
             "info",
@@ -958,6 +1008,8 @@ function SessionPageContent({
           tempId,
           thinking,
           session?.reasoningEffort,
+          undefined,
+          codexInputs,
         );
         // If process was restarted due to thinking mode change, reconnect stream
         if (result.restarted && result.processId) {
@@ -967,6 +1019,7 @@ function SessionPageContent({
       }
       // Success - clear the draft from localStorage
       draftControlsRef.current?.clearDraft();
+      clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
     } catch (err) {
       console.error("Failed to send:", err);
 
@@ -990,6 +1043,7 @@ function SessionPageContent({
               reasoningEffort: session?.reasoningEffort,
               provider: effectiveProvider,
               executor: session?.executor,
+              codexInputs,
             },
             currentAttachments.length > 0 ? currentAttachments : undefined,
             tempId,
@@ -1000,6 +1054,7 @@ function SessionPageContent({
             });
             setProcessState("idle");
             draftControlsRef.current?.clearDraft();
+            clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
             showToast(
               `Request queued at position ${result.position}. It has not started yet.`,
               "info",
@@ -1013,6 +1068,7 @@ function SessionPageContent({
             );
           }
           draftControlsRef.current?.clearDraft();
+          clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
           return;
         } catch (retryErr) {
           console.error("Failed to resume session:", retryErr);
@@ -1049,6 +1105,11 @@ function SessionPageContent({
   };
 
   const handleQueue = async (text: string) => {
+    const selectedCodexSkillAtSend = selectedCodexSkill;
+    const codexInputs = buildCodexSkillInputs(
+      effectiveProvider,
+      selectedCodexSkillAtSend,
+    );
     const tempId = addPendingMessage(text);
     setScrollTrigger((prev) => prev + 1);
 
@@ -1082,9 +1143,11 @@ function SessionPageContent({
         thinking,
         session?.reasoningEffort,
         true, // deferred
+        codexInputs,
       );
       removePendingMessage(tempId);
       draftControlsRef.current?.clearDraft();
+      clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
     } catch (err) {
       console.error("Failed to queue deferred message:", err);
       removePendingMessage(tempId);
@@ -2226,53 +2289,62 @@ function SessionPageContent({
               pendingInputRequest.sessionId === actualSessionId &&
               !isAskUserQuestion
             ) && (
-              <MessageInput
-                onSend={handleSend}
-                onQueue={
-                  status.owner !== "none" && processState !== "idle"
-                    ? handleQueue
-                    : undefined
-                }
-                placeholder={
-                  status.owner === "external"
-                    ? t("sessionPlaceholderExternal")
-                    : processState === "idle"
-                      ? t("sessionPlaceholderResume")
-                      : t("sessionPlaceholderQueue")
-                }
-                mode={permissionMode}
-                onModeChange={setPermissionMode}
-                isHeld={holdModeEnabled ? isHeld : undefined}
-                onHoldChange={holdModeEnabled ? setHold : undefined}
-                supportsPermissionMode={supportsPermissionMode}
-                provider={effectiveProvider}
-                permissionModes={permissionModes}
-                supportsThinkingToggle={supportsThinkingToggle}
-                isRunning={status.owner === "self"}
-                isThinking={processState === "in-turn"}
-                onStop={handleAbort}
-                draftKey={`draft-message-${sessionId}`}
-                onDraftControlsReady={handleDraftControlsReady}
-                collapsed={
-                  !!(
-                    pendingInputRequest &&
-                    pendingInputRequest.sessionId === actualSessionId
-                  )
-                }
-                contextUsage={session?.contextUsage}
-                projectId={projectId}
-                sessionId={sessionId}
-                attachments={attachments}
-                onAttach={handleAttach}
-                onRemoveAttachment={handleRemoveAttachment}
-                uploadProgress={uploadProgress}
-                commandPrefix={commandPrefix}
-                commandLabel={commandLabel}
-                commands={activeCommands}
-                showCommandButton={showCommandButton}
-                commandButtons={commandButtons}
-                onCustomCommand={handleCustomCommand}
-              />
+              <>
+                {isCodexAppServerProvider(effectiveProvider) && (
+                  <CodexSkillPicker
+                    sessionId={actualSessionId}
+                    selected={selectedCodexSkill}
+                    onSelect={setSelectedCodexSkill}
+                  />
+                )}
+                <MessageInput
+                  onSend={handleSend}
+                  onQueue={
+                    status.owner !== "none" && processState !== "idle"
+                      ? handleQueue
+                      : undefined
+                  }
+                  placeholder={
+                    status.owner === "external"
+                      ? t("sessionPlaceholderExternal")
+                      : processState === "idle"
+                        ? t("sessionPlaceholderResume")
+                        : t("sessionPlaceholderQueue")
+                  }
+                  mode={permissionMode}
+                  onModeChange={setPermissionMode}
+                  isHeld={holdModeEnabled ? isHeld : undefined}
+                  onHoldChange={holdModeEnabled ? setHold : undefined}
+                  supportsPermissionMode={supportsPermissionMode}
+                  provider={effectiveProvider}
+                  permissionModes={permissionModes}
+                  supportsThinkingToggle={supportsThinkingToggle}
+                  isRunning={status.owner === "self"}
+                  isThinking={processState === "in-turn"}
+                  onStop={handleAbort}
+                  draftKey={`draft-message-${sessionId}`}
+                  onDraftControlsReady={handleDraftControlsReady}
+                  collapsed={
+                    !!(
+                      pendingInputRequest &&
+                      pendingInputRequest.sessionId === actualSessionId
+                    )
+                  }
+                  contextUsage={session?.contextUsage}
+                  projectId={projectId}
+                  sessionId={sessionId}
+                  attachments={attachments}
+                  onAttach={handleAttach}
+                  onRemoveAttachment={handleRemoveAttachment}
+                  uploadProgress={uploadProgress}
+                  commandPrefix={commandPrefix}
+                  commandLabel={commandLabel}
+                  commands={activeCommands}
+                  showCommandButton={showCommandButton}
+                  commandButtons={commandButtons}
+                  onCustomCommand={handleCustomCommand}
+                />
+              </>
             )}
           </div>
         </footer>
