@@ -29,6 +29,7 @@ import {
   isActiveBridgeSessionView,
   isLiveBridgeSessionView,
 } from "../bridge-common/session-state.js";
+import type { FeishuDurableInbox } from "../channels/feishu/inbox.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import {
   type CodexEventStoreSource,
@@ -118,6 +119,8 @@ export interface SessionsDeps {
   supervisor: Supervisor;
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
+  /** Resolves authenticated, opaque Feishu card links to provider sessions. */
+  feishuInbox?: Pick<FeishuDurableInbox, "findByTempId">;
   externalTracker?: ExternalSessionTracker;
   notificationService?: NotificationService;
   sessionMetadataService?: SessionMetadataService;
@@ -783,12 +786,27 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   // a bug report) is not addressable. This is the one route that turns one
   // back into a location.
   routes.get("/sessions/:sessionId/locate", async (c) => {
-    const sessionId = c.req.param("sessionId");
+    const requestedSessionId = c.req.param("sessionId");
+    const opaqueFeishuReference = /^feishu-[a-f0-9]{32}$/.test(
+      requestedSessionId,
+    );
+    const inboxRecord = opaqueFeishuReference
+      ? deps.feishuInbox?.findByTempId(requestedSessionId)
+      : undefined;
+    if (opaqueFeishuReference && !inboxRecord?.sessionId) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+    const sessionId = inboxRecord?.sessionId ?? requestedSessionId;
     const location = await locateSession(deps, sessionId);
     if (!location) {
       return c.json({ error: "Session not found" }, 404);
     }
-    return c.json({ session: location });
+    return c.json({
+      session: {
+        ...location,
+        requestedSessionId,
+      },
+    });
   });
 
   // GET /api/projects/:projectId/sessions/:sessionId/agents - Get agent mappings
