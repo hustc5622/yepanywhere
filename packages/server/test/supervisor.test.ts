@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { encodeProjectId } from "../src/projects/paths.js";
 import { MessageQueue } from "../src/sdk/messageQueue.js";
 import { MockClaudeSDK, createMockScenario } from "../src/sdk/mock.js";
 import type {
@@ -133,6 +134,51 @@ describe("Supervisor", () => {
       expect(aborted).toBe(true);
       expect(providerSupervisor.getAllProcesses()).toHaveLength(0);
     });
+
+    it("passes canonical event provenance to create-only Codex sessions", async () => {
+      let aborted = false;
+      const startSession = vi.fn(async (_options: StartSessionOptions) => {
+        async function* iterator() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: "created-codex-session",
+          };
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+          },
+        };
+      });
+      const providerSupervisor = new Supervisor({
+        provider: createCodexTestProvider(startSession),
+        idleTimeoutMs: 100,
+      });
+
+      try {
+        await providerSupervisor.createSession(
+          "/tmp/codex-event-project",
+          undefined,
+          { codexEventAccountId: "account-event-spine" },
+        );
+
+        expect(startSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            codexEventAccountId: "account-event-spine",
+            codexEventProjectId: encodeProjectId("/tmp/codex-event-project"),
+          }),
+        );
+      } finally {
+        await providerSupervisor.shutdown();
+      }
+    });
   });
 
   describe("resumeSession", () => {
@@ -177,32 +223,26 @@ describe("Supervisor", () => {
 
     it("passes rollbackNumTurns to provider-backed resumed sessions", async () => {
       let aborted = false;
-      const startSession = vi.fn(
-        async (options: {
-          resumeSessionId?: string;
-          rollbackNumTurns?: number;
-          initialMessage?: { text: string };
-        }) => {
-          async function* iterator() {
-            yield {
-              type: "system",
-              subtype: "init",
-              session_id: options.resumeSessionId ?? "new-session",
-            };
-            while (!aborted) {
-              await new Promise((resolve) => setTimeout(resolve, 10));
-            }
-          }
-
-          return {
-            iterator: iterator(),
-            queue: new MessageQueue(),
-            abort: () => {
-              aborted = true;
-            },
+      const startSession = vi.fn(async (options: StartSessionOptions) => {
+        async function* iterator() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: options.resumeSessionId ?? "new-session",
           };
-        },
-      );
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+          },
+        };
+      });
       const provider: AgentProvider = {
         name: "codex",
         displayName: "Codex",
@@ -229,13 +269,15 @@ describe("Supervisor", () => {
         "/tmp/test",
         { text: "q2-1" },
         undefined,
-        { rollbackNumTurns: 2 },
+        { rollbackNumTurns: 2, codexEventAccountId: "account-event-spine" },
       );
 
       expect(startSession).toHaveBeenCalledWith(
         expect.objectContaining({
           resumeSessionId: "sess-123",
           rollbackNumTurns: 2,
+          codexEventAccountId: "account-event-spine",
+          codexEventProjectId: encodeProjectId("/tmp/test"),
           initialMessage: expect.objectContaining({ text: "q2-1" }),
         }),
       );

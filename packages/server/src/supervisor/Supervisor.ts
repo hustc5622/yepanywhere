@@ -80,6 +80,8 @@ export interface ModelSettings {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
   codexModelProvider?: string;
+  /** Stable non-secret channel account key for Codex event-spine rollout. */
+  codexEventAccountId?: string;
   /** Managed OpenCode provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Provider to use for this session. undefined = use the runtime default. */
@@ -447,6 +449,8 @@ export class Supervisor {
       reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
+      codexEventAccountId: modelSettings?.codexEventAccountId,
+      codexEventProjectId: projectId,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,
@@ -599,6 +603,8 @@ export class Supervisor {
       reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
+      codexEventAccountId: modelSettings?.codexEventAccountId,
+      codexEventProjectId: projectId,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,
