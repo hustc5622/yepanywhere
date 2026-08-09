@@ -698,6 +698,16 @@ export class CodexOSSProvider implements AgentProvider {
   ): SDKMessage[] {
     switch (event.type) {
       case "turn.started":
+        // Lifecycle-only signal; runSession owns the visible turn state.
+        return [];
+
+      case "thread.started":
+      case "item.started":
+      case "item.updated":
+      case "item.completed":
+        // These variants are consumed before this compatibility projection:
+        // thread.started establishes the session and item events are accumulated
+        // with stable UUIDs in runSession.
         return [];
 
       case "turn.completed":
@@ -723,9 +733,6 @@ export class CodexOSSProvider implements AgentProvider {
           } as SDKMessage,
         ];
 
-      // item.started, item.updated, item.completed are handled in runSession
-      // to support token accumulation with stable UUIDs
-
       case "error":
         return [
           {
@@ -734,10 +741,10 @@ export class CodexOSSProvider implements AgentProvider {
             error: event.message,
           } as SDKMessage,
         ];
-
-      default:
-        return [];
     }
+
+    const exhaustiveEvent: never = event;
+    return exhaustiveEvent;
   }
 
   /**
@@ -979,10 +986,10 @@ export class CodexOSSProvider implements AgentProvider {
             error: item.message,
           } as SDKMessage,
         ];
-
-      default:
-        return [];
     }
+
+    const exhaustiveItem: never = item;
+    return exhaustiveItem;
   }
 
   /**

@@ -44,7 +44,6 @@ import type {
   PermissionMode,
   SDKMessage,
   ToolApprovalResult,
-  UserMessage,
 } from "../types.js";
 import { ACPClient } from "./acp/client.js";
 import {

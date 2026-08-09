@@ -12,6 +12,8 @@ export interface ContentBlock {
   id?: string;
   name?: string;
   input?: unknown;
+  /** Provider lifecycle status for a projected tool_use block. */
+  status?: string;
   /** For tool_result blocks - references the tool_use id */
   tool_use_id?: string;
   /** For tool_result blocks - the result content */
