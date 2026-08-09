@@ -112,9 +112,11 @@ export interface AgentSession {
   sessionId?: string;
   /**
    * Steer an active turn with additional user input.
-   * Returns true when steered immediately, false when caller should enqueue instead.
+   * A structured result can carry the provider-native turn accepted by the
+   * steer operation. Boolean results remain supported for providers without a
+   * stable turn identity.
    */
-  steer?: (message: UserMessage) => Promise<boolean>;
+  steer?: (message: UserMessage) => Promise<AgentSteerResult>;
   /** Stable, capability-gated Codex app-server controls for this session. */
   codexControls?: CodexSessionControls;
   /**
@@ -166,6 +168,13 @@ export interface AgentSession {
     models: Array<{ id: string; contextWindow?: number }>;
   } | null>;
 }
+
+export type AgentSteerResult =
+  | boolean
+  | {
+      accepted: boolean;
+      turnId?: string;
+    };
 
 /**
  * Agent provider interface.

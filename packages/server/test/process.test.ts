@@ -328,7 +328,7 @@ describe("Process", () => {
       await process.abort();
     });
 
-    it("steers with internal paths while publishing only the safe projection", async () => {
+    it("passes provider-only inputs to steer while publishing only the safe projection", async () => {
       let resolveIterator: () => void;
       const iterator: AsyncIterator<SDKMessage> = {
         next: () =>
@@ -366,14 +366,14 @@ describe("Process", () => {
 
       expect(steerFn).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: expect.stringContaining("/private/provider/steer/report.pdf"),
-          attachments: undefined,
-          documents: undefined,
+          text: "inspect",
+          attachments: [
+            expect.objectContaining({
+              path: "/private/provider/steer/report.pdf",
+            }),
+          ],
+          documents: ["/private/provider/steer/notes.txt"],
         }),
-      );
-      const providerMessage = steerFn.mock.calls[0]?.[0];
-      expect(providerMessage?.text).toContain(
-        "/private/provider/steer/notes.txt",
       );
       const publicProjection = JSON.stringify({
         emitted,
@@ -416,9 +416,12 @@ describe("Process", () => {
       await process.abort();
     });
 
-    it("publishes an optimistic user event only after steering accepts it", async () => {
+    it("publishes a correlated optimistic echo only after steering accepts it", async () => {
       let resolveIterator: () => void;
-      let resolveSteer: (accepted: boolean) => void;
+      let resolveSteer: (value: {
+        accepted: true;
+        turnId: string;
+      }) => void;
       const iterator: AsyncIterator<SDKMessage> = {
         next: () =>
           new Promise((resolve) => {
@@ -427,7 +430,7 @@ describe("Process", () => {
       };
       const steerFn = vi.fn(
         () =>
-          new Promise<boolean>((resolve) => {
+          new Promise<{ accepted: true; turnId: string }>((resolve) => {
             resolveSteer = resolve;
           }),
       );
@@ -446,15 +449,27 @@ describe("Process", () => {
         }
       });
 
-      const admission = process.queueMessage({ text: "steer me" });
+      const admission = process.queueMessage({
+        text: "steer me",
+        tempId: "temp-steer",
+      });
       expect(userMessages).toHaveLength(0);
-      resolveSteer?.(true);
+      resolveSteer?.({ accepted: true, turnId: "turn-steer" });
 
       await expect(admission).resolves.toMatchObject({
         success: true,
         position: 0,
       });
       expect(userMessages).toHaveLength(1);
+      expect(userMessages[0]).toMatchObject({
+        type: "user",
+        tempId: "temp-steer",
+        clientUserMessageId: expect.any(String),
+        turnId: "turn-steer",
+        codexTurnId: "turn-steer",
+        isOptimistic: true,
+      });
+      expect(userMessages[0]?.clientUserMessageId).toBe(userMessages[0]?.uuid);
 
       resolveIterator?.();
       await process.abort();
@@ -1582,6 +1597,10 @@ describe("Process", () => {
       emitProviderEcho?.({
         type: "user",
         uuid: optimistic.uuid,
+        clientUserMessageId: optimistic.uuid,
+        turnId: "turn-echo",
+        codexTurnId: "turn-echo",
+        isOptimistic: false,
         message: {
           role: "user",
           content:
@@ -1601,6 +1620,17 @@ describe("Process", () => {
       expect(emitted.at(-1)?.message?.content).toContain(
         "[managed attachment]",
       );
+      const replayedUser = process
+        .getMessageHistory()
+        .find((message) => message.type === "user");
+      expect(replayedUser).toMatchObject({
+        uuid: optimistic.uuid,
+        clientUserMessageId: optimistic.uuid,
+        turnId: "turn-echo",
+        codexTurnId: "turn-echo",
+        isOptimistic: false,
+        message: { content: expect.stringContaining("[managed attachment]") },
+      });
     });
 
     it("keeps structured Codex paths out of public history and SSE", async () => {

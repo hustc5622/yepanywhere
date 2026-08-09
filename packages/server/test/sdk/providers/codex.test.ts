@@ -22,6 +22,7 @@ import {
   CodexProvider,
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
+import type { SDKMessage } from "../../../src/sdk/types.js";
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -131,6 +132,12 @@ function request(id, method, params) {
 }
 
 function handle(message) {
+  if (process.env.CODEX_FAKE_MESSAGE_CAPTURE) {
+    fs.appendFileSync(
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE,
+      JSON.stringify({ method: message.method, params: message.params }) + "\\n",
+    );
+  }
   if (!message.method && message.id === "approval-event-spine") {
     notify(
       "turn/completed",
@@ -172,10 +179,11 @@ function handle(message) {
   }
   if (message.method === "turn/start") {
     const eventMode = process.env.CODEX_FAKE_EVENT_MODE === "1";
+    const activeTurn = process.env.CODEX_FAKE_ACTIVE_TURN === "1";
     send(message.id, {
       turn: {
         id: "turn-rewrite",
-        status: eventMode ? "inProgress" : "completed",
+        status: eventMode || activeTurn ? "inProgress" : "completed",
         items: [],
         error: null,
       },
@@ -227,6 +235,15 @@ function handle(message) {
         },
       );
     }
+    return;
+  }
+  if (message.method === "turn/steer") {
+    send(message.id, {
+      turnId:
+        message.params.clientUserMessageId === "client-mismatch"
+          ? "different-turn"
+          : process.env.CODEX_FAKE_STEER_TURN_ID || message.params.expectedTurnId,
+    });
     return;
   }
   if ([
@@ -342,6 +359,23 @@ process.stdin.on("data", (chunk) => {
       return fakeCodexPath;
     }
 
+    function readMessageCapture(
+      capturePath: string,
+    ): Array<{ method?: string; params?: Record<string, unknown> }> {
+      if (!existsSync(capturePath)) return [];
+      return readFileSync(capturePath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              method?: string;
+              params?: Record<string, unknown>;
+            },
+        );
+    }
+
     it("should return session object with required methods", async () => {
       const session = await provider.startSession({
         cwd: "/tmp",
@@ -351,6 +385,199 @@ process.stdin.on("data", (chunk) => {
       expect(session.iterator).toBeDefined();
       expect(typeof session.abort).toBe("function");
       expect(session.queue).toBeDefined();
+    });
+
+    it("preserves native input and publishes the accepted turn correlation", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-native-input-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: {
+            text: "inspect inputs",
+            uuid: "client-native-input",
+            tempId: "temp-native-input",
+            images: ["data:image/webp;base64,AAAA"],
+            attachments: [
+              {
+                id: "image-upload",
+                originalName: "photo.png",
+                size: 4,
+                mimeType: "image/png",
+                path: join(tempDir, "photo.png"),
+              },
+              {
+                id: "document-upload",
+                originalName: "report.pdf",
+                size: 8,
+                mimeType: "application/pdf",
+                path: join(tempDir, "report.pdf"),
+              },
+            ],
+            codexInputs: [
+              {
+                type: "skill",
+                name: "review",
+                path: join(tempDir, "skills", "review", "SKILL.md"),
+              },
+              {
+                type: "mention",
+                name: "guide",
+                path: join(tempDir, "docs", "guide.md"),
+              },
+            ],
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+        for await (const message of session.iterator) {
+          messages.push(message);
+          if (
+            message.type === "result" &&
+            message.clientUserMessageId === "client-native-input"
+          ) {
+            break;
+          }
+        }
+
+        const turnStart = readMessageCapture(messageCapturePath).find(
+          ({ method }) => method === "turn/start",
+        );
+        expect(turnStart?.params).toMatchObject({
+          threadId: "thread-new",
+          clientUserMessageId: "client-native-input",
+          input: [
+            {
+              type: "text",
+              text: expect.stringContaining(join(tempDir, "report.pdf")),
+              text_elements: [],
+            },
+            { type: "image", url: "data:image/webp;base64,AAAA" },
+            { type: "localImage", path: join(tempDir, "photo.png") },
+            {
+              type: "skill",
+              name: "review",
+              path: join(tempDir, "skills", "review", "SKILL.md"),
+            },
+            {
+              type: "mention",
+              name: "guide",
+              path: join(tempDir, "docs", "guide.md"),
+            },
+          ],
+        });
+        const acceptedUser = messages.find(
+          (message) => message.type === "user",
+        );
+        expect(acceptedUser).toMatchObject({
+          uuid: "client-native-input",
+          tempId: "temp-native-input",
+          clientUserMessageId: "client-native-input",
+          turnId: "turn-rewrite",
+          codexTurnId: "turn-rewrite",
+          isOptimistic: false,
+          message: { content: expect.stringContaining("[managed attachment]") },
+        });
+        expect(JSON.stringify(acceptedUser)).not.toContain(tempDir);
+        expect(
+          messages.find(
+            (message) =>
+              message.type === "result" && message.clientUserMessageId,
+          ),
+        ).toMatchObject({
+          turnId: "turn-rewrite",
+          codexTurnId: "turn-rewrite",
+          clientUserMessageId: "client-native-input",
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("requires turn/steer to confirm the exact active turn", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-steer-identity-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousActiveTurn = process.env.CODEX_FAKE_ACTIVE_TURN;
+      const previousSteerTurnId = process.env.CODEX_FAKE_STEER_TURN_ID;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_ACTIVE_TURN = "1";
+      process.env.CODEX_FAKE_STEER_TURN_ID = "";
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "start", uuid: "client-start" },
+        });
+        await session.iterator.next();
+        await session.iterator.next();
+
+        await expect(
+          session.steer?.({
+            text: "steer",
+            uuid: "client-steer",
+            codexInputs: [
+              {
+                type: "skill",
+                name: "review",
+                path: join(tempDir, "skills", "review", "SKILL.md"),
+              },
+            ],
+          }),
+        ).resolves.toEqual({ accepted: true, turnId: "turn-rewrite" });
+        expect(
+          readMessageCapture(messageCapturePath).find(
+            ({ method }) => method === "turn/steer",
+          )?.params,
+        ).toMatchObject({
+          threadId: "thread-new",
+          clientUserMessageId: "client-steer",
+          expectedTurnId: "turn-rewrite",
+          input: [
+            { type: "text", text: "steer", text_elements: [] },
+            {
+              type: "skill",
+              name: "review",
+              path: join(tempDir, "skills", "review", "SKILL.md"),
+            },
+          ],
+        });
+
+        await expect(
+          session.steer?.({ text: "mismatch", uuid: "client-mismatch" }),
+        ).resolves.toBe(false);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_ACTIVE_TURN", previousActiveTurn);
+        restoreEnv("CODEX_FAKE_STEER_TURN_ID", previousSteerTurnId);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
 
     it("exposes only stable native controls and rejects calls until ready", async () => {

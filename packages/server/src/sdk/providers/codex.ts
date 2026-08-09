@@ -6,7 +6,7 @@
  */
 
 import { type ChildProcess, exec, spawn } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type { ModelInfo } from "@yep-anywhere/shared";
 import {
@@ -62,9 +62,9 @@ import { findCodexCliPath, whichCommand } from "../cli-detection.js";
 import { logSDKMessage } from "../messageLogger.js";
 import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
+  CodexStructuredUserInput,
   SDKMessage,
   TimestampedSDKMessage,
-  UserMessage,
 } from "../types.js";
 import type { ToolApprovalResult } from "../types.js";
 import {
@@ -79,6 +79,8 @@ import {
   DEFAULT_CODEX_MODEL_SOURCE,
   getCodexModelSourceRegistry,
 } from "./codex-model-sources.js";
+import type { TurnSteerParams } from "./codex-protocol/generated/v2/TurnSteerParams.js";
+import type { TurnSteerResponse } from "./codex-protocol/generated/v2/TurnSteerResponse.js";
 import type {
   AskForApproval as CodexAskForApproval,
   ErrorNotification as CodexErrorNotification,
@@ -86,6 +88,7 @@ import type {
   ItemStartedNotification as CodexItemStartedNotification,
   SandboxMode as CodexSandboxMode,
   ThreadItem as CodexThreadItem,
+  UserInput as CodexUserInput,
   CommandExecutionApprovalDecision,
   CommandExecutionRequestApprovalParams,
   FileChangeApprovalDecision,
@@ -1463,7 +1466,11 @@ export class CodexProvider implements AgentProvider {
    * Start a new Codex session.
    */
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
-    const queue = new MessageQueue();
+    const queue = new MessageQueue({
+      preserveAttachments: true,
+      preserveCodexInputs: true,
+      preserveClientMetadata: true,
+    });
     const abortController = new AbortController();
     const runtimeState: CodexTurnRuntimeState = {
       threadId: options.resumeSessionId ?? "",
@@ -1512,16 +1519,34 @@ export class CodexProvider implements AgentProvider {
         if (!activeClient) return false;
         if (!runtimeState.threadId || !runtimeState.activeTurnId) return false;
 
-        const userPrompt = this.extractTextFromMessage(message);
-        if (!userPrompt) return true;
+        const { internalPrompt } = getUserPromptProjection(message);
+        if (!internalPrompt) return false;
 
         try {
-          await activeClient.request<{ turnId: string }>("turn/steer", {
+          const expectedTurnId = runtimeState.activeTurnId;
+          const params: TurnSteerParams = {
             threadId: runtimeState.threadId,
-            input: [{ type: "text", text: userPrompt, text_elements: [] }],
-            expectedTurnId: runtimeState.activeTurnId,
-          });
-          return true;
+            clientUserMessageId: message.uuid,
+            input: buildCodexUserInput(message, internalPrompt),
+            expectedTurnId,
+          };
+          const result = await activeClient.request<TurnSteerResponse>(
+            "turn/steer",
+            params,
+          );
+          const acceptedTurnId = this.getOptionalString(result?.turnId);
+          if (!acceptedTurnId || acceptedTurnId !== expectedTurnId) {
+            log.warn(
+              {
+                threadId: runtimeState.threadId,
+                expectedTurnId,
+                acceptedTurnId: acceptedTurnId ?? null,
+              },
+              "Codex turn/steer returned an invalid turn identity; caller should queue instead",
+            );
+            return false;
+          }
+          return { accepted: true, turnId: acceptedTurnId };
         } catch (error) {
           log.warn(
             {
@@ -2041,27 +2066,10 @@ export class CodexProvider implements AgentProvider {
           isFirstMessage = false;
         }
 
-        // Emit user message with UUID from queue to enable deduplication.
-        const userMessage = withCodexTimestamp({
-          type: "user",
-          uuid: message.uuid,
-          session_id: sessionId,
-          message: {
-            role: "user",
-            content: publicPrompt,
-          },
-        } as SDKMessage);
-        logSdkCorrelationDebug(sessionId, userMessage, {
-          eventKind: "user_message",
-          phase: "submitted",
-          sourceEvent: "queued_input",
-        });
-        yield logMessage(userMessage);
-
         const turnStartParams: TurnStartParams = {
           threadId: sessionId,
           clientUserMessageId: message.uuid,
-          input: [{ type: "text", text: internalPrompt, text_elements: [] }],
+          input: buildCodexUserInput(message, internalPrompt),
           effort: this.mapEffortToReasoningEffort(
             options.reasoningEffort,
             options.effort,
@@ -2078,6 +2086,30 @@ export class CodexProvider implements AgentProvider {
 
         const activeTurnId = turnResult.turn.id;
         runtimeState.activeTurnId = activeTurnId;
+        // Publish the provider-accepted echo only after turn/start returns the
+        // authoritative turn identity. Process separately publishes the
+        // optimistic admission echo with the same UUID.
+        const userMessage = withCodexTimestamp({
+          type: "user",
+          uuid: message.uuid,
+          tempId: message.tempId,
+          session_id: sessionId,
+          clientUserMessageId: message.uuid,
+          turnId: activeTurnId,
+          codexTurnId: activeTurnId,
+          isOptimistic: false,
+          message: {
+            role: "user",
+            content: publicPrompt,
+          },
+        } as SDKMessage);
+        logSdkCorrelationDebug(sessionId, userMessage, {
+          eventKind: "user_message",
+          turnId: activeTurnId,
+          phase: "accepted",
+          sourceEvent: "turn/start",
+        });
+        yield logMessage(userMessage);
         if (historyRewritePending) {
           historyRewritePending = false;
           yield logMessage(
@@ -2214,12 +2246,18 @@ export class CodexProvider implements AgentProvider {
             session_id: sessionId,
             error: codexError.publicMessage,
             codexError,
+            turnId: activeTurnId,
+            codexTurnId: activeTurnId,
+            clientUserMessageId: message.uuid,
           } as SDKMessage);
         }
 
         yield logMessage({
           type: "result",
           session_id: sessionId,
+          turnId: activeTurnId,
+          codexTurnId: activeTurnId,
+          clientUserMessageId: message.uuid,
         } as SDKMessage);
       }
     } catch (error) {
@@ -3985,52 +4023,6 @@ export class CodexProvider implements AgentProvider {
     }
   }
 
-  /**
-   * Extract text content from a user message.
-   */
-  private extractTextFromMessage(message: unknown): string {
-    if (!message || typeof message !== "object") {
-      return "";
-    }
-
-    // Handle UserMessage format
-    const userMsg = message as UserMessage;
-    if (typeof userMsg.text === "string") {
-      return userMsg.text;
-    }
-
-    // Handle SDK message format
-    const sdkMsg = message as {
-      message?: { content?: string | unknown[] };
-    };
-    const content = sdkMsg.message?.content;
-
-    if (typeof content === "string") {
-      return content;
-    }
-
-    if (Array.isArray(content)) {
-      return content
-        .map((block: unknown) => {
-          if (typeof block === "string") return block;
-          if (
-            typeof block === "object" &&
-            block !== null &&
-            "type" in block &&
-            (block as { type: string }).type === "text" &&
-            "text" in block
-          ) {
-            return (block as { text: string }).text;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-
-    return "";
-  }
-
   private getOptionalString(value: unknown): string | null {
     return typeof value === "string" ? value : null;
   }
@@ -4044,6 +4036,60 @@ export class CodexProvider implements AgentProvider {
   private getOptionalNumber(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
+}
+
+export function buildCodexUserInput(
+  message: {
+    attachments?: Array<{ path: string; mimeType: string }>;
+    codexInputs?: CodexStructuredUserInput[];
+    message?: { content?: unknown };
+  },
+  text: string,
+): CodexUserInput[] {
+  const input: CodexUserInput[] = [{ type: "text", text, text_elements: [] }];
+
+  const content = message.message?.content;
+  if (Array.isArray(content)) {
+    for (const rawBlock of content) {
+      const block = asRecord(rawBlock);
+      const source = asRecord(block?.source);
+      if (
+        block?.type !== "image" ||
+        source?.type !== "base64" ||
+        typeof source.data !== "string" ||
+        typeof source.media_type !== "string"
+      ) {
+        continue;
+      }
+      input.push({
+        type: "image",
+        url: `data:${source.media_type};base64,${source.data}`,
+      });
+    }
+  }
+
+  for (const attachment of message.attachments ?? []) {
+    if (!isAbsolute(attachment.path)) continue;
+    const mimeType = attachment.mimeType.toLowerCase();
+    if (mimeType.startsWith("image/")) {
+      input.push({ type: "localImage", path: attachment.path });
+    } else if (mimeType.startsWith("audio/")) {
+      input.push({ type: "localAudio", path: attachment.path });
+    }
+  }
+
+  for (const structuredInput of message.codexInputs ?? []) {
+    if (!structuredInput.name || !structuredInput.path) continue;
+    input.push({ ...structuredInput });
+  }
+
+  return input;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /**

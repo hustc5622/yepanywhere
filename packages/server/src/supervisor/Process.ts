@@ -25,6 +25,7 @@ import {
   type CodexSessionControls,
   codexControlFailure,
 } from "../sdk/providers/codex-controls.js";
+import type { AgentSteerResult } from "../sdk/providers/types.js";
 import type {
   PermissionMode,
   SDKMessage,
@@ -70,6 +71,17 @@ export function shouldEmitMessage(_message: SDKMessage): boolean {
   return true;
 }
 
+function normalizeSteerResult(result: AgentSteerResult): {
+  accepted: boolean;
+  turnId?: string;
+} {
+  if (typeof result === "boolean") return { accepted: result };
+  return {
+    accepted: result.accepted,
+    ...(result.turnId ? { turnId: result.turnId } : {}),
+  };
+}
+
 /**
  * Pending tool approval request.
  * The SDK's canUseTool callback creates this and waits for respondToInput.
@@ -105,7 +117,7 @@ export interface ProcessConstructorOptions extends ProcessOptions {
    * Function to steer an active turn with additional user input.
    * Returns false when steering is unavailable and caller should enqueue.
    */
-  steerFn?: (message: UserMessage) => Promise<boolean>;
+  steerFn?: (message: UserMessage) => Promise<AgentSteerResult>;
   /** Capability-gated Codex app-server controls for this session. */
   codexControls?: CodexSessionControls;
   /** Function to get supported models (SDK 0.2.7+) */
@@ -205,7 +217,7 @@ export class Process {
   /** Function to interrupt current turn gracefully (SDK 0.2.7+) */
   private interruptFn: (() => Promise<void>) | null;
   /** Function to steer an active turn (provider-specific, currently Codex app-server) */
-  private steerFn: ((message: UserMessage) => Promise<boolean>) | null;
+  private steerFn: ((message: UserMessage) => Promise<AgentSteerResult>) | null;
   private codexControls: CodexSessionControls | null;
 
   /** Function to get supported models (SDK 0.2.7+) */
@@ -1109,33 +1121,14 @@ export class Process {
 
     // Create user message with UUID - this UUID will be used by both SSE and SDK
     const uuid = randomUUID();
-    const messageWithUuid: UserMessage = { ...message, uuid };
-    const { internalPrompt, publicPrompt } =
-      buildUserPromptProjection(messageWithUuid);
-
-    const sdkMessage = this.withTimestamp({
-      type: "user",
-      uuid,
-      tempId: message.tempId,
-      message: { role: "user", content: publicPrompt },
-    } as SDKMessage);
+    const messageWithUuid = { ...message, uuid };
 
     if (this.messageQueue) {
       // If provider supports in-turn steering, prefer that over queue-after-turn behavior.
       if (this._state.type === "in-turn" && this.steerFn) {
-        const steerMessage: UserMessage = {
-          ...messageWithUuid,
-          // The provider receives managed paths; the public echo never does.
-          text: internalPrompt,
-          attachments: undefined,
-          documents: undefined,
-        };
+        let steerResult: AgentSteerResult = false;
         try {
-          const steered = await this.steerFn(steerMessage);
-          if (steered) {
-            this.publishOptimisticUserMessage(sdkMessage);
-            return { success: true, position: 0 };
-          }
+          steerResult = await this.steerFn(messageWithUuid);
         } catch (error) {
           getLogger().warn(
             {
@@ -1147,6 +1140,11 @@ export class Process {
             },
             "Steer failed; falling back to queued message",
           );
+        }
+        const admission = normalizeSteerResult(steerResult);
+        if (admission.accepted) {
+          this.publishOptimisticUserMessage(messageWithUuid, admission.turnId);
+          return { success: true, position: 0 };
         }
       }
 
@@ -1175,40 +1173,48 @@ export class Process {
         this.clearIdleTimer();
         this.setState({ type: "in-turn" });
       }
-      this.publishOptimisticUserMessage(sdkMessage);
+      this.publishOptimisticUserMessage(messageWithUuid);
       return { success: true, position };
     }
 
     // Legacy behavior for mock SDK
     this.legacyQueue.push(messageWithUuid);
-    this.publishOptimisticUserMessage(sdkMessage);
+    this.publishOptimisticUserMessage(messageWithUuid);
     if (this._state.type === "idle") {
       this.processNextInQueue();
     }
     return { success: true, position: this.legacyQueue.length };
   }
 
-  private publishOptimisticUserMessage(message: TimestampedSDKMessage): void {
-    if (!shouldEmitMessage(message)) return;
+  private publishOptimisticUserMessage(
+    message: UserMessage & { uuid: string },
+    turnId?: string,
+  ): void {
+    const content = buildUserPromptProjection(message).publicPrompt;
+    this.rememberPublicUserPrompt(message.uuid, content);
+    const sdkMessage = this.withTimestamp({
+      type: "user",
+      uuid: message.uuid,
+      tempId: message.tempId,
+      clientUserMessageId: message.uuid,
+      isOptimistic: true,
+      ...(turnId ? { turnId, codexTurnId: turnId } : {}),
+      message: { role: "user", content },
+    } as SDKMessage);
 
-    if (message.type === "user" && message.uuid) {
-      const content = message.message?.content;
-      if (typeof content === "string") {
-        this.rememberPublicUserPrompt(message.uuid, content);
-      }
-    }
+    if (!shouldEmitMessage(sdkMessage)) return;
 
     // Add to history for SSE replay to late-joining clients. The provider echo
     // uses the same UUID and is deduplicated when JSONL is merged later.
     const isDuplicate =
-      this.currentBucket.some((item) => item.uuid === message.uuid) ||
-      this.previousBucket.some((item) => item.uuid === message.uuid);
+      this.currentBucket.some((item) => item.uuid === sdkMessage.uuid) ||
+      this.previousBucket.some((item) => item.uuid === sdkMessage.uuid);
     if (!isDuplicate) {
-      this.currentBucket.push(message);
+      this.currentBucket.push(sdkMessage);
     }
     this.emit({
       type: "message",
-      message: { ...message, session_id: this._sessionId },
+      message: { ...sdkMessage, session_id: this._sessionId },
     });
   }
 
@@ -1889,13 +1895,37 @@ export class Process {
           // Check for duplicates before adding to history
           // This handles the case where queueMessage added the optimistic message
           // and now the provider is echoing it back with the same UUID
-          const isDuplicate =
+          const duplicateBucket =
             message.type === "user" &&
             message.uuid &&
-            (this.currentBucket.some((m) => m.uuid === message.uuid) ||
-              this.previousBucket.some((m) => m.uuid === message.uuid));
+            (this.currentBucket.some((m) => m.uuid === message.uuid)
+              ? this.currentBucket
+              : this.previousBucket.some((m) => m.uuid === message.uuid)
+                ? this.previousBucket
+                : undefined);
 
-          if (!isDuplicate) {
+          if (duplicateBucket) {
+            const duplicateIndex = duplicateBucket.findIndex(
+              (existing) => existing.uuid === message.uuid,
+            );
+            const optimistic = duplicateBucket[duplicateIndex];
+            if (optimistic) {
+              // Keep one public-history row, but enrich the optimistic entry
+              // with the provider's authoritative turn correlation.
+              duplicateBucket[duplicateIndex] = {
+                ...optimistic,
+                ...message,
+                tempId: message.tempId ?? optimistic.tempId,
+                clientUserMessageId:
+                  message.clientUserMessageId ?? optimistic.clientUserMessageId,
+                message: message.message ?? optimistic.message,
+                isOptimistic:
+                  message.turnId || message.codexTurnId
+                    ? false
+                    : (message.isOptimistic ?? optimistic.isOptimistic),
+              } as TimestampedSDKMessage;
+            }
+          } else {
             this.currentBucket.push(message);
           }
         }
