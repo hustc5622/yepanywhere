@@ -9,11 +9,16 @@ export {
   type FeishuInboundEventHeader,
 } from "./event-header.js";
 export {
+  CODEX_REMOTE_COMMAND_CAPABILITIES,
+  getCodexRemoteCommandCapability,
+  type CodexRemoteCommandCapability,
+  type CodexRemoteCommandSupport,
+} from "./codex-command-registry.js";
+export {
   FeishuInboundProcessor,
   formatFeishuAttachmentManifest,
-  type FeishuConnectionContext,
+  type FeishuCommandName,
   type FeishuInboundAcceptResult,
-  type FeishuInboundEnvelope,
   type FeishuInboundOutcome,
   type FeishuInboundProcessorOptions,
 } from "./inbound-processor.js";
@@ -77,6 +82,18 @@ export {
   type FeishuScopeKind,
   type FeishuScopeResolutionInput,
 } from "./scope.js";
+export {
+  FeishuChannelService,
+  type FeishuChannelServiceOptions,
+  type FeishuConnectionContext,
+  type FeishuDiagnosticReport,
+  type FeishuDoctorAccountResult,
+  type FeishuDoctorResult,
+  type FeishuInboundEnvelope,
+  type FeishuMessageMutationEnvelope,
+  type FeishuMessageMutationPipelineDiagnostic,
+  type FeishuPermissionRequirements,
+} from "./service.js";
 export {
   FeishuSecretStore,
   type FeishuSecretStoreOptions,
