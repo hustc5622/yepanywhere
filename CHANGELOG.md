@@ -7,6 +7,8 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+## [2026.8.1] - 2026-08-09
+
 ### Added
 - Check in a complete Codex app-server 0.147.0 stable/experimental protocol baseline with deterministic schema manifests and explicit coverage guards
 - Add a durable, redacted Codex event spine with replay, diagnostics, canonical transcripts, and shadow-by-default bridge/provider ingress
