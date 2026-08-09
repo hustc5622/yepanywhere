@@ -368,6 +368,7 @@ function createTestRoutes(
     } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
     sessionInteractionService: {
       getPendingInput: vi.fn(async () => null),
+      getInteractionOperations: vi.fn(() => []),
     } as unknown as SessionInteractionService,
     scanner: {
       getOrCreateProject: vi.fn(async () => project),

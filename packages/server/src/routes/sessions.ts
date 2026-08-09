@@ -110,6 +110,32 @@ function isCodexProviderName(
   return provider === "codex" || provider === "codex-oss";
 }
 
+function listInteractionOperations(
+  service: SessionCommandService,
+  ...sessionIds: Array<string | undefined>
+) {
+  const byId = new Map<
+    string,
+    ReturnType<SessionCommandService["getInteractionOperations"]>[number]
+  >();
+  if (typeof service.getInteractionOperations !== "function") {
+    return [];
+  }
+  for (const candidate of new Set(
+    sessionIds.filter((sessionId): sessionId is string => Boolean(sessionId)),
+  )) {
+    for (const operation of service.getInteractionOperations(candidate)) {
+      const current = byId.get(operation.operationId);
+      if (!current || current.version <= operation.version) {
+        byId.set(operation.operationId, operation);
+      }
+    }
+  }
+  return [...byId.values()].sort(
+    (left, right) => left.createdAt - right.createdAt,
+  );
+}
+
 export interface SessionsDeps {
   runtimeController?: RuntimeController;
   /** Shared pending-input authority used by HTTP and channel adapters. */
@@ -915,6 +941,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       await sessionCommandService.getPendingInput(sessionId, {
         processSnapshot: process,
       });
+    const interactionOperations = listInteractionOperations(
+      sessionCommandService,
+      sessionId,
+      process?.sessionId,
+      bridgedSession?.session.id,
+      activePendingInputRequest?.sessionId,
+      activePendingInputRequest?.interaction?.sessionId,
+    );
     const pendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -1008,6 +1042,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         runtime,
         lastSeenAt,
         hasUnread,
+        interactionOperations,
       },
       ownership,
       runtime,
@@ -1376,6 +1411,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       await sessionCommandService.getPendingInput(sessionId, {
         processSnapshot: process,
       });
+    const interactionOperations = listInteractionOperations(
+      sessionCommandService,
+      sessionId,
+      process?.sessionId,
+      bridgedSession?.session.id,
+      activePendingInputRequest?.sessionId,
+      activePendingInputRequest?.interaction?.sessionId,
+    );
     const livePendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -1465,6 +1508,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             reasoningEffort: process.reasoningEffort,
             serviceTier: process.serviceTier,
             contextUsage,
+            interactionOperations,
           },
           messages: processMessages,
           ownership,
@@ -1500,6 +1544,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             runtime,
             lastSeenAt: lastSeenEntry?.timestamp,
             hasUnread,
+            interactionOperations,
           },
           messages: [],
           ownership,
@@ -1630,6 +1675,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           : session.retryStatus,
         lastSeenAt,
         hasUnread,
+        interactionOperations,
       },
       messages: session.messages,
       ownership,

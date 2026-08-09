@@ -790,6 +790,8 @@ export interface AppSessionSummary {
    * from session lists and shown inline under their parent instead.
    */
   parentSessionId?: string;
+  /** Safe persisted Codex descendant identities for detail-tree navigation. */
+  subagentThreads?: SessionSubagentThread[];
   /** Source session when this session is a source-preserving edit fork. */
   forkParentSessionId?: string;
   // Model used for this session (resolved, not "default")
@@ -802,6 +804,8 @@ export interface AppSessionSummary {
   serviceTier?: string;
   // Notification fields
   pendingInputType?: PendingInputType;
+  /** Durable interaction authority snapshots included by session detail APIs. */
+  interactionOperations?: InteractionOperation[];
   activity?: AgentActivity;
   runtime?: SessionRuntime;
   lastSeenAt?: string;
@@ -851,6 +855,16 @@ export interface AppSessionSummary {
   lastErrorMessage?: string;
   /** Present while the provider is retrying a failed request (OpenCode). */
   retryStatus?: SessionRetryStatus;
+}
+
+/** Safe persisted identity used to render and navigate a session subagent tree. */
+export interface SessionSubagentThread {
+  sessionId: string;
+  parentSessionId: string;
+  /** Depth relative to the session whose detail was requested (direct child = 1). */
+  depth: number;
+  agentNickname?: string;
+  agentRole?: string;
 }
 
 /**

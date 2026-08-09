@@ -1,4 +1,4 @@
-import type { MarkdownAugment } from "@yep-anywhere/shared";
+import type { CodexRetryStatus, MarkdownAugment } from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 import type {
   RenderItem,
@@ -7,8 +7,13 @@ import type {
   ToolCallItem,
   ToolResultData,
   UserPromptItem,
+  WarningRenderItem,
 } from "../types/renderItems";
 import { getCodexExecResultOverview } from "./codexExec";
+import {
+  dedupeCodexNativeRenderItems,
+  renderCodexThreadItem,
+} from "./codexRenderItems";
 import { getMessageId } from "./mergeMessages";
 import {
   extractOpenCodeTaskStateUpdates,
@@ -92,7 +97,9 @@ export function preprocessMessages(
     );
   }
 
-  const enrichedItems = enrichWriteStdinWithCommand(items);
+  const enrichedItems = enrichWriteStdinWithCommand(
+    dedupeCodexNativeRenderItems(items),
+  );
   const compactWaits = collapseCodexWaitPolls(enrichedItems);
   return reconcileOpenCodeBackgroundTaskStatuses(
     collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits)),
@@ -114,6 +121,9 @@ function getOpenCodeTaskStateText(item: RenderItem): string[] {
     case "thinking":
       return [];
   }
+
+  // Native Codex render items never carry OpenCode's synthetic task marker.
+  return [];
 }
 
 /**
@@ -577,6 +587,22 @@ function processMessage(
 ): void {
   const msgId = getMessageId(msg);
 
+  if (msg.codexThreadItem) {
+    items.push(
+      renderCodexThreadItem({
+        item: msg.codexThreadItem,
+        threadId: msg.codexThreadId,
+        turnId: msg.codexTurnId,
+        timestamp: msg.timestamp,
+        sequence: msg.codexEventSequence,
+        lifecycle: msg.codexThreadItemLifecycle,
+        rawReasoningAllowed: msg.codexRawReasoningAllowed,
+        sourceMessage: msg,
+      }),
+    );
+    return;
+  }
+
   const taskNotification = parseTaskNotificationMessage(msg);
   if (taskNotification) {
     attachTaskNotificationResult(
@@ -609,6 +635,23 @@ function processMessage(
   // Handle system entries (compact_boundary, status, etc.)
   if (msg.type === "system") {
     const subtype = (msg as { subtype?: string }).subtype ?? "unknown";
+    const retryStatus = codexRetryStatusValue(msg.codexRetryStatus);
+    if (subtype === "warning" && retryStatus) {
+      const warningItem: WarningRenderItem = {
+        type: "warning",
+        id: msgId || `codex-retry-${retryStatus.attempt}`,
+        message:
+          retryStatus.state === "queued"
+            ? "Codex is busy. The request is queued for a bounded retry."
+            : "Codex is busy. Retrying the request.",
+        retrying: true,
+        retryStatus,
+        status: "running",
+        sourceMessages: [msg],
+      };
+      items.push(warningItem);
+      return;
+    }
     // Render compact_boundary / turn_aborted / warning as visible markers
     if (
       subtype === "compact_boundary" ||
@@ -854,6 +897,33 @@ function processMessage(
       attachToolResult(block, msg, items, toolCallIndices, pendingToolCalls);
     }
   }
+}
+
+function codexRetryStatusValue(value: unknown): CodexRetryStatus | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const status = value as Record<string, unknown>;
+  if (
+    (status.state !== "queued" && status.state !== "retrying") ||
+    status.category !== "overloaded" ||
+    status.retryable !== true ||
+    !isPositiveInteger(status.attempt) ||
+    !isPositiveInteger(status.nextAttempt) ||
+    !isPositiveInteger(status.maxAttempts) ||
+    typeof status.retryInMs !== "number" ||
+    !Number.isFinite(status.retryInMs) ||
+    status.retryInMs < 0 ||
+    status.nextAttempt !== status.attempt + 1 ||
+    status.nextAttempt > status.maxAttempts
+  ) {
+    return undefined;
+  }
+  return status as unknown as CodexRetryStatus;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function getInitialToolStatus(

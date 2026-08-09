@@ -2131,6 +2131,77 @@ describe("Codex public prompt projection", () => {
   });
 });
 
+describe("Codex collaboration replay projection", () => {
+  it("replays canonical items without exposing prompts, paths, or status messages", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        timestamp: "2026-08-08T01:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "collab_agent_spawn_begin",
+          call_id: "spawn-1",
+          sender_thread_id: "parent",
+          prompt: "must-not-leak spawn prompt",
+          model: "gpt-5.6",
+          reasoning_effort: "high",
+        },
+      },
+      {
+        timestamp: "2026-08-08T01:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "collab_agent_spawn_end",
+          call_id: "spawn-1",
+          sender_thread_id: "parent",
+          new_thread_id: "child",
+          prompt: "must-not-leak spawn prompt",
+          model: "gpt-5.6",
+          reasoning_effort: "high",
+          status: { completed: "must-not-leak final response" },
+        },
+      },
+      {
+        timestamp: "2026-08-08T01:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "sub_agent_activity",
+          event_id: "activity-1",
+          agent_thread_id: "child",
+          agent_path: "/test-fixtures/codex/agents/private-path",
+          kind: "interacted",
+        },
+      },
+    ];
+
+    const normalized = normalizeSession(buildLoadedSession(entries));
+    expect(normalized.messages).toHaveLength(3);
+    expect(JSON.stringify(normalized.messages)).not.toContain(
+      "must-not-leak spawn prompt",
+    );
+    expect(JSON.stringify(normalized.messages)).not.toContain(
+      "must-not-leak final response",
+    );
+    expect(JSON.stringify(normalized.messages)).not.toContain(
+      "/test-fixtures/codex/agents/private-path",
+    );
+
+    const renderItems = preprocessMessages(normalized.messages);
+    expect(renderItems).toHaveLength(2);
+    expect(renderItems[0]).toMatchObject({
+      type: "subagent",
+      activity: "spawnAgent",
+      agentThreadIds: ["child"],
+      agentStates: { child: "completed" },
+      status: "complete",
+    });
+    expect(renderItems[1]).toMatchObject({
+      type: "subagent",
+      activity: "interacted",
+      agentThreadIds: ["child"],
+    });
+  });
+});
+
 describe("computeCodexRollbackNumTurns", () => {
   const entries: CodexSessionEntry[] = [
     codexUserMessage("q1", 1),

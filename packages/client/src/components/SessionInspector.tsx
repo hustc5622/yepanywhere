@@ -1,4 +1,8 @@
-import type { MarkdownAugment, SessionQuestion } from "@yep-anywhere/shared";
+import type {
+  AppSessionSummary,
+  MarkdownAugment,
+  SessionQuestion,
+} from "@yep-anywhere/shared";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -48,6 +52,8 @@ interface SessionInspectorProps {
   basePath?: string;
   status: SessionStatus;
   processState?: string;
+  /** Persisted Codex lineage. Only these entries are safe navigation targets. */
+  subagentThreads?: NonNullable<AppSessionSummary["subagentThreads"]>;
   onSelectMessage: (messageId: string) => void;
 }
 
@@ -90,7 +96,11 @@ interface SubagentItem {
   sessionId: string;
   description: string;
   agent?: string;
-  status: ToolCallItem["status"];
+  status?: ToolCallItem["status"] | "starting";
+  /** Canonical activity alone is not proof that a persisted session exists. */
+  navigable: boolean;
+  /** Relative depth within the displayed child tree. */
+  depth: number;
 }
 
 interface CodexChannelSummary {
@@ -130,6 +140,7 @@ export function SessionInspector({
   basePath = "",
   status,
   processState,
+  subagentThreads,
   onSelectMessage,
 }: SessionInspectorProps) {
   const { t, locale } = useI18n();
@@ -165,8 +176,8 @@ export function SessionInspector({
   );
   const checks = useMemo(() => buildCheckItems(renderItems), [renderItems]);
   const subagents = useMemo(
-    () => buildSubagentItems(renderItems),
-    [renderItems],
+    () => buildSubagentItems(renderItems, subagentThreads, sessionId),
+    [renderItems, sessionId, subagentThreads],
   );
   const planProgress = useMemo(
     () => buildPlanProgress(renderItems, t),
@@ -336,13 +347,9 @@ export function SessionInspector({
             count={subagents.length}
           >
             <ul className="session-inspector-list">
-              {subagents.map((subagent) => (
-                <li key={subagent.sessionId}>
-                  <Link
-                    className="session-inspector-row"
-                    to={`${basePath}/projects/${projectId}/sessions/${subagent.sessionId}`}
-                    title={subagent.description || subagent.sessionId}
-                  >
+              {subagents.map((subagent) => {
+                const rowContent = (
+                  <>
                     <span
                       className={`session-inspector-check-dot status-${getSubagentDotStatus(subagent.status)}`}
                       aria-hidden="true"
@@ -353,12 +360,46 @@ export function SessionInspector({
                       </span>
                       <span className="session-inspector-row-meta">
                         {subagent.agent ? `${subagent.agent} · ` : ""}
-                        {getSubagentStatusLabel(t, subagent.status)}
+                        {subagent.status
+                          ? getSubagentStatusLabel(t, subagent.status)
+                          : null}
+                        {!subagent.navigable
+                          ? `${subagent.status ? " · " : ""}${t(
+                              "sessionInspectorSubagentUnavailable",
+                            )}`
+                          : null}
                       </span>
                     </span>
-                  </Link>
-                </li>
-              ))}
+                  </>
+                );
+                const indentation = Math.max(0, subagent.depth - 1) * 12;
+
+                return (
+                  <li
+                    key={subagent.sessionId}
+                    data-depth={subagent.depth}
+                    style={{ paddingInlineStart: `${indentation}px` }}
+                  >
+                    {subagent.navigable ? (
+                      <Link
+                        className="session-inspector-row"
+                        to={`${basePath}/projects/${projectId}/sessions/${subagent.sessionId}`}
+                        title={subagent.description || subagent.sessionId}
+                      >
+                        {rowContent}
+                      </Link>
+                    ) : (
+                      <div
+                        className="session-inspector-row"
+                        title={subagent.description || subagent.sessionId}
+                        aria-disabled="true"
+                      >
+                        {rowContent}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </InspectorSection>
         )}
@@ -910,12 +951,34 @@ function getMessageIdLike(message: Message): string {
   return message.uuid ?? message.id ?? "";
 }
 
+type PersistedSubagentThread = NonNullable<
+  AppSessionSummary["subagentThreads"]
+>[number];
+
 /**
- * Collect OpenCode subagent sessions launched from this session's `task` tool
- * calls. Each carries the child session id in its lifted `opencodeMetadata`, so
- * we can link to the subagent's own session page.
+ * Merge provider-native child identities with activity state.
+ *
+ * OpenCode keeps deriving both identity and lifecycle from its persisted task
+ * tool. Codex deliberately separates the two: manifest lineage proves that a
+ * child transcript exists and can be linked, while canonical render items only
+ * provide lifecycle updates. A live-only Codex id remains visible but cannot
+ * navigate to a session that has not been persisted/indexed yet.
  */
-function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
+function buildSubagentItems(
+  items: RenderItem[],
+  persistedThreads: readonly PersistedSubagentThread[] | undefined,
+  currentSessionId: string,
+): SubagentItem[] {
+  const openCodeItems = buildOpenCodeSubagentItems(items);
+  const codexItems = buildCodexSubagentItems(
+    items,
+    persistedThreads,
+    currentSessionId,
+  );
+  return [...openCodeItems, ...codexItems];
+}
+
+function buildOpenCodeSubagentItems(items: RenderItem[]): SubagentItem[] {
   const result: SubagentItem[] = [];
   const resultIndexBySessionId = new Map<string, number>();
 
@@ -938,7 +1001,14 @@ function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
         ? item.toolInput.subagent_type.trim()
         : undefined;
 
-    const next = { sessionId, description, agent, status: item.status };
+    const next = {
+      sessionId,
+      description,
+      agent,
+      status: item.status,
+      navigable: true,
+      depth: 1,
+    } satisfies SubagentItem;
     const existingIndex = resultIndexBySessionId.get(sessionId);
     if (existingIndex === undefined) {
       resultIndexBySessionId.set(sessionId, result.length);
@@ -961,11 +1031,141 @@ function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
   return result;
 }
 
+function buildCodexSubagentItems(
+  items: RenderItem[],
+  persistedThreads: readonly PersistedSubagentThread[] | undefined,
+  currentSessionId: string,
+): SubagentItem[] {
+  const result: SubagentItem[] = [];
+  const resultIndexBySessionId = new Map<string, number>();
+
+  for (const thread of persistedThreads ?? []) {
+    const threadId = thread.sessionId.trim();
+    if (!threadId || threadId === currentSessionId) continue;
+
+    const nickname = thread.agentNickname?.trim();
+    const role = thread.agentRole?.trim();
+    const existingIndex = resultIndexBySessionId.get(threadId);
+    const next: SubagentItem = {
+      sessionId: threadId,
+      description: nickname || role || formatSubagentSessionId(threadId),
+      agent: nickname && role ? role : undefined,
+      navigable: true,
+      depth: normalizeSubagentDepth(thread.depth),
+    };
+
+    if (existingIndex === undefined) {
+      resultIndexBySessionId.set(threadId, result.length);
+      result.push(next);
+    } else {
+      result[existingIndex] = {
+        ...result[existingIndex],
+        ...next,
+      };
+    }
+  }
+
+  for (const item of items) {
+    if (item.type !== "subagent") continue;
+
+    for (const rawThreadId of item.agentThreadIds) {
+      const threadId = rawThreadId.trim();
+      if (!threadId || threadId === currentSessionId) continue;
+
+      const nextStatus = getCodexSubagentStatus(item, threadId);
+      const existingIndex = resultIndexBySessionId.get(threadId);
+      if (existingIndex !== undefined) {
+        const existing = result[existingIndex];
+        if (existing && nextStatus) {
+          result[existingIndex] = { ...existing, status: nextStatus };
+        }
+        continue;
+      }
+
+      const senderDepth = item.senderThreadId
+        ? result.find(
+            (candidate) => candidate.sessionId === item.senderThreadId,
+          )?.depth
+        : undefined;
+      resultIndexBySessionId.set(threadId, result.length);
+      result.push({
+        sessionId: threadId,
+        description: formatSubagentSessionId(threadId),
+        status: nextStatus,
+        navigable: false,
+        depth: Math.min((senderDepth ?? 0) + 1, 10),
+      });
+    }
+  }
+
+  return result;
+}
+
+function getCodexSubagentStatus(
+  item: Extract<RenderItem, { type: "subagent" }>,
+  threadId: string,
+): SubagentItem["status"] {
+  const agentState = item.agentStates?.[threadId];
+  if (agentState) {
+    const normalized = agentState
+      .trim()
+      .toLowerCase()
+      .replaceAll("_", "")
+      .replaceAll("-", "");
+    switch (normalized) {
+      case "pendinginit":
+      case "starting":
+        return "starting";
+      case "running":
+        return "pending";
+      case "completed":
+      case "complete":
+        return "complete";
+      case "interrupted":
+        return "aborted";
+      case "errored":
+      case "error":
+      case "failed":
+      case "notfound":
+        return "error";
+    }
+  }
+
+  const activity = item.activity
+    .trim()
+    .toLowerCase()
+    .replaceAll("_", "")
+    .replaceAll("-", "");
+  if (activity === "started") return "pending";
+  if (activity === "interrupted") return "aborted";
+  // `interacted` is intentionally non-lifecycle in Codex TUI semantics.
+  if (activity === "interacted") return undefined;
+  if (item.status === "error" || item.status === "declined") return "error";
+  if (item.status === "cancelled") return "aborted";
+  if (activity === "spawnagent" && item.status !== "complete") {
+    return "starting";
+  }
+  // Completing a collaboration tool does not imply that the child completed.
+  return undefined;
+}
+
+function normalizeSubagentDepth(depth: number): number {
+  if (!Number.isFinite(depth)) return 1;
+  return Math.min(Math.max(Math.trunc(depth), 1), 10);
+}
+
+function formatSubagentSessionId(sessionId: string): string {
+  if (sessionId.length <= 20) return sessionId;
+  return `${sessionId.slice(0, 10)}…${sessionId.slice(-6)}`;
+}
+
 function getSubagentStatusLabel(
   t: TFunction,
-  status: ToolCallItem["status"],
+  status: NonNullable<SubagentItem["status"]>,
 ): string {
   switch (status) {
+    case "starting":
+      return t("subagentStatusStarting");
     case "pending":
       return t("subagentStatusRunning");
     case "error":
@@ -977,15 +1177,18 @@ function getSubagentStatusLabel(
   }
 }
 
-function getSubagentDotStatus(status: ToolCallItem["status"]): CheckStatus {
+function getSubagentDotStatus(status: SubagentItem["status"]): CheckStatus {
   switch (status) {
+    case "starting":
     case "pending":
       return "running";
     case "error":
     case "aborted":
       return "failed";
-    default:
+    case "complete":
       return "passed";
+    default:
+      return "pending";
   }
 }
 

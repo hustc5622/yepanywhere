@@ -754,9 +754,16 @@ function convertCodexEntries(
             !directEditCallIds.has(patchApplyPayload.call_id),
           )
         : null;
+      const collaborationMessage = convertCodexCollaborationEvent(
+        entry,
+        messageIndex,
+      );
       // Skip agent_message and agent_reasoning events when response_item exists;
       // those are streaming artifacts that duplicate full response data.
-      if (patchApplyMessages && patchApplyPayload) {
+      if (collaborationMessage) {
+        messageIndex++;
+        messages.push(collaborationMessage);
+      } else if (patchApplyMessages && patchApplyPayload) {
         messageIndex++;
         for (const msg of patchApplyMessages) {
           if (isCodexCorrelationDebugEnabled()) {
@@ -2191,6 +2198,117 @@ function convertCodexEventMsg(
     default:
       return null;
   }
+}
+
+function codexCollabStatusLabel(status: unknown): string | undefined {
+  if (typeof status === "string") {
+    switch (status) {
+      case "pending_init":
+        return "pendingInit";
+      case "not_found":
+        return "notFound";
+      case "running":
+      case "interrupted":
+      case "shutdown":
+        return status;
+      default:
+        return undefined;
+    }
+  }
+  if (!isRecord(status)) return undefined;
+  if (Object.hasOwn(status, "completed")) return "completed";
+  if (Object.hasOwn(status, "errored")) return "errored";
+  return undefined;
+}
+
+function codexSpawnToolStatus(
+  childThreadId: string | null,
+  agentStatus: unknown,
+): "completed" | "failed" {
+  const status = codexCollabStatusLabel(agentStatus);
+  return !childThreadId || status === "errored" || status === "notFound"
+    ? "failed"
+    : "completed";
+}
+
+/**
+ * Rebuild the same stable app-server ThreadItem projection used for live
+ * events. Prompts, status messages and agent paths are intentionally omitted:
+ * the persisted UI only needs safe identity and lifecycle fields.
+ */
+function convertCodexCollaborationEvent(
+  entry: CodexEventMsgEntry,
+  index: number,
+): Message | null {
+  const payload = entry.payload;
+  if (payload.type === "collab_agent_spawn_begin") {
+    return {
+      uuid: `codex-native-${payload.call_id}-started-${index}`,
+      type: "system",
+      subtype: "codex_native_item",
+      timestamp: entry.timestamp,
+      codexThreadItem: {
+        type: "collabAgentToolCall",
+        id: payload.call_id,
+        tool: "spawnAgent",
+        status: "inProgress",
+        senderThreadId: payload.sender_thread_id,
+        receiverThreadIds: [],
+        model: payload.model,
+        agentsStates: {},
+      },
+      codexThreadItemLifecycle: "started",
+      codexThreadId: payload.sender_thread_id,
+      codexEventSequence: index,
+      codexRawReasoningAllowed: false,
+    };
+  }
+
+  if (payload.type === "collab_agent_spawn_end") {
+    const childThreadId = payload.new_thread_id;
+    const status = codexCollabStatusLabel(payload.status);
+    return {
+      uuid: `codex-native-${payload.call_id}-completed-${index}`,
+      type: "system",
+      subtype: "codex_native_item",
+      timestamp: entry.timestamp,
+      codexThreadItem: {
+        type: "collabAgentToolCall",
+        id: payload.call_id,
+        tool: "spawnAgent",
+        status: codexSpawnToolStatus(childThreadId, payload.status),
+        senderThreadId: payload.sender_thread_id,
+        receiverThreadIds: childThreadId ? [childThreadId] : [],
+        model: payload.model,
+        agentsStates:
+          childThreadId && status ? { [childThreadId]: { status } } : {},
+      },
+      codexThreadItemLifecycle: "completed",
+      codexThreadId: payload.sender_thread_id,
+      codexEventSequence: index,
+      codexRawReasoningAllowed: false,
+    };
+  }
+
+  if (payload.type === "sub_agent_activity") {
+    return {
+      uuid: `codex-native-${payload.event_id}-${index}`,
+      type: "system",
+      subtype: "codex_native_item",
+      timestamp: entry.timestamp,
+      codexThreadItem: {
+        type: "subAgentActivity",
+        id: payload.event_id,
+        kind: payload.kind,
+        agentThreadId: payload.agent_thread_id,
+      },
+      codexThreadItemLifecycle: "completed",
+      codexEventSequence: index,
+      codexRawReasoningAllowed: false,
+    };
+  }
+
+  return null;
 }
 
 // --- Gemini Conversion Logic ---

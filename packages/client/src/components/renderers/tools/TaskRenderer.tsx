@@ -14,7 +14,6 @@ import { useSessionMetadata } from "../../../contexts/SessionMetadataContext";
 import type { AgentContent } from "../../../hooks/useSessionMessages";
 import { useI18n } from "../../../i18n";
 import { classifyToolError } from "../../../lib/classifyToolError";
-import { isPlanProgressItem } from "../../../lib/preprocessMessages";
 import {
   type PreprocessMessagesCache,
   preprocessMessagesCached,
@@ -268,7 +267,7 @@ function SubagentTranscript({
       preprocessCacheRef.current,
     );
     preprocessCacheRef.current = result.cache;
-    return result.renderItems.filter((item) => !isPlanProgressItem(item));
+    return result.renderItems;
   }, [messages]);
 
   return (

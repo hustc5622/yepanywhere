@@ -226,6 +226,53 @@ describe("Sessions API", () => {
   });
 
   describe("GET /api/projects/:projectId/sessions/:sessionId", () => {
+    it("includes authoritative terminal interaction versions in the session timeline payload", async () => {
+      await writeFile(
+        join(sessionDir, "sess-interaction.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          uuid: "interaction-user-1",
+          cwd: join(testDir, "myproject"),
+          timestamp: "2026-08-08T00:00:00.000Z",
+          message: { role: "user", content: "Run the command" },
+        })}\n`,
+      );
+      const { app, interactionBroker } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const operation = await interactionBroker.register({
+        request: {
+          id: "approval-1",
+          sessionId: "sess-interaction",
+          type: "tool-approval",
+          prompt: "Allow command?",
+          toolName: "Bash",
+          timestamp: new Date().toISOString(),
+          source: "process",
+        },
+        owner: "process",
+        provider: "claude",
+        resolveProvider: async () => true,
+      });
+
+      const res = await app.request(
+        `/api/projects/${projectId}/sessions/sess-interaction`,
+      );
+
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.session.interactionOperations).toEqual([
+        expect.objectContaining({
+          operationId: operation.operationId,
+          requestId: "approval-1",
+          state: "cancelled",
+          version: 1,
+          resolution: expect.objectContaining({ decision: "request_missing" }),
+        }),
+      ]);
+    });
+
     it("returns pendingInputRequest for a persisted Claude AskUserQuestion", async () => {
       await writeFile(
         join(sessionDir, "sess-question.jsonl"),

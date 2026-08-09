@@ -11,7 +11,15 @@ import {
   useParams,
   useSearchParams,
 } from "react-router-dom";
-import { api, isQueuedResumeSessionResponse } from "../api/client";
+import {
+  type CodexStructuredUserInput,
+  api,
+  isQueuedResumeSessionResponse,
+} from "../api/client";
+import {
+  type CodexSkillOption,
+  CodexSkillPicker,
+} from "../components/CodexSkillPicker";
 import { MessageInput, type UploadProgress } from "../components/MessageInput";
 import { MessageInputToolbar } from "../components/MessageInputToolbar";
 import { MessageList } from "../components/MessageList";
@@ -20,6 +28,7 @@ import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { QuestionAnswerPanel } from "../components/QuestionAnswerPanel";
 import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
 import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
+import { SessionForkParentBanner } from "../components/SessionForkParentBanner";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
 import { SessionSearchBar } from "../components/SessionSearchBar";
@@ -55,6 +64,14 @@ import {
   getAgentCommandConfig,
   getStaticAgentCommandConfigs,
 } from "../lib/agentCommands";
+import {
+  type InputRequestInteractionResolution,
+  canResolveInputRequestInteraction,
+  mapInputRequestToInteractionRenderItem,
+  mapInteractionOperationToRenderItem,
+  mapInteractionResolutionToInputResponse,
+} from "../lib/codexRenderItems";
+import { isCodexSubagentViewOnly } from "../lib/codexSubagents";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
@@ -109,6 +126,24 @@ function isCodexAppServerProvider(
   provider: ProviderName | string | undefined | null,
 ): provider is "codex" {
   return provider === "codex";
+}
+
+export function buildCodexSkillInputs(
+  provider: ProviderName | string | undefined | null,
+  skill: CodexSkillOption | null,
+): CodexStructuredUserInput[] | undefined {
+  if (!isCodexAppServerProvider(provider) || !skill) return undefined;
+  return [{ type: "skill", name: skill.name, path: skill.path }];
+}
+
+export function remainingCodexSkillAfterSuccessfulSend(
+  current: CodexSkillOption | null,
+  sent: CodexSkillOption | null,
+): CodexSkillOption | null {
+  if (sent && current?.name === sent.name && current.path === sent.path) {
+    return null;
+  }
+  return current;
 }
 
 function getApprovalAgentName(
@@ -302,6 +337,21 @@ function SessionPageContent({
   // Effective provider for immediate display before session data loads
   const effectiveProvider = session?.provider ?? initialProvider;
   const approvalAgentName = getApprovalAgentName(effectiveProvider);
+  const [selectedCodexSkill, setSelectedCodexSkill] =
+    useState<CodexSkillOption | null>(null);
+  useEffect(() => {
+    if (effectiveProvider && !isCodexAppServerProvider(effectiveProvider)) {
+      setSelectedCodexSkill(null);
+    }
+  }, [effectiveProvider]);
+  const clearCodexSkillAfterSuccessfulSend = useCallback(
+    (sent: CodexSkillOption | null) => {
+      setSelectedCodexSkill((current) =>
+        remainingCodexSkillAfterSuccessfulSend(current, sent),
+      );
+    },
+    [],
+  );
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
   const draftControlsRef = useRef<DraftControls | null>(null);
@@ -701,6 +751,7 @@ function SessionPageContent({
   // advancing. Preserve that authoritative time on the child's latest turn.
   const isOpenCodeSubagentSession =
     session?.provider === "opencode" && Boolean(session.parentSessionId);
+  const codexSubagentViewOnly = isCodexSubagentViewOnly(session);
 
   useEngagementTracking({
     sessionId,
@@ -712,6 +763,11 @@ function SessionPageContent({
   });
 
   const handleSend = async (text: string) => {
+    const selectedCodexSkillAtSend = selectedCodexSkill;
+    const codexInputs = buildCodexSkillInputs(
+      effectiveProvider,
+      selectedCodexSkillAtSend,
+    );
     // Add to pending queue and get tempId to pass to server
     const tempId = addPendingMessage(text);
     let historicalEditPostAttempted = false;
@@ -755,6 +811,7 @@ function SessionPageContent({
           reasoningEffort: session?.reasoningEffort,
           provider: effectiveProvider,
           executor: session?.executor,
+          codexInputs,
         };
         const attachmentsArg =
           currentAttachments.length > 0 ? currentAttachments : undefined;
@@ -902,6 +959,7 @@ function SessionPageContent({
             `Editing historical messages is not supported for ${effectiveProvider ?? "this provider"}`,
           );
         }
+        clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
         return;
       }
 
@@ -924,6 +982,7 @@ function SessionPageContent({
             reasoningEffort: session?.reasoningEffort,
             provider: effectiveProvider,
             executor: session?.executor,
+            codexInputs,
           },
           currentAttachments.length > 0 ? currentAttachments : undefined,
           tempId,
@@ -934,6 +993,7 @@ function SessionPageContent({
           });
           setProcessState("idle");
           draftControlsRef.current?.clearDraft();
+          clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
           showToast(
             `Request queued at position ${result.position}. It has not started yet.`,
             "info",
@@ -958,6 +1018,8 @@ function SessionPageContent({
           tempId,
           thinking,
           session?.reasoningEffort,
+          undefined,
+          codexInputs,
         );
         // If process was restarted due to thinking mode change, reconnect stream
         if (result.restarted && result.processId) {
@@ -967,6 +1029,7 @@ function SessionPageContent({
       }
       // Success - clear the draft from localStorage
       draftControlsRef.current?.clearDraft();
+      clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
     } catch (err) {
       console.error("Failed to send:", err);
 
@@ -990,6 +1053,7 @@ function SessionPageContent({
               reasoningEffort: session?.reasoningEffort,
               provider: effectiveProvider,
               executor: session?.executor,
+              codexInputs,
             },
             currentAttachments.length > 0 ? currentAttachments : undefined,
             tempId,
@@ -1000,6 +1064,7 @@ function SessionPageContent({
             });
             setProcessState("idle");
             draftControlsRef.current?.clearDraft();
+            clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
             showToast(
               `Request queued at position ${result.position}. It has not started yet.`,
               "info",
@@ -1013,6 +1078,7 @@ function SessionPageContent({
             );
           }
           draftControlsRef.current?.clearDraft();
+          clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
           return;
         } catch (retryErr) {
           console.error("Failed to resume session:", retryErr);
@@ -1049,6 +1115,11 @@ function SessionPageContent({
   };
 
   const handleQueue = async (text: string) => {
+    const selectedCodexSkillAtSend = selectedCodexSkill;
+    const codexInputs = buildCodexSkillInputs(
+      effectiveProvider,
+      selectedCodexSkillAtSend,
+    );
     const tempId = addPendingMessage(text);
     setScrollTrigger((prev) => prev + 1);
 
@@ -1082,9 +1153,11 @@ function SessionPageContent({
         thinking,
         session?.reasoningEffort,
         true, // deferred
+        codexInputs,
       );
       removePendingMessage(tempId);
       draftControlsRef.current?.clearDraft();
+      clearCodexSkillAfterSuccessfulSend(selectedCodexSkillAtSend);
     } catch (err) {
       console.error("Failed to queue deferred message:", err);
       removePendingMessage(tempId);
@@ -1136,7 +1209,14 @@ function SessionPageContent({
   const handleApprove = useCallback(async () => {
     if (pendingInputRequest) {
       try {
-        await api.respondToInput(sessionId, pendingInputRequest.id, "approve");
+        await api.respondToInput(
+          sessionId,
+          pendingInputRequest.id,
+          "approve",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
+        );
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
@@ -1165,6 +1245,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_accept_edits",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         // Update local permission mode
         setPermissionMode("acceptEdits");
@@ -1196,6 +1279,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_for_session",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         markPendingInputResolved("in-turn");
       } catch (err) {
@@ -1224,6 +1310,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_strict_auto_review",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         markPendingInputResolved("in-turn");
       } catch (err) {
@@ -1252,6 +1341,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_always",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         markPendingInputResolved("in-turn");
       } catch (err) {
@@ -1276,7 +1368,14 @@ function SessionPageContent({
   const handleDeny = useCallback(async () => {
     if (pendingInputRequest) {
       try {
-        await api.respondToInput(sessionId, pendingInputRequest.id, "deny");
+        await api.respondToInput(
+          sessionId,
+          pendingInputRequest.id,
+          "deny",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
+        );
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
@@ -1307,6 +1406,7 @@ function SessionPageContent({
             "deny",
             undefined,
             feedback,
+            pendingInputRequest.interaction,
           );
           markPendingInputResolved("in-turn");
         } catch (err) {
@@ -1339,6 +1439,8 @@ function SessionPageContent({
             pendingInputRequest.id,
             "approve",
             answers,
+            undefined,
+            pendingInputRequest.interaction,
           );
           markPendingInputResolved("in-turn");
         } catch (err) {
@@ -1439,6 +1541,100 @@ function SessionPageContent({
   const isAskUserQuestion = pendingInputRequest?.toolName === "AskUserQuestion";
   const isPersistedInputRequest = pendingInputRequest?.source === "persisted";
 
+  const pendingInteraction = useMemo(() => {
+    if (
+      !pendingInputRequest ||
+      pendingInputRequest.sessionId !== actualSessionId ||
+      (!isCodexAppServerProvider(effectiveProvider) &&
+        pendingInputRequest.source !== "codex-bridge")
+    ) {
+      return null;
+    }
+
+    const item = mapInputRequestToInteractionRenderItem(pendingInputRequest, {
+      projectId,
+      provider:
+        pendingInputRequest.source === "codex-bridge"
+          ? "codex"
+          : (effectiveProvider ?? "codex"),
+      readOnly: codexSubagentViewOnly || isPersistedInputRequest,
+    });
+    const canResolve =
+      !codexSubagentViewOnly &&
+      !isPersistedInputRequest &&
+      canResolveInputRequestInteraction(pendingInputRequest, item.operation);
+
+    // A server-authoritative operation, including a terminal one observed
+    // while the provider snapshot lags, must suppress the legacy footer. Raw
+    // SSE requests without broker identity keep the compatibility panel until
+    // the authoritative pending-input fetch completes.
+    if (!canResolve && !codexSubagentViewOnly && !isPersistedInputRequest) {
+      return pendingInputRequest.interaction?.state !== "open" &&
+        pendingInputRequest.interaction
+        ? { item, canResolve: false }
+        : null;
+    }
+    return { item, canResolve };
+  }, [
+    actualSessionId,
+    codexSubagentViewOnly,
+    effectiveProvider,
+    isPersistedInputRequest,
+    pendingInputRequest,
+    projectId,
+  ]);
+
+  const handleResolveInteraction = useCallback(
+    async (resolution: InputRequestInteractionResolution) => {
+      if (!pendingInputRequest || !pendingInteraction?.canResolve) {
+        throw new Error("Interaction request is no longer active");
+      }
+      const submission = mapInteractionResolutionToInputResponse(
+        pendingInteraction.item.operation,
+        resolution,
+      );
+
+      try {
+        await api.respondToInput(
+          actualSessionId,
+          pendingInputRequest.id,
+          submission.response,
+          submission.answers,
+          undefined,
+          pendingInteraction.item.operation,
+        );
+        if (submission.response === "approve_accept_edits") {
+          setPermissionMode("acceptEdits");
+        }
+        markPendingInputResolved("in-turn");
+      } catch (err) {
+        if (isStalePendingInputError(err)) {
+          handleStalePendingInput();
+          return;
+        }
+        const status = (err as { status?: number }).status;
+        const fallback =
+          submission.answers !== undefined
+            ? t("sessionAnswerFailed")
+            : submission.response === "deny"
+              ? t("sessionDenyFailed")
+              : t("sessionApproveFailed");
+        showToast(status ? `Error ${status}` : fallback, "error");
+        throw err;
+      }
+    },
+    [
+      handleStalePendingInput,
+      markPendingInputResolved,
+      actualSessionId,
+      pendingInputRequest,
+      pendingInteraction,
+      setPermissionMode,
+      showToast,
+      t,
+    ],
+  );
+
   // If process is actively in-turn or waiting for input, don't mark tools as orphaned.
   // "orphanedToolUseIds" from server just means "no result yet" - but if the process is
   // in-turn (e.g., executing a Task subagent) or waiting for approval, they're not orphaned.
@@ -1460,8 +1656,42 @@ function SessionPageContent({
       preprocessCacheRef.current,
     );
     preprocessCacheRef.current = result.cache;
-    return result.renderItems;
-  }, [messages, markdownAugments, activeToolApproval]);
+
+    const interactionItems = new Map(
+      (session?.interactionOperations ?? []).map((operation) => [
+        operation.operationId,
+        mapInteractionOperationToRenderItem(operation),
+      ]),
+    );
+    if (pendingInteraction) {
+      const pendingOperation = pendingInteraction.item.operation;
+      const current = interactionItems.get(pendingOperation.operationId);
+      if (!current || current.operation.version < pendingOperation.version) {
+        interactionItems.set(
+          pendingOperation.operationId,
+          pendingInteraction.item,
+        );
+      }
+    }
+
+    if (interactionItems.size === 0) return result.renderItems;
+    const projected = result.renderItems.map((item) => {
+      if (item.type !== "interaction") return item;
+      const authoritative = interactionItems.get(item.operation.operationId);
+      if (!authoritative) return item;
+      interactionItems.delete(item.operation.operationId);
+      return authoritative.operation.version >= item.operation.version
+        ? authoritative
+        : item;
+    });
+    return [...projected, ...interactionItems.values()];
+  }, [
+    messages,
+    markdownAugments,
+    activeToolApproval,
+    pendingInteraction,
+    session?.interactionOperations,
+  ]);
 
   // Detect if session has pending tool calls without results
   // This can happen when the session is unowned but was active in another process (VS Code, CLI)
@@ -1949,6 +2179,10 @@ function SessionPageContent({
           onSelectMessage={handleSelectMessage}
         />
 
+        {session?.forkParentSessionId && (
+          <SessionForkParentBanner basePath={basePath} session={session} />
+        )}
+
         {session?.parentSessionId && (
           <Link
             className="subagent-parent-banner"
@@ -2061,11 +2295,17 @@ function SessionPageContent({
                   onFollowingBottomChange={updateActiveWindowFollowingBottom}
                   onEditUserPrompt={
                     !isViewingHistoricalBranch &&
+                    !codexSubagentViewOnly &&
                     supportsHistoricalMessageEditing(session?.provider)
                       ? handleEditUserPrompt
                       : undefined
                   }
                   onSelectBranch={handleSelectBranch}
+                  onResolveInteraction={
+                    pendingInteraction?.canResolve
+                      ? handleResolveInteraction
+                      : undefined
+                  }
                   focusBranchId={pendingBranchFocusId}
                   onBranchFocused={handleBranchFocused}
                   targetMessageId={targetMessageId}
@@ -2084,6 +2324,8 @@ function SessionPageContent({
             {/* User question panel */}
             {pendingInputRequest &&
               pendingInputRequest.sessionId === actualSessionId &&
+              !codexSubagentViewOnly &&
+              !pendingInteraction &&
               isAskUserQuestion && (
                 <QuestionAnswerPanel
                   key={pendingInputRequest.id}
@@ -2098,6 +2340,8 @@ function SessionPageContent({
             {/* Tool approval: show panel + always-visible toolbar */}
             {pendingInputRequest &&
               pendingInputRequest.sessionId === actualSessionId &&
+              !codexSubagentViewOnly &&
+              !pendingInteraction &&
               !isAskUserQuestion && (
                 <>
                   <ToolApprovalPanel
@@ -2220,60 +2464,80 @@ function SessionPageContent({
               </div>
             )}
 
-            {/* No pending approval: show full message input */}
-            {!(
-              pendingInputRequest &&
-              pendingInputRequest.sessionId === actualSessionId &&
-              !isAskUserQuestion
-            ) && (
-              <MessageInput
-                onSend={handleSend}
-                onQueue={
-                  status.owner !== "none" && processState !== "idle"
-                    ? handleQueue
-                    : undefined
-                }
-                placeholder={
-                  status.owner === "external"
-                    ? t("sessionPlaceholderExternal")
-                    : processState === "idle"
-                      ? t("sessionPlaceholderResume")
-                      : t("sessionPlaceholderQueue")
-                }
-                mode={permissionMode}
-                onModeChange={setPermissionMode}
-                isHeld={holdModeEnabled ? isHeld : undefined}
-                onHoldChange={holdModeEnabled ? setHold : undefined}
-                supportsPermissionMode={supportsPermissionMode}
-                provider={effectiveProvider}
-                permissionModes={permissionModes}
-                supportsThinkingToggle={supportsThinkingToggle}
-                isRunning={status.owner === "self"}
-                isThinking={processState === "in-turn"}
-                onStop={handleAbort}
-                draftKey={`draft-message-${sessionId}`}
-                onDraftControlsReady={handleDraftControlsReady}
-                collapsed={
-                  !!(
-                    pendingInputRequest &&
-                    pendingInputRequest.sessionId === actualSessionId
-                  )
-                }
-                contextUsage={session?.contextUsage}
-                projectId={projectId}
-                sessionId={sessionId}
-                attachments={attachments}
-                onAttach={handleAttach}
-                onRemoveAttachment={handleRemoveAttachment}
-                uploadProgress={uploadProgress}
-                commandPrefix={commandPrefix}
-                commandLabel={commandLabel}
-                commands={activeCommands}
-                showCommandButton={showCommandButton}
-                commandButtons={commandButtons}
-                onCustomCommand={handleCustomCommand}
-              />
-            )}
+            {/* Codex collaboration children are parent-owned and view-only. */}
+            {codexSubagentViewOnly ? (
+              <div
+                className="session-branch-sync-banner"
+                data-testid="codex-subagent-view-only"
+                role="status"
+              >
+                <span className="session-branch-sync-text">
+                  {t("sessionCodexSubagentViewOnly")}
+                </span>
+              </div>
+            ) : !(
+                pendingInputRequest &&
+                pendingInputRequest.sessionId === actualSessionId &&
+                !isAskUserQuestion &&
+                !pendingInteraction
+              ) ? (
+              <>
+                {isCodexAppServerProvider(effectiveProvider) && (
+                  <CodexSkillPicker
+                    sessionId={actualSessionId}
+                    selected={selectedCodexSkill}
+                    onSelect={setSelectedCodexSkill}
+                  />
+                )}
+                <MessageInput
+                  onSend={handleSend}
+                  onQueue={
+                    status.owner !== "none" && processState !== "idle"
+                      ? handleQueue
+                      : undefined
+                  }
+                  placeholder={
+                    status.owner === "external"
+                      ? t("sessionPlaceholderExternal")
+                      : processState === "idle"
+                        ? t("sessionPlaceholderResume")
+                        : t("sessionPlaceholderQueue")
+                  }
+                  mode={permissionMode}
+                  onModeChange={setPermissionMode}
+                  isHeld={holdModeEnabled ? isHeld : undefined}
+                  onHoldChange={holdModeEnabled ? setHold : undefined}
+                  supportsPermissionMode={supportsPermissionMode}
+                  provider={effectiveProvider}
+                  permissionModes={permissionModes}
+                  supportsThinkingToggle={supportsThinkingToggle}
+                  isRunning={status.owner === "self"}
+                  isThinking={processState === "in-turn"}
+                  onStop={handleAbort}
+                  draftKey={`draft-message-${sessionId}`}
+                  onDraftControlsReady={handleDraftControlsReady}
+                  collapsed={
+                    !!(
+                      pendingInputRequest &&
+                      pendingInputRequest.sessionId === actualSessionId
+                    )
+                  }
+                  contextUsage={session?.contextUsage}
+                  projectId={projectId}
+                  sessionId={sessionId}
+                  attachments={attachments}
+                  onAttach={handleAttach}
+                  onRemoveAttachment={handleRemoveAttachment}
+                  uploadProgress={uploadProgress}
+                  commandPrefix={commandPrefix}
+                  commandLabel={commandLabel}
+                  commands={activeCommands}
+                  showCommandButton={showCommandButton}
+                  commandButtons={commandButtons}
+                  onCustomCommand={handleCustomCommand}
+                />
+              </>
+            ) : null}
           </div>
         </footer>
       </div>
@@ -2295,6 +2559,7 @@ function SessionPageContent({
             basePath={basePath}
             status={status}
             processState={processState}
+            subagentThreads={session?.subagentThreads}
             onSelectMessage={handleSelectMessage}
           />
         ) : null
@@ -2316,6 +2581,7 @@ function SessionPageContent({
           basePath={basePath}
           status={status}
           processState={processState}
+          subagentThreads={session?.subagentThreads}
           onSelectMessage={handleSelectMessage}
         />
       )}

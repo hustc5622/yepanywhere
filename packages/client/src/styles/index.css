@@ -4217,6 +4217,119 @@ a.sidebar-nav-item {
   gap: 0.5rem;
 }
 
+.codex-skill-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-bottom: var(--space-2);
+}
+
+.codex-skill-picker-button,
+.codex-skill-selection {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+}
+
+.codex-skill-picker-button {
+  padding: 0.375rem 0.625rem;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.codex-skill-picker-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.codex-skill-picker-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.codex-skill-selection {
+  padding: 0.25rem 0.375rem 0.25rem 0.5rem;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.codex-skill-selection-kind {
+  color: var(--text-muted);
+}
+
+.codex-skill-selection-name {
+  overflow: hidden;
+  max-width: 16rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-skill-selection-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.codex-skill-selection-remove:hover {
+  background: var(--bg-active, var(--bg-secondary));
+  color: var(--text-primary);
+}
+
+.codex-skill-modal-content {
+  width: min(28rem, 80vw);
+  max-height: 60vh;
+  padding: var(--space-2);
+  overflow-y: auto;
+}
+
+.codex-skill-modal-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+.codex-skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.codex-skill-item {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.codex-skill-item:hover,
+.codex-skill-item.selected {
+  background: var(--bg-hover);
+}
+
 /* Pending approval indicator button in toolbar */
 .pending-approval-indicator {
   display: flex;
@@ -5392,7 +5505,7 @@ a.sidebar-nav-item {
   color: var(--status-badge-input-text);
 }
 
-/* Subagent → parent session banner (shown on OpenCode subagent session pages) */
+/* Session lineage banners (subagent parent and source-preserving fork parent) */
 .subagent-parent-banner {
   display: flex;
   align-items: center;
@@ -9886,6 +9999,25 @@ button.context-usage-indicator--button:focus-visible {
   gap: var(--space-3);
 }
 
+.feishu-settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.feishu-settings-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.feishu-settings-form-wide {
+  grid-column: 1 / -1;
+}
+
 .remote-executor-form-grid label {
   display: flex;
   flex-direction: column;
@@ -10030,6 +10162,14 @@ button.context-usage-indicator--button:focus-visible {
 @media (max-width: 600px) {
   .remote-executor-form-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .feishu-settings-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .feishu-settings-form-wide {
+    grid-column: auto;
   }
 
   .remote-executor-form-grid-wide {
