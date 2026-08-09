@@ -24,7 +24,7 @@ export interface FeishuTransportCallbacks {
 export interface FeishuTransport {
   start(): Promise<void>;
   stop(): Promise<void>;
-  getMessageApi?(): FeishuMessageApi;
+  getMessageApi?(): FeishuMessageApi | undefined;
 }
 
 export interface FeishuTransportFactoryInput {
