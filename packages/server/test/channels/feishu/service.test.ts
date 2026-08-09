@@ -326,6 +326,23 @@ describe("FeishuChannelService", () => {
     });
     expect(JSON.stringify(doctor)).not.toContain("fixture-sensitive-material");
   });
+
+  it("keeps stable doctor diagnostics available after fail-closed shutdown", async () => {
+    const dataDir = await createDataDir(dataDirs);
+    const service = new FeishuChannelService({ dataDir });
+    await service.initialize();
+    await service.shutdown();
+
+    expect(service.doctor()).toEqual({
+      ok: false,
+      initializationErrorCode: "CHANNEL_STOPPED",
+      accounts: [],
+    });
+    expect(service.diagnostics()).toMatchObject({
+      operational: false,
+      doctor: { initializationErrorCode: "CHANNEL_STOPPED" },
+    });
+  });
 });
 
 class FakeTransportFactory implements FeishuTransportFactory {

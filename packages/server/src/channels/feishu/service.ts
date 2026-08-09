@@ -81,7 +81,10 @@ export interface FeishuDoctorAccountResult {
 
 export interface FeishuDoctorResult {
   ok: boolean;
-  initializationErrorCode?: string;
+  initializationErrorCode?:
+    | "STORE_INITIALIZATION_FAILED"
+    | "CHANNEL_NOT_INITIALIZED"
+    | "CHANNEL_STOPPED";
   accounts: FeishuDoctorAccountResult[];
 }
 
@@ -146,7 +149,7 @@ export class FeishuChannelService {
   private readonly connections = new Map<string, FeishuAccountConnection>();
   private initialized = false;
   private shuttingDown = false;
-  private initializationErrorCode?: string;
+  private initializationErrorCode?: FeishuDoctorResult["initializationErrorCode"];
   private reconcileChain: Promise<void> = Promise.resolve();
 
   constructor(options: FeishuChannelServiceOptions) {
@@ -385,7 +388,15 @@ export class FeishuChannelService {
         accounts: [],
       };
     }
-    this.assertOperational();
+    if (!this.initialized || this.shuttingDown) {
+      return {
+        ok: false,
+        initializationErrorCode: this.shuttingDown
+          ? "CHANNEL_STOPPED"
+          : "CHANNEL_NOT_INITIALIZED",
+        accounts: [],
+      };
+    }
     const accounts = this.configStore.list().map((account) => {
       const policyConfigured =
         account.allowedUsers.length > 0 || account.adminUsers.length > 0;
