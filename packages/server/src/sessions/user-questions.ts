@@ -4,6 +4,7 @@ import {
   stripBridgeMetadata,
   stripIdeMetadata,
 } from "@yep-anywhere/shared";
+import { sanitizeManagedAttachmentPrompt } from "../sdk/messageQueue.js";
 import {
   isSessionSetupText,
   isSyntheticUserPromptText,
@@ -15,7 +16,9 @@ export function compactQuestionText(
   text: string,
   maxLength = SESSION_QUESTION_MAX_LENGTH,
 ): string {
-  const normalized = stripBridgeMetadata(stripIdeMetadata(text))
+  const normalized = sanitizeManagedAttachmentPrompt(
+    stripBridgeMetadata(stripIdeMetadata(text)),
+  )
     .replace(/\s+/g, " ")
     .trim();
   if (normalized.length <= maxLength) return normalized;
