@@ -221,7 +221,7 @@ step("Clean previous builds", () => {
 // Build shared package (types/schemas)
 step("Build shared package", () => {
   log("Building @yep-anywhere/shared (TypeScript compilation)...");
-  execStep("pnpm --filter @yep-anywhere/shared build");
+  execStep("corepack pnpm --filter @yep-anywhere/shared build");
 });
 
 // Build client
@@ -235,7 +235,7 @@ step("Build client", () => {
   log(
     `Building @yep-anywhere/client (Vite production build, BASE_PATH=${clientBasePath || "/"})...`,
   );
-  execStep("pnpm --filter @yep-anywhere/client build", undefined, {
+  execStep("corepack pnpm --filter @yep-anywhere/client build", undefined, {
     BASE_PATH: clientBasePath,
     YEP_BUILD_ID: BUILD_INFO.buildId,
     YEP_BUILD_VERSION: BUILD_INFO.version,
@@ -270,7 +270,7 @@ step("Build client", () => {
 // Build server
 step("Build server", () => {
   log("Building @yep-anywhere/server (TypeScript compilation)...");
-  execStep("pnpm --filter @yep-anywhere/server build");
+  execStep("corepack pnpm --filter @yep-anywhere/server build");
 
   // Verify server dist exists
   const serverDist = path.join(SERVER_PACKAGE, "dist");
