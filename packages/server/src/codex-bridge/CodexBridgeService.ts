@@ -29,6 +29,7 @@ import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { encodeProjectId } from "../projects/paths.js";
 import { ensureRuntimeToken } from "../runtime/token.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
+import { sanitizeManagedAttachmentPrompt } from "../sdk/messageQueue.js";
 import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
@@ -221,7 +222,6 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const MAX_MCP_STARTUP_EVENTS = 50;
 const MAX_RESOLVED_SERVER_REQUEST_IDS = 1_000;
 const CODEX_USAGE_CACHE_TTL_MS = 30_000;
-const MAX_UPSTREAM_STDERR_LENGTH = 64 * 1024;
 const INTERNAL_REQUEST_TIMEOUT_MS = 10_000;
 
 function isMcpThreadLifecycleMethod(
@@ -347,9 +347,17 @@ export class CodexBridgeService implements CodexBridgeController {
 
     const server = createServer((req, res) => {
       this.handleHttpRequest(req, res).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        res.writeHead(500, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: message }));
+        const diagnostic = projectBridgePublicDiagnostic(error);
+        this.lastError = diagnostic.publicMessage;
+        console.warn(
+          `[CodexBridge] HTTP request failed ${diagnostic.logFields}`,
+        );
+        writeBridgeHttpError(
+          res,
+          500,
+          "bridge_internal_error",
+          "Bridge request failed",
+        );
       });
     });
     const wss = new WebSocketServer({ server });
@@ -363,14 +371,13 @@ export class CodexBridgeService implements CodexBridgeController {
 
     await new Promise<void>((resolve) => {
       const onError = (error: Error) => {
-        this.lastError = error.message;
+        const diagnostic = projectBridgePublicDiagnostic(error);
+        this.lastError = diagnostic.publicMessage;
         this.listening = false;
         this.server = null;
         this.wss = null;
         wss.close();
-        console.warn(
-          `[CodexBridge] Failed to listen on ws://${this.host}:${this.port}: ${error.message}`,
-        );
+        console.warn(`[CodexBridge] Failed to listen ${diagnostic.logFields}`);
         cleanup();
         resolve();
       };
@@ -394,8 +401,9 @@ export class CodexBridgeService implements CodexBridgeController {
     });
 
     server.on("error", (error) => {
-      this.lastError = error.message;
-      console.warn(`[CodexBridge] Server error: ${error.message}`);
+      const diagnostic = projectBridgePublicDiagnostic(error);
+      this.lastError = diagnostic.publicMessage;
+      console.warn(`[CodexBridge] Server error ${diagnostic.logFields}`);
     });
   }
 
@@ -433,7 +441,9 @@ export class CodexBridgeService implements CodexBridgeController {
       host: this.host,
       port: this.port,
       url: `ws://${this.host}:${this.port}`,
-      upstreamUrl: this.upstreamUrlOverride ?? this.getManagedUpstreamUrl(),
+      upstreamUrl: sanitizeBridgePublicUrl(
+        this.upstreamUrlOverride ?? this.getManagedUpstreamUrl(),
+      ),
       upstreamRunning: this.isAnyManagedUpstreamRunning(),
       upstreamMode: this.upstreamUrlOverride ? "external" : "managed",
       upstreams: {
@@ -483,7 +493,7 @@ export class CodexBridgeService implements CodexBridgeController {
       })
       .catch((error: unknown) => ({
         usage: null,
-        error: error instanceof Error ? error.message : String(error),
+        error: projectBridgePublicDiagnostic(error).publicMessage,
       }))
       .finally(() => {
         this.usageRequest = null;
@@ -931,7 +941,12 @@ export class CodexBridgeService implements CodexBridgeController {
       return;
     }
 
-    const profile = parseMcpProfile(req.url, req.headers.authorization);
+    const profile = parseMcpProfile(
+      req.url,
+      req.headers.authorization,
+      readSingleHeader(req, "x-yep-codex-profile"),
+      this.requiresAuthentication,
+    );
     const connectionId = this.nextConnectionId++;
     const eventIdentity = createCodexBridgeEventIdentity({
       connectionId,
@@ -964,7 +979,7 @@ export class CodexBridgeService implements CodexBridgeController {
     };
     this.connections.set(connection.id, connection);
     console.log(
-      `[CodexBridge] Connection ${connection.id} profile=${profile} request=${req.url ?? "/"}`,
+      `[CodexBridge] Connection ${connection.id} profile=${profile} request=websocket`,
     );
 
     downstream.on("message", (data, isBinary) => {
@@ -976,16 +991,18 @@ export class CodexBridgeService implements CodexBridgeController {
       this.handleDownstreamClosed(connection, "client"),
     );
     downstream.on("error", (error) => {
-      this.lastError = error.message;
+      this.lastError = projectBridgePublicDiagnostic(error).publicMessage;
       this.handleDownstreamClosed(connection, "client-error");
     });
 
     const upstreamReady = this.connectUpstream(connection);
     connection.upstreamReady = upstreamReady;
     upstreamReady.catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.lastError = message;
-      console.warn(`[CodexBridge] Upstream connection failed: ${message}`);
+      const diagnostic = projectBridgePublicDiagnostic(error);
+      this.lastError = diagnostic.publicMessage;
+      console.warn(
+        `[CodexBridge] Upstream connection failed ${diagnostic.logFields}`,
+      );
       if (downstream.readyState === WebSocket.OPEN) {
         downstream.close(1011, "Failed to connect Codex app-server");
       }
@@ -1030,7 +1047,7 @@ export class CodexBridgeService implements CodexBridgeController {
 
       upstream.on("open", () => {
         console.log(
-          `[CodexBridge] Connection ${connection.id} profile=${connection.profile} upstream=${upstreamUrl}`,
+          `[CodexBridge] Connection ${connection.id} profile=${connection.profile} upstream=${sanitizeBridgePublicUrl(upstreamUrl) ?? "configured"}`,
         );
         while (
           connection.downstreamQueue.length > 0 &&
@@ -1070,7 +1087,7 @@ export class CodexBridgeService implements CodexBridgeController {
 
       upstream.on("close", () => this.closeConnection(connection, "upstream"));
       upstream.on("error", (error) => {
-        this.lastError = error.message;
+        this.lastError = projectBridgePublicDiagnostic(error).publicMessage;
         reject(error);
       });
     });
@@ -1361,9 +1378,10 @@ export class CodexBridgeService implements CodexBridgeController {
       );
       return getString(asRecord(threadRead?.thread)?.cwd);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const diagnostic = projectBridgePublicDiagnostic(error);
+      const safeThreadId = sanitizeBridgeDiagnosticIdentifier(threadId);
       console.debug(
-        `[CodexBridge] Could not resolve MCP cwd for ${method} thread=${threadId}: ${message}`,
+        `[CodexBridge] Could not resolve MCP cwd method=${method}${safeThreadId ? ` thread=${safeThreadId}` : ""} ${diagnostic.logFields}`,
       );
       return undefined;
     }
@@ -1579,7 +1597,7 @@ export class CodexBridgeService implements CodexBridgeController {
         if (!threadId) break;
         const record = this.sessions.get(threadId);
         if (!record) break;
-        const name = getString(p?.threadName);
+        const name = sanitizeBridgePublicTitle(getString(p?.threadName));
         if (name) {
           record.title = name;
           record.fullTitle = name;
@@ -1640,8 +1658,9 @@ export class CodexBridgeService implements CodexBridgeController {
               : "completed";
         record.lastErrorMessage =
           turnStatus === "failed"
-            ? (getString(asRecord(turn?.error)?.message) ??
-              record.lastErrorMessage)
+            ? sanitizeBridgePublicError(
+                turn?.error ?? record.lastErrorMessage ?? "Codex turn failed",
+              )
             : undefined;
         this.resolvePendingForThread(threadId, "turn-completed");
         record.turnActive = false;
@@ -1666,8 +1685,9 @@ export class CodexBridgeService implements CodexBridgeController {
         if (!threadId) break;
         const record = this.sessions.get(threadId);
         if (!record) break;
-        const message = getString(asRecord(p?.error)?.message);
-        record.lastErrorMessage = message ?? "Codex reported an error";
+        record.lastErrorMessage = sanitizeBridgePublicError(
+          p?.error ?? "Codex reported an error",
+        );
         record.updatedAt = new Date().toISOString();
         if (p?.willRetry !== true) {
           record.lastTurnStatus = "failed";
@@ -1791,15 +1811,24 @@ export class CodexBridgeService implements CodexBridgeController {
     connection: BridgeConnection,
     params: Record<string, unknown> | null,
   ): void {
+    const rawError = params?.error;
+    const diagnostic =
+      rawError === null || rawError === undefined
+        ? null
+        : projectBridgePublicDiagnostic(rawError);
     const event: CodexBridgeMcpStartupEvent = {
       timestamp: new Date().toISOString(),
       profile: connection.profile,
       connectionId: connection.id,
-      error: formatDiagnosticValue(params?.error),
+      error: diagnostic?.publicMessage ?? null,
     };
-    const threadId = getString(params?.threadId);
-    const name = getString(params?.name);
-    const status = getString(params?.status);
+    const threadId = sanitizeBridgeDiagnosticIdentifier(
+      getString(params?.threadId),
+    );
+    const name = sanitizeBridgeDiagnosticIdentifier(getString(params?.name));
+    const status = sanitizeBridgeDiagnosticIdentifier(
+      getString(params?.status),
+    );
     if (threadId) event.threadId = threadId;
     if (name) event.name = name;
     if (status) event.status = status;
@@ -1820,7 +1849,7 @@ export class CodexBridgeService implements CodexBridgeController {
         event.threadId ? `thread=${event.threadId}` : null,
         event.name ? `server=${event.name}` : null,
         event.status ? `status=${event.status}` : null,
-        event.error ? `error=${event.error}` : null,
+        diagnostic ? diagnostic.logFields : null,
       ]
         .filter((part): part is string => typeof part === "string")
         .join(" "),
@@ -2108,7 +2137,9 @@ export class CodexBridgeService implements CodexBridgeController {
       model: extra.model ?? getString(thread.model),
       reasoningEffort: extra.reasoningEffort,
       serviceTier: extra.serviceTier,
-      title: getString(thread.name) ?? getString(thread.preview),
+      title: sanitizeBridgePublicTitle(
+        getString(thread.name) ?? getString(thread.preview),
+      ),
       createdAt: timestampFromThreadValue(thread.createdAt),
       updatedAt: timestampFromThreadValue(thread.updatedAt),
       messageCount: Array.isArray(thread.turns)
@@ -2287,10 +2318,9 @@ export class CodexBridgeService implements CodexBridgeController {
         await writeFile(tmpPath, payload, "utf8");
         await rename(tmpPath, statePath);
       } catch (error) {
+        const diagnostic = projectBridgePublicDiagnostic(error);
         console.warn(
-          `[CodexBridge] Failed to persist session state: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `[CodexBridge] Failed to persist session state ${diagnostic.logFields}`,
         );
       }
     };
@@ -2307,11 +2337,25 @@ export class CodexBridgeService implements CodexBridgeController {
       return; // No state file yet, or unreadable - start fresh.
     }
     if (!Array.isArray(parsed.sessions)) return;
+    let needsSafeRewrite = false;
     for (const stored of parsed.sessions) {
       if (!stored || typeof stored.id !== "string" || !stored.projectPath) {
         continue;
       }
       if (this.sessions.has(stored.id)) continue;
+      const restoredTitle = sanitizeBridgePublicTitle(stored.title);
+      const restoredFullTitle = sanitizeBridgePublicTitle(stored.fullTitle);
+      const restoredLastError =
+        typeof stored.lastErrorMessage === "string"
+          ? sanitizeBridgePublicError(stored.lastErrorMessage)
+          : undefined;
+      if (
+        restoredTitle !== (stored.title ?? undefined) ||
+        restoredFullTitle !== (stored.fullTitle ?? undefined) ||
+        restoredLastError !== stored.lastErrorMessage
+      ) {
+        needsSafeRewrite = true;
+      }
       const record: SessionRecord = {
         id: stored.id,
         isSubagent: stored.isSubagent === true,
@@ -2321,8 +2365,8 @@ export class CodexBridgeService implements CodexBridgeController {
         projectPath: stored.projectPath,
         projectName: basename(stored.projectPath),
         projectPathKnown: stored.projectPathKnown === true,
-        title: stored.title ?? null,
-        fullTitle: stored.fullTitle ?? null,
+        title: restoredTitle ?? null,
+        fullTitle: restoredFullTitle ?? null,
         createdAt: stored.createdAt,
         updatedAt: stored.updatedAt,
         messageCount:
@@ -2335,7 +2379,7 @@ export class CodexBridgeService implements CodexBridgeController {
         activity: "idle",
         turnActive: false,
         lastTurnStatus: stored.lastTurnStatus,
-        lastErrorMessage: stored.lastErrorMessage,
+        lastErrorMessage: restoredLastError,
         connectionIds: new Set(),
         completedTurnIds: new Set(
           Array.isArray(stored.completedTurnIds) ? stored.completedTurnIds : [],
@@ -2345,6 +2389,9 @@ export class CodexBridgeService implements CodexBridgeController {
       if (stored.emitted) {
         this.emittedSessionIds.add(record.id);
       }
+    }
+    if (needsSafeRewrite) {
+      await this.persistSessions();
     }
   }
 
@@ -2544,28 +2591,44 @@ export class CodexBridgeService implements CodexBridgeController {
     const url = `ws://127.0.0.1:${port}`;
     const spawnArgs = ["app-server", ...args, "--listen", url];
     console.log(
-      `[CodexBridge] Starting managed Codex app-server profile=${profile} path=${codexPath} args=${JSON.stringify(spawnArgs)}`,
+      `[CodexBridge] Starting managed Codex app-server profile=${profile} configuredArgs=${args.length}`,
     );
     const child = spawn(codexPath, spawnArgs, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       env: process.env,
     });
+    let rejectChildError: (error: Error) => void = () => undefined;
+    const childError = new Promise<never>((_resolve, reject) => {
+      rejectChildError = reject;
+    });
+    child.on("error", (error) => {
+      const diagnostic = projectBridgePublicDiagnostic(error);
+      this.lastError = diagnostic.publicMessage;
+      console.warn(
+        `[CodexBridge] Managed app-server profile=${profile} process error ${diagnostic.logFields}`,
+      );
+      rejectChildError(error);
+    });
     state.process = child;
     state.url = url;
-    let upstreamStderr = "";
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8").trim();
-      if (text) console.debug(`[CodexBridge upstream:${profile}] ${text}`);
+      if (text) {
+        const diagnostic = projectBridgePublicDiagnostic(text);
+        console.debug(
+          `[CodexBridge upstream:${profile}] stdout ${diagnostic.logFields}`,
+        );
+      }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8").trim();
       if (text) {
-        upstreamStderr = `${upstreamStderr}${text}\n`.slice(
-          -MAX_UPSTREAM_STDERR_LENGTH,
+        const diagnostic = projectBridgePublicDiagnostic(text);
+        console.debug(
+          `[CodexBridge upstream:${profile}] stderr ${diagnostic.logFields}`,
         );
-        console.debug(`[CodexBridge upstream:${profile}] ${text}`);
       }
     });
     child.once("exit", (code, signal) => {
@@ -2580,7 +2643,10 @@ export class CodexBridgeService implements CodexBridgeController {
     });
 
     try {
-      await waitForWebSocket(url, this.startupTimeoutMs);
+      await Promise.race([
+        waitForWebSocket(url, this.startupTimeoutMs),
+        childError,
+      ]);
     } catch (error) {
       this.reservedUpstreamPorts.delete(port);
       if (state.process === child) {
@@ -2592,16 +2658,11 @@ export class CodexBridgeService implements CodexBridgeController {
           process.kill(process.platform !== "win32" ? -child.pid : child.pid);
         } catch {}
       }
-      const message = error instanceof Error ? error.message : String(error);
-      const stderr = upstreamStderr.trim();
-      throw new Error(
-        `${message}${stderr ? `\nCodex app-server stderr:\n${stderr}` : ""}`,
-        { cause: error },
-      );
+      throw error;
     }
 
     console.log(
-      `[CodexBridge] Managed Codex app-server profile=${profile} ready at ${url}`,
+      `[CodexBridge] Managed Codex app-server profile=${profile} ready`,
     );
     return url;
   }
@@ -2662,13 +2723,15 @@ export class CodexBridgeService implements CodexBridgeController {
     const running = this.isManagedUpstreamRunning(profile);
     return {
       profile,
-      url: this.upstreamUrlOverride ?? state?.url ?? null,
+      url: sanitizeBridgePublicUrl(
+        this.upstreamUrlOverride ?? state?.url ?? null,
+      ),
       running: this.upstreamUrlOverride ? false : running,
       starting: this.upstreamUrlOverride
         ? false
         : !!state?.startPromise && !running,
       pid: this.upstreamUrlOverride ? null : (process?.pid ?? null),
-      args: [...this.upstreamArgsByProfile[profile]],
+      args: summarizeBridgePublicArgs(this.upstreamArgsByProfile[profile]),
     };
   }
 
@@ -2720,10 +2783,16 @@ function serializeJsonRpcEnvelope(
 function parseMcpProfile(
   url: string | undefined,
   authorization: string | undefined,
+  profileHeader: string | undefined,
+  authenticationRequired: boolean,
 ): CodexBridgeUpstreamProfile {
-  const token = authorization
-    ?.replace(/^Bearer\s+/i, "")
-    .trim()
+  const token = (
+    profileHeader ??
+    (authenticationRequired
+      ? undefined
+      : authorization?.replace(/^Bearer\s+/i, ""))
+  )
+    ?.trim()
     .toLowerCase();
   if (token) {
     if (token === "full" || token === "mcp=full" || token === "profile:full") {
@@ -2893,20 +2962,63 @@ function getString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function formatDiagnosticValue(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "string") return value;
-  if (value instanceof Error) return value.message;
+function sanitizeBridgePublicTitle(
+  value: string | null | undefined,
+): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const sanitized = sanitizeManagedAttachmentPrompt(value).trim();
+  return sanitized.length > 0 ? sanitized : undefined;
+}
 
-  const record = asRecord(value);
-  const message = getString(record?.message);
-  if (message) return message;
+function sanitizeBridgePublicError(error: unknown): string {
+  return classifyCodexError(error).publicMessage;
+}
 
+function projectBridgePublicDiagnostic(error: unknown): {
+  publicMessage: string;
+  logFields: string;
+} {
+  const classified = classifyCodexError(error);
+  return {
+    publicMessage: classified.publicMessage,
+    logFields: `code=${classified.code} category=${classified.category} retryable=${String(classified.retryable)}`,
+  };
+}
+
+function sanitizeBridgePublicUrl(
+  value: string | null | undefined,
+): string | null {
+  if (!value) return null;
   try {
-    return JSON.stringify(value);
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== "ws:" &&
+      parsed.protocol !== "wss:" &&
+      parsed.protocol !== "http:" &&
+      parsed.protocol !== "https:"
+    ) {
+      return null;
+    }
+    return `${parsed.protocol}//${parsed.host}`;
   } catch {
-    return String(value);
+    return null;
   }
+}
+
+function summarizeBridgePublicArgs(args: readonly string[]): string[] {
+  return args.length === 0
+    ? []
+    : [
+        `[${args.length} configured argument${args.length === 1 ? "" : "s"} hidden]`,
+      ];
+}
+
+function sanitizeBridgeDiagnosticIdentifier(
+  value: string | undefined,
+): string | undefined {
+  return value && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
+    ? value
+    : undefined;
 }
 
 function timestampFromThreadValue(value: unknown): string | undefined {

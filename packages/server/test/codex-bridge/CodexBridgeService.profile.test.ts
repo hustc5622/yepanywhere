@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { CodexBridgeService } from "../../src/codex-bridge/CodexBridgeService.js";
 import { getCodexMcpAppServerArgs } from "../../src/codex/mcp-profile.js";
@@ -28,9 +28,15 @@ describe("CodexBridgeService managed upstream profiles", () => {
   });
 
   it("routes default connections to light upstream and bearer tokens to profile upstreams", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const debugSpy = vi
+      .spyOn(console, "debug")
+      .mockImplementation(() => undefined);
     tempDir = await mkdtemp(join(process.cwd(), ".tmp-codex-bridge-profile-"));
     const codexPath = join(tempDir, "fake-codex.mjs");
     const argsLogPath = join(tempDir, "args.jsonl");
+    const sensitiveArg =
+      "--config=mcp.token=profile-wire-secret,path=/private/profile.json";
     previousArgsLog = process.env.YEP_FAKE_CODEX_ARGS_LOG;
     process.env.YEP_FAKE_CODEX_ARGS_LOG = argsLogPath;
 
@@ -44,7 +50,7 @@ describe("CodexBridgeService managed upstream profiles", () => {
       host: "127.0.0.1",
       port: bridgePort,
       upstreamStartPort,
-      lightUpstreamArgs: ["--light-profile"],
+      lightUpstreamArgs: [sensitiveArg],
       clearUpstreamArgs: ["--clear-profile"],
       fullUpstreamArgs: ["--full-profile"],
       codexPath,
@@ -78,7 +84,7 @@ describe("CodexBridgeService managed upstream profiles", () => {
       ]);
       expect(args[1]).toEqual([
         "app-server",
-        ...getCodexMcpAppServerArgs("standard", ["--light-profile"]),
+        ...getCodexMcpAppServerArgs("standard", [sensitiveArg]),
         "--listen",
         expect.stringMatching(/^ws:\/\/127\.0\.0\.1:\d+$/),
       ]);
@@ -98,20 +104,30 @@ describe("CodexBridgeService managed upstream profiles", () => {
         profile: "clear",
         running: true,
         starting: false,
-        args: ["--clear-profile"],
+        args: ["[1 configured argument hidden]"],
       });
       expect(status.upstreams.light).toMatchObject({
         profile: "light",
         running: true,
         starting: false,
-        args: ["--light-profile"],
+        args: ["[1 configured argument hidden]"],
       });
       expect(status.upstreams.full).toMatchObject({
         profile: "full",
         running: true,
         starting: false,
-        args: ["--full-profile"],
+        args: ["[1 configured argument hidden]"],
       });
+      expect(JSON.stringify(status)).not.toContain("profile-wire-secret");
+      expect(JSON.stringify(status)).not.toContain("/private/profile.json");
+      await waitFor(() => debugSpy.mock.calls.length >= 6);
+      const ordinaryLogs = JSON.stringify([
+        ...logSpy.mock.calls,
+        ...debugSpy.mock.calls,
+      ]);
+      expect(ordinaryLogs).not.toContain("profile-wire-secret");
+      expect(ordinaryLogs).not.toContain("/private/profile.json");
+      expect(ordinaryLogs).not.toContain(codexPath);
       expect(status.upstreams.light.url).not.toBe(status.upstreams.full.url);
       expect(status.upstreams.clear.url).not.toBe(status.upstreams.light.url);
 
@@ -204,6 +220,8 @@ describe("CodexBridgeService managed upstream profiles", () => {
       fullClient.close();
       clearClient.close();
       fallbackClient.close();
+      logSpy.mockRestore();
+      debugSpy.mockRestore();
     }
   });
 });
@@ -215,6 +233,8 @@ import { WebSocketServer } from "ws";
 
 const args = process.argv.slice(2);
 const argsLogPath = process.env.YEP_FAKE_CODEX_ARGS_LOG;
+process.stdout.write("diagnostic token=profile-wire-secret path=/private/profile.json\\n");
+process.stderr.write("permission denied at /private/profile.json secret=profile-wire-secret\\n");
 if (argsLogPath) {
   appendFileSync(argsLogPath, JSON.stringify(args) + "\\n");
 }
