@@ -149,7 +149,7 @@ function getArchiveBlockReasonForState(
   return "This session cannot be archived right now.";
 }
 
-function calculateCodexRollbackNumTurns(
+function calculateCodexForkExcludedTurns(
   messages: Message[],
   editedUuid: string,
 ): number | null {
@@ -161,8 +161,8 @@ function calculateCodexRollbackNumTurns(
   );
   if (editedIndex < 0) return null;
 
-  const rollbackNumTurns = userPrompts.length - editedIndex;
-  return rollbackNumTurns > 0 ? rollbackNumTurns : null;
+  const excludedTurns = userPrompts.length - editedIndex;
+  return excludedTurns > 0 ? excludedTurns : null;
 }
 
 function hasBranchChoices(session: Session | null | undefined): boolean {
@@ -310,16 +310,17 @@ function SessionPageContent({
   }, []);
   const { showToast } = useToastContext();
 
-  // Edit/rewind: when set, the next send rewinds from a past user message.
+  // Historical edit boundary for the next send.
   // Claude uses `parentUuid` as its resume point. OpenCode uses the persisted
-  // prompt's own native `uuid` as a fork boundary. Codex app-server uses
-  // `rollbackNumTurns` to match Codex CLI Esc Esc backtrack semantics.
+  // prompt's own native `uuid` as a fork boundary. Codex keeps the legacy
+  // `rollbackNumTurns` wire field as a trailing-turn exclusion count for a
+  // source-preserving native fork.
   const [editRewind, setEditRewind] = useState<{
     parentUuid: string | null;
     uuid: string;
     preview: string;
     rollbackNumTurns?: number | null;
-    /** Entry timestamp of the edited message (Codex authoritative rewind). */
+    /** Entry timestamp used to resolve the authoritative Codex fork boundary. */
     timestamp?: string;
   } | null>(null);
   const [pendingBranchFocusId, setPendingBranchFocusId] = useState<
@@ -382,7 +383,7 @@ function SessionPageContent({
     }: { text: string; uuid: string; parentUuid: string | null }) => {
       if (isViewingHistoricalBranch) return;
       const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
-        ? calculateCodexRollbackNumTurns(messagesRef.current, uuid)
+        ? calculateCodexForkExcludedTurns(messagesRef.current, uuid)
         : null;
       const editedMessage = messagesRef.current.find(
         (message) => getMessageId(message) === uuid,
@@ -741,9 +742,9 @@ function SessionPageContent({
     }
 
     try {
-      // Provider-specific edit semantics: Codex rolls back its current thread,
-      // Claude resumes through the prompt parent, and OpenCode creates a new
-      // native session before the persisted prompt's own message ID.
+      // Provider-specific edit semantics: Codex and OpenCode create a new
+      // native session while preserving the source; Claude resumes through
+      // the prompt parent.
       if (editRewind) {
         const model = session?.model ?? getModelSetting();
         const thinking = getThinkingSetting();
@@ -759,13 +760,13 @@ function SessionPageContent({
           currentAttachments.length > 0 ? currentAttachments : undefined;
         const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
           ? (editRewind.rollbackNumTurns ??
-            calculateCodexRollbackNumTurns(messages, editRewind.uuid))
+            calculateCodexForkExcludedTurns(messages, editRewind.uuid))
           : editRewind.rollbackNumTurns;
         const editSubmission = resolveSessionEditSubmission(effectiveProvider, {
           ...editRewind,
           rollbackNumTurns,
         });
-        if (editSubmission.kind === "codex-resume") {
+        if (editSubmission.kind === "codex-fork") {
           historicalEditPostAttempted = true;
           const result = await requireStartedHistoricalEdit(
             await api.resumeSession(
@@ -787,19 +788,29 @@ function SessionPageContent({
             api.cancelQueuedRequest,
           );
           historicalEditRequestStarted = true;
-          truncateMessagesBefore(editRewind.uuid, tempId);
+          if (result.sessionId === sessionId) {
+            throw new Error(
+              "Codex edit fork did not return a new native session ID",
+            );
+          }
           setEditRewind(null);
           draftControlsRef.current?.clearDraft();
-          setStatus({ owner: "self", processId: result.processId });
           clearSelectedBranchAfterEdit();
-          queueEditBranchRefresh(text);
-          if (result.sessionId !== sessionId) {
-            navigate(
-              `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
-            );
-          } else {
-            reconnectStream();
-          }
+          // This optimistic message belongs to the unchanged source page.
+          // The fork receives its own provider echo/history after navigation.
+          removePendingMessage(tempId);
+          navigate(
+            `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
+            {
+              state: {
+                initialStatus: {
+                  owner: "self",
+                  processId: result.processId,
+                },
+                initialProvider: effectiveProvider,
+              },
+            },
+          );
         } else if (editSubmission.kind === "claude-resume") {
           historicalEditPostAttempted = true;
           const result = await requireStartedHistoricalEdit(
@@ -885,7 +896,7 @@ function SessionPageContent({
             `${basePath}/projects/${projectId}/sessions/${result.sessionId}`,
           );
         } else if (editSubmission.kind === "invalid-codex-boundary") {
-          throw new Error("Could not determine Codex rollback point");
+          throw new Error("Could not determine Codex fork point");
         } else {
           throw new Error(
             `Editing historical messages is not supported for ${effectiveProvider ?? "this provider"}`,
