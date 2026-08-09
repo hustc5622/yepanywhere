@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
@@ -12,10 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add a durable, redacted Codex event spine with replay, diagnostics, canonical transcripts, and shadow-by-default bridge/provider ingress
 - Centralize pending approvals and questions behind a durable at-most-once CAS interaction authority, with authenticated Codex sidecar claims and lifecycle recovery
 - Harden resident provider ownership with atomic worker admission, restart-safe terminal replay, fail-closed message queues, stable Codex turn controls, and redacted bridge diagnostics
+- Add a provider-neutral session application layer with source-preserving Codex forks, lineage, structured Skills input, native controls, and authenticated canonical transcript export
+- Add bounded attachment extraction and generated-artifact materialization with opaque references, exact-event provenance, retention, and verified downloads
+- Add an inert-by-default self-hosted Feishu/Lark channel with isolated accounts, durable inbox/outbox, CardKit replies, broker-backed interactions, commands, diagnostics, and read-only migration preflight
+- Add typed client rendering for native Codex activity, Skills, subagents, fork lineage, canonical interactions, artifacts, transcript export, and Feishu account settings
+- Expose the pinned Codex protocol identity and bounded fingerprint-only compatibility diagnostics through the version API
+
+### Changed
+- Align `.nvmrc` and `.node-version` on Node 22.22.2, verify the repository-pinned pnpm through Corepack, and keep deploy entry points independent of incidental global toolchains
+- Run macOS LaunchAgents from an atomically promoted repository-external runtime bundle while retaining one verified previous bundle for rollback
 
 ### Fixed
 - Keep JSON and other non-media OpenCode uploads on the tool-readable local-path flow instead of forwarding unsupported MIME types as native model attachments
 - Preserve image/PDF input for Anthropic OpenCode models that use the legacy `attachment: true` capability by emitting the `modalities` declaration required by current OpenCode
+
+### Security
+- Keep Feishu/Lark app secrets write-only and exclude message content, answers, provider tool input, raw identities, credentials, and private paths from durable projections and diagnostics
+- Bind generated artifacts and channel callbacks to exact event, actor, scope, generation, digest, and workspace provenance before exposing downloads or external actions
 
 ## [2026.8.0] - 2026-08-06
 
