@@ -219,7 +219,8 @@ export type AppConversationMessage =
 // Session Types
 // =============================================================================
 
-export type SessionCreatedBy = "yep" | "external";
+export type SessionCreatedBy = "yep" | "external" | "channel";
+export type SessionOriginChannel = "feishu";
 
 /** Type of pending input request for notification badges */
 export type PendingInputType = "tool-approval" | "user-question";
@@ -823,6 +824,8 @@ export interface AppSessionSummary {
   originator?: string;
   /** Explicit creation owner recorded by Yep metadata. */
   createdBy?: SessionCreatedBy;
+  /** Non-identifying inbound channel recorded by Yep metadata. */
+  originChannel?: SessionOriginChannel;
   /** CLI version from session metadata (e.g. "0.101.0") */
   cliVersion?: string;
   /** Session source from session metadata (e.g. "vscode", "exec") */

@@ -12,6 +12,7 @@ import type {
   SessionBranchState,
   SessionCreatedBy,
   SessionLastTurnStatus,
+  SessionOriginChannel,
   SessionQuestion,
   SessionRetryStatus,
   SessionRuntime,
@@ -145,6 +146,8 @@ export interface SessionSummary {
   originator?: string;
   /** Explicit creation owner recorded by Yep metadata. */
   createdBy?: SessionCreatedBy;
+  /** Non-identifying inbound channel recorded by Yep metadata. */
+  originChannel?: SessionOriginChannel;
   /** CLI version from session metadata (e.g. "0.101.0") */
   cliVersion?: string;
   /** Session source from session metadata (e.g. "vscode", "exec") */

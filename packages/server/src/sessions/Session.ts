@@ -102,6 +102,7 @@ export class Session extends SessionView {
       isStarred: metadata?.isStarred,
       executor: metadata?.executor,
       createdBy: metadata?.createdBy ?? summary.createdBy,
+      originChannel: metadata?.originChannel ?? summary.originChannel,
       forkParentSessionId:
         metadata?.forkParentSessionId ?? summary.forkParentSessionId,
     };

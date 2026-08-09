@@ -9,6 +9,8 @@ import {
   type OpenCodeSessionConfig,
   type PermissionRules,
   type ProviderName,
+  type SessionCreatedBy,
+  type SessionOriginChannel,
   type ThinkingOption,
   type UploadedFile,
   type UrlProjectId,
@@ -103,6 +105,7 @@ export interface SessionCommandServiceDeps {
 export interface StartSessionCommandInput {
   projectId: string;
   body: StartSessionBody;
+  origin?: SessionCommandOrigin;
   /** Reject atomically before worker-queue admission when an ID is needed now. */
   requireImmediate?: boolean;
 }
@@ -110,6 +113,7 @@ export interface StartSessionCommandInput {
 export interface CreateSessionCommandInput {
   projectId: string;
   body?: CreateSessionBody;
+  origin?: SessionCommandOrigin;
   /** Reject atomically when a create-only session cannot start immediately. */
   requireImmediate?: boolean;
 }
@@ -118,6 +122,7 @@ export interface ResumeSessionCommandInput {
   projectId: string;
   sessionId: string;
   body: StartSessionBody;
+  origin?: SessionCommandOrigin;
   /** Reject atomically when resuming would enter the worker queue. */
   requireImmediate?: boolean;
 }
@@ -131,6 +136,13 @@ export interface QueueSessionMessageCommandInput {
 
 export interface SendSessionMessageCommandInput
   extends ResumeSessionCommandInput {}
+
+export interface SessionCommandOrigin {
+  createdBy?: SessionCreatedBy;
+  originChannel?: SessionOriginChannel;
+  /** Stable, non-secret channel account key used only for Codex event rollout. */
+  codexEventAccountId?: string;
+}
 
 export interface StartSessionBody {
   message: string;
@@ -700,7 +712,10 @@ export class SessionCommandService {
       projectPath: project.path,
       message: this.toUserMessage(body),
       permissionMode: body.mode,
-      modelSettings: prepared.modelSettings,
+      modelSettings: {
+        ...prepared.modelSettings,
+        codexEventAccountId: input.origin?.codexEventAccountId,
+      },
       requireImmediate: input.requireImmediate,
     });
     const admissionFailure = this.mapAdmissionFailure(result);
@@ -719,7 +734,7 @@ export class SessionCommandService {
       limits: prepared.opencodeConfig?.limits,
     });
     await this.persistNewSessionMetadata(result, prepared, body.provider);
-    await this.recordYepSessionOrigin(result.sessionId, project);
+    await this.recordSessionOrigin(result.sessionId, project, input.origin);
 
     return commandSuccess({
       sessionId: result.sessionId,
@@ -749,7 +764,10 @@ export class SessionCommandService {
     const result = await this.deps.runtimeController.createSession({
       projectPath: project.path,
       permissionMode: body.mode,
-      modelSettings: prepared.modelSettings,
+      modelSettings: {
+        ...prepared.modelSettings,
+        codexEventAccountId: input.origin?.codexEventAccountId,
+      },
       requireImmediate: input.requireImmediate,
     });
     const admissionFailure = this.mapAdmissionFailure(result);
@@ -768,7 +786,7 @@ export class SessionCommandService {
       limits: prepared.opencodeConfig?.limits,
     });
     await this.persistNewSessionMetadata(result, prepared, body.provider, true);
-    await this.recordYepSessionOrigin(result.sessionId, project);
+    await this.recordSessionOrigin(result.sessionId, project, input.origin);
 
     return commandSuccess({
       sessionId: result.sessionId,
@@ -1040,6 +1058,7 @@ export class SessionCommandService {
               this.deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
         codexModelProvider: resumeCodexModelProvider,
+        codexEventAccountId: input.origin?.codexEventAccountId,
         opencodeConfig,
         executor,
         globalInstructions:
@@ -1144,7 +1163,7 @@ export class SessionCommandService {
           );
         }
       }
-      await this.recordYepSessionOrigin(actualSessionId, project);
+      await this.recordSessionOrigin(actualSessionId, project, input.origin);
     }
 
     this.recordOpenCodeContextWindowOverride({
@@ -1793,13 +1812,22 @@ export class SessionCommandService {
     }
   }
 
-  private async recordYepSessionOrigin(
+  private async recordSessionOrigin(
     sessionId: string,
     project: Project,
+    origin: SessionCommandOrigin | undefined,
   ): Promise<void> {
     const metadata = this.deps.sessionMetadataService;
     if (!metadata) return;
-    await metadata.setCreatedBy(sessionId, "yep");
+    const resolvedOrigin = {
+      createdBy: origin?.createdBy ?? "yep",
+      originChannel: origin?.originChannel,
+    };
+    if (typeof metadata.setOrigin === "function") {
+      await metadata.setOrigin(sessionId, resolvedOrigin);
+    } else {
+      await metadata.setCreatedBy(sessionId, resolvedOrigin.createdBy);
+    }
     await metadata.setProjectLocation(sessionId, project.id, project.path);
     this.deps.eventBus?.emit({
       type: "session-metadata-changed",

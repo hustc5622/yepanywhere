@@ -963,6 +963,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         serviceTier: sessionSummary?.serviceTier ?? process?.serviceTier,
         originator: sessionSummary?.originator,
         createdBy: metadata?.createdBy ?? sessionSummary?.createdBy,
+        originChannel: metadata?.originChannel ?? sessionSummary?.originChannel,
         cliVersion: sessionSummary?.cliVersion,
         source: sessionSummary?.source,
         approvalPolicy: sessionSummary?.approvalPolicy,
@@ -1438,6 +1439,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             isArchived: metadata?.isArchived,
             isStarred: metadata?.isStarred,
             createdBy: metadata?.createdBy,
+            originChannel: metadata?.originChannel,
             lastSeenAt: lastSeenEntry?.timestamp,
             hasUnread,
             provider: process.provider,
@@ -1472,6 +1474,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             isArchived: metadata?.isArchived,
             isStarred: metadata?.isStarred,
             createdBy: metadata?.createdBy ?? bridgedSession.session.createdBy,
+            originChannel:
+              metadata?.originChannel ?? bridgedSession.session.originChannel,
             ownership,
             pendingInputType: livePendingInputType,
             activity: runtime.activity,
@@ -1594,6 +1598,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         isArchived: metadata?.isArchived,
         isStarred: metadata?.isStarred,
         createdBy: metadata?.createdBy ?? session.createdBy,
+        originChannel: metadata?.originChannel ?? session.originChannel,
         // Model comes from the session reader (extracted from JSONL)
         model: session.model,
         lastTurnStatus: bridgedSession

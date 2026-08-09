@@ -272,6 +272,7 @@ export type {
   ContextUsage,
   SessionQuestion,
   SessionCreatedBy,
+  SessionOriginChannel,
   SessionOwnership,
   SessionSandboxPolicy,
   OpenCodeModelDefaultLimits,

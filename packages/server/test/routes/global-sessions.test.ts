@@ -1,4 +1,8 @@
-import type { SessionCreatedBy, UrlProjectId } from "@yep-anywhere/shared";
+import type {
+  SessionCreatedBy,
+  SessionOriginChannel,
+  UrlProjectId,
+} from "@yep-anywhere/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodexBridgeController } from "../../src/codex-bridge/types.js";
 import type { SessionIndexService } from "../../src/indexes/index.js";
@@ -90,6 +94,7 @@ describe("Global Sessions Routes", () => {
       isArchived?: boolean;
       isStarred?: boolean;
       createdBy?: SessionCreatedBy;
+      originChannel?: SessionOriginChannel;
     }
   >;
   let externalSessions: Set<string>;
@@ -229,13 +234,17 @@ describe("Global Sessions Routes", () => {
 
       vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
       sessionsByDir.set("/sessions/proj1", [session]);
-      metadataMap.set("sess1", { createdBy: "yep" });
+      metadataMap.set("sess1", {
+        createdBy: "channel",
+        originChannel: "feishu",
+      });
 
       const result = await makeRequest();
 
       expect(result.sessions[0]).toMatchObject({
         id: "sess1",
-        createdBy: "yep",
+        createdBy: "channel",
+        originChannel: "feishu",
         originator: "Codex Desktop",
         source: "appServer",
       });
