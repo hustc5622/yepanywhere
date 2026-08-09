@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,6 +18,26 @@ describe("Feishu message mutations", () => {
         .splice(0)
         .map((dir) => rm(dir, { recursive: true, force: true })),
     );
+  });
+
+  it("does not materialize mutation state before the first official event", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-mutations-"));
+    dataDirs.push(dataDir);
+    const store = new FeishuMessageMutationStore({ dataDir });
+    await store.initialize();
+
+    await expect(access(store.filePath)).rejects.toThrow();
+    await store.apply("account-fixture", {
+      version: 1,
+      eventId: "event-fixture",
+      eventType: "im.message.recalled_v1",
+      messageId: "message-fixture",
+      kind: "recalled",
+      occurredAtMs: 1_786_063_200_000,
+      source: "event",
+      recallType: "message_owner",
+    });
+    await expect(access(store.filePath)).resolves.toBeUndefined();
   });
 
   it("documents edit as a read observation and parses official recall events", () => {

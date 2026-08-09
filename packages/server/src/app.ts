@@ -15,6 +15,10 @@ import {
 } from "./archive/index.js";
 import type { AuthService } from "./auth/AuthService.js";
 import { createAuthRoutes } from "./auth/routes.js";
+import type { FeishuBindingStore } from "./channels/feishu/binding-store.js";
+import type { FeishuDurableInbox } from "./channels/feishu/inbox.js";
+import type { FeishuOperationStore } from "./channels/feishu/operation-store.js";
+import type { FeishuChannelService } from "./channels/feishu/service.js";
 import type { CodexBridgeController } from "./codex-bridge/types.js";
 import type { SessionTitleGenerationConfig } from "./config.js";
 import type { DeviceBridgeService } from "./device/DeviceBridgeService.js";
@@ -86,6 +90,7 @@ import {
 } from "./routes/deploy.js";
 import { createDevRoutes } from "./routes/dev.js";
 import { createDeviceRoutes } from "./routes/devices.js";
+import { createFeishuChannelRoutes } from "./routes/feishu-channel.js";
 import { createFilesRoutes } from "./routes/files.js";
 import { createGitStatusRoutes } from "./routes/git-status.js";
 import { createGlobalSessionsRoutes } from "./routes/global-sessions.js";
@@ -238,6 +243,16 @@ export interface AppOptions {
   codexTranscriptStoreSources?: readonly CodexTranscriptStoreSource[];
   /** OpenCode bridge for OpenCode CLI sessions. */
   opencodeBridgeService?: OpenCodeBridgeController;
+  /** Self-hosted Feishu/Lark channel configuration and lifecycle. */
+  feishuChannelService?: FeishuChannelService;
+  /** Protected Feishu scope-to-session bindings exposed to authenticated admins. */
+  feishuBindingStore?: FeishuBindingStore;
+  /** Durable Feishu event identities used for recovery and opaque deep links. */
+  feishuInbox?: FeishuDurableInbox;
+  /** Broker-owned interaction projections used for aggregate diagnostics. */
+  feishuOperationStore?: FeishuOperationStore;
+  /** Adapter-wide readiness, including persistence and recovery. */
+  feishuChannelReady?: () => boolean;
   /** AI title generation settings. */
   sessionTitleGeneration?: SessionTitleGenerationConfig;
   /** If non-empty, only these provider names are exposed via the API. */
@@ -1277,6 +1292,7 @@ export function createApp(options: AppOptions): AppResult {
       supervisor,
       scanner,
       readerFactory,
+      feishuInbox: options.feishuInbox,
       externalTracker,
       notificationService: options.notificationService,
       sessionMetadataService: options.sessionMetadataService,
@@ -1510,6 +1526,19 @@ export function createApp(options: AppOptions): AppResult {
           });
         },
         ohmyrouterBenchmarkService: options.ohmyrouterBenchmarkService,
+      }),
+    );
+  }
+
+  if (options.feishuChannelService) {
+    app.route(
+      "/api/channels/feishu",
+      createFeishuChannelRoutes({
+        feishuChannelService: options.feishuChannelService,
+        bindingStore: options.feishuBindingStore,
+        inbox: options.feishuInbox,
+        operationStore: options.feishuOperationStore,
+        isChannelReady: options.feishuChannelReady,
       }),
     );
   }

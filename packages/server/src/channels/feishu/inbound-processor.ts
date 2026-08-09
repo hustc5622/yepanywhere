@@ -1,11 +1,16 @@
 import { realpath } from "node:fs/promises";
-import { isAbsolute, relative } from "node:path";
+import { basename, isAbsolute, relative } from "node:path";
 import type {
   FeishuAccountConfig,
   FeishuSessionBinding,
   UploadedFile,
 } from "@yep-anywhere/shared";
+import {
+  containsSensitiveText,
+  redactSensitivePublicText,
+} from "../../codex-events/redaction.js";
 import { encodeProjectId } from "../../projects/paths.js";
+import type { CodexNativeControlRequest } from "../../sdk/providers/codex-controls.js";
 import type { SessionCommandService } from "../../services/SessionCommandService.js";
 import type { FeishuBindingStore } from "./binding-store.js";
 import {
@@ -25,11 +30,27 @@ import type {
   FeishuMessageApi,
   FeishuNormalizedInboundMessage,
 } from "./normalization/types.js";
+import {
+  type FeishuStreamingReplyTarget,
+  hasFeishuInteractionApi,
+} from "./outbound.js";
 import { authorizeFeishuMessage } from "./policy.js";
+import type {
+  FeishuReplyManager,
+  FeishuTurnReplyHandle,
+  FeishuTurnReplyInput,
+} from "./reply-manager.js";
 import { FeishuScopeScheduler } from "./scheduler.js";
 import { type FeishuScope, resolveFeishuScope } from "./scope.js";
+import type {
+  FeishuConnectionContext,
+  FeishuInboundEnvelope,
+} from "./service.js";
+import type {
+  FeishuSkillSelectionLease,
+  FeishuSkillSelectionManager,
+} from "./skill-selection-manager.js";
 import type { FeishuStatusRegistry } from "./status.js";
-import type { FeishuBotIdentity } from "./transport.js";
 
 export interface FeishuInboundProcessorOptions {
   sessionCommandService: SessionCommandService;
@@ -37,24 +58,11 @@ export interface FeishuInboundProcessorOptions {
   inbox: FeishuDurableInbox;
   mediaDownloader?: FeishuMediaDownloader;
   normalizer?: FeishuMessageNormalizer;
+  replyManager?: FeishuReplyManager;
+  skillSelectionManager?: FeishuSkillSelectionManager;
   statusRegistry?: FeishuStatusRegistry;
   debounceMs?: number;
   onOutcome?(outcome: FeishuInboundOutcome): void | Promise<void>;
-}
-
-/** Minimal receive envelope. Service/lifecycle ownership is added in Batch 7. */
-export interface FeishuInboundEnvelope {
-  account: FeishuAccountConfig;
-  event: unknown;
-  botIdentity?: FeishuBotIdentity;
-  api?: FeishuMessageApi;
-}
-
-/** Account-local recovery context without transport or output ownership. */
-export interface FeishuConnectionContext {
-  account: FeishuAccountConfig;
-  botIdentity: FeishuBotIdentity;
-  api: FeishuMessageApi;
 }
 
 export interface FeishuInboundAcceptResult {
@@ -65,12 +73,25 @@ export interface FeishuInboundAcceptResult {
 }
 
 export interface FeishuInboundOutcome {
-  type: "message";
+  type: "message" | "command";
   accountId: string;
   scopeKey: string;
   inboxKeys: string[];
   sessionId?: string;
+  command?: FeishuCommandName;
+  text?: string;
 }
+
+export type FeishuCommandName =
+  | "help"
+  | "new"
+  | "reset"
+  | "status"
+  | "stop"
+  | "project"
+  | "mode"
+  | "doctor"
+  | "codex";
 
 interface AcceptedMessage {
   account: FeishuAccountConfig;
@@ -78,6 +99,12 @@ interface AcceptedMessage {
   normalized: FeishuNormalizedInboundMessage;
   record: FeishuInboxRecord;
   scope: FeishuScope;
+  role: "user" | "admin";
+}
+
+interface FeishuCommand {
+  name: FeishuCommandName;
+  argument?: string;
 }
 
 interface ResolvedProject {
@@ -85,12 +112,16 @@ interface ResolvedProject {
   projectPath: string;
 }
 
+type FeishuCommandPermissionMode = "default" | "plan" | "acceptEdits";
+
 export class FeishuInboundProcessor {
   private readonly sessionCommandService: SessionCommandService;
   private readonly bindingStore: FeishuBindingStore;
   private readonly inbox: FeishuDurableInbox;
   private readonly mediaDownloader?: FeishuMediaDownloader;
   private readonly normalizer: FeishuMessageNormalizer;
+  private readonly replyManager?: FeishuReplyManager;
+  private readonly skillSelectionManager?: FeishuSkillSelectionManager;
   private readonly statusRegistry?: FeishuStatusRegistry;
   private readonly onOutcome?: FeishuInboundProcessorOptions["onOutcome"];
   private readonly scheduler: FeishuScopeScheduler<
@@ -107,6 +138,8 @@ export class FeishuInboundProcessor {
     this.inbox = options.inbox;
     this.mediaDownloader = options.mediaDownloader;
     this.normalizer = options.normalizer ?? new FeishuMessageNormalizer();
+    this.replyManager = options.replyManager;
+    this.skillSelectionManager = options.skillSelectionManager;
     this.statusRegistry = options.statusRegistry;
     this.onOutcome = options.onOutcome;
     this.scheduler = new FeishuScopeScheduler({
@@ -191,6 +224,7 @@ export class FeishuInboundProcessor {
           botIdentity,
           api: envelope.api,
           record: received.record,
+          role: policy.role,
         }),
       );
     }
@@ -209,23 +243,39 @@ export class FeishuInboundProcessor {
       const binding = record.scopeKey
         ? this.bindingStore.get(record.scopeKey)
         : undefined;
-      if (record.status === "dispatched") {
-        if (binding?.sessionId === record.sessionId) {
-          await this.inbox.complete(record.key);
-        } else {
-          await this.failRecord(record.key, "RECOVERY_FAILED");
-        }
+      const context = getContext(record.accountId);
+      if (record.status === "dispatched" && (!binding || !record.messageId)) {
+        await this.failRecord(record.key, "RECOVERY_FAILED");
         continue;
       }
       if (
-        record.status === "dispatching" &&
-        record.messageId &&
-        binding?.lastInboundMessageId === record.messageId
+        record.status === "dispatched" ||
+        (record.status === "dispatching" &&
+          record.messageId &&
+          binding?.lastInboundMessageId === record.messageId)
       ) {
-        await this.inbox.markDispatched(record.key, {
-          sessionId: binding.sessionId,
-        });
-        await this.inbox.complete(record.key);
+        if (record.status === "dispatching") {
+          await this.inbox.markDispatched(record.key, {
+            sessionId: binding?.sessionId,
+          });
+        }
+        const restored =
+          binding && context && record.messageId && this.replyManager
+            ? await this.replyManager.restoreTurn(
+                createTurnReplyInput({
+                  account: context.account,
+                  api: context.api,
+                  binding,
+                  record,
+                  replyToMessageId: record.messageId,
+                  requesterOpenId: binding.lastInboundSenderOpenId,
+                  allowedOperatorOpenIds: context.account.adminUsers,
+                }),
+              )
+            : false;
+        if (!restored && binding && context && this.replyManager) {
+          await this.failRecord(record.key, "RECOVERY_FAILED");
+        }
         continue;
       }
       if (record.status === "dispatching") {
@@ -243,7 +293,6 @@ export class FeishuInboundProcessor {
         await this.failRecord(record.key, "RECOVERY_FAILED");
         continue;
       }
-      const context = getContext(record.accountId);
       if (
         !context?.api.fetchMessageEvent ||
         !record.messageId ||
@@ -278,6 +327,7 @@ export class FeishuInboundProcessor {
             botIdentity: context.botIdentity,
             api: context.api,
             record,
+            role: policy.role,
           }),
         );
       } catch {
@@ -293,6 +343,7 @@ export class FeishuInboundProcessor {
     await Promise.allSettled(this.inFlight.values());
     this.inFlight.clear();
     this.mediaDownloader?.stopRetentionCleanup();
+    this.skillSelectionManager?.shutdown();
   }
 
   private async normalizeAndSchedule(input: {
@@ -301,6 +352,7 @@ export class FeishuInboundProcessor {
     botIdentity: NonNullable<FeishuInboundEnvelope["botIdentity"]>;
     api?: FeishuMessageApi;
     record: FeishuInboxRecord;
+    role: "user" | "admin";
   }): Promise<void> {
     const normalizationStartedAt = Date.now();
     let normalized: FeishuNormalizedInboundMessage;
@@ -330,34 +382,44 @@ export class FeishuInboundProcessor {
       normalized.chatType === "group" &&
       !normalized.threadId &&
       normalized.rootId &&
-      input.api?.getChatMode
+      input.account.groupSessionMode === "thread-when-available"
     ) {
-      chatMode = await input.api
-        .getChatMode(normalized.chatId)
-        .catch(() => undefined);
+      if (!input.api?.getChatMode) {
+        await this.failRecord(input.record.key, "NORMALIZATION_FAILED");
+        return;
+      }
+      try {
+        chatMode = await input.api.getChatMode(normalized.chatId);
+      } catch {
+        // A root_id can be either a normal group reply or a topic root. Do not
+        // guess and risk projecting a topic response into the main chat.
+        await this.failRecord(input.record.key, "NORMALIZATION_FAILED");
+        return;
+      }
     }
     const scope = resolveFeishuScope({
       account: input.account,
       message: normalized,
       chatMode,
     });
-    // Batch 6 owns normal inbound turns only. Commands and interactive output
-    // are added atomically in Batch 7; never reinterpret a slash command as a
-    // provider prompt while that authority is absent.
-    if (isDeferredFeishuCommand(normalized.content)) {
-      await this.failRecord(input.record.key, "DISPATCH_FAILED");
-      return;
-    }
     const accepted: AcceptedMessage = {
       account: input.account,
       api: input.api,
       normalized,
       record: input.record,
       scope,
+      role: input.role,
     };
+    const command = parseFeishuCommand(normalized.content);
     this.adjustQueueDepth(input.account.id, 1);
     try {
-      const outcome = await this.scheduler.enqueueMessage(scope.key, accepted);
+      const outcome = command
+        ? await this.scheduler.enqueueControl(
+            scope.key,
+            () => this.dispatchCommand(accepted, command),
+            { priority: command.name === "stop" ? "high" : "normal" },
+          )
+        : await this.scheduler.enqueueMessage(scope.key, accepted);
       await this.onOutcome?.(outcome);
     } finally {
       this.adjustQueueDepth(input.account.id, -1);
@@ -377,6 +439,7 @@ export class FeishuInboundProcessor {
         batch.map((message) => [message.record.key, message]),
       ).values(),
     ];
+    let replyHandle: FeishuTurnReplyHandle | undefined;
     try {
       for (const message of messages) {
         await this.inbox.beginDispatch(message.record.key, { scopeKey });
@@ -397,12 +460,52 @@ export class FeishuInboundProcessor {
       binding ??= this.buildBinding(first, project, first.record.tempId);
 
       const lastMessage = messages.at(-1);
+      const skillSelection = lastMessage
+        ? this.skillSelectionManager?.peekForNextMessage({
+            accountId: first.account.id,
+            scopeKey,
+            sessionId: binding.sessionId,
+            requesterOpenId: lastMessage.normalized.senderId,
+          })
+        : undefined;
+      if (this.replyManager && lastMessage) {
+        replyHandle = await this.replyManager.startTurn(
+          createTurnReplyInput({
+            account: first.account,
+            api: lastMessage.api,
+            binding,
+            record: first.record,
+            records: messages.map((message) => message.record),
+            replyToMessageId: lastMessage.normalized.messageId,
+            requesterOpenId: lastMessage.normalized.senderId,
+            deferSubscription: isFreshBinding,
+            allowedOperatorOpenIds: [
+              ...new Set([
+                ...messages.map((message) => message.normalized.senderId),
+                ...first.account.adminUsers,
+              ]),
+            ],
+          }),
+        );
+      }
 
       const attachmentResults = await Promise.all(
         messages.map((message) =>
           this.downloadAttachments(message, binding as FeishuSessionBinding),
         ),
       );
+      if (replyHandle && this.mediaDownloader) {
+        const taskIds = [
+          ...new Set(messages.map((message) => message.record.tempId)),
+        ];
+        replyHandle.addTerminalCleanup(async () => {
+          await Promise.all(
+            taskIds.map((taskId) =>
+              this.mediaDownloader?.releaseTaskAudioStaging(taskId),
+            ),
+          );
+        });
+      }
       const attachments = attachmentResults.flatMap(
         (result) => result.attachments,
       );
@@ -421,6 +524,7 @@ export class FeishuInboundProcessor {
         provider: "codex" as const,
         codexMcpMode: binding.codexMcpMode,
         tempId: messages[0]?.record.tempId,
+        ...(skillSelection ? { codexInputs: skillSelection.codexInputs } : {}),
       };
       const result = isFreshBinding
         ? await this.sessionCommandService.start({
@@ -449,10 +553,11 @@ export class FeishuInboundProcessor {
       }
       const runtimeProcessId = readString(result.body.processId);
       if (!runtimeProcessId) {
-        // Channel dispatches need a concrete runtime generation before a
-        // durable binding can serve as the at-most-once receipt.
+        // Channel dispatches need a concrete runtime generation before the
+        // inbox can become dispatched or a one-shot Skill can be consumed.
         throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
       }
+      await this.consumeSkillSelection(skillSelection);
       binding = await this.bindingStore.upsert({
         ...binding,
         sessionId: actualSessionId,
@@ -464,7 +569,16 @@ export class FeishuInboundProcessor {
         await this.inbox.markDispatched(message.record.key, {
           sessionId: actualSessionId,
         });
-        await this.inbox.complete(message.record.key);
+      }
+      if (replyHandle) {
+        await replyHandle.dispatchAccepted(binding.sessionId, {
+          processId: runtimeProcessId,
+          restarted: result.body.restarted === true,
+        });
+      } else {
+        for (const message of messages) {
+          await this.inbox.complete(message.record.key);
+        }
       }
       return {
         type: "message",
@@ -474,10 +588,326 @@ export class FeishuInboundProcessor {
         sessionId: binding.sessionId,
       };
     } catch (error) {
+      await replyHandle?.dispatchFailed();
       const code = toInboxErrorCode(error);
       await Promise.all(
         messages.map((message) => this.failRecord(message.record.key, code)),
       );
+      throw error;
+    }
+  }
+
+  private async dispatchCommand(
+    message: AcceptedMessage,
+    command: FeishuCommand,
+  ): Promise<FeishuInboundOutcome> {
+    const { record, scope, account } = message;
+    try {
+      await this.inbox.beginDispatch(record.key, { scopeKey: scope.key });
+      let binding = this.bindingStore.get(scope.key);
+      let text: string;
+
+      switch (command.name) {
+        case "help": {
+          text = FEISHU_COMMAND_HELP;
+          break;
+        }
+        case "reset": {
+          this.skillSelectionManager?.clearScope(scope.key);
+          const removed = await this.bindingStore.remove(scope.key);
+          binding = undefined;
+          text = removed ? "当前会话绑定已解除。" : "当前没有会话绑定。";
+          break;
+        }
+        case "status": {
+          const snapshot = binding
+            ? await this.sessionCommandService
+                .getSessionSnapshot(binding.sessionId)
+                .catch(() => null)
+            : null;
+          text = binding
+            ? [
+                `账号：${account.name} (${account.id})`,
+                `Scope：${scope.kind}`,
+                `项目：${basename(binding.projectPath)}`,
+                `Session：${binding.sessionId}`,
+                `Provider：${snapshot?.provider ?? binding.provider}`,
+                `Model：${snapshot?.model ?? binding.model ?? "默认"}`,
+                `Mode：${snapshot?.permissionMode ?? binding.permissionMode ?? account.defaultPermissionMode}`,
+                `状态：${snapshot?.state ?? "未运行"}`,
+              ].join("\n")
+            : `账号：${account.name} (${account.id})\nScope：${scope.kind}\n当前没有会话绑定。`;
+          break;
+        }
+        case "stop": {
+          if (!binding) {
+            text = "当前没有可停止的会话。";
+            break;
+          }
+          const result = await this.sessionCommandService.interrupt(
+            binding.sessionId,
+          );
+          if (result.ok) {
+            await this.replyManager?.interruptSession(binding.sessionId);
+          }
+          text = result.ok ? "已请求停止当前任务。" : "当前任务未在运行。";
+          break;
+        }
+        case "new": {
+          const project = await this.resolveProject(account, binding);
+          this.skillSelectionManager?.clearScope(scope.key);
+          if (binding) {
+            const previousSessionId = binding.sessionId;
+            const released =
+              await this.sessionCommandService.releaseSession(
+                previousSessionId,
+              );
+            if (!released.ok) {
+              throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
+            }
+            const removed = await this.bindingStore.removeIfSession(
+              scope.key,
+              previousSessionId,
+            );
+            if (!removed) {
+              throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
+            }
+            binding = undefined;
+          }
+          binding = await this.createBinding(message, project);
+          text = `已创建新会话：${binding.sessionId}`;
+          break;
+        }
+        case "project": {
+          if (!command.argument) {
+            text = binding
+              ? `当前项目：${basename(binding.projectPath)}\n使用 /project list 查看可选项目。`
+              : `默认项目：${account.defaultProjectPath ? basename(account.defaultProjectPath) : "未配置"}\n使用 /project list 查看可选项目。`;
+            break;
+          }
+          if (command.argument.toLowerCase() === "list") {
+            const projects = await this.listConfiguredProjects(account);
+            text =
+              projects.length > 0
+                ? `可用项目：\n${projects.map((project) => `- ${project.name}`).join("\n")}`
+                : "当前账号没有可用项目。";
+            break;
+          }
+          const useMatch = command.argument.match(/^use\s+(.+)$/i);
+          let project: ResolvedProject | undefined;
+          if (useMatch?.[1]) {
+            project = await this.resolveConfiguredProject(
+              account,
+              useMatch[1].trim(),
+            );
+            if (!project) {
+              text =
+                "项目名称不存在或不唯一。使用 /project list 查看可选项目。";
+              break;
+            }
+          } else {
+            if (message.role !== "admin") {
+              text =
+                "只有管理员可以使用绝对路径切换项目。请使用 /project use <name>。";
+              break;
+            }
+            project = await this.resolveAllowedProject(
+              account,
+              command.argument,
+            );
+          }
+          this.skillSelectionManager?.clearScope(scope.key);
+          if (binding) {
+            const previousSessionId = binding.sessionId;
+            const released =
+              await this.sessionCommandService.releaseSession(
+                previousSessionId,
+              );
+            if (!released.ok) {
+              throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
+            }
+            const removed = await this.bindingStore.removeIfSession(
+              scope.key,
+              previousSessionId,
+            );
+            if (!removed) {
+              throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
+            }
+            binding = undefined;
+          }
+          binding = await this.createBinding(message, project);
+          text = `已切换项目：${basename(binding.projectPath)}`;
+          break;
+        }
+        case "mode": {
+          const mode = parseCommandPermissionMode(command.argument);
+          if (!binding) {
+            text = "当前没有会话绑定。请先发送任务或使用 /new。";
+            break;
+          }
+          if (!mode) {
+            text = "用法：/mode <default|plan|acceptEdits>";
+            break;
+          }
+          const result = await this.sessionCommandService.setPermissionMode(
+            binding.sessionId,
+            mode,
+          );
+          if (!result.ok && result.status !== 404) {
+            text = "Permission mode 切换失败，请在 Yep 中查看状态。";
+            break;
+          }
+          const confirmedMode = result.ok
+            ? (parseCommandPermissionMode(
+                readString(result.body.permissionMode),
+              ) ?? mode)
+            : mode;
+          binding = { ...binding, permissionMode: confirmedMode };
+          text = `Mode 已切换为：${confirmedMode}${result.ok ? "" : "（下次启动生效）"}`;
+          break;
+        }
+        case "doctor": {
+          const runtime = await this.sessionCommandService
+            .getRuntimeStatus()
+            .catch(() => null);
+          text = [
+            "飞书连接：正常（已收到当前事件）",
+            `账号策略：${account.allowedUsers.length + account.adminUsers.length > 0 ? "已配置" : "未配置"}`,
+            `Workspace：${account.allowedWorkspaceRoots.length > 0 ? "已限制" : "未配置"}`,
+            `CardKit：${hasFeishuInteractionApi(message.api) ? "可用" : "不可用，将降级"}`,
+            `Yep Runtime：${runtime ? `可用，active=${runtime.activeWorkers}，queue=${runtime.queueLength}` : "不可用"}`,
+            `Session：${binding?.sessionId ?? "未绑定"}`,
+          ].join("\n");
+          break;
+        }
+        case "codex": {
+          text = await this.dispatchCodexCommand(
+            message,
+            binding,
+            command.argument,
+          );
+          break;
+        }
+      }
+
+      if (binding) {
+        binding = await this.bindingStore.upsert({
+          ...binding,
+          updatedAt: new Date().toISOString(),
+          lastInboundMessageId: record.messageId,
+          lastInboundSenderOpenId: message.normalized.senderId,
+        });
+      }
+      await this.inbox.markDispatched(record.key, {
+        sessionId: binding?.sessionId,
+      });
+      await this.inbox.complete(record.key);
+      await this.replyManager?.sendCommandResult(
+        message.api,
+        createReplyTarget(message.scope, message.normalized.messageId),
+        text,
+      );
+      return {
+        type: "command",
+        command: command.name,
+        accountId: account.id,
+        scopeKey: scope.key,
+        inboxKeys: [record.key],
+        sessionId: binding?.sessionId,
+        text,
+      };
+    } catch (error) {
+      await this.failRecord(record.key, toInboxErrorCode(error));
+      throw error;
+    }
+  }
+
+  private async dispatchCodexCommand(
+    message: AcceptedMessage,
+    binding: FeishuSessionBinding | undefined,
+    argument: string | undefined,
+  ): Promise<string> {
+    const command = parseFeishuCodexCommand(argument);
+    if (command.kind === "help") return FEISHU_CODEX_COMMAND_HELP;
+    if (command.kind === "blocked") return command.message;
+    if (command.kind === "invalid") return command.message;
+    if (!binding) {
+      return "当前没有 Codex 会话绑定。请先发送任务或使用 /new。";
+    }
+
+    const result = await this.sessionCommandService.executeCodexControl({
+      sessionId: binding.sessionId,
+      request: command.request,
+    });
+    if (!result.ok)
+      return formatCodexControlFailure(result.status, result.body);
+    if (
+      command.request.control === "skills/list" &&
+      this.skillSelectionManager
+    ) {
+      const presentation = await this.skillSelectionManager.presentPicker(
+        {
+          accountId: message.account.id,
+          scopeKey: message.scope.key,
+          sessionId: binding.sessionId,
+          chatId: message.scope.chatId,
+          threadId: message.scope.threadId,
+          replyToMessageId: message.normalized.messageId,
+          requesterOpenId: message.normalized.senderId,
+          api: message.api,
+        },
+        result.body.data,
+      );
+      return presentation.text;
+    }
+    return formatCodexControlSuccess(command.request, result.body.data);
+  }
+
+  private async consumeSkillSelection(
+    selection: FeishuSkillSelectionLease | undefined,
+  ): Promise<void> {
+    if (!selection) return;
+    await this.skillSelectionManager?.consume(selection);
+  }
+
+  private async createBinding(
+    message: AcceptedMessage,
+    project: ResolvedProject,
+  ): Promise<FeishuSessionBinding> {
+    const result = await this.sessionCommandService.create({
+      projectId: project.projectId,
+      origin: {
+        createdBy: "channel",
+        originChannel: "feishu",
+        codexEventAccountId: message.account.id,
+      },
+      body: {
+        provider: "codex",
+        mode: message.account.defaultPermissionMode,
+        model: message.account.defaultModel,
+        reasoningEffort: message.account.defaultReasoningEffort,
+        codexMcpMode: message.account.defaultCodexMcpMode,
+      },
+      requireImmediate: true,
+    });
+    const sessionId = result.ok ? readString(result.body.sessionId) : undefined;
+    const processId = result.ok ? readString(result.body.processId) : undefined;
+    if (!result.ok || result.status !== 200 || !sessionId || !processId) {
+      if (sessionId) {
+        await this.sessionCommandService
+          .releaseSession(sessionId)
+          .catch(() => undefined);
+      }
+      throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
+    }
+    try {
+      return await this.bindingStore.upsert(
+        this.buildBinding(message, project, sessionId),
+      );
+    } catch (error) {
+      await this.sessionCommandService
+        .releaseSession(sessionId)
+        .catch(() => undefined);
       throw error;
     }
   }
@@ -541,6 +971,39 @@ export class FeishuInboundProcessor {
       throw new FeishuDispatchError("PROJECT_NOT_ALLOWED");
     }
     return { projectId: encodeProjectId(projectPath), projectPath };
+  }
+
+  private async listConfiguredProjects(
+    account: FeishuAccountConfig,
+  ): Promise<Array<ResolvedProject & { name: string }>> {
+    const candidates = [
+      account.defaultProjectPath,
+      ...account.allowedWorkspaceRoots,
+    ].filter((candidate): candidate is string => Boolean(candidate));
+    const projects: Array<ResolvedProject & { name: string }> = [];
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      try {
+        const project = await this.resolveAllowedProject(account, candidate);
+        if (seen.has(project.projectPath)) continue;
+        seen.add(project.projectPath);
+        projects.push({ ...project, name: basename(project.projectPath) });
+      } catch {
+        // Invalid configured paths are omitted and surfaced by /doctor.
+      }
+    }
+    return projects;
+  }
+
+  private async resolveConfiguredProject(
+    account: FeishuAccountConfig,
+    name: string,
+  ): Promise<ResolvedProject | undefined> {
+    const normalized = name.toLocaleLowerCase();
+    const matches = (await this.listConfiguredProjects(account)).filter(
+      (project) => project.name.toLocaleLowerCase() === normalized,
+    );
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   private async downloadAttachments(
@@ -659,8 +1122,288 @@ function isMergeForwardEvent(event: unknown): boolean {
   );
 }
 
-function isDeferredFeishuCommand(content: string): boolean {
-  return /^\s*\/[A-Za-z]/.test(content);
+function parseFeishuCommand(content: string): FeishuCommand | undefined {
+  const trimmed = content.trim();
+  const match = trimmed.match(
+    /^\/(help|new|reset|status|stop|project|mode|doctor|codex)(?:\s+([\s\S]+))?$/i,
+  );
+  if (!match?.[1]) return undefined;
+  return {
+    name: match[1].toLowerCase() as FeishuCommandName,
+    argument: match[2]?.trim() || undefined,
+  };
+}
+
+type ParsedFeishuCodexCommand =
+  | { kind: "help" }
+  | { kind: "invoke"; request: CodexNativeControlRequest }
+  | { kind: "blocked"; message: string }
+  | { kind: "invalid"; message: string };
+
+function parseFeishuCodexCommand(
+  argument: string | undefined,
+): ParsedFeishuCodexCommand {
+  const value = argument?.trim();
+  if (!value || /^help$/i.test(value)) return { kind: "help" };
+  if (/^skills$/i.test(value)) {
+    return { kind: "invoke", request: { control: "skills/list" } };
+  }
+  if (/^compact$/i.test(value)) {
+    return { kind: "invoke", request: { control: "thread/compact/start" } };
+  }
+  if (/^review$/i.test(value)) {
+    return {
+      kind: "invoke",
+      request: {
+        control: "review/start",
+        target: { type: "uncommittedChanges" },
+        delivery: "inline",
+      },
+    };
+  }
+  if (/^goal$/i.test(value)) {
+    return { kind: "invoke", request: { control: "thread/goal/get" } };
+  }
+  if (/^goal\s+clear$/i.test(value)) {
+    return { kind: "invoke", request: { control: "thread/goal/clear" } };
+  }
+  const goalSet = value.match(/^goal\s+set(?:\s+([\s\S]+))?$/i);
+  if (goalSet) {
+    const objective = goalSet[1]?.trim();
+    if (!objective) {
+      return {
+        kind: "invalid",
+        message: "用法：/codex goal set <objective>",
+      };
+    }
+    if (containsSensitiveText(objective)) {
+      return {
+        kind: "invalid",
+        message: "Goal objective 疑似包含敏感信息，未提交。",
+      };
+    }
+    if (objective.length > MAX_CODEX_GOAL_OBJECTIVE_CHARS) {
+      return {
+        kind: "invalid",
+        message: `Goal objective 不能超过 ${MAX_CODEX_GOAL_OBJECTIVE_CHARS} 个字符。`,
+      };
+    }
+    return {
+      kind: "invoke",
+      request: { control: "thread/goal/set", objective },
+    };
+  }
+  if (/^shell(?:\s|$)/i.test(value)) {
+    return {
+      kind: "blocked",
+      message:
+        "已阻止 /codex shell：thread/shellCommand 会在 sandbox 外执行，飞书渠道不开放此高风险能力。",
+    };
+  }
+  if (/^(?:ps|stop|clean)(?:\s|$)/i.test(value)) {
+    return {
+      kind: "blocked",
+      message:
+        "已阻止该后台终端命令：当前 Codex session 未启用 experimental API。中断当前 turn 请使用顶层 /stop。",
+    };
+  }
+  return {
+    kind: "blocked",
+    message: `未知或未开放的 /codex 子命令。\n\n${FEISHU_CODEX_COMMAND_HELP}`,
+  };
+}
+
+function parseCommandPermissionMode(
+  value: string | undefined,
+): FeishuCommandPermissionMode | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "default" || normalized === "plan") return normalized;
+  return normalized === "acceptedits" ? "acceptEdits" : undefined;
+}
+
+const FEISHU_COMMAND_HELP = [
+  "可用命令：",
+  "/status — 当前项目、Session、模型与状态",
+  "/new — 创建新 Session，保留旧历史",
+  "/reset — 解除当前 Scope 的绑定",
+  "/stop — 停止当前任务",
+  "/project list — 查看允许的项目",
+  "/project use <name> — 切换到允许的项目",
+  "/mode <default|plan|acceptEdits> — 切换权限模式",
+  "/codex <subcommand> — Skills、Review、Compact 与 Goal 安全控制",
+  "/doctor — 检查连接、权限、卡片和 Runtime",
+  "安全限制：项目必须在账号 allowlist 内；审批仅限任务发起者或管理员；不支持 bypassPermissions。",
+].join("\n");
+
+const FEISHU_CODEX_COMMAND_HELP = [
+  "Codex 安全命令：",
+  "/codex skills — 选择一个 Skill 应用于下一条正常消息",
+  "/codex review — inline 审查未提交变更",
+  "/codex compact — 压缩当前上下文",
+  "/codex goal — 查看当前 Goal",
+  "/codex goal set <objective> — 设置 Goal",
+  "/codex goal clear — 清除 Goal",
+  "安全限制：/codex shell 与后台终端 ps/stop/clean 不开放；中断当前 turn 使用顶层 /stop。",
+].join("\n");
+
+const MAX_CODEX_SKILLS = 12;
+const MAX_CODEX_SKILL_NAME_CHARS = 80;
+const MAX_CODEX_SKILL_DESCRIPTION_CHARS = 160;
+const MAX_CODEX_GOAL_OBJECTIVE_CHARS = 4_000;
+const MAX_CODEX_COMMAND_OUTPUT_CHARS = 3_500;
+
+function formatCodexControlSuccess(
+  request: CodexNativeControlRequest,
+  data: unknown,
+): string {
+  switch (request.control) {
+    case "skills/list":
+      return formatCodexSkills(data);
+    case "review/start":
+      return "已启动对未提交变更的 inline review。";
+    case "thread/compact/start":
+      return "已请求压缩当前 Codex 上下文。";
+    case "thread/goal/get":
+    case "thread/goal/set":
+      return formatCodexGoal(data, request.control === "thread/goal/set");
+    case "thread/goal/clear": {
+      const cleared = readBoolean(readRecord(data)?.cleared);
+      return cleared === false
+        ? "当前没有可清除的 Goal。"
+        : "已清除当前 Goal。";
+    }
+    case "thread/shellCommand":
+    case "thread/backgroundTerminals/list":
+    case "thread/backgroundTerminals/terminate":
+    case "thread/backgroundTerminals/clean":
+      return "该 Codex 控制未在飞书渠道开放。";
+  }
+}
+
+function formatCodexSkills(data: unknown): string {
+  const root = readRecord(data);
+  const entries = Array.isArray(root?.data) ? root.data : [];
+  const skills: Array<{ name: string; description: string }> = [];
+  for (const entryValue of entries) {
+    const entry = readRecord(entryValue);
+    if (!Array.isArray(entry?.skills)) continue;
+    for (const skillValue of entry.skills) {
+      const skill = readRecord(skillValue);
+      const name = sanitizeCodexPublicText(
+        readString(skill?.name) ?? "",
+        MAX_CODEX_SKILL_NAME_CHARS,
+      );
+      if (!name) continue;
+      skills.push({
+        name,
+        description: sanitizeCodexPublicText(
+          readString(skill?.description) ?? "",
+          MAX_CODEX_SKILL_DESCRIPTION_CHARS,
+        ),
+      });
+    }
+  }
+  if (skills.length === 0) return "当前没有可用 Skills。";
+
+  const visible = skills.slice(0, MAX_CODEX_SKILLS);
+  const lines = visible.map(({ name, description }) =>
+    description ? `- ${name} — ${description}` : `- ${name}`,
+  );
+  if (skills.length > visible.length) {
+    lines.push(`…另有 ${skills.length - visible.length} 项未显示。`);
+  }
+  return boundCodexCommandOutput(
+    [`可用 Skills（${skills.length}）：`, ...lines].join("\n"),
+  );
+}
+
+function formatCodexGoal(data: unknown, updated: boolean): string {
+  const root = readRecord(data);
+  const goal = readRecord(root?.goal);
+  if (!goal) return updated ? "Goal 更新成功。" : "当前没有 Goal。";
+
+  const objective = sanitizeCodexPublicText(
+    readString(goal.objective) ?? "",
+    1_000,
+  );
+  const status = sanitizeCodexPublicText(
+    readString(goal.status) ?? "unknown",
+    40,
+  );
+  const tokenBudget = readSafeNumber(goal.tokenBudget);
+  const tokensUsed = readSafeNumber(goal.tokensUsed);
+  const lines = [updated ? "Goal 已更新：" : "当前 Goal："];
+  if (objective) lines.push(`目标：${objective}`);
+  lines.push(`状态：${status}`);
+  if (tokensUsed !== undefined) lines.push(`已用 tokens：${tokensUsed}`);
+  if (tokenBudget !== undefined) lines.push(`Token budget：${tokenBudget}`);
+  return boundCodexCommandOutput(lines.join("\n"));
+}
+
+function formatCodexControlFailure(
+  status: number,
+  body: Record<string, unknown>,
+): string {
+  switch (readString(body.code)) {
+    case "unsupported_provider":
+      return "当前绑定不是可执行原生控制的 Codex app-server session。";
+    case "unsupported_method":
+      return "当前 Codex app-server 版本不支持该控制。";
+    case "experimental_api_disabled":
+      return "该控制需要 experimental API；当前 session 已安全禁用。";
+    case "not_ready":
+      return "当前 Codex session 尚未就绪，请稍后重试。";
+    case "invalid_request":
+      return "Codex 拒绝了无效的控制参数，请检查命令用法。";
+    case "provider_error":
+      return readBoolean(body.retryable)
+        ? "Codex 暂时无法完成该控制，请稍后重试。"
+        : "Codex 无法完成该控制，请在 Yep 中查看诊断。";
+    default:
+      return status === 404
+        ? "当前 Codex session 没有活动进程，请先发送任务或使用 /new。"
+        : "Codex 控制执行失败，请在 Yep 中查看诊断。";
+  }
+}
+
+function sanitizeCodexPublicText(value: string, maxChars: number): string {
+  const withoutPaths = redactSensitivePublicText(value)
+    .replace(/file:\/\/\/[^\s]+/gi, "[path]")
+    .replace(/(^|[\s([{"'`=])\/(?:[^/\s]+\/)+(?:[^\s)\]}"'`,;]*)/g, "$1[path]")
+    .replace(/(^|[\s([{"'`=])~\/(?:[^\s]+)/g, "$1[path]")
+    .replace(/(^|[\s([{"'`=])[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/g, "$1[path]");
+  const withoutControls = Array.from(withoutPaths, (character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code <= 0x1f || code === 0x7f ? " " : character;
+  }).join("");
+  return boundText(withoutControls.replace(/\s+/g, " ").trim(), maxChars);
+}
+
+function boundCodexCommandOutput(value: string): string {
+  return boundText(value, MAX_CODEX_COMMAND_OUTPUT_CHARS);
+}
+
+function boundText(value: string, maxChars: number): string {
+  const characters = Array.from(value);
+  if (characters.length <= maxChars) return value;
+  return `${characters.slice(0, Math.max(0, maxChars - 1)).join("")}…`;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readSafeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function formatMessageBatch(
@@ -702,9 +1445,7 @@ function formatContextManifest(
     `truncated_items: ${manifest.truncatedItems}`,
     `failed_items: ${manifest.failedItems}`,
     `attachments: ${manifest.attachmentCount}`,
-    `operator: ${sanitizeManifestValue(
-      manifest.operator.name ?? manifest.operator.id,
-    )}`,
+    `operator: ${manifest.operator.name ?? manifest.operator.id}`,
     `complete: ${manifest.complete}`,
     `warnings: ${manifest.warnings.length > 0 ? manifest.warnings.join(",") : "none"}`,
     "</feishu_context_manifest>",
@@ -717,10 +1458,7 @@ export function formatFeishuAttachmentManifest(
   if (manifests.length === 0) return "";
   return `\n\n<feishu_attachment_manifest>\n${manifests
     .flatMap((manifest) => {
-      const name = sanitizeManifestValue(
-        manifest.originalName ?? manifest.sanitizedName,
-      );
-      const entry = `- ${name} | kind=${manifest.kind} | mime=${manifest.detectedMime ?? manifest.declaredMime ?? "unknown"} | bytes=${manifest.sizeBytes} | sha256=${manifest.sha256} | ref=${manifest.localPathRef} | status=${manifest.status}`;
+      const entry = `- ${manifest.originalName ?? manifest.sanitizedName} | kind=${manifest.kind} | mime=${manifest.detectedMime ?? manifest.declaredMime ?? "unknown"} | bytes=${manifest.sizeBytes} | sha256=${manifest.sha256} | ref=${manifest.localPathRef} | status=${manifest.status}`;
       if (!manifest.extraction) return [entry];
       const artifacts = manifest.extraction.artifacts.map(
         (artifact) =>
@@ -740,18 +1478,7 @@ export function formatFeishuAttachmentManifest(
 }
 
 function sanitizeManifestValue(value: string): string {
-  const sanitized = Array.from(value, (character) => {
-    const code = character.codePointAt(0) ?? 0;
-    if (code <= 0x1f || code === 0x7f) return " ";
-    if (character === "|") return "¦";
-    if (character === "<") return "‹";
-    if (character === ">") return "›";
-    return character;
-  })
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim();
-  return Array.from(sanitized).slice(0, 1_024).join("");
+  return sanitizeCodexPublicText(value, 1_024);
 }
 
 function isContainedPath(root: string, candidate: string): boolean {
@@ -764,4 +1491,61 @@ function isContainedPath(root: string, candidate: string): boolean {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function createTurnReplyInput(input: {
+  account: FeishuAccountConfig;
+  api?: FeishuMessageApi;
+  binding: FeishuSessionBinding;
+  record: FeishuInboxRecord;
+  records?: FeishuInboxRecord[];
+  replyToMessageId?: string;
+  requesterOpenId?: string;
+  deferSubscription?: boolean;
+  allowedOperatorOpenIds?: string[];
+}): FeishuTurnReplyInput {
+  const replyToMessageId =
+    input.replyToMessageId ??
+    input.record.messageId ??
+    input.binding.lastInboundMessageId;
+  if (!replyToMessageId) {
+    throw new FeishuDispatchError("RECOVERY_FAILED");
+  }
+  return {
+    accountId: input.account.id,
+    scopeKey: input.binding.scopeKey,
+    projectId: input.binding.projectId,
+    sessionId: input.binding.sessionId,
+    tempId: input.record.tempId,
+    inboxKeys: (input.records ?? [input.record]).map((record) => record.key),
+    replyMode: input.account.replyMode,
+    api: input.api,
+    threadId: input.binding.threadId,
+    target: createReplyTarget(
+      {
+        chatId: input.binding.chatId,
+        threadId: input.binding.threadId,
+      },
+      replyToMessageId,
+    ),
+    requesterOpenId: input.requesterOpenId,
+    deferSubscription: input.deferSubscription,
+    allowedOperatorOpenIds: [
+      ...new Set([
+        ...(input.requesterOpenId ? [input.requesterOpenId] : []),
+        ...(input.allowedOperatorOpenIds ?? input.account.adminUsers),
+      ]),
+    ],
+  };
+}
+
+function createReplyTarget(
+  scope: Pick<FeishuScope, "chatId" | "threadId">,
+  replyToMessageId: string,
+): FeishuStreamingReplyTarget {
+  return {
+    chatId: scope.chatId,
+    replyToMessageId,
+    replyInThread: Boolean(scope.threadId),
+  };
 }

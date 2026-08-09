@@ -111,14 +111,15 @@ export class FeishuDurableInbox {
   }
 
   async initialize(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
-    const handle = await open(this.filePath, "a", 0o600);
-    await handle.close();
-    if (process.platform !== "win32") {
-      await chmod(this.filePath, 0o600);
+    let content = "";
+    try {
+      content = await readFile(this.filePath, "utf8");
+      if (process.platform !== "win32") {
+        await chmod(this.filePath, 0o600);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-
-    const content = await readFile(this.filePath, "utf8");
     for (const [index, line] of content.split("\n").entries()) {
       if (!line.trim()) continue;
       try {
@@ -321,6 +322,9 @@ export class FeishuDurableInbox {
   }
 
   private async append(record: FeishuInboxRecord): Promise<void> {
+    const directory = dirname(this.filePath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") await chmod(directory, 0o700);
     const handle = await open(this.filePath, "a", 0o600);
     try {
       await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
@@ -328,6 +332,7 @@ export class FeishuDurableInbox {
     } finally {
       await handle.close();
     }
+    if (process.platform !== "win32") await chmod(this.filePath, 0o600);
   }
 
   private enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {

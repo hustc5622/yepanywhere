@@ -12,6 +12,7 @@ import { createApp } from "./app.js";
 import { SessionArchiveService } from "./archive/index.js";
 import { AuthService } from "./auth/AuthService.js";
 import { getRuntimeBuildInfo } from "./build-info.js";
+import { FeishuChannelRuntime } from "./channels/feishu/channel-runtime.js";
 import { CodexBridgeHttpClient } from "./codex-bridge/CodexBridgeHttpClient.js";
 import { CodexBridgeService } from "./codex-bridge/CodexBridgeService.js";
 import type { CodexBridgeController } from "./codex-bridge/types.js";
@@ -132,6 +133,7 @@ let runtimeControllerForShutdown: RuntimeController | null = null;
 let deviceBridgeForShutdown: DeviceBridgeService | null = null;
 let codexBridgeForShutdown: CodexBridgeController | null = null;
 let opencodeBridgeForShutdown: OpenCodeBridgeController | null = null;
+let feishuChannelRuntimeForShutdown: FeishuChannelRuntime | null = null;
 let opencodeSessionChangeMonitorForShutdown: OpenCodeSessionChangeMonitor | null =
   null;
 let terminalServiceForShutdown: TerminalService | null = null;
@@ -154,6 +156,15 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
   isShuttingDown = true;
 
   console.log(`[Shutdown] Received ${signal}, cleaning up...`);
+
+  if (feishuChannelRuntimeForShutdown) {
+    try {
+      await feishuChannelRuntimeForShutdown.shutdown();
+      console.log("[Shutdown] Feishu channel runtime shut down");
+    } catch {
+      console.error("[Shutdown] Error shutting down Feishu channel runtime");
+    }
+  }
 
   if (runtimeControllerForShutdown) {
     const abortActive = runtimeControllerForShutdown.mode === "embedded";
@@ -547,6 +558,21 @@ const sessionArchiveService = new SessionArchiveService({
   dataDir: config.dataDir,
 });
 const interactionBroker = new InteractionBroker({ dataDir: config.dataDir });
+const explicitPublicServerUrl =
+  process.env.YEP_SERVER_URL?.trim() ||
+  process.env.YEP_ANYWHERE_SERVER_URL?.trim() ||
+  undefined;
+const feishuChannelRuntime = new FeishuChannelRuntime({
+  dataDir: config.dataDir,
+  maxUploadSizeBytes: config.maxUploadSizeBytes,
+  ...(explicitPublicServerUrl
+    ? { publicBaseUrl: explicitPublicServerUrl }
+    : {}),
+  onDiagnostic: (code) => {
+    console.warn(`[Feishu] Channel runtime diagnostic: ${code}`);
+  },
+});
+feishuChannelRuntimeForShutdown = feishuChannelRuntime;
 
 async function startServer() {
   let tlsOptions: { key: Buffer; cert: Buffer } | undefined;
@@ -576,6 +602,7 @@ async function startServer() {
   await sessionArchiveService.initialize();
   await interactionBroker.initialize();
   interactionBrokerForShutdown = interactionBroker;
+  await feishuChannelRuntime.prepare(eventBus);
   await pushService.initialize();
   await nativePushService.initialize();
   await browserProfileService.initialize();
@@ -780,6 +807,7 @@ async function startServer() {
     supervisor,
     runtimeController,
     sessionInteractionService,
+    sessionCommandService,
     scanner,
   } = createApp({
     projectsDir: config.claudeProjectsDir,
@@ -818,6 +846,11 @@ async function startServer() {
     deviceBridgeService,
     codexBridgeService,
     opencodeBridgeService,
+    feishuChannelService: feishuChannelRuntime.service,
+    feishuBindingStore: feishuChannelRuntime.bindingStore,
+    feishuInbox: feishuChannelRuntime.inbox,
+    feishuOperationStore: feishuChannelRuntime.operationStore,
+    feishuChannelReady: () => feishuChannelRuntime.isOperational(),
     sessionTitleGeneration: config.sessionTitleGeneration,
     modelInfoService,
     enabledProviders: config.enabledProviders,
@@ -829,6 +862,8 @@ async function startServer() {
     runtimeController: configuredRuntimeController,
     interactionBroker,
   });
+
+  await feishuChannelRuntime.start({ eventBus, sessionCommandService });
 
   const opencodeProviderEnabled =
     config.enabledProviders.length === 0 ||

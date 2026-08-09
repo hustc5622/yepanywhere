@@ -1,6 +1,14 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FeishuDurableInbox } from "../../../src/channels/feishu/inbox.js";
 
@@ -13,6 +21,20 @@ describe("FeishuDurableInbox", () => {
         .splice(0)
         .map((dir) => rm(dir, { recursive: true, force: true })),
     );
+  });
+
+  it("does not materialize an empty journal before the first inbound event", async () => {
+    const dataDir = await createDataDir(dataDirs);
+    const inbox = new FeishuDurableInbox({ dataDir });
+    await inbox.initialize();
+
+    await expect(access(inbox.filePath)).rejects.toThrow();
+    await inbox.receive({
+      accountId: "account-fixture",
+      eventId: "event-fixture",
+      eventType: "im.message.receive_v1",
+    });
+    await expect(access(inbox.filePath)).resolves.toBeUndefined();
   });
 
   it("deduplicates the same event durably across restarts", async () => {
@@ -115,6 +137,7 @@ describe("FeishuDurableInbox", () => {
     const dataDir = await createDataDir(dataDirs);
     const inbox = new FeishuDurableInbox({ dataDir });
     await inbox.initialize();
+    await mkdir(dirname(inbox.filePath), { recursive: true });
     await writeFile(inbox.filePath, "not-json\n", "utf8");
 
     const reloaded = new FeishuDurableInbox({ dataDir });
