@@ -163,6 +163,7 @@ Native push deploy config:
   YEP_DEPLOY_ENV_FILE              Env file to load (default: .env.deploy.local)
   ALLOWED_IMAGE_PATHS              Extra local media paths for /api/local-image
                                    (default: /tmp,$HOME/Downloads)
+  ALLOWED_HOSTS                    Comma-separated public hostnames/IPs accepted by the server
   YEP_ANDROID_GOOGLE_SERVICES_JSON Source path copied to Android app google-services.json
   YEP_FCM_SERVICE_ACCOUNT_FILE     Firebase service account JSON path for server FCM
   YEP_FCM_SERVICE_ACCOUNT_JSON     Raw Firebase service account JSON for server FCM

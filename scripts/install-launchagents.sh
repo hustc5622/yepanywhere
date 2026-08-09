@@ -15,6 +15,7 @@ OPENCODE_BRIDGE_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywh
 SERVER_PORT="${YEP_DEPLOY_PORT:-8022}"
 SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
 SERVER_ALLOWED_IMAGE_PATHS="${ALLOWED_IMAGE_PATHS:-/tmp,$HOME/Downloads}"
+SERVER_ALLOWED_HOSTS="${ALLOWED_HOSTS:-}"
 BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
 BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${BRIDGE_PORT}}}"
 CODEX_CLI_PATH="${YEP_CODEX_PATH:-${CODEX_PATH:-}}"
@@ -35,7 +36,10 @@ else
   NVM_NODE_BIN="$(find "$HOME/.nvm/versions/node" -path '*/bin/node' -type f -print 2>/dev/null | sort | tail -n 1)"
   NODE_BIN="${NVM_NODE_BIN:-$(command -v node 2>/dev/null || true)}"
 fi
-CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
+SOURCE_BUNDLE_DIR="$REPO_ROOT/dist/npm-package"
+SOURCE_CLI_JS="$SOURCE_BUNDLE_DIR/dist/cli.js"
+LAUNCHD_RUNTIME_DIR="${YEP_LAUNCHD_RUNTIME_DIR:-$HOME/.yep-anywhere/runtime/npm-package}"
+CLI_JS="$LAUNCHD_RUNTIME_DIR/dist/cli.js"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
 USER_DOMAIN="gui/$(id -u)"
@@ -83,7 +87,10 @@ Environment overrides:
   YEP_LAUNCHD_NODE             Absolute node binary path
   YEP_LAUNCHD_PATH             PATH stored in the LaunchAgent environment
   YEP_CODEX_PATH               Absolute Codex CLI path stored for server/bridge detection
+  YEP_LAUNCHD_RUNTIME_DIR      Bundle copy used by LaunchAgents
+                               (default: ~/.yep-anywhere/runtime/npm-package)
   YEP_LAUNCHD_LOG_DIR          LaunchAgent stdout/stderr log directory
+  ALLOWED_HOSTS                Comma-separated public hostnames/IPs accepted by the server
   YEP_FCM_SERVICE_ACCOUNT_FILE Firebase service account JSON path for Android native push
   YEP_FCM_SERVICE_ACCOUNT_JSON Raw Firebase service account JSON for Android native push
   GOOGLE_APPLICATION_CREDENTIALS
@@ -169,14 +176,14 @@ if [[ -n "$CODEX_CLI_PATH" && ( "$CODEX_CLI_PATH" != /* || ! -x "$CODEX_CLI_PATH
   exit 1
 fi
 
-if [[ ! -f "$CLI_JS" ]]; then
-  err "Expected bundled CLI at $CLI_JS, but it does not exist."
+if [[ ! -f "$SOURCE_CLI_JS" ]]; then
+  err "Expected bundled CLI at $SOURCE_CLI_JS, but it does not exist."
   err "Run scripts/deploy.sh --server-only once to build dist/npm-package, then retry."
   exit 1
 fi
 
-if [[ ! -d "$REPO_ROOT/dist/npm-package/node_modules" ]]; then
-  warn "Runtime dependencies are missing from dist/npm-package/node_modules."
+if [[ ! -d "$SOURCE_BUNDLE_DIR/node_modules" ]]; then
+  warn "Runtime dependencies are missing from $SOURCE_BUNDLE_DIR/node_modules."
   warn "Run scripts/deploy.sh --server-only before relying on the LaunchAgents."
 fi
 
@@ -193,8 +200,15 @@ OPENCODE_API_KEY="${OPENCODE_LLM_API_KEY:-${LLM_API_KEY:-}}"
 OPENCODE_API_BASE="${OPENCODE_LLM_API_BASE:-${LLM_API_BASE:-}}"
 OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
 
-chmod +x "$CLI_JS" 2>/dev/null || true
+chmod +x "$SOURCE_CLI_JS" 2>/dev/null || true
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+
+log "Syncing LaunchAgent runtime outside the repository ..."
+YEP_LAUNCHD_RUNTIME_DIR="$LAUNCHD_RUNTIME_DIR" "$SCRIPT_DIR/sync-launchd-runtime.sh"
+if [[ ! -x "$CLI_JS" ]]; then
+  err "LaunchAgent runtime sync did not produce an executable CLI at $CLI_JS."
+  exit 1
+fi
 
 NODE_DIR="$(dirname "$NODE_BIN")"
 
@@ -261,7 +275,7 @@ write_header() {
     printf '%s\n' '  <key>RunAtLoad</key>'
     printf '%s\n' '  <true/>'
     printf '%s\n' '  <key>WorkingDirectory</key>'
-    printf '  <string>%s</string>\n' "$(xml_escape "$REPO_ROOT")"
+    printf '  <string>%s</string>\n' "$(xml_escape "$LAUNCHD_RUNTIME_DIR")"
     printf '%s\n' '  <key>StandardOutPath</key>'
     printf '  <string>%s</string>\n' "$(xml_escape "$stdout_path")"
     printf '%s\n' '  <key>StandardErrorPath</key>'
@@ -389,6 +403,9 @@ write_server_plist() {
   if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
     env_args+=("YEP_OPENCODE_BRIDGE_UPSTREAM_URL" "$OPENCODE_BRIDGE_UPSTREAM_URL")
   fi
+  if [[ -n "$SERVER_ALLOWED_HOSTS" ]]; then
+    env_args+=("ALLOWED_HOSTS" "$SERVER_ALLOWED_HOSTS")
+  fi
 
   if [[ -n "$FCM_SERVICE_ACCOUNT_FILE" ]]; then
     env_args+=("YEP_FCM_SERVICE_ACCOUNT_FILE" "$FCM_SERVICE_ACCOUNT_FILE")
@@ -440,13 +457,24 @@ write_server_plist() {
 reload_agent() {
   local label="$1"
   local plist="$2"
+  local old_pid=""
 
   if ! $START_NOW; then
     dim "wrote $plist; active LaunchAgent was not reloaded"
     return
   fi
+  old_pid="$(launchctl print "$USER_DOMAIN/$label" 2>/dev/null |
+    awk '$1 == "pid" && $2 == "=" { print $3; exit }' || true)"
   launchctl bootout "$USER_DOMAIN/$label" >/dev/null 2>&1 || true
   launchctl bootout "$USER_DOMAIN" "$plist" >/dev/null 2>&1 || true
+  if [[ -n "$old_pid" ]]; then
+    for _ in $(seq 1 40); do
+      if ! kill -0 "$old_pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.25
+    done
+  fi
   launchctl bootstrap "$USER_DOMAIN" "$plist"
   launchctl enable "$USER_DOMAIN/$label"
   launchctl kickstart -k "$USER_DOMAIN/$label"
@@ -503,6 +531,7 @@ else
   dim "opencode bridge: skipped"
 fi
 dim "logs:   $LOG_DIR/*-launchd.*.log"
+dim "runtime: $LAUNCHD_RUNTIME_DIR"
 if $INSTALL_SERVER; then
   if [[ -n "$FCM_SERVICE_ACCOUNT_FILE" ]]; then
     dim "native push: server FCM credentials from $FCM_SERVICE_ACCOUNT_FILE"
@@ -523,6 +552,9 @@ if $INSTALL_SERVER; then
     dim "session titles: SESSION_TITLE_GENERATION=$SESSION_TITLE_GENERATION"
   else
     warn "session titles: no LLM API key was stored in the server LaunchAgent."
+  fi
+  if [[ -n "$SERVER_ALLOWED_HOSTS" ]]; then
+    dim "allowed hosts: $SERVER_ALLOWED_HOSTS"
   fi
 fi
 dim "8022 restarts after abnormal exits only (10s launchd throttle); bridge agents start at login only."
