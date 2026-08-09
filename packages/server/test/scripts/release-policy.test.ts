@@ -33,6 +33,8 @@ describe("independent release policy", () => {
     expect(buildBundle).not.toContain("npm publish");
     expect(buildBundle).not.toMatch(/execStep\("pnpm\b/);
     expect(buildBundle.match(/execStep\("corepack pnpm\b/g)).toHaveLength(3);
+    expect(buildBundle).toContain("gitStatus.length > 0");
+    expect(buildBundle).not.toContain("output.length > 0 ? output : null");
     expect(buildBundle).toContain(
       "Do not publish this bundle to a package registry.",
     );

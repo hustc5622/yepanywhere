@@ -112,12 +112,11 @@ const BUILD_DATE = process.env.YEP_BUILD_DATE || new Date().toISOString();
 
 function commandOutput(command: string): string | null {
   try {
-    const output = execSync(command, {
+    return execSync(command, {
       cwd: ROOT_DIR,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "ignore"],
     }).trim();
-    return output.length > 0 ? output : null;
   } catch {
     return null;
   }
