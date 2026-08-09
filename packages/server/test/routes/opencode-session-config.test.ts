@@ -3,7 +3,7 @@ import {
   normalizeReasoningEffortForProvider,
   parseOptionalOpenCodeConfig,
   parseOptionalReasoningEffort,
-} from "../../src/routes/sessions.js";
+} from "../../src/services/SessionCommandService.js";
 
 describe("OpenCode session config validation", () => {
   it("accepts a complete managed model configuration", () => {

@@ -1,27 +1,17 @@
 import { stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import {
-  ALL_CODEX_MCP_MODES,
   ALL_PERMISSION_MODES,
-  type CodexMcpMode,
   type ContextCompactEvent,
   type ContextCumulativeUsage,
   type ContextStatusResponse,
   type ContextUsage,
-  type OpenCodeJsonObject,
-  type OpenCodeModelCapabilities,
   type OpenCodeModelLimits,
-  type OpenCodeRequestProtocol,
-  type OpenCodeSessionConfig,
-  type PermissionRules,
   type ProviderName,
-  type ThinkingOption,
-  type UploadedFile,
   type UrlProjectId,
   escalateContextWindow,
   getModelContextWindow,
   isUrlProjectId,
-  thinkingOptionToConfig,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import {
@@ -61,23 +51,20 @@ import { encodeProjectId } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
 import { EmbeddedRuntimeController } from "../runtime/EmbeddedRuntimeController.js";
-import type {
-  RuntimeController,
-  RuntimeSessionStartResponse,
-} from "../runtime/types.js";
+import type { RuntimeController } from "../runtime/types.js";
 import {
   type CodexNativeControlRequest,
   isCodexNativeControlMethod,
 } from "../sdk/providers/codex-controls.js";
-import type {
-  CodexStructuredUserInput,
-  PermissionMode,
-  SDKMessage,
-  UserMessage,
-} from "../sdk/types.js";
+import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
-import { SessionCommandService } from "../services/SessionCommandService.js";
+import {
+  type CreateSessionBody,
+  type QueueSessionMessageBody,
+  SessionCommandService,
+  type StartSessionBody,
+} from "../services/SessionCommandService.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
@@ -106,396 +93,18 @@ import {
 import type { ISessionReader } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
-import type {
-  ImmediateStartUnavailableResponse,
-  QueueFullResponse,
-  Supervisor,
-} from "../supervisor/Supervisor.js";
-import type { QueuedResponse } from "../supervisor/WorkerQueue.js";
+import type { Supervisor } from "../supervisor/Supervisor.js";
 import type {
   ContentBlock,
   Message,
   Project,
   SessionSummary,
 } from "../supervisor/types.js";
-import {
-  isValidSshHostAlias,
-  normalizeSshHostAlias,
-} from "../utils/sshHostAlias.js";
 import type { EventBus } from "../watcher/index.js";
-import { resolveSessionModel } from "./session-model.js";
-/**
- * Type guard to check if a result is a QueuedResponse
- */
-function isQueuedResponse(
-  result: RuntimeSessionStartResponse,
-): result is QueuedResponse {
-  return "queued" in result && result.queued === true;
-}
-
-/**
- * Type guard to check if a result is a QueueFullResponse
- */
-function isQueueFullResponse(
-  result: RuntimeSessionStartResponse,
-): result is QueueFullResponse {
-  return "error" in result && result.error === "queue_full";
-}
-
-function isImmediateStartUnavailableResponse(
-  result: RuntimeSessionStartResponse,
-): result is ImmediateStartUnavailableResponse {
-  return "error" in result && result.error === "immediate_start_unavailable";
-}
-
-function parseOptionalExecutor(rawExecutor: unknown): {
-  executor: string | undefined;
-  error?: string;
-} {
-  if (rawExecutor === undefined || rawExecutor === null) {
-    return { executor: undefined };
-  }
-  if (typeof rawExecutor !== "string") {
-    return { executor: undefined, error: "executor must be a string" };
-  }
-
-  const executor = normalizeSshHostAlias(rawExecutor);
-  if (!executor) {
-    return { executor: undefined };
-  }
-  if (!isValidSshHostAlias(executor)) {
-    return {
-      executor: undefined,
-      error: "executor must be a valid SSH host alias",
-    };
-  }
-
-  return { executor };
-}
-
-function parseOptionalCodexMcpMode(rawMode: unknown): {
-  codexMcpMode: CodexMcpMode | undefined;
-  error?: string;
-} {
-  if (rawMode === undefined || rawMode === null || rawMode === "") {
-    return { codexMcpMode: undefined };
-  }
-  if (
-    typeof rawMode === "string" &&
-    ALL_CODEX_MCP_MODES.includes(rawMode as CodexMcpMode)
-  ) {
-    return { codexMcpMode: rawMode as CodexMcpMode };
-  }
-  return { codexMcpMode: undefined, error: "codexMcpMode is invalid" };
-}
-
 function isCodexProviderName(
   provider: ProviderName | string | undefined,
 ): provider is "codex" | "codex-oss" {
   return provider === "codex" || provider === "codex-oss";
-}
-
-function parseOptionalPositiveInteger(
-  value: unknown,
-  fieldName: string,
-): { value: number | undefined; error?: string } {
-  if (value === undefined || value === null) {
-    return { value: undefined };
-  }
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return { value: undefined, error: `${fieldName} must be a number` };
-  }
-
-  if (!Number.isInteger(value) || value < 1) {
-    return {
-      value: undefined,
-      error: `${fieldName} must be a positive integer`,
-    };
-  }
-
-  return { value };
-}
-
-function parseOpenCodeModelLimits(rawLimits: unknown): {
-  limits: OpenCodeModelLimits | undefined;
-  error?: string;
-} {
-  if (rawLimits === undefined || rawLimits === null || rawLimits === "") {
-    return { limits: undefined };
-  }
-  if (!isPlainObject(rawLimits)) {
-    return {
-      limits: undefined,
-      error: "opencodeConfig.limits must be an object",
-    };
-  }
-
-  const input = rawLimits;
-  const hasContext = input.context !== undefined && input.context !== null;
-  const hasOutput = input.output !== undefined && input.output !== null;
-  if (!hasContext && !hasOutput) {
-    return { limits: undefined };
-  }
-  if (!hasContext || !hasOutput) {
-    return {
-      limits: undefined,
-      error: "opencodeConfig.limits requires both context and output",
-    };
-  }
-
-  const context = parseOptionalPositiveInteger(
-    input.context,
-    "opencodeConfig.limits.context",
-  );
-  if (context.error) {
-    return { limits: undefined, error: context.error };
-  }
-  const output = parseOptionalPositiveInteger(
-    input.output,
-    "opencodeConfig.limits.output",
-  );
-  if (output.error) {
-    return { limits: undefined, error: output.error };
-  }
-  if (context.value === undefined || output.value === undefined) {
-    return {
-      limits: undefined,
-      error: "opencodeConfig.limits requires both context and output",
-    };
-  }
-
-  const parsedInput = parseOptionalPositiveInteger(
-    input.input,
-    "opencodeConfig.limits.input",
-  );
-  if (parsedInput.error) return { limits: undefined, error: parsedInput.error };
-
-  return {
-    limits: {
-      context: context.value,
-      ...(parsedInput.value === undefined ? {} : { input: parsedInput.value }),
-      output: output.value,
-    },
-  };
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function validateOpenCodeJson(
-  value: unknown,
-  fieldName: string,
-  depth = 0,
-): string | undefined {
-  if (depth > 12) return `${fieldName} is nested too deeply`;
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return undefined;
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? undefined : `${fieldName} must be JSON`;
-  }
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      const error = validateOpenCodeJson(
-        value[index],
-        `${fieldName}[${index}]`,
-        depth + 1,
-      );
-      if (error) return error;
-    }
-    return undefined;
-  }
-  if (!isPlainObject(value)) return `${fieldName} must be JSON`;
-
-  for (const [key, item] of Object.entries(value)) {
-    if (key === "__proto__" || key === "prototype" || key === "constructor") {
-      return `${fieldName} contains a reserved key`;
-    }
-    const error = validateOpenCodeJson(item, `${fieldName}.${key}`, depth + 1);
-    if (error) return error;
-  }
-  return undefined;
-}
-
-function parseOpenCodeAdvancedObject(
-  value: unknown,
-  fieldName: string,
-): { value?: OpenCodeJsonObject; error?: string } {
-  if (value === undefined || value === null) return {};
-  if (!isPlainObject(value)) return { error: `${fieldName} must be an object` };
-  const error = validateOpenCodeJson(value, fieldName);
-  if (error) return { error };
-  if (JSON.stringify(value).length > 65_536) {
-    return { error: `${fieldName} is too large` };
-  }
-  return { value: value as OpenCodeJsonObject };
-}
-
-export function parseOptionalOpenCodeConfig(raw: unknown): {
-  opencodeConfig: OpenCodeSessionConfig | undefined;
-  error?: string;
-} {
-  if (raw === undefined || raw === null || raw === "") {
-    return { opencodeConfig: undefined };
-  }
-  if (!isPlainObject(raw)) {
-    return {
-      opencodeConfig: undefined,
-      error: "opencodeConfig must be an object",
-    };
-  }
-
-  const model = typeof raw.model === "string" ? raw.model.trim() : "";
-  if (
-    !model ||
-    model.length > 512 ||
-    model === "__proto__" ||
-    model === "prototype" ||
-    model === "constructor" ||
-    Array.from(model).some((character) => character.charCodeAt(0) < 32)
-  ) {
-    return {
-      opencodeConfig: undefined,
-      error: "opencodeConfig.model must be a valid model ID",
-    };
-  }
-  const requestProtocol = raw.requestProtocol;
-  if (
-    requestProtocol !== "openai-compatible" &&
-    requestProtocol !== "anthropic"
-  ) {
-    return {
-      opencodeConfig: undefined,
-      error: "opencodeConfig.requestProtocol is invalid",
-    };
-  }
-
-  const parsedLimits = parseOpenCodeModelLimits(raw.limits);
-  if (parsedLimits.error) {
-    return { opencodeConfig: undefined, error: parsedLimits.error };
-  }
-
-  let capabilities: OpenCodeModelCapabilities | undefined;
-  if (raw.capabilities !== undefined && raw.capabilities !== null) {
-    if (!isPlainObject(raw.capabilities)) {
-      return {
-        opencodeConfig: undefined,
-        error: "opencodeConfig.capabilities must be an object",
-      };
-    }
-    capabilities = {};
-    for (const key of [
-      "attachment",
-      "reasoning",
-      "temperature",
-      "toolCall",
-    ] as const) {
-      const value = raw.capabilities[key];
-      if (value === undefined) continue;
-      if (typeof value !== "boolean") {
-        return {
-          opencodeConfig: undefined,
-          error: `opencodeConfig.capabilities.${key} must be a boolean`,
-        };
-      }
-      capabilities[key] = value;
-    }
-  }
-
-  let advanced: OpenCodeSessionConfig["advanced"];
-  if (raw.advanced !== undefined && raw.advanced !== null) {
-    if (!isPlainObject(raw.advanced)) {
-      return {
-        opencodeConfig: undefined,
-        error: "opencodeConfig.advanced must be an object",
-      };
-    }
-    const provider = parseOpenCodeAdvancedObject(
-      raw.advanced.provider,
-      "opencodeConfig.advanced.provider",
-    );
-    if (provider.error) {
-      return { opencodeConfig: undefined, error: provider.error };
-    }
-    const modelPatch = parseOpenCodeAdvancedObject(
-      raw.advanced.model,
-      "opencodeConfig.advanced.model",
-    );
-    if (modelPatch.error) {
-      return { opencodeConfig: undefined, error: modelPatch.error };
-    }
-    if (provider.value || modelPatch.value) {
-      advanced = { provider: provider.value, model: modelPatch.value };
-    }
-  }
-
-  let name: string | undefined;
-  if (raw.name !== undefined && raw.name !== null && raw.name !== "") {
-    if (typeof raw.name !== "string" || raw.name.trim().length > 200) {
-      return {
-        opencodeConfig: undefined,
-        error: "opencodeConfig.name must be a string up to 200 characters",
-      };
-    }
-    name = raw.name.trim();
-  }
-
-  return {
-    opencodeConfig: {
-      model,
-      requestProtocol: requestProtocol as OpenCodeRequestProtocol,
-      ...(name ? { name } : {}),
-      ...(parsedLimits.limits ? { limits: parsedLimits.limits } : {}),
-      ...(capabilities && Object.keys(capabilities).length > 0
-        ? { capabilities }
-        : {}),
-      ...(advanced ? { advanced } : {}),
-    },
-  };
-}
-
-export function parseOptionalReasoningEffort(rawEffort: unknown): {
-  reasoningEffort?: string;
-  error?: string;
-} {
-  if (rawEffort === undefined || rawEffort === null || rawEffort === "") {
-    return {};
-  }
-  if (typeof rawEffort !== "string") {
-    return { error: "reasoningEffort must be a string" };
-  }
-
-  const reasoningEffort = rawEffort.trim();
-  if (
-    reasoningEffort.length === 0 ||
-    reasoningEffort.length > 64 ||
-    Array.from(reasoningEffort).some((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint <= 0x1f || codePoint === 0x7f;
-    })
-  ) {
-    return { error: "Invalid reasoningEffort" };
-  }
-
-  return { reasoningEffort };
-}
-
-export function normalizeReasoningEffortForProvider(
-  provider: ProviderName | undefined,
-  reasoningEffort: string | undefined,
-): string | undefined {
-  return provider === "opencode" && reasoningEffort === "default"
-    ? undefined
-    : reasoningEffort;
 }
 
 export interface SessionsDeps {
@@ -567,18 +176,6 @@ function getSessionPermissionModeState(
   };
 }
 
-async function persistSessionPermissionMode(
-  deps: SessionsDeps,
-  sessionId: string,
-  permissionMode: PermissionMode | undefined,
-): Promise<void> {
-  if (!permissionMode) return;
-  await deps.sessionMetadataService?.setPermissionMode?.(
-    sessionId,
-    permissionMode,
-  );
-}
-
 function isPermissionMode(value: unknown): value is PermissionMode {
   return (
     typeof value === "string" &&
@@ -609,79 +206,6 @@ function isLiveAnyBridgeSessionView(
   return isLiveBridgeSessionView(view);
 }
 
-interface StartSessionBody {
-  message: string;
-  images?: string[];
-  documents?: string[];
-  attachments?: UploadedFile[];
-  /** Ordered native Codex skill/mention input items. */
-  codexInputs?: CodexStructuredUserInput[];
-  mode?: PermissionMode;
-  model?: string;
-  thinking?: ThinkingOption;
-  /** Exact provider reasoning effort / OpenCode model variant. */
-  reasoningEffort?: string;
-  provider?: ProviderName;
-  /** Codex MCP profile. Only used when provider resolves to Codex. */
-  codexMcpMode?: CodexMcpMode;
-  /** Codex model source (Codex `model_provider`). Only used for Codex. */
-  codexModelProvider?: string;
-  /** OpenCode-only managed provider/model configuration. */
-  opencodeConfig?: OpenCodeSessionConfig;
-  /** Client-generated temp ID for optimistic UI tracking */
-  tempId?: string;
-  /** SSH host alias for remote execution (undefined = local) */
-  executor?: string;
-  /** Permission rules for tool filtering (deny/allow patterns) */
-  permissions?: PermissionRules;
-  /**
-   * Provider-native edit boundary. Claude receives the edited prompt's
-   * parentUuid and rewinds in-place; OpenCode receives the edited persisted
-   * user message's own native ID and forks before that message.
-   */
-  resumeSessionAt?: string;
-  /**
-   * Edit-fork for Codex app-server: exclude this many trailing source turns
-   * before sending the edited prompt in a new child thread. The legacy wire
-   * name is retained for deployed clients.
-   */
-  rollbackNumTurns?: number;
-  /**
-   * Identity of the edited user turn for a Codex edit fork. When present the
-   * server recomputes the authoritative excluded-turn count from the persisted
-   * turn tree instead of trusting the client-rendered prompt count.
-   */
-  rollbackTarget?: {
-    /** Entry timestamp of the edited user turn, when known. */
-    timestamp?: string;
-    /** Original prompt text of the edited user turn. */
-    text?: string;
-  };
-}
-
-interface CreateSessionBody {
-  mode?: PermissionMode;
-  model?: string;
-  thinking?: ThinkingOption;
-  /** Exact provider reasoning effort / OpenCode model variant. */
-  reasoningEffort?: string;
-  provider?: ProviderName;
-  /** Codex MCP profile. Only used when provider resolves to Codex. */
-  codexMcpMode?: CodexMcpMode;
-  /** Codex model source (Codex `model_provider`). Only used for Codex. */
-  codexModelProvider?: string;
-  /** OpenCode-only managed provider/model configuration. */
-  opencodeConfig?: OpenCodeSessionConfig;
-  /** SSH host alias for remote execution (undefined = local) */
-  executor?: string;
-  /** Permission rules for tool filtering (deny/allow patterns) */
-  permissions?: PermissionRules;
-}
-
-/**
- * Convert SDK messages to client Message format.
- * Used for mock SDK sessions where messages aren't persisted to disk.
- */
 function sdkMessagesToClientMessages(
   sdkMessages: SDKMessage[],
   options: { model?: string; provider?: ProviderName } = {},
@@ -2121,180 +1645,18 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
   // POST /api/sessions/:sessionId/messages - Queue message
   routes.post("/sessions/:sessionId/messages", async (c) => {
-    const sessionId = c.req.param("sessionId");
-
-    const process =
-      await runtimeController.getProcessSnapshotForSession(sessionId);
-    if (!process) {
-      return c.json({ error: "No active process for session" }, 404);
-    }
-
-    let body: StartSessionBody & { deferred?: boolean };
+    let body: QueueSessionMessageBody;
     try {
-      body = await c.req.json<StartSessionBody & { deferred?: boolean }>();
+      body = await c.req.json<QueueSessionMessageBody>();
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    if (!body.message) {
-      return c.json({ error: "Message is required" }, 400);
-    }
-    const parsedCodexMcpMode = parseOptionalCodexMcpMode(body.codexMcpMode);
-    if (parsedCodexMcpMode.error) {
-      return c.json({ error: parsedCodexMcpMode.error }, 400);
-    }
-    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
-      body.opencodeConfig,
-    );
-    if (parsedOpenCodeConfig.error) {
-      return c.json({ error: parsedOpenCodeConfig.error }, 400);
-    }
-    const parsedReasoningEffort = parseOptionalReasoningEffort(
-      body.reasoningEffort,
-    );
-    if (parsedReasoningEffort.error) {
-      return c.json({ error: parsedReasoningEffort.error }, 400);
-    }
-
-    if (body.mode !== undefined && !isPermissionMode(body.mode)) {
-      return c.json({ error: "Invalid permission mode" }, 400);
-    }
-    const effectivePermissionMode =
-      body.mode ??
-      process.permissionMode ??
-      deps.sessionMetadataService?.getPermissionMode?.(sessionId);
-
-    const userMessage: UserMessage = {
-      text: body.message,
-      images: body.images,
-      documents: body.documents,
-      attachments: body.attachments,
-      mode: effectivePermissionMode,
-      tempId: body.tempId,
-    };
-
-    // Check if process is terminated
-    if (process.state === "terminated") {
-      return c.json(
-        {
-          error: "Process terminated",
-          reason: process.terminationReason,
-        },
-        410,
-      ); // 410 Gone
-    }
-
-    // Deferred messages are held server-side and auto-sent when the agent finishes
-    if (body.deferred) {
-      const deferred = await runtimeController.deferMessage(
-        sessionId,
-        userMessage,
-      );
-      if (!deferred.queued) {
-        return c.json({ error: "No active process for session" }, 410);
-      }
-      return c.json({ queued: true, deferred: true });
-    }
-
-    // Convert thinking option to SDK config
-    const { thinking, effort } = body.thinking
-      ? thinkingOptionToConfig(body.thinking)
-      : { thinking: undefined, effort: undefined };
-
-    const metadataProvider = deps.sessionMetadataService?.getProvider(
-      sessionId,
-    ) as ProviderName | undefined;
-    const metadataExecutor = parseOptionalExecutor(
-      deps.sessionMetadataService?.getExecutor(sessionId),
-    );
-    if (metadataExecutor.error) {
-      return c.json({ error: metadataExecutor.error }, 400);
-    }
-    const { executor, error: executorError } = parseOptionalExecutor(
-      body.executor,
-    );
-    if (executorError) {
-      return c.json({ error: executorError }, 400);
-    }
-
-    const providerName = metadataProvider ?? body.provider ?? process.provider;
-    const model =
-      body.model === undefined
-        ? process.model
-        : resolveSessionModel(body.model, providerName);
-    const opencodeConfig =
-      parsedOpenCodeConfig.opencodeConfig ??
-      deps.sessionMetadataService?.getOpenCodeConfig?.(sessionId);
-
-    // Use queueMessageToSession which handles thinking mode changes
-    // If thinking mode changed, it will restart the process automatically
-    const queueGlobalInstructions =
-      deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
-    const result = await runtimeController.queueMessage({
-      sessionId,
-      projectPath: process.projectPath,
-      message: userMessage,
-      permissionMode: effectivePermissionMode,
-      modelSettings: {
-        model,
-        thinking,
-        effort,
-        reasoningEffort:
-          parsedReasoningEffort.reasoningEffort !== undefined
-            ? normalizeReasoningEffortForProvider(
-                providerName,
-                parsedReasoningEffort.reasoningEffort,
-              )
-            : (process.requestedReasoningEffort ?? process.reasoningEffort),
-        providerName,
-        codexMcpMode:
-          providerName === "codex"
-            ? (parsedCodexMcpMode.codexMcpMode ??
-              deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
-            : undefined,
-        codexModelProvider:
-          providerName === "codex"
-            ? deps.sessionMetadataService?.getCodexModelProvider?.(sessionId)
-            : undefined,
-        opencodeConfig,
-        executor:
-          executor ??
-          metadataExecutor.executor ??
-          process.executor ??
-          undefined,
-        globalInstructions: queueGlobalInstructions,
-        permissions: body.permissions,
-      },
+    const result = await sessionCommandService.queue({
+      sessionId: c.req.param("sessionId"),
+      body,
     });
-
-    if (!result.success) {
-      return c.json(
-        {
-          error: "Failed to queue message",
-          reason: result.error,
-        },
-        410,
-      ); // 410 Gone - process is no longer available
-    }
-
-    await persistSessionPermissionMode(
-      deps,
-      sessionId,
-      effectivePermissionMode,
-    );
-
-    recordOpenCodeContextWindowOverride(deps, {
-      provider: providerName,
-      model: opencodeConfig?.model ?? model,
-      sessionId,
-      limits: opencodeConfig?.limits,
-    });
-
-    return c.json({
-      queued: true,
-      restarted: result.restarted,
-      processId: result.process.id,
-    });
+    return c.json(result.body, result.status);
   });
 
   // POST /api/sessions/:sessionId/codex-control - Execute a bounded,

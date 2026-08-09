@@ -232,6 +232,176 @@ describe("SessionCommandService runtime boundary", () => {
     }
   });
 
+  it("queues native inputs without promoting resolved reasoning effort", async () => {
+    const snapshot = processSnapshot({
+      permissionMode: "default",
+      reasoningEffort: "xhigh",
+      requestedReasoningEffort: undefined,
+    });
+    const queueMessage = vi.fn(async () => ({
+      success: true as const,
+      process: { id: snapshot.id },
+      restarted: false,
+    }));
+    const setPermissionMode = vi.fn(async () => undefined);
+    const service = createService(
+      {
+        getProcessSnapshotForSession: vi.fn(async () => snapshot),
+        queueMessage,
+      },
+      {
+        metadata: {
+          getProvider: vi.fn(() => undefined),
+          getExecutor: vi.fn(() => undefined),
+          setPermissionMode,
+        } as unknown as SessionMetadataService,
+      },
+    );
+
+    await expect(
+      service.send({
+        projectId: "unused-for-owned-session",
+        sessionId: snapshot.sessionId,
+        requireImmediate: true,
+        body: {
+          message: "$fixture-skill continue",
+          codexInputs: [
+            {
+              type: "skill",
+              name: "fixture-skill",
+              path: "/fixture/SKILL.md",
+            },
+          ],
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      body: {
+        queued: true,
+        restarted: false,
+        processId: snapshot.id,
+      },
+    });
+    expect(queueMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: snapshot.sessionId,
+        requireImmediate: true,
+        permissionMode: "default",
+        message: expect.objectContaining({
+          text: "$fixture-skill continue",
+          mode: "default",
+          codexInputs: [
+            {
+              type: "skill",
+              name: "fixture-skill",
+              path: "/fixture/SKILL.md",
+            },
+          ],
+        }),
+        modelSettings: expect.objectContaining({
+          reasoningEffort: undefined,
+        }),
+      }),
+    );
+    expect(setPermissionMode).toHaveBeenCalledWith(
+      snapshot.sessionId,
+      "default",
+    );
+  });
+
+  it("deduplicates optimistic temp IDs before runtime queue dispatch", async () => {
+    const snapshot = processSnapshot({
+      messageHistory: [
+        {
+          type: "user",
+          tempId: "client-temp-existing",
+          message: { content: "already accepted" },
+        },
+      ] as RuntimeProcessSnapshot["messageHistory"],
+    });
+    const queueMessage = vi.fn();
+    const service = createService({
+      getProcessSnapshotForSession: vi.fn(async () => snapshot),
+      queueMessage,
+    });
+
+    await expect(
+      service.queue({
+        sessionId: snapshot.sessionId,
+        body: {
+          message: "retry",
+          tempId: "client-temp-existing",
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      body: {
+        queued: true,
+        duplicate: true,
+        processId: snapshot.id,
+      },
+    });
+    expect(queueMessage).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an external send cannot resume immediately", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-send-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-send",
+        sessionCount: 1,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex" as const,
+      } satisfies Project;
+      const resumeSession = vi.fn(async () => ({
+        error: "immediate_start_unavailable" as const,
+      }));
+      const service = new SessionCommandService({
+        runtimeController: {
+          getProcessSnapshotForSession: vi.fn(async () => null),
+          resumeSession,
+        } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+          mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+      });
+
+      await expect(
+        service.send({
+          projectId,
+          sessionId: "existing-thread",
+          requireImmediate: true,
+          body: {
+            message: "external follow-up",
+            provider: "codex",
+            reasoningEffort: "high",
+          },
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: 503,
+        body: { code: "immediate_start_unavailable" },
+      });
+      expect(resumeSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "existing-thread",
+          requireImmediate: true,
+        }),
+      );
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it("interrupts the active turn and closes interaction aliases", async () => {
     const terminateInteractionOperations = vi.fn(async () => []);
     const interactions = interactionService({

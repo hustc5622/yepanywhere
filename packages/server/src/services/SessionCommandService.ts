@@ -122,6 +122,16 @@ export interface ResumeSessionCommandInput {
   requireImmediate?: boolean;
 }
 
+export interface QueueSessionMessageCommandInput {
+  sessionId: string;
+  body: QueueSessionMessageBody;
+  /** Reject atomically if accepting this message requires a queued restart. */
+  requireImmediate?: boolean;
+}
+
+export interface SendSessionMessageCommandInput
+  extends ResumeSessionCommandInput {}
+
 export interface StartSessionBody {
   message: string;
   images?: string[];
@@ -166,6 +176,10 @@ export interface CreateSessionBody {
   opencodeConfig?: OpenCodeSessionConfig;
   executor?: string;
   permissions?: PermissionRules;
+}
+
+export interface QueueSessionMessageBody extends StartSessionBody {
+  deferred?: boolean;
 }
 
 export interface ExecuteCodexControlCommandInput {
@@ -464,7 +478,7 @@ function parseOpenCodeAdvancedObject(
   return { value: value as OpenCodeJsonObject };
 }
 
-function parseOptionalOpenCodeConfig(raw: unknown): {
+export function parseOptionalOpenCodeConfig(raw: unknown): {
   opencodeConfig: OpenCodeSessionConfig | undefined;
   error?: string;
 } {
@@ -584,7 +598,7 @@ function parseOptionalOpenCodeConfig(raw: unknown): {
   };
 }
 
-function parseOptionalReasoningEffort(rawEffort: unknown): {
+export function parseOptionalReasoningEffort(rawEffort: unknown): {
   reasoningEffort?: string;
   error?: string;
 } {
@@ -608,7 +622,7 @@ function parseOptionalReasoningEffort(rawEffort: unknown): {
   return { reasoningEffort };
 }
 
-function normalizeReasoningEffortForProvider(
+export function normalizeReasoningEffortForProvider(
   provider: ProviderName | undefined,
   reasoningEffort: string | undefined,
 ): string | undefined {
@@ -1163,6 +1177,180 @@ export class SessionCommandService {
       modeVersion: result.modeVersion,
       reasoningEffort: resumeReasoningEffort,
     });
+  }
+
+  async queue(
+    input: QueueSessionMessageCommandInput,
+  ): Promise<SessionCommandResult<Record<string, unknown>>> {
+    const { sessionId, body } = input;
+    const process =
+      await this.deps.runtimeController.getProcessSnapshotForSession(sessionId);
+    if (!process) {
+      return commandFailure("No active process for session", 404);
+    }
+    if (!body.message) return commandFailure("Message is required", 400);
+    const codexInputsError = validateOptionalCodexInputs(body.codexInputs);
+    if (codexInputsError) return commandFailure(codexInputsError, 400);
+    if (
+      body.tempId &&
+      process.messageHistory.some(
+        (message) => (message as { tempId?: unknown }).tempId === body.tempId,
+      )
+    ) {
+      return commandSuccess({
+        queued: true,
+        duplicate: true,
+        processId: process.id,
+      });
+    }
+
+    if (body.mode !== undefined && !this.isPermissionMode(body.mode)) {
+      return commandFailure("Invalid permission mode", 400);
+    }
+    const effectivePermissionMode =
+      body.mode ??
+      process.permissionMode ??
+      this.deps.sessionMetadataService?.getPermissionMode?.(sessionId);
+    const parsedCodexMcpMode = parseOptionalCodexMcpMode(body.codexMcpMode);
+    if (parsedCodexMcpMode.error) {
+      return commandFailure(parsedCodexMcpMode.error, 400);
+    }
+    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
+      body.opencodeConfig,
+    );
+    if (parsedOpenCodeConfig.error) {
+      return commandFailure(parsedOpenCodeConfig.error, 400);
+    }
+    const parsedReasoningEffort = parseOptionalReasoningEffort(
+      body.reasoningEffort,
+    );
+    if (parsedReasoningEffort.error) {
+      return commandFailure(parsedReasoningEffort.error, 400);
+    }
+
+    const userMessage = this.toUserMessage(body, effectivePermissionMode);
+    if (process.state === "terminated") {
+      return commandFailure("Process terminated", 410, {
+        reason: process.terminationReason,
+      });
+    }
+    if (body.deferred) {
+      const deferred = await this.deps.runtimeController.deferMessage(
+        sessionId,
+        userMessage,
+      );
+      return deferred.queued
+        ? commandSuccess({ queued: true, deferred: true })
+        : commandFailure("No active process for session", 410);
+    }
+
+    const { thinking, effort } = body.thinking
+      ? thinkingOptionToConfig(body.thinking)
+      : { thinking: undefined, effort: undefined };
+    const metadataProvider = this.deps.sessionMetadataService?.getProvider(
+      sessionId,
+    ) as ProviderName | undefined;
+    const metadataExecutor = parseOptionalExecutor(
+      this.deps.sessionMetadataService?.getExecutor(sessionId),
+    );
+    if (metadataExecutor.error) {
+      return commandFailure(metadataExecutor.error, 400);
+    }
+    const parsedBodyExecutor = parseOptionalExecutor(body.executor);
+    if (parsedBodyExecutor.error) {
+      return commandFailure(parsedBodyExecutor.error, 400);
+    }
+
+    const providerName = metadataProvider ?? body.provider ?? process.provider;
+    const model =
+      body.model === undefined
+        ? process.model
+        : resolveSessionModel(body.model, providerName);
+    const opencodeConfig =
+      parsedOpenCodeConfig.opencodeConfig ??
+      this.deps.sessionMetadataService?.getOpenCodeConfig?.(sessionId);
+    const result = await this.deps.runtimeController.queueMessage({
+      sessionId,
+      projectPath: process.projectPath,
+      message: userMessage,
+      permissionMode: effectivePermissionMode,
+      requireImmediate: input.requireImmediate,
+      modelSettings: {
+        model,
+        thinking,
+        effort,
+        reasoningEffort:
+          parsedReasoningEffort.reasoningEffort !== undefined
+            ? normalizeReasoningEffortForProvider(
+                providerName,
+                parsedReasoningEffort.reasoningEffort,
+              )
+            : process.requestedReasoningEffort,
+        providerName,
+        codexMcpMode:
+          providerName === "codex"
+            ? (parsedCodexMcpMode.codexMcpMode ??
+              this.deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
+            : undefined,
+        codexModelProvider:
+          providerName === "codex"
+            ? this.deps.sessionMetadataService?.getCodexModelProvider?.(
+                sessionId,
+              )
+            : undefined,
+        opencodeConfig,
+        executor:
+          parsedBodyExecutor.executor ??
+          metadataExecutor.executor ??
+          process.executor ??
+          undefined,
+        globalInstructions:
+          this.deps.serverSettingsService?.getSetting("globalInstructions") ||
+          undefined,
+        permissions: body.permissions,
+      },
+    });
+    if (!result.success) {
+      if (result.error === "immediate_start_unavailable") {
+        return commandFailure("Session could not restart immediately", 503, {
+          code: result.error,
+        });
+      }
+      return commandFailure("Failed to queue message", 410, {
+        reason: result.error,
+      });
+    }
+
+    await this.persistPermissionMode(sessionId, effectivePermissionMode);
+    this.recordOpenCodeContextWindowOverride({
+      provider: providerName,
+      model: opencodeConfig?.model ?? model,
+      sessionId,
+      limits: opencodeConfig?.limits,
+    });
+    return commandSuccess({
+      queued: true,
+      restarted: result.restarted,
+      processId: result.process.id,
+    });
+  }
+
+  /** Queue into an owned process, otherwise resume the persisted session. */
+  async send(
+    input: SendSessionMessageCommandInput,
+  ): Promise<SessionCommandResult<Record<string, unknown>>> {
+    const process =
+      await this.deps.runtimeController.getProcessSnapshotForSession(
+        input.sessionId,
+      );
+    if (process && process.state !== "terminated") {
+      return this.queue({
+        sessionId: input.sessionId,
+        body: input.body,
+        requireImmediate: input.requireImmediate,
+      });
+    }
+    return this.resume(input);
   }
 
   async interrupt(
