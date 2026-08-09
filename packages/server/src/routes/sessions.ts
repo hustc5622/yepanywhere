@@ -60,7 +60,6 @@ import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import {
   encodeProjectId,
   resolveResumeCwd,
-  resolveStartCwd,
 } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
@@ -77,7 +76,12 @@ import {
   CodexModelSourceError,
   getCodexModelSourceRegistry,
 } from "../sdk/providers/codex-model-sources.js";
-import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
+import type {
+  CodexStructuredUserInput,
+  PermissionMode,
+  SDKMessage,
+  UserMessage,
+} from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
 import { SessionCommandService } from "../services/SessionCommandService.js";
@@ -677,6 +681,8 @@ interface StartSessionBody {
   images?: string[];
   documents?: string[];
   attachments?: UploadedFile[];
+  /** Ordered native Codex skill/mention input items. */
+  codexInputs?: CodexStructuredUserInput[];
   mode?: PermissionMode;
   model?: string;
   thinking?: ThinkingOption;
@@ -1237,8 +1243,12 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     deps.sessionCommandService ??
     new SessionCommandService({
       runtimeController,
+      scanner: deps.scanner,
       sessionInteractionService,
       sessionMetadataService: deps.sessionMetadataService,
+      eventBus: deps.eventBus,
+      serverSettingsService: deps.serverSettingsService,
+      modelInfoService: deps.modelInfoService,
     });
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
     deps.codexReaderFactory?.(projectPath) ??
@@ -2117,46 +2127,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
   // POST /api/projects/:projectId/sessions - Start new session
   routes.post("/projects/:projectId/sessions", async (c) => {
-    const projectId = c.req.param("projectId");
-
-    // Validate projectId format at API boundary
-    if (!isUrlProjectId(projectId)) {
-      return c.json({ error: "Invalid project ID format" }, 400);
-    }
-
-    // Use getOrCreateProject to allow starting sessions in new directories
-    let project = await deps.scanner.getOrCreateProject(projectId);
-    if (!project) {
-      return c.json({ error: "Project not found or path does not exist" }, 404);
-    }
-
-    // Self-heal stale projectId: same problem as resume, but for a new
-    // session we can't read the named session's jsonl (it doesn't exist
-    // yet) — scan the project's session directory instead. Any existing
-    // jsonl carries the SDK-written cwd, which is the source of truth.
-    const recoverySessionDir = project.sessionDir;
-    const recoveredCwd = await resolveStartCwd(
-      project.path,
-      recoverySessionDir,
-      (cwd) => deps.scanner.mapSessionCwdToLocal(cwd, recoverySessionDir),
-    );
-    if (recoveredCwd) {
-      const recoveredId = encodeProjectId(recoveredCwd);
-      const fresh = await deps.scanner.getOrCreateProject(recoveredId);
-      if (!fresh) {
-        return c.json(
-          {
-            error: `Project directory ${project.path} no longer exists and recovered path ${recoveredCwd} is also invalid`,
-          },
-          404,
-        );
-      }
-      console.warn(
-        `[startSession] Stale projectId: ${project.path} no longer exists; recovered cwd=${recoveredCwd}`,
-      );
-      project = fresh;
-    }
-
     let body: StartSessionBody;
     try {
       body = await c.req.json<StartSessionBody>();
@@ -2164,350 +2134,28 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    if (!body.message) {
-      return c.json({ error: "Message is required" }, 400);
-    }
-    const { executor, error: executorError } = parseOptionalExecutor(
-      body.executor,
-    );
-    if (executorError) {
-      return c.json({ error: executorError }, 400);
-    }
-    const parsedCodexMcpMode = parseOptionalCodexMcpMode(body.codexMcpMode);
-    if (parsedCodexMcpMode.error) {
-      return c.json({ error: parsedCodexMcpMode.error }, 400);
-    }
-    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
-      body.opencodeConfig,
-    );
-    if (parsedOpenCodeConfig.error) {
-      return c.json({ error: parsedOpenCodeConfig.error }, 400);
-    }
-    const parsedReasoningEffort = parseOptionalReasoningEffort(
-      body.reasoningEffort,
-    );
-    if (parsedReasoningEffort.error) {
-      return c.json({ error: parsedReasoningEffort.error }, 400);
-    }
-
-    if (body.mode !== undefined && !isPermissionMode(body.mode)) {
-      return c.json({ error: "Invalid permission mode" }, 400);
-    }
-    const effectivePermissionMode = body.mode;
-
-    const userMessage: UserMessage = {
-      text: body.message,
-      images: body.images,
-      documents: body.documents,
-      attachments: body.attachments,
-      mode: effectivePermissionMode,
-      tempId: body.tempId,
-    };
-
-    // Convert thinking option to SDK config
-    const { thinking, effort } = body.thinking
-      ? thinkingOptionToConfig(body.thinking)
-      : { thinking: undefined, effort: undefined };
-
-    // Claude advertises "default" as Sonnet 5, so keep execution aligned
-    // with the picker instead of inheriting the remote VM's user setting.
-    const model = resolveSessionModel(
-      body.model,
-      body.provider ?? project.provider,
-    );
-
-    const parsedCodexModelProvider = resolveCodexModelProviderForStart(
-      body.provider ?? project.provider,
-      body.codexModelProvider,
-      model,
-    );
-    if (parsedCodexModelProvider.error) {
-      return c.json(
-        {
-          error: parsedCodexModelProvider.error,
-          code: parsedCodexModelProvider.code,
-        },
-        400,
-      );
-    }
-
-    // Debug: log what we received
-    console.log("[startSession] Request body:", {
-      provider: body.provider,
-      executor,
-      model: body.model,
-      opencodeConfig: parsedOpenCodeConfig.opencodeConfig
-        ? {
-            model: parsedOpenCodeConfig.opencodeConfig.model,
-            requestProtocol:
-              parsedOpenCodeConfig.opencodeConfig.requestProtocol,
-            limits: parsedOpenCodeConfig.opencodeConfig.limits,
-          }
-        : undefined,
+    const result = await sessionCommandService.start({
+      projectId: c.req.param("projectId"),
+      body,
     });
-
-    const globalInstructions =
-      deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
-
-    const result = await runtimeController.startSession({
-      projectPath: project.path,
-      message: userMessage,
-      permissionMode: effectivePermissionMode,
-      modelSettings: {
-        model,
-        thinking,
-        effort,
-        reasoningEffort: normalizeReasoningEffortForProvider(
-          body.provider ?? project.provider,
-          parsedReasoningEffort.reasoningEffort,
-        ),
-        providerName: body.provider,
-        codexMcpMode: parsedCodexMcpMode.codexMcpMode,
-        codexModelProvider: parsedCodexModelProvider.value,
-        opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
-        executor,
-        globalInstructions,
-        permissions: body.permissions,
-      },
-    });
-
-    // Check if queue is full
-    if (isQueueFullResponse(result)) {
-      return c.json(
-        { error: "Queue is full", maxQueueSize: result.maxQueueSize },
-        503,
-      );
-    }
-
-    if (isImmediateStartUnavailableResponse(result)) {
-      return c.json({ error: "Immediate start unavailable" }, 503);
-    }
-
-    // Check if request was queued
-    if (isQueuedResponse(result)) {
-      return c.json(result, 202); // 202 Accepted - queued for processing
-    }
-
-    recordOpenCodeContextWindowOverride(deps, {
-      provider: result.provider,
-      model: parsedOpenCodeConfig.opencodeConfig?.model ?? model,
-      sessionId: result.sessionId,
-      limits: parsedOpenCodeConfig.opencodeConfig?.limits,
-    });
-
-    // Save provider and executor to session metadata for resume
-    if (deps.sessionMetadataService) {
-      if (body.provider) {
-        await deps.sessionMetadataService.setProvider(
-          result.sessionId,
-          body.provider,
-        );
-      }
-      if (executor) {
-        await deps.sessionMetadataService.setExecutor(
-          result.sessionId,
-          executor,
-        );
-      }
-      if (parsedOpenCodeConfig.opencodeConfig) {
-        await deps.sessionMetadataService.setOpenCodeConfig(
-          result.sessionId,
-          parsedOpenCodeConfig.opencodeConfig,
-        );
-      }
-      if (result.provider === "codex" && parsedCodexMcpMode.codexMcpMode) {
-        await deps.sessionMetadataService.setCodexMcpMode?.(
-          result.sessionId,
-          parsedCodexMcpMode.codexMcpMode,
-        );
-      }
-    }
-    await persistSessionPermissionMode(
-      deps,
-      result.sessionId,
-      result.permissionMode,
-    );
-    await recordYepSessionOrigin(deps, result.sessionId, project);
-
-    return c.json({
-      sessionId: result.sessionId,
-      processId: result.id,
-      permissionMode: result.permissionMode,
-      modeVersion: result.modeVersion,
-    });
+    return c.json(result.body, result.status);
   });
 
-  // POST /api/projects/:projectId/sessions/create - Create session without starting agent
-  // Used for two-phase flow: create session first, upload files, then send first message
+  // POST /api/projects/:projectId/sessions/create - Create session without
+  // starting the agent. This supports the upload-first two-phase flow.
   routes.post("/projects/:projectId/sessions/create", async (c) => {
-    const projectId = c.req.param("projectId");
-
-    // Validate projectId format at API boundary
-    if (!isUrlProjectId(projectId)) {
-      return c.json({ error: "Invalid project ID format" }, 400);
-    }
-
-    // Use getOrCreateProject to allow starting sessions in new directories
-    const project = await deps.scanner.getOrCreateProject(projectId);
-    if (!project) {
-      return c.json({ error: "Project not found or path does not exist" }, 404);
-    }
-
     let body: CreateSessionBody = {};
     try {
       body = await c.req.json<CreateSessionBody>();
     } catch {
-      // Body is optional for this endpoint
+      // Body is optional for this endpoint.
     }
 
-    const { executor, error: executorError } = parseOptionalExecutor(
-      body.executor,
-    );
-    if (executorError) {
-      return c.json({ error: executorError }, 400);
-    }
-    const parsedCodexMcpMode = parseOptionalCodexMcpMode(body.codexMcpMode);
-    if (parsedCodexMcpMode.error) {
-      return c.json({ error: parsedCodexMcpMode.error }, 400);
-    }
-    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
-      body.opencodeConfig,
-    );
-    if (parsedOpenCodeConfig.error) {
-      return c.json({ error: parsedOpenCodeConfig.error }, 400);
-    }
-    const parsedReasoningEffort = parseOptionalReasoningEffort(
-      body.reasoningEffort,
-    );
-    if (parsedReasoningEffort.error) {
-      return c.json({ error: parsedReasoningEffort.error }, 400);
-    }
-
-    if (body.mode !== undefined && !isPermissionMode(body.mode)) {
-      return c.json({ error: "Invalid permission mode" }, 400);
-    }
-
-    // Convert thinking option to SDK config
-    const { thinking, effort } = body.thinking
-      ? thinkingOptionToConfig(body.thinking)
-      : { thinking: undefined, effort: undefined };
-
-    // Claude advertises "default" as Sonnet 5, so keep execution aligned
-    // with the picker instead of inheriting the remote VM's user setting.
-    const model = resolveSessionModel(
-      body.model,
-      body.provider ?? project.provider,
-    );
-
-    const parsedCodexModelProvider = resolveCodexModelProviderForStart(
-      body.provider ?? project.provider,
-      body.codexModelProvider,
-      model,
-    );
-    if (parsedCodexModelProvider.error) {
-      return c.json(
-        {
-          error: parsedCodexModelProvider.error,
-          code: parsedCodexModelProvider.code,
-        },
-        400,
-      );
-    }
-
-    const globalInstructions =
-      deps.serverSettingsService?.getSetting("globalInstructions") || undefined;
-
-    const result = await runtimeController.createSession({
-      projectPath: project.path,
-      permissionMode: body.mode,
-      modelSettings: {
-        model,
-        thinking,
-        effort,
-        reasoningEffort: normalizeReasoningEffortForProvider(
-          body.provider ?? project.provider,
-          parsedReasoningEffort.reasoningEffort,
-        ),
-        providerName: body.provider,
-        codexMcpMode: parsedCodexMcpMode.codexMcpMode,
-        codexModelProvider: parsedCodexModelProvider.value,
-        opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
-        executor,
-        globalInstructions,
-        permissions: body.permissions,
-      },
+    const result = await sessionCommandService.create({
+      projectId: c.req.param("projectId"),
+      body,
     });
-
-    // Check if queue is full
-    if (isQueueFullResponse(result)) {
-      return c.json(
-        { error: "Queue is full", maxQueueSize: result.maxQueueSize },
-        503,
-      );
-    }
-
-    if (isImmediateStartUnavailableResponse(result)) {
-      return c.json({ error: "Immediate start unavailable" }, 503);
-    }
-
-    // Check if request was queued
-    if (isQueuedResponse(result)) {
-      return c.json(result, 202); // 202 Accepted - queued for processing
-    }
-
-    recordOpenCodeContextWindowOverride(deps, {
-      provider: result.provider,
-      model: parsedOpenCodeConfig.opencodeConfig?.model ?? model,
-      sessionId: result.sessionId,
-      limits: parsedOpenCodeConfig.opencodeConfig?.limits,
-    });
-
-    // Save provider and executor to session metadata for resume
-    if (deps.sessionMetadataService) {
-      if (body.provider) {
-        await deps.sessionMetadataService.setProvider(
-          result.sessionId,
-          body.provider,
-        );
-      }
-      if (executor) {
-        await deps.sessionMetadataService.setExecutor(
-          result.sessionId,
-          executor,
-        );
-      }
-      if (parsedOpenCodeConfig.opencodeConfig) {
-        await deps.sessionMetadataService.setOpenCodeConfig(
-          result.sessionId,
-          parsedOpenCodeConfig.opencodeConfig,
-        );
-      }
-      if (result.provider === "codex" && parsedCodexMcpMode.codexMcpMode) {
-        await deps.sessionMetadataService.setCodexMcpMode?.(
-          result.sessionId,
-          parsedCodexMcpMode.codexMcpMode,
-        );
-      }
-      if (result.provider === "codex" && parsedCodexModelProvider.value) {
-        await deps.sessionMetadataService.setCodexModelProvider?.(
-          result.sessionId,
-          parsedCodexModelProvider.value,
-        );
-      }
-    }
-    await persistSessionPermissionMode(
-      deps,
-      result.sessionId,
-      result.permissionMode,
-    );
-    await recordYepSessionOrigin(deps, result.sessionId, project);
-
-    return c.json({
-      sessionId: result.sessionId,
-      processId: result.id,
-      permissionMode: result.permissionMode,
-      modeVersion: result.modeVersion,
-    });
+    return c.json(result.body, result.status);
   });
 
   // POST /api/projects/:projectId/sessions/:sessionId/resume - Resume session

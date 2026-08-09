@@ -1,12 +1,18 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionInteractionService } from "../../src/interactions/SessionInteractionService.js";
 import type { SessionMetadataService } from "../../src/metadata/SessionMetadataService.js";
+import { encodeProjectId } from "../../src/projects/paths.js";
+import type { ProjectScanner } from "../../src/projects/scanner.js";
 import type {
   RuntimeController,
   RuntimeProcessSnapshot,
   RuntimeSessionSubscription,
 } from "../../src/runtime/types.js";
 import { SessionCommandService } from "../../src/services/SessionCommandService.js";
+import type { Project } from "../../src/supervisor/types.js";
 
 function processSnapshot(
   overrides: Partial<RuntimeProcessSnapshot> = {},
@@ -61,12 +67,167 @@ function createService(
 ): SessionCommandService {
   return new SessionCommandService({
     runtimeController: runtime as RuntimeController,
+    scanner: {} as ProjectScanner,
     sessionInteractionService: options.interactions ?? interactionService(),
     sessionMetadataService: options.metadata,
   });
 }
 
 describe("SessionCommandService runtime boundary", () => {
+  it("starts one native Codex turn and persists lifecycle metadata", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-start-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project: Project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-start",
+        sessionCount: 0,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex",
+      };
+      const startSession = vi.fn(async () => ({
+        id: "process-first",
+        sessionId: "thread-first",
+        provider: "codex" as const,
+        permissionMode: "plan" as const,
+        modeVersion: 1,
+      }));
+      const setProvider = vi.fn(async () => undefined);
+      const setCodexMcpMode = vi.fn(async () => undefined);
+      const setPermissionMode = vi.fn(async () => undefined);
+      const setCreatedBy = vi.fn(async () => undefined);
+      const setProjectLocation = vi.fn(async () => undefined);
+      const service = new SessionCommandService({
+        runtimeController: { startSession } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+          mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
+        } as unknown as ProjectScanner,
+        sessionInteractionService: interactionService(),
+        sessionMetadataService: {
+          setProvider,
+          setCodexMcpMode,
+          setPermissionMode,
+          setCreatedBy,
+          setProjectLocation,
+        } as unknown as SessionMetadataService,
+      });
+
+      await expect(
+        service.start({
+          projectId,
+          requireImmediate: true,
+          body: {
+            message: "first native turn",
+            provider: "codex",
+            mode: "plan",
+            codexMcpMode: "standard",
+            reasoningEffort: "xhigh",
+            tempId: "client-temp-1",
+            codexInputs: [
+              {
+                type: "skill",
+                name: "fixture-skill",
+                path: "/fixture/SKILL.md",
+              },
+            ],
+          },
+        }),
+      ).resolves.toMatchObject({
+        ok: true,
+        status: 200,
+        body: {
+          sessionId: "thread-first",
+          processId: "process-first",
+          permissionMode: "plan",
+        },
+      });
+      expect(startSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectPath,
+          requireImmediate: true,
+          permissionMode: "plan",
+          message: expect.objectContaining({
+            text: "first native turn",
+            tempId: "client-temp-1",
+            codexInputs: [
+              {
+                type: "skill",
+                name: "fixture-skill",
+                path: "/fixture/SKILL.md",
+              },
+            ],
+          }),
+          modelSettings: expect.objectContaining({
+            providerName: "codex",
+            codexMcpMode: "standard",
+            reasoningEffort: "xhigh",
+          }),
+        }),
+      );
+      expect(setProvider).toHaveBeenCalledWith("thread-first", "codex");
+      expect(setCodexMcpMode).toHaveBeenCalledWith("thread-first", "standard");
+      expect(setPermissionMode).toHaveBeenCalledWith("thread-first", "plan");
+      expect(setCreatedBy).toHaveBeenCalledWith("thread-first", "yep");
+      expect(setProjectLocation).toHaveBeenCalledWith(
+        "thread-first",
+        projectId,
+        projectPath,
+      );
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
+  it("maps immediate create rejection without accepting queue ownership", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-create-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-create",
+        sessionCount: 0,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex" as const,
+      } satisfies Project;
+      const createSession = vi.fn(async () => ({
+        error: "immediate_start_unavailable" as const,
+      }));
+      const service = new SessionCommandService({
+        runtimeController: { createSession } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+        } as unknown as ProjectScanner,
+        sessionInteractionService: interactionService(),
+      });
+
+      await expect(
+        service.create({
+          projectId,
+          requireImmediate: true,
+          body: { provider: "codex" },
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: 503,
+        body: { code: "immediate_start_unavailable" },
+      });
+      expect(createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ requireImmediate: true }),
+      );
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it("interrupts the active turn and closes interaction aliases", async () => {
     const terminateInteractionOperations = vi.fn(async () => []);
     const interactions = interactionService({

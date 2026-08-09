@@ -654,8 +654,12 @@ export function createApp(options: AppOptions): AppResult {
   const interactionBroker = sessionInteractionService.getInteractionBroker();
   const sessionCommandService = new SessionCommandService({
     runtimeController,
+    scanner,
     sessionInteractionService,
     sessionMetadataService: options.sessionMetadataService,
+    eventBus: options.eventBus,
+    serverSettingsService: options.serverSettingsService,
+    modelInfoService: options.modelInfoService,
   });
 
   // Bridge HTTP clients observe the shared upstream server (OpenCode/Codex) and
