@@ -1,9 +1,13 @@
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CodexSessionEntry, UrlProjectId } from "@yep-anywhere/shared";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type CodexEventStore,
   type CodexEventStoreSource,
   InMemoryCodexEventStore,
+  JsonlCodexEventStore,
 } from "../../src/codex-events/index.js";
 import type { SessionInteractionService } from "../../src/interactions/SessionInteractionService.js";
 import {
@@ -12,10 +16,19 @@ import {
 } from "../../src/routes/sessions.js";
 import type { LoadedSession } from "../../src/sessions/types.js";
 import type { Project } from "../../src/supervisor/types.js";
+import { GeneratedArtifactMaterializer } from "../../src/uploads/generated-artifact.js";
+import { UploadManager } from "../../src/uploads/manager.js";
 import { testDraft } from "../codex-events/helpers.js";
 
 const projectId = "proj-1" as UrlProjectId;
 const sessionId = "session-1";
+const tempRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    tempRoots.splice(0).map((root) => rm(root, { recursive: true })),
+  );
+});
 
 describe("sessions route canonical Codex refresh overlay", () => {
   it("uses the provider-first journal without mixing bridge sequences", async () => {
@@ -150,6 +163,119 @@ describe("sessions route canonical Codex refresh overlay", () => {
     expect(body.session.title).not.toContain(managedPath);
     expect(JSON.stringify(entries)).toContain(managedPath);
   });
+
+  it("rebuilds only live generated manifests from the selected journal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-artifact-refresh-"));
+    tempRoots.push(root);
+    const workspace = join(root, "workspace");
+    const uploadsDir = join(root, "uploads");
+    const eventStorePath = join(root, "events.jsonl");
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(uploadsDir, { recursive: true }),
+    ]);
+    await writeFile(join(workspace, "refresh.txt"), "safe refresh\n");
+    const nowMs = Date.now();
+
+    const writer = new JsonlCodexEventStore({
+      filePath: eventStorePath,
+      now: () => 1_000,
+    });
+    const persisted = await writer.append(
+      testDraft(
+        "item/completed",
+        {
+          threadId: "thread-provider",
+          turnId: "turn-provider",
+          item: {
+            id: "file-provider",
+            type: "fileChange",
+            status: "completed",
+            changes: [{ path: "refresh.txt", kind: { type: "add" }, diff: "" }],
+          },
+        },
+        { sessionId, eventId: "provider-file-event" },
+      ),
+    );
+    const uploadManager = new UploadManager({ uploadsDir });
+    const materializer = new GeneratedArtifactMaterializer({
+      uploadManager,
+      now: () => nowMs,
+      retentionMs: 10_000,
+    });
+    const live = await materializer.materialize(
+      {
+        lifecycle: "completed",
+        item: {
+          id: "file-provider",
+          type: "fileChange",
+          status: "completed",
+          changes: [{ path: "refresh.txt", kind: { type: "add" }, diff: "" }],
+        },
+        threadId: "thread-provider",
+        turnId: "turn-provider",
+      },
+      {
+        projectId,
+        sessionId,
+        taskId: "task-provider",
+        workspaceRoot: workspace,
+        threadId: "thread-provider",
+        turnId: "turn-provider",
+        canonicalEventId: persisted.event.eventId,
+        canonicalEventSequence: persisted.event.sequence,
+      },
+    );
+    expect(live.artifacts).toHaveLength(1);
+
+    const reopenedManager = new UploadManager({ uploadsDir });
+    const routes = createTestRoutes(
+      "provider answer",
+      [
+        {
+          id: "provider",
+          createStore: () =>
+            new JsonlCodexEventStore({ filePath: eventStorePath }),
+        },
+      ],
+      {
+        generatedArtifactUploadManager: {
+          listReplayableGeneratedArtifacts: (scope, events) =>
+            reopenedManager.listReplayableGeneratedArtifacts(
+              scope,
+              events,
+              nowMs + 500,
+            ),
+        },
+      },
+    );
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}`,
+    );
+    const body = await response.json();
+    const artifactMessage = body.messages.find(
+      (message: { codexGeneratedArtifacts?: unknown }) =>
+        Array.isArray(message.codexGeneratedArtifacts),
+    );
+    expect(artifactMessage?.codexGeneratedArtifacts).toEqual(live.artifacts);
+
+    const artifact = live.artifacts[0];
+    if (!artifact) throw new Error("missing live artifact");
+    const registryPath = join(
+      uploadsDir,
+      projectId,
+      sessionId,
+      ".generated",
+      `${artifact.id}.json`,
+    );
+    await rename(registryPath, `${registryPath}.missing`);
+    const missingResponse = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}`,
+    );
+    expect(JSON.stringify(await missingResponse.json())).not.toContain(
+      artifact.id,
+    );
+  });
 });
 
 function fixedSource(
@@ -188,7 +314,11 @@ async function seededStore(
 function createTestRoutes(
   text: string,
   codexEventStoreSources: readonly CodexEventStoreSource[],
-  options: { entries?: CodexSessionEntry[]; title?: string } = {},
+  options: {
+    entries?: CodexSessionEntry[];
+    title?: string;
+    generatedArtifactUploadManager?: SessionsDeps["generatedArtifactUploadManager"];
+  } = {},
 ) {
   const project: Project = {
     id: projectId,
@@ -249,5 +379,11 @@ function createTestRoutes(
         }) as unknown as ReturnType<SessionsDeps["readerFactory"]>,
     ),
     codexEventStoreSources,
+    ...(options.generatedArtifactUploadManager
+      ? {
+          generatedArtifactUploadManager:
+            options.generatedArtifactUploadManager,
+        }
+      : {}),
   });
 }

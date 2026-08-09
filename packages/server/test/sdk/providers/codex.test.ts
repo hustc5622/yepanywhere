@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { GeneratedArtifactManifest } from "@yep-anywhere/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   InMemoryCodexEventStore,
@@ -27,6 +28,7 @@ import {
 } from "../../../src/sdk/providers/codex.js";
 import type { SDKMessage, ToolApprovalResult } from "../../../src/sdk/types.js";
 import { Supervisor } from "../../../src/supervisor/Supervisor.js";
+import { UploadManager } from "../../../src/uploads/manager.js";
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -262,6 +264,28 @@ function handle(message) {
         },
         1001,
       );
+      if (process.env.CODEX_FAKE_GENERATED_FILE) {
+        notify(
+          "item/completed",
+          {
+            threadId: "thread-new",
+            turnId: "turn-rewrite",
+            item: {
+              id: "file-generated",
+              type: "fileChange",
+              status: "completed",
+              changes: [
+                {
+                  path: process.env.CODEX_FAKE_GENERATED_FILE,
+                  kind: { type: "add" },
+                  diff: "+ password=fixture-only-private",
+                },
+              ],
+            },
+          },
+          1002,
+        );
+      }
       notify(
         "future/provider-event",
         {
@@ -1569,6 +1593,129 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
+    it("materializes a live canonical file item into a path-free managed artifact", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-generated-artifact-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const generatedPath = join(tempDir, "generated-report.pdf");
+      const uploadsDir = join(tempDir, "managed-uploads");
+      const capturePath = join(tempDir, "capture.json");
+      const bytes = Buffer.from("%PDF-1.7\nfixture report\n");
+      writeFileSync(generatedPath, bytes);
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousEventMode = process.env.CODEX_FAKE_EVENT_MODE;
+      const previousGeneratedFile = process.env.CODEX_FAKE_GENERATED_FILE;
+      const eventStore = new InMemoryCodexEventStore();
+      const uploadManager = new UploadManager({ uploadsDir });
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_EVENT_MODE = "1";
+      process.env.CODEX_FAKE_GENERATED_FILE = generatedPath;
+
+      try {
+        const provider = new CodexProvider({
+          codexPath: fakeCodexPath,
+          eventSpine: { defaultMode: "primary", store: eventStore },
+          generatedArtifactUploadManager: uploadManager,
+        });
+        session = await provider.startSession({
+          cwd: tempDir,
+          initialMessage: {
+            text: "create a fixture report",
+            uuid: "message-generated-artifact",
+          },
+          onToolApproval: async () => ({ behavior: "allow" }),
+        });
+
+        const output: SDKMessage[] = [];
+        for await (const item of session.iterator) {
+          output.push(item);
+          if (item.type === "result") break;
+        }
+
+        const artifactMessage = output.find((item) =>
+          Array.isArray(item.codexGeneratedArtifacts),
+        );
+        expect(artifactMessage, JSON.stringify(output, null, 2)).toBeDefined();
+        const artifacts = artifactMessage?.codexGeneratedArtifacts as
+          | GeneratedArtifactManifest[]
+          | undefined;
+        expect(artifacts).toHaveLength(1);
+        const artifact = artifacts?.[0];
+        if (!artifact) throw new Error("missing generated artifact");
+        expect(artifact).toMatchObject({
+          managedRef: expect.stringMatching(/^upload:/),
+          fileName: "generated-report.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: bytes.length,
+          source: {
+            provider: "codex",
+            type: "file_change",
+            threadId: "thread-new",
+            turnId: "turn-rewrite",
+            itemId: "file-generated",
+          },
+        });
+
+        const projectId = Buffer.from(tempDir).toString("base64url");
+        const restored = await uploadManager.readGeneratedArtifactBytes(
+          { projectId, sessionId: "thread-new" },
+          {
+            artifactId: artifact.id,
+            managedRef: artifact.managedRef,
+            fileName: artifact.fileName,
+            mimeType: artifact.mimeType,
+            sizeBytes: artifact.sizeBytes,
+            sha256: artifact.sha256,
+            expiresAtMs: Date.parse(artifact.retention.expiresAt),
+          },
+        );
+        expect(Buffer.from(restored.bytes)).toEqual(bytes);
+
+        const events = await eventStore.replay({ sessionId: "thread-new" });
+        const generatedEvent = events.find(
+          (event) => event.itemId === "file-generated",
+        );
+        expect(generatedEvent).toMatchObject({
+          method: "item/completed",
+          direction: "server_notification",
+        });
+        await expect(
+          uploadManager.listReplayableGeneratedArtifacts(
+            { projectId, sessionId: "thread-new" },
+            events,
+          ),
+        ).resolves.toEqual(artifacts);
+        await expect(
+          uploadManager.listReplayableGeneratedArtifacts(
+            { projectId, sessionId: "thread-new" },
+            events.map((event) =>
+              event.itemId === "file-generated"
+                ? { ...event, eventId: "different-source:1" }
+                : event,
+            ),
+          ),
+        ).resolves.toEqual([]);
+
+        const serialized = JSON.stringify(
+          output.filter(
+            (item) => item.codexThreadItem?.id === "file-generated",
+          ),
+        );
+        expect(serialized).not.toContain(tempDir);
+        expect(serialized).not.toContain("fixture-only-private");
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_EVENT_MODE", previousEventMode);
+        restoreEnv("CODEX_FAKE_GENERATED_FILE", previousGeneratedFile);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("forks through stable lastTurnId without mutating the source or losing thread MCP config", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-"),
@@ -2552,7 +2699,7 @@ describe("CodexProvider Event Normalization", () => {
     });
   });
 
-  it("normalizes imageGeneration notifications into completed ViewImage rows", () => {
+  it("normalizes imageGeneration without publishing provider savedPath", () => {
     const provider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (
         notification: { method: string; params?: unknown },
@@ -2590,8 +2737,8 @@ describe("CodexProvider Event Normalization", () => {
           id: "img-1",
           name: "ViewImage",
           input: {
-            path: "/tmp/generated.png",
             revised_prompt: "A quiet product screenshot",
+            result: "Image saved",
             status: "completed",
             title: "Generated image",
           },
@@ -2604,18 +2751,94 @@ describe("CodexProvider Event Normalization", () => {
         {
           type: "tool_result",
           tool_use_id: "img-1",
-          content: "Generated image: /tmp/generated.png",
+          content: "Image generation result: Image saved",
         },
       ],
     });
     expect(messages[1]?.toolUseResult).toMatchObject({
       type: "image",
-      path: "/tmp/generated.png",
       revisedPrompt: "A quiet product screenshot",
+    });
+    expect(JSON.stringify(messages)).not.toContain("/tmp/generated.png");
+  });
+
+  it("keeps canonical generated/file items path-free for public SDK messages", () => {
+    const provider = createTestProvider() as unknown as {
+      attachCanonicalCodexItem: (
+        messages: Array<Record<string, unknown>>,
+        event: Record<string, unknown>,
+        sessionId: string,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const generated = provider.attachCanonicalCodexItem(
+      [],
+      {
+        method: "item/completed",
+        payload: {
+          safety: "safe",
+          data: {
+            item: {
+              id: "img-local",
+              type: "imageGeneration",
+              status: "completed",
+              result: "file:///private/test/generated.png",
+              savedPath: "/private/test/generated.png",
+            },
+          },
+        },
+        eventId: "event-image",
+        sequence: 1,
+        receivedAtMs: 1,
+        threadId: "thread-1",
+        turnId: "turn-1",
+      },
+      "session-1",
+    );
+    const changed = provider.attachCanonicalCodexItem(
+      [],
+      {
+        method: "item/completed",
+        payload: {
+          safety: "safe",
+          data: {
+            item: {
+              id: "file-local",
+              type: "fileChange",
+              status: "completed",
+              changes: [
+                {
+                  path: "/private/test/result.txt",
+                  kind: { type: "add" },
+                  diff: "+ token=must-not-be-published",
+                },
+              ],
+            },
+          },
+        },
+        eventId: "event-file",
+        sequence: 2,
+        receivedAtMs: 2,
+        threadId: "thread-1",
+        turnId: "turn-1",
+      },
+      "session-1",
+    );
+
+    const serialized = JSON.stringify([generated, changed]);
+    expect(serialized).not.toContain("/private/test");
+    expect(serialized).not.toContain("must-not-be-published");
+    expect(changed[0]?.codexThreadItem).toMatchObject({
+      changes: [
+        {
+          path: "[path hidden]",
+          diff: "[REDACTED:secret-diff]",
+        },
+      ],
     });
   });
 
-  it("normalizes image_generation_call notifications into completed ViewImage rows", () => {
+  it("normalizes legacy image_generation_call rows without publishing saved_path", () => {
     const provider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (
         notification: { method: string; params?: unknown },
@@ -2654,7 +2877,6 @@ describe("CodexProvider Event Normalization", () => {
           id: "img-2",
           name: "ViewImage",
           input: {
-            path: "/Users/test/.codex/generated_images/session-1/ig_456.png",
             revised_prompt: "A saved generated image",
             status: "generating",
             title: "Generated image",
@@ -2664,9 +2886,58 @@ describe("CodexProvider Event Normalization", () => {
     });
     expect(messages[1]?.toolUseResult).toMatchObject({
       type: "image",
-      path: "/Users/test/.codex/generated_images/session-1/ig_456.png",
       revisedPrompt: "A saved generated image",
     });
+    expect(JSON.stringify(messages)).not.toContain(
+      "/Users/test/.codex/generated_images",
+    );
+  });
+
+  it("summarizes inline generated images without publishing their data URI", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const inlineImage = Buffer.concat([
+      Buffer.from("89504e470d0a1a0a", "hex"),
+      Buffer.alloc(192, 0x61),
+    ]).toString("base64");
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "img-inline",
+            type: "imageGeneration",
+            status: "completed",
+            result: inlineImage,
+          },
+        },
+      },
+      "session-1",
+      new Map(),
+    );
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.message).toMatchObject({
+      content: [
+        {
+          input: {
+            result: "[image data]",
+            status: "completed",
+          },
+        },
+      ],
+    });
+    const serialized = JSON.stringify(messages);
+    expect(serialized).not.toContain(inlineImage);
+    expect(serialized).not.toContain("data:image/");
   });
 
   it("does not emit rate limit errors when hasCredits is false but usage is below 100%", () => {

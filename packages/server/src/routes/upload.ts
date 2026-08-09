@@ -1,6 +1,6 @@
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
-import { join } from "node:path";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   type UploadClientMessage,
   type UploadCompleteMessage,
@@ -14,10 +14,16 @@ import { Hono } from "hono";
 import { stream } from "hono/streaming";
 import type { WSContext, WSEvents } from "hono/ws";
 import type { ProjectScanner } from "../projects/scanner.js";
-import { UPLOADS_DIR, UploadManager } from "../uploads/index.js";
+import {
+  GeneratedArtifactAccessError,
+  UPLOADS_DIR,
+  UploadManager,
+  isGeneratedArtifactStorageFilename,
+} from "../uploads/index.js";
 
 /** Progress update interval in bytes (64KB) */
 const PROGRESS_INTERVAL_BYTES = 64 * 1024;
+const STABLE_MANAGED_DOWNLOAD_BYTES = 30 * 1024 * 1024;
 
 // biome-ignore lint/suspicious/noExplicitAny: Complex third-party type from @hono/node-ws
 type UpgradeWebSocketFn = (createEvents: (c: Context) => WSEvents) => any;
@@ -27,13 +33,22 @@ export interface UploadDeps {
   upgradeWebSocket: UpgradeWebSocketFn;
   /** Maximum upload file size in bytes. 0 = unlimited */
   maxUploadSizeBytes?: number;
+  /** Test/embedding override; must refer to the same root as uploadManager. */
+  uploadsDir?: string;
+  uploadManager?: UploadManager;
+  now?: () => number;
 }
 
 export function createUploadRoutes(deps: UploadDeps): Hono {
   const routes = new Hono();
-  const uploadManager = new UploadManager({
-    maxUploadSizeBytes: deps.maxUploadSizeBytes,
-  });
+  const uploadsDir = deps.uploadsDir ?? UPLOADS_DIR;
+  const uploadManager =
+    deps.uploadManager ??
+    new UploadManager({
+      uploadsDir,
+      maxUploadSizeBytes: deps.maxUploadSizeBytes,
+    });
+  const now = deps.now ?? Date.now;
 
   const sendMessage = (ws: WSContext, msg: UploadServerMessage) => {
     ws.send(JSON.stringify(msg));
@@ -284,6 +299,68 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
     }),
   );
 
+  // Generated artifacts have a separate hash-bound route. Registry and
+  // retention are mandatory here; ordinary uploads never enter this branch.
+  routes.get(
+    "/projects/:projectId/sessions/:sessionId/generated-artifact/:artifactId/:sha256/:filename",
+    async (c) => {
+      const projectId = c.req.param("projectId") as string;
+      const sessionId = c.req.param("sessionId") as string;
+      const artifactId = c.req.param("artifactId") as string;
+      const sha256 = c.req.param("sha256") as string;
+      const fileName = c.req.param("filename") as string;
+      if (
+        !isUrlProjectId(projectId) ||
+        !isSafeUploadPathSegment(sessionId) ||
+        !/^ga_[a-f0-9]{32}$/.test(artifactId) ||
+        !/^[a-f0-9]{64}$/.test(sha256) ||
+        !isSafeGeneratedArtifactPublicFileName(fileName)
+      ) {
+        return c.json({ error: "Invalid generated artifact" }, 400);
+      }
+      try {
+        const result = await uploadManager.readGeneratedArtifactBytes(
+          { projectId, sessionId },
+          {
+            artifactId,
+            sha256: `sha256:${sha256}`,
+            fileName,
+          },
+          now(),
+        );
+        c.header("Content-Type", result.record.mimeType);
+        c.header("Content-Length", result.record.sizeBytes.toString());
+        c.header("Cache-Control", "private, no-store");
+        c.header("X-Content-Type-Options", "nosniff");
+        if (
+          !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(
+            result.record.mimeType,
+          ) ||
+          c.req.query("download") === "1"
+        ) {
+          c.header(
+            "Content-Disposition",
+            `attachment; filename*=UTF-8''${encodeRfc5987Value(fileName)}`,
+          );
+        }
+        const responseBytes = new Uint8Array(result.bytes.byteLength);
+        responseBytes.set(result.bytes);
+        return c.body(responseBytes);
+      } catch (error) {
+        if (error instanceof GeneratedArtifactAccessError) {
+          if (error.code === "EXPIRED") {
+            return c.json({ error: "Artifact expired" }, 410);
+          }
+          if (error.code === "INTEGRITY") {
+            return c.json({ error: "Artifact integrity check failed" }, 409);
+          }
+          return c.json({ error: "Artifact not found" }, 404);
+        }
+        return c.json({ error: "Artifact not found" }, 404);
+      }
+    },
+  );
+
   // GET endpoint: /projects/:projectId/sessions/:sessionId/upload/:filename
   // Serves uploaded files for viewing in the client
   routes.get(
@@ -298,23 +375,72 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
         return c.json({ error: "Invalid project ID" }, 400);
       }
 
-      // Validate filename - must have UUID prefix format
-      if (!filename || !/^[0-9a-f-]{36}_/.test(filename)) {
-        return c.json({ error: "Invalid filename" }, 400);
+      if (!isSafeUploadPathSegment(sessionId)) {
+        return c.json({ error: "Invalid session ID" }, 400);
       }
 
-      // Construct file path
-      const filePath = join(UPLOADS_DIR, projectId, sessionId, filename);
+      // Validate filename - must have UUID prefix format
+      if (!isSafeManagedUploadFilename(filename)) {
+        return c.json({ error: "Invalid filename" }, 400);
+      }
+      if (isGeneratedArtifactStorageFilename(filename)) {
+        return c.json({ error: "File not found" }, 404);
+      }
 
-      // Security: ensure the resolved path is within UPLOADS_DIR
-      if (!filePath.startsWith(UPLOADS_DIR)) {
+      const uploadsRoot = resolve(uploadsDir);
+      const filePath = resolve(uploadsRoot, projectId, sessionId, filename);
+      if (!isContainedUploadPath(uploadsRoot, filePath)) {
         return c.json({ error: "Invalid path" }, 400);
       }
 
       try {
-        const stats = await stat(filePath);
-        if (!stats.isFile()) {
+        const rootRealPath = await realpath(uploadsRoot);
+        await assertNoSymlinkUploadComponents(rootRealPath, [
+          projectId,
+          sessionId,
+          filename,
+        ]);
+        const before = await lstat(filePath, { bigint: true });
+        if (!before.isFile() || before.isSymbolicLink()) {
           return c.json({ error: "Not a file" }, 404);
+        }
+        const fileRealPath = await realpath(filePath);
+        if (!isContainedUploadPath(rootRealPath, fileRealPath)) {
+          return c.json({ error: "Invalid path" }, 400);
+        }
+        const handle = await open(
+          filePath,
+          constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+        );
+        const opened = await handle
+          .stat({ bigint: true })
+          .catch(async (error) => {
+            await handle.close().catch(() => undefined);
+            throw error;
+          });
+        if (!sameUploadFile(before, opened)) {
+          await handle.close();
+          return c.json({ error: "File changed" }, 409);
+        }
+        let stableBytes: Buffer | undefined;
+        if (opened.size <= BigInt(STABLE_MANAGED_DOWNLOAD_BYTES)) {
+          try {
+            stableBytes = await handle.readFile();
+            const after = await handle.stat({ bigint: true });
+            const realPathAfterRead = await realpath(filePath);
+            if (
+              !sameUploadFile(opened, after) ||
+              BigInt(stableBytes.length) !== after.size ||
+              realPathAfterRead !== fileRealPath
+            ) {
+              await handle.close();
+              return c.json({ error: "File changed" }, 409);
+            }
+          } catch (error) {
+            await handle.close();
+            throw error;
+          }
+          await handle.close();
         }
 
         // Determine content type from filename extension
@@ -325,32 +451,160 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
           jpeg: "image/jpeg",
           gif: "image/gif",
           webp: "image/webp",
-          svg: "image/svg+xml",
           pdf: "application/pdf",
-          txt: "text/plain",
+          txt: "text/plain; charset=utf-8",
+          md: "text/markdown; charset=utf-8",
+          csv: "text/csv; charset=utf-8",
           json: "application/json",
+          docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          mp4: "video/mp4",
         };
         const contentType = mimeTypes[ext] ?? "application/octet-stream";
+        const canPreview = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext);
 
         c.header("Content-Type", contentType);
-        c.header("Content-Length", stats.size.toString());
-        c.header("Cache-Control", "private, max-age=3600");
+        c.header("Content-Length", opened.size.toString());
+        c.header("Cache-Control", "private, no-store");
+        c.header("X-Content-Type-Options", "nosniff");
+        if (!canPreview || c.req.query("download") === "1") {
+          c.header(
+            "Content-Disposition",
+            `attachment; filename*=UTF-8''${encodeRfc5987Value(filename)}`,
+          );
+        }
 
+        if (stableBytes) {
+          const responseBytes = new Uint8Array(stableBytes.byteLength);
+          responseBytes.set(stableBytes);
+          return c.body(responseBytes);
+        }
         return stream(c, async (s) => {
-          const readable = createReadStream(filePath);
-          for await (const chunk of readable) {
-            await s.write(chunk);
+          try {
+            const readable = handle.createReadStream({ autoClose: false });
+            for await (const chunk of readable) {
+              await s.write(chunk);
+            }
+          } finally {
+            await handle.close();
           }
         });
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
           return c.json({ error: "File not found" }, 404);
         }
-        console.error("[Upload] Error serving file:", err);
+        if ((err as NodeJS.ErrnoException).code === "EINVAL") {
+          return c.json({ error: "Invalid path" }, 400);
+        }
+        console.error(
+          "[Upload] Error serving managed file:",
+          (err as NodeJS.ErrnoException).code ?? "UNKNOWN",
+        );
         return c.json({ error: "Internal error" }, 500);
       }
     },
   );
 
   return routes;
+}
+
+function isSafeUploadPathSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 256 &&
+    value !== "." &&
+    value !== ".." &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)
+  );
+}
+
+function isSafeManagedUploadFilename(value: string): boolean {
+  return (
+    value.length <= 280 &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_/.test(
+      value,
+    ) &&
+    !hasUnsafeUploadPathCharacter(value.slice(37)) &&
+    !value.includes("..")
+  );
+}
+
+function isSafeGeneratedArtifactPublicFileName(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 120 &&
+    value !== "." &&
+    value !== ".." &&
+    !value.includes("..") &&
+    !hasUnsafeUploadPathCharacter(value)
+  );
+}
+
+function hasUnsafeUploadPathCharacter(value: string): boolean {
+  if (!value) return true;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (
+      code <= 0x1f ||
+      code === 0x7f ||
+      character === "/" ||
+      character === "\\"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isContainedUploadPath(root: string, candidate: string): boolean {
+  const fromRoot = relative(root, candidate);
+  return (
+    fromRoot === "" ||
+    (fromRoot !== ".." &&
+      !fromRoot.startsWith(`..${sep}`) &&
+      !isAbsolute(fromRoot))
+  );
+}
+
+async function assertNoSymlinkUploadComponents(
+  root: string,
+  components: string[],
+): Promise<void> {
+  let current = root;
+  for (const component of components) {
+    current = resolve(current, component);
+    if (!isContainedUploadPath(root, current)) {
+      throw Object.assign(new Error("Upload path escaped its root"), {
+        code: "EINVAL",
+      });
+    }
+    const stats = await lstat(current);
+    if (stats.isSymbolicLink()) {
+      throw Object.assign(new Error("Upload path contains a symlink"), {
+        code: "EINVAL",
+      });
+    }
+  }
+}
+
+function sameUploadFile(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.isFile() &&
+    right.isFile() &&
+    left.nlink === 1n &&
+    right.nlink === 1n &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function encodeRfc5987Value(value: string): string {
+  return encodeURIComponent(value).replace(
+    /['()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
 }
