@@ -1,6 +1,8 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
+import type { FeishuCardActionEvent } from "./input-request.js";
 import { LarkSdkFeishuMessageApi } from "./lark-sdk-api.js";
 import { normalizeFeishuMessageMutation } from "./message-mutation.js";
+import { FeishuDurableOutbox } from "./outbox.js";
 import type {
   FeishuTransport,
   FeishuTransportCallbacks,
@@ -21,6 +23,7 @@ const silentLogger: Lark.Logger = {
 export interface LarkSdkFeishuTransportOptions
   extends FeishuTransportFactoryInput {
   connectTimeoutMs?: number;
+  outbox?: FeishuDurableOutbox;
 }
 
 export class LarkSdkFeishuTransport implements FeishuTransport {
@@ -43,6 +46,7 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
 
   private async doStart(): Promise<void> {
     const { account, appSecret, callbacks } = this.options;
+    await this.options.outbox?.initialize();
     const domain =
       account.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
     const client = new Lark.Client({
@@ -55,8 +59,10 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
     });
     this.messageApi = new LarkSdkFeishuMessageApi(client, {
       onApiSuccess: callbacks.onApiSuccess,
+      ...(this.options.outbox
+        ? { outbox: this.options.outbox, outboxOwner: account.id }
+        : {}),
     });
-
     let botInfo: { bot?: { open_id?: string; app_name?: string } };
     try {
       botInfo = await client.request({
@@ -76,6 +82,10 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
       openId: botInfo.bot.open_id,
       name: botInfo.bot.app_name,
     });
+    // Recover only after the current credentials have proved their bot
+    // identity. This keeps persisted intents fail-closed when an account id is
+    // accidentally reused with invalid or cross-tenant credentials.
+    await this.messageApi.recoverOutbox();
 
     const dispatcher = new Lark.EventDispatcher({ logger: silentLogger });
     dispatcher.register({
@@ -107,6 +117,12 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
         );
         if (mutation) {
           await callbacks.onMessageMutation(mutation, this.messageApi);
+        }
+      },
+      "card.action.trigger": async (event: unknown) => {
+        const normalized = normalizeFeishuCardAction(event);
+        if (normalized) {
+          await callbacks.onCardAction(normalized, this.messageApi);
         }
       },
     });
@@ -168,8 +184,48 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
   }
 }
 
+export function normalizeFeishuCardAction(
+  event: unknown,
+): FeishuCardActionEvent | undefined {
+  const raw = asRecord(event);
+  if (!raw) return undefined;
+  const normalized = Lark.normalizeCardAction(raw as Lark.RawCardActionEvent);
+  if (!normalized) return undefined;
+  const action = asRecord(raw.action);
+  const formValue =
+    asRecord(action?.form_value) ??
+    asRecord(action?.formValue) ??
+    asRecord(raw.form_value);
+  return {
+    messageId: normalized.messageId,
+    chatId: normalized.chatId,
+    operatorOpenId: normalized.operator.openId,
+    actionTag: normalized.action.tag,
+    value: normalized.action.value,
+    option: normalized.action.option,
+    ...(formValue ? { formValue } : {}),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 export class LarkSdkFeishuTransportFactory implements FeishuTransportFactory {
+  private readonly outbox?: FeishuDurableOutbox;
+
+  constructor(options: { dataDir?: string } = {}) {
+    this.outbox = options.dataDir
+      ? new FeishuDurableOutbox({ dataDir: options.dataDir })
+      : undefined;
+  }
+
   create(input: FeishuTransportFactoryInput): FeishuTransport {
-    return new LarkSdkFeishuTransport(input);
+    return new LarkSdkFeishuTransport({
+      ...input,
+      ...(this.outbox ? { outbox: this.outbox } : {}),
+    });
   }
 }

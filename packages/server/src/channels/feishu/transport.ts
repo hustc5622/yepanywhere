@@ -1,4 +1,5 @@
 import type { FeishuAccountConfig } from "@yep-anywhere/shared";
+import type { FeishuCardActionEvent } from "./input-request.js";
 import type { FeishuMessageMutation } from "./message-mutation.js";
 import type { FeishuMessageApi } from "./normalization/types.js";
 
@@ -17,6 +18,10 @@ export interface FeishuTransportCallbacks {
   onMessage(event: unknown, api?: FeishuMessageApi): void | Promise<void>;
   onMessageMutation(
     event: FeishuMessageMutation,
+    api?: FeishuMessageApi,
+  ): void | Promise<void>;
+  onCardAction(
+    event: FeishuCardActionEvent,
     api?: FeishuMessageApi,
   ): void | Promise<void>;
 }

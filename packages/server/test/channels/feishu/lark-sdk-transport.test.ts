@@ -38,6 +38,28 @@ vi.mock("@larksuiteoapi/node-sdk", () => {
     Domain: { Feishu: "domain-feishu", Lark: "domain-lark" },
     EventDispatcher,
     LoggerLevel: { error: "error" },
+    normalizeCardAction(event: Record<string, unknown>) {
+      const context = event.context as Record<string, unknown> | undefined;
+      const operator = event.operator as Record<string, unknown> | undefined;
+      const action = event.action as Record<string, unknown> | undefined;
+      if (
+        typeof context?.open_message_id !== "string" ||
+        typeof context.open_chat_id !== "string" ||
+        typeof operator?.open_id !== "string"
+      ) {
+        return null;
+      }
+      return {
+        messageId: context.open_message_id,
+        chatId: context.open_chat_id,
+        operator: { openId: operator.open_id },
+        action: {
+          tag: action?.tag ?? "unknown",
+          value: action?.value,
+          option: action?.option,
+        },
+      };
+    },
     WSClient,
   };
 });
@@ -45,6 +67,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => {
 import {
   LarkSdkFeishuTransport,
   LarkSdkFeishuTransportFactory,
+  normalizeFeishuCardAction,
 } from "../../../src/channels/feishu/lark-sdk-transport.js";
 import type { FeishuTransportCallbacks } from "../../../src/channels/feishu/transport.js";
 
@@ -88,7 +111,7 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
     expect(sdk.request).not.toHaveBeenCalled();
   });
 
-  it("authenticates one account and forwards only inbound message events", async () => {
+  it("authenticates one account and forwards normalized inbound events", async () => {
     const callbacks = makeCallbacks();
     const transport = new LarkSdkFeishuTransport({
       account: makeAccount({ domain: "lark" }),
@@ -116,6 +139,7 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
     });
     expect(callbacks.onReady).toHaveBeenCalledTimes(1);
     expect(Object.keys(sdk.handlers).sort()).toEqual([
+      "card.action.trigger",
       "im.message.reaction.created_v1",
       "im.message.reaction.deleted_v1",
       "im.message.recalled_v1",
@@ -144,6 +168,37 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
       transport.getMessageApi(),
     );
 
+    const cardAction = {
+      context: {
+        open_message_id: "om_card_fixture",
+        open_chat_id: "oc_chat_fixture",
+      },
+      operator: { open_id: "ou_user_fixture" },
+      action: {
+        tag: "button",
+        value: {
+          namespace: "yep-feishu",
+          operationId: "int_fixture_operation_0001",
+          operationVersion: 0,
+          action: "approve",
+        },
+        form_value: { q_0: "1" },
+      },
+    };
+    await sdk.handlers["card.action.trigger"]?.(cardAction);
+    expect(callbacks.onCardAction).toHaveBeenCalledWith(
+      {
+        messageId: "om_card_fixture",
+        chatId: "oc_chat_fixture",
+        operatorOpenId: "ou_user_fixture",
+        actionTag: "button",
+        value: cardAction.action.value,
+        option: undefined,
+        formValue: { q_0: "1" },
+      },
+      transport.getMessageApi(),
+    );
+
     await transport.stop();
     expect(sdk.wsClose).toHaveBeenCalledTimes(1);
     expect(transport.getMessageApi()).toBeUndefined();
@@ -166,6 +221,16 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
     );
     expect(sdk.wsOptions).toHaveLength(0);
     expect(callbacks.onMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed card-action envelopes at the transport boundary", () => {
+    expect(
+      normalizeFeishuCardAction({
+        context: { open_message_id: "om_missing_chat" },
+        operator: { open_id: "ou_fixture" },
+        action: { tag: "button", value: {} },
+      }),
+    ).toBeUndefined();
   });
 });
 
@@ -193,5 +258,6 @@ function makeCallbacks(): FeishuTransportCallbacks & {
     onTerminalError: vi.fn(),
     onMessage: vi.fn(),
     onMessageMutation: vi.fn(),
+    onCardAction: vi.fn(),
   };
 }
