@@ -3196,7 +3196,7 @@ export class CodexProvider implements AgentProvider {
         });
         if (turnStatus === "failed") {
           const codexError = classifyCodexError(
-            params.turn.error ?? notification.params,
+            params?.turn.error ?? notification.params,
             turnId ? { correlationId: turnId } : {},
           );
           return [
@@ -4588,10 +4588,10 @@ export class CodexProvider implements AgentProvider {
         });
         return [message];
       }
-
-      default:
-        return [];
     }
+
+    const exhaustiveItem: never = item;
+    return exhaustiveItem;
   }
 
   private getOptionalString(value: unknown): string | null {
