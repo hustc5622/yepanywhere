@@ -329,7 +329,13 @@ export interface SessionOptions {
   opencodeConfig?: OpenCodeSessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
+  /** Ephemeral provider-native input. Never persist this in message drafts. */
+  codexInputs?: CodexStructuredUserInput[];
 }
+
+export type CodexStructuredUserInput =
+  | { type: "skill"; name: string; path: string }
+  | { type: "mention"; name: string; path: string };
 
 export type { UploadedFile } from "@yep-anywhere/shared";
 
@@ -1027,6 +1033,7 @@ export const api = {
         codexModelProvider: options?.codexModelProvider,
         opencodeConfig: options?.opencodeConfig,
         executor: options?.executor,
+        codexInputs: options?.codexInputs,
         attachments,
       }),
     }),
@@ -1092,6 +1099,7 @@ export const api = {
           codexModelProvider: options?.codexModelProvider,
           opencodeConfig: options?.opencodeConfig,
           executor: options?.executor,
+          codexInputs: options?.codexInputs,
           attachments,
           tempId,
           resumeSessionAt,
@@ -1127,6 +1135,7 @@ export const api = {
     thinking?: ThinkingOption,
     reasoningEffort?: string,
     deferred?: boolean,
+    codexInputs?: CodexStructuredUserInput[],
   ) =>
     fetchJSON<{
       queued: boolean;
@@ -1143,6 +1152,7 @@ export const api = {
         thinking,
         reasoningEffort,
         deferred,
+        codexInputs,
       }),
     }),
 

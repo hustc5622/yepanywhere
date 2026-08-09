@@ -182,6 +182,92 @@ describe("queued session API responses", () => {
   });
 });
 
+describe("Codex structured input API", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const skillInput = {
+    type: "skill" as const,
+    name: "release-check",
+    path: "/test-fixtures/skills/release-check/SKILL.md",
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("serializes selected skills for start, resume, queue, and deferred queue", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        sessionId: "session-1",
+        processId: "process-1",
+        permissionMode: "default",
+        modeVersion: 1,
+        queued: true,
+      }),
+    } as Response);
+
+    await api.startSession("project-1", "start", {
+      provider: "codex",
+      codexInputs: [skillInput],
+    });
+    await api.resumeSession("project-1", "session-1", "resume", {
+      provider: "codex",
+      codexInputs: [skillInput],
+    });
+    await api.queueMessage(
+      "session-1",
+      "queue",
+      undefined,
+      undefined,
+      "temp-queue",
+      undefined,
+      undefined,
+      undefined,
+      [skillInput],
+    );
+    await api.queueMessage(
+      "session-1",
+      "defer",
+      undefined,
+      undefined,
+      "temp-defer",
+      undefined,
+      undefined,
+      true,
+      [skillInput],
+    );
+
+    const bodies = fetchMock.mock.calls.map(([, request]) =>
+      JSON.parse(String(request?.body)),
+    );
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        message: "start",
+        codexInputs: [skillInput],
+      }),
+      expect.objectContaining({
+        message: "resume",
+        codexInputs: [skillInput],
+      }),
+      expect.objectContaining({
+        message: "queue",
+        codexInputs: [skillInput],
+      }),
+      expect.objectContaining({
+        message: "defer",
+        deferred: true,
+        codexInputs: [skillInput],
+      }),
+    ]);
+  });
+});
+
 describe("Codex transcript export", () => {
   const fetchMock = vi.fn<typeof fetch>();
 
