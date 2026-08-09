@@ -12,6 +12,7 @@ import type {
   RuntimeSessionSubscription,
 } from "../../src/runtime/types.js";
 import { SessionCommandService } from "../../src/services/SessionCommandService.js";
+import type { ISessionReader } from "../../src/sessions/types.js";
 import type { Project } from "../../src/supervisor/types.js";
 
 function processSnapshot(
@@ -68,6 +69,7 @@ function createService(
   return new SessionCommandService({
     runtimeController: runtime as RuntimeController,
     scanner: {} as ProjectScanner,
+    readerFactory: () => ({}) as ISessionReader,
     sessionInteractionService: options.interactions ?? interactionService(),
     sessionMetadataService: options.metadata,
   });
@@ -107,6 +109,7 @@ describe("SessionCommandService runtime boundary", () => {
           getOrCreateProject: vi.fn(async () => project),
           mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
         } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
         sessionInteractionService: interactionService(),
         sessionMetadataService: {
           setProvider,
@@ -206,6 +209,7 @@ describe("SessionCommandService runtime boundary", () => {
         scanner: {
           getOrCreateProject: vi.fn(async () => project),
         } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
         sessionInteractionService: interactionService(),
       });
 

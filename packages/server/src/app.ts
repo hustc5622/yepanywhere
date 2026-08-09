@@ -655,11 +655,22 @@ export function createApp(options: AppOptions): AppResult {
   const sessionCommandService = new SessionCommandService({
     runtimeController,
     scanner,
+    readerFactory,
     sessionInteractionService,
     sessionMetadataService: options.sessionMetadataService,
     eventBus: options.eventBus,
     serverSettingsService: options.serverSettingsService,
     modelInfoService: options.modelInfoService,
+    recentsService: options.recentsService,
+    codexSessionsDir: CODEX_SESSIONS_DIR,
+    codexReaderFactory,
+    geminiScanner,
+    geminiSessionsDir: GEMINI_TMP_DIR,
+    geminiReaderFactory,
+    opencodeDbPath: OPENCODE_DB_PATH,
+    opencodeReaderFactory,
+    kimiSessionsDir: KIMI_SESSIONS_DIR,
+    kimiReaderFactory,
   });
 
   // Bridge HTTP clients observe the shared upstream server (OpenCode/Codex) and
@@ -1284,6 +1295,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiReaderFactory,
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
+      recentsService: options.recentsService,
       codexBridgeService: options.codexBridgeService,
       codexEventStoreSources: codexTranscriptStoreSources,
       opencodeBridgeService: options.opencodeBridgeService,
