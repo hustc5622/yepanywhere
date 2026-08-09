@@ -145,6 +145,32 @@ describe("Feishu channel routes", () => {
     expect((await routes.request("/accounts")).status).toBe(503);
   });
 
+  it("fails closed when adapter persistence or recovery is not ready", async () => {
+    const dataDir = await createDataDir(dataDirs);
+    const service = new FeishuChannelService({ dataDir });
+    await service.initialize();
+    const routes = createFeishuChannelRoutes({
+      feishuChannelService: service,
+      isChannelReady: () => false,
+    });
+
+    expect((await routes.request("/doctor")).status).toBe(200);
+    expect((await routes.request("/diagnostics")).status).toBe(200);
+    expect((await routes.request("/accounts")).status).toBe(503);
+    expect(
+      (
+        await routes.request("/accounts/account-fixture", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "Fixture",
+            appId: "cli_0123456789abcdef",
+          }),
+        })
+      ).status,
+    ).toBe(503);
+  });
+
   it("lists and removes persisted scope bindings", async () => {
     const dataDir = await createDataDir(dataDirs);
     const service = new FeishuChannelService({ dataDir });

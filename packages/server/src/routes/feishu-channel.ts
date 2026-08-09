@@ -10,6 +10,8 @@ export interface FeishuChannelRoutesOptions {
   bindingStore?: FeishuBindingStore;
   inbox?: FeishuDurableInbox;
   operationStore?: FeishuOperationStore;
+  /** Adapter-wide readiness, including persistence and recovery. */
+  isChannelReady?(): boolean;
 }
 
 export function createFeishuChannelRoutes(
@@ -22,7 +24,7 @@ export function createFeishuChannelRoutes(
     if (
       c.req.path.endsWith("/doctor") ||
       c.req.path.endsWith("/diagnostics") ||
-      service.isOperational()
+      (options.isChannelReady?.() ?? service.isOperational())
     ) {
       return next();
     }

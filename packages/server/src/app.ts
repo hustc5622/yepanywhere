@@ -251,6 +251,8 @@ export interface AppOptions {
   feishuInbox?: FeishuDurableInbox;
   /** Broker-owned interaction projections used for aggregate diagnostics. */
   feishuOperationStore?: FeishuOperationStore;
+  /** Adapter-wide readiness, including persistence and recovery. */
+  feishuChannelReady?: () => boolean;
   /** AI title generation settings. */
   sessionTitleGeneration?: SessionTitleGenerationConfig;
   /** If non-empty, only these provider names are exposed via the API. */
@@ -1536,6 +1538,7 @@ export function createApp(options: AppOptions): AppResult {
         bindingStore: options.feishuBindingStore,
         inbox: options.feishuInbox,
         operationStore: options.feishuOperationStore,
+        isChannelReady: options.feishuChannelReady,
       }),
     );
   }
