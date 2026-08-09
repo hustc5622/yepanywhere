@@ -98,8 +98,8 @@ export interface ModelSettings {
    */
   resumeSessionAt?: string;
   /**
-   * Provider-native same-thread rollback count. Currently Codex-only, mapping
-   * to app-server `thread/rollback` before the edited turn starts.
+   * Legacy wire name for the number of trailing Codex source turns excluded
+   * by a source-preserving edit fork.
    */
   rollbackNumTurns?: number;
 }
@@ -496,6 +496,7 @@ export class Supervisor {
     const options: ProcessConstructorOptions = {
       startupId,
       startupStartedAtMs,
+      unmaterializedSession: true,
       projectPath,
       projectId,
       sessionId: tempSessionId,
@@ -550,6 +551,7 @@ export class Supervisor {
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
     provider?: AgentProvider,
+    provenance?: { allowMissingRolloutReplacement?: boolean },
   ): Promise<Process> {
     const activeProvider = provider ?? this.provider;
     if (!activeProvider) {
@@ -596,6 +598,8 @@ export class Supervisor {
       cwd: projectPath,
       initialMessage: messageWithUuid,
       resumeSessionId,
+      allowMissingRolloutReplacement:
+        provenance?.allowMissingRolloutReplacement,
       permissionMode: effectiveMode,
       model: modelSettings?.model,
       thinking: modelSettings?.thinking,
@@ -689,9 +693,13 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message, messageUuid, message.tempId);
 
-    const isForkedResume =
+    const isOpenCodeFork =
       activeProvider.name === "opencode" &&
       Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
+    const isCodexFork =
+      activeProvider.name === "codex" &&
+      Boolean(resumeSessionId && modelSettings?.rollbackNumTurns);
+    const isForkedResume = isOpenCodeFork || isCodexFork;
     const requiresStrictSessionId =
       isForkedResume || activeProvider.name === "codex";
 
@@ -714,7 +722,7 @@ export class Supervisor {
       if (isForkedResume && resolvedSessionId === resumeSessionId) {
         await process.abort();
         throw new Error(
-          "OpenCode edit fork did not return a new native session ID",
+          `${activeProvider.displayName} edit fork did not return a new native session ID`,
         );
       }
     }
@@ -777,7 +785,10 @@ export class Supervisor {
     message: UserMessage,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
-    admission?: { requireImmediate?: boolean },
+    admission?: {
+      requireImmediate?: boolean;
+      allowMissingRolloutReplacement?: boolean;
+    },
   ): Promise<
     | Process
     | QueuedResponse
@@ -934,6 +945,8 @@ export class Supervisor {
         message,
         permissionMode,
         modelSettings,
+        allowMissingRolloutReplacement:
+          admission?.allowMissingRolloutReplacement,
       });
       if (isQueueFullError(result)) return result;
       return {
@@ -954,6 +967,10 @@ export class Supervisor {
           permissionMode,
           modelSettings,
           provider,
+          {
+            allowMissingRolloutReplacement:
+              admission?.allowMissingRolloutReplacement,
+          },
         );
       }
       return await this.startLegacySession(
@@ -1063,6 +1080,8 @@ export class Supervisor {
           "Thinking or reasoning effort changed on queue, restarting process",
         );
 
+        const allowMissingRolloutReplacement =
+          process.provider === "codex" && process.isUnmaterializedSession;
         await process.abort();
         this.unregisterProcess(process);
 
@@ -1072,7 +1091,12 @@ export class Supervisor {
           message,
           permissionMode,
           modelSettings,
-          admission,
+          {
+            ...admission,
+            ...(allowMissingRolloutReplacement
+              ? { allowMissingRolloutReplacement: true }
+              : {}),
+          },
         );
 
         if ("id" in result) {
@@ -1855,6 +1879,7 @@ export class Supervisor {
             undefined,
             request.permissionMode,
             request.modelSettings,
+            request.allowMissingRolloutReplacement,
           );
           process = result;
         } else {
@@ -1865,6 +1890,7 @@ export class Supervisor {
             request.sessionId,
             request.permissionMode,
             request.modelSettings,
+            request.allowMissingRolloutReplacement,
           );
           process = result;
         }
@@ -1929,6 +1955,7 @@ export class Supervisor {
     resumeSessionId?: string,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
+    allowMissingRolloutReplacement?: boolean,
   ): Promise<Process> {
     const provider = this.resolveProvider(modelSettings);
 
@@ -1942,6 +1969,7 @@ export class Supervisor {
         permissionMode,
         modelSettings,
         provider,
+        { allowMissingRolloutReplacement },
       );
     }
 

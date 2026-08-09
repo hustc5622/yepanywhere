@@ -22,6 +22,8 @@ export interface QueuedRequest {
   message: UserMessage;
   permissionMode?: PermissionMode;
   modelSettings?: ModelSettings;
+  /** Internal proof for the one safe Codex no-rollout replacement case. */
+  allowMissingRolloutReplacement?: boolean;
   queuedAt: Date;
   /** Resolver to call when request is processed or cancelled */
   resolve: (result: QueuedRequestResult) => void;
@@ -93,6 +95,7 @@ export class WorkerQueue {
     message: UserMessage;
     permissionMode?: PermissionMode;
     modelSettings?: ModelSettings;
+    allowMissingRolloutReplacement?: boolean;
   }): EnqueueResult {
     // Check queue size limit
     if (this.maxQueueSize > 0 && this.queue.length >= this.maxQueueSize) {
@@ -116,6 +119,7 @@ export class WorkerQueue {
       message: params.message,
       permissionMode: params.permissionMode,
       modelSettings: params.modelSettings,
+      allowMissingRolloutReplacement: params.allowMissingRolloutReplacement,
       queuedAt: new Date(),
       resolve: resolvePromise,
     };

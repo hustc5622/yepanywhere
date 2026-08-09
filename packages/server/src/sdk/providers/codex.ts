@@ -104,6 +104,8 @@ import type {
   CommandExecutionRequestApprovalParams,
   FileChangeApprovalDecision,
   FileChangeRequestApprovalParams,
+  ThreadForkParams,
+  ThreadForkResponse,
   ThreadResumeParams,
   ThreadResumeResponse,
   ThreadStartParams,
@@ -191,9 +193,6 @@ const APP_SERVER_OVERLOAD_BASE_DELAY_MS = 50;
 const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL_PROVIDER = DEFAULT_CODEX_MODEL_SOURCE;
 const CODEX_MODEL_PROVIDER_NAMES = new Set(["openai", "azure"]);
-const CODEX_THREAD_ROLLBACK_DEPRECATION_NOTICE =
-  "thread/rollback is deprecated and will be removed soon";
-let hasLoggedThreadRollbackDeprecation = false;
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 
 /**
@@ -373,15 +372,6 @@ interface CodexTurnRuntimeState {
   threadId: string;
   activeTurnId: string | null;
   ready: boolean;
-}
-
-interface ThreadRollbackParams {
-  threadId: string;
-  numTurns: number;
-}
-
-interface ThreadRollbackResponse {
-  thread: ThreadResumeResponse["thread"];
 }
 
 type CodexMessagePhase = "commentary" | "final_answer";
@@ -1531,9 +1521,13 @@ export class CodexProvider implements AgentProvider {
     });
   }
 
-  private normalizeRollbackNumTurns(value?: number): number | null {
-    if (typeof value !== "number") return null;
-    if (!Number.isInteger(value) || value <= 0) return null;
+  private normalizeCodexForkExcludedTurnCount(value?: number): number | null {
+    if (value === undefined) return null;
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(
+        "Codex edit fork requires rollbackNumTurns to be a positive safe integer",
+      );
+    }
     return value;
   }
 
@@ -2059,32 +2053,240 @@ export class CodexProvider implements AgentProvider {
         sandbox: policy.sandbox,
         config: mcpProfile.threadConfig,
       };
-      const threadExchange = options.resumeSessionId
-        ? yield* this.requestTrackedWithRetryProjection<ThreadResumeResponse>({
-            appServer,
+      const forkExcludedTurnCount = this.normalizeCodexForkExcludedTurnCount(
+        options.rollbackNumTurns,
+      );
+      if (forkExcludedTurnCount !== null && !options.resumeSessionId) {
+        throw new Error("Codex edit fork requires a source session ID");
+      }
+
+      let threadResult:
+        | ThreadResumeResponse
+        | ThreadStartResponse
+        | ThreadForkResponse;
+      let threadExchange: {
+        requestId: JsonRpcId;
+        method: "thread/resume" | "thread/start";
+        params: ThreadResumeParams | ThreadStartParams;
+        result: ThreadResumeResponse | ThreadStartResponse;
+      };
+      if (options.resumeSessionId) {
+        try {
+          const tracked =
+            yield* this.requestTrackedWithRetryProjection<ThreadResumeResponse>(
+              {
+                appServer,
+                method: "thread/resume",
+                params: threadResumeParams,
+                sessionId: () => sessionId || options.resumeSessionId,
+                onRetry: captureStartupRetry,
+              },
+            );
+          threadResult = tracked.result;
+          threadExchange = {
+            requestId: tracked.requestId,
             method: "thread/resume",
             params: threadResumeParams,
-            sessionId: () => sessionId || options.resumeSessionId,
-            onRetry: captureStartupRetry,
-          })
-        : yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
+            result: tracked.result,
+          };
+        } catch (error) {
+          if (
+            !options.allowMissingRolloutReplacement ||
+            !isNoRolloutFoundError(error, options.resumeSessionId)
+          ) {
+            throw error;
+          }
+          if (forkExcludedTurnCount !== null) {
+            throw new Error(
+              `Cannot fork Codex thread ${options.resumeSessionId}: the source has no persisted rollout`,
+            );
+          }
+          log.warn(
+            {
+              event: "codex_provisional_thread_replaced",
+              previousSessionId: options.resumeSessionId,
+            },
+            "Codex provisional thread had no rollout; starting replacement thread",
+          );
+          const tracked =
+            yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
+              appServer,
+              method: "thread/start",
+              params: threadStartParams,
+              sessionId: () => sessionId || options.resumeSessionId,
+              onRetry: captureStartupRetry,
+            });
+          threadResult = tracked.result;
+          threadExchange = {
+            requestId: tracked.requestId,
+            method: "thread/start",
+            params: threadStartParams,
+            result: tracked.result,
+          };
+        }
+      } else {
+        const tracked =
+          yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
             appServer,
             method: "thread/start",
             params: threadStartParams,
             sessionId: () => sessionId || options.resumeSessionId,
             onRetry: captureStartupRetry,
           });
-      const threadResult: ThreadResumeResponse | ThreadStartResponse =
-        threadExchange.result;
-      const threadMethod = options.resumeSessionId
-        ? ("thread/resume" as const)
-        : ("thread/start" as const);
-      const threadParams = options.resumeSessionId
-        ? threadResumeParams
-        : threadStartParams;
+        threadResult = tracked.result;
+        threadExchange = {
+          requestId: tracked.requestId,
+          method: "thread/start",
+          params: threadStartParams,
+          result: tracked.result,
+        };
+      }
 
       sessionId = threadResult.thread.id;
       runtimeState.threadId = sessionId;
+      if (
+        forkExcludedTurnCount !== null &&
+        sessionId !== options.resumeSessionId
+      ) {
+        throw new Error(
+          `Cannot fork Codex thread ${options.resumeSessionId}: thread/resume returned unexpected source ID ${sessionId}`,
+        );
+      }
+
+      let historyForkPending = forkExcludedTurnCount !== null;
+      let forkParentSessionId: string | undefined;
+      let forkStartedFresh = false;
+      let forkExchange:
+        | {
+            requestId: JsonRpcId;
+            method: "thread/fork";
+            params: ThreadForkParams;
+            result: ThreadForkResponse;
+          }
+        | {
+            requestId: JsonRpcId;
+            method: "thread/start";
+            params: ThreadStartParams;
+            result: ThreadStartResponse;
+          }
+        | undefined;
+      if (forkExcludedTurnCount !== null) {
+        const sourceThreadId = sessionId;
+        forkParentSessionId = sourceThreadId;
+        if (!Array.isArray(threadResult.thread.turns)) {
+          throw new Error(
+            `Cannot fork Codex thread ${sourceThreadId}: thread/resume did not return its turn history`,
+          );
+        }
+        const sourceTurns = threadResult.thread.turns;
+        if (forkExcludedTurnCount > sourceTurns.length) {
+          throw new Error(
+            `Cannot fork Codex thread ${sourceThreadId}: requested exclusion of ${forkExcludedTurnCount} trailing turns, but the source contains ${sourceTurns.length}`,
+          );
+        }
+
+        const retainedTurnCount = sourceTurns.length - forkExcludedTurnCount;
+        if (retainedTurnCount === 0) {
+          // Stable 0.147 has no stable "fork before the first turn" boundary.
+          // Start an empty child and persist its lineage in Yep metadata.
+          log.info(
+            {
+              event: "codex_thread_fork_fresh_start_requested",
+              sourceThreadId,
+              excludedTurnCount: forkExcludedTurnCount,
+            },
+            "Starting an empty Codex child for a first-prompt edit fork",
+          );
+          const tracked =
+            yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
+              appServer,
+              method: "thread/start",
+              params: threadStartParams,
+              sessionId: () => sessionId || options.resumeSessionId,
+              onRetry: captureStartupRetry,
+            });
+          threadResult = tracked.result;
+          forkStartedFresh = true;
+          forkExchange = {
+            requestId: tracked.requestId,
+            method: "thread/start",
+            params: threadStartParams,
+            result: tracked.result,
+          };
+        } else {
+          const boundaryTurn = sourceTurns[retainedTurnCount - 1];
+          if (
+            !boundaryTurn ||
+            typeof boundaryTurn.id !== "string" ||
+            boundaryTurn.id.length === 0 ||
+            boundaryTurn.status === "inProgress"
+          ) {
+            throw new Error(
+              `Cannot fork Codex thread ${sourceThreadId}: the retained turn boundary is missing or still in progress`,
+            );
+          }
+
+          // Use only the stable inclusive boundary. Keep the current-main MCP
+          // enablement in thread config; never send experimental beforeTurnId.
+          const forkParams: ThreadForkParams = {
+            threadId: sourceThreadId,
+            lastTurnId: boundaryTurn.id,
+            model: requestedModel,
+            modelProvider: modelSource.id,
+            cwd: options.cwd,
+            approvalPolicy: policy.approvalPolicy,
+            sandbox: policy.sandbox,
+            config: mcpProfile.threadConfig,
+          };
+          log.info(
+            {
+              event: "codex_thread_fork_requested",
+              sourceThreadId,
+              lastTurnId: boundaryTurn.id,
+              retainedTurnCount,
+              excludedTurnCount: forkExcludedTurnCount,
+            },
+            "Requesting a source-preserving Codex history fork",
+          );
+          const tracked =
+            yield* this.requestTrackedWithRetryProjection<ThreadForkResponse>({
+              appServer,
+              method: "thread/fork",
+              params: forkParams,
+              sessionId: () => sessionId || options.resumeSessionId,
+              onRetry: captureStartupRetry,
+            });
+          threadResult = tracked.result;
+          forkExchange = {
+            requestId: tracked.requestId,
+            method: "thread/fork",
+            params: forkParams,
+            result: tracked.result,
+          };
+        }
+
+        sessionId = threadResult.thread.id;
+        if (!sessionId || sessionId === sourceThreadId) {
+          throw new Error(
+            `Codex edit fork did not return a new thread ID for source ${sourceThreadId}`,
+          );
+        }
+        runtimeState.threadId = sessionId;
+        log.info(
+          {
+            event: "codex_thread_fork_completed",
+            sourceThreadId,
+            sessionId,
+            excludedTurnCount: forkExcludedTurnCount,
+            lastTurnId:
+              forkExchange?.method === "thread/fork"
+                ? forkExchange.params.lastTurnId
+                : null,
+            fallback: forkExchange?.method === "thread/start",
+          },
+          "Created source-preserving Codex history fork",
+        );
+      }
 
       projectionMode = resolveCodexEventProjectionMode(
         {
@@ -2117,11 +2319,17 @@ export class CodexProvider implements AgentProvider {
         });
       }
       await activeEventIngress.ingestClientExchange({
-        requestId: threadExchange.requestId,
-        method: threadMethod,
-        params: threadParams,
-        result: threadResult,
+        ...threadExchange,
+        result: threadExchange.result,
       });
+      if (forkExchange) {
+        await activeEventIngress.ingestClientExchange({
+          requestId: forkExchange.requestId,
+          method: forkExchange.method,
+          params: forkExchange.params,
+          result: forkExchange.result,
+        });
+      }
       await appServer.setEventObserver({
         onClientRequest: async (input) => {
           await activeEventIngress.ingestClientRequest({
@@ -2155,40 +2363,6 @@ export class CodexProvider implements AgentProvider {
           await activeEventIngress.ingestNotification(notification),
       });
 
-      const rollbackNumTurns = this.normalizeRollbackNumTurns(
-        options.rollbackNumTurns,
-      );
-      let historyRewritePending = rollbackNumTurns !== null;
-      if (rollbackNumTurns !== null) {
-        const beforeRollbackThreadId = sessionId;
-        const rollbackParams: ThreadRollbackParams = {
-          threadId: sessionId,
-          numTurns: rollbackNumTurns,
-        };
-        log.info(
-          {
-            event: "codex_thread_rollback_requested",
-            sessionId: beforeRollbackThreadId,
-            rollbackNumTurns,
-          },
-          "Requesting Codex app-server thread rollback",
-        );
-        const rollbackResult = await appServer.request<ThreadRollbackResponse>(
-          "thread/rollback",
-          rollbackParams,
-        );
-        sessionId = rollbackResult.thread.id;
-        runtimeState.threadId = sessionId;
-        log.info(
-          {
-            event: "codex_thread_rollback_completed",
-            beforeRollbackThreadId,
-            sessionId,
-            rollbackNumTurns,
-          },
-          "Rolled back Codex app-server thread before edited turn",
-        );
-      }
       runtimeState.ready = true;
 
       // The app-server returns the provider it actually bound the thread to;
@@ -2231,11 +2405,12 @@ export class CodexProvider implements AgentProvider {
           modelProvider: effectiveModelProvider,
           reasoningEffort: threadResult.reasoningEffort,
           serviceTier: threadResult.serviceTier,
+          ...(forkParentSessionId ? { forkParentSessionId } : {}),
         } as SDKMessage),
       );
 
       const messageGen = queue.generator();
-      let isFirstMessage = !options.resumeSessionId;
+      let isFirstMessage = !options.resumeSessionId || forkStartedFresh;
 
       for await (const message of messageGen) {
         if (signal.aborted) {
@@ -2314,14 +2489,15 @@ export class CodexProvider implements AgentProvider {
           sourceEvent: "turn/start",
         });
         yield logMessage(userMessage);
-        if (historyRewritePending) {
-          historyRewritePending = false;
+        if (historyForkPending) {
+          historyForkPending = false;
           yield logMessage(
             withCodexTimestamp({
               type: "system",
-              subtype: "history_rewrite_complete",
-              uuid: `codex-history-rewrite-${activeTurnId}`,
+              subtype: "history_fork_complete",
+              uuid: `codex-history-fork-${activeTurnId}`,
               session_id: sessionId,
+              forkParentSessionId,
               turnId: activeTurnId,
               messageUuid: message.uuid,
             } as SDKMessage),
@@ -3380,9 +3556,6 @@ export class CodexProvider implements AgentProvider {
       case "guardianWarning":
       case "deprecationNotice":
       case "configWarning": {
-        // Keep user-actionable safety/configuration notices in the transcript.
-        // The rollback deprecation is different: it describes Yep's internal
-        // app-server request, not a failed turn, and users cannot act on it.
         const params = notification.params as
           | {
               message?: string;
@@ -3395,26 +3568,6 @@ export class CodexProvider implements AgentProvider {
           this.getOptionalString(params?.summary);
         if (!summary) return [];
         const details = this.getOptionalString(params?.details ?? undefined);
-        if (
-          notification.method === "deprecationNotice" &&
-          summary === CODEX_THREAD_ROLLBACK_DEPRECATION_NOTICE
-        ) {
-          // Upstream's replacement is a bounded thread/fork. Adopting it
-          // requires cross-thread branch lineage; until then, keep this
-          // maintainer-facing signal out of the user's successful turn.
-          if (!hasLoggedThreadRollbackDeprecation) {
-            hasLoggedThreadRollbackDeprecation = true;
-            log.warn(
-              {
-                event: "codex_thread_rollback_deprecated",
-                sessionId,
-                details: details ?? null,
-              },
-              "Codex app-server thread/rollback is deprecated; retaining compatibility for same-session edit branches",
-            );
-          }
-          return [];
-        }
         return [
           withCodexTimestamp({
             type: "system",
@@ -4619,6 +4772,17 @@ function getProviderApprovalDecision(
   if (result.behavior === "deny") return "deny";
   if (result.providerDecision) return result.providerDecision;
   return result.approvalScope === "always" ? "approve_always" : "approve";
+}
+
+function isNoRolloutFoundError(
+  error: unknown,
+  expectedThreadId: string,
+): boolean {
+  return (
+    error instanceof CodexJsonRpcError &&
+    error.code === -32600 &&
+    error.message === `no rollout found for thread id ${expectedThreadId}`
+  );
 }
 
 function normalizeAutoResolutionMs(value: unknown): number | null {

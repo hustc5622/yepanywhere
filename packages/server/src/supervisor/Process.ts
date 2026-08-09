@@ -104,6 +104,8 @@ export interface ProcessConstructorOptions extends ProcessOptions {
   startupId?: string;
   /** Wall-clock start of the provider request, before preflight work. */
   startupStartedAtMs?: number;
+  /** Created without an initial turn and therefore not materialized yet. */
+  unmaterializedSession?: boolean;
   /** MessageQueue for real SDK, undefined for mock SDK */
   queue?: MessageQueue;
   /** Abort function from real SDK */
@@ -159,6 +161,7 @@ export class Process {
   private readonly startupStartedAtMs: number;
   private firstProviderMessageLogged = false;
   private firstProviderOutputLogged = false;
+  private _unmaterializedSession: boolean;
 
   private legacyQueue: UserMessage[] = [];
   private messageQueue: MessageQueue | null;
@@ -297,6 +300,7 @@ export class Process {
     this.startedAt = new Date();
     this.startupStartedAtMs =
       options.startupStartedAtMs ?? this.startedAt.getTime();
+    this._unmaterializedSession = options.unmaterializedSession === true;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 
     // Real SDK provides these, mock SDK doesn't
@@ -359,6 +363,11 @@ export class Process {
 
   get sessionId(): string {
     return this._sessionId;
+  }
+
+  /** Whether a create-only process has not yet accepted its first user turn. */
+  get isUnmaterializedSession(): boolean {
+    return this._unmaterializedSession;
   }
 
   /**
@@ -1069,6 +1078,7 @@ export class Process {
     uuid: string,
     tempId?: string,
   ): void {
+    this._unmaterializedSession = false;
     const publicPrompt = buildUserPromptProjection(
       typeof message === "string" ? { text: message } : message,
     ).publicPrompt;
@@ -1077,6 +1087,8 @@ export class Process {
       type: "user",
       uuid,
       tempId,
+      clientUserMessageId: uuid,
+      isOptimistic: true,
       message: { role: "user", content: publicPrompt },
     } as SDKMessage);
 
@@ -1144,6 +1156,7 @@ export class Process {
         }
         const admission = normalizeSteerResult(steerResult);
         if (admission.accepted) {
+          this._unmaterializedSession = false;
           this.publishOptimisticUserMessage(messageWithUuid, admission.turnId);
           return { success: true, position: 0 };
         }
@@ -1174,12 +1187,14 @@ export class Process {
         this.clearIdleTimer();
         this.setState({ type: "in-turn" });
       }
+      this._unmaterializedSession = false;
       this.publishOptimisticUserMessage(messageWithUuid);
       return { success: true, position };
     }
 
     // Legacy behavior for mock SDK
     this.legacyQueue.push(messageWithUuid);
+    this._unmaterializedSession = false;
     this.publishOptimisticUserMessage(messageWithUuid);
     if (this._state.type === "idle") {
       this.processNextInQueue();
