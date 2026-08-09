@@ -572,17 +572,19 @@ export class UploadManager {
     if (input.content.byteLength > 2 * 1024 * 1024) {
       throw new Error("Derived artifact exceeds maximum allowed size");
     }
-    await assertContainedUploadPath(this.uploadsDir, input.source.path);
-    const sourceRealPath = await realpath(input.source.path);
+    const sourceRealPath = await this.resolveTaskPathRef(
+      input,
+      `upload:${input.source.id}`,
+    );
+    const sourceStats = await lstat(sourceRealPath);
     if (
-      !(await isPathInsideTaskDir(
-        this.uploadsDir,
-        input.projectId,
-        input.sessionId,
-        sourceRealPath,
-      ))
+      basename(sourceRealPath) !== input.source.name ||
+      !sourceStats.isFile() ||
+      sourceStats.isSymbolicLink() ||
+      sourceStats.nlink !== 1 ||
+      sourceStats.size !== input.source.size
     ) {
-      throw new Error("Source attachment is outside the requested task scope");
+      throw new Error("Source attachment does not match its managed manifest");
     }
 
     const taskDir = taskUploadDir(
