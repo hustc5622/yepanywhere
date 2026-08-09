@@ -359,6 +359,29 @@ describe("Codex bridge interactive protocol", () => {
     },
   );
 
+  it("does not turn approve_always into a persistent network deny", () => {
+    expect(
+      buildCodexInteractiveResponse(
+        "item/commandExecution/requestApproval",
+        {
+          availableDecisions: [
+            "accept",
+            {
+              applyNetworkPolicyAmendment: {
+                network_policy_amendment: {
+                  host: "example.com",
+                  action: "deny",
+                },
+              },
+            },
+            "cancel",
+          ],
+        },
+        "approve_always",
+      ),
+    ).toEqual({ decision: "accept" });
+  });
+
   it.each([
     [
       "approve_for_session",

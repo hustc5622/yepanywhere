@@ -163,7 +163,25 @@ export interface ToolApprovalResult {
    * Absent/"once" applies to this request only.
    */
   approvalScope?: "once" | "always";
+  /**
+   * Exact decision selected on Yep's pending-input control plane.
+   *
+   * Provider adapters with richer native responses (notably Codex
+   * permissions and MCP elicitation) must prefer this over reconstructing a
+   * choice from `behavior` / `approvalScope`. Generic providers may safely
+   * ignore it and continue using the provider-neutral fields above.
+   */
+  providerDecision?: ProviderApprovalDecision;
 }
+
+/** Exact pending-input decisions accepted by the API/runtime boundary. */
+export type ProviderApprovalDecision =
+  | "approve"
+  | "approve_accept_edits"
+  | "approve_for_session"
+  | "approve_strict_auto_review"
+  | "approve_always"
+  | "deny";
 
 export type CanUseTool = (
   toolName: string,
@@ -172,6 +190,8 @@ export type CanUseTool = (
     signal: AbortSignal;
     /** Provider-native request id, when the provider exposes one. */
     requestId?: string;
+    /** Provider-native request method used to disambiguate reused ids. */
+    requestMethod?: string;
     /**
      * The provider already applied its native permission policy and still
      * decided this request needs a human. Skip Yep's mode-based auto-approval

@@ -13,7 +13,11 @@ import type {
   CodexNativeControlRequest,
   CodexNativeControlResult,
 } from "../sdk/providers/codex-controls.js";
-import type { SDKMessage, UserMessage } from "../sdk/types.js";
+import type {
+  ProviderApprovalDecision,
+  SDKMessage,
+  UserMessage,
+} from "../sdk/types.js";
 import type {
   ImmediateStartUnavailableResponse,
   ModelSettings,
@@ -26,7 +30,7 @@ import type {
 import type { ProcessInfo } from "../supervisor/types.js";
 import type { BusEvent } from "../watcher/index.js";
 
-export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 5;
+export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 6;
 
 export type RuntimeMode = "embedded" | "external";
 
@@ -170,10 +174,10 @@ export interface RuntimeInputResponseRequest {
   sessionId: string;
   requestId: string;
   /**
-   * approve_always persists the grant with the provider (OpenCode `always`
-   * reply). Providers without persistent approvals treat it as approve.
+   * Exact control-plane decision. Codex consumes the native distinctions;
+   * generic providers derive allow/deny and persistence conservatively.
    */
-  response: "approve" | "approve_always" | "deny";
+  response: ProviderApprovalDecision;
   answers?: UserQuestionAnswers;
   feedback?: string;
 }

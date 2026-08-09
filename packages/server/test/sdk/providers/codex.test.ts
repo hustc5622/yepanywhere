@@ -22,7 +22,7 @@ import {
   CodexProvider,
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
-import type { SDKMessage } from "../../../src/sdk/types.js";
+import type { SDKMessage, ToolApprovalResult } from "../../../src/sdk/types.js";
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -135,7 +135,13 @@ function handle(message) {
   if (process.env.CODEX_FAKE_MESSAGE_CAPTURE) {
     fs.appendFileSync(
       process.env.CODEX_FAKE_MESSAGE_CAPTURE,
-      JSON.stringify({ method: message.method, params: message.params }) + "\\n",
+      JSON.stringify({
+        id: message.id,
+        method: message.method,
+        params: message.params,
+        result: message.result,
+        error: message.error,
+      }) + "\\n",
     );
   }
   if (!message.method && message.id === "approval-event-spine") {
@@ -233,6 +239,13 @@ function handle(message) {
           availableDecisions: ["accept", "decline"],
           authorization: "Bearer approval-must-not-be-persisted",
         },
+      );
+    }
+    if (process.env.CODEX_FAKE_SERVER_REQUEST_METHOD) {
+      request(
+        "synthetic-server-request",
+        process.env.CODEX_FAKE_SERVER_REQUEST_METHOD,
+        {},
       );
     }
     return;
@@ -359,9 +372,13 @@ process.stdin.on("data", (chunk) => {
       return fakeCodexPath;
     }
 
-    function readMessageCapture(
-      capturePath: string,
-    ): Array<{ method?: string; params?: Record<string, unknown> }> {
+    function readMessageCapture(capturePath: string): Array<{
+      id?: string | number;
+      method?: string;
+      params?: Record<string, unknown>;
+      result?: unknown;
+      error?: { code?: number; message?: string };
+    }> {
       if (!existsSync(capturePath)) return [];
       return readFileSync(capturePath, "utf8")
         .trim()
@@ -370,8 +387,11 @@ process.stdin.on("data", (chunk) => {
         .map(
           (line) =>
             JSON.parse(line) as {
+              id?: string | number;
               method?: string;
               params?: Record<string, unknown>;
+              result?: unknown;
+              error?: { code?: number; message?: string };
             },
         );
     }
@@ -1267,6 +1287,48 @@ process.stdin.on("data", (chunk) => {
         } else {
           process.env.CODEX_FAKE_MCP_SERVERS = previousMcpServers;
         }
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("preserves typed JSON-RPC error codes for rejected server requests", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-server-request-error-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "messages.jsonl");
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousServerRequest =
+        process.env.CODEX_FAKE_SERVER_REQUEST_METHOD;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_SERVER_REQUEST_METHOD = "future/unknown";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "exercise server request errors" },
+        });
+        await session.iterator.next();
+        await session.iterator.next();
+        await vi.waitFor(() => {
+          expect(
+            readMessageCapture(capturePath).find(
+              ({ id }) => id === "synthetic-server-request",
+            ),
+          ).toMatchObject({
+            error: {
+              code: -32601,
+              message: "Unsupported Codex server request: future/unknown",
+            },
+          });
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_SERVER_REQUEST_METHOD", previousServerRequest);
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
@@ -2212,6 +2274,550 @@ describe("CodexProvider Event Normalization", () => {
         new Map(),
       ),
     ).toEqual([]);
+  });
+});
+
+describe("CodexProvider server requests", () => {
+  type ServerRequest = {
+    id: string | number;
+    method: string;
+    params?: unknown;
+  };
+  type HandleServerRequest = (
+    request: ServerRequest,
+    options: {
+      cwd: string;
+      onToolApproval?: (
+        toolName: string,
+        input: unknown,
+        options: {
+          signal: AbortSignal;
+          requestId?: string;
+          requestMethod?: string;
+          respectProviderDecision?: boolean;
+        },
+      ) => Promise<ToolApprovalResult>;
+    },
+    signal: AbortSignal,
+  ) => Promise<unknown>;
+
+  const getHandler = (provider: CodexProvider) =>
+    (
+      provider as unknown as {
+        handleServerRequestApproval: HandleServerRequest;
+      }
+    ).handleServerRequestApproval.bind(provider);
+
+  it("keeps requestUserInput pending until answers are submitted", async () => {
+    const provider = new CodexProvider();
+    let resolveApproval:
+      | ((result: {
+          behavior: "allow";
+          updatedInput: unknown;
+        }) => void)
+      | undefined;
+    const onToolApproval = vi.fn(
+      async (_toolName: string, input: unknown) =>
+        await new Promise<{
+          behavior: "allow";
+          updatedInput: unknown;
+        }>((resolve) => {
+          resolveApproval = resolve;
+        }),
+    );
+    let settled = false;
+    const responsePromise = getHandler(provider)(
+      {
+        id: 17,
+        method: "item/tool/requestUserInput",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          isBlocking: true,
+          autoResolutionMs: null,
+          questions: [
+            {
+              id: "choice",
+              header: "Mode",
+              question: "Choose a mode",
+              isOther: false,
+              isSecret: false,
+              options: [{ label: "Safe", description: "Use safe mode" }],
+            },
+            {
+              id: "note",
+              header: "Note",
+              question: "Add a note",
+              isOther: true,
+              isSecret: false,
+              options: null,
+            },
+          ],
+        },
+      },
+      { cwd: "/workspace", onToolApproval },
+      new AbortController().signal,
+    ).then((response) => {
+      settled = true;
+      return response;
+    });
+
+    await vi.waitFor(() => expect(onToolApproval).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(onToolApproval).toHaveBeenCalledWith(
+      "AskUserQuestion",
+      expect.objectContaining({
+        isBlocking: true,
+        questions: expect.arrayContaining([
+          expect.objectContaining({ id: "choice", question: "Choose a mode" }),
+        ]),
+      }),
+      expect.objectContaining({
+        requestId: "codex:number:17",
+        requestMethod: "item/tool/requestUserInput",
+        respectProviderDecision: true,
+      }),
+    );
+
+    const input = onToolApproval.mock.calls[0]?.[1] as Record<string, unknown>;
+    resolveApproval?.({
+      behavior: "allow",
+      updatedInput: {
+        ...input,
+        answers: { choice: "Safe", note: "ship it" },
+      },
+    });
+
+    await expect(responsePromise).resolves.toEqual({
+      answers: {
+        choice: { answers: ["Safe"] },
+        note: { answers: ["user_note: ship it"] },
+      },
+    });
+  });
+
+  it("fails closed instead of returning empty answers when user input is denied", async () => {
+    await expect(
+      getHandler(new CodexProvider())(
+        {
+          id: "question-denied",
+          method: "item/tool/requestUserInput",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            itemId: "item-question",
+            isBlocking: true,
+            autoResolutionMs: null,
+            questions: [
+              {
+                id: "secret",
+                header: "Secret",
+                question: "Enter the secret",
+                isOther: true,
+                isSecret: true,
+                options: null,
+              },
+            ],
+          },
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => ({
+            behavior: "deny" as const,
+            providerDecision: "deny" as const,
+          })),
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Codex tool user input request was declined");
+  });
+
+  it.each([
+    ["approve_for_session", "acceptForSession"],
+    [
+      "approve_always",
+      {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: ["git", "status"],
+        },
+      },
+    ],
+    ["approve_strict_auto_review", "accept"],
+  ] as const)(
+    "keeps exact command decision %s through native response mapping",
+    async (providerDecision, expectedDecision) => {
+      const amendment = {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: ["git", "status"],
+        },
+      };
+      const onToolApproval = vi.fn(async () => ({
+        behavior: "allow" as const,
+        providerDecision,
+      }));
+      await expect(
+        getHandler(new CodexProvider())(
+          {
+            id: `command-${providerDecision}`,
+            method: "item/commandExecution/requestApproval",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              itemId: "item-command",
+              startedAtMs: Date.now(),
+              environmentId: null,
+              command: "git status",
+              cwd: "/workspace",
+              availableDecisions: [
+                "accept",
+                "acceptForSession",
+                amendment,
+                "decline",
+                "cancel",
+              ],
+            },
+          },
+          { cwd: "/workspace", onToolApproval },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual({ decision: expectedDecision });
+      expect(onToolApproval).toHaveBeenCalledWith(
+        "Bash",
+        expect.objectContaining({
+          requestMethod: "item/commandExecution/requestApproval",
+          availableDecisions: expect.arrayContaining([
+            "accept",
+            "acceptForSession",
+          ]),
+        }),
+        expect.objectContaining({
+          requestId: `codex:string:command-${providerDecision}`,
+          requestMethod: "item/commandExecution/requestApproval",
+          respectProviderDecision: true,
+        }),
+      );
+    },
+  );
+
+  it("does not turn approve_always into a persistent network deny", async () => {
+    await expect(
+      getHandler(new CodexProvider())(
+        {
+          id: "command-network-deny",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            itemId: "item-command",
+            startedAtMs: Date.now(),
+            environmentId: null,
+            command: "curl example.com",
+            cwd: "/workspace",
+            availableDecisions: [
+              "accept",
+              {
+                applyNetworkPolicyAmendment: {
+                  network_policy_amendment: {
+                    host: "example.com",
+                    action: "deny",
+                  },
+                },
+              },
+              "cancel",
+            ],
+          },
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => ({
+            behavior: "allow" as const,
+            providerDecision: "approve_always" as const,
+          })),
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ decision: "accept" });
+  });
+
+  it("distinguishes explicit decline from transport cancellation", async () => {
+    const params = {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-command",
+      startedAtMs: Date.now(),
+      environmentId: null,
+      command: "pnpm test",
+      cwd: "/workspace",
+      availableDecisions: ["accept", "acceptForSession", "decline", "cancel"],
+    };
+    const handler = getHandler(new CodexProvider());
+
+    await expect(
+      handler(
+        {
+          id: "explicit-deny",
+          method: "item/commandExecution/requestApproval",
+          params,
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => ({
+            behavior: "deny" as const,
+            interrupt: true,
+            providerDecision: "deny" as const,
+          })),
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ decision: "decline" });
+
+    await expect(
+      handler(
+        {
+          id: "transport-abort",
+          method: "item/commandExecution/requestApproval",
+          params,
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            throw error;
+          }),
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ decision: "cancel" });
+  });
+
+  it.each([
+    [
+      "approve_for_session",
+      { permissions: { network: { enabled: true } }, scope: "session" },
+    ],
+    [
+      "approve_always",
+      { permissions: { network: { enabled: true } }, scope: "session" },
+    ],
+    [
+      "approve_strict_auto_review",
+      {
+        permissions: { network: { enabled: true } },
+        scope: "turn",
+        strictAutoReview: true,
+      },
+    ],
+  ] as const)(
+    "maps exact permissions decision %s without collapsing it",
+    async (providerDecision, expected) => {
+      const onToolApproval = vi.fn(async () => ({
+        behavior: "allow" as const,
+        providerDecision,
+      }));
+      await expect(
+        getHandler(new CodexProvider())(
+          {
+            id: `permissions-${providerDecision}`,
+            method: "item/permissions/requestApproval",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              itemId: "item-permissions",
+              environmentId: null,
+              startedAtMs: Date.now(),
+              cwd: "/workspace",
+              reason: "Network access is required",
+              permissions: {
+                network: { enabled: true },
+                fileSystem: null,
+              },
+            },
+          },
+          { cwd: "/workspace", onToolApproval },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual(expected);
+      expect(onToolApproval).toHaveBeenCalledWith(
+        "Permissions",
+        expect.objectContaining({
+          approvalKind: "permissions",
+          approvalPrompt: "Network access is required",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-permissions",
+        }),
+        expect.objectContaining({
+          requestId: `codex:string:permissions-${providerDecision}`,
+          requestMethod: "item/permissions/requestApproval",
+          respectProviderDecision: true,
+        }),
+      );
+    },
+  );
+
+  it.each([
+    ["approve_for_session", { persist: "session" }],
+    ["approve_always", { persist: "always" }],
+    ["approve_strict_auto_review", null],
+  ] as const)(
+    "preserves exact MCP persistence decision %s",
+    async (providerDecision, expectedMeta) => {
+      await expect(
+        getHandler(new CodexProvider())(
+          {
+            id: `mcp-${providerDecision}`,
+            method: "mcpServer/elicitation/request",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              serverName: "example",
+              mode: "form",
+              _meta: {
+                codex_approval_kind: "mcp_tool_call",
+                tool_name: "create_issue",
+                persist: ["session", "always"],
+              },
+              message: "Allow MCP tool?",
+              requestedSchema: { type: "object", properties: {} },
+            },
+          },
+          {
+            cwd: "/workspace",
+            onToolApproval: vi.fn(async () => ({
+              behavior: "allow" as const,
+              providerDecision,
+            })),
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual({
+        action: "accept",
+        content: null,
+        _meta: expectedMeta,
+      });
+    },
+  );
+
+  it("explicitly owns or fails closed for every pinned ServerRequest method", async () => {
+    const threadParams = {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-1",
+      startedAtMs: Date.now(),
+    };
+    const cases: Array<{
+      method: string;
+      params: Record<string, unknown>;
+      expected?: unknown;
+      error?: string;
+    }> = [
+      {
+        method: "item/commandExecution/requestApproval",
+        params: { ...threadParams, command: "pwd", cwd: "/workspace" },
+        expected: { decision: "decline" },
+      },
+      {
+        method: "item/fileChange/requestApproval",
+        params: { ...threadParams, reason: null, grantRoot: null },
+        expected: { decision: "decline" },
+      },
+      {
+        method: "item/tool/requestUserInput",
+        params: {
+          ...threadParams,
+          isBlocking: true,
+          autoResolutionMs: null,
+          questions: [],
+        },
+        error: "No interactive input handler is available",
+      },
+      {
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          serverName: "example",
+          mode: "form",
+          _meta: null,
+          message: "Continue?",
+          requestedSchema: { type: "object", properties: {} },
+        },
+        expected: { action: "decline", content: null, _meta: null },
+      },
+      {
+        method: "item/permissions/requestApproval",
+        params: {
+          ...threadParams,
+          environmentId: null,
+          cwd: "/workspace",
+          reason: null,
+          permissions: { network: null, fileSystem: null },
+        },
+        expected: { permissions: {}, scope: "turn" },
+      },
+      {
+        method: "item/tool/call",
+        params: {},
+        error: "Unsupported Codex server request: item/tool/call",
+      },
+      {
+        method: "account/chatgptAuthTokens/refresh",
+        params: {},
+        error:
+          "Unsupported Codex server request: account/chatgptAuthTokens/refresh",
+      },
+      {
+        method: "attestation/generate",
+        params: {},
+        error: "Unsupported Codex server request: attestation/generate",
+      },
+      {
+        method: "currentTime/read",
+        params: {},
+        error: "Unsupported Codex server request: currentTime/read",
+      },
+      {
+        method: "applyPatchApproval",
+        params: { fileChanges: { "/workspace/a.ts": { type: "update" } } },
+        expected: { decision: "denied" },
+      },
+      {
+        method: "execCommandApproval",
+        params: { command: ["pwd"], cwd: "/workspace" },
+        expected: { decision: "denied" },
+      },
+    ];
+
+    expect(cases).toHaveLength(11);
+    for (const testCase of cases) {
+      const response = getHandler(new CodexProvider())(
+        {
+          id: `owner-${testCase.method}`,
+          method: testCase.method,
+          params: testCase.params,
+        },
+        { cwd: "/workspace" },
+        new AbortController().signal,
+      );
+      if (testCase.error) {
+        await expect(response).rejects.toThrow(testCase.error);
+      } else {
+        await expect(response).resolves.toEqual(testCase.expected);
+      }
+    }
+  });
+
+  it("does not silently acknowledge an unknown server request", async () => {
+    await expect(
+      getHandler(new CodexProvider())(
+        { id: 99, method: "future/unknown", params: {} },
+        { cwd: "/workspace" },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Unsupported Codex server request: future/unknown");
   });
 });
 

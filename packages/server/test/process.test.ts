@@ -1307,7 +1307,7 @@ describe("Process", () => {
       expect(result.behavior).toBe("allow");
     });
 
-    it("preserves a provider-native approval request id", async () => {
+    it("preserves provider-native approval request identity", async () => {
       const process = new Process(createMockIterator([]), {
         projectPath: "/test",
         projectId: "proj-1",
@@ -1321,15 +1321,59 @@ describe("Process", () => {
       const approvalPromise = process.handleToolApproval(
         "Bash",
         { command: "git status" },
-        { signal: abortController.signal, requestId: "per_native_1" },
+        {
+          signal: abortController.signal,
+          requestId: "per_native_1",
+          requestMethod: "item/commandExecution/requestApproval",
+        },
       );
 
-      expect(process.getPendingInputRequest()?.id).toBe("per_native_1");
+      expect(process.getPendingInputRequest()).toMatchObject({
+        id: "per_native_1",
+        providerRequestId: "per_native_1",
+        providerRequestMethod: "item/commandExecution/requestApproval",
+      });
       expect(process.respondToInput("per_native_1", "approve")).toBe(true);
       await expect(approvalPromise).resolves.toMatchObject({
         behavior: "allow",
       });
     });
+
+    it.each([
+      ["approve_for_session", "always"],
+      ["approve_always", "always"],
+      ["approve_strict_auto_review", undefined],
+    ] as const)(
+      "preserves the exact %s provider approval decision",
+      async (response, approvalScope) => {
+        const process = new Process(createMockIterator([]), {
+          projectPath: "/test",
+          projectId: "proj-1",
+          sessionId: `sess-${response}`,
+          provider: "codex",
+          idleTimeoutMs: 100,
+          permissionMode: "default",
+        });
+        const approvalPromise = process.handleToolApproval(
+          "Bash",
+          { command: "git status" },
+          {
+            signal: new AbortController().signal,
+            requestId: `request-${response}`,
+            respectProviderDecision: true,
+          },
+        );
+
+        expect(process.respondToInput(`request-${response}`, response)).toBe(
+          true,
+        );
+        await expect(approvalPromise).resolves.toMatchObject({
+          behavior: "allow",
+          providerDecision: response,
+          approvalScope,
+        });
+      },
+    );
 
     it("handles concurrent tool approvals (queues them)", async () => {
       const iterator = createMockIterator([]);

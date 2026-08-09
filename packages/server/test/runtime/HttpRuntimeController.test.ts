@@ -241,6 +241,33 @@ describe("HttpRuntimeController", () => {
     );
   });
 
+  it("round-trips exact provider approval decisions across the runtime boundary", async () => {
+    const respondToInput = vi.fn(async () => ({ accepted: true }));
+    const app = createRuntimeControlApp({
+      controller: { respondToInput } as unknown as RuntimeController,
+      token: "runtime-test-token",
+    });
+    const controller = new HttpRuntimeController({
+      baseUrl: "http://runtime.test",
+      token: "runtime-test-token",
+      fetch: (input, init) =>
+        app.fetch(input instanceof Request ? input : new Request(input, init)),
+    });
+
+    await expect(
+      controller.respondToInput({
+        sessionId: "thread-approval",
+        requestId: "codex:string:request-1",
+        response: "approve_strict_auto_review",
+      }),
+    ).resolves.toEqual({ accepted: true });
+    expect(respondToInput).toHaveBeenCalledWith({
+      sessionId: "thread-approval",
+      requestId: "codex:string:request-1",
+      response: "approve_strict_auto_review",
+    });
+  });
+
   it("round-trips immediate admission without entering the external runtime queue", async () => {
     const { controller } = createHarness({ maxWorkers: 1 });
     await controller.start();

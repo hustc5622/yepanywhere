@@ -796,8 +796,8 @@ function getFiniteNumber(value: unknown): number | undefined {
 
 function isPersistentCommandDecision(value: unknown): boolean {
   const decision = asRecord(value);
-  return (
-    !!asRecord(decision?.acceptWithExecpolicyAmendment) ||
-    !!asRecord(decision?.applyNetworkPolicyAmendment)
-  );
+  if (asRecord(decision?.acceptWithExecpolicyAmendment)) return true;
+  const amendment = asRecord(decision?.applyNetworkPolicyAmendment);
+  const networkPolicy = asRecord(amendment?.network_policy_amendment);
+  return networkPolicy?.action === "allow";
 }

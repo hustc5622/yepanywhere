@@ -28,6 +28,7 @@ import {
 import type { AgentSteerResult } from "../sdk/providers/types.js";
 import type {
   PermissionMode,
+  ProviderApprovalDecision,
   SDKMessage,
   TimestampedSDKMessage,
   ToolApprovalResult,
@@ -1364,6 +1365,7 @@ export class Process {
     options: {
       signal: AbortSignal;
       requestId?: string;
+      requestMethod?: string;
       respectProviderDecision?: boolean;
     },
   ): Promise<ToolApprovalResult> {
@@ -1499,12 +1501,15 @@ export class Process {
     const firstQuestion = questionInput?.questions?.find(
       (question) => typeof question?.question === "string",
     )?.question;
+    const providerRequestId = options.requestId?.trim() || undefined;
     const request: InputRequest = {
       // Preserve a provider-native id when available. OpenCode's bridge sees
       // the same approval independently, so inventing a second UUID here can
       // make notification actions look stale even though both ids represent
       // the same request.
-      id: options.requestId?.trim() || randomUUID(),
+      id: providerRequestId || randomUUID(),
+      providerRequestId,
+      providerRequestMethod: options.requestMethod,
       sessionId: this._sessionId,
       type: isQuestion ? "question" : "tool-approval",
       prompt:
@@ -1581,7 +1586,7 @@ export class Process {
    */
   respondToInput(
     requestId: string,
-    response: "approve" | "approve_always" | "deny",
+    response: ProviderApprovalDecision,
     answers?: UserQuestionAnswers,
     feedback?: string,
   ): boolean {
@@ -1629,7 +1634,11 @@ export class Process {
       interrupt: !approved ? shouldInterrupt : undefined,
       // Providers with persistent grants (OpenCode `always` reply) honor
       // this; others ignore it and treat the approval as one-shot.
-      approvalScope: response === "approve_always" ? "always" : undefined,
+      approvalScope:
+        response === "approve_always" || response === "approve_for_session"
+          ? "always"
+          : undefined,
+      providerDecision: response,
     };
 
     // If answers provided (AskUserQuestion), pass them as updatedInput

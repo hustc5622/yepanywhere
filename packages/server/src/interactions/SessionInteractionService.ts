@@ -9,7 +9,7 @@ import type {
   RuntimeController,
   RuntimeProcessSnapshot,
 } from "../runtime/types.js";
-import type { PermissionMode } from "../sdk/types.js";
+import type { PermissionMode, ProviderApprovalDecision } from "../sdk/types.js";
 import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type { EventBus } from "../watcher/index.js";
 import {
@@ -109,17 +109,17 @@ function commandFailure(
 
 function normalizeProcessInputResponse(
   response: string,
-): "approve" | "approve_always" | "deny" {
-  if (response === "approve_always") return "approve_always";
+): ProviderApprovalDecision {
   if (
     response === "approve" ||
-    response === "allow" ||
     response === "approve_accept_edits" ||
     response === "approve_for_session" ||
-    response === "approve_strict_auto_review"
+    response === "approve_strict_auto_review" ||
+    response === "approve_always"
   ) {
-    return "approve";
+    return response;
   }
+  if (response === "allow") return "approve";
   return "deny";
 }
 

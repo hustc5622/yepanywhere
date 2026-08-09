@@ -8,7 +8,11 @@
 import { type ChildProcess, exec, spawn } from "node:child_process";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import type { ModelInfo } from "@yep-anywhere/shared";
+import type { ModelInfo, UserQuestionAnswers } from "@yep-anywhere/shared";
+import {
+  buildCodexInteractiveResponse,
+  toCodexInteractiveRequestView,
+} from "../../codex-bridge/interactions.js";
 import {
   CODEX_EVENT_RUNTIME_IDENTITY,
   type CodexEventEnvelope,
@@ -63,10 +67,11 @@ import { logSDKMessage } from "../messageLogger.js";
 import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
   CodexStructuredUserInput,
+  ProviderApprovalDecision,
   SDKMessage,
   TimestampedSDKMessage,
+  ToolApprovalResult,
 } from "../types.js";
-import type { ToolApprovalResult } from "../types.js";
 import {
   CODEX_NATIVE_CAPABILITIES,
   type CodexNativeControlDataMap,
@@ -838,11 +843,13 @@ class CodexAppServerClient {
         respond({ result: result ?? {} });
       })
       .catch((error) => {
+        const rpcError = error instanceof CodexJsonRpcError ? error : undefined;
         respond({
           error: {
-            code: -32000,
+            code: rpcError?.code ?? -32000,
             message:
               error instanceof Error ? error.message : "Server request failed",
+            ...(rpcError?.data === undefined ? {} : { data: rpcError.data }),
           },
         });
       });
@@ -2371,25 +2378,46 @@ export class CodexProvider implements AgentProvider {
           },
           "Handling Codex command approval request",
         );
+        const availableDecisions = getEffectiveCommandApprovalDecisions(
+          commandParams as unknown as Record<string, unknown>,
+        );
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "command_execution",
           command: commandParams.command,
           cwd: commandParams.cwd,
           reason: commandParams.reason,
           commandActions: commandParams.commandActions ?? [],
+          additionalPermissions: commandParams.additionalPermissions ?? null,
+          networkApprovalContext: commandParams.networkApprovalContext ?? null,
           proposedExecpolicyAmendment:
             commandParams.proposedExecpolicyAmendment ?? null,
+          proposedNetworkPolicyAmendments:
+            commandParams.proposedNetworkPolicyAmendments ?? null,
+          availableDecisions,
+          approvalId: commandParams.approvalId ?? null,
           threadId: commandParams.threadId,
           turnId: commandParams.turnId,
           itemId: commandParams.itemId,
         };
+        const sessionDecision = availableDecisions.includes("acceptForSession")
+          ? ("acceptForSession" as const)
+          : undefined;
+        const alwaysDecision =
+          availableDecisions.find(isPolicyAmendmentCommandApprovalDecision) ??
+          sessionDecision;
         const decision: CommandExecutionApprovalDecision =
-          await this.resolveApprovalDecision(
+          await this.resolveApprovalDecision<CommandExecutionApprovalDecision>(
             options,
             "Bash",
             toolInput,
             signal,
             "accept",
             "decline",
+            request.id,
+            sessionDecision,
+            "cancel",
+            alwaysDecision,
           );
         log.info(
           {
@@ -2432,9 +2460,17 @@ export class CodexProvider implements AgentProvider {
           "Handling Codex file-change approval request",
         );
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "file_change",
           file_path: grantRoot ?? undefined,
           reason: fileParams.reason ?? null,
           grantRoot,
+          availableDecisions: [
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel",
+          ],
           threadId: fileParams.threadId,
           turnId: fileParams.turnId,
           itemId: fileParams.itemId,
@@ -2447,6 +2483,10 @@ export class CodexProvider implements AgentProvider {
             signal,
             "accept",
             "decline",
+            request.id,
+            "acceptForSession",
+            "cancel",
+            "acceptForSession",
           );
         log.info(
           {
@@ -2462,6 +2502,128 @@ export class CodexProvider implements AgentProvider {
         return { decision };
       }
 
+      case "item/permissions/requestApproval": {
+        const threadId = this.getOptionalString(params.threadId);
+        const turnId = this.getOptionalString(params.turnId);
+        const itemId = this.getOptionalString(params.itemId);
+        if (!threadId || !turnId || !itemId || !asRecord(params.permissions)) {
+          throw new CodexJsonRpcError(
+            -32602,
+            "Invalid item/permissions/requestApproval params",
+          );
+        }
+
+        const requestView = toCodexInteractiveRequestView(
+          codexServerRequestId(request.id),
+          "item/permissions/requestApproval",
+          threadId,
+          params,
+          new Date().toISOString(),
+        );
+        const result = await this.requestToolApprovalResult(
+          options,
+          requestView.inputRequest.toolName ?? "Permissions",
+          {
+            ...(asRecord(requestView.inputRequest.toolInput) ?? {}),
+            approvalPrompt: requestView.inputRequest.prompt,
+            requestMethod: request.method,
+          },
+          signal,
+          request.id,
+        );
+        const providerDecision = getProviderApprovalDecision(result);
+        const response = buildCodexInteractiveResponse(
+          "item/permissions/requestApproval",
+          params,
+          providerDecision,
+        );
+        log.info(
+          {
+            method: request.method,
+            requestId: request.id,
+            threadId,
+            turnId,
+            itemId,
+            providerDecision,
+          },
+          "Resolved Codex permissions approval request",
+        );
+        return response;
+      }
+
+      case "mcpServer/elicitation/request": {
+        const threadId = this.getOptionalString(params.threadId);
+        const serverName = this.getOptionalString(params.serverName);
+        const mode = this.getOptionalString(params.mode);
+        const message = this.getOptionalString(params.message);
+        if (
+          !threadId ||
+          !serverName ||
+          !message ||
+          (mode !== "form" && mode !== "openai/form" && mode !== "url") ||
+          (mode === "url" &&
+            (!this.getOptionalString(params.url) ||
+              !this.getOptionalString(params.elicitationId))) ||
+          (mode !== "url" && !("requestedSchema" in params))
+        ) {
+          throw new CodexJsonRpcError(
+            -32602,
+            "Invalid mcpServer/elicitation/request params",
+          );
+        }
+
+        const requestView = toCodexInteractiveRequestView(
+          codexServerRequestId(request.id),
+          "mcpServer/elicitation/request",
+          threadId,
+          params,
+          new Date().toISOString(),
+        );
+        const result = await this.requestToolApprovalResult(
+          options,
+          requestView.inputRequest.toolName ?? "MCP",
+          {
+            ...(asRecord(requestView.inputRequest.toolInput) ?? {}),
+            approvalPrompt: requestView.inputRequest.prompt,
+            requestMethod: request.method,
+          },
+          signal,
+          request.id,
+        );
+        const providerDecision = getProviderApprovalDecision(result);
+        const updatedInput = asRecord(result.updatedInput);
+        const answers = updatedInput?.answers as
+          | UserQuestionAnswers
+          | undefined;
+        const response = buildCodexInteractiveResponse(
+          "mcpServer/elicitation/request",
+          params,
+          providerDecision,
+          answers,
+        ) as Record<string, unknown>;
+        if (
+          result.behavior === "deny" &&
+          result.interrupt === true &&
+          response.action === "decline"
+        ) {
+          response.action = "cancel";
+        }
+        log.info(
+          {
+            method: request.method,
+            requestId: request.id,
+            threadId,
+            turnId: this.getOptionalString(params.turnId),
+            serverName,
+            mode,
+            providerDecision,
+            action: response.action,
+          },
+          "Resolved Codex MCP elicitation request",
+        );
+        return response;
+      }
+
       // Backward-compatible protocol variants.
       case "execCommandApproval": {
         const commandParts = Array.isArray(params.command)
@@ -2470,6 +2632,8 @@ export class CodexProvider implements AgentProvider {
             )
           : [];
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "legacy_command_execution",
           command: commandParts.join(" "),
           cwd: this.getOptionalString(params.cwd),
           reason: this.getOptionalString(params.reason),
@@ -2483,6 +2647,7 @@ export class CodexProvider implements AgentProvider {
           signal,
           "approved",
           "denied",
+          request.id,
         );
         log.info(
           {
@@ -2504,6 +2669,8 @@ export class CodexProvider implements AgentProvider {
             : {};
         const paths = Object.keys(fileChanges);
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "legacy_file_change",
           changes: paths.map((path) => ({ path, kind: "update" })),
           reason: this.getOptionalString(params.reason),
           grantRoot: this.getOptionalString(params.grantRoot),
@@ -2516,6 +2683,7 @@ export class CodexProvider implements AgentProvider {
           signal,
           "approved",
           "denied",
+          request.id,
         );
         log.info(
           {
@@ -2532,71 +2700,259 @@ export class CodexProvider implements AgentProvider {
 
       case "item/tool/requestUserInput": {
         const requestInput = this.asToolRequestUserInputParams(request.params);
-        const questions = requestInput?.questions ?? [];
-
-        // MVP: return empty answers so request can complete without blocking.
-        const answers: ToolRequestUserInputResponse["answers"] = {};
-        for (const question of questions) {
-          answers[question.id] = { answers: [] };
+        if (!requestInput) {
+          throw new CodexJsonRpcError(
+            -32602,
+            "Invalid item/tool/requestUserInput params",
+          );
         }
-        log.warn(
+        if (!options.onToolApproval) {
+          throw new CodexJsonRpcError(
+            -32601,
+            "No interactive input handler is available",
+          );
+        }
+
+        const requestView = toCodexInteractiveRequestView(
+          codexServerRequestId(request.id),
+          "item/tool/requestUserInput",
+          requestInput.threadId,
+          params,
+          new Date().toISOString(),
+        );
+        const toolInput = {
+          ...(asRecord(requestView.inputRequest.toolInput) ?? {}),
+          requestMethod: request.method,
+          isBlocking: requestInput.isBlocking,
+          threadId: requestInput.threadId,
+          turnId: requestInput.turnId,
+          itemId: requestInput.itemId,
+        };
+        const timeoutMs = normalizeAutoResolutionMs(
+          requestInput.autoResolutionMs,
+        );
+        const timeoutController =
+          timeoutMs === null ? null : new AbortController();
+        const approvalSignal = timeoutController
+          ? AbortSignal.any([signal, timeoutController.signal])
+          : signal;
+        const timeout =
+          timeoutController && timeoutMs !== null
+            ? setTimeout(() => timeoutController.abort(), timeoutMs)
+            : undefined;
+        timeout?.unref?.();
+
+        let result: ToolApprovalResult;
+        try {
+          result = await this.requestToolApprovalResult(
+            options,
+            requestView.inputRequest.toolName ?? "AskUserQuestion",
+            toolInput,
+            approvalSignal,
+            request.id,
+          );
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+
+        if (result.behavior !== "allow") {
+          throw new CodexJsonRpcError(
+            -32000,
+            "Codex tool user input request was declined",
+          );
+        }
+        const updatedInput = asRecord(result.updatedInput);
+        const answers = updatedInput?.answers as
+          | UserQuestionAnswers
+          | undefined;
+        const response = buildCodexInteractiveResponse(
+          "item/tool/requestUserInput",
+          params,
+          getProviderApprovalDecision(result),
+          answers,
+        ) as ToolRequestUserInputResponse;
+        log.info(
           {
             method: request.method,
             requestId: request.id,
-            questionCount: questions.length,
-            threadId: requestInput?.threadId ?? null,
-            turnId: requestInput?.turnId ?? null,
-            itemId: requestInput?.itemId ?? null,
+            questionCount: requestInput.questions.length,
+            threadId: requestInput.threadId,
+            turnId: requestInput.turnId,
+            itemId: requestInput.itemId,
+            resolution: "answered",
           },
-          "Codex requested tool user input; returning empty answers in MVP",
+          "Resolved Codex tool user input request",
         );
-        const response: ToolRequestUserInputResponse = { answers };
         return response;
       }
+
+      case "item/tool/call":
+        return this.rejectUnownedServerCapability(
+          request,
+          "dynamic tools are not registered by this client",
+        );
+
+      case "account/chatgptAuthTokens/refresh":
+        return this.rejectUnownedServerCapability(
+          request,
+          "ChatGPT auth-token refresh is not owned by this client",
+        );
+
+      case "attestation/generate":
+        return this.rejectUnownedServerCapability(
+          request,
+          "attestation generation was not requested during initialization",
+        );
+
+      case "currentTime/read":
+        return this.rejectUnownedServerCapability(
+          request,
+          "the experimental external-clock capability is disabled",
+        );
 
       default: {
         log.warn(
           { method: request.method, requestId: request.id },
           "Unhandled codex server request",
         );
-        return {};
+        throw new CodexJsonRpcError(
+          -32601,
+          `Unsupported Codex server request: ${request.method}`,
+        );
       }
     }
   }
 
-  private async resolveApprovalDecision<TDecision extends string>(
+  private rejectUnownedServerCapability(
+    request: JsonRpcServerRequest,
+    reason: string,
+  ): never {
+    log.warn(
+      {
+        method: request.method,
+        requestId: request.id,
+        owner: "app-server-client",
+        outcome: "rejected",
+      },
+      "Rejected disabled Codex server-request capability",
+    );
+    throw new CodexJsonRpcError(
+      -32601,
+      `Unsupported Codex server request: ${request.method} (${reason})`,
+    );
+  }
+
+  private async requestToolApprovalResult(
+    options: StartSessionOptions,
+    toolName: string,
+    toolInput: unknown,
+    signal: AbortSignal,
+    requestId?: JsonRpcId,
+  ): Promise<ToolApprovalResult> {
+    if (signal.aborted) {
+      return {
+        behavior: "deny",
+        message: "Interactive approval request was aborted",
+        interrupt: true,
+      };
+    }
+    if (!options.onToolApproval) {
+      log.warn(
+        { toolName },
+        "No onToolApproval handler available; denying Codex approval request",
+      );
+      return {
+        behavior: "deny",
+        message: "No interactive approval handler is available",
+      };
+    }
+
+    let result: ToolApprovalResult;
+    try {
+      const requestMethod = asRecord(toolInput)?.requestMethod;
+      result = await options.onToolApproval(toolName, toolInput, {
+        signal,
+        requestId:
+          requestId === undefined ? undefined : codexServerRequestId(requestId),
+        requestMethod:
+          typeof requestMethod === "string" ? requestMethod : undefined,
+        respectProviderDecision: true,
+      });
+    } catch (error) {
+      const aborted =
+        signal.aborted ||
+        (error instanceof Error && error.name === "AbortError");
+      log.warn(
+        {
+          toolName,
+          errorName: error instanceof Error ? error.name : "UnknownError",
+          aborted,
+        },
+        "onToolApproval threw; denying Codex approval request",
+      );
+      return {
+        behavior: "deny",
+        message: aborted
+          ? "Interactive approval request was aborted"
+          : "Interactive approval handler failed",
+        ...(aborted ? { interrupt: true } : {}),
+      };
+    }
+
+    log.info(
+      {
+        toolName,
+        behavior: result.behavior,
+        approvalScope: result.approvalScope ?? "once",
+        providerDecision: result.providerDecision ?? null,
+        interrupt: result.interrupt ?? false,
+      },
+      "Resolved tool approval callback result",
+    );
+    return result;
+  }
+
+  private async resolveApprovalDecision<TDecision>(
     options: StartSessionOptions,
     toolName: string,
     toolInput: unknown,
     signal: AbortSignal,
     allowDecision: TDecision,
     denyDecision: TDecision,
+    requestId?: JsonRpcId,
+    sessionDecision?: TDecision,
+    cancelDecision?: TDecision,
+    alwaysDecision?: TDecision,
   ): Promise<TDecision> {
-    if (!options.onToolApproval) {
-      log.warn(
-        { toolName },
-        "No onToolApproval handler available; denying Codex approval request",
-      );
-      return denyDecision;
-    }
-
-    let result: ToolApprovalResult;
-    try {
-      result = await options.onToolApproval(toolName, toolInput, { signal });
-    } catch (error) {
-      log.warn(
-        { toolName, error },
-        "onToolApproval threw; denying Codex approval request",
-      );
-      return denyDecision;
-    }
-
-    log.info(
-      { toolName, behavior: result.behavior },
-      "Resolved tool approval callback result",
+    const result = await this.requestToolApprovalResult(
+      options,
+      toolName,
+      toolInput,
+      signal,
+      requestId,
     );
 
-    return result.behavior === "allow" ? allowDecision : denyDecision;
+    if (result.behavior === "allow" && result.providerDecision !== "deny") {
+      if (
+        result.providerDecision === "approve_always" ||
+        (!result.providerDecision && result.approvalScope === "always")
+      ) {
+        return alwaysDecision ?? sessionDecision ?? allowDecision;
+      }
+      if (
+        result.providerDecision === "approve_accept_edits" ||
+        result.providerDecision === "approve_for_session"
+      ) {
+        return sessionDecision ?? allowDecision;
+      }
+      return allowDecision;
+    }
+    // An explicit user denial means native `decline`; `cancel` is reserved for
+    // transport abort/cancellation paths without a selected native decision.
+    if (result.providerDecision === "deny") return denyDecision;
+    return result.interrupt && cancelDecision !== undefined
+      ? cancelDecision
+      : denyDecision;
   }
 
   private convertNotificationToSDKMessages(
@@ -4036,6 +4392,104 @@ export class CodexProvider implements AgentProvider {
   private getOptionalNumber(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
+}
+
+function codexServerRequestId(id: JsonRpcId): string {
+  return `codex:${typeof id}:${String(id)}`;
+}
+
+function getProviderApprovalDecision(
+  result: ToolApprovalResult,
+): ProviderApprovalDecision {
+  if (result.behavior === "deny") return "deny";
+  if (result.providerDecision) return result.providerDecision;
+  return result.approvalScope === "always" ? "approve_always" : "approve";
+}
+
+function normalizeAutoResolutionMs(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return Math.min(Math.floor(value), 2_147_483_647);
+}
+
+function isCommandApprovalDecision(
+  value: unknown,
+): value is CommandExecutionApprovalDecision {
+  if (
+    value === "accept" ||
+    value === "acceptForSession" ||
+    value === "decline" ||
+    value === "cancel"
+  ) {
+    return true;
+  }
+  const decision = asRecord(value);
+  return Boolean(
+    decision &&
+      (asRecord(decision.acceptWithExecpolicyAmendment) ||
+        asRecord(decision.applyNetworkPolicyAmendment)),
+  );
+}
+
+function isPolicyAmendmentCommandApprovalDecision(
+  decision: CommandExecutionApprovalDecision,
+): boolean {
+  if (typeof decision !== "object") return false;
+  if ("acceptWithExecpolicyAmendment" in decision) return true;
+  const amendment = asRecord(decision.applyNetworkPolicyAmendment);
+  const networkPolicy = asRecord(amendment?.network_policy_amendment);
+  return networkPolicy?.action === "allow";
+}
+
+/** Mirrors Codex TUI's stable-protocol fallback when availableDecisions is absent. */
+function getEffectiveCommandApprovalDecisions(
+  params: Record<string, unknown>,
+): CommandExecutionApprovalDecision[] {
+  if (Array.isArray(params.availableDecisions)) {
+    return params.availableDecisions.filter(isCommandApprovalDecision);
+  }
+
+  if (params.networkApprovalContext != null) {
+    const decisions: CommandExecutionApprovalDecision[] = [
+      "accept",
+      "acceptForSession",
+    ];
+    const amendment = Array.isArray(params.proposedNetworkPolicyAmendments)
+      ? params.proposedNetworkPolicyAmendments.find(
+          (candidate) => asRecord(candidate)?.action === "allow",
+        )
+      : undefined;
+    if (amendment) {
+      decisions.push({
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: amendment as {
+            host: string;
+            action: "allow" | "deny";
+          },
+        },
+      });
+    }
+    decisions.push("cancel");
+    return decisions;
+  }
+
+  if (params.additionalPermissions != null) {
+    return ["accept", "cancel"];
+  }
+
+  const decisions: CommandExecutionApprovalDecision[] = ["accept"];
+  if (Array.isArray(params.proposedExecpolicyAmendment)) {
+    decisions.push({
+      acceptWithExecpolicyAmendment: {
+        execpolicy_amendment: params.proposedExecpolicyAmendment.filter(
+          (part): part is string => typeof part === "string",
+        ),
+      },
+    });
+  }
+  decisions.push("cancel");
+  return decisions;
 }
 
 export function buildCodexUserInput(
