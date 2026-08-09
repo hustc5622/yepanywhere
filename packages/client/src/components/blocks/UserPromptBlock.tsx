@@ -364,8 +364,11 @@ function UploadedFilesMetadata({ files }: { files: UploadedFileInfo[] }) {
 
   return (
     <div className="user-prompt-metadata">
-      {files.map((file) => (
-        <UploadedFileItem key={file.path} file={file} />
+      {files.map((file, index) => (
+        <UploadedFileItem
+          key={`${file.path}:${file.originalName}:${index}`}
+          file={file}
+        />
       ))}
     </div>
   );
