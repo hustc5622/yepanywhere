@@ -42,6 +42,12 @@ import {
   type StartRuntimeSessionRequest,
 } from "./types.js";
 
+function immediateAdmissionArgs(
+  requireImmediate: boolean | undefined,
+): [] | [{ requireImmediate: true }] {
+  return requireImmediate ? [{ requireImmediate: true }] : [];
+}
+
 export class EmbeddedRuntimeController implements RuntimeController {
   readonly mode = "embedded" as const;
   private readonly journalSubscriptions = new Map<string, () => void>();
@@ -212,7 +218,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       input.message,
       input.permissionMode,
       input.modelSettings,
-      input.requireImmediate ? { requireImmediate: true } : undefined,
+      ...immediateAdmissionArgs(input.requireImmediate),
     );
     if ("id" in result) await this.ensureJournalSubscription(result.sessionId);
     return this.toStartResponse(result);
@@ -225,7 +231,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       input.projectPath,
       input.permissionMode,
       input.modelSettings,
-      input.requireImmediate ? { requireImmediate: true } : undefined,
+      ...immediateAdmissionArgs(input.requireImmediate),
     );
     if ("id" in result) await this.ensureJournalSubscription(result.sessionId);
     return this.toStartResponse(result);
@@ -240,7 +246,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       input.message,
       input.permissionMode,
       input.modelSettings,
-      input.requireImmediate ? { requireImmediate: true } : undefined,
+      ...immediateAdmissionArgs(input.requireImmediate),
     );
     if ("id" in result) await this.ensureJournalSubscription(result.sessionId);
     return this.toStartResponse(result);
@@ -255,7 +261,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       input.message,
       input.permissionMode,
       input.modelSettings,
-      input.requireImmediate ? { requireImmediate: true } : undefined,
+      ...immediateAdmissionArgs(input.requireImmediate),
     );
     if (!result.success) return result;
     await this.ensureJournalSubscription(result.process.sessionId);
