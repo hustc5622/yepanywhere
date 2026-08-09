@@ -1752,6 +1752,141 @@ describe("CodexProvider Event Normalization", () => {
     });
   });
 
+  it("correlates turn completion with its native status", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: {
+            id: "turn-interrupted",
+            status: "interrupted",
+            items: [],
+            error: null,
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "system",
+        subtype: "turn_complete",
+        turnId: "turn-interrupted",
+        turnStatus: "interrupted",
+      }),
+    ]);
+  });
+
+  it("correlates item lifecycle messages and publishes terminal tool status", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-declined",
+          item: {
+            id: "call-declined",
+            type: "commandExecution",
+            command: "printf denied",
+            aggregatedOutput: "",
+            exitCode: null,
+            status: "declined",
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toHaveLength(2);
+    for (const message of messages) {
+      expect(message).toMatchObject({
+        turnId: "turn-declined",
+        codexTurnId: "turn-declined",
+      });
+    }
+    expect(messages[0]?.message).toMatchObject({
+      content: [
+        expect.objectContaining({
+          type: "tool_use",
+          id: "call-declined",
+          status: "declined",
+        }),
+      ],
+    });
+  });
+
+  it("marks failed MCP lifecycle results as errors", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-mcp-failed",
+          item: {
+            id: "mcp-failed",
+            type: "mcpToolCall",
+            server: "synthetic",
+            tool: "fixture_call",
+            arguments: { fixture: true },
+            result: null,
+            error: null,
+            status: "failed",
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.message).toMatchObject({
+      content: [
+        expect.objectContaining({
+          type: "tool_use",
+          id: "mcp-failed",
+          status: "failed",
+        }),
+      ],
+    });
+    expect(messages[1]?.message).toMatchObject({
+      content: [
+        expect.objectContaining({
+          type: "tool_result",
+          tool_use_id: "mcp-failed",
+          is_error: true,
+        }),
+      ],
+    });
+  });
+
   it("normalizes shell-launcher wrapped command execution to Read shape", () => {
     const provider = createTestProvider() as unknown as {
       convertItemToSDKMessages: (
@@ -2197,6 +2332,10 @@ describe("CodexProvider Event Normalization", () => {
     );
 
     expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
+    });
     expect(calls[0]?.message).toMatchObject({
       role: "assistant",
       content: [
@@ -2230,6 +2369,10 @@ describe("CodexProvider Event Normalization", () => {
     );
 
     expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
+    });
     expect(results[0]?.message).toMatchObject({
       role: "user",
       content: [
@@ -2273,6 +2416,8 @@ describe("CodexProvider Event Normalization", () => {
       type: "assistant",
       session_id: "thread-1",
       uuid: "codex-plan-turn-1",
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
       message: {
         role: "assistant",
         content: [
@@ -2401,6 +2546,8 @@ describe("CodexProvider Event Normalization", () => {
     expect(first[0]).toMatchObject({
       type: "assistant",
       uuid: "item-cmd-turn-1",
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
       message: {
         role: "assistant",
         content: [

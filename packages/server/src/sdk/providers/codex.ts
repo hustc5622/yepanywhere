@@ -3165,6 +3165,7 @@ export class CodexProvider implements AgentProvider {
       case "turn/completed": {
         const params = this.asTurnCompletedNotification(notification.params);
         const turnId = params?.turn.id ?? null;
+        const turnStatus = params?.turn.status ?? "completed";
         if (turnId) {
           const keyPrefix = `${turnId}\0`;
           for (const key of commandOutputBuffers.keys()) {
@@ -3176,6 +3177,8 @@ export class CodexProvider implements AgentProvider {
           type: "system",
           subtype: "turn_complete",
           session_id: sessionId,
+          turnId,
+          turnStatus,
           usage: usage
             ? {
                 input_tokens: usage.inputTokens,
@@ -3191,7 +3194,7 @@ export class CodexProvider implements AgentProvider {
           phase: "completed",
           sourceEvent: notification.method,
         });
-        if (params?.turn.status === "failed") {
+        if (turnStatus === "failed") {
           const codexError = classifyCodexError(
             params.turn.error ?? notification.params,
             turnId ? { correlationId: turnId } : {},
@@ -3272,7 +3275,11 @@ export class CodexProvider implements AgentProvider {
           sessionId,
           turnId,
           notification.method,
-        );
+        ).map((message) => ({
+          ...message,
+          turnId,
+          codexTurnId: turnId,
+        }));
       }
 
       case "rawResponseItem/completed":
@@ -3291,6 +3298,8 @@ export class CodexProvider implements AgentProvider {
             type: "assistant",
             session_id: sessionId,
             uuid: toolUseId,
+            turnId: params.turnId,
+            codexTurnId: params.turnId,
             message: {
               role: "assistant",
               content: [
@@ -3351,6 +3360,8 @@ export class CodexProvider implements AgentProvider {
             type: "assistant",
             session_id: sessionId,
             uuid: `${itemId}-${turnId}`,
+            turnId,
+            codexTurnId: turnId,
             message: {
               role: "assistant",
               content: [
@@ -3588,6 +3599,8 @@ export class CodexProvider implements AgentProvider {
           type: "assistant",
           session_id: sessionId,
           uuid: `${itemId}-${turnId}-custom-call`,
+          turnId,
+          codexTurnId: turnId,
           message: {
             role: "assistant",
             content,
@@ -3626,6 +3639,8 @@ export class CodexProvider implements AgentProvider {
           type: "user",
           session_id: sessionId,
           uuid: `${itemId}-${turnId}-custom-result`,
+          turnId,
+          codexTurnId: turnId,
           message: {
             role: "user",
             content: [toolResult],
@@ -4091,6 +4106,7 @@ export class CodexProvider implements AgentProvider {
                   id: item.id,
                   name: normalizedInvocation.toolName,
                   input: normalizedInvocation.input,
+                  status: item.status,
                 },
               ],
             },
@@ -4252,6 +4268,7 @@ export class CodexProvider implements AgentProvider {
                   id: item.id,
                   name: `${item.server}:${item.tool}`,
                   input: item.arguments,
+                  status: item.status,
                 },
               ],
             },
@@ -4285,6 +4302,7 @@ export class CodexProvider implements AgentProvider {
                       item.status === "completed"
                         ? JSON.stringify(item.result)
                         : item.error?.message || "MCP tool call failed",
+                    ...(item.status === "completed" ? {} : { is_error: true }),
                   },
                 ],
               },
