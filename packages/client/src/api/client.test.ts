@@ -181,3 +181,44 @@ describe("queued session API responses", () => {
     );
   });
 });
+
+describe("Codex transcript export", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("downloads the authenticated canonical Markdown transcript", async () => {
+    const blob = new Blob(["# Transcript\n"], { type: "text/markdown" });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        "Content-Disposition":
+          'attachment; filename="codex-transcript-session-1.md"',
+      }),
+      blob: async () => blob,
+    } as Response);
+
+    await expect(
+      api.downloadCodexTranscript("session/1"),
+    ).resolves.toMatchObject({
+      blob,
+      fileName: "codex-transcript-session-1.md",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/session%2F1/codex-transcript?format=markdown",
+      expect.objectContaining({
+        cache: "no-store",
+        credentials: "include",
+        headers: expect.objectContaining({ "X-Yep-Anywhere": "true" }),
+      }),
+    );
+  });
+});

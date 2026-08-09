@@ -878,6 +878,14 @@ export const api = {
     return fetchBlob(`/deploy/apk/download${qs ? `?${qs}` : ""}`);
   },
 
+  downloadCodexTranscript: (
+    sessionId: string,
+    format: "markdown" | "json" = "markdown",
+  ) =>
+    fetchBlob(
+      `/sessions/${encodeURIComponent(sessionId)}/codex-transcript?format=${format}`,
+    ),
+
   // Provider API
   getProviders: () => fetchJSON<{ providers: ProviderInfo[] }>("/providers"),
 

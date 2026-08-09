@@ -73,6 +73,11 @@ import { createActivityRoutes } from "./routes/activity.js";
 import { createBrowserProfilesRoutes } from "./routes/browser-profiles.js";
 import { createClientLogsRoutes } from "./routes/client-logs.js";
 import { createCodexBridgeRoutes } from "./routes/codex-bridge.js";
+import {
+  type CodexTranscriptStoreSource,
+  createCodexTranscriptRoutes,
+  createDefaultCodexTranscriptStoreSources,
+} from "./routes/codex-transcript.js";
 import { createConnectionsRoutes } from "./routes/connections.js";
 import { createDebugStreamingRoutes } from "./routes/debug-streaming.js";
 import {
@@ -228,6 +233,8 @@ export interface AppOptions {
   deviceBridgeService?: DeviceBridgeService;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
   codexBridgeService?: CodexBridgeController;
+  /** Canonical Codex transcript sources. Primarily injectable for tests/embedders. */
+  codexTranscriptStoreSources?: readonly CodexTranscriptStoreSource[];
   /** OpenCode bridge for OpenCode CLI sessions. */
   opencodeBridgeService?: OpenCodeBridgeController;
   /** AI title generation settings. */
@@ -1201,6 +1208,16 @@ export function createApp(options: AppOptions): AppResult {
     );
   }
 
+  const codexTranscriptStoreSources =
+    options.codexTranscriptStoreSources ??
+    (options.dataDir
+      ? createDefaultCodexTranscriptStoreSources({
+          dataDir: options.dataDir,
+          providerEventStorePath:
+            process.env.YEP_CODEX_EVENT_STORE_PATH?.trim(),
+        })
+      : []);
+
   // Mount API routes
   app.route(
     "/api/projects",
@@ -1366,6 +1383,11 @@ export function createApp(options: AppOptions): AppResult {
       codexBridgeService: options.codexBridgeService,
       opencodeBridgeService: options.opencodeBridgeService,
     }),
+  );
+
+  app.route(
+    "/api/sessions",
+    createCodexTranscriptRoutes({ sources: codexTranscriptStoreSources }),
   );
 
   // Search routes (full-text content search across sessions)
