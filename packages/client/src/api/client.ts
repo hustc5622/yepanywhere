@@ -10,6 +10,10 @@ import type {
   ContextUsage,
   DeviceInfo,
   EnrichedRecentEntry,
+  FeishuAccountConfig,
+  FeishuAccountPublicView,
+  FeishuAccountStatus,
+  FeishuSessionBinding,
   FileContentResponse,
   GitStatusInfo,
   NewSessionDefaults,
@@ -106,6 +110,39 @@ export interface InboxItem {
   originator?: string;
   source?: string;
 }
+
+export interface FeishuDoctorResult {
+  ok: boolean;
+  initializationErrorCode?:
+    | "STORE_INITIALIZATION_FAILED"
+    | "CHANNEL_NOT_INITIALIZED"
+    | "CHANNEL_STOPPED";
+  accounts: Array<{
+    accountId: string;
+    enabled: boolean;
+    policyConfigured: boolean;
+    secretConfigured: boolean;
+    connectionState: FeishuAccountStatus["state"];
+    checks: Array<{
+      name: "policy" | "secret" | "connection";
+      ok: boolean;
+      code?: string;
+    }>;
+  }>;
+}
+
+export interface FeishuPermissionRequirements {
+  accountId: string;
+  capabilities: Array<{
+    capability: string;
+    scopes: string[];
+    optional: boolean;
+  }>;
+  events: string[];
+  callbacks: string[];
+}
+
+export type FeishuAccountUpdate = Omit<FeishuAccountConfig, "secretRef">;
 
 /**
  * Inbox response with sessions categorized into priority tiers.
@@ -911,6 +948,62 @@ export const api = {
 
   // Provider API
   getProviders: () => fetchJSON<{ providers: ProviderInfo[] }>("/providers"),
+
+  getFeishuAccounts: () =>
+    fetchJSON<{ accounts: FeishuAccountPublicView[] }>(
+      "/channels/feishu/accounts",
+    ),
+  getFeishuStatuses: () =>
+    fetchJSON<{ accounts: FeishuAccountStatus[] }>("/channels/feishu/status"),
+  getFeishuDoctor: () =>
+    fetchJSON<FeishuDoctorResult>("/channels/feishu/doctor"),
+  getFeishuDiagnostics: () =>
+    fetchJSON<Record<string, unknown>>("/channels/feishu/diagnostics"),
+  getFeishuBindings: () =>
+    fetchJSON<{ bindings: FeishuSessionBinding[] }>(
+      "/channels/feishu/bindings",
+    ),
+  getFeishuPermissions: (accountId: string) =>
+    fetchJSON<FeishuPermissionRequirements>(
+      `/channels/feishu/accounts/${encodeURIComponent(accountId)}/permissions`,
+    ),
+  saveFeishuAccount: (account: FeishuAccountUpdate) =>
+    fetchJSON<{ account: FeishuAccountPublicView }>(
+      `/channels/feishu/accounts/${encodeURIComponent(account.id)}`,
+      { method: "PUT", body: JSON.stringify(account) },
+    ),
+  deleteFeishuAccount: (accountId: string) =>
+    fetchJSON<{ success: true }>(
+      `/channels/feishu/accounts/${encodeURIComponent(accountId)}`,
+      { method: "DELETE" },
+    ),
+  setFeishuSecret: (accountId: string, appSecret: string) =>
+    fetchJSON<{ account: FeishuAccountPublicView }>(
+      `/channels/feishu/accounts/${encodeURIComponent(accountId)}/secret`,
+      { method: "PUT", body: JSON.stringify({ appSecret }) },
+    ),
+  connectFeishuAccount: (accountId: string) =>
+    fetchJSON<{ success: true }>(
+      `/channels/feishu/accounts/${encodeURIComponent(accountId)}/connect`,
+      { method: "POST" },
+    ),
+  disconnectFeishuAccount: (accountId: string) =>
+    fetchJSON<{ success: true }>(
+      `/channels/feishu/accounts/${encodeURIComponent(accountId)}/disconnect`,
+      { method: "POST" },
+    ),
+  reconnectFeishuAccount: (accountId: string) =>
+    fetchJSON<{ success: true }>(
+      `/channels/feishu/accounts/${encodeURIComponent(accountId)}/reconnect`,
+      { method: "POST" },
+    ),
+  testFeishuAccount: (accountId: string) =>
+    fetchJSON<{
+      ok: boolean;
+      account: FeishuDoctorResult["accounts"][number];
+    }>(`/channels/feishu/accounts/${encodeURIComponent(accountId)}/test`, {
+      method: "POST",
+    }),
 
   getProvider: (name: ProviderName, options?: { fresh?: boolean }) =>
     fetchJSON<{ provider: ProviderInfo }>(

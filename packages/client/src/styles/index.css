@@ -9999,6 +9999,25 @@ button.context-usage-indicator--button:focus-visible {
   gap: var(--space-3);
 }
 
+.feishu-settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.feishu-settings-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.feishu-settings-form-wide {
+  grid-column: 1 / -1;
+}
+
 .remote-executor-form-grid label {
   display: flex;
   flex-direction: column;
@@ -10143,6 +10162,14 @@ button.context-usage-indicator--button:focus-visible {
 @media (max-width: 600px) {
   .remote-executor-form-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .feishu-settings-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .feishu-settings-form-wide {
+    grid-column: auto;
   }
 
   .remote-executor-form-grid-wide {

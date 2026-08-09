@@ -169,6 +169,64 @@ describe("interaction response API", () => {
   });
 });
 
+describe("Feishu account API", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ account: {} }),
+    } as Response);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("keeps non-secret configuration and credential writes on separate endpoints", async () => {
+    const fixtureValue = "fixture-write-only-value";
+    await api.saveFeishuAccount({
+      id: "fixture-account",
+      name: "Fixture Bot",
+      enabled: false,
+      domain: "feishu",
+      appId: "fixture-app-id",
+      allowedWorkspaceRoots: ["/test-fixtures/repo"],
+      allowedUsers: ["fixture-user"],
+      adminUsers: [],
+      allowedChats: ["fixture-chat"],
+      requireMentionInGroup: true,
+      groupSessionMode: "thread-when-available",
+      defaultProvider: "codex",
+      defaultCodexMcpMode: "standard",
+      defaultPermissionMode: "default",
+      replyMode: "card",
+    });
+    await api.setFeishuSecret("fixture-account", fixtureValue);
+
+    const [configCall, credentialCall] = fetchMock.mock.calls;
+    const [configUrl, configRequest] = configCall ?? [];
+    const [credentialUrl, credentialRequest] = credentialCall ?? [];
+    expect(configUrl).toBe("/api/channels/feishu/accounts/fixture-account");
+    expect(JSON.parse(String(configRequest?.body))).toEqual(
+      expect.not.objectContaining({
+        appSecret: expect.anything(),
+        secret: expect.anything(),
+        secretRef: expect.anything(),
+      }),
+    );
+    expect(credentialUrl).toBe(
+      "/api/channels/feishu/accounts/fixture-account/secret",
+    );
+    expect(JSON.parse(String(credentialRequest?.body))).toEqual({
+      appSecret: fixtureValue,
+    });
+  });
+});
+
 describe("queued session API responses", () => {
   const fetchMock = vi.fn<typeof fetch>();
 
