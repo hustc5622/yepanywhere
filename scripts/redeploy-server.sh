@@ -53,6 +53,11 @@ warn() { echo -e "${C_YELLOW}!!${C_RESET}  $*" >&2; }
 err()  { echo -e "${C_RED}xx${C_RESET}  $*" >&2; }
 dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 
+# shellcheck source=scripts/lib/node.sh
+source "$SCRIPT_DIR/lib/node.sh"
+# shellcheck source=scripts/lib/pnpm.sh
+source "$SCRIPT_DIR/lib/pnpm.sh"
+
 # ----- args -----
 DO_BUILD=true
 DO_RESTART=true
@@ -105,6 +110,8 @@ for arg in "$@"; do
 done
 
 # ----- preflight -----
+ensure_project_node
+
 # Pull version from the monorepo root package.json so the bundle reports the
 # real version (build-bundle.ts otherwise falls back to a hardcoded string).
 NPM_VERSION="$(node -p "require('./package.json').version")"
@@ -516,6 +523,7 @@ ensure_bundle_ready() {
 
 # ----- build -----
 if $DO_BUILD; then
+  ensure_pnpm
   log "Building bundle (NPM_VERSION=${NPM_VERSION}) ..."
   NPM_VERSION="$NPM_VERSION" pnpm build:bundle
 
