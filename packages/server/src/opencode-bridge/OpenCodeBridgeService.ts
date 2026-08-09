@@ -2076,6 +2076,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       projectName: session.projectName,
       activity: session.activity,
       pendingInputType: session.pendingInputType,
+      pendingInputRequestId: this.getPendingInputRequest(session.id)?.id,
       // Published so the main server can answer liveness for a whole list from
       // this snapshot instead of probing /active per session.
       active: isLiveOpenCodeBridgeSession(session),

@@ -23,6 +23,8 @@ import type {
   SessionContentIndexService,
   SessionIndexService,
 } from "./indexes/index.js";
+import type { InteractionBroker } from "./interactions/InteractionBroker.js";
+import { SessionInteractionService } from "./interactions/SessionInteractionService.js";
 import { getLogger } from "./logging/logger.js";
 import type {
   ProjectMetadataService,
@@ -247,6 +249,8 @@ export interface AppOptions {
   basePath?: string;
   /** Runtime facade for live agent operations. Defaults to embedded Supervisor mode. */
   runtimeController?: RuntimeController;
+  /** Durable authority shared by every interaction channel. */
+  interactionBroker?: InteractionBroker;
 }
 
 export interface AppResult {
@@ -255,6 +259,10 @@ export interface AppResult {
   supervisor: Supervisor;
   /** Runtime facade used by live session routes */
   runtimeController: RuntimeController;
+  /** Provider-neutral pending-input application authority. */
+  sessionInteractionService: SessionInteractionService;
+  /** Durable CAS authority used by every interaction channel. */
+  interactionBroker: InteractionBroker;
   /** Project scanner for debug API access */
   scanner: ProjectScanner;
   /** Session reader factory for debug API access */
@@ -624,6 +632,15 @@ export function createApp(options: AppOptions): AppResult {
   const runtimeController =
     options.runtimeController ??
     new EmbeddedRuntimeController(supervisor, options.eventBus);
+  const sessionInteractionService = new SessionInteractionService({
+    runtimeController,
+    codexBridgeService: options.codexBridgeService,
+    opencodeBridgeService: options.opencodeBridgeService,
+    sessionMetadataService: options.sessionMetadataService,
+    eventBus: options.eventBus,
+    interactionBroker: options.interactionBroker,
+  });
+  const interactionBroker = sessionInteractionService.getInteractionBroker();
 
   // Bridge HTTP clients observe the shared upstream server (OpenCode/Codex) and
   // replay lifecycle changes onto the EventBus. Teach them which sessions the
@@ -1237,6 +1254,7 @@ export function createApp(options: AppOptions): AppResult {
       modelInfoService: options.modelInfoService,
       codexBridgeService: options.codexBridgeService,
       opencodeBridgeService: options.opencodeBridgeService,
+      sessionInteractionService,
       sessionArchiveService: options.sessionArchiveService,
       claudeProjectsDir: options.projectsDir ?? CLAUDE_PROJECTS_DIR,
     }),
@@ -1578,7 +1596,15 @@ export function createApp(options: AppOptions): AppResult {
     });
   }
 
-  return { app, supervisor, runtimeController, scanner, readerFactory };
+  return {
+    app,
+    supervisor,
+    runtimeController,
+    sessionInteractionService,
+    interactionBroker,
+    scanner,
+    readerFactory,
+  };
 }
 
 // Default app for backwards compatibility (health check only)

@@ -186,7 +186,17 @@ describe("pending input owner routing", () => {
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({
-      request: { id: BRIDGE_REQUEST_ID, type: "tool-approval" },
+      request: {
+        id: BRIDGE_REQUEST_ID,
+        type: "tool-approval",
+        interaction: {
+          operationId: expect.stringMatching(/^int_/u),
+          requestId: BRIDGE_REQUEST_ID,
+          sessionId: SESSION_ID,
+          state: "open",
+          version: 0,
+        },
+      },
     });
   });
 
@@ -459,6 +469,50 @@ describe("pending input owner routing", () => {
       error: "Invalid JSON body",
     });
 
+    expect(h.calls.bridgeRespond).toEqual([]);
+    expect(h.calls.runtimeRespond).toEqual([]);
+  });
+
+  it("rejects a partial broker identity before invoking either owner", async () => {
+    const h = harness({
+      processPending: null,
+      bridgePending: toolApproval(BRIDGE_REQUEST_ID),
+    });
+
+    const res = await postInput(h, {
+      requestId: BRIDGE_REQUEST_ID,
+      response: "approve",
+      operationId: "int_12345678-1234-4234-8234-123456789abc",
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "operationId and operationVersion must be provided together",
+      code: "interaction_identity_incomplete",
+    });
+    expect(h.calls.bridgeRespond).toEqual([]);
+    expect(h.calls.runtimeRespond).toEqual([]);
+  });
+
+  it("rejects malformed untrusted identity fields without throwing", async () => {
+    const h = harness({
+      processPending: null,
+      bridgePending: toolApproval(BRIDGE_REQUEST_ID),
+    });
+
+    const res = await postInput(h, {
+      requestId: BRIDGE_REQUEST_ID,
+      response: "approve",
+      operationId: 7,
+      operationVersion: 0,
+      actor: { id: 42, channel: "feishu" },
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "Interaction identity is invalid",
+      code: "interaction_identity_invalid",
+    });
     expect(h.calls.bridgeRespond).toEqual([]);
     expect(h.calls.runtimeRespond).toEqual([]);
   });

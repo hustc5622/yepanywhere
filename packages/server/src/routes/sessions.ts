@@ -8,7 +8,6 @@ import {
   type ContextCumulativeUsage,
   type ContextStatusResponse,
   type ContextUsage,
-  type InputRequest,
   type OpenCodeJsonObject,
   type OpenCodeModelCapabilities,
   type OpenCodeModelLimits,
@@ -19,7 +18,6 @@ import {
   type ThinkingOption,
   type UploadedFile,
   type UrlProjectId,
-  type UserQuestionAnswers,
   escalateContextWindow,
   getModelContextWindow,
   isUrlProjectId,
@@ -34,16 +32,17 @@ import {
 import { augmentTextBlocks } from "../augments/markdown-augments.js";
 import {
   type BridgeControllers,
-  getAnyBridgePendingInputRequest,
   getAnyBridgeSessionView,
-  respondToAnyBridgeInput,
 } from "../bridge-common/multi.js";
 import {
   isActiveBridgeSessionView,
   isLiveBridgeSessionView,
 } from "../bridge-common/session-state.js";
-import type { BridgeInputResponse } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
+import {
+  type SessionInputResponseBody,
+  SessionInteractionService,
+} from "../interactions/SessionInteractionService.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
@@ -92,7 +91,6 @@ import {
   findSessionSummaryAcrossProviders,
   resolveSessionSources,
 } from "../sessions/provider-resolution.js";
-import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import { locateSession } from "../sessions/session-locator.js";
 import {
   deriveSessionRuntime,
@@ -547,6 +545,8 @@ export function normalizeReasoningEffortForProvider(
 
 export interface SessionsDeps {
   runtimeController?: RuntimeController;
+  /** Shared pending-input authority used by HTTP and channel adapters. */
+  sessionInteractionService?: SessionInteractionService;
   supervisor: Supervisor;
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
@@ -644,119 +644,10 @@ async function getBridgeSessionView(
   return getAnyBridgeSessionView(bridgeControllers(deps), sessionId);
 }
 
-async function getBridgePendingInputRequest(
-  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
-  sessionId: string,
-) {
-  return getAnyBridgePendingInputRequest(bridgeControllers(deps), sessionId);
-}
-
-async function respondToBridgeInput(
-  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
-  sessionId: string,
-  requestId: string,
-  response: BridgeInputResponse,
-  answers?: UserQuestionAnswers,
-): Promise<boolean> {
-  return respondToAnyBridgeInput(
-    bridgeControllers(deps),
-    sessionId,
-    requestId,
-    response,
-    answers,
-  );
-}
-
 function isLiveAnyBridgeSessionView(
   view: NonNullable<BridgeSessionView>,
 ): boolean {
   return isLiveBridgeSessionView(view);
-}
-
-/**
- * Which side actually holds a session's pending input request.
- *
- * A Yep-owned process and a bridge track approvals independently. The
- * provider's per-turn OpenCode SSE stream can miss a `permission.asked` event
- * across a reconnect while the bridge's long-lived stream records it, so the
- * owned process reports no pending request even though one genuinely blocks
- * the session. Every read (session detail, GET pending-input) and the write
- * (POST input) must therefore agree on one priority: process first, bridge as
- * the fallback. Diverging rules produced an approval the UI could display but
- * not submit, which re-appeared on every refetch.
- */
-type PendingInputOwner = "process" | "bridge";
-
-interface ResolvedPendingInput {
-  owner: PendingInputOwner;
-  request: InputRequest;
-}
-
-/** The authoritative pending request for a session, whichever side owns it. */
-async function resolvePendingInputRequest(
-  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
-  sessionId: string,
-  processPending: InputRequest | null | undefined,
-): Promise<ResolvedPendingInput | null> {
-  if (processPending) return { owner: "process", request: processPending };
-  const bridgeRequest = await getBridgePendingInputRequest(deps, sessionId);
-  return bridgeRequest ? { owner: "bridge", request: bridgeRequest } : null;
-}
-
-/**
- * Pick the owner that actually holds `requestId`. Routing by request identity
- * rather than by "does an owned process exist" is what lets a bridge-only
- * approval be consumed while Yep still owns the process. The process wins a
- * tie so a single click can never be submitted to both sides.
- */
-async function selectPendingInputOwner(
-  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
-  sessionId: string,
-  processPending: InputRequest | null | undefined,
-  requestId: string,
-): Promise<ResolvedPendingInput | null> {
-  if (processPending?.id === requestId) {
-    return { owner: "process", request: processPending };
-  }
-  const bridgeRequest = await getBridgePendingInputRequest(deps, sessionId);
-  if (bridgeRequest?.id === requestId) {
-    return { owner: "bridge", request: bridgeRequest };
-  }
-  return null;
-}
-
-/**
- * Runtime-facing verbs. The runtime only understands approve/approve_always/
- * deny; provider-specific approvals (`approve_accept_edits`) approve and then
- * switch the permission mode separately.
- */
-function normalizeProcessInputResponse(
-  response: string,
-): "approve" | "approve_always" | "deny" {
-  if (response === "approve_always") return "approve_always";
-  if (
-    response === "approve" ||
-    response === "allow" ||
-    response === "approve_accept_edits"
-  ) {
-    return "approve";
-  }
-  return "deny";
-}
-
-/**
- * Bridge-facing verbs. `approve_always` survives verbatim so OpenCode can
- * reply with its native `always`, and the Codex-only session/auto-review
- * grants pass through untouched. Anything unrecognized denies.
- */
-function normalizeBridgeInputResponse(response: string): BridgeInputResponse {
-  return response === "approve" ||
-    response === "approve_accept_edits" ||
-    response === "approve_for_session" ||
-    response === "approve_strict_auto_review" ||
-    response === "approve_always"
-    ? response
-    : "deny";
 }
 
 interface StartSessionBody {
@@ -824,13 +715,6 @@ interface CreateSessionBody {
   executor?: string;
   /** Permission rules for tool filtering (deny/allow patterns) */
   permissions?: PermissionRules;
-}
-
-interface InputResponseBody {
-  requestId: string;
-  response: "approve" | "approve_accept_edits" | "deny" | string;
-  answers?: UserQuestionAnswers;
-  feedback?: string;
 }
 
 /**
@@ -1314,6 +1198,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const routes = new Hono();
   const runtimeController =
     deps.runtimeController ?? new EmbeddedRuntimeController(deps.supervisor);
+  const sessionInteractionService =
+    deps.sessionInteractionService ??
+    new SessionInteractionService({
+      runtimeController,
+      codexBridgeService: deps.codexBridgeService,
+      opencodeBridgeService: deps.opencodeBridgeService,
+      sessionMetadataService: deps.sessionMetadataService,
+      eventBus: deps.eventBus,
+    });
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
     deps.codexReaderFactory?.(projectPath) ??
     (deps.codexSessionsDir
@@ -1481,13 +1374,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Get pending input request from active process
     const activePendingInputRequest =
-      (
-        await resolvePendingInputRequest(
-          deps,
-          sessionId,
-          process?.pendingInputRequest,
-        )
-      )?.request ?? null;
+      await sessionInteractionService.getPendingInput(sessionId, {
+        processSnapshot: process,
+      });
     const pendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -1895,13 +1784,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // Get pending input request from active process (for tool approval prompts)
     // This ensures clients get pending requests immediately without waiting for SSE
     const activePendingInputRequest =
-      (
-        await resolvePendingInputRequest(
-          deps,
-          sessionId,
-          process?.pendingInputRequest,
-        )
-      )?.request ?? null;
+      await sessionInteractionService.getPendingInput(sessionId, {
+        processSnapshot: process,
+      });
     const livePendingInputType =
       pendingInputTypeFromProcess(process) ??
       bridgedSession?.pendingInputType ??
@@ -3283,13 +3168,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // round-trip is needed here.
     const process =
       await runtimeController.getProcessSnapshotForSession(sessionId);
-    const resolved = await resolvePendingInputRequest(
-      deps,
-      sessionId,
-      process?.pendingInputRequest,
-    );
+    const request = await sessionInteractionService.getPendingInput(sessionId, {
+      processSnapshot: process,
+    });
 
-    return c.json({ request: resolved?.request ?? null });
+    return c.json({ request });
   });
 
   // GET /api/sessions/:sessionId/process - Get process info for a session
@@ -3310,138 +3193,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Parse and validate the body exactly once, before any owner lookup, so
     // the two paths cannot diverge on validation order or error wording.
-    let body: InputResponseBody;
+    let body: SessionInputResponseBody;
     try {
-      body = await c.req.json<InputResponseBody>();
+      body = await c.req.json<SessionInputResponseBody>();
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
-
-    if (!body.requestId || !body.response) {
-      return c.json({ error: "requestId and response are required" }, 400);
-    }
-
-    const process =
-      await runtimeController.getProcessSnapshotForSession(sessionId);
-    const processPending = process?.pendingInputRequest ?? null;
-
-    // Route by who actually holds this requestId, not by whether Yep owns a
-    // process. An owned OpenCode process whose per-turn SSE stream missed
-    // `permission.asked` has no pending request of its own while the bridge
-    // does; the old process-existence check rejected the submit with
-    // "No pending input request" and the approval popped up again forever.
-    const target = await selectPendingInputOwner(
-      deps,
+    const result = await sessionInteractionService.respondToInput(
       sessionId,
-      processPending,
-      body.requestId,
+      body,
     );
-
-    if (!target) {
-      // No process at all: keep the historical 404 so clients can tell
-      // "session is gone" from "this approval is stale".
-      if (!process) {
-        return c.json({ error: "No active process for session" }, 404);
-      }
-      return c.json({ error: "Invalid request ID or no pending request" }, 400);
-    }
-
-    // Handle approve_accept_edits: approve and switch permission mode
-    const isApproveAcceptEdits = body.response === "approve_accept_edits";
-
-    const processResponse = normalizeProcessInputResponse(body.response);
-    const bridgeResponse = normalizeBridgeInputResponse(body.response);
-    const approving =
-      target.owner === "process"
-        ? processResponse !== "deny"
-        : bridgeResponse !== "deny";
-
-    // Questions must not be consumed while required answers are missing,
-    // regardless of which side owns the request.
-    if (approving) {
-      const validation = validateQuestionAnswers(target.request, body.answers);
-      if (!validation.valid) {
-        return c.json(
-          {
-            error: `Question response is missing ${validation.missingAnswerCount} required answer${validation.missingAnswerCount === 1 ? "" : "s"}`,
-          },
-          400,
-        );
-      }
-    }
-
-    if (target.owner === "process") {
-      // Call respondToInput which resolves the SDK's canUseTool promise
-      const { accepted } = await runtimeController.respondToInput({
-        sessionId,
-        requestId: body.requestId,
-        response: processResponse,
-        answers: body.answers,
-        feedback: body.feedback,
-      });
-      if (!accepted) {
-        return c.json(
-          { error: "Invalid request ID or no pending request" },
-          400,
-        );
-      }
-    } else {
-      if (process) {
-        // The interesting case: Yep owns the process but the approval only
-        // exists on the bridge. Log identity only, never tool input.
-        getLogger().info(
-          {
-            event: "session_input_routed_to_bridge",
-            sessionId,
-            requestId: body.requestId,
-            processPendingId: processPending?.id ?? null,
-            selectedOwner: "bridge",
-          },
-          "Routing pending input response to bridge while a Yep process is owned",
-        );
-      }
-      const accepted = await respondToBridgeInput(
-        deps,
-        sessionId,
-        body.requestId,
-        bridgeResponse,
-        body.answers,
-      );
-      if (!accepted) {
-        return c.json({ error: "No active process for session" }, 404);
-      }
-    }
-
-    // If approve_accept_edits, switch the permission mode. This also applies
-    // when the approval itself was consumed by the bridge: the owned process
-    // (and its provider-native session) must not stay in the stricter mode the
-    // user just opted out of. A failed mode switch cannot un-consume the
-    // approval, so it is reported without failing the response.
-    if (isApproveAcceptEdits && process) {
-      try {
-        const modeResult = await runtimeController.setPermissionMode({
-          sessionId,
-          mode: "acceptEdits",
-        });
-        await persistSessionPermissionMode(
-          deps,
-          sessionId,
-          modeResult.permissionMode ?? "acceptEdits",
-        );
-      } catch (error) {
-        getLogger().warn(
-          {
-            event: "session_input_accept_edits_mode_failed",
-            sessionId,
-            requestId: body.requestId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "Approval accepted but switching to acceptEdits failed",
-        );
-      }
-    }
-
-    return c.json({ accepted: true });
+    return c.json(result.body, result.status);
   });
 
   // POST /api/sessions/:sessionId/mark-seen - Mark session as seen (read)

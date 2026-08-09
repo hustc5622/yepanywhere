@@ -14,6 +14,11 @@ describe("CodexBridgeHttpClient", () => {
   let baseUrl: string;
   let sessionViews: CodexBridgeSessionView[];
   let sidecarAvailable: boolean;
+  let controlRequests: Array<{
+    path: string;
+    authorization?: string;
+    body: Record<string, unknown>;
+  }>;
 
   beforeEach(async () => {
     sessionViews = [
@@ -31,8 +36,9 @@ describe("CodexBridgeHttpClient", () => {
       }),
     ];
     sidecarAvailable = true;
+    controlRequests = [];
 
-    server = createServer((req, res) => {
+    server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       res.setHeader("content-type", "application/json");
 
@@ -73,6 +79,33 @@ describe("CodexBridgeHttpClient", () => {
             },
             error: null,
           } satisfies CodexUsageResponse),
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        (url.pathname.endsWith("/input-binding") ||
+          url.pathname.endsWith("/input"))
+      ) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        controlRequests.push({
+          path: url.pathname,
+          authorization: req.headers.authorization,
+          body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
+            string,
+            unknown
+          >,
+        });
+        res.end(
+          JSON.stringify(
+            url.pathname.endsWith("/input-binding")
+              ? { bound: true }
+              : { accepted: true },
+          ),
         );
         return;
       }
@@ -133,6 +166,57 @@ describe("CodexBridgeHttpClient", () => {
       usage: { planType: "pro", primary: { usedPercent: 47 } },
       error: null,
     });
+  });
+
+  it("carries the authenticated central broker claim to the sidecar", async () => {
+    const client = new CodexBridgeHttpClient({
+      baseUrl,
+      authToken: "shared-control-token",
+    });
+    const binding = {
+      operationId: "int_12345678-1234-4234-8234-123456789abc",
+      operationVersion: 2,
+    };
+
+    await expect(
+      client.bindPendingInputInteraction(
+        "bridge-session",
+        "bridge-request",
+        binding,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      client.respondToInput(
+        "bridge-session",
+        "bridge-request",
+        "approve",
+        undefined,
+        {
+          ...binding,
+          operationVersion: 3,
+          actor: { id: "feishu-user", channel: "feishu" },
+        },
+      ),
+    ).resolves.toBe(true);
+
+    expect(controlRequests).toEqual([
+      {
+        path: "/sessions/bridge-session/input-binding",
+        authorization: "Bearer shared-control-token",
+        body: { requestId: "bridge-request", ...binding },
+      },
+      {
+        path: "/sessions/bridge-session/input",
+        authorization: "Bearer shared-control-token",
+        body: {
+          requestId: "bridge-request",
+          response: "approve",
+          operationId: binding.operationId,
+          operationVersion: 3,
+          actor: { id: "feishu-user", channel: "feishu" },
+        },
+      },
+    ]);
   });
 
   it("keeps the last Codex poll snapshot during a transient sidecar outage", async () => {
