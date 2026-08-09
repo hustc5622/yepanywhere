@@ -103,4 +103,16 @@ describe("provider fork lineage resolution", () => {
       summary: { forkParentSessionId: "native-source" },
     });
   });
+
+  it("accepts metadata adapters that predate fork-lineage support", async () => {
+    const child = summary("child", "2026-08-08T01:00:00.000Z");
+    const deps = {
+      readerFactory: () => reader([child]),
+      sessionMetadataService: {},
+    };
+
+    await expect(listSessionsAcrossProviders(project, deps)).resolves.toEqual([
+      child,
+    ]);
+  });
 });

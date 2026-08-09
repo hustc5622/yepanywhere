@@ -38,7 +38,7 @@ export interface ProviderResolutionDeps {
   allowStaleSessionCache?: boolean;
   /** Yep sidecar lineage used when a stable provider API cannot persist it. */
   sessionMetadataService?: {
-    getForkParentSessionId: (sessionId: string) => string | undefined;
+    getForkParentSessionId?: (sessionId: string) => string | undefined;
   };
 }
 
@@ -330,7 +330,7 @@ function applyForkLineageMetadata(
   if (!metadata) return sessions;
   return sessions.map((session) => {
     if (session.forkParentSessionId) return session;
-    const forkParentSessionId = metadata.getForkParentSessionId(session.id);
+    const forkParentSessionId = metadata.getForkParentSessionId?.(session.id);
     return forkParentSessionId ? { ...session, forkParentSessionId } : session;
   });
 }
