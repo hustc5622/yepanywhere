@@ -301,6 +301,37 @@ describe("FeishuMediaDownloader", () => {
     });
   });
 
+  it("starts one lazy retention sweep for concurrent first media requests", async () => {
+    const uploadsDir = await createDataDir(dataDirs);
+    const uploadManager = new UploadManager({ uploadsDir });
+    const cleanup = vi
+      .spyOn(uploadManager, "cleanupExpiredTaskAttachments")
+      .mockResolvedValue({
+        scannedTasks: 0,
+        removedTasks: 0,
+        removedBytes: 0,
+        skippedTasks: 0,
+        failures: [],
+      });
+    const downloader = new FeishuMediaDownloader({ uploadManager });
+    const input = {
+      api: { fetchMessageItems: async () => [] },
+      messageId: "message-fixture",
+      projectId: "encoded-project",
+      sessionId: "session-fixture",
+      taskId: "task-fixture",
+      resources: [{ type: "image" as const, fileKey: "image-fixture" }],
+    };
+
+    await Promise.all([
+      downloader.downloadAll(input),
+      downloader.downloadAll({ ...input, taskId: "task-fixture-2" }),
+    ]);
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    downloader.stopRetentionCleanup();
+  });
+
   it("attaches safe Office extraction artifacts to the canonical manifest", async () => {
     const uploadsDir = await createDataDir(dataDirs);
     const archive = createZip([

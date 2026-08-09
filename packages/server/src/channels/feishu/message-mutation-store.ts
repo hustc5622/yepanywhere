@@ -126,16 +126,17 @@ export class FeishuMessageMutationStore {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     let parsed: z.infer<typeof StoreDocumentSchema>;
+    let fileExists = false;
     try {
       parsed = StoreDocumentSchema.parse(
         JSON.parse(await readFile(this.filePath, "utf8")),
       );
+      fileExists = true;
     } catch (error) {
       if (!isMissingFile(error)) throw error;
       parsed = { version: 1, events: [], states: [] };
-      await atomicWriteJson(this.filePath, parsed);
     }
-    if (process.platform !== "win32") {
+    if (fileExists && process.platform !== "win32") {
       await chmod(this.filePath, 0o600);
     }
     this.events = parsed.events as FeishuPersistedMessageMutation[];

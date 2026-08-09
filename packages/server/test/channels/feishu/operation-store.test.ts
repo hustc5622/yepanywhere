@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InteractionOperation } from "@yep-anywhere/shared";
@@ -12,6 +19,19 @@ describe("FeishuOperationStore", () => {
     await Promise.all(
       dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
     );
+  });
+
+  it("does not materialize an empty projection before broker activity", async () => {
+    const dataDir = await temporaryDataDir(dirs);
+    const store = new FeishuOperationStore({ dataDir });
+    await store.initialize();
+
+    await expect(access(store.filePath)).rejects.toThrow();
+    await store.upsert({
+      operation: makeOperation(1),
+      ...projectionInput(),
+    });
+    await expect(access(store.filePath)).resolves.toBeUndefined();
   });
 
   it("persists only presentation metadata from the central broker", async () => {

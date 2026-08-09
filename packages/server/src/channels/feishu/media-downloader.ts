@@ -97,6 +97,8 @@ export class FeishuMediaDownloader {
   private readonly audioStagingRetentionMs: number;
   private readonly audioStagingByTask = new Map<string, Map<string, number>>();
   private cleanupTimer?: ReturnType<typeof setInterval>;
+  private cleanupStart?: Promise<void>;
+  private cleanupEpoch = 0;
   private cleanupInFlight = false;
 
   constructor(options: FeishuMediaDownloaderOptions) {
@@ -127,6 +129,9 @@ export class FeishuMediaDownloader {
   async downloadAll(
     input: FeishuMediaDownloadInput,
   ): Promise<FeishuMediaDownloadResult> {
+    if (input.resources.length > 0) {
+      await this.startRetentionCleanup();
+    }
     const attachments: UploadedFile[] = [];
     const manifests: FeishuAttachmentManifest[] = [];
     const failures: FeishuMediaDownloadFailure[] = [];
@@ -349,14 +354,18 @@ export class FeishuMediaDownloader {
       throw new Error("Invalid Feishu attachment cleanup interval");
     }
     if (this.cleanupTimer) return;
-    await this.runRetentionCleanup();
-    this.cleanupTimer = setInterval(() => {
-      void this.runRetentionCleanup();
-    }, intervalMs);
-    this.cleanupTimer.unref();
+    if (!this.cleanupStart) {
+      const epoch = this.cleanupEpoch;
+      const task = this.startCleanupTimer(intervalMs, epoch).finally(() => {
+        if (this.cleanupStart === task) this.cleanupStart = undefined;
+      });
+      this.cleanupStart = task;
+    }
+    await this.cleanupStart;
   }
 
   stopRetentionCleanup(): void {
+    this.cleanupEpoch += 1;
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     this.cleanupTimer = undefined;
   }
@@ -384,6 +393,18 @@ export class FeishuMediaDownloader {
     } finally {
       this.cleanupInFlight = false;
     }
+  }
+
+  private async startCleanupTimer(
+    intervalMs: number,
+    epoch: number,
+  ): Promise<void> {
+    await this.runRetentionCleanup();
+    if (epoch !== this.cleanupEpoch || this.cleanupTimer) return;
+    this.cleanupTimer = setInterval(() => {
+      void this.runRetentionCleanup();
+    }, intervalMs);
+    this.cleanupTimer.unref();
   }
 
   private async stageAudioAttachment(

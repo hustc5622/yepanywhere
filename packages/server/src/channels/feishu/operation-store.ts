@@ -457,8 +457,10 @@ export class FeishuOperationStore {
 
   private async load(now: Date): Promise<void> {
     let parsed: z.infer<typeof FileSchema> = { version: 1, records: [] };
+    let fileExists = false;
     try {
       const contents = await readFile(this.filePath, "utf8");
+      fileExists = true;
       if (Buffer.byteLength(contents, "utf8") > MAX_PROJECTION_FILE_BYTES) {
         throw new Error("Feishu operation projection file is too large");
       }
@@ -482,7 +484,7 @@ export class FeishuOperationStore {
         ]),
     );
     this.trim(records, now);
-    await this.persist(records);
+    if (fileExists) await this.persist(records);
     this.records = records;
     this.initialized = true;
   }
