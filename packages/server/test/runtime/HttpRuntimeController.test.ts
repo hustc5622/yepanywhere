@@ -17,6 +17,10 @@ import type {
 } from "../../src/runtime/types.js";
 import { MessageQueue } from "../../src/sdk/messageQueue.js";
 import { MockClaudeSDK } from "../../src/sdk/mock.js";
+import {
+  CODEX_NATIVE_CAPABILITIES,
+  codexControlFailure,
+} from "../../src/sdk/providers/codex-controls.js";
 import type {
   AgentProvider,
   StartSessionOptions,
@@ -54,6 +58,23 @@ function createLongRunningProvider(): AgentProvider {
         queue: new MessageQueue(),
         abort: () => {
           aborted = true;
+        },
+        codexControls: {
+          capabilities: CODEX_NATIVE_CAPABILITIES,
+          invoke: async (request) => {
+            if (request.control === "thread/goal/get") {
+              return {
+                ok: true as const,
+                control: request.control,
+                data: { goal: null },
+              };
+            }
+            return codexControlFailure(
+              request.control,
+              "unsupported_method",
+              "Control is outside this runtime fixture",
+            );
+          },
         },
       };
     }),
@@ -281,11 +302,25 @@ describe("HttpRuntimeController", () => {
       id: processId,
       permissionMode: "default",
       state: "in-turn",
+      codexNativeCapabilities: {
+        codexVersion: "0.147.0",
+        experimentalApi: false,
+      },
     });
 
     await expect(
       controller.setPermissionMode({ sessionId, mode: "acceptEdits" }),
     ).resolves.toMatchObject({ ok: true, permissionMode: "acceptEdits" });
+    await expect(
+      controller.executeCodexControl({
+        sessionId,
+        request: { control: "thread/goal/get" },
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      control: "thread/goal/get",
+      data: { goal: null },
+    });
     await expect(
       controller.setHold({ sessionId, hold: true }),
     ).resolves.toMatchObject({ ok: true, state: "hold" });

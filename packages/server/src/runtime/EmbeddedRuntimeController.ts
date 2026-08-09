@@ -6,6 +6,10 @@ import type {
   SlashCommand,
 } from "@yep-anywhere/shared";
 import { markSubagent } from "../augments/index.js";
+import {
+  type CodexNativeCapabilities,
+  codexControlFailure,
+} from "../sdk/providers/codex-controls.js";
 import { configureClaudeRemoteExecutors } from "../sdk/providers/index.js";
 import type { UserMessage } from "../sdk/types.js";
 import {
@@ -23,6 +27,7 @@ import {
   RUNTIME_CONTROLLER_PROTOCOL_VERSION,
   type ResumeRuntimeSessionRequest,
   type RuntimeActivityEventListener,
+  type RuntimeCodexControlRequest,
   type RuntimeController,
   type RuntimeEventRecord,
   type RuntimeHoldProcessRequest,
@@ -162,6 +167,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       supportsDynamicModels?: boolean;
       supportsDynamicCommands?: boolean;
       supportsSetModel?: boolean;
+      codexNativeCapabilities?: CodexNativeCapabilities;
       getInfo?: () => ProcessInfo;
       getPendingInputRequest?: () => InputRequest | null;
       getMessageHistory?: () => RuntimeProcessSnapshot["messageHistory"];
@@ -203,6 +209,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       supportsDynamicCommands:
         compatibleProcess.supportsDynamicCommands ?? false,
       supportsSetModel: compatibleProcess.supportsSetModel ?? false,
+      codexNativeCapabilities: compatibleProcess.codexNativeCapabilities,
     };
   }
 
@@ -350,6 +357,18 @@ export class EmbeddedRuntimeController implements RuntimeController {
       permissionMode: process.permissionMode,
       modeVersion: process.modeVersion,
     };
+  }
+
+  async executeCodexControl(input: RuntimeCodexControlRequest) {
+    const process = this.supervisor.getProcessForSession(input.sessionId);
+    if (!process) {
+      return codexControlFailure(
+        input.request.control,
+        "not_ready",
+        "No active process for session",
+      );
+    }
+    return process.executeCodexControl(input.request);
   }
 
   async setHold(input: RuntimeHoldProcessRequest): Promise<{

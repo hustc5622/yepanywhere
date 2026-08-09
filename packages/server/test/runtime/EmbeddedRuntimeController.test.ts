@@ -197,6 +197,17 @@ describe("EmbeddedRuntimeController", () => {
     });
 
     await expect(
+      controller.executeCodexControl({
+        sessionId,
+        request: { control: "thread/goal/get" },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      control: "thread/goal/get",
+      error: { code: "unsupported_provider" },
+    });
+
+    await expect(
       controller.queueMessage({
         sessionId,
         projectPath: "/tmp/runtime-controller-controls",

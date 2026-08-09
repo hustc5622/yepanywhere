@@ -18,6 +18,13 @@ import {
   type MessageQueue,
   buildUserPromptProjection,
 } from "../sdk/messageQueue.js";
+import {
+  type CodexNativeCapabilities,
+  type CodexNativeControlRequest,
+  type CodexNativeControlResult,
+  type CodexSessionControls,
+  codexControlFailure,
+} from "../sdk/providers/codex-controls.js";
 import type {
   PermissionMode,
   SDKMessage,
@@ -99,6 +106,8 @@ export interface ProcessConstructorOptions extends ProcessOptions {
    * Returns false when steering is unavailable and caller should enqueue.
    */
   steerFn?: (message: UserMessage) => Promise<boolean>;
+  /** Capability-gated Codex app-server controls for this session. */
+  codexControls?: CodexSessionControls;
   /** Function to get supported models (SDK 0.2.7+) */
   supportedModelsFn?: () => Promise<ModelInfo[]>;
   /** Function to get supported slash commands (SDK 0.2.7+) */
@@ -197,6 +206,7 @@ export class Process {
   private interruptFn: (() => Promise<void>) | null;
   /** Function to steer an active turn (provider-specific, currently Codex app-server) */
   private steerFn: ((message: UserMessage) => Promise<boolean>) | null;
+  private codexControls: CodexSessionControls | null;
 
   /** Function to get supported models (SDK 0.2.7+) */
   private supportedModelsFn: (() => Promise<ModelInfo[]>) | null;
@@ -290,6 +300,7 @@ export class Process {
     this.setMaxThinkingTokensFn = options.setMaxThinkingTokensFn ?? null;
     this.interruptFn = options.interruptFn ?? null;
     this.steerFn = options.steerFn ?? null;
+    this.codexControls = options.codexControls ?? null;
     this.supportedModelsFn = options.supportedModelsFn ?? null;
     this.supportedCommandsFn = options.supportedCommandsFn ?? null;
     this._pidResolver = options.pid;
@@ -521,6 +532,23 @@ export class Process {
    */
   get supportsSetModel(): boolean {
     return this.setModelFn !== null;
+  }
+
+  get codexNativeCapabilities(): CodexNativeCapabilities | undefined {
+    return this.codexControls?.capabilities;
+  }
+
+  async executeCodexControl(
+    request: CodexNativeControlRequest,
+  ): Promise<CodexNativeControlResult> {
+    if (!this.codexControls) {
+      return codexControlFailure(
+        request.control,
+        "unsupported_provider",
+        `Provider ${this.provider} does not expose Codex native controls`,
+      );
+    }
+    return this.codexControls.invoke(request);
   }
 
   /**

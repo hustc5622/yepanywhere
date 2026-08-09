@@ -68,6 +68,13 @@ import type {
 } from "../types.js";
 import type { ToolApprovalResult } from "../types.js";
 import {
+  CODEX_NATIVE_CAPABILITIES,
+  type CodexNativeControlDataMap,
+  type CodexNativeControlRequest,
+  type CodexNativeControlResult,
+  codexControlFailure,
+} from "./codex-controls.js";
+import {
   type CodexModelSourceDefinition,
   DEFAULT_CODEX_MODEL_SOURCE,
   getCodexModelSourceRegistry,
@@ -283,6 +290,18 @@ interface JsonRpcError {
   data?: unknown;
 }
 
+class CodexJsonRpcError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+    readonly data?: unknown,
+    readonly requestId?: JsonRpcId,
+  ) {
+    super(message);
+    this.name = "CodexJsonRpcError";
+  }
+}
+
 interface JsonRpcResponse {
   id?: JsonRpcId;
   result?: unknown;
@@ -337,6 +356,7 @@ interface TokenUsageSnapshot {
 interface CodexTurnRuntimeState {
   threadId: string;
   activeTurnId: string | null;
+  ready: boolean;
 }
 
 interface ThreadRollbackParams {
@@ -758,7 +778,14 @@ class CodexAppServerClient {
             error,
             ...(pending.metadata ? { metadata: pending.metadata } : {}),
           });
-          pending.reject(new Error(error.message ?? "JSON-RPC request failed"));
+          pending.reject(
+            new CodexJsonRpcError(
+              typeof error.code === "number" ? error.code : -32000,
+              error.message ?? "JSON-RPC request failed",
+              error.data,
+              id,
+            ),
+          );
           return;
         }
         await observer?.onClientResponse({
@@ -1441,6 +1468,7 @@ export class CodexProvider implements AgentProvider {
     const runtimeState: CodexTurnRuntimeState = {
       threadId: options.resumeSessionId ?? "",
       activeTurnId: null,
+      ready: false,
     };
 
     // Push initial message if provided
@@ -1470,6 +1498,16 @@ export class CodexProvider implements AgentProvider {
       get pid() {
         return activeClient?.pid;
       },
+      codexControls: {
+        capabilities: CODEX_NATIVE_CAPABILITIES,
+        invoke: (request) =>
+          this.invokeCodexNativeControl({
+            getClient: () => activeClient,
+            runtimeState,
+            cwd: options.cwd,
+            request,
+          }),
+      },
       steer: async (message) => {
         if (!activeClient) return false;
         if (!runtimeState.threadId || !runtimeState.activeTurnId) return false;
@@ -1497,6 +1535,192 @@ export class CodexProvider implements AgentProvider {
         }
       },
     };
+  }
+
+  private async invokeCodexNativeControl(input: {
+    getClient: () => CodexAppServerClient | null;
+    runtimeState: CodexTurnRuntimeState;
+    cwd: string;
+    request: CodexNativeControlRequest;
+  }): Promise<CodexNativeControlResult> {
+    const { request, runtimeState } = input;
+    if (!CODEX_NATIVE_CAPABILITIES.methods[request.control]) {
+      return codexControlFailure(
+        request.control,
+        "experimental_api_disabled",
+        `${request.control} requires Codex experimentalApi, which is disabled for this session`,
+      );
+    }
+
+    const client = input.getClient();
+    if (!client || !runtimeState.ready || !runtimeState.threadId) {
+      return codexControlFailure(
+        request.control,
+        "not_ready",
+        "Codex app-server session is not ready",
+        true,
+      );
+    }
+
+    try {
+      switch (request.control) {
+        case "skills/list": {
+          const data = await client.request<
+            CodexNativeControlDataMap["skills/list"]
+          >("skills/list", {
+            cwds: [input.cwd],
+            forceReload: request.forceReload ?? false,
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "review/start": {
+          const data = await client.request<
+            CodexNativeControlDataMap["review/start"]
+          >("review/start", {
+            threadId: runtimeState.threadId,
+            target: request.target,
+            ...(request.delivery === undefined
+              ? {}
+              : { delivery: request.delivery }),
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/compact/start": {
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/compact/start"]
+          >("thread/compact/start", { threadId: runtimeState.threadId });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/goal/get": {
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/goal/get"]
+          >("thread/goal/get", { threadId: runtimeState.threadId });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/goal/set": {
+          const objective = request.objective;
+          if (
+            typeof objective === "string" &&
+            (objective.trim().length === 0 || objective.length > 4_000)
+          ) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "Goal objective must contain 1 to 4000 characters",
+            );
+          }
+          if (
+            request.tokenBudget !== undefined &&
+            request.tokenBudget !== null &&
+            (!Number.isSafeInteger(request.tokenBudget) ||
+              request.tokenBudget <= 0)
+          ) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "Goal tokenBudget must be a positive safe integer or null",
+            );
+          }
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/goal/set"]
+          >("thread/goal/set", {
+            threadId: runtimeState.threadId,
+            ...(request.objective === undefined
+              ? {}
+              : { objective: request.objective }),
+            ...(request.status === undefined ? {} : { status: request.status }),
+            ...(request.tokenBudget === undefined
+              ? {}
+              : { tokenBudget: request.tokenBudget }),
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/goal/clear": {
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/goal/clear"]
+          >("thread/goal/clear", { threadId: runtimeState.threadId });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/shellCommand": {
+          if (!request.confirmed) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "thread/shellCommand requires explicit confirmation because it runs unsandboxed",
+            );
+          }
+          if (request.command.trim().length === 0) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "Shell command must not be empty",
+            );
+          }
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/shellCommand"]
+          >("thread/shellCommand", {
+            threadId: runtimeState.threadId,
+            command: request.command,
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/backgroundTerminals/list":
+        case "thread/backgroundTerminals/terminate":
+        case "thread/backgroundTerminals/clean":
+          return codexControlFailure(
+            request.control,
+            "experimental_api_disabled",
+            `${request.control} requires Codex experimentalApi, which is disabled for this session`,
+          );
+      }
+    } catch (error) {
+      log.warn(
+        {
+          control: request.control,
+          threadId: runtimeState.threadId,
+          errorCode:
+            error instanceof CodexJsonRpcError ? error.code : undefined,
+          errorType: error instanceof Error ? error.name : typeof error,
+        },
+        "Codex native control request failed",
+      );
+      if (error instanceof CodexJsonRpcError) {
+        if (error.code === -32601) {
+          return codexControlFailure(
+            request.control,
+            "unsupported_method",
+            `Codex app-server does not support ${request.control}`,
+          );
+        }
+        if (error.code === -32602) {
+          return codexControlFailure(
+            request.control,
+            "invalid_request",
+            "Codex app-server rejected invalid control parameters",
+          );
+        }
+        return codexControlFailure(
+          request.control,
+          "provider_error",
+          error.code === -32001
+            ? "Codex app-server is overloaded; retry the control request"
+            : "Codex app-server control request failed",
+          error.code === -32001,
+        );
+      }
+      return codexControlFailure(
+        request.control,
+        "provider_error",
+        "Codex app-server control request failed",
+      );
+    }
   }
 
   /**
@@ -1749,6 +1973,7 @@ export class CodexProvider implements AgentProvider {
           "Rolled back Codex app-server thread before edited turn",
         );
       }
+      runtimeState.ready = true;
 
       // The app-server returns the provider it actually bound the thread to;
       // trust that effective value over the requested one for logs/metadata.
@@ -2017,6 +2242,7 @@ export class CodexProvider implements AgentProvider {
       }
     } finally {
       runtimeState.activeTurnId = null;
+      runtimeState.ready = false;
       appServer?.close();
     }
 

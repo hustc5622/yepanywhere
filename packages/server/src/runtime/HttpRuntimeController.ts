@@ -5,6 +5,7 @@ import type {
   PermissionMode,
   SlashCommand,
 } from "@yep-anywhere/shared";
+import type { CodexNativeControlResult } from "../sdk/providers/codex-controls.js";
 import type { UserMessage } from "../sdk/types.js";
 import type { ProcessInfo } from "../supervisor/types.js";
 import type { BusEvent } from "../watcher/index.js";
@@ -15,6 +16,7 @@ import type {
   QueueRuntimeMessageRequest,
   ResumeRuntimeSessionRequest,
   RuntimeActivityEventListener,
+  RuntimeCodexControlRequest,
   RuntimeController,
   RuntimeEventRecord,
   RuntimeHoldProcessRequest,
@@ -295,6 +297,19 @@ export class HttpRuntimeController implements RuntimeController {
       method: "PUT",
       body: JSON.stringify(body),
     });
+  }
+
+  async executeCodexControl(
+    input: RuntimeCodexControlRequest,
+  ): Promise<CodexNativeControlResult> {
+    const { sessionId, ...body } = input;
+    return this.request<CodexNativeControlResult>(
+      `/sessions/${encode(sessionId)}/codex-control`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    );
   }
 
   async setHold(input: RuntimeHoldProcessRequest): Promise<{

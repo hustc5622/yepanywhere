@@ -8,6 +8,11 @@ import type {
   SlashCommand,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import type {
+  CodexNativeCapabilities,
+  CodexNativeControlRequest,
+  CodexNativeControlResult,
+} from "../sdk/providers/codex-controls.js";
 import type { SDKMessage, UserMessage } from "../sdk/types.js";
 import type {
   ImmediateStartUnavailableResponse,
@@ -21,7 +26,7 @@ import type {
 import type { ProcessInfo } from "../supervisor/types.js";
 import type { BusEvent } from "../watcher/index.js";
 
-export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 4;
+export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 5;
 
 export type RuntimeMode = "embedded" | "external";
 
@@ -83,6 +88,7 @@ export interface RuntimeProcessSnapshot extends ProcessInfo {
   supportsDynamicModels: boolean;
   supportsDynamicCommands: boolean;
   supportsSetModel: boolean;
+  codexNativeCapabilities?: CodexNativeCapabilities;
 }
 
 export type RuntimeSessionEventEmitter = (
@@ -177,6 +183,11 @@ export interface RuntimePermissionModeRequest {
   mode: PermissionMode;
 }
 
+export interface RuntimeCodexControlRequest {
+  sessionId: string;
+  request: CodexNativeControlRequest;
+}
+
 export interface RuntimeHoldProcessRequest {
   sessionId: string;
   hold: boolean;
@@ -234,6 +245,9 @@ export interface RuntimeController {
     permissionMode?: PermissionMode;
     modeVersion?: number;
   }>;
+  executeCodexControl(
+    input: RuntimeCodexControlRequest,
+  ): Promise<CodexNativeControlResult>;
   setHold(input: RuntimeHoldProcessRequest): Promise<{
     ok: boolean;
     isHeld?: boolean;

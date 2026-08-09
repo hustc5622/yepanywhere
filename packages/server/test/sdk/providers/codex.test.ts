@@ -23,6 +23,14 @@ import {
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
 
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    Reflect.deleteProperty(process.env, name);
+  } else {
+    process.env[name] = value;
+  }
+}
+
 describe("CodexProvider", () => {
   let provider: CodexProvider;
 
@@ -102,6 +110,12 @@ let buffer = "";
 
 function send(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+}
+
+function sendError(id, code, message) {
+  process.stdout.write(
+    JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\\n",
+  );
 }
 
 function notify(method, params, emittedAtMs) {
@@ -215,6 +229,74 @@ function handle(message) {
     }
     return;
   }
+  if ([
+    "skills/list",
+    "review/start",
+    "thread/compact/start",
+    "thread/goal/get",
+    "thread/goal/set",
+    "thread/goal/clear",
+    "thread/shellCommand",
+  ].includes(message.method)) {
+    if (process.env.CODEX_FAKE_CONTROL_CAPTURE) {
+      fs.appendFileSync(
+        process.env.CODEX_FAKE_CONTROL_CAPTURE,
+        JSON.stringify({ method: message.method, params: message.params }) + "\\n",
+      );
+    }
+    if (process.env.CODEX_FAKE_UNSUPPORTED_CONTROLS === "1") {
+      sendError(message.id, -32601, "Method not found");
+      return;
+    }
+    if (
+      message.method === "thread/goal/set" &&
+      message.params.objective === "provider-invalid"
+    ) {
+      sendError(message.id, -32602, "synthetic invalid parameters");
+      return;
+    }
+    if (message.method === "skills/list") {
+      send(message.id, { data: [] });
+      return;
+    }
+    if (message.method === "review/start") {
+      send(message.id, {
+        turn: {
+          id: "review-turn",
+          status: "inProgress",
+          items: [],
+          error: null,
+        },
+        reviewThreadId: message.params.threadId,
+      });
+      return;
+    }
+    if (message.method === "thread/goal/get") {
+      send(message.id, { goal: null });
+      return;
+    }
+    if (message.method === "thread/goal/set") {
+      send(message.id, {
+        goal: {
+          threadId: message.params.threadId,
+          objective: message.params.objective || "",
+          status: message.params.status || "active",
+          tokenBudget: message.params.tokenBudget || null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      });
+      return;
+    }
+    if (message.method === "thread/goal/clear") {
+      send(message.id, { cleared: true });
+      return;
+    }
+    send(message.id, {});
+    return;
+  }
   if (message.method !== "thread/start" && message.method !== "thread/resume") {
     return;
   }
@@ -269,6 +351,219 @@ process.stdin.on("data", (chunk) => {
       expect(session.iterator).toBeDefined();
       expect(typeof session.abort).toBe("function");
       expect(session.queue).toBeDefined();
+    });
+
+    it("exposes only stable native controls and rejects calls until ready", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-controls-ready-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        const controls = session.codexControls;
+        expect(controls?.capabilities).toMatchObject({
+          codexVersion: "0.147.0",
+          experimentalApi: false,
+          methods: {
+            "skills/list": true,
+            "thread/backgroundTerminals/list": false,
+          },
+        });
+        await expect(
+          controls?.invoke({ control: "skills/list" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "not_ready", retryable: true },
+        });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: { type: "system", subtype: "init" },
+        });
+        await expect(
+          controls?.invoke({ control: "thread/backgroundTerminals/list" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "experimental_api_disabled", retryable: false },
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("maps stable native controls to exact 0.147 request contracts", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-controls-contract-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const controlCapturePath = join(tempDir, "controls.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousControlCapture = process.env.CODEX_FAKE_CONTROL_CAPTURE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_CONTROL_CAPTURE = controlCapturePath;
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        await session.iterator.next();
+        const controls = session.codexControls;
+        if (!controls) throw new Error("expected Codex native controls");
+
+        await expect(
+          controls.invoke({ control: "skills/list", forceReload: true }),
+        ).resolves.toMatchObject({ ok: true, data: { data: [] } });
+        await expect(
+          controls.invoke({
+            control: "review/start",
+            target: { type: "uncommittedChanges" },
+            delivery: "inline",
+          }),
+        ).resolves.toMatchObject({
+          ok: true,
+          data: { reviewThreadId: "thread-new" },
+        });
+        await expect(
+          controls.invoke({ control: "thread/compact/start" }),
+        ).resolves.toMatchObject({ ok: true, data: {} });
+        await expect(
+          controls.invoke({ control: "thread/goal/get" }),
+        ).resolves.toMatchObject({ ok: true, data: { goal: null } });
+        await expect(
+          controls.invoke({
+            control: "thread/goal/set",
+            objective: "Ship the control boundary",
+            status: "active",
+            tokenBudget: 40_000,
+          }),
+        ).resolves.toMatchObject({
+          ok: true,
+          data: {
+            goal: {
+              threadId: "thread-new",
+              objective: "Ship the control boundary",
+              tokenBudget: 40_000,
+            },
+          },
+        });
+        await expect(
+          controls.invoke({
+            control: "thread/goal/set",
+            objective: "provider-invalid",
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          control: "thread/goal/set",
+          error: { code: "invalid_request", retryable: false },
+        });
+        await expect(
+          controls.invoke({ control: "thread/goal/clear" }),
+        ).resolves.toMatchObject({ ok: true, data: { cleared: true } });
+        await expect(
+          controls.invoke({
+            control: "thread/shellCommand",
+            command: "git status --short",
+            confirmed: false,
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "invalid_request" },
+        });
+        await expect(
+          controls.invoke({
+            control: "thread/shellCommand",
+            command: "git status --short",
+            confirmed: true,
+          }),
+        ).resolves.toMatchObject({ ok: true, data: {} });
+
+        const captured = readFileSync(controlCapturePath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(captured).toEqual(
+          expect.arrayContaining([
+            {
+              method: "skills/list",
+              params: { cwds: [tempDir], forceReload: true },
+            },
+            {
+              method: "review/start",
+              params: {
+                threadId: "thread-new",
+                target: { type: "uncommittedChanges" },
+                delivery: "inline",
+              },
+            },
+            {
+              method: "thread/goal/set",
+              params: {
+                threadId: "thread-new",
+                objective: "Ship the control boundary",
+                status: "active",
+                tokenBudget: 40_000,
+              },
+            },
+            {
+              method: "thread/shellCommand",
+              params: {
+                threadId: "thread-new",
+                command: "git status --short",
+              },
+            },
+          ]),
+        );
+        expect(
+          captured.filter(({ method }) => method === "thread/shellCommand"),
+        ).toHaveLength(1);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_CONTROL_CAPTURE", previousControlCapture);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("maps app-server method absence to a typed unsupported result", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-controls-unsupported-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousUnsupported = process.env.CODEX_FAKE_UNSUPPORTED_CONTROLS;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_UNSUPPORTED_CONTROLS = "1";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        await session.iterator.next();
+        await expect(
+          session.codexControls?.invoke({ control: "skills/list" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          control: "skills/list",
+          error: { code: "unsupported_method", retryable: false },
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_UNSUPPORTED_CONTROLS", previousUnsupported);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
 
     it("should emit error if Codex CLI is not found", async () => {

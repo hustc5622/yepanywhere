@@ -17,6 +17,69 @@ function createMockIterator(messages: SDKMessage[]): AsyncIterator<SDKMessage> {
 }
 
 describe("Process", () => {
+  it("forwards typed Codex controls and exposes their capability snapshot", async () => {
+    const invoke = vi.fn(async () => ({
+      ok: true as const,
+      control: "thread/goal/get" as const,
+      data: { goal: null },
+    }));
+    const process = new Process(createMockIterator([]), {
+      projectPath: "/test",
+      projectId: "proj-1",
+      sessionId: "sess-codex-control",
+      provider: "codex",
+      codexControls: {
+        capabilities: {
+          codexVersion: "0.147.0",
+          experimentalApi: false,
+          methods: {
+            "skills/list": true,
+            "review/start": true,
+            "thread/compact/start": true,
+            "thread/goal/get": true,
+            "thread/goal/set": true,
+            "thread/goal/clear": true,
+            "thread/shellCommand": true,
+            "thread/backgroundTerminals/list": false,
+            "thread/backgroundTerminals/terminate": false,
+            "thread/backgroundTerminals/clean": false,
+          },
+        },
+        invoke,
+      },
+    });
+
+    expect(process.codexNativeCapabilities).toMatchObject({
+      codexVersion: "0.147.0",
+      experimentalApi: false,
+    });
+    await expect(
+      process.executeCodexControl({ control: "thread/goal/get" }),
+    ).resolves.toMatchObject({
+      ok: true,
+      control: "thread/goal/get",
+      data: { goal: null },
+    });
+    expect(invoke).toHaveBeenCalledWith({ control: "thread/goal/get" });
+  });
+
+  it("returns typed unsupported controls for non-Codex providers", async () => {
+    const process = new Process(createMockIterator([]), {
+      projectPath: "/test",
+      projectId: "proj-1",
+      sessionId: "sess-no-codex-control",
+      provider: "claude",
+    });
+
+    await expect(
+      process.executeCodexControl({ control: "thread/goal/get" }),
+    ).resolves.toMatchObject({
+      ok: false,
+      control: "thread/goal/get",
+      error: { code: "unsupported_provider", retryable: false },
+    });
+  });
+
   it("keeps a generic OpenCode reasoning preference when switching models", async () => {
     const setModel = vi.fn(async () => {});
     const process = new Process(createMockIterator([]), {

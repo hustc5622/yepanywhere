@@ -9,6 +9,7 @@ import type {
 } from "@yep-anywhere/shared";
 import type { MessageQueue } from "../messageQueue.js";
 import type { CanUseTool, SDKMessage, UserMessage } from "../types.js";
+import type { CodexSessionControls } from "./codex-controls.js";
 
 /**
  * Provider names - extensible for future providers.
@@ -114,6 +115,8 @@ export interface AgentSession {
    * Returns true when steered immediately, false when caller should enqueue instead.
    */
   steer?: (message: UserMessage) => Promise<boolean>;
+  /** Stable, capability-gated Codex app-server controls for this session. */
+  codexControls?: CodexSessionControls;
   /**
    * Change max thinking tokens without restarting the session.
    * Pass null to disable thinking mode.

@@ -5,6 +5,7 @@ import type {
   CreateRuntimeSessionRequest,
   QueueRuntimeMessageRequest,
   ResumeRuntimeSessionRequest,
+  RuntimeCodexControlRequest,
   RuntimeController,
   RuntimeHoldProcessRequest,
   RuntimeInputResponseRequest,
@@ -160,6 +161,16 @@ export function createRuntimeControlApp(
       await c.req.json<Omit<RuntimePermissionModeRequest, "sessionId">>();
     return c.json(
       await controller.setPermissionMode({
+        ...body,
+        sessionId: c.req.param("sessionId"),
+      }),
+    );
+  });
+  app.post("/sessions/:sessionId/codex-control", async (c) => {
+    const body =
+      await c.req.json<Omit<RuntimeCodexControlRequest, "sessionId">>();
+    return c.json(
+      await controller.executeCodexControl({
         ...body,
         sessionId: c.req.param("sessionId"),
       }),
