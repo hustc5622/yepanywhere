@@ -197,12 +197,22 @@ function handle(message) {
   if (message.method === "turn/start") {
     const eventMode = process.env.CODEX_FAKE_EVENT_MODE === "1";
     const activeTurn = process.env.CODEX_FAKE_ACTIVE_TURN === "1";
+    const failedTurn = process.env.CODEX_FAKE_FAILED_TURN === "1";
     send(message.id, {
       turn: {
         id: "turn-rewrite",
-        status: eventMode || activeTurn ? "inProgress" : "completed",
+        status: failedTurn
+          ? "failed"
+          : eventMode || activeTurn
+            ? "inProgress"
+            : "completed",
         items: [],
-        error: null,
+        error: failedTurn
+          ? {
+              message:
+                "provider failure synthetic-wire-secret at /private/provider/error",
+            }
+          : null,
       },
     });
     if (eventMode) {
@@ -686,6 +696,71 @@ process.stdin.on("data", (chunk) => {
         restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
         restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
         restoreEnv("CODEX_FAKE_ACTIVE_TURN", previousActiveTurn);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("redacts a failed turn and preserves its accepted correlation", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-failed-turn-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousFailedTurn = process.env.CODEX_FAKE_FAILED_TURN;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_FAILED_TURN = "1";
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: {
+            text: "begin",
+            uuid: "client-failed-turn",
+          },
+        });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: { type: "system", subtype: "init" },
+        });
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "user",
+            uuid: "client-failed-turn",
+            turnId: "turn-rewrite",
+          },
+        });
+        const failed = await session.iterator.next();
+        expect(failed.value).toMatchObject({
+          type: "error",
+          error:
+            "Codex encountered an unclassified error before the task completed.",
+          turnId: "turn-rewrite",
+          codexTurnId: "turn-rewrite",
+          clientUserMessageId: "client-failed-turn",
+          codexError: expect.objectContaining({
+            code: "CODEX_UNKNOWN",
+            correlationId: "turn-rewrite",
+          }),
+        });
+        expect(JSON.stringify(failed.value)).not.toContain(
+          "synthetic-wire-secret",
+        );
+        expect(JSON.stringify(failed.value)).not.toContain("/private/provider");
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "result",
+            turnId: "turn-rewrite",
+            clientUserMessageId: "client-failed-turn",
+          },
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_FAILED_TURN", previousFailedTurn);
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
