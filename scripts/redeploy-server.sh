@@ -18,8 +18,6 @@
 #                                      # legacy: run 4510 inside 8022
 #
 # Assumes:
-#   - Global `yepanywhere` command is pnpm-linked to dist/npm-package
-#     (one-time: `pnpm link --global` from repo root).
 #   - You want to keep the relay process and frp tunnel running. This script
 #     only touches the yepanywhere server itself.
 #
@@ -53,6 +51,11 @@ warn() { echo -e "${C_YELLOW}!!${C_RESET}  $*" >&2; }
 err()  { echo -e "${C_RED}xx${C_RESET}  $*" >&2; }
 dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 
+# shellcheck source=scripts/lib/node.sh
+source "$SCRIPT_DIR/lib/node.sh"
+# shellcheck source=scripts/lib/pnpm.sh
+source "$SCRIPT_DIR/lib/pnpm.sh"
+
 # ----- args -----
 DO_BUILD=true
 DO_RESTART=true
@@ -72,6 +75,8 @@ SERVER_BASE_URL="http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
 SERVER_LAUNCHD_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
 SERVER_LAUNCHD_LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
 SERVER_CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
+LAUNCHD_RUNTIME_DIR="${YEP_LAUNCHD_RUNTIME_DIR:-$HOME/.yep-anywhere/runtime/npm-package}"
+LAUNCHD_SERVER_CLI_JS="$LAUNCHD_RUNTIME_DIR/dist/cli.js"
 CODEX_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
 OPENCODE_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
 for arg in "$@"; do
@@ -105,6 +110,8 @@ for arg in "$@"; do
 done
 
 # ----- preflight -----
+ensure_project_node
+
 # Pull version from the monorepo root package.json so the bundle reports the
 # real version (build-bundle.ts otherwise falls back to a hardcoded string).
 NPM_VERSION="$(node -p "require('./package.json').version")"
@@ -146,7 +153,10 @@ wait_port_released() {
 
 server_process_pids() {
   local port="$1"
-  pgrep -f "${REPO_ROOT}/dist/npm-package/dist/cli.js --port ${port}" 2>/dev/null | sort -u || true
+  {
+    pgrep -f "${SERVER_CLI_JS} --port ${port}" 2>/dev/null || true
+    pgrep -f "${LAUNCHD_SERVER_CLI_JS} --port ${port}" 2>/dev/null || true
+  } | sort -u
 }
 
 parent_pid() {
@@ -391,13 +401,16 @@ stop_launchagent_server_for_fallback() {
 start_codex_bridge_sidecar() {
   local bridge_port="$1"
   local bridge_url="$2"
+  local node_bin
 
   if launchd_label_loaded "$CODEX_BRIDGE_LAUNCHD_LABEL"; then
     log "Starting Codex bridge LaunchAgent ${CODEX_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
     kickstart_launchd_label "$CODEX_BRIDGE_LAUNCHD_LABEL"
   else
+    node_bin="$(server_node_bin)" || return 1
     log "Starting Codex bridge sidecar on ${bridge_url} (logs: /tmp/yep-codex-bridge.log) ..."
-    YEP_CODEX_BRIDGE_PORT="$bridge_port" nohup yepanywhere --codex-bridge-only >/tmp/yep-codex-bridge.log 2>&1 & disown
+    YEP_CODEX_BRIDGE_PORT="$bridge_port" \
+      nohup "$node_bin" "$SERVER_CLI_JS" --codex-bridge-only >/tmp/yep-codex-bridge.log 2>&1 & disown
   fi
 
   for _ in $(seq 1 60); do
@@ -420,12 +433,14 @@ start_opencode_bridge_sidecar() {
   local opencode_start_port="$4"
   local opencode_bridge_upstream_url="${5:-}"
   local using_launchd=false
+  local node_bin
 
   if launchd_label_loaded "$OPENCODE_BRIDGE_LAUNCHD_LABEL"; then
     using_launchd=true
     log "Starting OpenCode bridge LaunchAgent ${OPENCODE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
     kickstart_launchd_label "$OPENCODE_BRIDGE_LAUNCHD_LABEL"
   else
+    node_bin="$(server_node_bin)" || return 1
     log "Starting OpenCode CLI bridge sidecar on ${bridge_url} (logs: /tmp/yep-opencode-bridge.log) ..."
     if [[ -n "$opencode_bridge_upstream_url" ]]; then
       YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
@@ -433,13 +448,13 @@ start_opencode_bridge_sidecar() {
         YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
         YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$opencode_bridge_upstream_url" \
         env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-        nohup yepanywhere --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
+        nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
     else
       YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
         YEP_SERVER_URL="$server_url" \
         YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
         env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-        nohup yepanywhere --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
+        nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
     fi
   fi
 
@@ -501,6 +516,20 @@ sync_opencode_forwarder_plugin() {
   "$installer"
 }
 
+sync_launchd_runtime_if_installed() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+
+  local agents_dir="$HOME/Library/LaunchAgents"
+  if [[ ! -f "$agents_dir/${SERVER_LAUNCHD_LABEL}.plist" &&
+    ! -f "$agents_dir/${CODEX_BRIDGE_LAUNCHD_LABEL}.plist" &&
+    ! -f "$agents_dir/${OPENCODE_BRIDGE_LAUNCHD_LABEL}.plist" ]]; then
+    return 0
+  fi
+
+  log "Syncing the LaunchAgent runtime from the new bundle ..."
+  YEP_LAUNCHD_RUNTIME_DIR="$LAUNCHD_RUNTIME_DIR" "$SCRIPT_DIR/sync-launchd-runtime.sh"
+}
+
 ensure_bundle_ready() {
   if [[ ! -f "$SERVER_CLI_JS" ]]; then
     err "Expected $SERVER_CLI_JS, but it's missing. Rebuild before restarting."
@@ -516,13 +545,12 @@ ensure_bundle_ready() {
 
 # ----- build -----
 if $DO_BUILD; then
+  ensure_pnpm
   log "Building bundle (NPM_VERSION=${NPM_VERSION}) ..."
   NPM_VERSION="$NPM_VERSION" pnpm build:bundle
 
-  # build-bundle.ts only stages the package for publishing — it doesn't
-  # install runtime dependencies. When npm publishes, `npm i -g yepanywhere`
-  # installs the dependencies for end users; for local dev we have to do
-  # it ourselves, otherwise `yepanywhere` boots with ERR_MODULE_NOT_FOUND.
+  # build-bundle.ts stages the self-contained package but does not install its
+  # runtime dependencies. Local deployment must do that before promotion.
   install_runtime_dependencies
 
   # Default OpenCode TUI/run processes load this global plugin instead of the
@@ -530,25 +558,17 @@ if $DO_BUILD; then
   # bridge fix cannot remain dormant behind a stale, manually copied plugin.
   sync_opencode_forwarder_plugin
 
-  # Sanity-check the linked global command resolves to our bundle.
-  GLOBAL_BIN="$(command -v yepanywhere 2>/dev/null || true)"
-  if [[ -z "$GLOBAL_BIN" ]]; then
-    warn "'yepanywhere' command not on PATH. Run 'pnpm link --global' from the repo root, then re-run this script."
-  else
-    RESOLVED="$(readlink -f "$GLOBAL_BIN" 2>/dev/null || echo "$GLOBAL_BIN")"
-    EXPECTED="$REPO_ROOT/dist/npm-package/dist/cli.js"
-    if [[ "$RESOLVED" != "$EXPECTED" ]]; then
-      warn "'yepanywhere' resolves to $RESOLVED, not $EXPECTED"
-      warn "Restart will launch the wrong build. Run 'pnpm link --global' to fix."
-    fi
-  fi
-
   # Verify the bundle actually reports the version we asked for. Catches
   # silent build issues (e.g. NPM_VERSION not picked up by build-bundle).
-  ACTUAL_VERSION="$(yepanywhere --version 2>&1 | head -1 | awk '{print $NF}' || true)"
+  ACTUAL_VERSION="$(node "$SERVER_CLI_JS" --version 2>&1 | head -1 | awk '{print $NF}' || true)"
   if [[ "$ACTUAL_VERSION" != "v${NPM_VERSION}" && "$ACTUAL_VERSION" != "${NPM_VERSION}" ]]; then
     warn "Bundle reports version '${ACTUAL_VERSION}' but expected 'v${NPM_VERSION}'."
   fi
+
+  # Promote only after the bundle and its companion plugin are ready. Running
+  # LaunchAgents are not restarted here; this updates what their next launch
+  # will execute and retains the former runtime as `.previous` for rollback.
+  sync_launchd_runtime_if_installed
 fi
 
 if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
@@ -723,8 +743,8 @@ if $DO_RESTART; then
   fi
 
   log "Starting yepanywhere ..."
-  # Mount under /yep so Caddy at air.yueyuan.uk/yep/* reverse-proxies into us
-  # cleanly (see INFRA.md). The Hono app + client bundle both pick up BASE_PATH.
+  # Mount under the configured base path so a reverse proxy can forward the
+  # service cleanly. The Hono app + client bundle both pick up BASE_PATH.
   # APK / direct-mode tcp tunnel callers are unaffected — they hit ws://host:8022
   # which still serves /yep/api/ws; only the URL prefix changes, not the port.
   STARTED_SERVER_WITH_LAUNCHAGENT=false

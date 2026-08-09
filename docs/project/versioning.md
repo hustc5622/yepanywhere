@@ -271,7 +271,7 @@ Desktop 版本分散在三处（package.json / Cargo.toml / tauri.conf.json）�
 
 AGENTS.md 只放长期规则，不放逐版本内容。拟在「发布」小节新增：
 
-> 凡会进入正式部署产物的功能、修复或兼容性变更，开发时必须更新 `CHANGELOG.md` 的 `[Unreleased]`；正式部署或发布前必须按 SemVer 提升根 `package.json` 版本，并确保版本号、CHANGELOG、release tag 与构建产物一致。本仓库是独立 fork 发行线，主产品 tag 使用 `ya-v*`，`v*` 保留给 upstream。开发和临时验证不需要提升版本，靠 `buildId` 区分。详见 `docs/project/versioning.md`。
+> 凡会进入正式部署产物的功能、修复或兼容性变更，开发时必须更新 `CHANGELOG.md` 的 `[Unreleased]`；正式部署或发布前必须按 CalVer `YYYY.M.N` 提升根 `package.json` 版本，并确保版本号、CHANGELOG、release tag 与构建产物一致。本仓库是独立 fork 发行线，主产品 tag 使用 `ya-v*`，`v*` 保留给 upstream。开发和临时验证不需要提升版本，靠 `buildId` 区分。详见 `docs/project/versioning.md`。
 
 同时把现有「发布」段落中的 `v*` 描述改为 `ya-v*`，避免与 upstream 命名空间混淆。
 

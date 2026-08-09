@@ -36,6 +36,11 @@ warn() { echo -e "${C_YELLOW}!!${C_RESET}  $*" >&2; }
 err()  { echo -e "${C_RED}xx${C_RESET}  $*" >&2; }
 dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 
+# shellcheck source=scripts/lib/node.sh
+source "$SCRIPT_DIR/lib/node.sh"
+# shellcheck source=scripts/lib/pnpm.sh
+source "$SCRIPT_DIR/lib/pnpm.sh"
+
 LOADED_DEPLOY_ENV_FILE=""
 DISCOVERED_FCM_SERVICE_ACCOUNT_FILE=""
 
@@ -158,6 +163,7 @@ Native push deploy config:
   YEP_DEPLOY_ENV_FILE              Env file to load (default: .env.deploy.local)
   ALLOWED_IMAGE_PATHS              Extra local media paths for /api/local-image
                                    (default: /tmp,$HOME/Downloads)
+  ALLOWED_HOSTS                    Comma-separated public hostnames/IPs accepted by the server
   YEP_ANDROID_GOOGLE_SERVICES_JSON Source path copied to Android app google-services.json
   YEP_FCM_SERVICE_ACCOUNT_FILE     Firebase service account JSON path for server FCM
   YEP_FCM_SERVICE_ACCOUNT_JSON     Raw Firebase service account JSON for server FCM
@@ -899,6 +905,8 @@ if ! $DO_SERVER && ! $DO_CODEX_BRIDGE && ! $DO_OPENCODE_BRIDGE && ! $DO_APK; the
   exit 2
 fi
 
+ensure_project_node
+
 log "Deploy plan"
 dim "8022 web/API:        $DO_SERVER"
 dim "8022 dev hot reload: $DO_DEV_SERVER"
@@ -928,6 +936,10 @@ if ! $DO_DEV_SERVER; then
   check_session_title_preflight
   log "Checking local media deploy prerequisites ..."
   check_local_media_preflight
+fi
+
+if $DO_DEV_SERVER || { $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; }; }; then
+  ensure_pnpm
 fi
 
 if $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; }; then

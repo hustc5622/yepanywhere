@@ -47,6 +47,11 @@ warn() { echo -e "${C_YELLOW}!!${C_RESET}  $*" >&2; }
 err()  { echo -e "${C_RED}xx${C_RESET}  $*" >&2; }
 dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 
+# shellcheck source=scripts/lib/node.sh
+source "$SCRIPT_DIR/lib/node.sh"
+# shellcheck source=scripts/lib/pnpm.sh
+source "$SCRIPT_DIR/lib/pnpm.sh"
+
 # ----- args -----
 BUILD_TYPE="release"      # release | debug
 DEVICE_ID=""              # passed to adb -s
@@ -160,6 +165,8 @@ APK_NAME="app-universal-${BUILD_TYPE}.apk"
 APK_PATH="$MOBILE_DIR/src-tauri/gen/android/app/build/outputs/apk/universal/${BUILD_TYPE}/${APK_NAME}"
 
 if $DO_BUILD; then
+  ensure_project_node
+  ensure_pnpm
   # Version stamping:
   # - versionName follows the monorepo version (tauri.conf.json points at the
   #   root package.json), so installers show e.g. 0.4.29 instead of 0.1.0.
