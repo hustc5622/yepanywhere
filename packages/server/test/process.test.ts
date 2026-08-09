@@ -17,6 +17,69 @@ function createMockIterator(messages: SDKMessage[]): AsyncIterator<SDKMessage> {
 }
 
 describe("Process", () => {
+  it("forwards typed Codex controls and exposes their capability snapshot", async () => {
+    const invoke = vi.fn(async () => ({
+      ok: true as const,
+      control: "thread/goal/get" as const,
+      data: { goal: null },
+    }));
+    const process = new Process(createMockIterator([]), {
+      projectPath: "/test",
+      projectId: "proj-1",
+      sessionId: "sess-codex-control",
+      provider: "codex",
+      codexControls: {
+        capabilities: {
+          codexVersion: "0.147.0",
+          experimentalApi: false,
+          methods: {
+            "skills/list": true,
+            "review/start": true,
+            "thread/compact/start": true,
+            "thread/goal/get": true,
+            "thread/goal/set": true,
+            "thread/goal/clear": true,
+            "thread/shellCommand": true,
+            "thread/backgroundTerminals/list": false,
+            "thread/backgroundTerminals/terminate": false,
+            "thread/backgroundTerminals/clean": false,
+          },
+        },
+        invoke,
+      },
+    });
+
+    expect(process.codexNativeCapabilities).toMatchObject({
+      codexVersion: "0.147.0",
+      experimentalApi: false,
+    });
+    await expect(
+      process.executeCodexControl({ control: "thread/goal/get" }),
+    ).resolves.toMatchObject({
+      ok: true,
+      control: "thread/goal/get",
+      data: { goal: null },
+    });
+    expect(invoke).toHaveBeenCalledWith({ control: "thread/goal/get" });
+  });
+
+  it("returns typed unsupported controls for non-Codex providers", async () => {
+    const process = new Process(createMockIterator([]), {
+      projectPath: "/test",
+      projectId: "proj-1",
+      sessionId: "sess-no-codex-control",
+      provider: "claude",
+    });
+
+    await expect(
+      process.executeCodexControl({ control: "thread/goal/get" }),
+    ).resolves.toMatchObject({
+      ok: false,
+      control: "thread/goal/get",
+      error: { code: "unsupported_provider", retryable: false },
+    });
+  });
+
   it("keeps a generic OpenCode reasoning preference when switching models", async () => {
     const setModel = vi.fn(async () => {});
     const process = new Process(createMockIterator([]), {
@@ -34,6 +97,20 @@ describe("Process", () => {
     expect(setModel).toHaveBeenCalledWith("ohmyrouter/deepseek-v4-pro");
     expect(process.requestedReasoningEffort).toBe("max");
     expect(process.resolvedReasoningEffort).toBe("max");
+  });
+
+  it("does not report a model switch when the provider has no native API", async () => {
+    const process = new Process(createMockIterator([]), {
+      projectPath: "/test",
+      projectId: "proj-1",
+      sessionId: "sess-no-model-switch",
+      provider: "codex",
+      model: "gpt-5.5",
+    });
+
+    await expect(process.setModel("gpt-5.6-sol")).resolves.toBe(false);
+    expect(process.supportsSetModel).toBe(false);
+    expect(process.resolvedModel).toBe("gpt-5.5");
   });
 
   describe("event subscription", () => {
@@ -172,10 +249,10 @@ describe("Process", () => {
         }
       });
 
-      process.queueMessage({ text: "first" });
+      await process.queueMessage({ text: "first" });
       await firstTurnStarted;
 
-      process.queueMessage({ text: "second" });
+      await process.queueMessage({ text: "second" });
       expect(queue.depth).toBe(1);
       completeFirstTurn();
 
@@ -203,8 +280,8 @@ describe("Process", () => {
         idleTimeoutMs: 100,
       });
 
-      const result1 = process.queueMessage({ text: "first" });
-      const result2 = process.queueMessage({ text: "second" });
+      const result1 = await process.queueMessage({ text: "first" });
+      const result2 = await process.queueMessage({ text: "second" });
 
       expect(result1.success).toBe(true);
       expect(result1.position).toBe(1);
@@ -224,10 +301,13 @@ describe("Process", () => {
         idleTimeoutMs: 100,
       });
 
-      process.queueMessage({ text: "first" });
-      process.queueMessage({ text: "second" });
+      const admissions = [
+        process.queueMessage({ text: "first" }),
+        process.queueMessage({ text: "second" }),
+      ];
 
       expect(process.queueDepth).toBe(2);
+      await Promise.all(admissions);
     });
 
     it("prefers steerFn for in-turn messages when available", async () => {
@@ -250,7 +330,7 @@ describe("Process", () => {
         steerFn,
       });
 
-      const result = process.queueMessage({ text: "steer me" });
+      const result = await process.queueMessage({ text: "steer me" });
 
       expect(result.success).toBe(true);
       expect(result.position).toBe(0);
@@ -258,6 +338,64 @@ describe("Process", () => {
       expect(process.queueDepth).toBe(0);
 
       // Let the iterator complete so abort() doesn't hang
+      resolveIterator?.();
+      await process.abort();
+    });
+
+    it("passes provider-only inputs to steer while publishing only the safe projection", async () => {
+      let resolveIterator: () => void;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () =>
+          new Promise((resolve) => {
+            resolveIterator = () => resolve({ done: true, value: undefined });
+          }),
+      };
+      const steerFn = vi.fn(async () => true);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+        steerFn,
+      });
+      const emitted: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emitted.push(event.message);
+      });
+
+      await process.queueMessage({
+        text: "inspect",
+        attachments: [
+          {
+            id: "steer-file",
+            originalName: "report.pdf",
+            size: 1024,
+            mimeType: "application/pdf",
+            path: "/private/provider/steer/report.pdf",
+          },
+        ],
+        documents: ["/private/provider/steer/notes.txt"],
+      });
+
+      expect(steerFn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "inspect",
+          attachments: [
+            expect.objectContaining({
+              path: "/private/provider/steer/report.pdf",
+            }),
+          ],
+          documents: ["/private/provider/steer/notes.txt"],
+        }),
+      );
+      const publicProjection = JSON.stringify({
+        emitted,
+        history: process.getMessageHistory(),
+      });
+      expect(publicProjection).toContain("[managed attachment]");
+      expect(publicProjection).not.toContain("/private/provider/steer");
+
       resolveIterator?.();
       await process.abort();
     });
@@ -282,18 +420,243 @@ describe("Process", () => {
         steerFn,
       });
 
-      const result = process.queueMessage({ text: "fallback me" });
+      const result = await process.queueMessage({ text: "fallback me" });
       expect(result.success).toBe(true);
-      expect(result.position).toBe(0);
-
-      // steerFn returns a resolved promise, then .then() pushes to queue —
-      // need 2 microtask ticks for both to settle
-      await Promise.resolve();
-      await Promise.resolve();
+      expect(result.position).toBe(1);
       expect(process.queueDepth).toBe(1);
 
       // Let the iterator complete so abort() doesn't hang
       resolveIterator?.();
+      await process.abort();
+    });
+
+    it("publishes a correlated optimistic echo only after steering accepts it", async () => {
+      let resolveIterator: () => void;
+      let resolveSteer: (value: {
+        accepted: true;
+        turnId: string;
+      }) => void;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () =>
+          new Promise((resolve) => {
+            resolveIterator = () => resolve({ done: true, value: undefined });
+          }),
+      };
+      const steerFn = vi.fn(
+        () =>
+          new Promise<{ accepted: true; turnId: string }>((resolve) => {
+            resolveSteer = resolve;
+          }),
+      );
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+        steerFn,
+      });
+      const userMessages: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message" && event.message.type === "user") {
+          userMessages.push(event.message);
+        }
+      });
+
+      const admission = process.queueMessage({
+        text: "steer me",
+        tempId: "temp-steer",
+      });
+      expect(userMessages).toHaveLength(0);
+      resolveSteer?.({ accepted: true, turnId: "turn-steer" });
+
+      await expect(admission).resolves.toMatchObject({
+        success: true,
+        position: 0,
+      });
+      expect(userMessages).toHaveLength(1);
+      expect(userMessages[0]).toMatchObject({
+        type: "user",
+        tempId: "temp-steer",
+        clientUserMessageId: expect.any(String),
+        turnId: "turn-steer",
+        codexTurnId: "turn-steer",
+        isOptimistic: true,
+      });
+      expect(userMessages[0]?.clientUserMessageId).toBe(userMessages[0]?.uuid);
+
+      resolveIterator?.();
+      await process.abort();
+    });
+
+    it("rejects a steer fallback when the process terminates in flight", async () => {
+      let resolveSteer: (accepted: boolean) => void;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () => new Promise(() => undefined),
+      };
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+        steerFn: () =>
+          new Promise<boolean>((resolve) => {
+            resolveSteer = resolve;
+          }),
+      });
+
+      const admission = process.queueMessage({ text: "do not lose me" });
+      process.terminate("test termination");
+      resolveSteer?.(false);
+
+      await expect(admission).resolves.toMatchObject({
+        success: false,
+        error: "Process provider is no longer accepting messages",
+      });
+      expect(
+        process
+          .getMessageHistory()
+          .filter((message) => message.type === "user"),
+      ).toHaveLength(0);
+    });
+
+    it("restores in-turn when a rejected steer settles after the old turn result", async () => {
+      let emitOldResult!: () => void;
+      let finishIterator!: () => void;
+      const oldResultGate = new Promise<void>((resolve) => {
+        emitOldResult = resolve;
+      });
+      const finishGate = new Promise<void>((resolve) => {
+        finishIterator = resolve;
+      });
+      async function* iterator(): AsyncGenerator<SDKMessage> {
+        await oldResultGate;
+        yield {
+          type: "result",
+          session_id: "sess-1",
+          turnId: "turn-a",
+        };
+        await finishGate;
+      }
+      let resolveSteer!: (value: false) => void;
+      const steerGate = new Promise<false>((resolve) => {
+        resolveSteer = resolve;
+      });
+      const queue = new MessageQueue();
+      const process = new Process(iterator(), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        provider: "codex",
+        idleTimeoutMs: 60_000,
+        queue,
+        steerFn: vi.fn(() => steerGate),
+      });
+      const users: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message" && event.message.type === "user") {
+          users.push(event.message);
+        }
+      });
+
+      const pending = process.queueMessage({
+        text: "fallback B",
+        tempId: "temp-b",
+      });
+      emitOldResult();
+      await vi.waitFor(() => expect(process.state.type).toBe("idle"));
+      expect(users).toHaveLength(0);
+
+      resolveSteer(false);
+      await expect(pending).resolves.toMatchObject({
+        success: true,
+        position: 1,
+      });
+      expect(process.state.type).toBe("in-turn");
+      expect(queue.depth).toBe(1);
+      expect(users).toHaveLength(1);
+      expect(users[0]).toMatchObject({
+        type: "user",
+        tempId: "temp-b",
+        isOptimistic: true,
+      });
+      expect(users[0]).not.toHaveProperty("turnId");
+
+      finishIterator();
+      await vi.waitFor(() => expect(queue.isClosed).toBe(true));
+      await process.abort();
+    });
+
+    it("fails closed without an optimistic echo when the queue closes during steer", async () => {
+      let resolveIterator: (() => void) | undefined;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () =>
+          new Promise((resolve) => {
+            resolveIterator = () => resolve({ done: true, value: undefined });
+          }),
+      };
+      let resolveSteer!: (value: false) => void;
+      const steerGate = new Promise<false>((resolve) => {
+        resolveSteer = resolve;
+      });
+      const queue = new MessageQueue();
+      const steerFn = vi.fn(() => steerGate);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        provider: "codex",
+        idleTimeoutMs: 100,
+        queue,
+        steerFn,
+      });
+      const users: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message" && event.message.type === "user") {
+          users.push(event.message);
+        }
+      });
+
+      const pending = process.queueMessage({
+        text: "must not be acknowledged",
+        tempId: "temp-closed",
+      });
+      await vi.waitFor(() => expect(steerFn).toHaveBeenCalledTimes(1));
+      queue.close();
+      resolveSteer(false);
+
+      await expect(pending).resolves.toEqual({
+        success: false,
+        error: "Process provider is no longer accepting messages",
+      });
+      expect(users).toHaveLength(0);
+      expect(queue.depth).toBe(0);
+
+      resolveIterator?.();
+      await process.abort();
+    });
+
+    it("rejects messages after the provider iterator ends", async () => {
+      const endedIterator: AsyncIterator<SDKMessage> = {
+        next: async () => ({ done: true, value: undefined }),
+      };
+      const queue = new MessageQueue();
+      const process = new Process(endedIterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue,
+      });
+
+      await vi.waitFor(() => expect(queue.isClosed).toBe(true));
+      await expect(
+        process.queueMessage({ text: "too late" }),
+      ).resolves.toMatchObject({
+        success: false,
+        error: "Process provider is no longer accepting messages",
+      });
       await process.abort();
     });
   });
@@ -649,7 +1012,9 @@ describe("Process", () => {
     });
 
     it("queues deny feedback as follow-up message for Codex approvals", async () => {
-      const iterator = createMockIterator([]);
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () => new Promise(() => undefined),
+      };
       const process = new Process(iterator, {
         projectPath: "/test",
         projectId: "proj-1",
@@ -682,6 +1047,7 @@ describe("Process", () => {
       expect(result.message).toBe("edit src/foo.ts instead");
       expect(result.interrupt).toBe(false);
       expect(process.queueDepth).toBe(1);
+      process.terminate("test complete");
     });
 
     it("does not queue deny feedback follow-up for non-Codex providers", async () => {
@@ -1071,7 +1437,7 @@ describe("Process", () => {
       expect(result.behavior).toBe("allow");
     });
 
-    it("preserves a provider-native approval request id", async () => {
+    it("preserves provider-native approval request identity", async () => {
       const process = new Process(createMockIterator([]), {
         projectPath: "/test",
         projectId: "proj-1",
@@ -1085,15 +1451,59 @@ describe("Process", () => {
       const approvalPromise = process.handleToolApproval(
         "Bash",
         { command: "git status" },
-        { signal: abortController.signal, requestId: "per_native_1" },
+        {
+          signal: abortController.signal,
+          requestId: "per_native_1",
+          requestMethod: "item/commandExecution/requestApproval",
+        },
       );
 
-      expect(process.getPendingInputRequest()?.id).toBe("per_native_1");
+      expect(process.getPendingInputRequest()).toMatchObject({
+        id: "per_native_1",
+        providerRequestId: "per_native_1",
+        providerRequestMethod: "item/commandExecution/requestApproval",
+      });
       expect(process.respondToInput("per_native_1", "approve")).toBe(true);
       await expect(approvalPromise).resolves.toMatchObject({
         behavior: "allow",
       });
     });
+
+    it.each([
+      ["approve_for_session", "always"],
+      ["approve_always", "always"],
+      ["approve_strict_auto_review", undefined],
+    ] as const)(
+      "preserves the exact %s provider approval decision",
+      async (response, approvalScope) => {
+        const process = new Process(createMockIterator([]), {
+          projectPath: "/test",
+          projectId: "proj-1",
+          sessionId: `sess-${response}`,
+          provider: "codex",
+          idleTimeoutMs: 100,
+          permissionMode: "default",
+        });
+        const approvalPromise = process.handleToolApproval(
+          "Bash",
+          { command: "git status" },
+          {
+            signal: new AbortController().signal,
+            requestId: `request-${response}`,
+            respectProviderDecision: true,
+          },
+        );
+
+        expect(process.respondToInput(`request-${response}`, response)).toBe(
+          true,
+        );
+        await expect(approvalPromise).resolves.toMatchObject({
+          behavior: "allow",
+          providerDecision: response,
+          approvalScope,
+        });
+      },
+    );
 
     it("handles concurrent tool approvals (queues them)", async () => {
       const iterator = createMockIterator([]);
@@ -1173,7 +1583,7 @@ describe("Process", () => {
       });
 
       // Queue a user message
-      process.queueMessage({ text: "test message" });
+      await process.queueMessage({ text: "test message" });
 
       // User message SHOULD be in history for replay to late-joining clients.
       // Client-side deduplication (mergeStreamMessage, mergeJSONLMessages) handles
@@ -1199,7 +1609,7 @@ describe("Process", () => {
       });
 
       // Queue a user message
-      process.queueMessage({ text: "test message" });
+      await process.queueMessage({ text: "test message" });
 
       // User message SHOULD be in history (mock SDK needs replay)
       const userMessages = process
@@ -1231,14 +1641,14 @@ describe("Process", () => {
       });
 
       // Queue a user message
-      process.queueMessage({ text: "test message" });
+      await process.queueMessage({ text: "test message" });
 
       // Message should still be emitted for live stream subscribers
       const userEmits = emittedMessages.filter((m) => m.type === "user");
       expect(userEmits).toHaveLength(1);
     });
 
-    it("should include attachment info in user message content", async () => {
+    it("publishes attachment metadata without server paths in history and SSE", async () => {
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },
       ]);
@@ -1251,9 +1661,13 @@ describe("Process", () => {
         idleTimeoutMs: 100,
         queue,
       });
+      const emittedMessages: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emittedMessages.push(event.message);
+      });
 
       // Queue a user message with attachments
-      process.queueMessage({
+      await process.queueMessage({
         text: "Here is a screenshot",
         attachments: [
           {
@@ -1277,10 +1691,168 @@ describe("Process", () => {
       expect(content).toContain("screenshot.png");
       expect(content).toContain("1.0 KB");
       expect(content).toContain("image/png");
-      expect(content).toContain("/uploads/screenshot.png");
+      expect(content).toContain("[managed attachment]");
+      expect(content).not.toContain("/uploads/screenshot.png");
+      expect(JSON.stringify(emittedMessages)).not.toContain(
+        "/uploads/screenshot.png",
+      );
     });
 
-    it("should produce identical content format as MessageQueue for deduplication", async () => {
+    it("publishes a safe initial attachment projection", async () => {
+      const iterator = createMockIterator([
+        { type: "system", subtype: "init", session_id: "sess-1" },
+      ]);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+      });
+
+      process.addInitialUserMessage(
+        {
+          text: "Review this",
+          attachments: [
+            {
+              id: "file-initial",
+              originalName: "report.pdf",
+              size: 2048,
+              mimeType: "application/pdf",
+              path: "/private/uploads/report.pdf",
+            },
+          ],
+        },
+        "initial-user-1",
+      );
+
+      const publicProjection = JSON.stringify(process.getMessageHistory());
+      expect(publicProjection).toContain("report.pdf");
+      expect(publicProjection).toContain("[managed attachment]");
+      expect(publicProjection).not.toContain("/private/uploads/report.pdf");
+    });
+
+    it("replaces a provider echo with the UUID-matched public prompt", async () => {
+      let emitProviderEcho: ((message: SDKMessage) => void) | undefined;
+      async function* providerIterator(): AsyncIterator<SDKMessage> {
+        yield { type: "system", subtype: "init", session_id: "sess-echo" };
+        const echo = await new Promise<SDKMessage>((resolve) => {
+          emitProviderEcho = resolve;
+        });
+        yield echo;
+      }
+      const process = new Process(providerIterator(), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-echo",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+      });
+      const emitted: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emitted.push(event.message);
+      });
+
+      await process.queueMessage({
+        text: "Inspect",
+        attachments: [
+          {
+            id: "echo-file",
+            originalName: "echo.pdf",
+            size: 1024,
+            mimeType: "application/pdf",
+            path: "/private/provider-only/echo.pdf",
+          },
+        ],
+      });
+      const optimistic = emitted.find((message) => message.type === "user");
+      if (!optimistic?.uuid) throw new Error("expected optimistic user UUID");
+      await vi.waitFor(() => expect(emitProviderEcho).toBeTypeOf("function"));
+      emitProviderEcho?.({
+        type: "user",
+        uuid: optimistic.uuid,
+        clientUserMessageId: optimistic.uuid,
+        turnId: "turn-echo",
+        codexTurnId: "turn-echo",
+        isOptimistic: false,
+        message: {
+          role: "user",
+          content:
+            "Inspect\n\nUser uploaded files:\n- echo.pdf (1.0 KB, application/pdf): /private/provider-only/echo.pdf",
+        },
+      });
+      await vi.waitFor(() => {
+        expect(
+          emitted.filter((message) => message.type === "user"),
+        ).toHaveLength(2);
+      });
+
+      expect(JSON.stringify(emitted)).not.toContain("/private/provider-only");
+      expect(JSON.stringify(process.getMessageHistory())).not.toContain(
+        "/private/provider-only",
+      );
+      expect(emitted.at(-1)?.message?.content).toContain(
+        "[managed attachment]",
+      );
+      const replayedUser = process
+        .getMessageHistory()
+        .find((message) => message.type === "user");
+      expect(replayedUser).toMatchObject({
+        uuid: optimistic.uuid,
+        clientUserMessageId: optimistic.uuid,
+        turnId: "turn-echo",
+        codexTurnId: "turn-echo",
+        isOptimistic: false,
+        message: { content: expect.stringContaining("[managed attachment]") },
+      });
+    });
+
+    it("keeps structured Codex paths out of public history and SSE", async () => {
+      const iterator = createMockIterator([
+        { type: "system", subtype: "init", session_id: "sess-1" },
+      ]);
+      const queue = new MessageQueue({ preserveCodexInputs: true });
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue,
+      });
+      const emitted: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message") emitted.push(event.message);
+      });
+
+      await process.queueMessage({
+        text: "$skill-creator inspect",
+        codexInputs: [
+          {
+            type: "skill",
+            name: "skill-creator",
+            path: "/private/workspace/.codex/skills/skill-creator/SKILL.md",
+          },
+        ],
+      });
+
+      const publicProjection = JSON.stringify({
+        history: process.getMessageHistory(),
+        emitted,
+      });
+      expect(publicProjection).not.toContain("codexInputs");
+      expect(publicProjection).not.toContain("/private/workspace");
+
+      const queued = await queue.generator().next();
+      expect(queued.value?.codexInputs).toEqual([
+        {
+          type: "skill",
+          name: "skill-creator",
+          path: "/private/workspace/.codex/skills/skill-creator/SKILL.md",
+        },
+      ]);
+    });
+
+    it("deduplicates by UUID even though public and internal prompts differ", async () => {
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },
       ]);
@@ -1315,7 +1887,7 @@ describe("Process", () => {
       };
 
       // Queue the message through Process
-      process.queueMessage(testMessage);
+      await process.queueMessage(testMessage);
 
       // Get what Process put in history
       const historyContent = process.getMessageHistory()[0]?.message
@@ -1326,8 +1898,10 @@ describe("Process", () => {
       const sdkMessage = await gen.next();
       const sdkContent = sdkMessage.value?.message?.content as string;
 
-      // Both should produce identical content for deduplication to work
-      expect(historyContent).toBe(sdkContent);
+      expect(historyContent).not.toBe(sdkContent);
+      expect(historyContent).not.toContain("/uploads/");
+      expect(sdkContent).toContain("/uploads/screenshot.png");
+      expect(process.getMessageHistory()[0]?.uuid).toBe(sdkMessage.value?.uuid);
     });
   });
 
@@ -1369,7 +1943,7 @@ describe("Process", () => {
       });
 
       // Now queueMessage should return an error
-      const result = process.queueMessage({ text: "should fail" });
+      const result = await process.queueMessage({ text: "should fail" });
 
       expect(result.success).toBe(false);
       expect(result.error).toContain("terminated");
@@ -1630,7 +2204,7 @@ describe("Process", () => {
       process.setHold(true);
 
       // Should still be able to queue messages
-      const result = process.queueMessage({ text: "Hello while held" });
+      const result = await process.queueMessage({ text: "Hello while held" });
       expect(result.success).toBe(true);
       expect(result.position).toBe(1);
     });

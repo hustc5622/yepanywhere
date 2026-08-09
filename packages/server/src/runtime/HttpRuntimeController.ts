@@ -5,6 +5,7 @@ import type {
   PermissionMode,
   SlashCommand,
 } from "@yep-anywhere/shared";
+import type { CodexNativeControlResult } from "../sdk/providers/codex-controls.js";
 import type { UserMessage } from "../sdk/types.js";
 import type { ProcessInfo } from "../supervisor/types.js";
 import type { BusEvent } from "../watcher/index.js";
@@ -15,6 +16,7 @@ import type {
   QueueRuntimeMessageRequest,
   ResumeRuntimeSessionRequest,
   RuntimeActivityEventListener,
+  RuntimeCodexControlRequest,
   RuntimeController,
   RuntimeEventRecord,
   RuntimeHoldProcessRequest,
@@ -26,9 +28,9 @@ import type {
   RuntimeQueueStatus,
   RuntimeReplayOptions,
   RuntimeSessionEventEmitter,
+  RuntimeSessionStartResponse,
   RuntimeSessionSubscription,
   RuntimeSessionSubscriptionOptions,
-  RuntimeStartResponse,
   RuntimeStatus,
   RuntimeWorkerActivity,
   StartRuntimeSessionRequest,
@@ -201,7 +203,7 @@ export class HttpRuntimeController implements RuntimeController {
 
   async startSession(
     input: StartRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     return this.request("/sessions", {
       method: "POST",
       body: JSON.stringify(input),
@@ -210,7 +212,7 @@ export class HttpRuntimeController implements RuntimeController {
 
   async createSession(
     input: CreateRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     return this.request("/sessions", {
       method: "POST",
       body: JSON.stringify(input),
@@ -219,7 +221,7 @@ export class HttpRuntimeController implements RuntimeController {
 
   async resumeSession(
     input: ResumeRuntimeSessionRequest,
-  ): Promise<RuntimeStartResponse> {
+  ): Promise<RuntimeSessionStartResponse> {
     const { sessionId, ...body } = input;
     return this.request(`/sessions/${encode(sessionId)}/resume`, {
       method: "POST",
@@ -295,6 +297,19 @@ export class HttpRuntimeController implements RuntimeController {
       method: "PUT",
       body: JSON.stringify(body),
     });
+  }
+
+  async executeCodexControl(
+    input: RuntimeCodexControlRequest,
+  ): Promise<CodexNativeControlResult> {
+    const { sessionId, ...body } = input;
+    return this.request<CodexNativeControlResult>(
+      `/sessions/${encode(sessionId)}/codex-control`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    );
   }
 
   async setHold(input: RuntimeHoldProcessRequest): Promise<{
@@ -384,10 +399,12 @@ export class HttpRuntimeController implements RuntimeController {
     options?: RuntimeSessionSubscriptionOptions,
   ): Promise<RuntimeSessionSubscription | null> {
     if (options?.signal?.aborted) return null;
-    if (!(await this.getProcessForSession(sessionId))) return null;
-    if (options?.signal?.aborted) return null;
 
+    // The runtime, not the replaceable HTTP shell, is authoritative for both
+    // live processes and its durable journal. A process preflight here would
+    // suppress the finite replay-only subscription after completion.
     const token = await this.getToken();
+    if (options?.signal?.aborted) return null;
     const controller = new AbortController();
     const abortFromCaller = () => controller.abort();
     options?.signal?.addEventListener("abort", abortFromCaller, { once: true });

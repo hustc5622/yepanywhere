@@ -73,6 +73,42 @@ describe("SessionInteractionService", () => {
     expect(providerResponse).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    "approve_for_session",
+    "approve_strict_auto_review",
+    "approve_always",
+  ] as const)(
+    "forwards the exact %s decision to a process owner",
+    async (response) => {
+      const request = makeRequest({ id: `request-${response}` });
+      const providerResponse = vi.fn(async () => ({ accepted: true }));
+      const service = createService(services, brokers, {
+        getProcessSnapshotForSession: vi.fn(async () =>
+          processSnapshot(request),
+        ),
+        respondToInput: providerResponse,
+      });
+      const pending = await service.getPendingInput(request.sessionId);
+
+      await expect(
+        service.respondToInput(request.sessionId, {
+          requestId: request.id,
+          response,
+          operationId: pending?.interaction?.operationId,
+          operationVersion: pending?.interaction?.version,
+          actor: { id: "yep-user", channel: "yep" },
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(providerResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: request.sessionId,
+          requestId: request.id,
+          response,
+        }),
+      );
+    },
+  );
+
   it("binds and forwards the exact winning claim to a bridge", async () => {
     const request = makeRequest({ source: "codex-bridge" });
     let releaseBridge!: () => void;

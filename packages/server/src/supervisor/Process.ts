@@ -13,9 +13,22 @@ import type {
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
-import type { MessageQueue } from "../sdk/messageQueue.js";
+import { sanitizeSDKMessageForPublic } from "../sdk/messageLogger.js";
+import {
+  type MessageQueue,
+  buildUserPromptProjection,
+} from "../sdk/messageQueue.js";
+import {
+  type CodexNativeCapabilities,
+  type CodexNativeControlRequest,
+  type CodexNativeControlResult,
+  type CodexSessionControls,
+  codexControlFailure,
+} from "../sdk/providers/codex-controls.js";
+import type { AgentSteerResult } from "../sdk/providers/types.js";
 import type {
   PermissionMode,
+  ProviderApprovalDecision,
   SDKMessage,
   TimestampedSDKMessage,
   ToolApprovalResult,
@@ -34,6 +47,12 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from "./types.js";
 
 type Listener = (event: ProcessEvent) => void;
 
+export interface ProcessQueueMessageResult {
+  success: boolean;
+  position?: number;
+  error?: string;
+}
+
 /**
  * IMPORTANT: Never filter out messages by type before emitting to SSE!
  *
@@ -51,6 +70,17 @@ export function shouldEmitMessage(_message: SDKMessage): boolean {
   // Always emit. DO NOT add filtering here!
   // See docstring above for why this is critical.
   return true;
+}
+
+function normalizeSteerResult(result: AgentSteerResult): {
+  accepted: boolean;
+  turnId?: string;
+} {
+  if (typeof result === "boolean") return { accepted: result };
+  return {
+    accepted: result.accepted,
+    ...(result.turnId ? { turnId: result.turnId } : {}),
+  };
 }
 
 /**
@@ -88,7 +118,9 @@ export interface ProcessConstructorOptions extends ProcessOptions {
    * Function to steer an active turn with additional user input.
    * Returns false when steering is unavailable and caller should enqueue.
    */
-  steerFn?: (message: UserMessage) => Promise<boolean>;
+  steerFn?: (message: UserMessage) => Promise<AgentSteerResult>;
+  /** Capability-gated Codex app-server controls for this session. */
+  codexControls?: CodexSessionControls;
   /** Function to get supported models (SDK 0.2.7+) */
   supportedModelsFn?: () => Promise<ModelInfo[]>;
   /** Function to get supported slash commands (SDK 0.2.7+) */
@@ -136,6 +168,7 @@ export class Process {
   private idleTimer: NodeJS.Timeout | null = null;
   private idleTimeoutMs: number;
   private iteratorDone = false;
+  private acceptingMessages = true;
 
   /** Set synchronously when transport/spawn fails to prevent race with queueMessage */
   private transportFailed = false;
@@ -147,6 +180,9 @@ export class Process {
    */
   private currentBucket: SDKMessage[] = [];
   private previousBucket: SDKMessage[] = [];
+  /** UUID-keyed public prompts used to replace provider echoes losslessly. */
+  private publicUserPrompts = new Map<string, string>();
+  private static readonly MAX_PUBLIC_USER_PROMPTS = 256;
   private bucketSwapTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly BUCKET_SWAP_INTERVAL_MS = 15_000;
 
@@ -182,7 +218,8 @@ export class Process {
   /** Function to interrupt current turn gracefully (SDK 0.2.7+) */
   private interruptFn: (() => Promise<void>) | null;
   /** Function to steer an active turn (provider-specific, currently Codex app-server) */
-  private steerFn: ((message: UserMessage) => Promise<boolean>) | null;
+  private steerFn: ((message: UserMessage) => Promise<AgentSteerResult>) | null;
+  private codexControls: CodexSessionControls | null;
 
   /** Function to get supported models (SDK 0.2.7+) */
   private supportedModelsFn: (() => Promise<ModelInfo[]>) | null;
@@ -276,6 +313,7 @@ export class Process {
     this.setMaxThinkingTokensFn = options.setMaxThinkingTokensFn ?? null;
     this.interruptFn = options.interruptFn ?? null;
     this.steerFn = options.steerFn ?? null;
+    this.codexControls = options.codexControls ?? null;
     this.supportedModelsFn = options.supportedModelsFn ?? null;
     this.supportedCommandsFn = options.supportedCommandsFn ?? null;
     this._pidResolver = options.pid;
@@ -507,6 +545,23 @@ export class Process {
    */
   get supportsSetModel(): boolean {
     return this.setModelFn !== null;
+  }
+
+  get codexNativeCapabilities(): CodexNativeCapabilities | undefined {
+    return this.codexControls?.capabilities;
+  }
+
+  async executeCodexControl(
+    request: CodexNativeControlRequest,
+  ): Promise<CodexNativeControlResult> {
+    if (!this.codexControls) {
+      return codexControlFailure(
+        request.control,
+        "unsupported_provider",
+        `Provider ${this.provider} does not expose Codex native controls`,
+      );
+    }
+    return this.codexControls.invoke(request);
   }
 
   /**
@@ -747,6 +802,7 @@ export class Process {
 
     this.clearIdleTimer();
     this.stopBucketSwapTimer();
+    this.closeMessageQueue("process_terminated");
     this.iteratorDone = true;
 
     // Wake up hold wait if held (so processMessages loop can exit)
@@ -974,55 +1030,58 @@ export class Process {
     } as TimestampedSDKMessage<T>;
   }
 
+  private rememberPublicUserPrompt(uuid: string, publicPrompt: string): void {
+    this.publicUserPrompts.delete(uuid);
+    this.publicUserPrompts.set(uuid, publicPrompt);
+    while (this.publicUserPrompts.size > Process.MAX_PUBLIC_USER_PROMPTS) {
+      const oldest = this.publicUserPrompts.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.publicUserPrompts.delete(oldest);
+    }
+  }
+
+  private projectProviderMessageForPublic(message: SDKMessage): SDKMessage {
+    const safeMessage = sanitizeSDKMessageForPublic(message) as SDKMessage;
+    if (safeMessage.type !== "user" || !safeMessage.uuid) return safeMessage;
+    const publicPrompt = this.publicUserPrompts.get(safeMessage.uuid);
+    if (!publicPrompt) return safeMessage;
+    return {
+      ...safeMessage,
+      message: {
+        ...safeMessage.message,
+        role: safeMessage.message?.role ?? "user",
+        content: publicPrompt,
+      },
+    };
+  }
+
   /**
    * Add initial user message to history without queuing to SDK.
    * Used for real SDK sessions where the initial message is passed directly
    * to the SDK but needs to be in history for SSE replay to late-joining clients.
    *
-   * @param text - The message text
+   * @param message - Structured input used to construct the public view
    * @param uuid - The UUID to use (should match what was passed to SDK)
    * @param tempId - Optional client temp ID for optimistic UI tracking
    */
-  addInitialUserMessage(text: string, uuid: string, tempId?: string): void {
+  addInitialUserMessage(
+    message: UserMessage | string,
+    uuid: string,
+    tempId?: string,
+  ): void {
+    const publicPrompt = buildUserPromptProjection(
+      typeof message === "string" ? { text: message } : message,
+    ).publicPrompt;
+    this.rememberPublicUserPrompt(uuid, publicPrompt);
     const sdkMessage = this.withTimestamp({
       type: "user",
       uuid,
       tempId,
-      message: { role: "user", content: text },
+      message: { role: "user", content: publicPrompt },
     } as SDKMessage);
 
     this.currentBucket.push(sdkMessage);
     this.emit({ type: "message", message: sdkMessage });
-  }
-
-  /**
-   * Format file size for display.
-   */
-  private formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024)
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  }
-
-  /**
-   * Build user message content that matches what MessageQueue sends to the SDK.
-   * This ensures SSE/history messages can be deduplicated against JSONL.
-   */
-  private buildUserMessageContent(message: UserMessage): string {
-    let text = message.text;
-
-    // Append attachment paths (same format as MessageQueue.toSDKMessage)
-    if (message.attachments?.length) {
-      const lines = message.attachments.map(
-        (f) =>
-          `- ${f.originalName} (${this.formatSize(f.size)}, ${f.mimeType}): ${f.path}`,
-      );
-      text += `\n\nUser uploaded files:\n${lines.join("\n")}`;
-    }
-
-    return text;
   }
 
   /**
@@ -1032,11 +1091,7 @@ export class Process {
    *
    * @returns Object with success status and queue position or error
    */
-  queueMessage(message: UserMessage): {
-    success: boolean;
-    position?: number;
-    error?: string;
-  } {
+  async queueMessage(message: UserMessage): Promise<ProcessQueueMessageResult> {
     // Check if process is terminated or transport failed
     if (this._state.type === "terminated") {
       return {
@@ -1053,97 +1108,115 @@ export class Process {
         error: "Process transport failed",
       };
     }
+    if (
+      this.messageQueue &&
+      (!this.acceptingMessages ||
+        this.iteratorDone ||
+        this.messageQueue.isClosed)
+    ) {
+      return {
+        success: false,
+        error: "Process provider is no longer accepting messages",
+      };
+    }
 
     // Create user message with UUID - this UUID will be used by both SSE and SDK
     const uuid = randomUUID();
-    const messageWithUuid: UserMessage = { ...message, uuid };
-
-    // Build content that matches what the SDK will write to JSONL.
-    // This ensures SSE/history messages can be deduplicated against JSONL.
-    const content = this.buildUserMessageContent(message);
-
-    const sdkMessage = this.withTimestamp({
-      type: "user",
-      uuid,
-      tempId: message.tempId,
-      message: { role: "user", content },
-    } as SDKMessage);
-
-    // Add to history for SSE replay to late-joining clients.
-    // The client-side deduplication (mergeSSEMessage, mergeJSONLMessages) handles
-    // any duplicates when JSONL is later fetched. This is especially important
-    // for the two-phase flow (createSession + queueMessage) where the client
-    // may connect before the JSONL is written.
-    if (shouldEmitMessage(sdkMessage)) {
-      // Check for duplicates in both buckets before adding
-      // This prevents duplicates if the provider echoes the message back with the same UUID
-      const isDuplicate =
-        this.currentBucket.some((m) => m.uuid && m.uuid === sdkMessage.uuid) ||
-        this.previousBucket.some((m) => m.uuid && m.uuid === sdkMessage.uuid);
-      if (!isDuplicate) {
-        this.currentBucket.push(sdkMessage);
-      }
-    }
-
-    // Emit to current SSE subscribers so other clients see it immediately
-    // Include the session ID so client can associate it correctly
-    // The provider will echo this message back, but if we ensure UUIDs match,
-    // the client will merge them.
-    if (shouldEmitMessage(sdkMessage)) {
-      this.emit({
-        type: "message",
-        message: { ...sdkMessage, session_id: this._sessionId },
-      });
-    }
+    const messageWithUuid = { ...message, uuid };
 
     if (this.messageQueue) {
       // If provider supports in-turn steering, prefer that over queue-after-turn behavior.
       if (this._state.type === "in-turn" && this.steerFn) {
-        const steerMessage: UserMessage = {
-          ...messageWithUuid,
-          // Mirror MessageQueue's attachment expansion for steer payloads.
-          text: content,
-          attachments: undefined,
-        };
-        void this.steerFn(steerMessage)
-          .then((steered) => {
-            if (!steered) {
-              this.messageQueue?.push(messageWithUuid);
-            }
-          })
-          .catch((error) => {
-            const log = getLogger();
-            log.warn(
-              {
-                event: "process_steer_failed",
-                sessionId: this._sessionId,
-                processId: this.id,
-                provider: this.provider,
-                error: error instanceof Error ? error.message : String(error),
-              },
-              "Steer failed; falling back to queued message",
-            );
-            this.messageQueue?.push(messageWithUuid);
-          });
-        return { success: true, position: 0 };
+        let steerResult: AgentSteerResult = false;
+        try {
+          steerResult = await this.steerFn(messageWithUuid);
+        } catch (error) {
+          getLogger().warn(
+            {
+              event: "process_steer_failed",
+              sessionId: this._sessionId,
+              processId: this.id,
+              provider: this.provider,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "Steer failed; falling back to queued message",
+          );
+        }
+        const admission = normalizeSteerResult(steerResult);
+        if (admission.accepted) {
+          this.publishOptimisticUserMessage(messageWithUuid, admission.turnId);
+          return { success: true, position: 0 };
+        }
       }
 
-      // Transition to running if we were idle
+      // Steering may have completed after the provider exited. Re-check the
+      // resident queue before acknowledging or publishing an optimistic echo.
+      if (
+        !this.acceptingMessages ||
+        this.iteratorDone ||
+        this.messageQueue.isClosed
+      ) {
+        return {
+          success: false,
+          error: "Process provider is no longer accepting messages",
+        };
+      }
+      const position = this.messageQueue.push(messageWithUuid);
+      if (position === -1) {
+        return {
+          success: false,
+          error: "Process provider is no longer accepting messages",
+        };
+      }
+
+      // Transition to running only after the resident queue accepted the input.
       if (this._state.type === "idle") {
         this.clearIdleTimer();
         this.setState({ type: "in-turn" });
       }
-      // Pass message with UUID so SDK uses the same UUID we emitted via SSE
-      const position = this.messageQueue.push(messageWithUuid);
+      this.publishOptimisticUserMessage(messageWithUuid);
       return { success: true, position };
     }
 
     // Legacy behavior for mock SDK
-    this.legacyQueue.push(message);
+    this.legacyQueue.push(messageWithUuid);
+    this.publishOptimisticUserMessage(messageWithUuid);
     if (this._state.type === "idle") {
       this.processNextInQueue();
     }
     return { success: true, position: this.legacyQueue.length };
+  }
+
+  private publishOptimisticUserMessage(
+    message: UserMessage & { uuid: string },
+    turnId?: string,
+  ): void {
+    const content = buildUserPromptProjection(message).publicPrompt;
+    this.rememberPublicUserPrompt(message.uuid, content);
+    const sdkMessage = this.withTimestamp({
+      type: "user",
+      uuid: message.uuid,
+      tempId: message.tempId,
+      clientUserMessageId: message.uuid,
+      isOptimistic: true,
+      ...(turnId ? { turnId, codexTurnId: turnId } : {}),
+      message: { role: "user", content },
+    } as SDKMessage);
+
+    if (!shouldEmitMessage(sdkMessage)) return;
+
+    // Add to history for SSE replay to late-joining clients. The provider echo
+    // uses the same UUID and is deduplicated when JSONL is merged later.
+    const isDuplicate =
+      this.currentBucket.some((item) => item.uuid === sdkMessage.uuid) ||
+      this.previousBucket.some((item) => item.uuid === sdkMessage.uuid);
+    if (!isDuplicate) {
+      this.currentBucket.push(sdkMessage);
+    }
+    this.emit({
+      type: "message",
+      message: { ...sdkMessage, session_id: this._sessionId },
+    });
   }
 
   /**
@@ -1292,6 +1365,7 @@ export class Process {
     options: {
       signal: AbortSignal;
       requestId?: string;
+      requestMethod?: string;
       respectProviderDecision?: boolean;
     },
   ): Promise<ToolApprovalResult> {
@@ -1427,12 +1501,15 @@ export class Process {
     const firstQuestion = questionInput?.questions?.find(
       (question) => typeof question?.question === "string",
     )?.question;
+    const providerRequestId = options.requestId?.trim() || undefined;
     const request: InputRequest = {
       // Preserve a provider-native id when available. OpenCode's bridge sees
       // the same approval independently, so inventing a second UUID here can
       // make notification actions look stale even though both ids represent
       // the same request.
-      id: options.requestId?.trim() || randomUUID(),
+      id: providerRequestId || randomUUID(),
+      providerRequestId,
+      providerRequestMethod: options.requestMethod,
       sessionId: this._sessionId,
       type: isQuestion ? "question" : "tool-approval",
       prompt:
@@ -1509,7 +1586,7 @@ export class Process {
    */
   respondToInput(
     requestId: string,
-    response: "approve" | "approve_always" | "deny",
+    response: ProviderApprovalDecision,
     answers?: UserQuestionAnswers,
     feedback?: string,
   ): boolean {
@@ -1557,7 +1634,11 @@ export class Process {
       interrupt: !approved ? shouldInterrupt : undefined,
       // Providers with persistent grants (OpenCode `always` reply) honor
       // this; others ignore it and treat the approval as one-shot.
-      approvalScope: response === "approve_always" ? "always" : undefined,
+      approvalScope:
+        response === "approve_always" || response === "approve_for_session"
+          ? "always"
+          : undefined,
+      providerDecision: response,
     };
 
     // If answers provided (AskUserQuestion), pass them as updatedInput
@@ -1591,19 +1672,30 @@ export class Process {
     // Codex app-server decline decisions do not currently include a rejection
     // reason in-protocol. Queue the feedback as a follow-up user message.
     if (response === "deny" && trimmedFeedback && this.provider === "codex") {
-      const queued = this.queueMessage({
+      void this.queueMessage({
         text: `I denied that request. Instead: ${trimmedFeedback}`,
-      });
-      if (!queued.success) {
-        getLogger().warn(
-          {
-            sessionId: this._sessionId,
-            processId: this.id,
-            error: queued.error,
-          },
-          "Failed to queue Codex deny feedback follow-up message",
-        );
-      }
+      })
+        .then((queued) => {
+          if (queued.success) return;
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: queued.error,
+            },
+            "Failed to queue Codex deny feedback follow-up message",
+          );
+        })
+        .catch((error) => {
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "Codex deny feedback follow-up admission rejected unexpectedly",
+          );
+        });
     }
 
     // Emit the next pending approval, or transition to running if none left
@@ -1654,6 +1746,7 @@ export class Process {
   async abort(): Promise<void> {
     this.clearIdleTimer();
     this.stopBucketSwapTimer();
+    this.closeMessageQueue("process_aborted");
 
     // Call the SDK's abort function if available
     if (this.abortFn) {
@@ -1704,6 +1797,7 @@ export class Process {
 
         if (result.done) {
           this.iteratorDone = true;
+          this.closeMessageQueue("provider_iterator_done");
           if (this.startupId && !this.firstProviderMessageLogged) {
             getLogger().warn(
               {
@@ -1731,7 +1825,9 @@ export class Process {
           break;
         }
 
-        const message = this.withTimestamp(result.value);
+        const message = this.projectProviderMessageForPublic(
+          this.withTimestamp(result.value),
+        ) as TimestampedSDKMessage;
         this._lastMessageTime = new Date();
 
         const isProviderOutput =
@@ -1808,13 +1904,37 @@ export class Process {
           // Check for duplicates before adding to history
           // This handles the case where queueMessage added the optimistic message
           // and now the provider is echoing it back with the same UUID
-          const isDuplicate =
+          const duplicateBucket =
             message.type === "user" &&
             message.uuid &&
-            (this.currentBucket.some((m) => m.uuid === message.uuid) ||
-              this.previousBucket.some((m) => m.uuid === message.uuid));
+            (this.currentBucket.some((m) => m.uuid === message.uuid)
+              ? this.currentBucket
+              : this.previousBucket.some((m) => m.uuid === message.uuid)
+                ? this.previousBucket
+                : undefined);
 
-          if (!isDuplicate) {
+          if (duplicateBucket) {
+            const duplicateIndex = duplicateBucket.findIndex(
+              (existing) => existing.uuid === message.uuid,
+            );
+            const optimistic = duplicateBucket[duplicateIndex];
+            if (optimistic) {
+              // Keep one public-history row, but enrich the optimistic entry
+              // with the provider's authoritative turn correlation.
+              duplicateBucket[duplicateIndex] = {
+                ...optimistic,
+                ...message,
+                tempId: message.tempId ?? optimistic.tempId,
+                clientUserMessageId:
+                  message.clientUserMessageId ?? optimistic.clientUserMessageId,
+                message: message.message ?? optimistic.message,
+                isOptimistic:
+                  message.turnId || message.codexTurnId
+                    ? false
+                    : (message.isOptimistic ?? optimistic.isOptimistic),
+              } as TimestampedSDKMessage;
+            }
+          } else {
             this.currentBucket.push(message);
           }
         }
@@ -1937,6 +2057,8 @@ export class Process {
     } catch (error) {
       const err = error as Error;
       const log = getLogger();
+      this.iteratorDone = true;
+      this.closeMessageQueue("provider_iterator_error");
 
       log.error(
         {
@@ -2028,7 +2150,33 @@ export class Process {
     const next = this.deferredQueue.shift();
     if (next) {
       this.emitDeferredQueueChange();
-      this.queueMessage(next.message); // stays in-turn, SDK picks it up
+      void this.queueMessage(next.message)
+        .then((result) => {
+          if (result.success || this._state.type === "terminated") return;
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: result.error,
+            },
+            "Failed to queue deferred message after turn completion",
+          );
+          this.setState({ type: "idle", since: new Date() });
+          this.startIdleTimer();
+        })
+        .catch((error) => {
+          if (this._state.type === "terminated") return;
+          getLogger().warn(
+            {
+              sessionId: this._sessionId,
+              processId: this.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "Deferred message admission rejected unexpectedly",
+          );
+          this.setState({ type: "idle", since: new Date() });
+          this.startIdleTimer();
+        });
       return;
     }
 
@@ -2051,6 +2199,25 @@ export class Process {
     this.setState({ type: "idle", since: new Date() });
     this.startIdleTimer();
     this.processNextInQueue();
+  }
+
+  private closeMessageQueue(reason: string): void {
+    if (!this.messageQueue) return;
+    this.acceptingMessages = false;
+    const discarded = this.messageQueue.close();
+    if (discarded === 0) return;
+    getLogger().warn(
+      {
+        event: "process_message_queue_discarded",
+        sessionId: this._sessionId,
+        processId: this.id,
+        projectId: this.projectId,
+        provider: this.provider,
+        reason,
+        discardedCount: discarded,
+      },
+      "Discarded messages after the resident provider queue closed",
+    );
   }
 
   /**

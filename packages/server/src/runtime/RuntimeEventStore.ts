@@ -58,7 +58,6 @@ export class RuntimeEventStore {
   private readonly retentionMs: number;
   private readonly states = new Map<string, Promise<ProcessFileState>>();
   private readonly writes = new Map<string, Promise<unknown>>();
-  private readonly sessionToProcess = new Map<string, string>();
   private initializePromise: Promise<void> | null = null;
 
   constructor(options: RuntimeEventStoreOptions) {
@@ -150,9 +149,6 @@ export class RuntimeEventStore {
           ...(await this.readPath(this.rotatedPath(processId))),
           ...(await this.readPath(this.currentPath(processId))),
         ];
-        for (const record of records) {
-          this.sessionToProcess.set(record.sessionId, record.processId);
-        }
         const lastSeq = records.reduce(
           (max, record) => Math.max(max, record.seq),
           0,
@@ -200,7 +196,6 @@ export class RuntimeEventStore {
 
       await appendFile(currentPath, line, { encoding: "utf8", mode: 0o600 });
       state.size += lineBytes;
-      this.sessionToProcess.set(input.sessionId, input.processId);
       return record;
     });
     this.writes.set(
@@ -212,14 +207,16 @@ export class RuntimeEventStore {
 
   async replay(options: RuntimeReplayOptions): Promise<RuntimeEventRecord[]> {
     await this.initialize();
-    let processId = options.processId;
-    if (!processId && options.sessionId) {
-      processId = this.sessionToProcess.get(options.sessionId);
-    }
-
+    const processId =
+      options.processId ??
+      (options.sessionId
+        ? await this.findLatestProcessIdForSession(options.sessionId)
+        : undefined);
     const processIds = processId
       ? [processId]
-      : await this.findProcessIdsForSession(options.sessionId);
+      : options.sessionId
+        ? []
+        : await this.findProcessIdsForSession(undefined);
     const records = (
       await Promise.all(
         processIds.map(async (id) => [
@@ -236,13 +233,52 @@ export class RuntimeEventStore {
       );
 
     return records.sort((left, right) => {
+      if (left.processId === right.processId) return left.seq - right.seq;
       const byTime = left.timestamp.localeCompare(right.timestamp);
       if (byTime !== 0) return byTime;
-      if (left.processId !== right.processId) {
-        return left.processId.localeCompare(right.processId);
-      }
-      return left.seq - right.seq;
+      return left.processId.localeCompare(right.processId);
     });
+  }
+
+  private async findLatestProcessIdForSession(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const names = await readdir(this.eventsDir).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      },
+    );
+    const latestByProcess = new Map<
+      string,
+      { seq: number; timestamp: string }
+    >();
+    for (const name of names) {
+      if (!name.endsWith(".jsonl") && !name.endsWith(".jsonl.1")) continue;
+      const records = await this.readPath(path.join(this.eventsDir, name));
+      for (const record of records) {
+        if (record.sessionId !== sessionId) continue;
+        const current = latestByProcess.get(record.processId);
+        if (!current || record.seq > current.seq) {
+          latestByProcess.set(record.processId, {
+            seq: record.seq,
+            timestamp: record.timestamp,
+          });
+        }
+      }
+    }
+
+    let latest: { processId: string; timestamp: string } | undefined;
+    for (const [processId, record] of latestByProcess) {
+      if (
+        !latest ||
+        record.timestamp > latest.timestamp ||
+        (record.timestamp === latest.timestamp && processId > latest.processId)
+      ) {
+        latest = { processId, timestamp: record.timestamp };
+      }
+    }
+    return latest?.processId;
   }
 
   private async findProcessIdsForSession(

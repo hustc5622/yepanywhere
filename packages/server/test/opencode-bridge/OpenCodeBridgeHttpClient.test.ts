@@ -326,6 +326,7 @@ describe("OpenCodeBridgeHttpClient", () => {
       };
       projectName: string;
       activity: "in-turn" | "waiting-input";
+      pendingInputRequestId?: string;
     };
     const rawEmitChanges = (
       client as unknown as {
@@ -336,6 +337,7 @@ describe("OpenCodeBridgeHttpClient", () => {
             projectId: string;
             activity: "in-turn" | "waiting-input";
             pendingInputType?: string;
+            pendingInputRequestId?: string;
             active: boolean;
           };
         }) => void;
@@ -350,6 +352,7 @@ describe("OpenCodeBridgeHttpClient", () => {
         state: {
           projectId: view.session.projectId,
           activity: view.session.activity,
+          pendingInputRequestId: view.pendingInputRequestId,
           active: true,
         },
       });
@@ -390,6 +393,21 @@ describe("OpenCodeBridgeHttpClient", () => {
       ...view,
       session: { ...view.session, activity: "waiting-input" },
       activity: "waiting-input",
+      pendingInputRequestId: "request-1",
+    });
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "process-state-changed",
+        activity: "waiting-input",
+      }),
+    );
+
+    eventBus.emit.mockClear();
+    emitChanges({
+      ...view,
+      session: { ...view.session, activity: "waiting-input" },
+      activity: "waiting-input",
+      pendingInputRequestId: "request-2",
     });
     expect(eventBus.emit).toHaveBeenCalledWith(
       expect.objectContaining({

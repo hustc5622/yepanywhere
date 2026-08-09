@@ -415,7 +415,7 @@ describe("pending input owner routing", () => {
       {
         sessionId: SESSION_ID,
         requestId: "req-process",
-        response: "approve",
+        response: "approve_accept_edits",
         answers: undefined,
         feedback: undefined,
       },

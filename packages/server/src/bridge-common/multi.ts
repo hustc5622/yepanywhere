@@ -2,6 +2,7 @@ import type { InputRequest, UserQuestionAnswers } from "@yep-anywhere/shared";
 import { isActiveBridgeSessionView } from "./session-state.js";
 import type {
   BridgeController,
+  BridgeInputResolutionContext,
   BridgeInputResponse,
   BridgeSessionView,
 } from "./types.js";
@@ -68,6 +69,7 @@ export async function respondToAnyBridgeInput(
   sessionId: string,
   requestId: string,
   response: BridgeInputResponse,
+  context: BridgeInputResolutionContext,
   answers?: UserQuestionAnswers,
 ): Promise<boolean> {
   for (const controller of controllers) {
@@ -78,6 +80,7 @@ export async function respondToAnyBridgeInput(
           requestId,
           response,
           answers,
+          context,
         )
       ) {
         return true;

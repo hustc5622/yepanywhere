@@ -61,7 +61,7 @@ import type { RecentsService } from "../recents/index.js";
 import { EmbeddedRuntimeController } from "../runtime/EmbeddedRuntimeController.js";
 import type {
   RuntimeController,
-  RuntimeStartResponse,
+  RuntimeSessionStartResponse,
 } from "../runtime/types.js";
 import {
   CodexModelSourceError,
@@ -100,6 +100,7 @@ import type { ISessionReader } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
 import type {
+  ImmediateStartUnavailableResponse,
   QueueFullResponse,
   Supervisor,
 } from "../supervisor/Supervisor.js";
@@ -120,7 +121,7 @@ import { resolveSessionModel } from "./session-model.js";
  * Type guard to check if a result is a QueuedResponse
  */
 function isQueuedResponse(
-  result: RuntimeStartResponse,
+  result: RuntimeSessionStartResponse,
 ): result is QueuedResponse {
   return "queued" in result && result.queued === true;
 }
@@ -129,9 +130,15 @@ function isQueuedResponse(
  * Type guard to check if a result is a QueueFullResponse
  */
 function isQueueFullResponse(
-  result: RuntimeStartResponse,
+  result: RuntimeSessionStartResponse,
 ): result is QueueFullResponse {
   return "error" in result && result.error === "queue_full";
+}
+
+function isImmediateStartUnavailableResponse(
+  result: RuntimeSessionStartResponse,
+): result is ImmediateStartUnavailableResponse {
+  return "error" in result && result.error === "immediate_start_unavailable";
 }
 
 function parseOptionalExecutor(rawExecutor: unknown): {
@@ -2212,6 +2219,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       );
     }
 
+    if (isImmediateStartUnavailableResponse(result)) {
+      return c.json({ error: "Immediate start unavailable" }, 503);
+    }
+
     // Check if request was queued
     if (isQueuedResponse(result)) {
       return c.json(result, 202); // 202 Accepted - queued for processing
@@ -2373,6 +2384,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         { error: "Queue is full", maxQueueSize: result.maxQueueSize },
         503,
       );
+    }
+
+    if (isImmediateStartUnavailableResponse(result)) {
+      return c.json({ error: "Immediate start unavailable" }, 503);
     }
 
     // Check if request was queued
@@ -2790,6 +2805,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         { error: "Queue is full", maxQueueSize: result.maxQueueSize },
         503,
       );
+    }
+
+    if (isImmediateStartUnavailableResponse(result)) {
+      return c.json({ error: "Immediate start unavailable" }, 503);
     }
 
     // Check if request was queued

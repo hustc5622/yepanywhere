@@ -495,7 +495,7 @@ async function handleSend(
   const beforeCount = process.getMessageHistory().length;
 
   // Queue the message
-  const queueResult = process.queueMessage({ text: body.message });
+  const queueResult = await process.queueMessage({ text: body.message });
 
   if (!queueResult.success) {
     sendJson(res, 500, { error: queueResult.error });
@@ -578,7 +578,7 @@ async function handleRapid(
   // Send all messages rapidly
   for (const message of body.messages) {
     const queuedAt = new Date().toISOString();
-    const queueResult = process.queueMessage({ text: message });
+    const queueResult = await process.queueMessage({ text: message });
 
     results.push({
       message,
@@ -704,7 +704,9 @@ async function handleCreate(
     if ("error" in result) {
       sendJson(res, 503, {
         error: result.error,
-        maxQueueSize: result.maxQueueSize,
+        ...(result.error === "queue_full"
+          ? { maxQueueSize: result.maxQueueSize }
+          : {}),
       });
       return;
     }

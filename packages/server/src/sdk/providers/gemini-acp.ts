@@ -24,7 +24,7 @@ import type { ModelInfo } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
 import { whichCommand } from "../cli-detection.js";
 const execAsync = promisify(exec);
-import { MessageQueue } from "../messageQueue.js";
+import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
   CanUseTool,
   PermissionMode,
@@ -387,12 +387,13 @@ export class GeminiACPProvider implements AgentProvider {
       for await (const message of messageGen) {
         if (signal.aborted) break;
 
-        // Extract text from the message
-        let userText = this.extractTextFromMessage(message);
+        let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
 
         // Prepend global instructions to the first message of new sessions
         if (isFirstNewMessage && options.globalInstructions) {
-          userText = `[Global context]\n${options.globalInstructions}\n\n---\n\n${userText}`;
+          const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+          internalPrompt = `${prefix}${internalPrompt}`;
+          publicPrompt = `${prefix}${publicPrompt}`;
         }
         isFirstNewMessage = false;
 
@@ -405,7 +406,7 @@ export class GeminiACPProvider implements AgentProvider {
           session_id: sessionId,
           message: {
             role: "user",
-            content: userText,
+            content: publicPrompt,
           },
         } as SDKMessage;
 
@@ -416,10 +417,10 @@ export class GeminiACPProvider implements AgentProvider {
         // Updates are collected via callback during this time
         const promptStart = Date.now();
         this.log.debug(
-          { textLength: userText.length },
+          { textLength: internalPrompt.length },
           "Sending prompt to Gemini",
         );
-        const promptPromise = client.prompt(sessionId, userText);
+        const promptPromise = client.prompt(sessionId, internalPrompt);
 
         // Yield updates from the async generator
         for await (const msg of this.yieldUpdates(
@@ -822,52 +823,6 @@ export class GeminiACPProvider implements AgentProvider {
         this.log.trace({ updateType, update }, "Unhandled ACP update type");
         return null;
     }
-  }
-
-  /**
-   * Extract text content from a user message.
-   */
-  private extractTextFromMessage(message: unknown): string {
-    if (!message || typeof message !== "object") {
-      return "";
-    }
-
-    // Handle UserMessage format
-    const userMsg = message as { text?: string };
-    if (typeof userMsg.text === "string") {
-      return userMsg.text;
-    }
-
-    // Handle SDK message format
-    const sdkMsg = message as {
-      message?: { content?: string | unknown[] };
-    };
-    const content = sdkMsg.message?.content;
-
-    if (typeof content === "string") {
-      return content;
-    }
-
-    if (Array.isArray(content)) {
-      return content
-        .map((block: unknown) => {
-          if (typeof block === "string") return block;
-          if (
-            typeof block === "object" &&
-            block !== null &&
-            "type" in block &&
-            (block as { type: string }).type === "text" &&
-            "text" in block
-          ) {
-            return (block as { text: string }).text;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-
-    return "";
   }
 
   /**

@@ -16,12 +16,24 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { InMemoryCodexEventStore } from "../../../src/codex-events/index.js";
+import {
+  InMemoryCodexEventStore,
+  replayCodexSession,
+} from "../../../src/codex-events/index.js";
 import { getCodexMcpAppServerArgs } from "../../../src/codex/mcp-profile.js";
 import {
   CodexProvider,
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
+import type { SDKMessage, ToolApprovalResult } from "../../../src/sdk/types.js";
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    Reflect.deleteProperty(process.env, name);
+  } else {
+    process.env[name] = value;
+  }
+}
 
 describe("CodexProvider", () => {
   let provider: CodexProvider;
@@ -99,9 +111,16 @@ if (argv[0] === "app-server" && process.env.CODEX_FAKE_APP_SERVER_ERROR) {
   process.exit(1);
 }
 let buffer = "";
+const attemptsByMethod = new Map();
 
 function send(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+}
+
+function sendError(id, code, message) {
+  process.stdout.write(
+    JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\\n",
+  );
 }
 
 function notify(method, params, emittedAtMs) {
@@ -117,6 +136,25 @@ function request(id, method, params) {
 }
 
 function handle(message) {
+  const method = typeof message.method === "string" ? message.method : "";
+  const attempt = method ? (attemptsByMethod.get(method) || 0) + 1 : 0;
+  if (method) {
+    attemptsByMethod.set(method, attempt);
+  }
+  if (process.env.CODEX_FAKE_MESSAGE_CAPTURE) {
+    fs.appendFileSync(
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE,
+      JSON.stringify({
+        id: message.id,
+        method: message.method,
+        params: message.params,
+        result: message.result,
+        error: message.error,
+        attempt,
+        monotonicMs: Date.now(),
+      }) + "\\n",
+    );
+  }
   if (!message.method && message.id === "approval-event-spine") {
     notify(
       "turn/completed",
@@ -158,12 +196,23 @@ function handle(message) {
   }
   if (message.method === "turn/start") {
     const eventMode = process.env.CODEX_FAKE_EVENT_MODE === "1";
+    const activeTurn = process.env.CODEX_FAKE_ACTIVE_TURN === "1";
+    const failedTurn = process.env.CODEX_FAKE_FAILED_TURN === "1";
     send(message.id, {
       turn: {
         id: "turn-rewrite",
-        status: eventMode ? "inProgress" : "completed",
+        status: failedTurn
+          ? "failed"
+          : eventMode || activeTurn
+            ? "inProgress"
+            : "completed",
         items: [],
-        error: null,
+        error: failedTurn
+          ? {
+              message:
+                "provider failure synthetic-wire-secret at /private/provider/error",
+            }
+          : null,
       },
     });
     if (eventMode) {
@@ -213,9 +262,120 @@ function handle(message) {
         },
       );
     }
+    if (process.env.CODEX_FAKE_SERVER_REQUEST_METHOD) {
+      request(
+        "synthetic-server-request",
+        process.env.CODEX_FAKE_SERVER_REQUEST_METHOD,
+        {},
+      );
+    }
+    return;
+  }
+  if (message.method === "turn/steer") {
+    send(message.id, {
+      turnId:
+        message.params.clientUserMessageId === "client-mismatch"
+          ? "different-turn"
+          : process.env.CODEX_FAKE_STEER_TURN_ID || message.params.expectedTurnId,
+    });
+    return;
+  }
+  if (message.method === "turn/interrupt") {
+    send(message.id, {});
+    return;
+  }
+  if ([
+    "skills/list",
+    "review/start",
+    "thread/compact/start",
+    "thread/goal/get",
+    "thread/goal/set",
+    "thread/goal/clear",
+    "thread/shellCommand",
+  ].includes(message.method)) {
+    if (process.env.CODEX_FAKE_CONTROL_CAPTURE) {
+      fs.appendFileSync(
+        process.env.CODEX_FAKE_CONTROL_CAPTURE,
+        JSON.stringify({ method: message.method, params: message.params }) + "\\n",
+      );
+    }
+    if (process.env.CODEX_FAKE_UNSUPPORTED_CONTROLS === "1") {
+      sendError(message.id, -32601, "Method not found");
+      return;
+    }
+    if (
+      message.method === "thread/goal/set" &&
+      message.params.objective === "provider-invalid"
+    ) {
+      sendError(message.id, -32602, "synthetic invalid parameters");
+      return;
+    }
+    if (message.method === "skills/list") {
+      send(message.id, { data: [] });
+      return;
+    }
+    if (message.method === "review/start") {
+      send(message.id, {
+        turn: {
+          id: "review-turn",
+          status: "inProgress",
+          items: [],
+          error: null,
+        },
+        reviewThreadId: message.params.threadId,
+      });
+      return;
+    }
+    if (message.method === "thread/goal/get") {
+      send(message.id, { goal: null });
+      return;
+    }
+    if (message.method === "thread/goal/set") {
+      send(message.id, {
+        goal: {
+          threadId: message.params.threadId,
+          objective: message.params.objective || "",
+          status: message.params.status || "active",
+          tokenBudget: message.params.tokenBudget || null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      });
+      return;
+    }
+    if (message.method === "thread/goal/clear") {
+      send(message.id, { cleared: true });
+      return;
+    }
+    send(message.id, {});
     return;
   }
   if (message.method !== "thread/start" && message.method !== "thread/resume") {
+    return;
+  }
+  const overloadAttempts = Number.parseInt(
+    process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS || "0",
+    10,
+  );
+  if (
+    message.method === "thread/start" &&
+    Number.isSafeInteger(overloadAttempts) &&
+    attempt <= overloadAttempts
+  ) {
+    sendError(message.id, -32001, "Server overloaded; retry later.");
+    return;
+  }
+  const threadStartErrorCode = Number.parseInt(
+    process.env.CODEX_FAKE_THREAD_START_ERROR_CODE || "",
+    10,
+  );
+  if (
+    message.method === "thread/start" &&
+    Number.isSafeInteger(threadStartErrorCode)
+  ) {
+    sendError(message.id, threadStartErrorCode, "synthetic request failure");
     return;
   }
   fs.writeFileSync(
@@ -260,6 +420,34 @@ process.stdin.on("data", (chunk) => {
       return fakeCodexPath;
     }
 
+    function readMessageCapture(capturePath: string): Array<{
+      id?: string | number;
+      method?: string;
+      params?: Record<string, unknown>;
+      result?: unknown;
+      error?: { code?: number; message?: string };
+      attempt?: number;
+      monotonicMs?: number;
+    }> {
+      if (!existsSync(capturePath)) return [];
+      return readFileSync(capturePath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              id?: string | number;
+              method?: string;
+              params?: Record<string, unknown>;
+              result?: unknown;
+              error?: { code?: number; message?: string };
+              attempt?: number;
+              monotonicMs?: number;
+            },
+        );
+    }
+
     it("should return session object with required methods", async () => {
       const session = await provider.startSession({
         cwd: "/tmp",
@@ -269,6 +457,525 @@ process.stdin.on("data", (chunk) => {
       expect(session.iterator).toBeDefined();
       expect(typeof session.abort).toBe("function");
       expect(session.queue).toBeDefined();
+    });
+
+    it("preserves native input and publishes the accepted turn correlation", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-native-input-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: {
+            text: "inspect inputs",
+            uuid: "client-native-input",
+            tempId: "temp-native-input",
+            images: ["data:image/webp;base64,AAAA"],
+            attachments: [
+              {
+                id: "image-upload",
+                originalName: "photo.png",
+                size: 4,
+                mimeType: "image/png",
+                path: join(tempDir, "photo.png"),
+              },
+              {
+                id: "document-upload",
+                originalName: "report.pdf",
+                size: 8,
+                mimeType: "application/pdf",
+                path: join(tempDir, "report.pdf"),
+              },
+            ],
+            codexInputs: [
+              {
+                type: "skill",
+                name: "review",
+                path: join(tempDir, "skills", "review", "SKILL.md"),
+              },
+              {
+                type: "mention",
+                name: "guide",
+                path: join(tempDir, "docs", "guide.md"),
+              },
+            ],
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+        for await (const message of session.iterator) {
+          messages.push(message);
+          if (
+            message.type === "result" &&
+            message.clientUserMessageId === "client-native-input"
+          ) {
+            break;
+          }
+        }
+
+        const turnStart = readMessageCapture(messageCapturePath).find(
+          ({ method }) => method === "turn/start",
+        );
+        expect(turnStart?.params).toMatchObject({
+          threadId: "thread-new",
+          clientUserMessageId: "client-native-input",
+          input: [
+            {
+              type: "text",
+              text: expect.stringContaining(join(tempDir, "report.pdf")),
+              text_elements: [],
+            },
+            { type: "image", url: "data:image/webp;base64,AAAA" },
+            { type: "localImage", path: join(tempDir, "photo.png") },
+            {
+              type: "skill",
+              name: "review",
+              path: join(tempDir, "skills", "review", "SKILL.md"),
+            },
+            {
+              type: "mention",
+              name: "guide",
+              path: join(tempDir, "docs", "guide.md"),
+            },
+          ],
+        });
+        const acceptedUser = messages.find(
+          (message) => message.type === "user",
+        );
+        expect(acceptedUser).toMatchObject({
+          uuid: "client-native-input",
+          tempId: "temp-native-input",
+          clientUserMessageId: "client-native-input",
+          turnId: "turn-rewrite",
+          codexTurnId: "turn-rewrite",
+          isOptimistic: false,
+          message: { content: expect.stringContaining("[managed attachment]") },
+        });
+        expect(JSON.stringify(acceptedUser)).not.toContain(tempDir);
+        expect(
+          messages.find(
+            (message) =>
+              message.type === "result" && message.clientUserMessageId,
+          ),
+        ).toMatchObject({
+          turnId: "turn-rewrite",
+          codexTurnId: "turn-rewrite",
+          clientUserMessageId: "client-native-input",
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("requires turn/steer to confirm the exact active turn", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-steer-identity-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousActiveTurn = process.env.CODEX_FAKE_ACTIVE_TURN;
+      const previousSteerTurnId = process.env.CODEX_FAKE_STEER_TURN_ID;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_ACTIVE_TURN = "1";
+      process.env.CODEX_FAKE_STEER_TURN_ID = "";
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "start", uuid: "client-start" },
+        });
+        await session.iterator.next();
+        await session.iterator.next();
+
+        await expect(
+          session.steer?.({
+            text: "steer",
+            uuid: "client-steer",
+            codexInputs: [
+              {
+                type: "skill",
+                name: "review",
+                path: join(tempDir, "skills", "review", "SKILL.md"),
+              },
+            ],
+          }),
+        ).resolves.toEqual({ accepted: true, turnId: "turn-rewrite" });
+        expect(
+          readMessageCapture(messageCapturePath).find(
+            ({ method }) => method === "turn/steer",
+          )?.params,
+        ).toMatchObject({
+          threadId: "thread-new",
+          clientUserMessageId: "client-steer",
+          expectedTurnId: "turn-rewrite",
+          input: [
+            { type: "text", text: "steer", text_elements: [] },
+            {
+              type: "skill",
+              name: "review",
+              path: join(tempDir, "skills", "review", "SKILL.md"),
+            },
+          ],
+        });
+
+        await expect(
+          session.steer?.({ text: "mismatch", uuid: "client-mismatch" }),
+        ).resolves.toBe(false);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_ACTIVE_TURN", previousActiveTurn);
+        restoreEnv("CODEX_FAKE_STEER_TURN_ID", previousSteerTurnId);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("interrupts the exact active Codex turn through the stable API", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-interrupt-identity-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousActiveTurn = process.env.CODEX_FAKE_ACTIVE_TURN;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_ACTIVE_TURN = "1";
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "start", uuid: "client-interrupt" },
+        });
+        await session.iterator.next();
+        await session.iterator.next();
+
+        await expect(session.interrupt?.()).resolves.toBeUndefined();
+        expect(
+          readMessageCapture(messageCapturePath).find(
+            ({ method }) => method === "turn/interrupt",
+          )?.params,
+        ).toEqual({ threadId: "thread-new", turnId: "turn-rewrite" });
+        expect(session.codexControls?.capabilities.experimentalApi).toBe(false);
+        expect(
+          readMessageCapture(messageCapturePath).some(
+            ({ method }) =>
+              method === "thread/backgroundTerminals/terminate" ||
+              method === "thread/backgroundTerminals/clean",
+          ),
+        ).toBe(false);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_ACTIVE_TURN", previousActiveTurn);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("redacts a failed turn and preserves its accepted correlation", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-failed-turn-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousFailedTurn = process.env.CODEX_FAKE_FAILED_TURN;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_FAILED_TURN = "1";
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: {
+            text: "begin",
+            uuid: "client-failed-turn",
+          },
+        });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: { type: "system", subtype: "init" },
+        });
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "user",
+            uuid: "client-failed-turn",
+            turnId: "turn-rewrite",
+          },
+        });
+        const failed = await session.iterator.next();
+        expect(failed.value).toMatchObject({
+          type: "error",
+          error:
+            "Codex encountered an unclassified error before the task completed.",
+          turnId: "turn-rewrite",
+          codexTurnId: "turn-rewrite",
+          clientUserMessageId: "client-failed-turn",
+          codexError: expect.objectContaining({
+            code: "CODEX_UNKNOWN",
+            correlationId: "turn-rewrite",
+          }),
+        });
+        expect(JSON.stringify(failed.value)).not.toContain(
+          "synthetic-wire-secret",
+        );
+        expect(JSON.stringify(failed.value)).not.toContain("/private/provider");
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "result",
+            turnId: "turn-rewrite",
+            clientUserMessageId: "client-failed-turn",
+          },
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_FAILED_TURN", previousFailedTurn);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("exposes only stable native controls and rejects calls until ready", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-controls-ready-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        const controls = session.codexControls;
+        expect(controls?.capabilities).toMatchObject({
+          codexVersion: "0.147.0",
+          experimentalApi: false,
+          methods: {
+            "skills/list": true,
+            "thread/backgroundTerminals/list": false,
+          },
+        });
+        await expect(
+          controls?.invoke({ control: "skills/list" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "not_ready", retryable: true },
+        });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: { type: "system", subtype: "init" },
+        });
+        await expect(
+          controls?.invoke({ control: "thread/backgroundTerminals/list" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "experimental_api_disabled", retryable: false },
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("maps stable native controls to exact 0.147 request contracts", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-controls-contract-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const controlCapturePath = join(tempDir, "controls.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousControlCapture = process.env.CODEX_FAKE_CONTROL_CAPTURE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_CONTROL_CAPTURE = controlCapturePath;
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        await session.iterator.next();
+        const controls = session.codexControls;
+        if (!controls) throw new Error("expected Codex native controls");
+
+        await expect(
+          controls.invoke({ control: "skills/list", forceReload: true }),
+        ).resolves.toMatchObject({ ok: true, data: { data: [] } });
+        await expect(
+          controls.invoke({
+            control: "review/start",
+            target: { type: "uncommittedChanges" },
+            delivery: "inline",
+          }),
+        ).resolves.toMatchObject({
+          ok: true,
+          data: { reviewThreadId: "thread-new" },
+        });
+        await expect(
+          controls.invoke({ control: "thread/compact/start" }),
+        ).resolves.toMatchObject({ ok: true, data: {} });
+        await expect(
+          controls.invoke({ control: "thread/goal/get" }),
+        ).resolves.toMatchObject({ ok: true, data: { goal: null } });
+        await expect(
+          controls.invoke({
+            control: "thread/goal/set",
+            objective: "Ship the control boundary",
+            status: "active",
+            tokenBudget: 40_000,
+          }),
+        ).resolves.toMatchObject({
+          ok: true,
+          data: {
+            goal: {
+              threadId: "thread-new",
+              objective: "Ship the control boundary",
+              tokenBudget: 40_000,
+            },
+          },
+        });
+        await expect(
+          controls.invoke({
+            control: "thread/goal/set",
+            objective: "provider-invalid",
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          control: "thread/goal/set",
+          error: { code: "invalid_request", retryable: false },
+        });
+        await expect(
+          controls.invoke({ control: "thread/goal/clear" }),
+        ).resolves.toMatchObject({ ok: true, data: { cleared: true } });
+        await expect(
+          controls.invoke({
+            control: "thread/shellCommand",
+            command: "git status --short",
+            confirmed: false,
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "invalid_request" },
+        });
+        await expect(
+          controls.invoke({
+            control: "thread/shellCommand",
+            command: "git status --short",
+            confirmed: true,
+          }),
+        ).resolves.toMatchObject({ ok: true, data: {} });
+
+        const captured = readFileSync(controlCapturePath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(captured).toEqual(
+          expect.arrayContaining([
+            {
+              method: "skills/list",
+              params: { cwds: [tempDir], forceReload: true },
+            },
+            {
+              method: "review/start",
+              params: {
+                threadId: "thread-new",
+                target: { type: "uncommittedChanges" },
+                delivery: "inline",
+              },
+            },
+            {
+              method: "thread/goal/set",
+              params: {
+                threadId: "thread-new",
+                objective: "Ship the control boundary",
+                status: "active",
+                tokenBudget: 40_000,
+              },
+            },
+            {
+              method: "thread/shellCommand",
+              params: {
+                threadId: "thread-new",
+                command: "git status --short",
+              },
+            },
+          ]),
+        );
+        expect(
+          captured.filter(({ method }) => method === "thread/shellCommand"),
+        ).toHaveLength(1);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_CONTROL_CAPTURE", previousControlCapture);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("maps app-server method absence to a typed unsupported result", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-controls-unsupported-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousUnsupported = process.env.CODEX_FAKE_UNSUPPORTED_CONTROLS;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_UNSUPPORTED_CONTROLS = "1";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        await session.iterator.next();
+        await expect(
+          session.codexControls?.invoke({ control: "skills/list" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          control: "skills/list",
+          error: { code: "unsupported_method", retryable: false },
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_UNSUPPORTED_CONTROLS", previousUnsupported);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
 
     it("should emit error if Codex CLI is not found", async () => {
@@ -336,6 +1043,193 @@ process.stdin.on("data", (chunk) => {
         } else {
           process.env.CODEX_FAKE_APP_SERVER_ERROR = previousError;
         }
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("retries only transient overloads with bounded exponential backoff", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-overload-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousOverloadAttempts = process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS;
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS = "2";
+
+      try {
+        const eventStore = new InMemoryCodexEventStore();
+        const provider = new CodexProvider({
+          codexPath: fakeCodexPath,
+          eventSpine: { store: eventStore },
+        });
+        session = await provider.startSession({ cwd: tempDir });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "system",
+            subtype: "warning",
+            warningKind: "codex_app_server_overloaded",
+            willRetry: true,
+            codexRetryStatus: {
+              state: "queued",
+              category: "overloaded",
+              retryable: true,
+              attempt: 1,
+              nextAttempt: 2,
+              maxAttempts: 4,
+              retryInMs: 50,
+            },
+          },
+        });
+        const retrying = await session.iterator.next();
+        expect(retrying).toMatchObject({
+          value: {
+            type: "system",
+            subtype: "warning",
+            warningKind: "codex_app_server_overloaded",
+            codexRetryStatus: {
+              state: "retrying",
+              attempt: 2,
+              nextAttempt: 3,
+              maxAttempts: 4,
+              retryInMs: 100,
+            },
+          },
+        });
+        expect(JSON.stringify(retrying.value)).not.toContain("-32001");
+        expect(JSON.stringify(retrying.value)).not.toContain(
+          "Server overloaded; retry later.",
+        );
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "system",
+            subtype: "init",
+            session_id: "thread-new",
+          },
+        });
+
+        const replayed = await replayCodexSession(eventStore, "thread-new");
+        expect(replayed.clientRetries).toMatchObject([
+          { state: "queued", attempt: 1, method: "thread/start" },
+          { state: "retrying", attempt: 2, method: "thread/start" },
+        ]);
+        expect(JSON.stringify(replayed.clientRetries)).not.toContain("-32001");
+
+        const attempts = readMessageCapture(messageCapturePath).filter(
+          ({ method }) => method === "thread/start",
+        );
+        expect(attempts.map(({ attempt }) => attempt)).toEqual([1, 2, 3]);
+        expect(
+          (attempts[1]?.monotonicMs ?? 0) -
+            (attempts[0]?.monotonicMs ?? Number.POSITIVE_INFINITY),
+        ).toBeGreaterThanOrEqual(40);
+        expect(
+          (attempts[2]?.monotonicMs ?? 0) -
+            (attempts[1]?.monotonicMs ?? Number.POSITIVE_INFINITY),
+        ).toBeGreaterThanOrEqual(80);
+      } finally {
+        session?.abort();
+        random.mockRestore();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_OVERLOAD_ATTEMPTS", previousOverloadAttempts);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not retry non-overload JSON-RPC failures", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-no-retry-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousErrorCode = process.env.CODEX_FAKE_THREAD_START_ERROR_CODE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_THREAD_START_ERROR_CODE = "-32600";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: { type: "error" },
+        });
+        expect(
+          readMessageCapture(messageCapturePath)
+            .filter(({ method }) => method === "thread/start")
+            .map(({ attempt }) => attempt),
+        ).toEqual([1]);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_THREAD_START_ERROR_CODE", previousErrorCode);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("stops overload retries after four total attempts", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-bounded-retry-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousOverloadAttempts = process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS;
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS = "99";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        const messages: unknown[] = [];
+        for (let index = 0; index < 4; index += 1) {
+          messages.push((await session.iterator.next()).value);
+        }
+
+        expect(messages.slice(0, 3)).toMatchObject([
+          { codexRetryStatus: { attempt: 1, retryInMs: 50 } },
+          { codexRetryStatus: { attempt: 2, retryInMs: 100 } },
+          { codexRetryStatus: { attempt: 3, retryInMs: 200 } },
+        ]);
+        expect(messages[3]).toMatchObject({ type: "error" });
+        expect(JSON.stringify(messages[3])).not.toContain(
+          "Server overloaded; retry later.",
+        );
+        expect(
+          readMessageCapture(messageCapturePath)
+            .filter(({ method }) => method === "thread/start")
+            .map(({ attempt }) => attempt),
+        ).toEqual([1, 2, 3, 4]);
+      } finally {
+        session?.abort();
+        random.mockRestore();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_OVERLOAD_ATTEMPTS", previousOverloadAttempts);
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
@@ -748,6 +1642,48 @@ process.stdin.on("data", (chunk) => {
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
+
+    it("preserves typed JSON-RPC error codes for rejected server requests", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-server-request-error-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "messages.jsonl");
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousServerRequest =
+        process.env.CODEX_FAKE_SERVER_REQUEST_METHOD;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_SERVER_REQUEST_METHOD = "future/unknown";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "exercise server request errors" },
+        });
+        await session.iterator.next();
+        await session.iterator.next();
+        await vi.waitFor(() => {
+          expect(
+            readMessageCapture(capturePath).find(
+              ({ id }) => id === "synthetic-server-request",
+            ),
+          ).toMatchObject({
+            error: {
+              code: -32601,
+              message: "Unsupported Codex server request: future/unknown",
+            },
+          });
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_SERVER_REQUEST_METHOD", previousServerRequest);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -888,6 +1824,141 @@ describe("CodexProvider Event Normalization", () => {
       file: {
         filePath: "src/example.ts",
       },
+    });
+  });
+
+  it("correlates turn completion with its native status", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: {
+            id: "turn-interrupted",
+            status: "interrupted",
+            items: [],
+            error: null,
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "system",
+        subtype: "turn_complete",
+        turnId: "turn-interrupted",
+        turnStatus: "interrupted",
+      }),
+    ]);
+  });
+
+  it("correlates item lifecycle messages and publishes terminal tool status", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-declined",
+          item: {
+            id: "call-declined",
+            type: "commandExecution",
+            command: "printf denied",
+            aggregatedOutput: "",
+            exitCode: null,
+            status: "declined",
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toHaveLength(2);
+    for (const message of messages) {
+      expect(message).toMatchObject({
+        turnId: "turn-declined",
+        codexTurnId: "turn-declined",
+      });
+    }
+    expect(messages[0]?.message).toMatchObject({
+      content: [
+        expect.objectContaining({
+          type: "tool_use",
+          id: "call-declined",
+          status: "declined",
+        }),
+      ],
+    });
+  });
+
+  it("marks failed MCP lifecycle results as errors", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-mcp-failed",
+          item: {
+            id: "mcp-failed",
+            type: "mcpToolCall",
+            server: "synthetic",
+            tool: "fixture_call",
+            arguments: { fixture: true },
+            result: null,
+            error: null,
+            status: "failed",
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.message).toMatchObject({
+      content: [
+        expect.objectContaining({
+          type: "tool_use",
+          id: "mcp-failed",
+          status: "failed",
+        }),
+      ],
+    });
+    expect(messages[1]?.message).toMatchObject({
+      content: [
+        expect.objectContaining({
+          type: "tool_result",
+          tool_use_id: "mcp-failed",
+          is_error: true,
+        }),
+      ],
     });
   });
 
@@ -1336,6 +2407,10 @@ describe("CodexProvider Event Normalization", () => {
     );
 
     expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
+    });
     expect(calls[0]?.message).toMatchObject({
       role: "assistant",
       content: [
@@ -1369,6 +2444,10 @@ describe("CodexProvider Event Normalization", () => {
     );
 
     expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
+    });
     expect(results[0]?.message).toMatchObject({
       role: "user",
       content: [
@@ -1412,6 +2491,8 @@ describe("CodexProvider Event Normalization", () => {
       type: "assistant",
       session_id: "thread-1",
       uuid: "codex-plan-turn-1",
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
       message: {
         role: "assistant",
         content: [
@@ -1540,6 +2621,8 @@ describe("CodexProvider Event Normalization", () => {
     expect(first[0]).toMatchObject({
       type: "assistant",
       uuid: "item-cmd-turn-1",
+      turnId: "turn-1",
+      codexTurnId: "turn-1",
       message: {
         role: "assistant",
         content: [
@@ -1690,6 +2773,550 @@ describe("CodexProvider Event Normalization", () => {
         new Map(),
       ),
     ).toEqual([]);
+  });
+});
+
+describe("CodexProvider server requests", () => {
+  type ServerRequest = {
+    id: string | number;
+    method: string;
+    params?: unknown;
+  };
+  type HandleServerRequest = (
+    request: ServerRequest,
+    options: {
+      cwd: string;
+      onToolApproval?: (
+        toolName: string,
+        input: unknown,
+        options: {
+          signal: AbortSignal;
+          requestId?: string;
+          requestMethod?: string;
+          respectProviderDecision?: boolean;
+        },
+      ) => Promise<ToolApprovalResult>;
+    },
+    signal: AbortSignal,
+  ) => Promise<unknown>;
+
+  const getHandler = (provider: CodexProvider) =>
+    (
+      provider as unknown as {
+        handleServerRequestApproval: HandleServerRequest;
+      }
+    ).handleServerRequestApproval.bind(provider);
+
+  it("keeps requestUserInput pending until answers are submitted", async () => {
+    const provider = new CodexProvider();
+    let resolveApproval:
+      | ((result: {
+          behavior: "allow";
+          updatedInput: unknown;
+        }) => void)
+      | undefined;
+    const onToolApproval = vi.fn(
+      async (_toolName: string, input: unknown) =>
+        await new Promise<{
+          behavior: "allow";
+          updatedInput: unknown;
+        }>((resolve) => {
+          resolveApproval = resolve;
+        }),
+    );
+    let settled = false;
+    const responsePromise = getHandler(provider)(
+      {
+        id: 17,
+        method: "item/tool/requestUserInput",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          isBlocking: true,
+          autoResolutionMs: null,
+          questions: [
+            {
+              id: "choice",
+              header: "Mode",
+              question: "Choose a mode",
+              isOther: false,
+              isSecret: false,
+              options: [{ label: "Safe", description: "Use safe mode" }],
+            },
+            {
+              id: "note",
+              header: "Note",
+              question: "Add a note",
+              isOther: true,
+              isSecret: false,
+              options: null,
+            },
+          ],
+        },
+      },
+      { cwd: "/workspace", onToolApproval },
+      new AbortController().signal,
+    ).then((response) => {
+      settled = true;
+      return response;
+    });
+
+    await vi.waitFor(() => expect(onToolApproval).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(onToolApproval).toHaveBeenCalledWith(
+      "AskUserQuestion",
+      expect.objectContaining({
+        isBlocking: true,
+        questions: expect.arrayContaining([
+          expect.objectContaining({ id: "choice", question: "Choose a mode" }),
+        ]),
+      }),
+      expect.objectContaining({
+        requestId: "codex:number:17",
+        requestMethod: "item/tool/requestUserInput",
+        respectProviderDecision: true,
+      }),
+    );
+
+    const input = onToolApproval.mock.calls[0]?.[1] as Record<string, unknown>;
+    resolveApproval?.({
+      behavior: "allow",
+      updatedInput: {
+        ...input,
+        answers: { choice: "Safe", note: "ship it" },
+      },
+    });
+
+    await expect(responsePromise).resolves.toEqual({
+      answers: {
+        choice: { answers: ["Safe"] },
+        note: { answers: ["user_note: ship it"] },
+      },
+    });
+  });
+
+  it("fails closed instead of returning empty answers when user input is denied", async () => {
+    await expect(
+      getHandler(new CodexProvider())(
+        {
+          id: "question-denied",
+          method: "item/tool/requestUserInput",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            itemId: "item-question",
+            isBlocking: true,
+            autoResolutionMs: null,
+            questions: [
+              {
+                id: "secret",
+                header: "Secret",
+                question: "Enter the secret",
+                isOther: true,
+                isSecret: true,
+                options: null,
+              },
+            ],
+          },
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => ({
+            behavior: "deny" as const,
+            providerDecision: "deny" as const,
+          })),
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Codex tool user input request was declined");
+  });
+
+  it.each([
+    ["approve_for_session", "acceptForSession"],
+    [
+      "approve_always",
+      {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: ["git", "status"],
+        },
+      },
+    ],
+    ["approve_strict_auto_review", "accept"],
+  ] as const)(
+    "keeps exact command decision %s through native response mapping",
+    async (providerDecision, expectedDecision) => {
+      const amendment = {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: ["git", "status"],
+        },
+      };
+      const onToolApproval = vi.fn(async () => ({
+        behavior: "allow" as const,
+        providerDecision,
+      }));
+      await expect(
+        getHandler(new CodexProvider())(
+          {
+            id: `command-${providerDecision}`,
+            method: "item/commandExecution/requestApproval",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              itemId: "item-command",
+              startedAtMs: Date.now(),
+              environmentId: null,
+              command: "git status",
+              cwd: "/workspace",
+              availableDecisions: [
+                "accept",
+                "acceptForSession",
+                amendment,
+                "decline",
+                "cancel",
+              ],
+            },
+          },
+          { cwd: "/workspace", onToolApproval },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual({ decision: expectedDecision });
+      expect(onToolApproval).toHaveBeenCalledWith(
+        "Bash",
+        expect.objectContaining({
+          requestMethod: "item/commandExecution/requestApproval",
+          availableDecisions: expect.arrayContaining([
+            "accept",
+            "acceptForSession",
+          ]),
+        }),
+        expect.objectContaining({
+          requestId: `codex:string:command-${providerDecision}`,
+          requestMethod: "item/commandExecution/requestApproval",
+          respectProviderDecision: true,
+        }),
+      );
+    },
+  );
+
+  it("does not turn approve_always into a persistent network deny", async () => {
+    await expect(
+      getHandler(new CodexProvider())(
+        {
+          id: "command-network-deny",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            itemId: "item-command",
+            startedAtMs: Date.now(),
+            environmentId: null,
+            command: "curl example.com",
+            cwd: "/workspace",
+            availableDecisions: [
+              "accept",
+              {
+                applyNetworkPolicyAmendment: {
+                  network_policy_amendment: {
+                    host: "example.com",
+                    action: "deny",
+                  },
+                },
+              },
+              "cancel",
+            ],
+          },
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => ({
+            behavior: "allow" as const,
+            providerDecision: "approve_always" as const,
+          })),
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ decision: "accept" });
+  });
+
+  it("distinguishes explicit decline from transport cancellation", async () => {
+    const params = {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-command",
+      startedAtMs: Date.now(),
+      environmentId: null,
+      command: "pnpm test",
+      cwd: "/workspace",
+      availableDecisions: ["accept", "acceptForSession", "decline", "cancel"],
+    };
+    const handler = getHandler(new CodexProvider());
+
+    await expect(
+      handler(
+        {
+          id: "explicit-deny",
+          method: "item/commandExecution/requestApproval",
+          params,
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => ({
+            behavior: "deny" as const,
+            interrupt: true,
+            providerDecision: "deny" as const,
+          })),
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ decision: "decline" });
+
+    await expect(
+      handler(
+        {
+          id: "transport-abort",
+          method: "item/commandExecution/requestApproval",
+          params,
+        },
+        {
+          cwd: "/workspace",
+          onToolApproval: vi.fn(async () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            throw error;
+          }),
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ decision: "cancel" });
+  });
+
+  it.each([
+    [
+      "approve_for_session",
+      { permissions: { network: { enabled: true } }, scope: "session" },
+    ],
+    [
+      "approve_always",
+      { permissions: { network: { enabled: true } }, scope: "session" },
+    ],
+    [
+      "approve_strict_auto_review",
+      {
+        permissions: { network: { enabled: true } },
+        scope: "turn",
+        strictAutoReview: true,
+      },
+    ],
+  ] as const)(
+    "maps exact permissions decision %s without collapsing it",
+    async (providerDecision, expected) => {
+      const onToolApproval = vi.fn(async () => ({
+        behavior: "allow" as const,
+        providerDecision,
+      }));
+      await expect(
+        getHandler(new CodexProvider())(
+          {
+            id: `permissions-${providerDecision}`,
+            method: "item/permissions/requestApproval",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              itemId: "item-permissions",
+              environmentId: null,
+              startedAtMs: Date.now(),
+              cwd: "/workspace",
+              reason: "Network access is required",
+              permissions: {
+                network: { enabled: true },
+                fileSystem: null,
+              },
+            },
+          },
+          { cwd: "/workspace", onToolApproval },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual(expected);
+      expect(onToolApproval).toHaveBeenCalledWith(
+        "Permissions",
+        expect.objectContaining({
+          approvalKind: "permissions",
+          approvalPrompt: "Network access is required",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-permissions",
+        }),
+        expect.objectContaining({
+          requestId: `codex:string:permissions-${providerDecision}`,
+          requestMethod: "item/permissions/requestApproval",
+          respectProviderDecision: true,
+        }),
+      );
+    },
+  );
+
+  it.each([
+    ["approve_for_session", { persist: "session" }],
+    ["approve_always", { persist: "always" }],
+    ["approve_strict_auto_review", null],
+  ] as const)(
+    "preserves exact MCP persistence decision %s",
+    async (providerDecision, expectedMeta) => {
+      await expect(
+        getHandler(new CodexProvider())(
+          {
+            id: `mcp-${providerDecision}`,
+            method: "mcpServer/elicitation/request",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              serverName: "example",
+              mode: "form",
+              _meta: {
+                codex_approval_kind: "mcp_tool_call",
+                tool_name: "create_issue",
+                persist: ["session", "always"],
+              },
+              message: "Allow MCP tool?",
+              requestedSchema: { type: "object", properties: {} },
+            },
+          },
+          {
+            cwd: "/workspace",
+            onToolApproval: vi.fn(async () => ({
+              behavior: "allow" as const,
+              providerDecision,
+            })),
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual({
+        action: "accept",
+        content: null,
+        _meta: expectedMeta,
+      });
+    },
+  );
+
+  it("explicitly owns or fails closed for every pinned ServerRequest method", async () => {
+    const threadParams = {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-1",
+      startedAtMs: Date.now(),
+    };
+    const cases: Array<{
+      method: string;
+      params: Record<string, unknown>;
+      expected?: unknown;
+      error?: string;
+    }> = [
+      {
+        method: "item/commandExecution/requestApproval",
+        params: { ...threadParams, command: "pwd", cwd: "/workspace" },
+        expected: { decision: "decline" },
+      },
+      {
+        method: "item/fileChange/requestApproval",
+        params: { ...threadParams, reason: null, grantRoot: null },
+        expected: { decision: "decline" },
+      },
+      {
+        method: "item/tool/requestUserInput",
+        params: {
+          ...threadParams,
+          isBlocking: true,
+          autoResolutionMs: null,
+          questions: [],
+        },
+        error: "No interactive input handler is available",
+      },
+      {
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          serverName: "example",
+          mode: "form",
+          _meta: null,
+          message: "Continue?",
+          requestedSchema: { type: "object", properties: {} },
+        },
+        expected: { action: "decline", content: null, _meta: null },
+      },
+      {
+        method: "item/permissions/requestApproval",
+        params: {
+          ...threadParams,
+          environmentId: null,
+          cwd: "/workspace",
+          reason: null,
+          permissions: { network: null, fileSystem: null },
+        },
+        expected: { permissions: {}, scope: "turn" },
+      },
+      {
+        method: "item/tool/call",
+        params: {},
+        error: "Unsupported Codex server request: item/tool/call",
+      },
+      {
+        method: "account/chatgptAuthTokens/refresh",
+        params: {},
+        error:
+          "Unsupported Codex server request: account/chatgptAuthTokens/refresh",
+      },
+      {
+        method: "attestation/generate",
+        params: {},
+        error: "Unsupported Codex server request: attestation/generate",
+      },
+      {
+        method: "currentTime/read",
+        params: {},
+        error: "Unsupported Codex server request: currentTime/read",
+      },
+      {
+        method: "applyPatchApproval",
+        params: { fileChanges: { "/workspace/a.ts": { type: "update" } } },
+        expected: { decision: "denied" },
+      },
+      {
+        method: "execCommandApproval",
+        params: { command: ["pwd"], cwd: "/workspace" },
+        expected: { decision: "denied" },
+      },
+    ];
+
+    expect(cases).toHaveLength(11);
+    for (const testCase of cases) {
+      const response = getHandler(new CodexProvider())(
+        {
+          id: `owner-${testCase.method}`,
+          method: testCase.method,
+          params: testCase.params,
+        },
+        { cwd: "/workspace" },
+        new AbortController().signal,
+      );
+      if (testCase.error) {
+        await expect(response).rejects.toThrow(testCase.error);
+      } else {
+        await expect(response).resolves.toEqual(testCase.expected);
+      }
+    }
+  });
+
+  it("does not silently acknowledge an unknown server request", async () => {
+    await expect(
+      getHandler(new CodexProvider())(
+        { id: 99, method: "future/unknown", params: {} },
+        { cwd: "/workspace" },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Unsupported Codex server request: future/unknown");
   });
 });
 

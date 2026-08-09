@@ -80,6 +80,8 @@ export interface ModelSettings {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
   codexModelProvider?: string;
+  /** Stable non-secret channel account key for Codex event-spine rollout. */
+  codexEventAccountId?: string;
   /** Managed OpenCode provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Provider to use for this session. undefined = use the runtime default. */
@@ -120,6 +122,11 @@ function getRewindSettings(modelSettings?: ModelSettings): {
 export interface QueueFullResponse {
   error: "queue_full";
   maxQueueSize: number;
+}
+
+/** Immediate callers cannot take ownership of work that would enter the queue. */
+export interface ImmediateStartUnavailableResponse {
+  error: "immediate_start_unavailable";
 }
 
 /** Optional callback to persist executor when session ID is received */
@@ -197,6 +204,10 @@ export class Supervisor {
   private staleCheckTimer: ReturnType<typeof setInterval>;
   private isShuttingDown = false;
   private queueProcessingPromise: Promise<void> | null = null;
+  /** Provider starts which passed admission but are not registered yet. */
+  private pendingWorkerStarts = 0;
+  /** Prevent concurrent admission attempts from preempting one process twice. */
+  private readonly preemptingProcessIds = new Set<string>();
 
   constructor(options: SupervisorOptions) {
     this.provider = options.provider ?? null;
@@ -273,61 +284,60 @@ export class Supervisor {
     message: UserMessage,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
-  ): Promise<Process | QueuedResponse | QueueFullResponse> {
+    admission?: { requireImmediate?: boolean },
+  ): Promise<
+    | Process
+    | QueuedResponse
+    | QueueFullResponse
+    | ImmediateStartUnavailableResponse
+  > {
     this.assertAcceptingWork();
     const projectId = encodeProjectId(projectPath);
 
-    // Check if at capacity
-    if (this.isAtCapacity()) {
-      // Try to preempt an idle worker
-      const preemptable = this.findPreemptableWorker();
-      if (preemptable) {
-        await this.preemptWorker(preemptable);
-        // Fall through to start session normally
-      } else {
-        // Queue the request
-        const result = this.workerQueue.enqueue({
-          type: "new-session",
+    const releaseWorkerStart = await this.tryReserveWorkerStart();
+    if (!releaseWorkerStart) {
+      if (admission?.requireImmediate) {
+        return { error: "immediate_start_unavailable" };
+      }
+      const result = this.workerQueue.enqueue({
+        type: "new-session",
+        projectPath,
+        projectId,
+        message,
+        permissionMode,
+        modelSettings,
+      });
+      if (isQueueFullError(result)) return result;
+      return {
+        queued: true,
+        queueId: result.queueId,
+        position: result.position,
+      };
+    }
+
+    try {
+      const provider = this.resolveProvider(modelSettings);
+      if (provider) {
+        return await this.startProviderSession(
           projectPath,
           projectId,
           message,
+          undefined,
           permissionMode,
           modelSettings,
-        });
-        if (isQueueFullError(result)) {
-          return result;
-        }
-        return {
-          queued: true,
-          queueId: result.queueId,
-          position: result.position,
-        };
+          provider,
+        );
       }
-    }
-
-    const provider = this.resolveProvider(modelSettings);
-
-    // Use provider if available (preferred)
-    if (provider) {
-      return this.startProviderSession(
+      return await this.startLegacySession(
         projectPath,
         projectId,
         message,
         undefined,
         permissionMode,
-        modelSettings,
-        provider,
       );
+    } finally {
+      releaseWorkerStart();
     }
-
-    // Fall back to legacy mock SDK
-    return this.startLegacySession(
-      projectPath,
-      projectId,
-      message,
-      undefined,
-      permissionMode,
-    );
   }
 
   /**
@@ -339,55 +349,54 @@ export class Supervisor {
     projectPath: string,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
-  ): Promise<Process | QueuedResponse | QueueFullResponse> {
+    admission?: { requireImmediate?: boolean },
+  ): Promise<
+    | Process
+    | QueuedResponse
+    | QueueFullResponse
+    | ImmediateStartUnavailableResponse
+  > {
     this.assertAcceptingWork();
     const projectId = encodeProjectId(projectPath);
 
-    // Check if at capacity
-    if (this.isAtCapacity()) {
-      // Try to preempt an idle worker
-      const preemptable = this.findPreemptableWorker();
-      if (preemptable) {
-        await this.preemptWorker(preemptable);
-        // Fall through to create session normally
-      } else {
-        // Queue the request - use empty message placeholder
-        const result = this.workerQueue.enqueue({
-          type: "new-session",
-          projectPath,
-          projectId,
-          message: { text: "" }, // Placeholder, will be replaced when first message sent
-          permissionMode,
-          modelSettings,
-        });
-        if (isQueueFullError(result)) {
-          return result;
-        }
-        return {
-          queued: true,
-          queueId: result.queueId,
-          position: result.position,
-        };
+    const releaseWorkerStart = await this.tryReserveWorkerStart();
+    if (!releaseWorkerStart) {
+      if (admission?.requireImmediate) {
+        return { error: "immediate_start_unavailable" };
       }
-    }
-
-    const provider = this.resolveProvider(modelSettings);
-
-    // Use provider if available (preferred)
-    if (provider) {
-      return this.createProviderSession(
+      const result = this.workerQueue.enqueue({
+        type: "new-session",
         projectPath,
         projectId,
+        message: { text: "" },
         permissionMode,
         modelSettings,
-        provider,
-      );
+      });
+      if (isQueueFullError(result)) return result;
+      return {
+        queued: true,
+        queueId: result.queueId,
+        position: result.position,
+      };
     }
 
-    // Fall back to legacy mock SDK - not supported for create-only
-    throw new Error(
-      "createSession requires a provider - legacy mock SDK does not support create-only sessions",
-    );
+    try {
+      const provider = this.resolveProvider(modelSettings);
+      if (provider) {
+        return await this.createProviderSession(
+          projectPath,
+          projectId,
+          permissionMode,
+          modelSettings,
+          provider,
+        );
+      }
+      throw new Error(
+        "createSession requires a provider - legacy mock SDK does not support create-only sessions",
+      );
+    } finally {
+      releaseWorkerStart();
+    }
   }
 
   /**
@@ -440,6 +449,8 @@ export class Supervisor {
       reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
+      codexEventAccountId: modelSettings?.codexEventAccountId,
+      codexEventProjectId: projectId,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,
@@ -473,6 +484,7 @@ export class Supervisor {
       setMaxThinkingTokens,
       interrupt,
       steer,
+      codexControls,
       supportedModels,
       supportedCommands,
       setModel,
@@ -498,6 +510,7 @@ export class Supervisor {
       setMaxThinkingTokensFn: setMaxThinkingTokens,
       interruptFn: interrupt,
       steerFn: steer,
+      codexControls,
       supportedModelsFn: supportedModels,
       supportedCommandsFn: supportedCommands,
       setModelFn: setModel,
@@ -590,6 +603,8 @@ export class Supervisor {
       reasoningEffort: modelSettings?.reasoningEffort,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
+      codexEventAccountId: modelSettings?.codexEventAccountId,
+      codexEventProjectId: projectId,
       opencodeConfig: modelSettings?.opencodeConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,
@@ -625,6 +640,7 @@ export class Supervisor {
       setMaxThinkingTokens,
       interrupt,
       steer,
+      codexControls,
       supportedModels,
       supportedCommands,
       setModel,
@@ -650,6 +666,7 @@ export class Supervisor {
       setMaxThinkingTokensFn: setMaxThinkingTokens,
       interruptFn: interrupt,
       steerFn: steer,
+      codexControls,
       supportedModelsFn: supportedModels,
       supportedCommandsFn: supportedCommands,
       setModelFn: setModel,
@@ -670,7 +687,7 @@ export class Supervisor {
     processHolder.process = process;
 
     // Add the initial user message to history with the same UUID we passed to provider.
-    process.addInitialUserMessage(message.text, messageUuid, message.tempId);
+    process.addInitialUserMessage(message, messageUuid, message.tempId);
 
     const isForkedResume =
       activeProvider.name === "opencode" &&
@@ -710,13 +727,13 @@ export class Supervisor {
   /**
    * Start a session using the legacy mock SDK.
    */
-  private startLegacySession(
+  private async startLegacySession(
     projectPath: string,
     projectId: UrlProjectId,
     message: UserMessage,
     resumeSessionId?: string,
     permissionMode?: PermissionMode,
-  ): Process {
+  ): Promise<Process> {
     // sdk is guaranteed to exist here (checked in startSession)
     if (!this.sdk) {
       throw new Error("sdk is not available");
@@ -745,7 +762,11 @@ export class Supervisor {
     this.registerProcess(process, !resumeSessionId);
 
     // Queue the initial message
-    process.queueMessage(message);
+    const admission = await process.queueMessage(message);
+    if (!admission.success) {
+      this.unregisterProcess(process);
+      throw new Error(admission.error ?? "Failed to admit initial message");
+    }
 
     return process;
   }
@@ -756,7 +777,13 @@ export class Supervisor {
     message: UserMessage,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
-  ): Promise<Process | QueuedResponse | QueueFullResponse> {
+    admission?: { requireImmediate?: boolean },
+  ): Promise<
+    | Process
+    | QueuedResponse
+    | QueueFullResponse
+    | ImmediateStartUnavailableResponse
+  > {
     this.assertAcceptingWork();
     const rewind = getRewindSettings(modelSettings);
 
@@ -852,7 +879,7 @@ export class Supervisor {
           }
           // Queue message to existing process (if we didn't fall through to restart)
           if (!existingProcess.isTerminated) {
-            const result = existingProcess.queueMessage(message);
+            const result = await existingProcess.queueMessage(message);
             if (result.success) {
               return existingProcess;
             }
@@ -866,6 +893,9 @@ export class Supervisor {
     // Check if there's already a queued request for this session
     const existingQueued = this.workerQueue.findBySessionId(sessionId);
     if (existingQueued) {
+      if (admission?.requireImmediate) {
+        return { error: "immediate_start_unavailable" };
+      }
       if (rewind.hasRewind) {
         getLogger().info(
           {
@@ -891,58 +921,51 @@ export class Supervisor {
 
     const projectId = encodeProjectId(projectPath);
 
-    // Check if at capacity
-    if (this.isAtCapacity()) {
-      // Try to preempt an idle worker
-      const preemptable = this.findPreemptableWorker();
-      if (preemptable) {
-        await this.preemptWorker(preemptable);
-        // Fall through to start session normally
-      } else {
-        // Queue the request
-        const result = this.workerQueue.enqueue({
-          type: "resume-session",
-          projectPath,
-          projectId,
-          sessionId,
-          message,
-          permissionMode,
-          modelSettings,
-        });
-        if (isQueueFullError(result)) {
-          return result;
-        }
-        return {
-          queued: true,
-          queueId: result.queueId,
-          position: result.position,
-        };
+    const releaseWorkerStart = await this.tryReserveWorkerStart();
+    if (!releaseWorkerStart) {
+      if (admission?.requireImmediate) {
+        return { error: "immediate_start_unavailable" };
       }
+      const result = this.workerQueue.enqueue({
+        type: "resume-session",
+        projectPath,
+        projectId,
+        sessionId,
+        message,
+        permissionMode,
+        modelSettings,
+      });
+      if (isQueueFullError(result)) return result;
+      return {
+        queued: true,
+        queueId: result.queueId,
+        position: result.position,
+      };
     }
 
-    const provider = this.resolveProvider(modelSettings);
-
-    // Use provider if available (preferred)
-    if (provider) {
-      return this.startProviderSession(
+    try {
+      const provider = this.resolveProvider(modelSettings);
+      if (provider) {
+        return await this.startProviderSession(
+          projectPath,
+          projectId,
+          message,
+          sessionId,
+          permissionMode,
+          modelSettings,
+          provider,
+        );
+      }
+      return await this.startLegacySession(
         projectPath,
         projectId,
         message,
         sessionId,
         permissionMode,
-        modelSettings,
-        provider,
       );
+    } finally {
+      releaseWorkerStart();
     }
-
-    // Fall back to legacy mock SDK
-    return this.startLegacySession(
-      projectPath,
-      projectId,
-      message,
-      sessionId,
-      permissionMode,
-    );
   }
 
   getProcess(processId: string): Process | undefined {
@@ -970,6 +993,7 @@ export class Supervisor {
     message: UserMessage,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
+    admission?: { requireImmediate?: boolean },
   ): Promise<
     | { success: true; process: Process; restarted: boolean }
     | { success: false; error: string }
@@ -1048,10 +1072,17 @@ export class Supervisor {
           message,
           permissionMode,
           modelSettings,
+          admission,
         );
 
         if ("id" in result) {
           return { success: true, process: result, restarted: true };
+        }
+        if (
+          "error" in result &&
+          result.error === "immediate_start_unavailable"
+        ) {
+          return { success: false, error: result.error };
         }
         return { success: false, error: "Request was queued or failed" };
       }
@@ -1062,7 +1093,7 @@ export class Supervisor {
       await process.syncPermissionMode(permissionMode);
     }
 
-    const result = process.queueMessage(message);
+    const result = await process.queueMessage(message);
     if (result.success) {
       return { success: true, process, restarted: false };
     }
@@ -1225,6 +1256,26 @@ export class Supervisor {
       if (event.type === "complete") {
         this.unregisterProcess(process);
       } else if (event.type === "session-id-changed") {
+        const oldOwner = this.sessionToProcess.get(event.oldSessionId);
+        const newOwner = this.sessionToProcess.get(event.newSessionId);
+        if (
+          this.processes.get(process.id) !== process ||
+          oldOwner !== process.id ||
+          (newOwner !== undefined && newOwner !== process.id)
+        ) {
+          getLogger().warn(
+            {
+              event: "session_id_mapping_stale_update_ignored",
+              oldSessionId: event.oldSessionId,
+              newSessionId: event.newSessionId,
+              processId: process.id,
+              oldOwner: oldOwner ?? null,
+              newOwner: newOwner ?? null,
+            },
+            "Ignored a stale session ID mapping update from a replaced process",
+          );
+          return;
+        }
         // Update session→process mapping when temp ID is replaced by real ID from SDK
         // This is critical for ExternalSessionTracker to correctly identify owned sessions
         const log = getLogger();
@@ -1706,7 +1757,41 @@ export class Supervisor {
    */
   private isAtCapacity(): boolean {
     if (this.maxWorkers <= 0) return false; // 0 = unlimited
-    return this.processes.size >= this.maxWorkers;
+    return this.processes.size + this.pendingWorkerStarts >= this.maxWorkers;
+  }
+
+  /**
+   * Reserve capacity before the first asynchronous provider operation. Without
+   * this counter, concurrent callers can all observe one free worker slot and
+   * exceed maxWorkers before any Process is registered.
+   */
+  private async tryReserveWorkerStart(): Promise<(() => void) | null> {
+    let preemptable: Process | undefined;
+    if (this.isAtCapacity()) {
+      preemptable = this.findPreemptableWorker();
+      if (!preemptable) return null;
+      this.preemptingProcessIds.add(preemptable.id);
+    }
+
+    this.pendingWorkerStarts += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.pendingWorkerStarts = Math.max(0, this.pendingWorkerStarts - 1);
+      if (!this.isShuttingDown) this.scheduleProcessQueue();
+    };
+
+    if (!preemptable) return release;
+    try {
+      await this.preemptWorker(preemptable);
+      return release;
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      this.preemptingProcessIds.delete(preemptable.id);
+    }
   }
 
   /**
@@ -1722,6 +1807,7 @@ export class Supervisor {
     for (const process of this.processes.values()) {
       // Only preempt idle processes, not waiting-input
       if (process.state.type !== "idle") continue;
+      if (this.preemptingProcessIds.has(process.id)) continue;
 
       const idleMs = now - process.state.since.getTime();
       if (idleMs >= this.idlePreemptThresholdMs && idleMs > oldestIdleTime) {
@@ -1750,8 +1836,13 @@ export class Supervisor {
       !this.workerQueue.isEmpty &&
       !this.isAtCapacity()
     ) {
+      const releaseWorkerStart = await this.tryReserveWorkerStart();
+      if (!releaseWorkerStart) break;
       const request = this.workerQueue.dequeue();
-      if (!request) break;
+      if (!request) {
+        releaseWorkerStart();
+        break;
+      }
 
       try {
         let process: Process;
@@ -1804,6 +1895,8 @@ export class Supervisor {
           status: "cancelled",
           reason: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        releaseWorkerStart();
       }
     }
   }

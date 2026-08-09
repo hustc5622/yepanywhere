@@ -6,9 +6,17 @@
  */
 
 import { type ChildProcess, exec, spawn } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import type { ModelInfo } from "@yep-anywhere/shared";
+import type {
+  CodexRetryStatus,
+  ModelInfo,
+  UserQuestionAnswers,
+} from "@yep-anywhere/shared";
+import {
+  buildCodexInteractiveResponse,
+  toCodexInteractiveRequestView,
+} from "../../codex-bridge/interactions.js";
 import {
   CODEX_EVENT_RUNTIME_IDENTITY,
   type CodexEventEnvelope,
@@ -60,18 +68,30 @@ import { getDataDir } from "../../config.js";
 import { getLogger } from "../../logging/logger.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
 import { logSDKMessage } from "../messageLogger.js";
-import { MessageQueue } from "../messageQueue.js";
+import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
+  CodexStructuredUserInput,
+  ProviderApprovalDecision,
   SDKMessage,
   TimestampedSDKMessage,
-  UserMessage,
+  ToolApprovalResult,
 } from "../types.js";
-import type { ToolApprovalResult } from "../types.js";
+import {
+  CODEX_NATIVE_CAPABILITIES,
+  type CodexNativeControlDataMap,
+  type CodexNativeControlRequest,
+  type CodexNativeControlResult,
+  codexControlFailure,
+} from "./codex-controls.js";
 import {
   type CodexModelSourceDefinition,
   DEFAULT_CODEX_MODEL_SOURCE,
   getCodexModelSourceRegistry,
 } from "./codex-model-sources.js";
+import type { TurnInterruptParams } from "./codex-protocol/generated/v2/TurnInterruptParams.js";
+import type { TurnInterruptResponse } from "./codex-protocol/generated/v2/TurnInterruptResponse.js";
+import type { TurnSteerParams } from "./codex-protocol/generated/v2/TurnSteerParams.js";
+import type { TurnSteerResponse } from "./codex-protocol/generated/v2/TurnSteerResponse.js";
 import type {
   AskForApproval as CodexAskForApproval,
   ErrorNotification as CodexErrorNotification,
@@ -79,6 +99,7 @@ import type {
   ItemStartedNotification as CodexItemStartedNotification,
   SandboxMode as CodexSandboxMode,
   ThreadItem as CodexThreadItem,
+  UserInput as CodexUserInput,
   CommandExecutionApprovalDecision,
   CommandExecutionRequestApprovalParams,
   FileChangeApprovalDecision,
@@ -164,6 +185,8 @@ const APP_SERVER_INIT_REQUEST_ID = 1;
 const APP_SERVER_MODEL_LIST_REQUEST_ID = 2;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
 const MAX_APP_SERVER_STDERR_LENGTH = 64 * 1024;
+const APP_SERVER_OVERLOAD_MAX_ATTEMPTS = 4;
+const APP_SERVER_OVERLOAD_BASE_DELAY_MS = 50;
 /** Max characters of live command output kept for the streaming preview. */
 const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL_PROVIDER = DEFAULT_CODEX_MODEL_SOURCE;
@@ -283,6 +306,18 @@ interface JsonRpcError {
   data?: unknown;
 }
 
+class CodexJsonRpcError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+    readonly data?: unknown,
+    readonly requestId?: JsonRpcId,
+  ) {
+    super(message);
+    this.name = "CodexJsonRpcError";
+  }
+}
+
 interface JsonRpcResponse {
   id?: JsonRpcId;
   result?: unknown;
@@ -337,6 +372,7 @@ interface TokenUsageSnapshot {
 interface CodexTurnRuntimeState {
   threadId: string;
   activeTurnId: string | null;
+  ready: boolean;
 }
 
 interface ThreadRollbackParams {
@@ -535,6 +571,17 @@ type AppServerRequestHandler = (
 interface AppServerRequestMetadata {
   clientMessageId?: string;
 }
+
+interface AppServerRetryUpdate {
+  requestId: JsonRpcId;
+  method: string;
+  retryStatus: CodexRetryStatus;
+  metadata?: AppServerRequestMetadata;
+}
+
+type AppServerRetryHandler = (
+  update: AppServerRetryUpdate,
+) => void | Promise<void>;
 
 interface AppServerEventObserver {
   onClientRequest(input: {
@@ -758,7 +805,14 @@ class CodexAppServerClient {
             error,
             ...(pending.metadata ? { metadata: pending.metadata } : {}),
           });
-          pending.reject(new Error(error.message ?? "JSON-RPC request failed"));
+          pending.reject(
+            new CodexJsonRpcError(
+              typeof error.code === "number" ? error.code : -32000,
+              error.message ?? "JSON-RPC request failed",
+              error.data,
+              id,
+            ),
+          );
           return;
         }
         await observer?.onClientResponse({
@@ -808,11 +862,13 @@ class CodexAppServerClient {
         respond({ result: result ?? {} });
       })
       .catch((error) => {
+        const rpcError = error instanceof CodexJsonRpcError ? error : undefined;
         respond({
           error: {
-            code: -32000,
+            code: rpcError?.code ?? -32000,
             message:
               error instanceof Error ? error.message : "Server request failed",
+            ...(rpcError?.data === undefined ? {} : { data: rpcError.data }),
           },
         });
       });
@@ -823,6 +879,55 @@ class CodexAppServerClient {
   }
 
   async requestTracked<T>(
+    method: string,
+    params?: unknown,
+    metadata?: AppServerRequestMetadata,
+    onRetry?: AppServerRetryHandler,
+  ): Promise<{ requestId: JsonRpcId; result: T }> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.requestOnceTracked<T>(method, params, metadata);
+      } catch (error) {
+        if (
+          !(error instanceof CodexJsonRpcError) ||
+          error.code !== -32001 ||
+          attempt >= APP_SERVER_OVERLOAD_MAX_ATTEMPTS
+        ) {
+          throw error;
+        }
+
+        const exponentialDelay =
+          APP_SERVER_OVERLOAD_BASE_DELAY_MS * 2 ** (attempt - 1);
+        const jitter = Math.floor(
+          Math.random() * APP_SERVER_OVERLOAD_BASE_DELAY_MS,
+        );
+        const delayMs = exponentialDelay + jitter;
+        if (error.requestId !== undefined) {
+          await onRetry?.({
+            requestId: error.requestId,
+            method,
+            retryStatus: {
+              state: attempt === 1 ? "queued" : "retrying",
+              category: "overloaded",
+              retryable: true,
+              attempt,
+              nextAttempt: attempt + 1,
+              maxAttempts: APP_SERVER_OVERLOAD_MAX_ATTEMPTS,
+              retryInMs: delayMs,
+            },
+            ...(metadata ? { metadata } : {}),
+          });
+        }
+        log.warn(
+          { method, attempt, delayMs, errorCode: error.code },
+          "Codex app-server overloaded; retrying request",
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  private async requestOnceTracked<T>(
     method: string,
     params?: unknown,
     metadata?: AppServerRequestMetadata,
@@ -1436,11 +1541,16 @@ export class CodexProvider implements AgentProvider {
    * Start a new Codex session.
    */
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
-    const queue = new MessageQueue();
+    const queue = new MessageQueue({
+      preserveAttachments: true,
+      preserveCodexInputs: true,
+      preserveClientMetadata: true,
+    });
     const abortController = new AbortController();
     const runtimeState: CodexTurnRuntimeState = {
       threadId: options.resumeSessionId ?? "",
       activeTurnId: null,
+      ready: false,
     };
 
     // Push initial message if provided
@@ -1470,20 +1580,64 @@ export class CodexProvider implements AgentProvider {
       get pid() {
         return activeClient?.pid;
       },
+      interrupt: async () => {
+        const client = activeClient;
+        const threadId = runtimeState.threadId;
+        const turnId = runtimeState.activeTurnId;
+        if (
+          !client ||
+          !client.isAlive() ||
+          !runtimeState.ready ||
+          !threadId ||
+          !turnId
+        ) {
+          throw new Error("Codex turn interrupt requires an active turn");
+        }
+        const params: TurnInterruptParams = { threadId, turnId };
+        await client.request<TurnInterruptResponse>("turn/interrupt", params);
+      },
+      codexControls: {
+        capabilities: CODEX_NATIVE_CAPABILITIES,
+        invoke: (request) =>
+          this.invokeCodexNativeControl({
+            getClient: () => activeClient,
+            runtimeState,
+            cwd: options.cwd,
+            request,
+          }),
+      },
       steer: async (message) => {
         if (!activeClient) return false;
         if (!runtimeState.threadId || !runtimeState.activeTurnId) return false;
 
-        const userPrompt = this.extractTextFromMessage(message);
-        if (!userPrompt) return true;
+        const { internalPrompt } = getUserPromptProjection(message);
+        if (!internalPrompt) return false;
 
         try {
-          await activeClient.request<{ turnId: string }>("turn/steer", {
+          const expectedTurnId = runtimeState.activeTurnId;
+          const params: TurnSteerParams = {
             threadId: runtimeState.threadId,
-            input: [{ type: "text", text: userPrompt, text_elements: [] }],
-            expectedTurnId: runtimeState.activeTurnId,
-          });
-          return true;
+            clientUserMessageId: message.uuid,
+            input: buildCodexUserInput(message, internalPrompt),
+            expectedTurnId,
+          };
+          const result = await activeClient.request<TurnSteerResponse>(
+            "turn/steer",
+            params,
+          );
+          const acceptedTurnId = this.getOptionalString(result?.turnId);
+          if (!acceptedTurnId || acceptedTurnId !== expectedTurnId) {
+            log.warn(
+              {
+                threadId: runtimeState.threadId,
+                expectedTurnId,
+                acceptedTurnId: acceptedTurnId ?? null,
+              },
+              "Codex turn/steer returned an invalid turn identity; caller should queue instead",
+            );
+            return false;
+          }
+          return { accepted: true, turnId: acceptedTurnId };
         } catch (error) {
           log.warn(
             {
@@ -1497,6 +1651,259 @@ export class CodexProvider implements AgentProvider {
         }
       },
     };
+  }
+
+  private async invokeCodexNativeControl(input: {
+    getClient: () => CodexAppServerClient | null;
+    runtimeState: CodexTurnRuntimeState;
+    cwd: string;
+    request: CodexNativeControlRequest;
+  }): Promise<CodexNativeControlResult> {
+    const { request, runtimeState } = input;
+    if (!CODEX_NATIVE_CAPABILITIES.methods[request.control]) {
+      return codexControlFailure(
+        request.control,
+        "experimental_api_disabled",
+        `${request.control} requires Codex experimentalApi, which is disabled for this session`,
+      );
+    }
+
+    const client = input.getClient();
+    if (!client || !runtimeState.ready || !runtimeState.threadId) {
+      return codexControlFailure(
+        request.control,
+        "not_ready",
+        "Codex app-server session is not ready",
+        true,
+      );
+    }
+
+    try {
+      switch (request.control) {
+        case "skills/list": {
+          const data = await client.request<
+            CodexNativeControlDataMap["skills/list"]
+          >("skills/list", {
+            cwds: [input.cwd],
+            forceReload: request.forceReload ?? false,
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "review/start": {
+          const data = await client.request<
+            CodexNativeControlDataMap["review/start"]
+          >("review/start", {
+            threadId: runtimeState.threadId,
+            target: request.target,
+            ...(request.delivery === undefined
+              ? {}
+              : { delivery: request.delivery }),
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/compact/start": {
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/compact/start"]
+          >("thread/compact/start", { threadId: runtimeState.threadId });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/goal/get": {
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/goal/get"]
+          >("thread/goal/get", { threadId: runtimeState.threadId });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/goal/set": {
+          const objective = request.objective;
+          if (
+            typeof objective === "string" &&
+            (objective.trim().length === 0 || objective.length > 4_000)
+          ) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "Goal objective must contain 1 to 4000 characters",
+            );
+          }
+          if (
+            request.tokenBudget !== undefined &&
+            request.tokenBudget !== null &&
+            (!Number.isSafeInteger(request.tokenBudget) ||
+              request.tokenBudget <= 0)
+          ) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "Goal tokenBudget must be a positive safe integer or null",
+            );
+          }
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/goal/set"]
+          >("thread/goal/set", {
+            threadId: runtimeState.threadId,
+            ...(request.objective === undefined
+              ? {}
+              : { objective: request.objective }),
+            ...(request.status === undefined ? {} : { status: request.status }),
+            ...(request.tokenBudget === undefined
+              ? {}
+              : { tokenBudget: request.tokenBudget }),
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/goal/clear": {
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/goal/clear"]
+          >("thread/goal/clear", { threadId: runtimeState.threadId });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/shellCommand": {
+          if (!request.confirmed) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "thread/shellCommand requires explicit confirmation because it runs unsandboxed",
+            );
+          }
+          if (request.command.trim().length === 0) {
+            return codexControlFailure(
+              request.control,
+              "invalid_request",
+              "Shell command must not be empty",
+            );
+          }
+          const data = await client.request<
+            CodexNativeControlDataMap["thread/shellCommand"]
+          >("thread/shellCommand", {
+            threadId: runtimeState.threadId,
+            command: request.command,
+          });
+          return { ok: true, control: request.control, data };
+        }
+
+        case "thread/backgroundTerminals/list":
+        case "thread/backgroundTerminals/terminate":
+        case "thread/backgroundTerminals/clean":
+          return codexControlFailure(
+            request.control,
+            "experimental_api_disabled",
+            `${request.control} requires Codex experimentalApi, which is disabled for this session`,
+          );
+      }
+    } catch (error) {
+      log.warn(
+        {
+          control: request.control,
+          threadId: runtimeState.threadId,
+          errorCode:
+            error instanceof CodexJsonRpcError ? error.code : undefined,
+          errorType: error instanceof Error ? error.name : typeof error,
+        },
+        "Codex native control request failed",
+      );
+      if (error instanceof CodexJsonRpcError) {
+        if (error.code === -32601) {
+          return codexControlFailure(
+            request.control,
+            "unsupported_method",
+            `Codex app-server does not support ${request.control}`,
+          );
+        }
+        if (error.code === -32602) {
+          return codexControlFailure(
+            request.control,
+            "invalid_request",
+            "Codex app-server rejected invalid control parameters",
+          );
+        }
+        return codexControlFailure(
+          request.control,
+          "provider_error",
+          error.code === -32001
+            ? "Codex app-server is overloaded; retry the control request"
+            : "Codex app-server control request failed",
+          error.code === -32001,
+        );
+      }
+      return codexControlFailure(
+        request.control,
+        "provider_error",
+        "Codex app-server control request failed",
+      );
+    }
+  }
+
+  /**
+   * Await one JSON-RPC request while yielding only the client's safe overload
+   * decision. Raw JSON-RPC error messages/data never enter the UI projection.
+   */
+  private async *requestTrackedWithRetryProjection<T>(input: {
+    appServer: CodexAppServerClient;
+    method: string;
+    params?: unknown;
+    metadata?: AppServerRequestMetadata;
+    sessionId?: () => string | undefined;
+    onRetry?: (
+      update: AppServerRetryUpdate,
+    ) => Promise<CodexEventEnvelope | undefined>;
+  }): AsyncGenerator<
+    SDKMessage,
+    { requestId: JsonRpcId; result: T },
+    undefined
+  > {
+    const updates = new AsyncQueue<{
+      update: AppServerRetryUpdate;
+      canonicalEvent?: CodexEventEnvelope;
+    }>();
+    const request = input.appServer.requestTracked<T>(
+      input.method,
+      input.params,
+      input.metadata,
+      async (update) => {
+        const canonicalEvent = await input.onRetry?.(update);
+        updates.push({
+          update,
+          ...(canonicalEvent ? { canonicalEvent } : {}),
+        });
+      },
+    );
+    const settled = request.then(
+      (result) => ({ kind: "result" as const, result }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    let nextUpdate = updates.shift().then(
+      (value) => ({ kind: "retry" as const, value }),
+      () => ({ kind: "closed" as const }),
+    );
+
+    try {
+      for (;;) {
+        const outcome = await Promise.race([settled, nextUpdate]);
+        if (outcome.kind === "retry") {
+          yield buildCodexRetryWarning(
+            outcome.value.update,
+            input.sessionId?.(),
+            outcome.value.canonicalEvent,
+          );
+          nextUpdate = updates.shift().then(
+            (value) => ({ kind: "retry" as const, value }),
+            () => ({ kind: "closed" as const }),
+          );
+          continue;
+        }
+        if (outcome.kind === "result") return outcome.result;
+        if (outcome.kind === "error") throw outcome.error;
+        throw new Error("Codex retry status channel closed unexpectedly");
+      }
+    } finally {
+      updates.close(new Error("Codex request settled"));
+    }
   }
 
   /**
@@ -1522,6 +1929,11 @@ export class CodexProvider implements AgentProvider {
 
     let sessionId = options.resumeSessionId ?? "";
     let eventIngress: CodexEventIngress | null = null;
+    const startupRetryUpdates: AppServerRetryUpdate[] = [];
+    const captureStartupRetry = async (update: AppServerRetryUpdate) => {
+      startupRetryUpdates.push(update);
+      return undefined;
+    };
     let projectionMode: CodexEventProjectionMode = "shadow";
     const usageByTurnId = new Map<string, TokenUsageSnapshot>();
     const customToolContexts = new Map<string, CodexToolCallContext>();
@@ -1580,25 +1992,36 @@ export class CodexProvider implements AgentProvider {
 
       await appServer.connect();
 
-      await appServer.request<{ userAgent: string }>("initialize", {
-        clientInfo: {
-          name: this.getCodexClientName(),
-          version: "dev",
+      yield* this.requestTrackedWithRetryProjection<{ userAgent: string }>({
+        appServer,
+        method: "initialize",
+        params: {
+          clientInfo: {
+            name: this.getCodexClientName(),
+            version: "dev",
+          },
+          capabilities: null,
         },
-        capabilities: null,
+        sessionId: () => sessionId || options.resumeSessionId,
+        onRetry: captureStartupRetry,
       });
       appServer.notify("initialized");
 
       // Read the same app-server's effective config for this cwd. This is both
       // substantially faster than spawning `codex mcp list --json` and keeps
       // project-level .codex/config.toml layers aligned with the thread.
-      const configRead = await appServer.request<{ config?: unknown }>(
-        "config/read",
-        {
+      const configRead = (yield* this.requestTrackedWithRetryProjection<{
+        config?: unknown;
+      }>({
+        appServer,
+        method: "config/read",
+        params: {
           includeLayers: false,
           cwd: options.cwd,
         },
-      );
+        sessionId: () => sessionId || options.resumeSessionId,
+        onRetry: captureStartupRetry,
+      })).result;
       const mcpProfile = resolveCodexMcpThreadProfile(
         options.codexMcpMode,
         configRead.config,
@@ -1637,14 +2060,20 @@ export class CodexProvider implements AgentProvider {
         config: mcpProfile.threadConfig,
       };
       const threadExchange = options.resumeSessionId
-        ? await appServer.requestTracked<ThreadResumeResponse>(
-            "thread/resume",
-            threadResumeParams,
-          )
-        : await appServer.requestTracked<ThreadStartResponse>(
-            "thread/start",
-            threadStartParams,
-          );
+        ? yield* this.requestTrackedWithRetryProjection<ThreadResumeResponse>({
+            appServer,
+            method: "thread/resume",
+            params: threadResumeParams,
+            sessionId: () => sessionId || options.resumeSessionId,
+            onRetry: captureStartupRetry,
+          })
+        : yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
+            appServer,
+            method: "thread/start",
+            params: threadStartParams,
+            sessionId: () => sessionId || options.resumeSessionId,
+            onRetry: captureStartupRetry,
+          });
       const threadResult: ThreadResumeResponse | ThreadStartResponse =
         threadExchange.result;
       const threadMethod = options.resumeSessionId
@@ -1676,6 +2105,17 @@ export class CodexProvider implements AgentProvider {
           : {}),
       });
       const activeEventIngress = eventIngress;
+      for (const update of startupRetryUpdates) {
+        await activeEventIngress.ingestClientRetry({
+          requestId: update.requestId,
+          method: update.method,
+          retryStatus: update.retryStatus,
+          threadId: sessionId,
+          ...(update.metadata?.clientMessageId
+            ? { clientMessageId: update.metadata.clientMessageId }
+            : {}),
+        });
+      }
       await activeEventIngress.ingestClientExchange({
         requestId: threadExchange.requestId,
         method: threadMethod,
@@ -1749,6 +2189,7 @@ export class CodexProvider implements AgentProvider {
           "Rolled back Codex app-server thread before edited turn",
         );
       }
+      runtimeState.ready = true;
 
       // The app-server returns the provider it actually bound the thread to;
       // trust that effective value over the requested one for logs/metadata.
@@ -1801,56 +2242,78 @@ export class CodexProvider implements AgentProvider {
           break;
         }
 
-        let userPrompt = this.extractTextFromMessage(message);
-        if (!userPrompt) {
+        let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
+        if (!internalPrompt) {
           continue;
         }
 
         // Prepend global instructions to the first message of new sessions
         if (isFirstMessage && options.globalInstructions) {
-          userPrompt = `[Global context]\n${options.globalInstructions}\n\n---\n\n${userPrompt}`;
+          const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+          internalPrompt = `${prefix}${internalPrompt}`;
+          publicPrompt = `${prefix}${publicPrompt}`;
           isFirstMessage = false;
         } else {
           isFirstMessage = false;
         }
 
-        // Emit user message with UUID from queue to enable deduplication.
-        const userMessage = withCodexTimestamp({
-          type: "user",
-          uuid: message.uuid,
-          session_id: sessionId,
-          message: {
-            role: "user",
-            content: userPrompt,
-          },
-        } as SDKMessage);
-        logSdkCorrelationDebug(sessionId, userMessage, {
-          eventKind: "user_message",
-          phase: "submitted",
-          sourceEvent: "queued_input",
-        });
-        yield logMessage(userMessage);
-
         const turnStartParams: TurnStartParams = {
           threadId: sessionId,
           clientUserMessageId: message.uuid,
-          input: [{ type: "text", text: userPrompt, text_elements: [] }],
+          input: buildCodexUserInput(message, internalPrompt),
           effort: this.mapEffortToReasoningEffort(
             options.reasoningEffort,
             options.effort,
             options.thinking,
           ),
         };
-        const turnResult = (
-          await appServer.requestTracked<TurnStartResponse>(
-            "turn/start",
-            turnStartParams,
-            message.uuid ? { clientMessageId: message.uuid } : undefined,
-          )
-        ).result;
+        const turnResult =
+          (yield* this.requestTrackedWithRetryProjection<TurnStartResponse>({
+            appServer,
+            method: "turn/start",
+            params: turnStartParams,
+            metadata: message.uuid
+              ? { clientMessageId: message.uuid }
+              : undefined,
+            sessionId: () => sessionId,
+            onRetry: async (update) =>
+              await activeEventIngress.ingestClientRetry({
+                requestId: update.requestId,
+                method: update.method,
+                retryStatus: update.retryStatus,
+                threadId: sessionId,
+                ...(update.metadata?.clientMessageId
+                  ? { clientMessageId: update.metadata.clientMessageId }
+                  : {}),
+              }),
+          })).result;
 
         const activeTurnId = turnResult.turn.id;
         runtimeState.activeTurnId = activeTurnId;
+        // Publish the provider-accepted echo only after turn/start returns the
+        // authoritative turn identity. Process separately publishes the
+        // optimistic admission echo with the same UUID.
+        const userMessage = withCodexTimestamp({
+          type: "user",
+          uuid: message.uuid,
+          tempId: message.tempId,
+          session_id: sessionId,
+          clientUserMessageId: message.uuid,
+          turnId: activeTurnId,
+          codexTurnId: activeTurnId,
+          isOptimistic: false,
+          message: {
+            role: "user",
+            content: publicPrompt,
+          },
+        } as SDKMessage);
+        logSdkCorrelationDebug(sessionId, userMessage, {
+          eventKind: "user_message",
+          turnId: activeTurnId,
+          phase: "accepted",
+          sourceEvent: "turn/start",
+        });
+        yield logMessage(userMessage);
         if (historyRewritePending) {
           historyRewritePending = false;
           yield logMessage(
@@ -1987,12 +2450,18 @@ export class CodexProvider implements AgentProvider {
             session_id: sessionId,
             error: codexError.publicMessage,
             codexError,
+            turnId: activeTurnId,
+            codexTurnId: activeTurnId,
+            clientUserMessageId: message.uuid,
           } as SDKMessage);
         }
 
         yield logMessage({
           type: "result",
           session_id: sessionId,
+          turnId: activeTurnId,
+          codexTurnId: activeTurnId,
+          clientUserMessageId: message.uuid,
         } as SDKMessage);
       }
     } catch (error) {
@@ -2015,6 +2484,7 @@ export class CodexProvider implements AgentProvider {
       }
     } finally {
       runtimeState.activeTurnId = null;
+      runtimeState.ready = false;
       appServer?.close();
     }
 
@@ -2105,25 +2575,46 @@ export class CodexProvider implements AgentProvider {
           },
           "Handling Codex command approval request",
         );
+        const availableDecisions = getEffectiveCommandApprovalDecisions(
+          commandParams as unknown as Record<string, unknown>,
+        );
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "command_execution",
           command: commandParams.command,
           cwd: commandParams.cwd,
           reason: commandParams.reason,
           commandActions: commandParams.commandActions ?? [],
+          additionalPermissions: commandParams.additionalPermissions ?? null,
+          networkApprovalContext: commandParams.networkApprovalContext ?? null,
           proposedExecpolicyAmendment:
             commandParams.proposedExecpolicyAmendment ?? null,
+          proposedNetworkPolicyAmendments:
+            commandParams.proposedNetworkPolicyAmendments ?? null,
+          availableDecisions,
+          approvalId: commandParams.approvalId ?? null,
           threadId: commandParams.threadId,
           turnId: commandParams.turnId,
           itemId: commandParams.itemId,
         };
+        const sessionDecision = availableDecisions.includes("acceptForSession")
+          ? ("acceptForSession" as const)
+          : undefined;
+        const alwaysDecision =
+          availableDecisions.find(isPolicyAmendmentCommandApprovalDecision) ??
+          sessionDecision;
         const decision: CommandExecutionApprovalDecision =
-          await this.resolveApprovalDecision(
+          await this.resolveApprovalDecision<CommandExecutionApprovalDecision>(
             options,
             "Bash",
             toolInput,
             signal,
             "accept",
             "decline",
+            request.id,
+            sessionDecision,
+            "cancel",
+            alwaysDecision,
           );
         log.info(
           {
@@ -2166,9 +2657,17 @@ export class CodexProvider implements AgentProvider {
           "Handling Codex file-change approval request",
         );
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "file_change",
           file_path: grantRoot ?? undefined,
           reason: fileParams.reason ?? null,
           grantRoot,
+          availableDecisions: [
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel",
+          ],
           threadId: fileParams.threadId,
           turnId: fileParams.turnId,
           itemId: fileParams.itemId,
@@ -2181,6 +2680,10 @@ export class CodexProvider implements AgentProvider {
             signal,
             "accept",
             "decline",
+            request.id,
+            "acceptForSession",
+            "cancel",
+            "acceptForSession",
           );
         log.info(
           {
@@ -2196,6 +2699,128 @@ export class CodexProvider implements AgentProvider {
         return { decision };
       }
 
+      case "item/permissions/requestApproval": {
+        const threadId = this.getOptionalString(params.threadId);
+        const turnId = this.getOptionalString(params.turnId);
+        const itemId = this.getOptionalString(params.itemId);
+        if (!threadId || !turnId || !itemId || !asRecord(params.permissions)) {
+          throw new CodexJsonRpcError(
+            -32602,
+            "Invalid item/permissions/requestApproval params",
+          );
+        }
+
+        const requestView = toCodexInteractiveRequestView(
+          codexServerRequestId(request.id),
+          "item/permissions/requestApproval",
+          threadId,
+          params,
+          new Date().toISOString(),
+        );
+        const result = await this.requestToolApprovalResult(
+          options,
+          requestView.inputRequest.toolName ?? "Permissions",
+          {
+            ...(asRecord(requestView.inputRequest.toolInput) ?? {}),
+            approvalPrompt: requestView.inputRequest.prompt,
+            requestMethod: request.method,
+          },
+          signal,
+          request.id,
+        );
+        const providerDecision = getProviderApprovalDecision(result);
+        const response = buildCodexInteractiveResponse(
+          "item/permissions/requestApproval",
+          params,
+          providerDecision,
+        );
+        log.info(
+          {
+            method: request.method,
+            requestId: request.id,
+            threadId,
+            turnId,
+            itemId,
+            providerDecision,
+          },
+          "Resolved Codex permissions approval request",
+        );
+        return response;
+      }
+
+      case "mcpServer/elicitation/request": {
+        const threadId = this.getOptionalString(params.threadId);
+        const serverName = this.getOptionalString(params.serverName);
+        const mode = this.getOptionalString(params.mode);
+        const message = this.getOptionalString(params.message);
+        if (
+          !threadId ||
+          !serverName ||
+          !message ||
+          (mode !== "form" && mode !== "openai/form" && mode !== "url") ||
+          (mode === "url" &&
+            (!this.getOptionalString(params.url) ||
+              !this.getOptionalString(params.elicitationId))) ||
+          (mode !== "url" && !("requestedSchema" in params))
+        ) {
+          throw new CodexJsonRpcError(
+            -32602,
+            "Invalid mcpServer/elicitation/request params",
+          );
+        }
+
+        const requestView = toCodexInteractiveRequestView(
+          codexServerRequestId(request.id),
+          "mcpServer/elicitation/request",
+          threadId,
+          params,
+          new Date().toISOString(),
+        );
+        const result = await this.requestToolApprovalResult(
+          options,
+          requestView.inputRequest.toolName ?? "MCP",
+          {
+            ...(asRecord(requestView.inputRequest.toolInput) ?? {}),
+            approvalPrompt: requestView.inputRequest.prompt,
+            requestMethod: request.method,
+          },
+          signal,
+          request.id,
+        );
+        const providerDecision = getProviderApprovalDecision(result);
+        const updatedInput = asRecord(result.updatedInput);
+        const answers = updatedInput?.answers as
+          | UserQuestionAnswers
+          | undefined;
+        const response = buildCodexInteractiveResponse(
+          "mcpServer/elicitation/request",
+          params,
+          providerDecision,
+          answers,
+        ) as Record<string, unknown>;
+        if (
+          result.behavior === "deny" &&
+          result.interrupt === true &&
+          response.action === "decline"
+        ) {
+          response.action = "cancel";
+        }
+        log.info(
+          {
+            method: request.method,
+            requestId: request.id,
+            threadId,
+            turnId: this.getOptionalString(params.turnId),
+            serverName,
+            mode,
+            providerDecision,
+            action: response.action,
+          },
+          "Resolved Codex MCP elicitation request",
+        );
+        return response;
+      }
+
       // Backward-compatible protocol variants.
       case "execCommandApproval": {
         const commandParts = Array.isArray(params.command)
@@ -2204,6 +2829,8 @@ export class CodexProvider implements AgentProvider {
             )
           : [];
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "legacy_command_execution",
           command: commandParts.join(" "),
           cwd: this.getOptionalString(params.cwd),
           reason: this.getOptionalString(params.reason),
@@ -2217,6 +2844,7 @@ export class CodexProvider implements AgentProvider {
           signal,
           "approved",
           "denied",
+          request.id,
         );
         log.info(
           {
@@ -2238,6 +2866,8 @@ export class CodexProvider implements AgentProvider {
             : {};
         const paths = Object.keys(fileChanges);
         const toolInput = {
+          requestMethod: request.method,
+          approvalKind: "legacy_file_change",
           changes: paths.map((path) => ({ path, kind: "update" })),
           reason: this.getOptionalString(params.reason),
           grantRoot: this.getOptionalString(params.grantRoot),
@@ -2250,6 +2880,7 @@ export class CodexProvider implements AgentProvider {
           signal,
           "approved",
           "denied",
+          request.id,
         );
         log.info(
           {
@@ -2266,71 +2897,259 @@ export class CodexProvider implements AgentProvider {
 
       case "item/tool/requestUserInput": {
         const requestInput = this.asToolRequestUserInputParams(request.params);
-        const questions = requestInput?.questions ?? [];
-
-        // MVP: return empty answers so request can complete without blocking.
-        const answers: ToolRequestUserInputResponse["answers"] = {};
-        for (const question of questions) {
-          answers[question.id] = { answers: [] };
+        if (!requestInput) {
+          throw new CodexJsonRpcError(
+            -32602,
+            "Invalid item/tool/requestUserInput params",
+          );
         }
-        log.warn(
+        if (!options.onToolApproval) {
+          throw new CodexJsonRpcError(
+            -32601,
+            "No interactive input handler is available",
+          );
+        }
+
+        const requestView = toCodexInteractiveRequestView(
+          codexServerRequestId(request.id),
+          "item/tool/requestUserInput",
+          requestInput.threadId,
+          params,
+          new Date().toISOString(),
+        );
+        const toolInput = {
+          ...(asRecord(requestView.inputRequest.toolInput) ?? {}),
+          requestMethod: request.method,
+          isBlocking: requestInput.isBlocking,
+          threadId: requestInput.threadId,
+          turnId: requestInput.turnId,
+          itemId: requestInput.itemId,
+        };
+        const timeoutMs = normalizeAutoResolutionMs(
+          requestInput.autoResolutionMs,
+        );
+        const timeoutController =
+          timeoutMs === null ? null : new AbortController();
+        const approvalSignal = timeoutController
+          ? AbortSignal.any([signal, timeoutController.signal])
+          : signal;
+        const timeout =
+          timeoutController && timeoutMs !== null
+            ? setTimeout(() => timeoutController.abort(), timeoutMs)
+            : undefined;
+        timeout?.unref?.();
+
+        let result: ToolApprovalResult;
+        try {
+          result = await this.requestToolApprovalResult(
+            options,
+            requestView.inputRequest.toolName ?? "AskUserQuestion",
+            toolInput,
+            approvalSignal,
+            request.id,
+          );
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+
+        if (result.behavior !== "allow") {
+          throw new CodexJsonRpcError(
+            -32000,
+            "Codex tool user input request was declined",
+          );
+        }
+        const updatedInput = asRecord(result.updatedInput);
+        const answers = updatedInput?.answers as
+          | UserQuestionAnswers
+          | undefined;
+        const response = buildCodexInteractiveResponse(
+          "item/tool/requestUserInput",
+          params,
+          getProviderApprovalDecision(result),
+          answers,
+        ) as ToolRequestUserInputResponse;
+        log.info(
           {
             method: request.method,
             requestId: request.id,
-            questionCount: questions.length,
-            threadId: requestInput?.threadId ?? null,
-            turnId: requestInput?.turnId ?? null,
-            itemId: requestInput?.itemId ?? null,
+            questionCount: requestInput.questions.length,
+            threadId: requestInput.threadId,
+            turnId: requestInput.turnId,
+            itemId: requestInput.itemId,
+            resolution: "answered",
           },
-          "Codex requested tool user input; returning empty answers in MVP",
+          "Resolved Codex tool user input request",
         );
-        const response: ToolRequestUserInputResponse = { answers };
         return response;
       }
+
+      case "item/tool/call":
+        return this.rejectUnownedServerCapability(
+          request,
+          "dynamic tools are not registered by this client",
+        );
+
+      case "account/chatgptAuthTokens/refresh":
+        return this.rejectUnownedServerCapability(
+          request,
+          "ChatGPT auth-token refresh is not owned by this client",
+        );
+
+      case "attestation/generate":
+        return this.rejectUnownedServerCapability(
+          request,
+          "attestation generation was not requested during initialization",
+        );
+
+      case "currentTime/read":
+        return this.rejectUnownedServerCapability(
+          request,
+          "the experimental external-clock capability is disabled",
+        );
 
       default: {
         log.warn(
           { method: request.method, requestId: request.id },
           "Unhandled codex server request",
         );
-        return {};
+        throw new CodexJsonRpcError(
+          -32601,
+          `Unsupported Codex server request: ${request.method}`,
+        );
       }
     }
   }
 
-  private async resolveApprovalDecision<TDecision extends string>(
+  private rejectUnownedServerCapability(
+    request: JsonRpcServerRequest,
+    reason: string,
+  ): never {
+    log.warn(
+      {
+        method: request.method,
+        requestId: request.id,
+        owner: "app-server-client",
+        outcome: "rejected",
+      },
+      "Rejected disabled Codex server-request capability",
+    );
+    throw new CodexJsonRpcError(
+      -32601,
+      `Unsupported Codex server request: ${request.method} (${reason})`,
+    );
+  }
+
+  private async requestToolApprovalResult(
+    options: StartSessionOptions,
+    toolName: string,
+    toolInput: unknown,
+    signal: AbortSignal,
+    requestId?: JsonRpcId,
+  ): Promise<ToolApprovalResult> {
+    if (signal.aborted) {
+      return {
+        behavior: "deny",
+        message: "Interactive approval request was aborted",
+        interrupt: true,
+      };
+    }
+    if (!options.onToolApproval) {
+      log.warn(
+        { toolName },
+        "No onToolApproval handler available; denying Codex approval request",
+      );
+      return {
+        behavior: "deny",
+        message: "No interactive approval handler is available",
+      };
+    }
+
+    let result: ToolApprovalResult;
+    try {
+      const requestMethod = asRecord(toolInput)?.requestMethod;
+      result = await options.onToolApproval(toolName, toolInput, {
+        signal,
+        requestId:
+          requestId === undefined ? undefined : codexServerRequestId(requestId),
+        requestMethod:
+          typeof requestMethod === "string" ? requestMethod : undefined,
+        respectProviderDecision: true,
+      });
+    } catch (error) {
+      const aborted =
+        signal.aborted ||
+        (error instanceof Error && error.name === "AbortError");
+      log.warn(
+        {
+          toolName,
+          errorName: error instanceof Error ? error.name : "UnknownError",
+          aborted,
+        },
+        "onToolApproval threw; denying Codex approval request",
+      );
+      return {
+        behavior: "deny",
+        message: aborted
+          ? "Interactive approval request was aborted"
+          : "Interactive approval handler failed",
+        ...(aborted ? { interrupt: true } : {}),
+      };
+    }
+
+    log.info(
+      {
+        toolName,
+        behavior: result.behavior,
+        approvalScope: result.approvalScope ?? "once",
+        providerDecision: result.providerDecision ?? null,
+        interrupt: result.interrupt ?? false,
+      },
+      "Resolved tool approval callback result",
+    );
+    return result;
+  }
+
+  private async resolveApprovalDecision<TDecision>(
     options: StartSessionOptions,
     toolName: string,
     toolInput: unknown,
     signal: AbortSignal,
     allowDecision: TDecision,
     denyDecision: TDecision,
+    requestId?: JsonRpcId,
+    sessionDecision?: TDecision,
+    cancelDecision?: TDecision,
+    alwaysDecision?: TDecision,
   ): Promise<TDecision> {
-    if (!options.onToolApproval) {
-      log.warn(
-        { toolName },
-        "No onToolApproval handler available; denying Codex approval request",
-      );
-      return denyDecision;
-    }
-
-    let result: ToolApprovalResult;
-    try {
-      result = await options.onToolApproval(toolName, toolInput, { signal });
-    } catch (error) {
-      log.warn(
-        { toolName, error },
-        "onToolApproval threw; denying Codex approval request",
-      );
-      return denyDecision;
-    }
-
-    log.info(
-      { toolName, behavior: result.behavior },
-      "Resolved tool approval callback result",
+    const result = await this.requestToolApprovalResult(
+      options,
+      toolName,
+      toolInput,
+      signal,
+      requestId,
     );
 
-    return result.behavior === "allow" ? allowDecision : denyDecision;
+    if (result.behavior === "allow" && result.providerDecision !== "deny") {
+      if (
+        result.providerDecision === "approve_always" ||
+        (!result.providerDecision && result.approvalScope === "always")
+      ) {
+        return alwaysDecision ?? sessionDecision ?? allowDecision;
+      }
+      if (
+        result.providerDecision === "approve_accept_edits" ||
+        result.providerDecision === "approve_for_session"
+      ) {
+        return sessionDecision ?? allowDecision;
+      }
+      return allowDecision;
+    }
+    // An explicit user denial means native `decline`; `cancel` is reserved for
+    // transport abort/cancellation paths without a selected native decision.
+    if (result.providerDecision === "deny") return denyDecision;
+    return result.interrupt && cancelDecision !== undefined
+      ? cancelDecision
+      : denyDecision;
   }
 
   private convertNotificationToSDKMessages(
@@ -2346,6 +3165,7 @@ export class CodexProvider implements AgentProvider {
       case "turn/completed": {
         const params = this.asTurnCompletedNotification(notification.params);
         const turnId = params?.turn.id ?? null;
+        const turnStatus = params?.turn.status ?? "completed";
         if (turnId) {
           const keyPrefix = `${turnId}\0`;
           for (const key of commandOutputBuffers.keys()) {
@@ -2357,6 +3177,8 @@ export class CodexProvider implements AgentProvider {
           type: "system",
           subtype: "turn_complete",
           session_id: sessionId,
+          turnId,
+          turnStatus,
           usage: usage
             ? {
                 input_tokens: usage.inputTokens,
@@ -2372,9 +3194,9 @@ export class CodexProvider implements AgentProvider {
           phase: "completed",
           sourceEvent: notification.method,
         });
-        if (params?.turn.status === "failed") {
+        if (turnStatus === "failed") {
           const codexError = classifyCodexError(
-            params.turn.error ?? notification.params,
+            params?.turn.error ?? notification.params,
             turnId ? { correlationId: turnId } : {},
           );
           return [
@@ -2453,7 +3275,11 @@ export class CodexProvider implements AgentProvider {
           sessionId,
           turnId,
           notification.method,
-        );
+        ).map((message) => ({
+          ...message,
+          turnId,
+          codexTurnId: turnId,
+        }));
       }
 
       case "rawResponseItem/completed":
@@ -2472,6 +3298,8 @@ export class CodexProvider implements AgentProvider {
             type: "assistant",
             session_id: sessionId,
             uuid: toolUseId,
+            turnId: params.turnId,
+            codexTurnId: params.turnId,
             message: {
               role: "assistant",
               content: [
@@ -2532,6 +3360,8 @@ export class CodexProvider implements AgentProvider {
             type: "assistant",
             session_id: sessionId,
             uuid: `${itemId}-${turnId}`,
+            turnId,
+            codexTurnId: turnId,
             message: {
               role: "assistant",
               content: [
@@ -2769,6 +3599,8 @@ export class CodexProvider implements AgentProvider {
           type: "assistant",
           session_id: sessionId,
           uuid: `${itemId}-${turnId}-custom-call`,
+          turnId,
+          codexTurnId: turnId,
           message: {
             role: "assistant",
             content,
@@ -2807,6 +3639,8 @@ export class CodexProvider implements AgentProvider {
           type: "user",
           session_id: sessionId,
           uuid: `${itemId}-${turnId}-custom-result`,
+          turnId,
+          codexTurnId: turnId,
           message: {
             role: "user",
             content: [toolResult],
@@ -3272,6 +4106,7 @@ export class CodexProvider implements AgentProvider {
                   id: item.id,
                   name: normalizedInvocation.toolName,
                   input: normalizedInvocation.input,
+                  status: item.status,
                 },
               ],
             },
@@ -3433,6 +4268,7 @@ export class CodexProvider implements AgentProvider {
                   id: item.id,
                   name: `${item.server}:${item.tool}`,
                   input: item.arguments,
+                  status: item.status,
                 },
               ],
             },
@@ -3466,6 +4302,7 @@ export class CodexProvider implements AgentProvider {
                       item.status === "completed"
                         ? JSON.stringify(item.result)
                         : item.error?.message || "MCP tool call failed",
+                    ...(item.status === "completed" ? {} : { is_error: true }),
                   },
                 ],
               },
@@ -3751,56 +4588,10 @@ export class CodexProvider implements AgentProvider {
         });
         return [message];
       }
-
-      default:
-        return [];
-    }
-  }
-
-  /**
-   * Extract text content from a user message.
-   */
-  private extractTextFromMessage(message: unknown): string {
-    if (!message || typeof message !== "object") {
-      return "";
     }
 
-    // Handle UserMessage format
-    const userMsg = message as UserMessage;
-    if (typeof userMsg.text === "string") {
-      return userMsg.text;
-    }
-
-    // Handle SDK message format
-    const sdkMsg = message as {
-      message?: { content?: string | unknown[] };
-    };
-    const content = sdkMsg.message?.content;
-
-    if (typeof content === "string") {
-      return content;
-    }
-
-    if (Array.isArray(content)) {
-      return content
-        .map((block: unknown) => {
-          if (typeof block === "string") return block;
-          if (
-            typeof block === "object" &&
-            block !== null &&
-            "type" in block &&
-            (block as { type: string }).type === "text" &&
-            "text" in block
-          ) {
-            return (block as { text: string }).text;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-
-    return "";
+    const exhaustiveItem: never = item;
+    return exhaustiveItem;
   }
 
   private getOptionalString(value: unknown): string | null {
@@ -3816,6 +4607,187 @@ export class CodexProvider implements AgentProvider {
   private getOptionalNumber(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
+}
+
+function codexServerRequestId(id: JsonRpcId): string {
+  return `codex:${typeof id}:${String(id)}`;
+}
+
+function getProviderApprovalDecision(
+  result: ToolApprovalResult,
+): ProviderApprovalDecision {
+  if (result.behavior === "deny") return "deny";
+  if (result.providerDecision) return result.providerDecision;
+  return result.approvalScope === "always" ? "approve_always" : "approve";
+}
+
+function normalizeAutoResolutionMs(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return Math.min(Math.floor(value), 2_147_483_647);
+}
+
+function isCommandApprovalDecision(
+  value: unknown,
+): value is CommandExecutionApprovalDecision {
+  if (
+    value === "accept" ||
+    value === "acceptForSession" ||
+    value === "decline" ||
+    value === "cancel"
+  ) {
+    return true;
+  }
+  const decision = asRecord(value);
+  return Boolean(
+    decision &&
+      (asRecord(decision.acceptWithExecpolicyAmendment) ||
+        asRecord(decision.applyNetworkPolicyAmendment)),
+  );
+}
+
+function isPolicyAmendmentCommandApprovalDecision(
+  decision: CommandExecutionApprovalDecision,
+): boolean {
+  if (typeof decision !== "object") return false;
+  if ("acceptWithExecpolicyAmendment" in decision) return true;
+  const amendment = asRecord(decision.applyNetworkPolicyAmendment);
+  const networkPolicy = asRecord(amendment?.network_policy_amendment);
+  return networkPolicy?.action === "allow";
+}
+
+/** Mirrors Codex TUI's stable-protocol fallback when availableDecisions is absent. */
+function getEffectiveCommandApprovalDecisions(
+  params: Record<string, unknown>,
+): CommandExecutionApprovalDecision[] {
+  if (Array.isArray(params.availableDecisions)) {
+    return params.availableDecisions.filter(isCommandApprovalDecision);
+  }
+
+  if (params.networkApprovalContext != null) {
+    const decisions: CommandExecutionApprovalDecision[] = [
+      "accept",
+      "acceptForSession",
+    ];
+    const amendment = Array.isArray(params.proposedNetworkPolicyAmendments)
+      ? params.proposedNetworkPolicyAmendments.find(
+          (candidate) => asRecord(candidate)?.action === "allow",
+        )
+      : undefined;
+    if (amendment) {
+      decisions.push({
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: amendment as {
+            host: string;
+            action: "allow" | "deny";
+          },
+        },
+      });
+    }
+    decisions.push("cancel");
+    return decisions;
+  }
+
+  if (params.additionalPermissions != null) {
+    return ["accept", "cancel"];
+  }
+
+  const decisions: CommandExecutionApprovalDecision[] = ["accept"];
+  if (Array.isArray(params.proposedExecpolicyAmendment)) {
+    decisions.push({
+      acceptWithExecpolicyAmendment: {
+        execpolicy_amendment: params.proposedExecpolicyAmendment.filter(
+          (part): part is string => typeof part === "string",
+        ),
+      },
+    });
+  }
+  decisions.push("cancel");
+  return decisions;
+}
+
+function buildCodexRetryWarning(
+  update: AppServerRetryUpdate,
+  sessionId: string | undefined,
+  canonicalEvent: CodexEventEnvelope | undefined,
+): SDKMessage {
+  const status = update.retryStatus;
+  const content =
+    status.state === "queued"
+      ? `Codex is busy. The request is queued for bounded attempt ${status.nextAttempt}/${status.maxAttempts}.`
+      : `Codex is busy. Retrying with bounded attempt ${status.nextAttempt}/${status.maxAttempts}.`;
+  return withCodexTimestamp({
+    type: "system",
+    subtype: "warning",
+    uuid: `codex-retry-${String(update.requestId)}-${status.attempt}`,
+    ...(sessionId ? { session_id: sessionId } : {}),
+    content,
+    warning: content,
+    warningKind: "codex_app_server_overloaded",
+    willRetry: true,
+    codexRetryStatus: { ...status },
+    ...(canonicalEvent
+      ? {
+          codexEventSequence: canonicalEvent.sequence,
+          codexEventId: canonicalEvent.eventId,
+        }
+      : {}),
+  } as SDKMessage);
+}
+
+export function buildCodexUserInput(
+  message: {
+    attachments?: Array<{ path: string; mimeType: string }>;
+    codexInputs?: CodexStructuredUserInput[];
+    message?: { content?: unknown };
+  },
+  text: string,
+): CodexUserInput[] {
+  const input: CodexUserInput[] = [{ type: "text", text, text_elements: [] }];
+
+  const content = message.message?.content;
+  if (Array.isArray(content)) {
+    for (const rawBlock of content) {
+      const block = asRecord(rawBlock);
+      const source = asRecord(block?.source);
+      if (
+        block?.type !== "image" ||
+        source?.type !== "base64" ||
+        typeof source.data !== "string" ||
+        typeof source.media_type !== "string"
+      ) {
+        continue;
+      }
+      input.push({
+        type: "image",
+        url: `data:${source.media_type};base64,${source.data}`,
+      });
+    }
+  }
+
+  for (const attachment of message.attachments ?? []) {
+    if (!isAbsolute(attachment.path)) continue;
+    const mimeType = attachment.mimeType.toLowerCase();
+    if (mimeType.startsWith("image/")) {
+      input.push({ type: "localImage", path: attachment.path });
+    } else if (mimeType.startsWith("audio/")) {
+      input.push({ type: "localAudio", path: attachment.path });
+    }
+  }
+
+  for (const structuredInput of message.codexInputs ?? []) {
+    if (!structuredInput.name || !structuredInput.path) continue;
+    input.push({ ...structuredInput });
+  }
+
+  return input;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /**

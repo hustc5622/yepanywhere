@@ -12,6 +12,8 @@ export interface ContentBlock {
   id?: string;
   name?: string;
   input?: unknown;
+  /** Provider lifecycle status for a projected tool_use block. */
+  status?: string;
   /** For tool_result blocks - references the tool_use id */
   tool_use_id?: string;
   /** For tool_result blocks - the result content */
@@ -82,12 +84,19 @@ export type TimestampedSDKMessage<T extends SDKMessage = SDKMessage> = T & {
   timestamp: string;
 };
 
+/** Exact structured Codex app-server user inputs retained across queue/steer. */
+export type CodexStructuredUserInput =
+  | { type: "skill"; name: string; path: string }
+  | { type: "mention"; name: string; path: string };
+
 export interface UserMessage {
   text: string;
   images?: string[]; // base64 or file paths
   documents?: string[];
   /** File attachments with paths for agent to access via Read tool */
   attachments?: UploadedFile[];
+  /** Ordered provider-native Codex skill/mention inputs. */
+  codexInputs?: CodexStructuredUserInput[];
   mode?: PermissionMode;
   /** UUID to use for this message. If not provided, SDK will generate one. */
   uuid?: string;
@@ -105,12 +114,16 @@ export interface UserMessage {
 export interface QueuedUserMessage {
   type: "user";
   uuid?: string;
+  /** Provider-internal client correlation, retained only when enabled. */
+  tempId?: string;
   /**
    * Structured uploads retained for providers with native file-part support.
    * MessageQueue only includes this field when explicitly configured so SDKs
    * that validate their input shape do not receive provider-specific metadata.
    */
   attachments?: UploadedFile[];
+  /** Structured Codex input items, retained only when enabled. */
+  codexInputs?: CodexStructuredUserInput[];
   message: {
     role: "user";
     content:
@@ -152,7 +165,25 @@ export interface ToolApprovalResult {
    * Absent/"once" applies to this request only.
    */
   approvalScope?: "once" | "always";
+  /**
+   * Exact decision selected on Yep's pending-input control plane.
+   *
+   * Provider adapters with richer native responses (notably Codex
+   * permissions and MCP elicitation) must prefer this over reconstructing a
+   * choice from `behavior` / `approvalScope`. Generic providers may safely
+   * ignore it and continue using the provider-neutral fields above.
+   */
+  providerDecision?: ProviderApprovalDecision;
 }
+
+/** Exact pending-input decisions accepted by the API/runtime boundary. */
+export type ProviderApprovalDecision =
+  | "approve"
+  | "approve_accept_edits"
+  | "approve_for_session"
+  | "approve_strict_auto_review"
+  | "approve_always"
+  | "deny";
 
 export type CanUseTool = (
   toolName: string,
@@ -161,6 +192,8 @@ export type CanUseTool = (
     signal: AbortSignal;
     /** Provider-native request id, when the provider exposes one. */
     requestId?: string;
+    /** Provider-native request method used to disambiguate reused ids. */
+    requestMethod?: string;
     /**
      * The provider already applied its native permission policy and still
      * decided this request needs a human. Skip Yep's mode-based auto-approval

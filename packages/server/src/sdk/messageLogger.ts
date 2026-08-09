@@ -1,6 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { publicCodexFilePath } from "../codex/file-change.js";
 import { loadConfig } from "../config.js";
+import {
+  MANAGED_ATTACHMENT_MARKER,
+  sanitizeManagedAttachmentPrompt,
+} from "./messageQueue.js";
 
 /**
  * Simple JSONL logger for raw SDK messages.
@@ -55,19 +60,122 @@ export function logSDKMessage(
     _sid: sessionId,
     ...(options?.provider ? { _provider: options.provider } : {}),
   };
+  const safeMessage = sanitizeSDKMessageForLog(message);
 
-  if (message && typeof message === "object" && !Array.isArray(message)) {
+  if (
+    safeMessage &&
+    typeof safeMessage === "object" &&
+    !Array.isArray(safeMessage)
+  ) {
     logRaw({
       ...base,
-      ...(message as Record<string, unknown>),
+      ...(safeMessage as Record<string, unknown>),
     });
     return;
   }
 
   logRaw({
     ...base,
-    _message: message,
+    _message: safeMessage,
   });
+}
+
+/** Project provider messages onto the public/log-safe boundary. */
+export function sanitizeSDKMessageForPublic(message: unknown): unknown {
+  if (Array.isArray(message)) {
+    return message.map((entry) => sanitizeSDKMessageForPublic(entry));
+  }
+  const sanitizePromptStrings =
+    Boolean(message) &&
+    typeof message === "object" &&
+    !Array.isArray(message) &&
+    (message as Record<string, unknown>).type === "user";
+  return sanitizeSDKValue(message, false, sanitizePromptStrings, false);
+}
+
+function sanitizeSDKValue(
+  value: unknown,
+  insideAttachments: boolean,
+  sanitizePromptStrings: boolean,
+  insideCodexImageViewInput: boolean,
+): unknown {
+  if (typeof value === "string") {
+    return sanitizePromptStrings
+      ? sanitizeManagedAttachmentPrompt(value)
+      : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) =>
+      sanitizeSDKValue(
+        entry,
+        insideAttachments,
+        sanitizePromptStrings,
+        insideCodexImageViewInput,
+      ),
+    );
+  }
+  if (!value || typeof value !== "object") return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+
+  const source = value as Record<string, unknown>;
+  const isStructuredCodexReference =
+    (source.type === "skill" || source.type === "mention") &&
+    typeof source.name === "string";
+  const isLocalMedia =
+    source.type === "localImage" || source.type === "localAudio";
+  const isCodexImageViewItem =
+    source.type === "imageView" || source.type === "image_view";
+  const isCodexImageViewToolUse =
+    source.type === "tool_use" && source.name === "ViewImage";
+  const isToolResult = source.type === "tool_result";
+  const isUploadedFile =
+    typeof source.path === "string" &&
+    typeof source.mimeType === "string" &&
+    typeof source.size === "number" &&
+    (typeof source.id === "string" || typeof source.originalName === "string");
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(source)) {
+    if (isStructuredCodexReference && key === "path") continue;
+    if (key === "internalPrompt") continue;
+    if (
+      key === "path" &&
+      (insideAttachments || isUploadedFile || isLocalMedia)
+    ) {
+      output[key] = MANAGED_ATTACHMENT_MARKER;
+      continue;
+    }
+    if (
+      key === "path" &&
+      typeof entry === "string" &&
+      (insideCodexImageViewInput || isCodexImageViewItem)
+    ) {
+      output[key] = publicCodexFilePath(entry);
+      continue;
+    }
+    if (key === "content" && isToolResult && typeof entry === "string") {
+      output[key] = sanitizeCodexImageViewToolResult(entry);
+      continue;
+    }
+    output[key] = sanitizeSDKValue(
+      entry,
+      insideAttachments || key === "attachments",
+      sanitizePromptStrings,
+      insideCodexImageViewInput || (isCodexImageViewToolUse && key === "input"),
+    );
+  }
+  return output;
+}
+
+function sanitizeCodexImageViewToolResult(value: string): string {
+  const prefix = "Viewed image: ";
+  if (!value.startsWith(prefix)) return value;
+  return `${prefix}${publicCodexFilePath(value.slice(prefix.length))}`;
+}
+
+/** Keep provider-only paths out of the optional sdk-raw JSONL. */
+export function sanitizeSDKMessageForLog(message: unknown): unknown {
+  return sanitizeSDKMessageForPublic(message);
 }
 
 /**

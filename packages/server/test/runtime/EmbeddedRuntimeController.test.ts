@@ -141,6 +141,42 @@ describe("EmbeddedRuntimeController", () => {
     });
   });
 
+  it("rejects immediate-only starts before embedded queue admission", async () => {
+    const controller = createController({ maxWorkers: 1, maxQueueSize: 4 });
+
+    await controller.startSession({
+      projectPath: "/tmp/runtime-immediate-one",
+      message: { text: "one" },
+    });
+    await expect(
+      controller.startSession({
+        projectPath: "/tmp/runtime-immediate-two",
+        message: { text: "must not queue" },
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+    await expect(
+      controller.createSession({
+        projectPath: "/tmp/runtime-immediate-create",
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+    await expect(
+      controller.resumeSession({
+        sessionId: "existing-runtime-thread",
+        projectPath: "/tmp/runtime-immediate-resume",
+        message: { text: "must not queue as a resume" },
+        requireImmediate: true,
+      }),
+    ).resolves.toEqual({ error: "immediate_start_unavailable" });
+
+    await expect(controller.getQueueStatus()).resolves.toMatchObject({
+      activeWorkers: 1,
+      queueLength: 0,
+    });
+    await expect(controller.listProcesses()).resolves.toHaveLength(1);
+  });
+
   it("forwards live session controls through structured methods", async () => {
     const controller = createController();
     const started = await controller.startSession({
@@ -158,6 +194,17 @@ describe("EmbeddedRuntimeController", () => {
       ok: true,
       permissionMode: "acceptEdits",
       modeVersion: 1,
+    });
+
+    await expect(
+      controller.executeCodexControl({
+        sessionId,
+        request: { control: "thread/goal/get" },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      control: "thread/goal/get",
+      error: { code: "unsupported_provider" },
     });
 
     await expect(
@@ -248,6 +295,209 @@ describe("EmbeddedRuntimeController", () => {
       type: "mode-change",
       data: { permissionMode: "acceptEdits", modeVersion: 1 },
     });
+  });
+
+  it("replays a durable terminal stream after restart without an active process", async () => {
+    const eventsDir = path.join(
+      tmpdir(),
+      `embedded-runtime-offline-replay-${randomUUID()}`,
+    );
+    eventDirs.push(eventsDir);
+    const sessionId = "restarted-session";
+    const firstStore = new RuntimeEventStore({ eventsDir });
+    await firstStore.append({
+      processId: "old-process",
+      sessionId,
+      type: "message",
+      data: {
+        type: "user",
+        tempId: "restarted-turn",
+        message: { content: [] },
+      },
+    });
+    await firstStore.append({
+      processId: "old-process",
+      sessionId,
+      type: "message",
+      data: {
+        type: "system",
+        subtype: "turn_complete",
+        turnStatus: "completed",
+      },
+    });
+    await firstStore.append({
+      processId: "old-process",
+      sessionId,
+      type: "complete",
+      data: { timestamp: "2026-08-08T00:00:00.000Z" },
+    });
+    await firstStore.flush();
+
+    const restarted = createController({
+      eventStore: new RuntimeEventStore({ eventsDir }),
+    });
+    const events: Array<{ type: string; data: unknown }> = [];
+    const subscription = await restarted.subscribeSession(
+      sessionId,
+      (type, data) => events.push({ type, data }),
+    );
+
+    expect(subscription).not.toBeNull();
+    expect(events[0]).toEqual({
+      type: "connected",
+      data: {
+        processId: "old-process",
+        sessionId,
+        state: "idle",
+        replayOnly: true,
+      },
+    });
+    expect(events[1]).toMatchObject({
+      type: "message",
+      data: { type: "user", tempId: "restarted-turn", isReplay: true },
+    });
+    expect(events.at(-1)).toEqual({
+      type: "complete",
+      data: { timestamp: "2026-08-08T00:00:00.000Z" },
+    });
+    subscription?.cleanup();
+  });
+
+  it.each([
+    [
+      "result",
+      {
+        type: "result",
+        turnId: "offline-turn",
+        is_error: false,
+      },
+    ],
+    [
+      "turn_complete",
+      {
+        type: "system",
+        subtype: "turn_complete",
+        turnId: "offline-turn",
+        turnStatus: "completed",
+      },
+    ],
+    [
+      "non-retryable error",
+      {
+        type: "error",
+        turnId: "offline-turn",
+        willRetry: false,
+        error: "terminal failure",
+      },
+    ],
+  ])(
+    "bounds an offline %s terminal with a replay-only transport completion",
+    async (_label, terminalMessage) => {
+      const eventsDir = path.join(
+        tmpdir(),
+        `embedded-runtime-turn-terminal-${randomUUID()}`,
+      );
+      eventDirs.push(eventsDir);
+      const eventStore = new RuntimeEventStore({ eventsDir });
+      await eventStore.append({
+        processId: "idle-process",
+        sessionId: "idle-session",
+        type: "message",
+        data: { type: "user", turnId: "offline-turn", uuid: "offline-user" },
+        timestamp: "2026-08-08T00:00:00.000Z",
+      });
+      await eventStore.append({
+        processId: "idle-process",
+        sessionId: "idle-session",
+        type: "message",
+        data: terminalMessage,
+        timestamp: "2026-08-08T00:00:01.000Z",
+      });
+      await eventStore.append({
+        processId: "idle-process",
+        sessionId: "idle-session",
+        type: "status",
+        data: { state: "idle" },
+        timestamp: "2026-08-08T00:00:02.000Z",
+      });
+      await eventStore.flush();
+      const controller = createController({
+        eventStore: new RuntimeEventStore({ eventsDir }),
+      });
+      const events: Array<{ type: string; data: unknown }> = [];
+
+      const subscription = await controller.subscribeSession(
+        "idle-session",
+        (type, data) => events.push({ type, data }),
+      );
+
+      expect(subscription).not.toBeNull();
+      expect(events.filter((event) => event.type === "complete")).toEqual([
+        {
+          type: "complete",
+          data: {
+            timestamp: "2026-08-08T00:00:01.000Z",
+            replayOnly: true,
+            synthetic: true,
+            reason: "journal-turn-terminal",
+          },
+        },
+      ]);
+      expect(events.at(-2)).toEqual({
+        type: "status",
+        data: { state: "idle" },
+      });
+      subscription?.cleanup();
+    },
+  );
+
+  it("does not let an older terminal close a partial offline user/delta turn", async () => {
+    const eventsDir = path.join(
+      tmpdir(),
+      `embedded-runtime-partial-replay-${randomUUID()}`,
+    );
+    eventDirs.push(eventsDir);
+    const eventStore = new RuntimeEventStore({ eventsDir });
+    await eventStore.append({
+      processId: "interrupted-process",
+      sessionId: "interrupted-session",
+      type: "message",
+      data: { type: "result", turnId: "completed-turn" },
+    });
+    await eventStore.append({
+      processId: "interrupted-process",
+      sessionId: "interrupted-session",
+      type: "message",
+      data: { type: "user", turnId: "interrupted-turn" },
+    });
+    await eventStore.append({
+      processId: "interrupted-process",
+      sessionId: "interrupted-session",
+      type: "message",
+      data: {
+        type: "stream_event",
+        turnId: "interrupted-turn",
+        delta: "partial",
+      },
+    });
+    await eventStore.append({
+      processId: "interrupted-process",
+      sessionId: "interrupted-session",
+      type: "message",
+      data: {
+        type: "error",
+        turnId: "interrupted-turn",
+        willRetry: true,
+      },
+    });
+    await eventStore.flush();
+    const controller = createController({
+      eventStore: new RuntimeEventStore({ eventsDir }),
+    });
+
+    await expect(
+      controller.subscribeSession("interrupted-session", vi.fn()),
+    ).resolves.toBeNull();
   });
 
   it("cancels queued starts before aborting active processes during shutdown", async () => {

@@ -117,6 +117,9 @@ export function toCodexInteractiveRequestView(
           allowPartialSubmission: true,
           autoResolutionMs: getFiniteNumber(params.autoResolutionMs) ?? null,
           codexQuestions: params.questions ?? [],
+          threadId,
+          turnId: params.turnId,
+          itemId: params.itemId,
         },
       },
     };
@@ -214,20 +217,23 @@ export function buildCodexInteractiveResponse(
     response === "approve_accept_edits" || response === "approve_for_session";
   const approveStrictAutoReview = response === "approve_strict_auto_review";
   const approveAlways = response === "approve_always";
+  const approvePersistently = approveForSession || approveAlways;
 
   switch (method) {
     case "item/commandExecution/requestApproval":
       return {
         decision: approved
-          ? approveForSession
-            ? getCommandPersistentApprovalDecision(params)
-            : "accept"
+          ? approveAlways
+            ? getCommandAlwaysApprovalDecision(params)
+            : approveForSession
+              ? getCommandSessionApprovalDecision(params)
+              : "accept"
           : "decline",
       };
     case "item/fileChange/requestApproval":
       return {
         decision: approved
-          ? approveForSession
+          ? approvePersistently
             ? "acceptForSession"
             : "accept"
           : "decline",
@@ -249,7 +255,7 @@ export function buildCodexInteractiveResponse(
       }
       return {
         permissions: granted,
-        scope: approveForSession ? "session" : "turn",
+        scope: approvePersistently ? "session" : "turn",
         ...(approveStrictAutoReview ? { strictAutoReview: true } : {}),
       };
     }
@@ -379,6 +385,10 @@ function toMcpElicitationRequestView(
         toolInput: {
           questions,
           allowPartialSubmission: false,
+          threadId,
+          turnId: params.turnId,
+          itemId: params.itemId,
+          elicitationId: params.elicitationId,
           mcpElicitation: {
             mode: params.mode,
             serverName,
@@ -446,7 +456,18 @@ function buildMcpElicitationResponse(
   };
 }
 
-function getCommandPersistentApprovalDecision(
+function getCommandSessionApprovalDecision(
+  params: Record<string, unknown>,
+): unknown {
+  const availableDecisions = Array.isArray(params.availableDecisions)
+    ? params.availableDecisions
+    : [];
+  return availableDecisions.includes("acceptForSession")
+    ? "acceptForSession"
+    : "accept";
+}
+
+function getCommandAlwaysApprovalDecision(
   params: Record<string, unknown>,
 ): unknown {
   const availableDecisions = Array.isArray(params.availableDecisions)
@@ -457,33 +478,7 @@ function getCommandPersistentApprovalDecision(
   );
   if (offeredPersistentDecision) return offeredPersistentDecision;
 
-  if (Array.isArray(params.proposedExecpolicyAmendment)) {
-    return {
-      acceptWithExecpolicyAmendment: {
-        execpolicy_amendment: params.proposedExecpolicyAmendment,
-      },
-    };
-  }
-
-  const networkAmendments = Array.isArray(
-    params.proposedNetworkPolicyAmendments,
-  )
-    ? params.proposedNetworkPolicyAmendments
-    : [];
-  const networkAmendment = networkAmendments.find(
-    (value) => asRecord(value) !== null,
-  );
-  if (networkAmendment) {
-    return {
-      applyNetworkPolicyAmendment: {
-        network_policy_amendment: networkAmendment,
-      },
-    };
-  }
-
-  return availableDecisions.includes("acceptForSession")
-    ? "acceptForSession"
-    : "accept";
+  return getCommandSessionApprovalDecision(params);
 }
 
 function normalizeCodexQuestions(value: unknown): QuestionView[] {
@@ -801,8 +796,8 @@ function getFiniteNumber(value: unknown): number | undefined {
 
 function isPersistentCommandDecision(value: unknown): boolean {
   const decision = asRecord(value);
-  return (
-    !!asRecord(decision?.acceptWithExecpolicyAmendment) ||
-    !!asRecord(decision?.applyNetworkPolicyAmendment)
-  );
+  if (asRecord(decision?.acceptWithExecpolicyAmendment)) return true;
+  const amendment = asRecord(decision?.applyNetworkPolicyAmendment);
+  const networkPolicy = asRecord(amendment?.network_policy_amendment);
+  return networkPolicy?.action === "allow";
 }

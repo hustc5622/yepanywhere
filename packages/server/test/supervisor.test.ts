@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { encodeProjectId } from "../src/projects/paths.js";
 import { MessageQueue } from "../src/sdk/messageQueue.js";
 import { MockClaudeSDK, createMockScenario } from "../src/sdk/mock.js";
 import type {
@@ -133,6 +134,51 @@ describe("Supervisor", () => {
       expect(aborted).toBe(true);
       expect(providerSupervisor.getAllProcesses()).toHaveLength(0);
     });
+
+    it("passes canonical event provenance to create-only Codex sessions", async () => {
+      let aborted = false;
+      const startSession = vi.fn(async (_options: StartSessionOptions) => {
+        async function* iterator() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: "created-codex-session",
+          };
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+          },
+        };
+      });
+      const providerSupervisor = new Supervisor({
+        provider: createCodexTestProvider(startSession),
+        idleTimeoutMs: 100,
+      });
+
+      try {
+        await providerSupervisor.createSession(
+          "/tmp/codex-event-project",
+          undefined,
+          { codexEventAccountId: "account-event-spine" },
+        );
+
+        expect(startSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            codexEventAccountId: "account-event-spine",
+            codexEventProjectId: encodeProjectId("/tmp/codex-event-project"),
+          }),
+        );
+      } finally {
+        await providerSupervisor.shutdown();
+      }
+    });
   });
 
   describe("resumeSession", () => {
@@ -177,32 +223,26 @@ describe("Supervisor", () => {
 
     it("passes rollbackNumTurns to provider-backed resumed sessions", async () => {
       let aborted = false;
-      const startSession = vi.fn(
-        async (options: {
-          resumeSessionId?: string;
-          rollbackNumTurns?: number;
-          initialMessage?: { text: string };
-        }) => {
-          async function* iterator() {
-            yield {
-              type: "system",
-              subtype: "init",
-              session_id: options.resumeSessionId ?? "new-session",
-            };
-            while (!aborted) {
-              await new Promise((resolve) => setTimeout(resolve, 10));
-            }
-          }
-
-          return {
-            iterator: iterator(),
-            queue: new MessageQueue(),
-            abort: () => {
-              aborted = true;
-            },
+      const startSession = vi.fn(async (options: StartSessionOptions) => {
+        async function* iterator() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: options.resumeSessionId ?? "new-session",
           };
-        },
-      );
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+          },
+        };
+      });
       const provider: AgentProvider = {
         name: "codex",
         displayName: "Codex",
@@ -229,13 +269,15 @@ describe("Supervisor", () => {
         "/tmp/test",
         { text: "q2-1" },
         undefined,
-        { rollbackNumTurns: 2 },
+        { rollbackNumTurns: 2, codexEventAccountId: "account-event-spine" },
       );
 
       expect(startSession).toHaveBeenCalledWith(
         expect.objectContaining({
           resumeSessionId: "sess-123",
           rollbackNumTurns: 2,
+          codexEventAccountId: "account-event-spine",
+          codexEventProjectId: encodeProjectId("/tmp/test"),
           initialMessage: expect.objectContaining({ text: "q2-1" }),
         }),
       );
@@ -671,6 +713,79 @@ describe("Supervisor", () => {
       const found = supervisor.getProcessForSession("unknown-session");
       expect(found).toBeUndefined();
     });
+
+    it("ignores a late durable-id claim when another process already owns it", async () => {
+      const starts: Array<{
+        releaseInit: () => void;
+        stop: () => void;
+      }> = [];
+      const provider = createCodexTestProvider(async () => {
+        let releaseInit = () => undefined;
+        let stop = () => undefined;
+        const initGate = new Promise<void>((resolve) => {
+          releaseInit = resolve;
+        });
+        const stopGate = new Promise<void>((resolve) => {
+          stop = resolve;
+        });
+        starts.push({ releaseInit, stop });
+
+        async function* iterator() {
+          await initGate;
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: "durable-session",
+          };
+          await stopGate;
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: stop,
+        };
+      });
+      const providerSupervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+      });
+
+      const first = await providerSupervisor.resumeSession(
+        "temporary-first",
+        "/tmp/test",
+        { text: "first" },
+      );
+      const second = await providerSupervisor.resumeSession(
+        "temporary-second",
+        "/tmp/test",
+        { text: "second" },
+      );
+      if (!("id" in first) || !("id" in second)) {
+        throw new Error("expected immediate processes");
+      }
+
+      starts[1]?.releaseInit();
+      await vi.waitFor(() => {
+        expect(
+          providerSupervisor.getProcessForSession("durable-session")?.id,
+        ).toBe(second.id);
+      });
+
+      starts[0]?.releaseInit();
+      await vi.waitFor(() => {
+        expect(first.sessionId).toBe("durable-session");
+      });
+      expect(
+        providerSupervisor.getProcessForSession("durable-session")?.id,
+      ).toBe(second.id);
+      expect(
+        providerSupervisor.getProcessForSession("temporary-first")?.id,
+      ).toBe(first.id);
+
+      await providerSupervisor.abortProcess(first.id);
+      await providerSupervisor.abortProcess(second.id);
+    });
   });
 
   describe("getProcessInfoList", () => {
@@ -718,6 +833,199 @@ describe("Supervisor", () => {
       await supervisor.abortProcess(process.id);
 
       expect(supervisor.getProcessForSession("sess-123")).toBeUndefined();
+    });
+  });
+
+  describe("worker admission", () => {
+    it("rejects immediate-only starts before queue admission", async () => {
+      let invocation = 0;
+      const aborters: Array<() => void> = [];
+      const startSession = vi.fn(async () => {
+        invocation += 1;
+        let aborted = false;
+        aborters.push(() => {
+          aborted = true;
+        });
+        const sessionId = `immediate-session-${invocation}`;
+        async function* iterator() {
+          yield {
+            type: "system" as const,
+            subtype: "init" as const,
+            session_id: sessionId,
+          };
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: aborters.at(-1) ?? (() => {}),
+        };
+      });
+      const admissionSupervisor = new Supervisor({
+        provider: createOpenCodeTestProvider(startSession),
+        idleTimeoutMs: 100,
+        maxWorkers: 1,
+        idlePreemptThresholdMs: 60_000,
+      });
+
+      try {
+        const first = await admissionSupervisor.startSession("/tmp/first", {
+          text: "first",
+        });
+        expect("id" in first).toBe(true);
+
+        await expect(
+          admissionSupervisor.startSession(
+            "/tmp/second",
+            { text: "must not enter the queue" },
+            undefined,
+            undefined,
+            { requireImmediate: true },
+          ),
+        ).resolves.toEqual({ error: "immediate_start_unavailable" });
+        await expect(
+          admissionSupervisor.createSession(
+            "/tmp/create-only",
+            undefined,
+            undefined,
+            { requireImmediate: true },
+          ),
+        ).resolves.toEqual({ error: "immediate_start_unavailable" });
+
+        expect(admissionSupervisor.getQueueInfo()).toHaveLength(0);
+        expect(startSession).toHaveBeenCalledTimes(1);
+      } finally {
+        await admissionSupervisor.shutdown();
+      }
+    });
+
+    it("does not attach an immediate resume to queued background work", async () => {
+      let aborted = false;
+      const startSession = vi.fn(async (options: StartSessionOptions) => {
+        const sessionId = options.resumeSessionId ?? "capacity-owner";
+        async function* iterator() {
+          yield { type: "system", subtype: "init", session_id: sessionId };
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+          },
+        };
+      });
+      const admissionSupervisor = new Supervisor({
+        provider: createOpenCodeTestProvider(startSession),
+        idleTimeoutMs: 100,
+        maxWorkers: 1,
+        idlePreemptThresholdMs: 60_000,
+      });
+
+      try {
+        const active = await admissionSupervisor.startSession(
+          "/tmp/capacity-owner",
+          { text: "occupy capacity" },
+        );
+        expect("id" in active).toBe(true);
+
+        const queued = await admissionSupervisor.resumeSession(
+          "queued-thread",
+          "/tmp/queued-thread",
+          { text: "background request" },
+        );
+        expect(queued).toMatchObject({ queued: true, position: 1 });
+
+        await expect(
+          admissionSupervisor.resumeSession(
+            "queued-thread",
+            "/tmp/queued-thread",
+            { text: "external request must not be orphaned" },
+            undefined,
+            undefined,
+            { requireImmediate: true },
+          ),
+        ).resolves.toEqual({ error: "immediate_start_unavailable" });
+
+        expect(admissionSupervisor.getQueueInfo()).toHaveLength(1);
+        expect(admissionSupervisor.getQueueInfo()[0]?.id).toBe(
+          "queueId" in queued ? queued.queueId : undefined,
+        );
+        expect(startSession).toHaveBeenCalledTimes(1);
+      } finally {
+        await admissionSupervisor.shutdown();
+      }
+    });
+
+    it("reserves capacity while a provider start is still pending", async () => {
+      let releaseProviderStart = () => undefined;
+      const providerStartGate = new Promise<void>((resolve) => {
+        releaseProviderStart = resolve;
+      });
+      let aborted = false;
+      const startSession = vi.fn(async () => {
+        await providerStartGate;
+        async function* iterator() {
+          yield {
+            type: "system" as const,
+            subtype: "init" as const,
+            session_id: "reserved-session",
+          };
+          while (!aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+          },
+        };
+      });
+      const admissionSupervisor = new Supervisor({
+        provider: createOpenCodeTestProvider(startSession),
+        idleTimeoutMs: 100,
+        maxWorkers: 1,
+        idlePreemptThresholdMs: 60_000,
+      });
+      let first: ReturnType<Supervisor["startSession"]> | undefined;
+
+      try {
+        first = admissionSupervisor.startSession(
+          "/tmp/reserved-first",
+          { text: "first" },
+          undefined,
+          undefined,
+          { requireImmediate: true },
+        );
+        await vi.waitFor(() => expect(startSession).toHaveBeenCalledTimes(1));
+
+        await expect(
+          admissionSupervisor.startSession(
+            "/tmp/reserved-second",
+            { text: "must not penetrate admission" },
+            undefined,
+            undefined,
+            { requireImmediate: true },
+          ),
+        ).resolves.toEqual({ error: "immediate_start_unavailable" });
+        expect(startSession).toHaveBeenCalledTimes(1);
+        expect(admissionSupervisor.getQueueInfo()).toHaveLength(0);
+
+        releaseProviderStart();
+        await expect(first).resolves.toMatchObject({
+          sessionId: "reserved-session",
+        });
+      } finally {
+        releaseProviderStart();
+        await first?.catch(() => undefined);
+        await admissionSupervisor.shutdown();
+      }
     });
   });
 
@@ -894,6 +1202,32 @@ describe("Supervisor", () => {
         resumeSessionId: "reasoning-session",
         reasoningEffort: "xhigh",
       });
+
+      const resumeSession = vi
+        .spyOn(reasoningSupervisor, "resumeSession")
+        .mockResolvedValueOnce({ error: "immediate_start_unavailable" });
+      await expect(
+        reasoningSupervisor.queueMessageToSession(
+          "reasoning-session",
+          "/tmp/reasoning-session",
+          { text: "must not queue after restart" },
+          undefined,
+          { reasoningEffort: "high" },
+          { requireImmediate: true },
+        ),
+      ).resolves.toEqual({
+        success: false,
+        error: "immediate_start_unavailable",
+      });
+      expect(resumeSession).toHaveBeenCalledWith(
+        "reasoning-session",
+        "/tmp/reasoning-session",
+        expect.objectContaining({ text: "must not queue after restart" }),
+        undefined,
+        expect.objectContaining({ reasoningEffort: "high" }),
+        { requireImmediate: true },
+      );
+      expect(reasoningSupervisor.getQueueInfo()).toHaveLength(0);
 
       await reasoningSupervisor.shutdown();
     });
