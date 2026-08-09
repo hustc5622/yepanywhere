@@ -63,6 +63,7 @@ import {
   getAgentCommandConfig,
   getStaticAgentCommandConfigs,
 } from "../lib/agentCommands";
+import { isCodexSubagentViewOnly } from "../lib/codexSubagents";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
@@ -742,6 +743,7 @@ function SessionPageContent({
   // advancing. Preserve that authoritative time on the child's latest turn.
   const isOpenCodeSubagentSession =
     session?.provider === "opencode" && Boolean(session.parentSessionId);
+  const codexSubagentViewOnly = isCodexSubagentViewOnly(session);
 
   useEngagementTracking({
     sessionId,
@@ -2124,6 +2126,7 @@ function SessionPageContent({
                   onFollowingBottomChange={updateActiveWindowFollowingBottom}
                   onEditUserPrompt={
                     !isViewingHistoricalBranch &&
+                    !codexSubagentViewOnly &&
                     supportsHistoricalMessageEditing(session?.provider)
                       ? handleEditUserPrompt
                       : undefined
@@ -2147,6 +2150,7 @@ function SessionPageContent({
             {/* User question panel */}
             {pendingInputRequest &&
               pendingInputRequest.sessionId === actualSessionId &&
+              !codexSubagentViewOnly &&
               isAskUserQuestion && (
                 <QuestionAnswerPanel
                   key={pendingInputRequest.id}
@@ -2161,6 +2165,7 @@ function SessionPageContent({
             {/* Tool approval: show panel + always-visible toolbar */}
             {pendingInputRequest &&
               pendingInputRequest.sessionId === actualSessionId &&
+              !codexSubagentViewOnly &&
               !isAskUserQuestion && (
                 <>
                   <ToolApprovalPanel
@@ -2283,12 +2288,22 @@ function SessionPageContent({
               </div>
             )}
 
-            {/* No pending approval: show full message input */}
-            {!(
-              pendingInputRequest &&
-              pendingInputRequest.sessionId === actualSessionId &&
-              !isAskUserQuestion
-            ) && (
+            {/* Codex collaboration children are parent-owned and view-only. */}
+            {codexSubagentViewOnly ? (
+              <div
+                className="session-branch-sync-banner"
+                data-testid="codex-subagent-view-only"
+                role="status"
+              >
+                <span className="session-branch-sync-text">
+                  {t("sessionCodexSubagentViewOnly")}
+                </span>
+              </div>
+            ) : !(
+                pendingInputRequest &&
+                pendingInputRequest.sessionId === actualSessionId &&
+                !isAskUserQuestion
+              ) ? (
               <>
                 {isCodexAppServerProvider(effectiveProvider) && (
                   <CodexSkillPicker
@@ -2345,7 +2360,7 @@ function SessionPageContent({
                   onCustomCommand={handleCustomCommand}
                 />
               </>
-            )}
+            ) : null}
           </div>
         </footer>
       </div>
@@ -2367,6 +2382,7 @@ function SessionPageContent({
             basePath={basePath}
             status={status}
             processState={processState}
+            subagentThreads={session?.subagentThreads}
             onSelectMessage={handleSelectMessage}
           />
         ) : null
@@ -2388,6 +2404,7 @@ function SessionPageContent({
           basePath={basePath}
           status={status}
           processState={processState}
+          subagentThreads={session?.subagentThreads}
           onSelectMessage={handleSelectMessage}
         />
       )}
