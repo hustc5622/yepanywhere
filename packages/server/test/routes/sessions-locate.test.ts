@@ -87,6 +87,51 @@ describe("GET /sessions/:sessionId/locate", () => {
     });
   });
 
+  it("resolves an opaque Feishu card reference through the durable inbox", async () => {
+    const sessionDir = join(tmpdir(), `locate-route-${randomUUID()}`);
+    await mkdir(sessionDir, { recursive: true });
+    tempDirs.push(sessionDir);
+    await writeFile(join(sessionDir, "ses_from_feishu.jsonl"), "{}\n");
+    const project = createProject(sessionDir);
+    const turnReference = "feishu-0123456789abcdef0123456789abcdef";
+    const routes = createRoutes({
+      feishuInbox: {
+        findByTempId: vi.fn(() => ({ sessionId: "ses_from_feishu" })),
+      } as unknown as SessionsDeps["feishuInbox"],
+      scanner: {
+        listProjects: vi.fn(async () => [project]),
+      } as unknown as SessionsDeps["scanner"],
+    });
+
+    const response = await routes.request(`/sessions/${turnReference}/locate`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      session: {
+        sessionId: "ses_from_feishu",
+        requestedSessionId: turnReference,
+        projectId: project.id,
+      },
+    });
+  });
+
+  it("does not scan providers for an unknown opaque Feishu reference", async () => {
+    const listProjects = vi.fn(async () => []);
+    const routes = createRoutes({
+      feishuInbox: {
+        findByTempId: vi.fn(() => undefined),
+      } as unknown as SessionsDeps["feishuInbox"],
+      scanner: { listProjects } as unknown as SessionsDeps["scanner"],
+    });
+
+    const response = await routes.request(
+      "/sessions/feishu-ffffffffffffffffffffffffffffffff/locate",
+    );
+
+    expect(response.status).toBe(404);
+    expect(listProjects).not.toHaveBeenCalled();
+  });
+
   it("returns 404 rather than touching disk for unsafe ids", async () => {
     const listProjects = vi.fn(async () => []);
     const routes = createRoutes({

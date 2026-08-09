@@ -276,6 +276,26 @@ describe("SessionMetadataService", () => {
     });
   });
 
+  describe("setOrigin", () => {
+    it("persists channel ownership without chat or user identity", async () => {
+      await service.initialize();
+      await service.setOrigin("session-1", {
+        createdBy: "channel",
+        originChannel: "feishu",
+      });
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+      expect(reloaded.getMetadata("session-1")).toMatchObject({
+        createdBy: "channel",
+        originChannel: "feishu",
+      });
+      const serialized = JSON.stringify(reloaded.getMetadata("session-1"));
+      expect(serialized).not.toContain("chat_fixture");
+      expect(serialized).not.toContain("user_fixture");
+    });
+  });
+
   describe("fork lineage", () => {
     it("persists a child-to-source relationship without aliasing the source", async () => {
       await service.initialize();

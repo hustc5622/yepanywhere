@@ -11,6 +11,7 @@
 
 import {
   type SessionCreatedBy,
+  type SessionOriginChannel,
   getSessionDisplayTitle,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
@@ -125,6 +126,7 @@ export interface InboxItem {
   activity?: AgentActivity;
   hasUnread?: boolean;
   createdBy?: SessionCreatedBy;
+  originChannel?: SessionOriginChannel;
   originator?: string;
   source?: string;
 }
@@ -214,6 +216,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       customTitle?: string;
       aiTitle?: string;
       createdBy?: SessionCreatedBy;
+      originChannel?: SessionOriginChannel;
       originator?: string;
       source?: string;
     }> = [];
@@ -328,6 +331,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
           customTitle: metadata?.customTitle ?? session.customTitle,
           aiTitle: metadata?.aiTitle ?? session.aiTitle,
           createdBy: metadata?.createdBy ?? session.createdBy,
+          originChannel: metadata?.originChannel ?? session.originChannel,
           originator: session.originator,
           source: session.source,
         });
@@ -369,6 +373,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
         customTitle: metadata?.customTitle ?? item.session.customTitle,
         aiTitle: metadata?.aiTitle ?? item.session.aiTitle,
         createdBy: metadata?.createdBy ?? item.session.createdBy,
+        originChannel: metadata?.originChannel ?? item.session.originChannel,
         originator: item.session.originator,
         source: item.session.source,
       });
@@ -418,6 +423,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       activity: item.activity,
       hasUnread: item.hasUnread,
       createdBy: item.createdBy,
+      originChannel: item.originChannel,
       originator: item.originator,
       source: item.source,
     });

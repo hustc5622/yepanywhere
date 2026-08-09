@@ -13,6 +13,7 @@ import type {
   PermissionMode,
   ProviderName,
   SessionCreatedBy,
+  SessionOriginChannel,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 
@@ -53,6 +54,8 @@ export interface SessionMetadata {
   forkParentSessionId?: string;
   /** Whether Yep created this session, or it was discovered from an external client. */
   createdBy?: SessionCreatedBy;
+  /** Non-identifying inbound channel. Channel/chat identities are stored separately. */
+  originChannel?: SessionOriginChannel;
 }
 
 export interface SessionMetadataState {
@@ -447,6 +450,21 @@ export class SessionMetadataService {
     await this.save();
   }
 
+  async setOrigin(
+    sessionId: string,
+    origin: {
+      createdBy?: SessionCreatedBy;
+      originChannel?: SessionOriginChannel;
+    },
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      createdBy: origin.createdBy || undefined,
+      originChannel: origin.originChannel || undefined,
+    }));
+    await this.save();
+  }
+
   /**
    * Update metadata for a session (title, archived, starred).
    */
@@ -512,6 +530,7 @@ export class SessionMetadataService {
       cleaned.forkParentSessionId = updated.forkParentSessionId;
     }
     if (updated.createdBy) cleaned.createdBy = updated.createdBy;
+    if (updated.originChannel) cleaned.originChannel = updated.originChannel;
     if (updated.projectId) cleaned.projectId = updated.projectId;
     if (updated.projectPath) cleaned.projectPath = updated.projectPath;
 

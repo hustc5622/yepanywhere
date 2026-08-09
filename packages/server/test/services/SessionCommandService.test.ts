@@ -232,6 +232,86 @@ describe("SessionCommandService runtime boundary", () => {
     }
   });
 
+  it("persists channel origin and scopes Codex rollout by stable account key", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-channel-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-channel",
+        sessionCount: 0,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex" as const,
+      } satisfies Project;
+      const createSession = vi.fn(async () => ({
+        id: "process-channel",
+        sessionId: "thread-channel",
+        provider: "codex" as const,
+        permissionMode: "default" as const,
+        modeVersion: 0,
+      }));
+      const setOrigin = vi.fn(async () => undefined);
+      const setProjectLocation = vi.fn(async () => undefined);
+      const service = new SessionCommandService({
+        runtimeController: { createSession } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+        sessionMetadataService: {
+          setOrigin,
+          setProjectLocation,
+          setProvider: vi.fn(async () => undefined),
+          setPermissionMode: vi.fn(async () => undefined),
+        } as unknown as SessionMetadataService,
+      });
+
+      await expect(
+        service.create({
+          projectId,
+          requireImmediate: true,
+          origin: {
+            createdBy: "channel",
+            originChannel: "feishu",
+            codexEventAccountId: "account-fixture",
+          },
+          body: { provider: "codex" },
+        }),
+      ).resolves.toMatchObject({
+        ok: true,
+        body: {
+          sessionId: "thread-channel",
+          processId: "process-channel",
+        },
+      });
+      expect(createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requireImmediate: true,
+          modelSettings: expect.objectContaining({
+            providerName: "codex",
+            codexEventAccountId: "account-fixture",
+          }),
+        }),
+      );
+      expect(setOrigin).toHaveBeenCalledWith("thread-channel", {
+        createdBy: "channel",
+        originChannel: "feishu",
+      });
+      expect(setProjectLocation).toHaveBeenCalledWith(
+        "thread-channel",
+        projectId,
+        projectPath,
+      );
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it("queues native inputs without promoting resolved reasoning effort", async () => {
     const snapshot = processSnapshot({
       permissionMode: "default",

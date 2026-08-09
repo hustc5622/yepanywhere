@@ -12,6 +12,7 @@ import {
   type ProviderName,
   type SessionCreatedBy,
   type SessionKind,
+  type SessionOriginChannel,
   type SessionQuestion,
   type SessionRuntime,
   isSessionKind,
@@ -147,6 +148,8 @@ export interface GlobalSessionItem {
   executor?: string;
   /** Explicit creation owner recorded by Yep metadata. */
   createdBy?: SessionCreatedBy;
+  /** Non-identifying inbound channel recorded by Yep metadata. */
+  originChannel?: SessionOriginChannel;
   /** Launcher identifier from session metadata (e.g. "Codex Desktop", "yep-anywhere") */
   originator?: string;
   /** Session source from provider metadata (e.g. "appServer", "exec") */
@@ -606,6 +609,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         const aiTitle = metadata?.aiTitle ?? session.aiTitle;
         const executor = metadata?.executor;
         const createdBy = metadata?.createdBy ?? session.createdBy;
+        const originChannel = metadata?.originChannel ?? session.originChannel;
 
         // Get unread status
         const hasUnread = deps.notificationService
@@ -719,6 +723,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
             isStarred,
             executor,
             createdBy,
+            originChannel,
             originator: session.originator,
             source: session.source,
             contextUsage: session.contextUsage,
@@ -757,6 +762,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       const aiTitle = metadata?.aiTitle ?? session.aiTitle;
       const executor = metadata?.executor;
       const createdBy = metadata?.createdBy ?? session.createdBy;
+      const originChannel = metadata?.originChannel ?? session.originChannel;
 
       const hasUnread = deps.notificationService
         ? deps.notificationService.hasUnread(session.id, session.updatedAt)
@@ -837,6 +843,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
           isStarred,
           executor,
           createdBy,
+          originChannel,
           originator: session.originator,
           source: session.source,
           contextUsage: session.contextUsage,

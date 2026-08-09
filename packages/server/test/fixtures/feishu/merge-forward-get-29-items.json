@@ -1,0 +1,261 @@
+{
+  "items": [
+    {
+      "message_id": "om_fixture_root",
+      "msg_type": "merge_forward",
+      "body": { "content": "{}" },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786063140000"
+    },
+    {
+      "message_id": "om_01",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": {
+        "content": "{\"text\":\"第 01 条文本：请分析任务不达标原因。\"}"
+      },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786063200000"
+    },
+    {
+      "message_id": "om_02",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 02 条文本\"}" },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786063260000"
+    },
+    {
+      "message_id": "om_03",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 03 条文本\"}" },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786063320000"
+    },
+    {
+      "message_id": "om_04",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 04 条文本\"}" },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786063380000"
+    },
+    {
+      "message_id": "om_05",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 05 条文本\"}" },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786063440000"
+    },
+    {
+      "message_id": "om_06",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 06 条文本\"}" },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786063500000"
+    },
+    {
+      "message_id": "om_07",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 07 条文本\"}" },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786063560000"
+    },
+    {
+      "message_id": "om_08",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 08 条文本\"}" },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786063620000"
+    },
+    {
+      "message_id": "om_09",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 09 条文本\"}" },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786063680000"
+    },
+    {
+      "message_id": "om_10",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 10 条文本\"}" },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786063740000"
+    },
+    {
+      "message_id": "om_11",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 11 条文本\"}" },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786063800000"
+    },
+    {
+      "message_id": "om_12",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 12 条文本\"}" },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786063860000"
+    },
+    {
+      "message_id": "om_13",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 13 条文本\"}" },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786063920000"
+    },
+    {
+      "message_id": "om_14",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 14 条文本\"}" },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786063980000"
+    },
+    {
+      "message_id": "om_15",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 15 条文本\"}" },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786064040000"
+    },
+    {
+      "message_id": "om_16",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 16 条文本\"}" },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786064100000"
+    },
+    {
+      "message_id": "om_17",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 17 条文本\"}" },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786064160000"
+    },
+    {
+      "message_id": "om_18",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 18 条文本\"}" },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786064220000"
+    },
+    {
+      "message_id": "om_19",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 19 条文本\"}" },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786064280000"
+    },
+    {
+      "message_id": "om_20",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 20 条文本\"}" },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786064340000"
+    },
+    {
+      "message_id": "om_21",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "text",
+      "body": { "content": "{\"text\":\"第 21 条文本\"}" },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786064400000"
+    },
+    {
+      "message_id": "om_22",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"卡片 22\"}},\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 22 条卡片结论\"},{\"tag\":\"button\",\"text\":{\"tag\":\"plain_text\",\"content\":\"详情\"},\"url\":\"https://example.test/22\"}]}"
+      },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786064460000"
+    },
+    {
+      "message_id": "om_23",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 23 条卡片结论\"}]}"
+      },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786064520000"
+    },
+    {
+      "message_id": "om_24",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 24 条卡片结论\"}]}"
+      },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786064580000"
+    },
+    {
+      "message_id": "om_25",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 25 条卡片结论\"}]}"
+      },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786064640000"
+    },
+    {
+      "message_id": "om_26",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 26 条卡片结论\"}]}"
+      },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786064700000"
+    },
+    {
+      "message_id": "om_27",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 27 条卡片结论\"}]}"
+      },
+      "sender": { "id": "sender_c", "sender_type": "user" },
+      "create_time": "1786064760000"
+    },
+    {
+      "message_id": "om_28",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 28 条卡片结论\"}]}"
+      },
+      "sender": { "id": "sender_a", "sender_type": "user" },
+      "create_time": "1786064820000"
+    },
+    {
+      "message_id": "om_29",
+      "upper_message_id": "om_fixture_root",
+      "msg_type": "interactive",
+      "body": {
+        "content": "{\"elements\":[{\"tag\":\"markdown\",\"content\":\"第 29 条卡片结论\"}]}"
+      },
+      "sender": { "id": "sender_b", "sender_type": "user" },
+      "create_time": "1786064880000"
+    }
+  ]
+}
