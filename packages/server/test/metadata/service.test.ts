@@ -276,6 +276,27 @@ describe("SessionMetadataService", () => {
     });
   });
 
+  describe("fork lineage", () => {
+    it("persists a child-to-source relationship without aliasing the source", async () => {
+      await service.initialize();
+      await service.setProvider("source-session", "codex");
+      await service.setForkParentSessionId("child-session", "source-session");
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+
+      expect(reloaded.getForkParentSessionId("child-session")).toBe(
+        "source-session",
+      );
+      expect(reloaded.getCanonicalSessionId("source-session")).toBe(
+        "source-session",
+      );
+      expect(reloaded.getMetadata("source-session")).toEqual({
+        provider: "codex",
+      });
+    });
+  });
+
   describe("setProjectLocation", () => {
     it("persists the owning project so a bare session id stays resolvable", async () => {
       await service.initialize();

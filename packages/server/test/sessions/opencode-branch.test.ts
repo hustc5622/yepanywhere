@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   type OpenCodeBranchSession,
   buildOpenCodeBranchView,
+  collapseEditForkFamilies,
   collapseOpenCodeForkFamilies,
   findOpenCodeBranchFamilySessionIds,
   readOpenCodeForkParentSessionId,
@@ -349,7 +350,7 @@ describe("readOpenCodeForkParentSessionId", () => {
   });
 });
 
-describe("collapseOpenCodeForkFamilies", () => {
+describe("collapseEditForkFamilies", () => {
   const summary = (
     id: string,
     updatedAt: string,
@@ -367,7 +368,7 @@ describe("collapseOpenCodeForkFamilies", () => {
       summary("ses_grandchild", "2026-07-15T02:00:00.000Z", "ses_child"),
     ];
 
-    const collapsed = collapseOpenCodeForkFamilies(summaries);
+    const collapsed = collapseEditForkFamilies(summaries);
 
     expect(collapsed.map((s) => s.id)).toEqual(["ses_grandchild"]);
   });
@@ -380,7 +381,7 @@ describe("collapseOpenCodeForkFamilies", () => {
       summary("ses_child", "2026-07-15T01:00:00.000Z", "ses_parent"),
     ];
 
-    expect(collapseOpenCodeForkFamilies(summaries).map((s) => s.id)).toEqual([
+    expect(collapseEditForkFamilies(summaries).map((s) => s.id)).toEqual([
       "ses_parent",
     ]);
   });
@@ -394,7 +395,7 @@ describe("collapseOpenCodeForkFamilies", () => {
       summary("ses_orphan", "2026-07-15T00:00:00.000Z", "ses_missing"),
     ];
 
-    const kept = collapseOpenCodeForkFamilies(summaries)
+    const kept = collapseEditForkFamilies(summaries)
       .map((s) => s.id)
       .sort();
 
@@ -407,6 +408,11 @@ describe("collapseOpenCodeForkFamilies", () => {
       summary("ses_b", "2026-07-15T01:00:00.000Z"),
     ];
 
+    expect(collapseEditForkFamilies(summaries)).toBe(summaries);
+  });
+
+  it("keeps the OpenCode compatibility alias", () => {
+    const summaries = [summary("ses_parent", "2026-07-15T00:00:00.000Z")];
     expect(collapseOpenCodeForkFamilies(summaries)).toBe(summaries);
   });
 });

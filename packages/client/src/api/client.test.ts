@@ -181,3 +181,161 @@ describe("queued session API responses", () => {
     );
   });
 });
+
+describe("Codex structured input API", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const skillInput = {
+    type: "skill" as const,
+    name: "release-check",
+    path: "/test-fixtures/skills/release-check/SKILL.md",
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("serializes selected skills for start, resume, queue, and deferred queue", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        sessionId: "session-1",
+        processId: "process-1",
+        permissionMode: "default",
+        modeVersion: 1,
+        queued: true,
+      }),
+    } as Response);
+
+    await api.startSession("project-1", "start", {
+      provider: "codex",
+      codexInputs: [skillInput],
+    });
+    await api.resumeSession("project-1", "session-1", "resume", {
+      provider: "codex",
+      codexInputs: [skillInput],
+    });
+    await api.queueMessage(
+      "session-1",
+      "queue",
+      undefined,
+      undefined,
+      "temp-queue",
+      undefined,
+      undefined,
+      undefined,
+      [skillInput],
+    );
+    await api.queueMessage(
+      "session-1",
+      "defer",
+      undefined,
+      undefined,
+      "temp-defer",
+      undefined,
+      undefined,
+      true,
+      [skillInput],
+    );
+
+    const bodies = fetchMock.mock.calls.map(([, request]) =>
+      JSON.parse(String(request?.body)),
+    );
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        message: "start",
+        codexInputs: [skillInput],
+      }),
+      expect.objectContaining({
+        message: "resume",
+        codexInputs: [skillInput],
+      }),
+      expect.objectContaining({
+        message: "queue",
+        codexInputs: [skillInput],
+      }),
+      expect.objectContaining({
+        message: "defer",
+        deferred: true,
+        codexInputs: [skillInput],
+      }),
+    ]);
+  });
+});
+
+describe("Codex transcript export", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("downloads the authenticated canonical Markdown transcript", async () => {
+    const blob = new Blob(["# Transcript\n"], { type: "text/markdown" });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        "Content-Disposition":
+          'attachment; filename="codex-transcript-session-1.md"',
+      }),
+      blob: async () => blob,
+    } as Response);
+
+    await expect(
+      api.downloadCodexTranscript("session/1"),
+    ).resolves.toMatchObject({
+      blob,
+      fileName: "codex-transcript-session-1.md",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/session%2F1/codex-transcript?format=markdown",
+      expect.objectContaining({
+        cache: "no-store",
+        credentials: "include",
+        headers: expect.objectContaining({ "X-Yep-Anywhere": "true" }),
+      }),
+    );
+  });
+});
+
+describe("Codex native controls", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("uses the authenticated bounded control endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ control: "skills/list", data: { data: [] } }),
+    } as Response);
+
+    await api.executeCodexControl("session/1", { control: "skills/list" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/session%2F1/codex-control",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ control: "skills/list" }),
+      }),
+    );
+  });
+});

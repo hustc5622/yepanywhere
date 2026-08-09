@@ -81,6 +81,10 @@ import {
   CODEX_TURN_ABORTED_DISPLAY_TEXT,
   isCodexTurnAbortedNoticeText,
 } from "./codex-turn-aborted.js";
+import {
+  MANAGED_ATTACHMENT_MARKER,
+  sanitizePublicUserPrompt,
+} from "./public-user-prompt.js";
 import type { LoadedSession } from "./types.js";
 import { isUserPromptMessage } from "./user-prompt-message.js";
 
@@ -150,6 +154,241 @@ function normalizeClaudeQueueOperationContent(content: unknown): string {
     .join("\n");
 }
 
+function sanitizePublicMimeType(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const safe = value
+    .replace(/[^A-Za-z0-9!#$&^_.+/-]+/g, "_")
+    .trim()
+    .slice(0, 120);
+  return safe || undefined;
+}
+
+function safePublicMediaUrl(
+  value: unknown,
+  kind: "image" | "audio",
+): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const url = value.trim();
+  if (!url) return undefined;
+
+  const dataPrefix = kind === "image" ? /^data:image\//iu : /^data:audio\//iu;
+  if (dataPrefix.test(url) && /;base64,/iu.test(url.slice(0, 256))) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:"
+      ? url
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizePublicMediaBlock(block: ContentBlock): ContentBlock {
+  if (block.type !== "input_image" && block.type !== "input_audio") {
+    return block;
+  }
+
+  const kind = block.type === "input_image" ? "image" : "audio";
+  const urlKey = kind === "image" ? "image_url" : "audio_url";
+  const rawUrl = block[urlKey];
+  const publicUrl = safePublicMediaUrl(rawUrl, kind);
+  const mimeType = sanitizePublicMimeType(block.mime_type);
+  const hadManagedLocation =
+    typeof block.file_path === "string" ||
+    typeof block.path === "string" ||
+    (typeof rawUrl === "string" && !publicUrl);
+  const needsClone =
+    hadManagedLocation || publicUrl !== rawUrl || mimeType !== block.mime_type;
+  if (!needsClone) return block;
+
+  const projected = Object.fromEntries(
+    Object.entries(block).filter(
+      ([key]) =>
+        key !== "file_path" &&
+        key !== "path" &&
+        key !== urlKey &&
+        key !== "mime_type",
+    ),
+  ) as ContentBlock;
+  if (publicUrl) {
+    projected[urlKey] = publicUrl;
+  }
+  if (mimeType) {
+    projected.mime_type = mimeType;
+  }
+  if (hadManagedLocation) {
+    projected.managed_attachment = MANAGED_ATTACHMENT_MARKER;
+  }
+  return projected;
+}
+
+function sanitizePublicUserContent(
+  content: string | ContentBlock[] | undefined,
+  codex: boolean,
+): string | ContentBlock[] | undefined {
+  if (typeof content === "string") {
+    return sanitizePublicUserPrompt(content, { codex });
+  }
+  if (!Array.isArray(content)) return content;
+
+  let changed = false;
+  const projected = content.map((block) => {
+    if (!block || typeof block !== "object") return block;
+    if (block.type === "text" && typeof block.text === "string") {
+      const text = sanitizePublicUserPrompt(block.text, { codex });
+      if (text !== block.text) {
+        changed = true;
+        return { ...block, text };
+      }
+    }
+    const media = sanitizePublicMediaBlock(block);
+    if (media !== block) changed = true;
+    return media;
+  });
+  return changed ? projected : content;
+}
+
+function truncatePublicBranchTitle(prompt: string, maxLength: number): string {
+  const firstLine = prompt
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  const text = firstLine || prompt.trim() || MANAGED_ATTACHMENT_MARKER;
+  if (maxLength < 4 || text.length <= maxLength) {
+    return text.slice(0, maxLength);
+  }
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
+function sanitizePublicBranchOption(
+  branch: SessionBranchOption,
+  codex: boolean,
+): SessionBranchOption {
+  const prompt = sanitizePublicUserPrompt(branch.prompt, { codex });
+  const sanitizedTitle = sanitizePublicUserPrompt(branch.title, { codex });
+  const title =
+    prompt === branch.prompt
+      ? sanitizedTitle
+      : truncatePublicBranchTitle(prompt, Math.max(branch.title.length, 1));
+  return prompt === branch.prompt && title === branch.title
+    ? branch
+    : { ...branch, prompt, title };
+}
+
+function sanitizePublicBranchState(
+  branchState: SessionBranchState | undefined,
+  codex: boolean,
+): SessionBranchState | undefined {
+  if (!branchState) return undefined;
+  const branches = branchState.branches.map((branch) =>
+    sanitizePublicBranchOption(branch, codex),
+  );
+  return branches.every(
+    (branch, index) => branch === branchState.branches[index],
+  )
+    ? branchState
+    : { ...branchState, branches };
+}
+
+function sanitizeMessageBranchMetadata(
+  value: unknown,
+  codex: boolean,
+): unknown {
+  if (!isRecord(value) || !Array.isArray(value.alternatives)) return value;
+  const currentAlternatives = value.alternatives as unknown[];
+  const alternatives = currentAlternatives.map((branch) =>
+    isRecord(branch) &&
+    typeof branch.prompt === "string" &&
+    typeof branch.title === "string"
+      ? sanitizePublicBranchOption(
+          branch as unknown as SessionBranchOption,
+          codex,
+        )
+      : branch,
+  );
+  return alternatives.every(
+    (branch, index) => branch === currentAlternatives[index],
+  )
+    ? value
+    : { ...value, alternatives };
+}
+
+function sanitizePublicNormalizedMessage(
+  message: Message,
+  codex: boolean,
+): Message {
+  let projected = message;
+
+  if (isUserPromptMessage(message)) {
+    const nestedContent = sanitizePublicUserContent(
+      message.message?.content,
+      codex,
+    );
+    const directContent = sanitizePublicUserContent(
+      message.content as string | ContentBlock[] | undefined,
+      codex,
+    );
+    if (
+      nestedContent !== message.message?.content ||
+      directContent !== message.content
+    ) {
+      projected = {
+        ...projected,
+        ...(message.message
+          ? { message: { ...message.message, content: nestedContent } }
+          : {}),
+        ...(message.content !== undefined ? { content: directContent } : {}),
+      };
+    }
+  }
+
+  const branch = sanitizeMessageBranchMetadata(projected.branch, codex);
+  const codexBranch = sanitizeMessageBranchMetadata(
+    projected.codexBranch,
+    codex,
+  );
+  if (branch !== projected.branch || codexBranch !== projected.codexBranch) {
+    projected = { ...projected, branch, codexBranch };
+  }
+  return projected;
+}
+
+function sanitizePublicNormalizedSession(session: Session): Session {
+  const codex =
+    session.provider === "codex" || session.provider === "codex-oss";
+  const messages = session.messages.map((message) =>
+    sanitizePublicNormalizedMessage(message, codex),
+  );
+  const branchState = sanitizePublicBranchState(session.branchState, codex);
+  const codexBranchState = sanitizePublicBranchState(
+    session.codexBranchState,
+    codex,
+  );
+  const title = session.title
+    ? sanitizePublicUserPrompt(session.title, { codex })
+    : session.title;
+  const fullTitle = session.fullTitle
+    ? sanitizePublicUserPrompt(session.fullTitle, { codex })
+    : session.fullTitle;
+  const userQuestions = session.userQuestions?.map((question) => ({
+    ...question,
+    text: sanitizePublicUserPrompt(question.text, { codex }),
+  }));
+
+  return {
+    ...session,
+    title,
+    fullTitle,
+    userQuestions,
+    branchState,
+    codexBranchState,
+    messages,
+  };
+}
+
 /**
  * Normalize a UnifiedSession into the generic Session format expected by the frontend.
  */
@@ -173,18 +412,18 @@ export function normalizeSession(loaded: LoadedSession): Session {
         convertClaudeMessage(raw, index, orphanedToolUses),
       );
 
-      return {
+      return sanitizePublicNormalizedSession({
         ...summary,
         branchState: loaded.branchState,
         messages: loaded.branchState
           ? annotateBranchMessages(messages, loaded.branchState)
           : messages,
-      };
+      });
     }
     case "codex":
     case "codex-oss": {
       const branchState = loaded.codexBranchState ?? loaded.branchState;
-      return {
+      return sanitizePublicNormalizedSession({
         ...summary,
         branchState,
         codexBranchState: loaded.codexBranchState,
@@ -197,28 +436,28 @@ export function normalizeSession(loaded: LoadedSession): Session {
             provider: data.provider,
           },
         ),
-      };
+      });
     }
     case "gemini":
-      return {
+      return sanitizePublicNormalizedSession({
         ...summary,
         messages: convertGeminiMessages(data.session.messages),
-      };
+      });
     case "opencode": {
       const messages = convertOpenCodeEntries(data.session.messages);
-      return {
+      return sanitizePublicNormalizedSession({
         ...summary,
         branchState: loaded.branchState,
         messages: loaded.branchState
           ? annotateBranchMessages(messages, loaded.branchState)
           : messages,
-      };
+      });
     }
     case "kimi":
-      return {
+      return sanitizePublicNormalizedSession({
         ...summary,
         messages: convertKimiMessages(data.session),
-      };
+      });
   }
 }
 
@@ -1236,8 +1475,11 @@ function convertCodexMessagePayload(
   }
 
   for (const block of payload.content) {
-    if (block.type !== "input_image") continue;
-    content.push(normalizeCodexInputImageBlock(block));
+    if (block.type === "input_image") {
+      content.push(normalizeCodexInputImageBlock(block));
+    } else if (block.type === "input_audio") {
+      content.push(normalizeCodexInputAudioBlock(block));
+    }
   }
 
   if (content.length === 0) {
@@ -1306,6 +1548,11 @@ type CodexInputImageBlock = Extract<
   { type: "input_image" }
 >;
 
+type CodexInputAudioBlock = Extract<
+  CodexMessagePayload["content"][number],
+  { type: "input_audio" }
+>;
+
 function normalizeCodexInputImageBlock(
   block: CodexInputImageBlock,
 ): ContentBlock {
@@ -1328,6 +1575,31 @@ function normalizeCodexInputImageBlock(
     normalized.image_url = imageUrl;
   }
 
+  return normalized;
+}
+
+function normalizeCodexInputAudioBlock(
+  block: CodexInputAudioBlock,
+): ContentBlock {
+  const normalized: ContentBlock = { type: "input_audio" };
+  const filePath =
+    typeof block.file_path === "string" ? block.file_path.trim() : "";
+  if (filePath) {
+    normalized.file_path = filePath;
+  }
+
+  const audioUrl =
+    typeof block.audio_url === "string" ? block.audio_url.trim() : "";
+  if (audioUrl) {
+    normalized.audio_url = audioUrl;
+  }
+
+  const mimeType =
+    sanitizePublicMimeType(block.mime_type) ??
+    (audioUrl ? parseDataUrlMimeType(audioUrl) : undefined);
+  if (mimeType) {
+    normalized.mime_type = mimeType;
+  }
   return normalized;
 }
 

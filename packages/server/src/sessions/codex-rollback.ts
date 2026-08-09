@@ -4,6 +4,7 @@ import type {
   CodexSessionEntry,
 } from "@yep-anywhere/shared";
 import { isCodexTurnAbortedNoticeText } from "./codex-turn-aborted.js";
+import { sanitizeCodexPublicUserPrompt } from "./public-user-prompt.js";
 import {
   isSessionSetupText,
   isSyntheticUserPromptText,
@@ -386,14 +387,15 @@ function orderedActivePath(branchState: CodexBranchState): CodexBranchOption[] {
 }
 
 /**
- * Compute the authoritative `thread/rollback` turn count for editing a user
- * prompt. Codex rollback semantics count user turns on the *active* path, so
- * the count must come from the persisted turn tree - not from however many
- * user prompts the client happened to render (setup folding, dedupe, and
- * viewing an older branch all skew the client-side count).
+ * Compute the authoritative legacy exclusion count for editing a user prompt.
+ * Stable Codex editing forks a new thread after the retained boundary, so this
+ * is the number of source user turns excluded from the child. The count must
+ * come from the persisted turn tree - not from however many prompts the client
+ * happened to render (setup folding, dedupe, and viewing an older branch all
+ * skew the client-side count).
  *
- * When the edited turn sits on a sibling branch, the rollback unwinds the
- * active path back to the deepest common ancestor.
+ * When the edited turn sits on a sibling branch, the child forks from the
+ * deepest common ancestor on the active path.
  */
 export function computeCodexRollbackNumTurns(
   branchState: CodexBranchState,
@@ -402,19 +404,26 @@ export function computeCodexRollbackNumTurns(
   const activePath = orderedActivePath(branchState);
   if (activePath.length === 0) return null;
 
-  const targetPrompt = target.prompt.trim();
+  const targetPrompt = sanitizeCodexPublicUserPrompt(target.prompt).trim();
   if (!targetPrompt) return null;
 
   const promptMatches = branchState.branches.filter(
-    (branch) => branch.prompt.trim() === targetPrompt,
+    (branch) =>
+      sanitizeCodexPublicUserPrompt(branch.prompt).trim() === targetPrompt,
   );
-  if (promptMatches.length === 0) return null;
 
   const timestampMatches = target.timestamp
-    ? promptMatches.filter((branch) => branch.createdAt === target.timestamp)
+    ? branchState.branches.filter(
+        (branch) => branch.createdAt === target.timestamp,
+      )
     : [];
   const candidates =
-    timestampMatches.length > 0 ? timestampMatches : promptMatches;
+    timestampMatches.length === 1
+      ? timestampMatches
+      : timestampMatches.length > 1
+        ? timestampMatches.filter((branch) => promptMatches.includes(branch))
+        : promptMatches;
+  if (candidates.length === 0) return null;
 
   // Prefer a candidate on the active path; otherwise take the most recent.
   const activeIds = new Map(activePath.map((node, index) => [node.id, index]));
@@ -430,7 +439,7 @@ export function computeCodexRollbackNumTurns(
     return numTurns > 0 ? numTurns : null;
   }
 
-  // Edited turn is on a sibling branch: roll back to the deepest ancestor
+  // Edited turn is on a sibling branch: retain through the deepest ancestor
   // shared with the active path (the new prompt becomes a fresh sibling).
   const byId = new Map(
     branchState.branches.map((branch) => [branch.id, branch]),
@@ -447,6 +456,6 @@ export function computeCodexRollbackNumTurns(
     cursor = byId.get(cursor)?.parentId ?? null;
   }
 
-  // No shared ancestor: unwind the entire active path.
+  // No shared ancestor: exclude the entire active path.
   return activePath.length;
 }

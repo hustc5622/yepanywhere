@@ -329,7 +329,13 @@ export interface SessionOptions {
   opencodeConfig?: OpenCodeSessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
+  /** Ephemeral provider-native input. Never persist this in message drafts. */
+  codexInputs?: CodexStructuredUserInput[];
 }
+
+export type CodexStructuredUserInput =
+  | { type: "skill"; name: string; path: string }
+  | { type: "mention"; name: string; path: string };
 
 export type { UploadedFile } from "@yep-anywhere/shared";
 
@@ -878,6 +884,14 @@ export const api = {
     return fetchBlob(`/deploy/apk/download${qs ? `?${qs}` : ""}`);
   },
 
+  downloadCodexTranscript: (
+    sessionId: string,
+    format: "markdown" | "json" = "markdown",
+  ) =>
+    fetchBlob(
+      `/sessions/${encodeURIComponent(sessionId)}/codex-transcript?format=${format}`,
+    ),
+
   // Provider API
   getProviders: () => fetchJSON<{ providers: ProviderInfo[] }>("/providers"),
 
@@ -1019,6 +1033,7 @@ export const api = {
         codexModelProvider: options?.codexModelProvider,
         opencodeConfig: options?.opencodeConfig,
         executor: options?.executor,
+        codexInputs: options?.codexInputs,
         attachments,
       }),
     }),
@@ -1057,13 +1072,14 @@ export const api = {
      */
     resumeSessionAt?: string,
     /**
-     * Codex app-server rewind/edit: drop this many trailing user turns via
-     * `thread/rollback` before sending the edited prompt in the same session.
+     * Codex app-server edit fork: exclude this many trailing source user turns
+     * before sending the edited prompt in a new child thread. The parameter
+     * keeps its legacy name for compatibility with deployed servers.
      */
     rollbackNumTurns?: number,
     /**
      * Identity of the edited user turn (original prompt text + timestamp).
-     * Lets the server recompute the authoritative rollback count from the
+     * Lets the server recompute the authoritative excluded-turn count from the
      * persisted Codex turn tree instead of trusting the client-side count.
      */
     rollbackTarget?: { timestamp?: string; text?: string },
@@ -1083,6 +1099,7 @@ export const api = {
           codexModelProvider: options?.codexModelProvider,
           opencodeConfig: options?.opencodeConfig,
           executor: options?.executor,
+          codexInputs: options?.codexInputs,
           attachments,
           tempId,
           resumeSessionAt,
@@ -1097,6 +1114,18 @@ export const api = {
       method: "DELETE",
     }),
 
+  executeCodexControl: (
+    sessionId: string,
+    request: { control: string; [key: string]: unknown },
+  ) =>
+    fetchJSON<{ control: string; data: unknown }>(
+      `/sessions/${encodeURIComponent(sessionId)}/codex-control`,
+      {
+        method: "POST",
+        body: JSON.stringify(request),
+      },
+    ),
+
   queueMessage: (
     sessionId: string,
     message: string,
@@ -1106,6 +1135,7 @@ export const api = {
     thinking?: ThinkingOption,
     reasoningEffort?: string,
     deferred?: boolean,
+    codexInputs?: CodexStructuredUserInput[],
   ) =>
     fetchJSON<{
       queued: boolean;
@@ -1122,6 +1152,7 @@ export const api = {
         thinking,
         reasoningEffort,
         deferred,
+        codexInputs,
       }),
     }),
 

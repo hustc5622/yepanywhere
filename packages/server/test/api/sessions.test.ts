@@ -373,10 +373,14 @@ describe("Sessions API", () => {
       expect(json.processId).toBeDefined();
     });
 
-    it("passes Codex rollbackNumTurns when resuming an edited Codex prompt", async () => {
+    it("forks edited Codex prompts immediately and persists child lineage", async () => {
       const sessionMetadataService = {
         getProvider: vi.fn(() => "codex"),
         getExecutor: vi.fn(() => undefined),
+        setForkParentSessionId: vi.fn(async () => undefined),
+        setProvider: vi.fn(async () => undefined),
+        setCreatedBy: vi.fn(async () => undefined),
+        setProjectLocation: vi.fn(async () => undefined),
       };
       const { app, supervisor } = createApp({
         sdk: mockSdk,
@@ -388,6 +392,7 @@ describe("Sessions API", () => {
         .spyOn(supervisor, "resumeSession")
         .mockResolvedValue({
           id: "process-codex",
+          sessionId: "thread-codex-child",
           permissionMode: "default",
           modeVersion: 0,
         } as unknown as Awaited<ReturnType<typeof supervisor.resumeSession>>);
@@ -408,6 +413,11 @@ describe("Sessions API", () => {
       );
 
       expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        sessionId: "thread-codex-child",
+        forkParentSessionId: "sess-existing",
+        processId: "process-codex",
+      });
       expect(resumeSpy).toHaveBeenCalledWith(
         "sess-existing",
         expect.any(String),
@@ -418,7 +428,11 @@ describe("Sessions API", () => {
           rollbackNumTurns: 2,
           resumeSessionAt: undefined,
         }),
+        { requireImmediate: true },
       );
+      expect(
+        sessionMetadataService.setForkParentSessionId,
+      ).toHaveBeenCalledWith("thread-codex-child", "sess-existing");
     });
 
     it("does not pass Codex rollbackNumTurns when resuming Claude", async () => {
@@ -532,6 +546,7 @@ describe("Sessions API", () => {
           rollbackNumTurns: undefined,
           opencodeConfig,
         }),
+        { requireImmediate: true },
       );
       expect(sessionMetadataService.setProvider).toHaveBeenCalledWith(
         "ses_opencode_fork",

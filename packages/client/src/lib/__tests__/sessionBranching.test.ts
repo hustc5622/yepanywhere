@@ -47,7 +47,7 @@ describe("provider-specific historical message editing", () => {
     });
   });
 
-  it("keeps Claude parent-boundary and Codex rollback semantics", () => {
+  it("keeps Claude parent-boundary and gives Codex source-preserving fork semantics", () => {
     expect(
       resolveSessionEditSubmission("claude", {
         uuid: "user-2",
@@ -69,7 +69,12 @@ describe("provider-specific historical message editing", () => {
         parentUuid: null,
         rollbackNumTurns: 2,
       }),
-    ).toMatchObject({ kind: "codex-resume", rollbackNumTurns: 2 });
+    ).toEqual({
+      kind: "codex-fork",
+      rollbackNumTurns: 2,
+      optimisticTruncate: false,
+      refreshSameSessionBranches: false,
+    });
   });
 
   it("only enables OpenCode editing after the authoritative disk message arrives", () => {

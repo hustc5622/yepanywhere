@@ -45,6 +45,7 @@ import type {
   SessionSummary,
 } from "../supervisor/types.js";
 import { convertKimiMessages } from "./normalization.js";
+import { sanitizePublicUserPrompt } from "./public-user-prompt.js";
 import type { AgentSession as AgentSessionResult } from "./reader.js";
 import type {
   GetSessionOptions,
@@ -130,10 +131,10 @@ export class KimiSessionReader implements ISessionReader {
       if (derived.messageCount === 0) return null;
 
       const stats = await stat(entry.filePath);
-      const fullTitle = (
+      const fullTitle = sanitizePublicUserPrompt(
         entry.title && entry.title !== "New Session"
           ? entry.title
-          : (derived.firstPromptText ?? entry.title ?? "")
+          : (derived.firstPromptText ?? entry.title ?? ""),
       ).trim();
       const title =
         fullTitle.length === 0

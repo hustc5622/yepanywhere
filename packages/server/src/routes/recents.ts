@@ -82,6 +82,7 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
         projectId,
         {
           readerFactory: deps.readerFactory,
+          sessionMetadataService: deps.sessionMetadataService,
           sessionIndexService: deps.sessionIndexService,
           codexSessionsDir: deps.codexSessionsDir,
           codexReaderFactory: deps.codexReaderFactory,

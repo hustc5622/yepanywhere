@@ -73,6 +73,11 @@ import { createActivityRoutes } from "./routes/activity.js";
 import { createBrowserProfilesRoutes } from "./routes/browser-profiles.js";
 import { createClientLogsRoutes } from "./routes/client-logs.js";
 import { createCodexBridgeRoutes } from "./routes/codex-bridge.js";
+import {
+  type CodexTranscriptStoreSource,
+  createCodexTranscriptRoutes,
+  createDefaultCodexTranscriptStoreSources,
+} from "./routes/codex-transcript.js";
 import { createConnectionsRoutes } from "./routes/connections.js";
 import { createDebugStreamingRoutes } from "./routes/debug-streaming.js";
 import {
@@ -119,6 +124,7 @@ import type { ModelInfoService } from "./services/ModelInfoService.js";
 import type { NetworkBindingService } from "./services/NetworkBindingService.js";
 import type { OhMyRouterBenchmarkService } from "./services/OhMyRouterBenchmarkService.js";
 import type { ServerSettingsService } from "./services/ServerSettingsService.js";
+import { SessionCommandService } from "./services/SessionCommandService.js";
 import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
 import { CodexSessionReader } from "./sessions/codex-reader.js";
@@ -228,6 +234,8 @@ export interface AppOptions {
   deviceBridgeService?: DeviceBridgeService;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
   codexBridgeService?: CodexBridgeController;
+  /** Canonical Codex transcript sources. Primarily injectable for tests/embedders. */
+  codexTranscriptStoreSources?: readonly CodexTranscriptStoreSource[];
   /** OpenCode bridge for OpenCode CLI sessions. */
   opencodeBridgeService?: OpenCodeBridgeController;
   /** AI title generation settings. */
@@ -261,6 +269,8 @@ export interface AppResult {
   runtimeController: RuntimeController;
   /** Provider-neutral pending-input application authority. */
   sessionInteractionService: SessionInteractionService;
+  /** Provider-neutral application boundary for session commands. */
+  sessionCommandService: SessionCommandService;
   /** Durable CAS authority used by every interaction channel. */
   interactionBroker: InteractionBroker;
   /** Project scanner for debug API access */
@@ -582,6 +592,7 @@ export function createApp(options: AppOptions): AppResult {
       project.id,
       {
         readerFactory,
+        sessionMetadataService: options.sessionMetadataService,
         codexSessionsDir: CODEX_SESSIONS_DIR,
         codexReaderFactory,
         geminiSessionsDir: GEMINI_TMP_DIR,
@@ -641,6 +652,26 @@ export function createApp(options: AppOptions): AppResult {
     interactionBroker: options.interactionBroker,
   });
   const interactionBroker = sessionInteractionService.getInteractionBroker();
+  const sessionCommandService = new SessionCommandService({
+    runtimeController,
+    scanner,
+    readerFactory,
+    sessionInteractionService,
+    sessionMetadataService: options.sessionMetadataService,
+    eventBus: options.eventBus,
+    serverSettingsService: options.serverSettingsService,
+    modelInfoService: options.modelInfoService,
+    recentsService: options.recentsService,
+    codexSessionsDir: CODEX_SESSIONS_DIR,
+    codexReaderFactory,
+    geminiScanner,
+    geminiSessionsDir: GEMINI_TMP_DIR,
+    geminiReaderFactory,
+    opencodeDbPath: OPENCODE_DB_PATH,
+    opencodeReaderFactory,
+    kimiSessionsDir: KIMI_SESSIONS_DIR,
+    kimiReaderFactory,
+  });
 
   // Bridge HTTP clients observe the shared upstream server (OpenCode/Codex) and
   // replay lifecycle changes onto the EventBus. Teach them which sessions the
@@ -756,6 +787,7 @@ export function createApp(options: AppOptions): AppResult {
               project,
               {
                 readerFactory,
+                sessionMetadataService: options.sessionMetadataService,
                 sessionIndexService: options.sessionIndexService,
                 codexSessionsDir: CODEX_SESSIONS_DIR,
                 codexReaderFactory,
@@ -838,6 +870,7 @@ export function createApp(options: AppOptions): AppResult {
           project.id,
           {
             readerFactory,
+            sessionMetadataService: options.sessionMetadataService,
             codexSessionsDir: CODEX_SESSIONS_DIR,
             codexReaderFactory,
             geminiSessionsDir: GEMINI_TMP_DIR,
@@ -1198,6 +1231,16 @@ export function createApp(options: AppOptions): AppResult {
     );
   }
 
+  const codexTranscriptStoreSources =
+    options.codexTranscriptStoreSources ??
+    (options.dataDir
+      ? createDefaultCodexTranscriptStoreSources({
+          dataDir: options.dataDir,
+          providerEventStorePath:
+            process.env.YEP_CODEX_EVENT_STORE_PATH?.trim(),
+        })
+      : []);
+
   // Mount API routes
   app.route(
     "/api/projects",
@@ -1252,9 +1295,12 @@ export function createApp(options: AppOptions): AppResult {
       kimiReaderFactory,
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
+      recentsService: options.recentsService,
       codexBridgeService: options.codexBridgeService,
+      codexEventStoreSources: codexTranscriptStoreSources,
       opencodeBridgeService: options.opencodeBridgeService,
       sessionInteractionService,
+      sessionCommandService,
       sessionArchiveService: options.sessionArchiveService,
       claudeProjectsDir: options.projectsDir ?? CLAUDE_PROJECTS_DIR,
     }),
@@ -1363,6 +1409,11 @@ export function createApp(options: AppOptions): AppResult {
       codexBridgeService: options.codexBridgeService,
       opencodeBridgeService: options.opencodeBridgeService,
     }),
+  );
+
+  app.route(
+    "/api/sessions",
+    createCodexTranscriptRoutes({ sources: codexTranscriptStoreSources }),
   );
 
   // Search routes (full-text content search across sessions)
@@ -1601,6 +1652,7 @@ export function createApp(options: AppOptions): AppResult {
     supervisor,
     runtimeController,
     sessionInteractionService,
+    sessionCommandService,
     interactionBroker,
     scanner,
     readerFactory,

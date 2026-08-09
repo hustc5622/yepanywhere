@@ -65,10 +65,10 @@ export function shouldRestoreHistoricalEditAfterFailure(
 
 export type SessionEditSubmission =
   | {
-      kind: "codex-resume";
+      kind: "codex-fork";
       rollbackNumTurns: number;
-      optimisticTruncate: true;
-      refreshSameSessionBranches: true;
+      optimisticTruncate: false;
+      refreshSameSessionBranches: false;
     }
   | {
       kind: "claude-resume";
@@ -130,10 +130,10 @@ export function resolveSessionEditSubmission(
   if (provider === "codex") {
     return edit.rollbackNumTurns && edit.rollbackNumTurns > 0
       ? {
-          kind: "codex-resume",
+          kind: "codex-fork",
           rollbackNumTurns: edit.rollbackNumTurns,
-          optimisticTruncate: true,
-          refreshSameSessionBranches: true,
+          optimisticTruncate: false,
+          refreshSameSessionBranches: false,
         }
       : { kind: "invalid-codex-boundary" };
   }

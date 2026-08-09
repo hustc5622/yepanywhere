@@ -300,6 +300,7 @@ describe("SessionView", () => {
         hasUnread: true,
         contextUsage: { inputTokens: 5000, percentage: 25 },
         provider: "claude",
+        forkParentSessionId: "source-session",
       };
 
       const view = SessionView.from(summary);
@@ -318,6 +319,7 @@ describe("SessionView", () => {
       expect(view.hasUnread).toBe(true);
       expect(view.needsAttention).toBe(true);
       expect(view.contextUsage).toEqual({ inputTokens: 5000, percentage: 25 });
+      expect(view.forkParentSessionId).toBe("source-session");
     });
 
     it("handles summary without optional fields", () => {
@@ -353,6 +355,7 @@ describe("SessionView", () => {
         aiTitle: "AI",
         customTitle: "Custom",
         isStarred: true,
+        forkParentSessionId: "source-session",
       });
 
       expect(view.id).toBe("session-123");
@@ -362,6 +365,7 @@ describe("SessionView", () => {
       expect(view.displayTitle).toBe("Custom");
       expect(view.isStarred).toBe(true);
       expect(view.isArchived).toBe(false);
+      expect(view.forkParentSessionId).toBe("source-session");
     });
 
     it("handles minimal data with defaults", () => {

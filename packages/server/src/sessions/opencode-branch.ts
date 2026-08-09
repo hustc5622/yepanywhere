@@ -179,11 +179,9 @@ export interface CollapsibleForkFamilyMember {
 }
 
 /**
- * Collapse OpenCode edit-fork families down to a single representative per
- * family, mirroring Codex's single-session-with-branch-switcher UX. Because
- * OpenCode's native fork creates a brand new session per edit, a family would
- * otherwise surface as several independent list entries (plus a stray "Cont"
- * badge on the interrupted parent).
+ * Collapse provider edit-fork families down to a single representative per
+ * family. Both OpenCode and stable Codex editing create a new session/thread,
+ * so a family would otherwise surface as several independent list entries.
  *
  * The representative is the most recently updated member (the tip of the latest
  * edit / the branch currently being worked on). Hidden members remain directly
@@ -192,9 +190,9 @@ export interface CollapsibleForkFamilyMember {
  * Sessions without fork lineage are singleton families and always kept. Order
  * of the input is preserved for the surviving entries.
  */
-export function collapseOpenCodeForkFamilies<
-  T extends CollapsibleForkFamilyMember,
->(summaries: T[]): T[] {
+export function collapseEditForkFamilies<T extends CollapsibleForkFamilyMember>(
+  summaries: T[],
+): T[] {
   const byId = new Map(summaries.map((summary) => [summary.id, summary]));
 
   // Union-find over the family graph. Each surviving edge points a child at its
@@ -243,6 +241,9 @@ export function collapseOpenCodeForkFamilies<
   );
   return summaries.filter((summary) => keep.has(summary.id));
 }
+
+/** @deprecated Use the provider-neutral collapseEditForkFamilies name. */
+export const collapseOpenCodeForkFamilies = collapseEditForkFamilies;
 
 function isMoreRecentMember(
   candidate: CollapsibleForkFamilyMember,

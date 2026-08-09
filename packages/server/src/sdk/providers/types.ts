@@ -53,16 +53,22 @@ export interface StartSessionOptions {
   /** Session ID to resume (optional) */
   resumeSessionId?: string;
   /**
+   * Internal provenance proof that `resumeSessionId` came from a create-only
+   * Codex process which never accepted a user turn. Only that narrow case may
+   * replace an exact `no rollout found` response with a fresh thread.
+   */
+  allowMissingRolloutReplacement?: boolean;
+  /**
    * Provider-native edit boundary used with resumeSessionId. Claude resumes
    * through the supplied ancestor UUID; OpenCode forks before the supplied
    * native user message ID. Maps to the provider's `resumeSessionAt` option.
    */
   resumeSessionAt?: string;
   /**
-   * Drop this many trailing user turns before continuing the same provider
-   * session. Currently used by Codex app-server `thread/rollback`; other
-   * providers should ignore it unless they expose equivalent same-thread
-   * history control.
+   * Legacy wire name for the number of trailing source turns excluded by a
+   * source-preserving Codex edit fork. The provider creates a new thread with
+   * stable `thread/fork.lastTurnId` (or a fresh thread for the first prompt)
+   * and never mutates the source thread.
    */
   rollbackNumTurns?: number;
   /** Permission mode for tool approvals */

@@ -247,6 +247,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
             project,
             {
               readerFactory: deps.readerFactory,
+              sessionMetadataService: deps.sessionMetadataService,
               sessionIndexService: deps.sessionIndexService,
               codexSessionsDir: deps.codexSessionsDir,
               codexReaderFactory: deps.codexReaderFactory,

@@ -1469,7 +1469,9 @@ export function useSession(
 
         if (
           msgType === "system" &&
-          sdkMessage.subtype === "history_rewrite_complete"
+          (sdkMessage.subtype === "history_fork_complete" ||
+            // Older servers emitted the same sync signal under this subtype.
+            sdkMessage.subtype === "history_rewrite_complete")
         ) {
           signalHistoryRewriteSync();
           return;

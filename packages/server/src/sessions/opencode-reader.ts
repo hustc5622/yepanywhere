@@ -36,6 +36,7 @@ import {
   withOpenCodeDbResult,
 } from "./opencode-db.js";
 import { normalizeProviderGeneratedTitle } from "./provider-title-quality.js";
+import { sanitizePublicUserPrompt } from "./public-user-prompt.js";
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -510,10 +511,13 @@ class OpenCodeJsonSessionReader implements ISessionReader {
 
       // Provider defaults and explanatory preambles are not useful display
       // titles. Fall back to the first real user message in that case.
-      const fullTitle =
+      const rawFullTitle =
         normalizeProviderGeneratedTitle(session.title) ||
         firstUserMessageText?.trim() ||
         null;
+      const fullTitle = rawFullTitle
+        ? sanitizePublicUserPrompt(rawFullTitle)
+        : null;
 
       const forkParentSessionId = readOpenCodeForkParentSessionId(
         session.metadata,
@@ -1555,7 +1559,10 @@ export class OpenCodeSessionReader implements ISessionReader {
     // OpenCode replaces its generic initial title with a generated session
     // title. Prefer that persisted title so the SQLite reader agrees with the
     // bridge and does not flip back to the first user prompt on each refresh.
-    const fullTitle = providerTitle || firstUserMessageText?.trim() || null;
+    const rawFullTitle = providerTitle || firstUserMessageText?.trim() || null;
+    const fullTitle = rawFullTitle
+      ? sanitizePublicUserPrompt(rawFullTitle)
+      : null;
     const contextUsage = this.extractSqliteContextUsageFromMessages(
       messages,
       model,

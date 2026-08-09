@@ -221,14 +221,16 @@ describe("Supervisor", () => {
       expect(process1.id).not.toBe(process2.id);
     });
 
-    it("passes rollbackNumTurns to provider-backed resumed sessions", async () => {
+    it("passes the legacy exclusion count and registers a distinct Codex fork", async () => {
       let aborted = false;
       const startSession = vi.fn(async (options: StartSessionOptions) => {
         async function* iterator() {
           yield {
             type: "system",
             subtype: "init",
-            session_id: options.resumeSessionId ?? "new-session",
+            session_id: options.rollbackNumTurns
+              ? "sess-123-fork"
+              : (options.resumeSessionId ?? "new-session"),
           };
           while (!aborted) {
             await new Promise((resolve) => setTimeout(resolve, 10));
@@ -281,12 +283,21 @@ describe("Supervisor", () => {
           initialMessage: expect.objectContaining({ text: "q2-1" }),
         }),
       );
+      expect((process as { sessionId: string }).sessionId).toBe(
+        "sess-123-fork",
+      );
+      expect(providerSupervisor.getProcessForSession("sess-123")).toBe(
+        undefined,
+      );
+      expect(providerSupervisor.getProcessForSession("sess-123-fork")?.id).toBe(
+        (process as { id: string }).id,
+      );
 
       aborted = true;
       await providerSupervisor.abortProcess((process as { id: string }).id);
     });
 
-    it("restarts an existing process before applying rollbackNumTurns", async () => {
+    it("restarts the source process before creating a Codex edit fork", async () => {
       const starts: Array<{
         aborted: boolean;
         options: {
@@ -308,7 +319,9 @@ describe("Supervisor", () => {
             yield {
               type: "system",
               subtype: "init",
-              session_id: options.resumeSessionId ?? "new-session",
+              session_id: options.rollbackNumTurns
+                ? "sess-123-fork"
+                : (options.resumeSessionId ?? "new-session"),
             };
             while (!start.aborted) {
               await new Promise((resolve) => setTimeout(resolve, 10));
@@ -369,6 +382,15 @@ describe("Supervisor", () => {
           rollbackNumTurns: 1,
           initialMessage: expect.objectContaining({ text: "q1-1" }),
         }),
+      );
+      expect((process2 as { sessionId: string }).sessionId).toBe(
+        "sess-123-fork",
+      );
+      expect(providerSupervisor.getProcessForSession("sess-123")).toBe(
+        undefined,
+      );
+      expect(providerSupervisor.getProcessForSession("sess-123-fork")?.id).toBe(
+        (process2 as { id: string }).id,
       );
 
       const secondStart = starts[1];

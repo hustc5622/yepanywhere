@@ -48,6 +48,10 @@ import {
   getCodexSessionManifest,
   invalidateCodexSessionManifest,
 } from "./codex-session-manifest.js";
+import {
+  sanitizeCodexPublicUserPrompt,
+  sanitizeCodexUserContentBlockText,
+} from "./public-user-prompt.js";
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -281,6 +285,9 @@ export class CodexSessionReader implements ISessionReader {
         compactCount,
         compactEvents,
         provider,
+        ...(metaEntry.payload.forked_from_id
+          ? { forkParentSessionId: metaEntry.payload.forked_from_id }
+          : {}),
         model,
         codexModelProvider: metaEntry.payload.model_provider ?? undefined,
         reasoningEffort: runtimeConfig.reasoningEffort,
@@ -501,7 +508,9 @@ export class CodexSessionReader implements ISessionReader {
         entry.type === "event_msg" &&
         entry.payload.type === "user_message"
       ) {
-        const fullTitle = entry.payload.message.trim();
+        const fullTitle = sanitizeCodexPublicUserPrompt(
+          entry.payload.message,
+        ).trim();
         if (skipLeadingSystemPrompts && isSyntheticUserPromptText(fullTitle)) {
           continue;
         }
@@ -512,10 +521,7 @@ export class CodexSessionReader implements ISessionReader {
       if (entry.type === "response_item") {
         const payload = entry.payload;
         if (payload.type === "message" && payload.role === "user") {
-          const text = payload.content
-            .map((c) => ("text" in c ? c.text : ""))
-            .join("\n")
-            .trim();
+          const text = this.extractCodexUserMessageText(payload.content).trim();
           if (
             text &&
             !(skipLeadingSystemPrompts && isSyntheticUserPromptText(text))
@@ -536,9 +542,10 @@ export class CodexSessionReader implements ISessionReader {
     for (let index = branches.length - 1; index >= 0; index--) {
       const prompt = branches[index]?.prompt;
       if (typeof prompt !== "string") continue;
-      if (isSyntheticUserPromptText(prompt)) continue;
+      const publicPrompt = sanitizeCodexPublicUserPrompt(prompt);
+      if (isSyntheticUserPromptText(publicPrompt)) continue;
 
-      const title = this.buildTitleFromText(prompt);
+      const title = this.buildTitleFromText(publicPrompt);
       if (title) return title;
     }
 
@@ -548,7 +555,7 @@ export class CodexSessionReader implements ISessionReader {
   private buildTitleFromText(
     text: string,
   ): { title: string; fullTitle: string } | null {
-    const fullTitle = text.trim();
+    const fullTitle = sanitizeCodexPublicUserPrompt(text).trim();
     if (!fullTitle) return null;
 
     const title =
@@ -605,7 +612,7 @@ export class CodexSessionReader implements ISessionReader {
           {
             id: `codex-event-${messageIndex}-${entry.timestamp}`,
             text: [
-              entry.payload.message,
+              sanitizeCodexPublicUserPrompt(entry.payload.message),
               ...(entry.payload.images?.length ? ["[image]"] : []),
             ].join("\n"),
             timestamp: entry.timestamp,
@@ -637,18 +644,23 @@ export class CodexSessionReader implements ISessionReader {
   private extractCodexUserMessageText(
     content: CodexMessagePayload["content"],
   ): string {
-    return content
-      .map((block) => {
-        if (block.type === "input_text") {
-          return block.text;
-        }
-        if (block.type === "input_image") {
-          return "[image]";
-        }
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
+    return sanitizeCodexPublicUserPrompt(
+      content
+        .map((block) => {
+          if (block.type === "input_text") {
+            return sanitizeCodexUserContentBlockText(block.text);
+          }
+          if (block.type === "input_image") {
+            return "[image]";
+          }
+          if (block.type === "input_audio") {
+            return "[audio]";
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n"),
+    );
   }
 
   /**

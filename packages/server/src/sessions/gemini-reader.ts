@@ -33,6 +33,7 @@ import type {
   Session,
   SessionSummary,
 } from "../supervisor/types.js";
+import { sanitizePublicUserPrompt } from "./public-user-prompt.js";
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -450,7 +451,9 @@ export class GeminiSessionReader implements ISessionReader {
     for (const msg of messages) {
       if (msg.type === "user") {
         const userMsg = msg as GeminiUserMessage;
-        const fullTitle = getGeminiUserMessageText(userMsg.content).trim();
+        const fullTitle = sanitizePublicUserPrompt(
+          getGeminiUserMessageText(userMsg.content),
+        ).trim();
         const title =
           fullTitle.length <= SESSION_TITLE_MAX_LENGTH
             ? fullTitle

@@ -789,6 +789,8 @@ export interface AppSessionSummary {
    * from session lists and shown inline under their parent instead.
    */
   parentSessionId?: string;
+  /** Source session when this session is a source-preserving edit fork. */
+  forkParentSessionId?: string;
   // Model used for this session (resolved, not "default")
   model?: string;
   // Provider-specific reasoning effort for this session (e.g. "max", "xhigh")

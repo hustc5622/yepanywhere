@@ -26,6 +26,7 @@ import {
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
 import type { SDKMessage, ToolApprovalResult } from "../../../src/sdk/types.js";
+import { Supervisor } from "../../../src/supervisor/Supervisor.js";
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -135,6 +136,24 @@ function request(id, method, params) {
   );
 }
 
+function sendThread(id, threadId, cwd, options = {}) {
+  send(id, {
+    thread: {
+      id: threadId,
+      cwd,
+      modelProvider: "openai",
+      status: { type: "idle" },
+      turns: options.turns || [],
+      forkedFromId: options.forkedFromId || null,
+    },
+    model: "gpt-5.5",
+    modelProvider: "openai",
+    serviceTier: null,
+    cwd,
+    reasoningEffort: null,
+  });
+}
+
 function handle(message) {
   const method = typeof message.method === "string" ? message.method : "";
   const attempt = method ? (attemptsByMethod.get(method) || 0) + 1 : 0;
@@ -188,9 +207,14 @@ function handle(message) {
     });
     return;
   }
-  if (message.method === "thread/rollback") {
-    send(message.id, {
-      thread: { id: message.params.threadId, status: { type: "idle" } },
+  if (message.method === "thread/fork") {
+    const turns = JSON.parse(process.env.CODEX_FAKE_SOURCE_TURNS || "[]");
+    const boundary = turns.findIndex(
+      (turn) => turn.id === message.params.lastTurnId,
+    );
+    sendThread(message.id, "thread-forked", message.params.cwd, {
+      turns: boundary < 0 ? [] : turns.slice(0, boundary + 1),
+      forkedFromId: message.params.threadId,
     });
     return;
   }
@@ -355,6 +379,19 @@ function handle(message) {
   if (message.method !== "thread/start" && message.method !== "thread/resume") {
     return;
   }
+  if (
+    message.method === "thread/resume" &&
+    process.env.CODEX_FAKE_NO_ROLLOUT === "1"
+  ) {
+    const code = Number.parseInt(
+      process.env.CODEX_FAKE_NO_ROLLOUT_CODE || "-32600",
+      10,
+    );
+    const threadId =
+      process.env.CODEX_FAKE_NO_ROLLOUT_THREAD || message.params.threadId;
+    sendError(message.id, code, "no rollout found for thread id " + threadId);
+    return;
+  }
   const overloadAttempts = Number.parseInt(
     process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS || "0",
     10,
@@ -386,19 +423,25 @@ function handle(message) {
       params: message.params,
     }),
   );
-  send(message.id, {
-    thread: {
-      id: message.params.threadId || "thread-new",
-      cwd: message.params.cwd,
-      modelProvider: "openai",
-      status: { type: "idle" },
-    },
-    model: "gpt-5.5",
-    modelProvider: "openai",
-    serviceTier: null,
-    cwd: message.params.cwd,
-    reasoningEffort: null,
-  });
+  const resumed = (attemptsByMethod.get("thread/resume") || 0) > 0;
+  const threadId =
+    message.method === "thread/start" &&
+    resumed &&
+    process.env.CODEX_FAKE_FIRST_PROMPT_FORK === "1"
+      ? "thread-first-fork"
+      : message.method === "thread/start" &&
+          resumed &&
+          process.env.CODEX_FAKE_NO_ROLLOUT === "1"
+        ? "thread-replacement"
+        : message.method === "thread/start" &&
+            process.env.CODEX_FAKE_PROVISIONAL_START === "1"
+          ? "thread-provisional"
+        : message.params.threadId || "thread-new";
+  const turns =
+    message.method === "thread/resume"
+      ? JSON.parse(process.env.CODEX_FAKE_SOURCE_TURNS || "[]")
+      : [];
+  sendThread(message.id, threadId, message.params.cwd, { turns });
 }
 
 process.stdin.setEncoding("utf8");
@@ -1526,17 +1569,28 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
-    it("emits history_rewrite_complete after rollback and turn/start", async () => {
+    it("forks through stable lastTurnId without mutating the source or losing thread MCP config", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-"),
       );
       const fakeCodexPath = writeFakeCodexAppServer(tempDir);
       const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
       const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousMcpServers = process.env.CODEX_FAKE_MCP_SERVERS;
       let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
         null;
 
       process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify([
+        { id: "turn-source-1", status: "completed", items: [], error: null },
+        { id: "turn-source-2", status: "completed", items: [], error: null },
+        { id: "turn-source-3", status: "completed", items: [], error: null },
+      ]);
+      process.env.CODEX_FAKE_MCP_SERVERS = JSON.stringify(["web"]);
 
       try {
         const provider = new CodexProvider({ codexPath: fakeCodexPath });
@@ -1545,31 +1599,414 @@ process.stdin.on("data", (chunk) => {
           resumeSessionId: "thread-existing",
           initialMessage: { text: "edited prompt", uuid: "message-edit" },
           rollbackNumTurns: 1,
+          codexMcpMode: "clear",
         });
 
         const messages: Array<Record<string, unknown>> = [];
         for await (const item of session.iterator) {
           messages.push(item as unknown as Record<string, unknown>);
-          if (item.subtype === "history_rewrite_complete") break;
+          if (item.subtype === "history_fork_complete") break;
         }
 
         expect(messages).toContainEqual(
           expect.objectContaining({
             type: "system",
-            subtype: "history_rewrite_complete",
-            uuid: "codex-history-rewrite-turn-rewrite",
-            session_id: "thread-existing",
+            subtype: "init",
+            session_id: "thread-forked",
+            forkParentSessionId: "thread-existing",
+          }),
+        );
+        expect(messages).toContainEqual(
+          expect.objectContaining({
+            type: "system",
+            subtype: "history_fork_complete",
+            uuid: "codex-history-fork-turn-rewrite",
+            session_id: "thread-forked",
+            forkParentSessionId: "thread-existing",
             turnId: "turn-rewrite",
             messageUuid: "message-edit",
           }),
         );
+
+        const requests = readMessageCapture(messageCapturePath);
+        expect(
+          requests.filter(({ method }) => method === "thread/resume"),
+        ).toHaveLength(1);
+        expect(
+          requests.filter(({ method }) => method === "thread/fork"),
+        ).toEqual([
+          expect.objectContaining({
+            params: expect.objectContaining({
+              threadId: "thread-existing",
+              lastTurnId: "turn-source-2",
+              config: expect.objectContaining({
+                mcp_servers: expect.objectContaining({
+                  web: expect.objectContaining({ enabled: false }),
+                }),
+              }),
+            }),
+          }),
+        ]);
+        expect(
+          requests.find(({ method }) => method === "thread/fork")?.params,
+        ).not.toHaveProperty("beforeTurnId");
+        expect(
+          requests.find(({ method }) => method === "turn/start")?.params,
+        ).toMatchObject({ threadId: "thread-forked" });
+        expect(
+          requests.some(({ method }) => method === "thread/rollback"),
+        ).toBe(false);
       } finally {
         session?.abort();
-        if (previousCapturePath === undefined) {
-          process.env.CODEX_FAKE_CAPTURE = undefined;
-        } else {
-          process.env.CODEX_FAKE_CAPTURE = previousCapturePath;
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_MCP_SERVERS", previousMcpServers);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("starts an empty child for a first-prompt edit and records manual lineage", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-first-fork-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousFirstPrompt = process.env.CODEX_FAKE_FIRST_PROMPT_FORK;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify([
+        { id: "turn-source-1", status: "completed", items: [], error: null },
+        { id: "turn-source-2", status: "completed", items: [], error: null },
+        { id: "turn-source-3", status: "completed", items: [], error: null },
+      ]);
+      process.env.CODEX_FAKE_FIRST_PROMPT_FORK = "1";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: {
+            text: "edited first prompt",
+            uuid: "message-first",
+          },
+          rollbackNumTurns: 3,
+        });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "system",
+            subtype: "init",
+            session_id: "thread-first-fork",
+            forkParentSessionId: "thread-existing",
+          },
+        });
+        await session.iterator.next();
+        await session.iterator.next();
+
+        const requests = readMessageCapture(messageCapturePath);
+        expect(
+          requests.filter(({ method }) => method === "thread/start"),
+        ).toHaveLength(1);
+        expect(requests.some(({ method }) => method === "thread/fork")).toBe(
+          false,
+        );
+        expect(
+          requests.some(({ method }) => method === "thread/rollback"),
+        ).toBe(false);
+        expect(
+          requests.find(({ method }) => method === "turn/start")?.params,
+        ).toMatchObject({ threadId: "thread-first-fork" });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_FIRST_PROMPT_FORK", previousFirstPrompt);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      {
+        name: "excluded suffix exceeds source history",
+        turns: [
+          { id: "turn-source-1", status: "completed", items: [], error: null },
+        ],
+        rollbackNumTurns: 2,
+      },
+      {
+        name: "retained boundary is still in progress",
+        turns: [
+          { id: "turn-source-1", status: "completed", items: [], error: null },
+          { id: "turn-source-2", status: "inProgress", items: [], error: null },
+          { id: "turn-source-3", status: "completed", items: [], error: null },
+        ],
+        rollbackNumTurns: 1,
+      },
+    ])("fails closed when $name", async ({ turns, rollbackNumTurns }) => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-invalid-fork-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify(turns);
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "invalid edit" },
+          rollbackNumTurns,
+        });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: { type: "error" },
+        });
+        const requests = readMessageCapture(messageCapturePath);
+        expect(
+          requests.some(({ method }) =>
+            [
+              "thread/fork",
+              "thread/start",
+              "thread/rollback",
+              "turn/start",
+            ].includes(method ?? ""),
+          ),
+        ).toBe(false);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      {
+        name: "replaces an exact missing rollout with create-only provenance",
+        allowReplacement: true,
+        errorCode: -32600,
+        errorThread: "thread-provisional",
+        expectsReplacement: true,
+      },
+      {
+        name: "rejects an exact missing rollout without create-only provenance",
+        allowReplacement: false,
+        errorCode: -32600,
+        errorThread: "thread-provisional",
+        expectsReplacement: false,
+      },
+      {
+        name: "rejects a lookalike missing-rollout error code",
+        allowReplacement: true,
+        errorCode: -32000,
+        errorThread: "thread-provisional",
+        expectsReplacement: false,
+      },
+      {
+        name: "rejects a missing-rollout error for another thread",
+        allowReplacement: true,
+        errorCode: -32600,
+        errorThread: "another-thread",
+        expectsReplacement: false,
+      },
+    ])(
+      "$name",
+      async ({
+        allowReplacement,
+        errorCode,
+        errorThread,
+        expectsReplacement,
+      }) => {
+        const tempDir = mkdtempSync(
+          join(require("node:os").tmpdir(), "codex-no-rollout-"),
+        );
+        const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+        const capturePath = join(tempDir, "capture.json");
+        const messageCapturePath = join(tempDir, "messages.jsonl");
+        const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+        const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+        const previousNoRollout = process.env.CODEX_FAKE_NO_ROLLOUT;
+        const previousNoRolloutCode = process.env.CODEX_FAKE_NO_ROLLOUT_CODE;
+        const previousNoRolloutThread =
+          process.env.CODEX_FAKE_NO_ROLLOUT_THREAD;
+        let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+          null;
+
+        process.env.CODEX_FAKE_CAPTURE = capturePath;
+        process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+        process.env.CODEX_FAKE_NO_ROLLOUT = "1";
+        process.env.CODEX_FAKE_NO_ROLLOUT_CODE = String(errorCode);
+        process.env.CODEX_FAKE_NO_ROLLOUT_THREAD = errorThread;
+
+        try {
+          const provider = new CodexProvider({ codexPath: fakeCodexPath });
+          session = await provider.startSession({
+            cwd: tempDir,
+            resumeSessionId: "thread-provisional",
+            allowMissingRolloutReplacement: allowReplacement,
+            initialMessage: { text: "first prompt", uuid: "first-1" },
+          });
+
+          if (expectsReplacement) {
+            await expect(session.iterator.next()).resolves.toMatchObject({
+              value: {
+                type: "system",
+                subtype: "init",
+                session_id: "thread-replacement",
+              },
+            });
+            await expect(session.iterator.next()).resolves.toMatchObject({
+              value: {
+                type: "user",
+                uuid: "first-1",
+                session_id: "thread-replacement",
+              },
+            });
+            await expect(session.iterator.next()).resolves.toMatchObject({
+              value: { type: "result", session_id: "thread-replacement" },
+            });
+          } else {
+            await expect(session.iterator.next()).resolves.toMatchObject({
+              value: { type: "error" },
+            });
+          }
+
+          const requests = readMessageCapture(messageCapturePath);
+          expect(
+            requests.filter(({ method }) => method === "thread/resume"),
+          ).toHaveLength(1);
+          expect(
+            requests.filter(({ method }) => method === "thread/start"),
+          ).toHaveLength(expectsReplacement ? 1 : 0);
+          expect(
+            requests.filter(({ method }) => method === "turn/start"),
+          ).toHaveLength(expectsReplacement ? 1 : 0);
+        } finally {
+          session?.abort();
+          restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+          restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+          restoreEnv("CODEX_FAKE_NO_ROLLOUT", previousNoRollout);
+          restoreEnv("CODEX_FAKE_NO_ROLLOUT_CODE", previousNoRolloutCode);
+          restoreEnv("CODEX_FAKE_NO_ROLLOUT_THREAD", previousNoRolloutThread);
+          rmSync(tempDir, { recursive: true, force: true });
         }
+      },
+    );
+
+    it("restarts a create-only Codex process without replaying its first turn twice", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-provisional-restart-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousNoRollout = process.env.CODEX_FAKE_NO_ROLLOUT;
+      const previousProvisional = process.env.CODEX_FAKE_PROVISIONAL_START;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_NO_ROLLOUT = "1";
+      process.env.CODEX_FAKE_PROVISIONAL_START = "1";
+
+      const provider = new CodexProvider({ codexPath: fakeCodexPath });
+      const onSessionIdChanged = vi.fn(async () => undefined);
+      const supervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 60_000,
+        onSessionIdChanged,
+      });
+
+      try {
+        const created = await supervisor.createSession(tempDir);
+        expect("id" in created).toBe(true);
+        if (!("id" in created)) throw new Error("expected a process");
+        expect(created.sessionId).toBe("thread-provisional");
+        expect(created.isUnmaterializedSession).toBe(true);
+
+        const queued = await supervisor.queueMessageToSession(
+          created.sessionId,
+          tempDir,
+          { text: "first after create", tempId: "first-after-create" },
+          undefined,
+          { reasoningEffort: "xhigh" },
+        );
+        expect(queued).toMatchObject({ success: true, restarted: true });
+        if (!queued.success) throw new Error(queued.error);
+
+        await vi.waitFor(() => {
+          expect(queued.process.sessionId).toBe("thread-replacement");
+          expect(queued.process.state.type).toBe("idle");
+          expect(queued.process.queueDepth).toBe(0);
+        });
+        expect(queued.process.isUnmaterializedSession).toBe(false);
+        expect(supervisor.getProcessForSession("thread-provisional")?.id).toBe(
+          queued.process.id,
+        );
+        expect(supervisor.getProcessForSession("thread-replacement")?.id).toBe(
+          queued.process.id,
+        );
+        expect(
+          queued.process
+            .getMessageHistory()
+            .filter((message) => message.type === "user"),
+        ).toHaveLength(1);
+        expect(
+          queued.process
+            .getMessageHistory()
+            .filter((message) => message.type === "result"),
+        ).toHaveLength(1);
+        expect(onSessionIdChanged).toHaveBeenCalledWith(
+          "thread-provisional",
+          "thread-replacement",
+          created.projectId,
+        );
+
+        const requests = readMessageCapture(messageCapturePath);
+        expect(
+          requests.filter(({ method }) => method === "thread/start"),
+        ).toHaveLength(2);
+        expect(
+          requests.filter(({ method }) => method === "thread/resume"),
+        ).toHaveLength(1);
+        expect(
+          requests.filter(({ method }) => method === "turn/start"),
+        ).toEqual([
+          expect.objectContaining({
+            params: expect.objectContaining({
+              threadId: "thread-replacement",
+              effort: "xhigh",
+              clientUserMessageId: expect.any(String),
+            }),
+          }),
+        ]);
+      } finally {
+        await supervisor.shutdown();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_NO_ROLLOUT", previousNoRollout);
+        restoreEnv("CODEX_FAKE_PROVISIONAL_START", previousProvisional);
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
@@ -2744,7 +3181,11 @@ describe("CodexProvider Event Normalization", () => {
       "session-1",
       new Map(),
     );
-    expect(rollbackDeprecation).toEqual([]);
+    expect(rollbackDeprecation[0]).toMatchObject({
+      type: "system",
+      subtype: "warning",
+      content: "thread/rollback is deprecated and will be removed soon",
+    });
 
     const empty = provider.convertNotificationToSDKMessages(
       { method: "configWarning", params: {} },

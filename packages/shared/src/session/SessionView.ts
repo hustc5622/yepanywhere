@@ -74,6 +74,8 @@ export class SessionView {
     readonly compactCount: number | undefined = undefined,
     /** Best-effort details for each recorded context compaction */
     readonly compactEvents: ContextCompactEvent[] | undefined = undefined,
+    /** Source session when this session is a source-preserving edit fork. */
+    readonly forkParentSessionId: string | undefined = undefined,
   ) {}
 
   // ===========================================================================
@@ -194,6 +196,7 @@ export class SessionView {
       summary.cumulativeUsage,
       summary.compactCount,
       summary.compactEvents,
+      summary.forkParentSessionId,
     );
   }
 
@@ -222,6 +225,7 @@ export class SessionView {
     cumulativeUsage?: ContextCumulativeUsage;
     compactCount?: number;
     compactEvents?: ContextCompactEvent[];
+    forkParentSessionId?: string;
     provider?: ProviderName;
   }): SessionView {
     const now = new Date().toISOString();
@@ -247,6 +251,7 @@ export class SessionView {
       data.cumulativeUsage,
       data.compactCount,
       data.compactEvents,
+      data.forkParentSessionId,
     );
   }
 }

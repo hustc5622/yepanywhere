@@ -90,6 +90,20 @@ export const CodexInputImageContentSchema = z
   })
   .passthrough();
 
+/**
+ * Input audio content block in user messages.
+ * Local audio is persisted as a data URL with an adjacent provider-generated
+ * label, while rollout variants may carry additional metadata.
+ */
+export const CodexInputAudioContentSchema = z
+  .object({
+    type: z.literal("input_audio"),
+    audio_url: z.string().optional(),
+    file_path: z.string().optional(),
+    mime_type: z.string().optional(),
+  })
+  .passthrough();
+
 export const CodexMessagePhaseSchema = z
   .enum(["commentary", "final_answer"])
   .nullable()
@@ -109,6 +123,7 @@ export const CodexMessagePayloadSchema = z.object({
       CodexInputTextContentSchema,
       CodexOutputTextContentSchema,
       CodexInputImageContentSchema,
+      CodexInputAudioContentSchema,
     ]),
   ),
 });
