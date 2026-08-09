@@ -8,7 +8,11 @@
 import { type ChildProcess, exec, spawn } from "node:child_process";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import type { ModelInfo, UserQuestionAnswers } from "@yep-anywhere/shared";
+import type {
+  CodexRetryStatus,
+  ModelInfo,
+  UserQuestionAnswers,
+} from "@yep-anywhere/shared";
 import {
   buildCodexInteractiveResponse,
   toCodexInteractiveRequestView,
@@ -179,6 +183,8 @@ const APP_SERVER_INIT_REQUEST_ID = 1;
 const APP_SERVER_MODEL_LIST_REQUEST_ID = 2;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
 const MAX_APP_SERVER_STDERR_LENGTH = 64 * 1024;
+const APP_SERVER_OVERLOAD_MAX_ATTEMPTS = 4;
+const APP_SERVER_OVERLOAD_BASE_DELAY_MS = 50;
 /** Max characters of live command output kept for the streaming preview. */
 const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL_PROVIDER = DEFAULT_CODEX_MODEL_SOURCE;
@@ -564,6 +570,17 @@ interface AppServerRequestMetadata {
   clientMessageId?: string;
 }
 
+interface AppServerRetryUpdate {
+  requestId: JsonRpcId;
+  method: string;
+  retryStatus: CodexRetryStatus;
+  metadata?: AppServerRequestMetadata;
+}
+
+type AppServerRetryHandler = (
+  update: AppServerRetryUpdate,
+) => void | Promise<void>;
+
 interface AppServerEventObserver {
   onClientRequest(input: {
     requestId: JsonRpcId;
@@ -860,6 +877,55 @@ class CodexAppServerClient {
   }
 
   async requestTracked<T>(
+    method: string,
+    params?: unknown,
+    metadata?: AppServerRequestMetadata,
+    onRetry?: AppServerRetryHandler,
+  ): Promise<{ requestId: JsonRpcId; result: T }> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.requestOnceTracked<T>(method, params, metadata);
+      } catch (error) {
+        if (
+          !(error instanceof CodexJsonRpcError) ||
+          error.code !== -32001 ||
+          attempt >= APP_SERVER_OVERLOAD_MAX_ATTEMPTS
+        ) {
+          throw error;
+        }
+
+        const exponentialDelay =
+          APP_SERVER_OVERLOAD_BASE_DELAY_MS * 2 ** (attempt - 1);
+        const jitter = Math.floor(
+          Math.random() * APP_SERVER_OVERLOAD_BASE_DELAY_MS,
+        );
+        const delayMs = exponentialDelay + jitter;
+        if (error.requestId !== undefined) {
+          await onRetry?.({
+            requestId: error.requestId,
+            method,
+            retryStatus: {
+              state: attempt === 1 ? "queued" : "retrying",
+              category: "overloaded",
+              retryable: true,
+              attempt,
+              nextAttempt: attempt + 1,
+              maxAttempts: APP_SERVER_OVERLOAD_MAX_ATTEMPTS,
+              retryInMs: delayMs,
+            },
+            ...(metadata ? { metadata } : {}),
+          });
+        }
+        log.warn(
+          { method, attempt, delayMs, errorCode: error.code },
+          "Codex app-server overloaded; retrying request",
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  private async requestOnceTracked<T>(
     method: string,
     params?: unknown,
     metadata?: AppServerRequestMetadata,
@@ -1756,6 +1822,73 @@ export class CodexProvider implements AgentProvider {
   }
 
   /**
+   * Await one JSON-RPC request while yielding only the client's safe overload
+   * decision. Raw JSON-RPC error messages/data never enter the UI projection.
+   */
+  private async *requestTrackedWithRetryProjection<T>(input: {
+    appServer: CodexAppServerClient;
+    method: string;
+    params?: unknown;
+    metadata?: AppServerRequestMetadata;
+    sessionId?: () => string | undefined;
+    onRetry?: (
+      update: AppServerRetryUpdate,
+    ) => Promise<CodexEventEnvelope | undefined>;
+  }): AsyncGenerator<
+    SDKMessage,
+    { requestId: JsonRpcId; result: T },
+    undefined
+  > {
+    const updates = new AsyncQueue<{
+      update: AppServerRetryUpdate;
+      canonicalEvent?: CodexEventEnvelope;
+    }>();
+    const request = input.appServer.requestTracked<T>(
+      input.method,
+      input.params,
+      input.metadata,
+      async (update) => {
+        const canonicalEvent = await input.onRetry?.(update);
+        updates.push({
+          update,
+          ...(canonicalEvent ? { canonicalEvent } : {}),
+        });
+      },
+    );
+    const settled = request.then(
+      (result) => ({ kind: "result" as const, result }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    let nextUpdate = updates.shift().then(
+      (value) => ({ kind: "retry" as const, value }),
+      () => ({ kind: "closed" as const }),
+    );
+
+    try {
+      for (;;) {
+        const outcome = await Promise.race([settled, nextUpdate]);
+        if (outcome.kind === "retry") {
+          yield buildCodexRetryWarning(
+            outcome.value.update,
+            input.sessionId?.(),
+            outcome.value.canonicalEvent,
+          );
+          nextUpdate = updates.shift().then(
+            (value) => ({ kind: "retry" as const, value }),
+            () => ({ kind: "closed" as const }),
+          );
+          continue;
+        }
+        if (outcome.kind === "result") return outcome.result;
+        if (outcome.kind === "error") throw outcome.error;
+        throw new Error("Codex retry status channel closed unexpectedly");
+      }
+    } finally {
+      updates.close(new Error("Codex request settled"));
+    }
+  }
+
+  /**
    * Main session loop using codex app-server.
    */
   private async *runSession(
@@ -1778,6 +1911,11 @@ export class CodexProvider implements AgentProvider {
 
     let sessionId = options.resumeSessionId ?? "";
     let eventIngress: CodexEventIngress | null = null;
+    const startupRetryUpdates: AppServerRetryUpdate[] = [];
+    const captureStartupRetry = async (update: AppServerRetryUpdate) => {
+      startupRetryUpdates.push(update);
+      return undefined;
+    };
     let projectionMode: CodexEventProjectionMode = "shadow";
     const usageByTurnId = new Map<string, TokenUsageSnapshot>();
     const customToolContexts = new Map<string, CodexToolCallContext>();
@@ -1836,25 +1974,36 @@ export class CodexProvider implements AgentProvider {
 
       await appServer.connect();
 
-      await appServer.request<{ userAgent: string }>("initialize", {
-        clientInfo: {
-          name: this.getCodexClientName(),
-          version: "dev",
+      yield* this.requestTrackedWithRetryProjection<{ userAgent: string }>({
+        appServer,
+        method: "initialize",
+        params: {
+          clientInfo: {
+            name: this.getCodexClientName(),
+            version: "dev",
+          },
+          capabilities: null,
         },
-        capabilities: null,
+        sessionId: () => sessionId || options.resumeSessionId,
+        onRetry: captureStartupRetry,
       });
       appServer.notify("initialized");
 
       // Read the same app-server's effective config for this cwd. This is both
       // substantially faster than spawning `codex mcp list --json` and keeps
       // project-level .codex/config.toml layers aligned with the thread.
-      const configRead = await appServer.request<{ config?: unknown }>(
-        "config/read",
-        {
+      const configRead = (yield* this.requestTrackedWithRetryProjection<{
+        config?: unknown;
+      }>({
+        appServer,
+        method: "config/read",
+        params: {
           includeLayers: false,
           cwd: options.cwd,
         },
-      );
+        sessionId: () => sessionId || options.resumeSessionId,
+        onRetry: captureStartupRetry,
+      })).result;
       const mcpProfile = resolveCodexMcpThreadProfile(
         options.codexMcpMode,
         configRead.config,
@@ -1893,14 +2042,20 @@ export class CodexProvider implements AgentProvider {
         config: mcpProfile.threadConfig,
       };
       const threadExchange = options.resumeSessionId
-        ? await appServer.requestTracked<ThreadResumeResponse>(
-            "thread/resume",
-            threadResumeParams,
-          )
-        : await appServer.requestTracked<ThreadStartResponse>(
-            "thread/start",
-            threadStartParams,
-          );
+        ? yield* this.requestTrackedWithRetryProjection<ThreadResumeResponse>({
+            appServer,
+            method: "thread/resume",
+            params: threadResumeParams,
+            sessionId: () => sessionId || options.resumeSessionId,
+            onRetry: captureStartupRetry,
+          })
+        : yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
+            appServer,
+            method: "thread/start",
+            params: threadStartParams,
+            sessionId: () => sessionId || options.resumeSessionId,
+            onRetry: captureStartupRetry,
+          });
       const threadResult: ThreadResumeResponse | ThreadStartResponse =
         threadExchange.result;
       const threadMethod = options.resumeSessionId
@@ -1932,6 +2087,17 @@ export class CodexProvider implements AgentProvider {
           : {}),
       });
       const activeEventIngress = eventIngress;
+      for (const update of startupRetryUpdates) {
+        await activeEventIngress.ingestClientRetry({
+          requestId: update.requestId,
+          method: update.method,
+          retryStatus: update.retryStatus,
+          threadId: sessionId,
+          ...(update.metadata?.clientMessageId
+            ? { clientMessageId: update.metadata.clientMessageId }
+            : {}),
+        });
+      }
       await activeEventIngress.ingestClientExchange({
         requestId: threadExchange.requestId,
         method: threadMethod,
@@ -2083,13 +2249,26 @@ export class CodexProvider implements AgentProvider {
             options.thinking,
           ),
         };
-        const turnResult = (
-          await appServer.requestTracked<TurnStartResponse>(
-            "turn/start",
-            turnStartParams,
-            message.uuid ? { clientMessageId: message.uuid } : undefined,
-          )
-        ).result;
+        const turnResult =
+          (yield* this.requestTrackedWithRetryProjection<TurnStartResponse>({
+            appServer,
+            method: "turn/start",
+            params: turnStartParams,
+            metadata: message.uuid
+              ? { clientMessageId: message.uuid }
+              : undefined,
+            sessionId: () => sessionId,
+            onRetry: async (update) =>
+              await activeEventIngress.ingestClientRetry({
+                requestId: update.requestId,
+                method: update.method,
+                retryStatus: update.retryStatus,
+                threadId: sessionId,
+                ...(update.metadata?.clientMessageId
+                  ? { clientMessageId: update.metadata.clientMessageId }
+                  : {}),
+              }),
+          })).result;
 
         const activeTurnId = turnResult.turn.id;
         runtimeState.activeTurnId = activeTurnId;
@@ -4490,6 +4669,35 @@ function getEffectiveCommandApprovalDecisions(
   }
   decisions.push("cancel");
   return decisions;
+}
+
+function buildCodexRetryWarning(
+  update: AppServerRetryUpdate,
+  sessionId: string | undefined,
+  canonicalEvent: CodexEventEnvelope | undefined,
+): SDKMessage {
+  const status = update.retryStatus;
+  const content =
+    status.state === "queued"
+      ? `Codex is busy. The request is queued for bounded attempt ${status.nextAttempt}/${status.maxAttempts}.`
+      : `Codex is busy. Retrying with bounded attempt ${status.nextAttempt}/${status.maxAttempts}.`;
+  return withCodexTimestamp({
+    type: "system",
+    subtype: "warning",
+    uuid: `codex-retry-${String(update.requestId)}-${status.attempt}`,
+    ...(sessionId ? { session_id: sessionId } : {}),
+    content,
+    warning: content,
+    warningKind: "codex_app_server_overloaded",
+    willRetry: true,
+    codexRetryStatus: { ...status },
+    ...(canonicalEvent
+      ? {
+          codexEventSequence: canonicalEvent.sequence,
+          codexEventId: canonicalEvent.eventId,
+        }
+      : {}),
+  } as SDKMessage);
 }
 
 export function buildCodexUserInput(

@@ -16,7 +16,10 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { InMemoryCodexEventStore } from "../../../src/codex-events/index.js";
+import {
+  InMemoryCodexEventStore,
+  replayCodexSession,
+} from "../../../src/codex-events/index.js";
 import { getCodexMcpAppServerArgs } from "../../../src/codex/mcp-profile.js";
 import {
   CodexProvider,
@@ -108,6 +111,7 @@ if (argv[0] === "app-server" && process.env.CODEX_FAKE_APP_SERVER_ERROR) {
   process.exit(1);
 }
 let buffer = "";
+const attemptsByMethod = new Map();
 
 function send(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
@@ -132,6 +136,11 @@ function request(id, method, params) {
 }
 
 function handle(message) {
+  const method = typeof message.method === "string" ? message.method : "";
+  const attempt = method ? (attemptsByMethod.get(method) || 0) + 1 : 0;
+  if (method) {
+    attemptsByMethod.set(method, attempt);
+  }
   if (process.env.CODEX_FAKE_MESSAGE_CAPTURE) {
     fs.appendFileSync(
       process.env.CODEX_FAKE_MESSAGE_CAPTURE,
@@ -141,6 +150,8 @@ function handle(message) {
         params: message.params,
         result: message.result,
         error: message.error,
+        attempt,
+        monotonicMs: Date.now(),
       }) + "\\n",
     );
   }
@@ -330,6 +341,29 @@ function handle(message) {
   if (message.method !== "thread/start" && message.method !== "thread/resume") {
     return;
   }
+  const overloadAttempts = Number.parseInt(
+    process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS || "0",
+    10,
+  );
+  if (
+    message.method === "thread/start" &&
+    Number.isSafeInteger(overloadAttempts) &&
+    attempt <= overloadAttempts
+  ) {
+    sendError(message.id, -32001, "Server overloaded; retry later.");
+    return;
+  }
+  const threadStartErrorCode = Number.parseInt(
+    process.env.CODEX_FAKE_THREAD_START_ERROR_CODE || "",
+    10,
+  );
+  if (
+    message.method === "thread/start" &&
+    Number.isSafeInteger(threadStartErrorCode)
+  ) {
+    sendError(message.id, threadStartErrorCode, "synthetic request failure");
+    return;
+  }
   fs.writeFileSync(
     process.env.CODEX_FAKE_CAPTURE,
     JSON.stringify({
@@ -378,6 +412,8 @@ process.stdin.on("data", (chunk) => {
       params?: Record<string, unknown>;
       result?: unknown;
       error?: { code?: number; message?: string };
+      attempt?: number;
+      monotonicMs?: number;
     }> {
       if (!existsSync(capturePath)) return [];
       return readFileSync(capturePath, "utf8")
@@ -392,6 +428,8 @@ process.stdin.on("data", (chunk) => {
               params?: Record<string, unknown>;
               result?: unknown;
               error?: { code?: number; message?: string };
+              attempt?: number;
+              monotonicMs?: number;
             },
         );
     }
@@ -878,6 +916,193 @@ process.stdin.on("data", (chunk) => {
         } else {
           process.env.CODEX_FAKE_APP_SERVER_ERROR = previousError;
         }
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("retries only transient overloads with bounded exponential backoff", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-overload-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousOverloadAttempts = process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS;
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS = "2";
+
+      try {
+        const eventStore = new InMemoryCodexEventStore();
+        const provider = new CodexProvider({
+          codexPath: fakeCodexPath,
+          eventSpine: { store: eventStore },
+        });
+        session = await provider.startSession({ cwd: tempDir });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "system",
+            subtype: "warning",
+            warningKind: "codex_app_server_overloaded",
+            willRetry: true,
+            codexRetryStatus: {
+              state: "queued",
+              category: "overloaded",
+              retryable: true,
+              attempt: 1,
+              nextAttempt: 2,
+              maxAttempts: 4,
+              retryInMs: 50,
+            },
+          },
+        });
+        const retrying = await session.iterator.next();
+        expect(retrying).toMatchObject({
+          value: {
+            type: "system",
+            subtype: "warning",
+            warningKind: "codex_app_server_overloaded",
+            codexRetryStatus: {
+              state: "retrying",
+              attempt: 2,
+              nextAttempt: 3,
+              maxAttempts: 4,
+              retryInMs: 100,
+            },
+          },
+        });
+        expect(JSON.stringify(retrying.value)).not.toContain("-32001");
+        expect(JSON.stringify(retrying.value)).not.toContain(
+          "Server overloaded; retry later.",
+        );
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "system",
+            subtype: "init",
+            session_id: "thread-new",
+          },
+        });
+
+        const replayed = await replayCodexSession(eventStore, "thread-new");
+        expect(replayed.clientRetries).toMatchObject([
+          { state: "queued", attempt: 1, method: "thread/start" },
+          { state: "retrying", attempt: 2, method: "thread/start" },
+        ]);
+        expect(JSON.stringify(replayed.clientRetries)).not.toContain("-32001");
+
+        const attempts = readMessageCapture(messageCapturePath).filter(
+          ({ method }) => method === "thread/start",
+        );
+        expect(attempts.map(({ attempt }) => attempt)).toEqual([1, 2, 3]);
+        expect(
+          (attempts[1]?.monotonicMs ?? 0) -
+            (attempts[0]?.monotonicMs ?? Number.POSITIVE_INFINITY),
+        ).toBeGreaterThanOrEqual(40);
+        expect(
+          (attempts[2]?.monotonicMs ?? 0) -
+            (attempts[1]?.monotonicMs ?? Number.POSITIVE_INFINITY),
+        ).toBeGreaterThanOrEqual(80);
+      } finally {
+        session?.abort();
+        random.mockRestore();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_OVERLOAD_ATTEMPTS", previousOverloadAttempts);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not retry non-overload JSON-RPC failures", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-no-retry-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousErrorCode = process.env.CODEX_FAKE_THREAD_START_ERROR_CODE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_THREAD_START_ERROR_CODE = "-32600";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: { type: "error" },
+        });
+        expect(
+          readMessageCapture(messageCapturePath)
+            .filter(({ method }) => method === "thread/start")
+            .map(({ attempt }) => attempt),
+        ).toEqual([1]);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_THREAD_START_ERROR_CODE", previousErrorCode);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("stops overload retries after four total attempts", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-app-server-bounded-retry-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousOverloadAttempts = process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS;
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS = "99";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        const messages: unknown[] = [];
+        for (let index = 0; index < 4; index += 1) {
+          messages.push((await session.iterator.next()).value);
+        }
+
+        expect(messages.slice(0, 3)).toMatchObject([
+          { codexRetryStatus: { attempt: 1, retryInMs: 50 } },
+          { codexRetryStatus: { attempt: 2, retryInMs: 100 } },
+          { codexRetryStatus: { attempt: 3, retryInMs: 200 } },
+        ]);
+        expect(messages[3]).toMatchObject({ type: "error" });
+        expect(JSON.stringify(messages[3])).not.toContain(
+          "Server overloaded; retry later.",
+        );
+        expect(
+          readMessageCapture(messageCapturePath)
+            .filter(({ method }) => method === "thread/start")
+            .map(({ attempt }) => attempt),
+        ).toEqual([1, 2, 3, 4]);
+      } finally {
+        session?.abort();
+        random.mockRestore();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_OVERLOAD_ATTEMPTS", previousOverloadAttempts);
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
