@@ -582,6 +582,7 @@ export function createApp(options: AppOptions): AppResult {
       project.id,
       {
         readerFactory,
+        sessionMetadataService: options.sessionMetadataService,
         codexSessionsDir: CODEX_SESSIONS_DIR,
         codexReaderFactory,
         geminiSessionsDir: GEMINI_TMP_DIR,
@@ -756,6 +757,7 @@ export function createApp(options: AppOptions): AppResult {
               project,
               {
                 readerFactory,
+                sessionMetadataService: options.sessionMetadataService,
                 sessionIndexService: options.sessionIndexService,
                 codexSessionsDir: CODEX_SESSIONS_DIR,
                 codexReaderFactory,
@@ -838,6 +840,7 @@ export function createApp(options: AppOptions): AppResult {
           project.id,
           {
             readerFactory,
+            sessionMetadataService: options.sessionMetadataService,
             codexSessionsDir: CODEX_SESSIONS_DIR,
             codexReaderFactory,
             geminiSessionsDir: GEMINI_TMP_DIR,

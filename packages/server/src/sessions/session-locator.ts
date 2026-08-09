@@ -282,6 +282,7 @@ async function locateViaProviderScan(
     deps.sessionMetadataService?.getProvider(sessionId) ?? undefined;
   const resolutionDeps = {
     readerFactory: deps.readerFactory,
+    sessionMetadataService: deps.sessionMetadataService,
     codexSessionsDir: deps.codexSessionsDir,
     codexReaderFactory: deps.codexReaderFactory,
     geminiSessionsDir: deps.geminiSessionsDir,

@@ -318,6 +318,10 @@ describe("Session", () => {
       await metadataService.setTitle("session-json", "Custom name");
       await metadataService.setArchived("session-json", true);
       await metadataService.setStarred("session-json", true);
+      await metadataService.setForkParentSessionId(
+        "session-json",
+        "source-session",
+      );
 
       const session = await Session.load("session-json", projectId, deps);
       const json = session?.toJSON();
@@ -333,6 +337,7 @@ describe("Session", () => {
       expect(json.updatedAt).toBeDefined();
       expect(json.messageCount).toBe(1);
       expect(json.ownership).toEqual({ owner: "none" });
+      expect(json.forkParentSessionId).toBe("source-session");
     });
   });
 

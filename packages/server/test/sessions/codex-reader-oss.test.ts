@@ -39,6 +39,7 @@ describe("CodexSessionReader - OSS Support", () => {
       lastCachedInputTokens?: number;
       modelContextWindow?: number;
     },
+    forkedFromId?: string,
   ) => {
     const metaPayload = {
       id: sessionId,
@@ -46,6 +47,7 @@ describe("CodexSessionReader - OSS Support", () => {
       timestamp: new Date().toISOString(),
       ...(provider ? { model_provider: provider } : {}),
       ...(originator ? { originator } : {}),
+      ...(forkedFromId ? { forked_from_id: forkedFromId } : {}),
     };
 
     const lines = [
@@ -126,6 +128,26 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(second).toHaveLength(1);
     expect(first[0]?.sessionId).toBe(sessionId);
     expect(second[0]?.sessionId).toBe(sessionId);
+  });
+
+  it("preserves native thread/fork lineage in the session summary", async () => {
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    await createSessionFile(
+      childId,
+      "openai",
+      "gpt-5",
+      undefined,
+      undefined,
+      parentId,
+    );
+
+    await expect(
+      reader.getSessionSummary(childId, "test-project" as UrlProjectId),
+    ).resolves.toMatchObject({
+      id: childId,
+      forkParentSessionId: parentId,
+    });
   });
 
   it("filters manifest session files by project path", async () => {

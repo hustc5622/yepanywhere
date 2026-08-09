@@ -281,6 +281,9 @@ export class CodexSessionReader implements ISessionReader {
         compactCount,
         compactEvents,
         provider,
+        ...(metaEntry.payload.forked_from_id
+          ? { forkParentSessionId: metaEntry.payload.forked_from_id }
+          : {}),
         model,
         codexModelProvider: metaEntry.payload.model_provider ?? undefined,
         reasoningEffort: runtimeConfig.reasoningEffort,

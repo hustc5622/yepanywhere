@@ -687,14 +687,14 @@ interface StartSessionBody {
    */
   resumeSessionAt?: string;
   /**
-   * Rewind/edit for Codex app-server: drop this many trailing user turns via
-   * `thread/rollback` before sending the edited prompt in the same session.
-   * Used as a fallback when `rollbackTarget` cannot be resolved server-side.
+   * Edit-fork for Codex app-server: exclude this many trailing source turns
+   * before sending the edited prompt in a new child thread. The legacy wire
+   * name is retained for deployed clients.
    */
   rollbackNumTurns?: number;
   /**
-   * Identity of the edited user turn for Codex rewind. When present the
-   * server recomputes the authoritative rollback count from the persisted
+   * Identity of the edited user turn for a Codex edit fork. When present the
+   * server recomputes the authoritative excluded-turn count from the persisted
    * turn tree instead of trusting the client-rendered prompt count.
    */
   rollbackTarget?: {
@@ -1016,6 +1016,7 @@ async function resolveReaderForSession(
 function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
   return {
     readerFactory: deps.readerFactory,
+    sessionMetadataService: deps.sessionMetadataService,
     codexSessionsDir: deps.codexSessionsDir,
     codexReaderFactory: deps.codexReaderFactory,
     geminiSessionsDir: deps.geminiSessionsDir,
@@ -1442,6 +1443,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           process?.provider ??
           project.provider,
         parentSessionId: sessionSummary?.parentSessionId,
+        forkParentSessionId:
+          metadata?.forkParentSessionId ?? sessionSummary?.forkParentSessionId,
         model: sessionSummary?.model,
         reasoningEffort:
           sessionSummary?.reasoningEffort ?? process?.reasoningEffort,
@@ -2612,10 +2615,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     const model = resolveSessionModel(body.model, providerName);
 
-    // Codex rewind: the client's rollbackNumTurns is derived from rendered
-    // prompt items, which can drift from the app-server turn count (setup
-    // folding, dedupe, viewing an older branch). When the edited turn's
-    // identity is provided, recompute the count from the persisted turn tree.
+    // The legacy rollbackNumTurns wire field now means the number of trailing
+    // source turns excluded from a new Codex fork. Recompute it from the
+    // persisted turn tree when the edited prompt identity is available.
     let effectiveRollbackNumTurns = parsedRollbackNumTurns.value;
     if (
       providerName === "codex" &&
@@ -2735,11 +2737,18 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       );
     }
 
+    const isSourcePreservingFork =
+      (providerName === "codex" && effectiveRollbackNumTurns !== undefined) ||
+      (providerName === "opencode" && Boolean(body.resumeSessionAt));
+
     const result = await runtimeController.resumeSession({
       sessionId,
       projectPath: project.path,
       message: userMessage,
       permissionMode: effectivePermissionMode,
+      // A fork must return its durable child id in this request so lineage and
+      // inherited metadata cannot be orphaned behind an admitted queue item.
+      requireImmediate: isSourcePreservingFork,
       modelSettings: {
         model,
         thinking,
@@ -2764,8 +2773,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         resumeSessionAt: supportsResumeSessionAt(providerName)
           ? body.resumeSessionAt
           : undefined,
-        // Codex app-server models Codex CLI Esc Esc backtrack as a
-        // same-thread rollback count, not as a message UUID.
+        // Legacy wire name retained for deployed clients. The Codex provider
+        // interprets this only as a source-preserving fork exclusion count.
         rollbackNumTurns:
           providerName === "codex" ? effectiveRollbackNumTurns : undefined,
       },
@@ -2859,6 +2868,27 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           opencodeConfig,
         );
       }
+      if (providerName === "codex" && effectiveRollbackNumTurns !== undefined) {
+        await deps.sessionMetadataService.setForkParentSessionId(
+          actualSessionId,
+          sessionId,
+        );
+        const codexMcpMode =
+          parsedCodexMcpMode.codexMcpMode ??
+          deps.sessionMetadataService.getCodexMcpMode?.(sessionId);
+        if (codexMcpMode) {
+          await deps.sessionMetadataService.setCodexMcpMode?.(
+            actualSessionId,
+            codexMcpMode,
+          );
+        }
+        if (resumeCodexModelProvider) {
+          await deps.sessionMetadataService.setCodexModelProvider?.(
+            actualSessionId,
+            resumeCodexModelProvider,
+          );
+        }
+      }
     }
     if (actualSessionId !== sessionId) {
       await recordYepSessionOrigin(deps, actualSessionId, project);
@@ -2887,6 +2917,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     return c.json({
       sessionId: actualSessionId,
+      ...(actualSessionId !== sessionId && isSourcePreservingFork
+        ? { forkParentSessionId: sessionId }
+        : {}),
       processId: result.id,
       permissionMode: result.permissionMode,
       modeVersion: result.modeVersion,

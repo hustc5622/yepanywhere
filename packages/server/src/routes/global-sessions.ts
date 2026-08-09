@@ -389,6 +389,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       project,
       {
         readerFactory: deps.readerFactory,
+        sessionMetadataService: deps.sessionMetadataService,
         sessionIndexService: deps.sessionIndexService,
         codexSessionsDir: deps.codexSessionsDir,
         codexReaderFactory: deps.codexReaderFactory,

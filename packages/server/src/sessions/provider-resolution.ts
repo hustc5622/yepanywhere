@@ -5,7 +5,7 @@ import type { Project, SessionSummary } from "../supervisor/types.js";
 import { CodexSessionReader } from "./codex-reader.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
 import { KimiSessionReader } from "./kimi-reader.js";
-import { collapseOpenCodeForkFamilies } from "./opencode-branch.js";
+import { collapseEditForkFamilies } from "./opencode-branch.js";
 import { OPENCODE_DB_PATH } from "./opencode-db.js";
 import { OpenCodeSessionReader } from "./opencode-reader.js";
 import {
@@ -36,6 +36,10 @@ export interface ProviderResolutionDeps {
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   allowStaleSessionCache?: boolean;
+  /** Yep sidecar lineage used when a stable provider API cannot persist it. */
+  sessionMetadataService?: {
+    getForkParentSessionId: (sessionId: string) => string | undefined;
+  };
 }
 
 export interface SessionSource {
@@ -281,8 +285,11 @@ async function listSessionsForSource(
   deps: ProviderResolutionDeps,
 ): Promise<SessionSummary[]> {
   if (!deps.sessionIndexService) {
-    return collapseOpenCodeForkFamilies(
-      await source.reader.listSessions(project.id),
+    return collapseEditForkFamilies(
+      applyForkLineageMetadata(
+        await source.reader.listSessions(project.id),
+        deps,
+      ),
     );
   }
 
@@ -309,11 +316,23 @@ async function listSessionsForSource(
     }
   }
 
-  // Collapse OpenCode edit-fork families (parent + per-edit child sessions) into
-  // a single list entry so editing a message behaves like Codex's in-session
-  // branch switcher instead of spawning independent sessions. No-ops for
-  // providers that never set forkParentSessionId.
-  return collapseOpenCodeForkFamilies(sessions);
+  // Collapse provider edit-fork families (parent + per-edit child sessions)
+  // into one list entry. Native rollout lineage wins; the Yep sidecar fills
+  // the stable Codex first-prompt fallback where thread/start has no parent.
+  return collapseEditForkFamilies(applyForkLineageMetadata(sessions, deps));
+}
+
+function applyForkLineageMetadata(
+  sessions: SessionSummary[],
+  deps: ProviderResolutionDeps,
+): SessionSummary[] {
+  const metadata = deps.sessionMetadataService;
+  if (!metadata) return sessions;
+  return sessions.map((session) => {
+    if (session.forkParentSessionId) return session;
+    const forkParentSessionId = metadata.getForkParentSessionId(session.id);
+    return forkParentSessionId ? { ...session, forkParentSessionId } : session;
+  });
 }
 
 export async function listSessionsAcrossProviders(
@@ -360,7 +379,8 @@ export async function findSessionSummaryAcrossProviders(
         )
       : await source.reader.getSessionSummary(sessionId, projectId);
     if (summary) {
-      return { source, summary };
+      const [enriched] = applyForkLineageMetadata([summary], deps);
+      return { source, summary: enriched ?? summary };
     }
   }
 

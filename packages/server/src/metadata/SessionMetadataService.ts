@@ -49,6 +49,8 @@ export interface SessionMetadata {
   opencodeConfig?: OpenCodeSessionConfig;
   /** Last permission/session mode selected for this session. */
   permissionMode?: PermissionMode;
+  /** Source session for a provider-native, source-preserving edit fork. */
+  forkParentSessionId?: string;
   /** Whether Yep created this session, or it was discovered from an external client. */
   createdBy?: SessionCreatedBy;
 }
@@ -369,6 +371,23 @@ export class SessionMetadataService {
     return this.getMetadata(sessionId)?.permissionMode;
   }
 
+  /** Persist manual lineage when the provider cannot encode it itself. */
+  async setForkParentSessionId(
+    sessionId: string,
+    forkParentSessionId: string | undefined,
+  ): Promise<void> {
+    if (this.getForkParentSessionId(sessionId) === forkParentSessionId) return;
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      forkParentSessionId: forkParentSessionId || undefined,
+    }));
+    await this.save();
+  }
+
+  getForkParentSessionId(sessionId: string): string | undefined {
+    return this.getMetadata(sessionId)?.forkParentSessionId;
+  }
+
   /**
    * Move metadata from a provider's temporary session ID to its durable ID.
    *
@@ -488,6 +507,9 @@ export class SessionMetadataService {
     }
     if (updated.permissionMode) {
       cleaned.permissionMode = updated.permissionMode;
+    }
+    if (updated.forkParentSessionId) {
+      cleaned.forkParentSessionId = updated.forkParentSessionId;
     }
     if (updated.createdBy) cleaned.createdBy = updated.createdBy;
     if (updated.projectId) cleaned.projectId = updated.projectId;

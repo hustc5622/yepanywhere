@@ -1057,13 +1057,14 @@ export const api = {
      */
     resumeSessionAt?: string,
     /**
-     * Codex app-server rewind/edit: drop this many trailing user turns via
-     * `thread/rollback` before sending the edited prompt in the same session.
+     * Codex app-server edit fork: exclude this many trailing source user turns
+     * before sending the edited prompt in a new child thread. The parameter
+     * keeps its legacy name for compatibility with deployed servers.
      */
     rollbackNumTurns?: number,
     /**
      * Identity of the edited user turn (original prompt text + timestamp).
-     * Lets the server recompute the authoritative rollback count from the
+     * Lets the server recompute the authoritative excluded-turn count from the
      * persisted Codex turn tree instead of trusting the client-side count.
      */
     rollbackTarget?: { timestamp?: string; text?: string },

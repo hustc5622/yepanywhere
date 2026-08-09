@@ -778,7 +778,7 @@ function SessionPageContent({
               undefined,
               editSubmission.rollbackNumTurns,
               // Original prompt identity so the server can recompute the
-              // rollback count from the persisted Codex turn tree.
+              // fork exclusion count from the persisted Codex turn tree.
               {
                 timestamp: editRewind.timestamp,
                 text: editRewind.preview,
