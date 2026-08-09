@@ -40,6 +40,12 @@ import {
 } from "../bridge-common/session-state.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import {
+  type CodexEventStoreSource,
+  normalizeCodexEventStoreSources,
+  overlayCanonicalCodexSessionMessages,
+  selectCodexEventSource,
+} from "../codex-events/index.js";
+import {
   type SessionInputResponseBody,
   SessionInteractionService,
 } from "../interactions/SessionInteractionService.js";
@@ -585,6 +591,8 @@ export interface SessionsDeps {
   recentsService?: RecentsService;
   /** Codex bridge for externally launched `codex --remote` TUI sessions. */
   codexBridgeService?: CodexBridgeController;
+  /** Ordered, independently sequenced canonical journals for persisted refresh. */
+  codexEventStoreSources?: readonly CodexEventStoreSource[];
   /** OpenCode bridge for OpenCode CLI sessions. */
   opencodeBridgeService?: OpenCodeBridgeController;
   /** Physical cold-archive service for moving old provider JSONL files away from hot scan paths. */
@@ -1204,6 +1212,9 @@ function recordOpenCodeContextWindowOverride(
 
 export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const routes = new Hono();
+  const codexEventStoreSources = normalizeCodexEventStoreSources(
+    deps.codexEventStoreSources ?? [],
+  );
   const runtimeController =
     deps.runtimeController ?? new EmbeddedRuntimeController(deps.supervisor);
   const sessionInteractionService =
@@ -1782,6 +1793,38 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     let session = loadedSession ? normalizeSession(loadedSession) : null;
+
+    if (
+      session &&
+      isCodexProviderName(session.provider) &&
+      codexEventStoreSources.length > 0
+    ) {
+      try {
+        const selected = await selectCodexEventSource(
+          codexEventStoreSources,
+          sessionId,
+        );
+        if (selected) {
+          const overlay = overlayCanonicalCodexSessionMessages(
+            sessionId,
+            session.messages,
+            selected.events,
+            {
+              appendUnmatched: afterMessageId === undefined,
+              ...(afterMessageId === undefined ? {} : { afterMessageId }),
+            },
+          );
+          session = { ...session, messages: overlay.messages };
+        }
+      } catch {
+        // Refresh remains available from the provider rollout if a canonical
+        // journal is temporarily unreadable or exceeds its safety bound.
+        getLogger().warn(
+          { sessionId },
+          "Canonical Codex session overlay unavailable; using legacy normalization",
+        );
+      }
+    }
 
     const runtime = deriveSessionRuntime({
       process,

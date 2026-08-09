@@ -1273,6 +1273,7 @@ export function createApp(options: AppOptions): AppResult {
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
       codexBridgeService: options.codexBridgeService,
+      codexEventStoreSources: codexTranscriptStoreSources,
       opencodeBridgeService: options.opencodeBridgeService,
       sessionInteractionService,
       sessionArchiveService: options.sessionArchiveService,
