@@ -1,0 +1,17 @@
+{
+  "event_id": "evt_fixture_merge_forward",
+  "tenant_key": "tenant_fixture",
+  "sender": {
+    "sender_id": { "open_id": "sender_a" },
+    "sender_type": "user",
+    "tenant_key": "tenant_fixture"
+  },
+  "message": {
+    "message_id": "om_fixture_root",
+    "create_time": "1786063140000",
+    "chat_id": "oc_fixture_chat",
+    "chat_type": "group",
+    "message_type": "merge_forward",
+    "content": "{}"
+  }
+}
