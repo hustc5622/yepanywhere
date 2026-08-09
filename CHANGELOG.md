@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Check in a complete Codex app-server 0.147.0 stable/experimental protocol baseline with deterministic schema manifests and explicit coverage guards
+- Add a durable, redacted Codex event spine with replay, diagnostics, canonical transcripts, and shadow-by-default bridge/provider ingress
 
 ### Fixed
 - Keep JSON and other non-media OpenCode uploads on the tool-readable local-path flow instead of forwarding unsupported MIME types as native model attachments

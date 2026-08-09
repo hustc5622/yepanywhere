@@ -26,6 +26,8 @@ export interface JsonRpcMessage {
   params?: unknown;
   result?: unknown;
   error?: JsonRpcError;
+  /** Top-level app-server notification timestamp (Codex 0.147+). */
+  emittedAtMs?: number;
 }
 
 export interface CodexBridgeStatus extends BridgeStatusBase {

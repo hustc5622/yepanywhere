@@ -7,6 +7,68 @@ export {
   getFilename,
 } from "./ideMetadata.js";
 
+export {
+  CODEX_THREAD_ITEM_RENDER_POLICY,
+  CODEX_THREAD_ITEM_TYPES,
+  NATIVE_RENDER_ITEM_TYPES,
+  isNativeRenderItemType,
+} from "./render-items.js";
+export type {
+  GeneratedArtifactBlockReason,
+  GeneratedArtifactKind,
+  GeneratedArtifactManifest,
+  GeneratedArtifactRetention,
+  GeneratedArtifactSource,
+  GeneratedArtifactSourceType,
+  GeneratedArtifactWarning,
+} from "./generated-artifact.js";
+export { isGeneratedArtifactDownloadUrl } from "./generated-artifact.js";
+export type {
+  CodexThreadItemRenderPolicy,
+  CodexThreadItemType,
+  CodexRetryStatus,
+  CommandRenderItem,
+  CompactionRenderItem,
+  DynamicToolContentItem,
+  DynamicToolRenderItem,
+  FileChangeRenderEntry,
+  FileChangeRenderItem,
+  HookRenderItem,
+  ImageRenderItem,
+  InteractionActorPolicy,
+  InteractionOperation,
+  InteractionOperationKind,
+  InteractionOperationState,
+  InteractionRenderItem,
+  LegacyRenderItem,
+  McpToolRenderItem,
+  NativeDecisionDescriptor,
+  NativeRenderItem,
+  NativeRenderItemType,
+  PlanRenderItem,
+  PlanStep,
+  ReasoningRenderItem,
+  RenderItem,
+  RenderItemBase,
+  RenderItemLifecycleStatus,
+  RenderItemRedaction,
+  ReviewRenderItem,
+  SafeInteractionPayload,
+  SafeInteractionQuestion,
+  SessionSetupItem,
+  SleepRenderItem,
+  SubAgentRenderItem,
+  SystemItem,
+  TextItem,
+  ThinkingItem,
+  ToolCallItem,
+  ToolResultData,
+  UnknownRenderItem,
+  UserPromptItem,
+  WarningRenderItem,
+  WebSearchRenderItem,
+} from "./render-items.js";
+
 // File path detection (shared between server and client)
 export type { DetectedFilePath, TextSegment } from "./filePathDetection.js";
 export {
@@ -165,6 +227,7 @@ export type {
   AppContentBlock,
   // Message extensions
   AppMessageExtensions,
+  CodexPersistedInteraction,
   AppUserMessage,
   AppAssistantMessage,
   AppSystemMessage,
