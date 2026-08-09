@@ -5505,7 +5505,7 @@ a.sidebar-nav-item {
   color: var(--status-badge-input-text);
 }
 
-/* Subagent → parent session banner (shown on OpenCode subagent session pages) */
+/* Session lineage banners (subagent parent and source-preserving fork parent) */
 .subagent-parent-banner {
   display: flex;
   align-items: center;
