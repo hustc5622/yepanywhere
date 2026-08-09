@@ -1437,6 +1437,55 @@ export function useSession(
     [clearStreaming, setAgentContent, setMessages],
   );
 
+  const reconcileStreamPendingInput = useCallback(
+    (request: InputRequest) => {
+      // Process stream snapshots can predate the broker projection. Preserve a
+      // matching REST identity immediately, then refresh from the dedicated
+      // endpoint so raw SSE data cannot replace operationId/version.
+      setPendingInputRequest((current) =>
+        current?.id === request.id &&
+        current.interaction &&
+        !request.interaction
+          ? { ...request, interaction: current.interaction }
+          : request,
+      );
+      if (request.interaction) return;
+
+      const requestId = request.id;
+      void api
+        .getPendingInputRequest(request.sessionId || sessionId)
+        .then((result) => {
+          setPendingInputRequest((current) =>
+            current?.id === requestId ? (result.request ?? null) : current,
+          );
+          const operation = result.request?.interaction;
+          if (!operation) return;
+          setSession((current) => {
+            if (!current) return current;
+            const operations = new Map(
+              (current.interactionOperations ?? []).map((candidate) => [
+                candidate.operationId,
+                candidate,
+              ]),
+            );
+            const existing = operations.get(operation.operationId);
+            if (!existing || existing.version <= operation.version) {
+              operations.set(operation.operationId, operation);
+            }
+            return {
+              ...current,
+              interactionOperations: [...operations.values()],
+            };
+          });
+        })
+        .catch(() => {
+          // Keep the preserved REST identity; later metadata/activity refreshes
+          // retry against the authoritative endpoint.
+        });
+    },
+    [sessionId, setSession],
+  );
+
   // Subscribe to live updates
   const handleStreamMessage = useCallback(
     (data: { eventType: string; [key: string]: unknown }) => {
@@ -1616,7 +1665,7 @@ export function useSession(
         }
         // Capture pending input request when waiting for user input
         if (statusData.state === "waiting-input" && statusData.request) {
-          setPendingInputRequest(statusData.request);
+          reconcileStreamPendingInput(statusData.request);
           // Also update actualSessionId from request in case it differs from URL
           // This handles the temp→real ID transition when state-change arrives
           // after the connected event (which may have had the temp ID)
@@ -1685,7 +1734,7 @@ export function useSession(
         // Restore pending input request if state is waiting-input, clear if not
         // (handles reconnection after another tab already approved/denied)
         if (connectedData.state === "waiting-input" && connectedData.request) {
-          setPendingInputRequest(connectedData.request);
+          reconcileStreamPendingInput(connectedData.request);
         } else {
           setPendingInputRequest((prev) =>
             keepPersistedPendingInputForSession(prev, sessionId),
@@ -1848,6 +1897,7 @@ export function useSession(
       handleStreamSubagentMessage,
       registerToolUseAgent,
       scheduleAuthoritativeSnapshotRefresh,
+      reconcileStreamPendingInput,
       historyRewriteRequest,
       signalHistoryRewriteSync,
       setSession,

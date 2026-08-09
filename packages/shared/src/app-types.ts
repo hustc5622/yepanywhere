@@ -804,6 +804,8 @@ export interface AppSessionSummary {
   serviceTier?: string;
   // Notification fields
   pendingInputType?: PendingInputType;
+  /** Durable interaction authority snapshots included by session detail APIs. */
+  interactionOperations?: InteractionOperation[];
   activity?: AgentActivity;
   runtime?: SessionRuntime;
   lastSeenAt?: string;

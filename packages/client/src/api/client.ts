@@ -313,6 +313,8 @@ export interface ApiError extends Error {
   details?: unknown;
   runtime?: SessionRuntime;
   setupRequired?: boolean;
+  /** Current safe interaction state returned for CAS conflicts. */
+  operation?: InputRequest["interaction"];
 }
 
 export interface SessionOptions {
@@ -453,6 +455,7 @@ export async function fetchJSON<T>(
           path?: unknown;
           details?: unknown;
           runtime?: unknown;
+          operation?: unknown;
         }
       | undefined;
     try {
@@ -478,6 +481,9 @@ export async function fetchJSON<T>(
     if (errorBody?.details !== undefined) error.details = errorBody.details;
     if (errorBody?.runtime !== undefined) {
       error.runtime = errorBody.runtime as SessionRuntime;
+    }
+    if (errorBody?.operation !== undefined) {
+      error.operation = errorBody.operation as InputRequest["interaction"];
     }
     if (setupRequired) error.setupRequired = true;
     throw error;
@@ -1211,11 +1217,23 @@ export const api = {
       | "deny",
     answers?: UserQuestionAnswers,
     feedback?: string,
+    interaction?: InputRequest["interaction"],
   ) =>
-    fetchJSON<{ accepted: boolean }>(`/sessions/${sessionId}/input`, {
-      method: "POST",
-      body: JSON.stringify({ requestId, response, answers, feedback }),
-    }),
+    fetchJSON<{ accepted: boolean; operation?: InputRequest["interaction"] }>(
+      `/sessions/${sessionId}/input`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          requestId,
+          response,
+          answers,
+          feedback,
+          operationId: interaction?.operationId,
+          operationVersion: interaction?.version,
+          actor: { id: "yep-authenticated-user", channel: "yep" },
+        }),
+      },
+    ),
 
   getPendingInputRequest: (sessionId: string) =>
     fetchJSON<{ request: InputRequest | null }>(

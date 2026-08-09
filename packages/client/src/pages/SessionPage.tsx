@@ -63,6 +63,13 @@ import {
   getAgentCommandConfig,
   getStaticAgentCommandConfigs,
 } from "../lib/agentCommands";
+import {
+  type InputRequestInteractionResolution,
+  canResolveInputRequestInteraction,
+  mapInputRequestToInteractionRenderItem,
+  mapInteractionOperationToRenderItem,
+  mapInteractionResolutionToInputResponse,
+} from "../lib/codexRenderItems";
 import { isCodexSubagentViewOnly } from "../lib/codexSubagents";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
@@ -1201,7 +1208,14 @@ function SessionPageContent({
   const handleApprove = useCallback(async () => {
     if (pendingInputRequest) {
       try {
-        await api.respondToInput(sessionId, pendingInputRequest.id, "approve");
+        await api.respondToInput(
+          sessionId,
+          pendingInputRequest.id,
+          "approve",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
+        );
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
@@ -1230,6 +1244,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_accept_edits",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         // Update local permission mode
         setPermissionMode("acceptEdits");
@@ -1261,6 +1278,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_for_session",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         markPendingInputResolved("in-turn");
       } catch (err) {
@@ -1289,6 +1309,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_strict_auto_review",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         markPendingInputResolved("in-turn");
       } catch (err) {
@@ -1317,6 +1340,9 @@ function SessionPageContent({
           sessionId,
           pendingInputRequest.id,
           "approve_always",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
         );
         markPendingInputResolved("in-turn");
       } catch (err) {
@@ -1341,7 +1367,14 @@ function SessionPageContent({
   const handleDeny = useCallback(async () => {
     if (pendingInputRequest) {
       try {
-        await api.respondToInput(sessionId, pendingInputRequest.id, "deny");
+        await api.respondToInput(
+          sessionId,
+          pendingInputRequest.id,
+          "deny",
+          undefined,
+          undefined,
+          pendingInputRequest.interaction,
+        );
         markPendingInputResolved("in-turn");
       } catch (err) {
         const status = (err as { status?: number }).status;
@@ -1372,6 +1405,7 @@ function SessionPageContent({
             "deny",
             undefined,
             feedback,
+            pendingInputRequest.interaction,
           );
           markPendingInputResolved("in-turn");
         } catch (err) {
@@ -1404,6 +1438,8 @@ function SessionPageContent({
             pendingInputRequest.id,
             "approve",
             answers,
+            undefined,
+            pendingInputRequest.interaction,
           );
           markPendingInputResolved("in-turn");
         } catch (err) {
@@ -1504,6 +1540,100 @@ function SessionPageContent({
   const isAskUserQuestion = pendingInputRequest?.toolName === "AskUserQuestion";
   const isPersistedInputRequest = pendingInputRequest?.source === "persisted";
 
+  const pendingInteraction = useMemo(() => {
+    if (
+      !pendingInputRequest ||
+      pendingInputRequest.sessionId !== actualSessionId ||
+      (!isCodexAppServerProvider(effectiveProvider) &&
+        pendingInputRequest.source !== "codex-bridge")
+    ) {
+      return null;
+    }
+
+    const item = mapInputRequestToInteractionRenderItem(pendingInputRequest, {
+      projectId,
+      provider:
+        pendingInputRequest.source === "codex-bridge"
+          ? "codex"
+          : (effectiveProvider ?? "codex"),
+      readOnly: codexSubagentViewOnly || isPersistedInputRequest,
+    });
+    const canResolve =
+      !codexSubagentViewOnly &&
+      !isPersistedInputRequest &&
+      canResolveInputRequestInteraction(pendingInputRequest, item.operation);
+
+    // A server-authoritative operation, including a terminal one observed
+    // while the provider snapshot lags, must suppress the legacy footer. Raw
+    // SSE requests without broker identity keep the compatibility panel until
+    // the authoritative pending-input fetch completes.
+    if (!canResolve && !codexSubagentViewOnly && !isPersistedInputRequest) {
+      return pendingInputRequest.interaction?.state !== "open" &&
+        pendingInputRequest.interaction
+        ? { item, canResolve: false }
+        : null;
+    }
+    return { item, canResolve };
+  }, [
+    actualSessionId,
+    codexSubagentViewOnly,
+    effectiveProvider,
+    isPersistedInputRequest,
+    pendingInputRequest,
+    projectId,
+  ]);
+
+  const handleResolveInteraction = useCallback(
+    async (resolution: InputRequestInteractionResolution) => {
+      if (!pendingInputRequest || !pendingInteraction?.canResolve) {
+        throw new Error("Interaction request is no longer active");
+      }
+      const submission = mapInteractionResolutionToInputResponse(
+        pendingInteraction.item.operation,
+        resolution,
+      );
+
+      try {
+        await api.respondToInput(
+          actualSessionId,
+          pendingInputRequest.id,
+          submission.response,
+          submission.answers,
+          undefined,
+          pendingInteraction.item.operation,
+        );
+        if (submission.response === "approve_accept_edits") {
+          setPermissionMode("acceptEdits");
+        }
+        markPendingInputResolved("in-turn");
+      } catch (err) {
+        if (isStalePendingInputError(err)) {
+          handleStalePendingInput();
+          return;
+        }
+        const status = (err as { status?: number }).status;
+        const fallback =
+          submission.answers !== undefined
+            ? t("sessionAnswerFailed")
+            : submission.response === "deny"
+              ? t("sessionDenyFailed")
+              : t("sessionApproveFailed");
+        showToast(status ? `Error ${status}` : fallback, "error");
+        throw err;
+      }
+    },
+    [
+      handleStalePendingInput,
+      markPendingInputResolved,
+      actualSessionId,
+      pendingInputRequest,
+      pendingInteraction,
+      setPermissionMode,
+      showToast,
+      t,
+    ],
+  );
+
   // If process is actively in-turn or waiting for input, don't mark tools as orphaned.
   // "orphanedToolUseIds" from server just means "no result yet" - but if the process is
   // in-turn (e.g., executing a Task subagent) or waiting for approval, they're not orphaned.
@@ -1525,8 +1655,42 @@ function SessionPageContent({
       preprocessCacheRef.current,
     );
     preprocessCacheRef.current = result.cache;
-    return result.renderItems;
-  }, [messages, markdownAugments, activeToolApproval]);
+
+    const interactionItems = new Map(
+      (session?.interactionOperations ?? []).map((operation) => [
+        operation.operationId,
+        mapInteractionOperationToRenderItem(operation),
+      ]),
+    );
+    if (pendingInteraction) {
+      const pendingOperation = pendingInteraction.item.operation;
+      const current = interactionItems.get(pendingOperation.operationId);
+      if (!current || current.operation.version < pendingOperation.version) {
+        interactionItems.set(
+          pendingOperation.operationId,
+          pendingInteraction.item,
+        );
+      }
+    }
+
+    if (interactionItems.size === 0) return result.renderItems;
+    const projected = result.renderItems.map((item) => {
+      if (item.type !== "interaction") return item;
+      const authoritative = interactionItems.get(item.operation.operationId);
+      if (!authoritative) return item;
+      interactionItems.delete(item.operation.operationId);
+      return authoritative.operation.version >= item.operation.version
+        ? authoritative
+        : item;
+    });
+    return [...projected, ...interactionItems.values()];
+  }, [
+    messages,
+    markdownAugments,
+    activeToolApproval,
+    pendingInteraction,
+    session?.interactionOperations,
+  ]);
 
   // Detect if session has pending tool calls without results
   // This can happen when the session is unowned but was active in another process (VS Code, CLI)
@@ -2132,6 +2296,11 @@ function SessionPageContent({
                       : undefined
                   }
                   onSelectBranch={handleSelectBranch}
+                  onResolveInteraction={
+                    pendingInteraction?.canResolve
+                      ? handleResolveInteraction
+                      : undefined
+                  }
                   focusBranchId={pendingBranchFocusId}
                   onBranchFocused={handleBranchFocused}
                   targetMessageId={targetMessageId}
@@ -2151,6 +2320,7 @@ function SessionPageContent({
             {pendingInputRequest &&
               pendingInputRequest.sessionId === actualSessionId &&
               !codexSubagentViewOnly &&
+              !pendingInteraction &&
               isAskUserQuestion && (
                 <QuestionAnswerPanel
                   key={pendingInputRequest.id}
@@ -2166,6 +2336,7 @@ function SessionPageContent({
             {pendingInputRequest &&
               pendingInputRequest.sessionId === actualSessionId &&
               !codexSubagentViewOnly &&
+              !pendingInteraction &&
               !isAskUserQuestion && (
                 <>
                   <ToolApprovalPanel
@@ -2302,7 +2473,8 @@ function SessionPageContent({
             ) : !(
                 pendingInputRequest &&
                 pendingInputRequest.sessionId === actualSessionId &&
-                !isAskUserQuestion
+                !isAskUserQuestion &&
+                !pendingInteraction
               ) ? (
               <>
                 {isCodexAppServerProvider(effectiveProvider) && (

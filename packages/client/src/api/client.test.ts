@@ -1,3 +1,4 @@
+import type { InteractionOperation } from "@yep-anywhere/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, fetchJSON, isQueuedResumeSessionResponse } from "./client";
 
@@ -77,6 +78,93 @@ describe("fetchJSON errors", () => {
         canArchive: false,
         activity: "waiting-input",
       },
+    });
+  });
+
+  it("preserves the authoritative operation returned by a CAS conflict", async () => {
+    const operation: InteractionOperation = {
+      operationId: "operation-1",
+      provider: "codex",
+      requestId: "request-1",
+      requestMethod: "item/commandExecution/requestApproval",
+      sessionId: "session-1",
+      kind: "command_approval",
+      state: "resolved",
+      publicPayload: { prompt: "Allow command?" },
+      allowedActors: { mode: "any_member" },
+      allowedDecisions: [{ id: "accept", label: "Allow" }],
+      createdAt: 1,
+      resolution: { decision: "accept", resolvedAt: 2 },
+      version: 5,
+    };
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 409,
+      statusText: "Conflict",
+      headers: new Headers(),
+      json: async () => ({
+        error: "Interaction changed",
+        operation,
+      }),
+    } as Response);
+
+    await expect(fetchJSON("/sessions/session-1/input")).rejects.toMatchObject({
+      message: "Interaction changed",
+      status: 409,
+      operation,
+    });
+  });
+});
+
+describe("interaction response API", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const operation: InteractionOperation = {
+    operationId: "operation-1",
+    provider: "codex",
+    requestId: "request-1",
+    requestMethod: "item/commandExecution/requestApproval",
+    sessionId: "session-1",
+    kind: "command_approval",
+    state: "open",
+    publicPayload: { prompt: "Allow command?" },
+    allowedActors: { mode: "any_member" },
+    allowedDecisions: [{ id: "accept", label: "Allow" }],
+    createdAt: 1,
+    version: 4,
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("submits only the CAS identity and authenticated actor projection", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ accepted: true }),
+    } as Response);
+
+    await api.respondToInput(
+      "session-1",
+      "request-1",
+      "approve",
+      undefined,
+      undefined,
+      operation,
+    );
+
+    const [, request] = fetchMock.mock.calls[0] ?? [];
+    expect(JSON.parse(String(request?.body))).toEqual({
+      requestId: "request-1",
+      response: "approve",
+      operationId: "operation-1",
+      operationVersion: 4,
+      actor: { id: "yep-authenticated-user", channel: "yep" },
     });
   });
 });
