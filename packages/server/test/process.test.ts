@@ -99,6 +99,20 @@ describe("Process", () => {
     expect(process.resolvedReasoningEffort).toBe("max");
   });
 
+  it("does not report a model switch when the provider has no native API", async () => {
+    const process = new Process(createMockIterator([]), {
+      projectPath: "/test",
+      projectId: "proj-1",
+      sessionId: "sess-no-model-switch",
+      provider: "codex",
+      model: "gpt-5.5",
+    });
+
+    await expect(process.setModel("gpt-5.6-sol")).resolves.toBe(false);
+    expect(process.supportsSetModel).toBe(false);
+    expect(process.resolvedModel).toBe("gpt-5.5");
+  });
+
   describe("event subscription", () => {
     it("emits message events", async () => {
       const messages: SDKMessage[] = [
@@ -505,6 +519,122 @@ describe("Process", () => {
           .getMessageHistory()
           .filter((message) => message.type === "user"),
       ).toHaveLength(0);
+    });
+
+    it("restores in-turn when a rejected steer settles after the old turn result", async () => {
+      let emitOldResult!: () => void;
+      let finishIterator!: () => void;
+      const oldResultGate = new Promise<void>((resolve) => {
+        emitOldResult = resolve;
+      });
+      const finishGate = new Promise<void>((resolve) => {
+        finishIterator = resolve;
+      });
+      async function* iterator(): AsyncGenerator<SDKMessage> {
+        await oldResultGate;
+        yield {
+          type: "result",
+          session_id: "sess-1",
+          turnId: "turn-a",
+        };
+        await finishGate;
+      }
+      let resolveSteer!: (value: false) => void;
+      const steerGate = new Promise<false>((resolve) => {
+        resolveSteer = resolve;
+      });
+      const queue = new MessageQueue();
+      const process = new Process(iterator(), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        provider: "codex",
+        idleTimeoutMs: 60_000,
+        queue,
+        steerFn: vi.fn(() => steerGate),
+      });
+      const users: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message" && event.message.type === "user") {
+          users.push(event.message);
+        }
+      });
+
+      const pending = process.queueMessage({
+        text: "fallback B",
+        tempId: "temp-b",
+      });
+      emitOldResult();
+      await vi.waitFor(() => expect(process.state.type).toBe("idle"));
+      expect(users).toHaveLength(0);
+
+      resolveSteer(false);
+      await expect(pending).resolves.toMatchObject({
+        success: true,
+        position: 1,
+      });
+      expect(process.state.type).toBe("in-turn");
+      expect(queue.depth).toBe(1);
+      expect(users).toHaveLength(1);
+      expect(users[0]).toMatchObject({
+        type: "user",
+        tempId: "temp-b",
+        isOptimistic: true,
+      });
+      expect(users[0]).not.toHaveProperty("turnId");
+
+      finishIterator();
+      await vi.waitFor(() => expect(queue.isClosed).toBe(true));
+      await process.abort();
+    });
+
+    it("fails closed without an optimistic echo when the queue closes during steer", async () => {
+      let resolveIterator: (() => void) | undefined;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () =>
+          new Promise((resolve) => {
+            resolveIterator = () => resolve({ done: true, value: undefined });
+          }),
+      };
+      let resolveSteer!: (value: false) => void;
+      const steerGate = new Promise<false>((resolve) => {
+        resolveSteer = resolve;
+      });
+      const queue = new MessageQueue();
+      const steerFn = vi.fn(() => steerGate);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        provider: "codex",
+        idleTimeoutMs: 100,
+        queue,
+        steerFn,
+      });
+      const users: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message" && event.message.type === "user") {
+          users.push(event.message);
+        }
+      });
+
+      const pending = process.queueMessage({
+        text: "must not be acknowledged",
+        tempId: "temp-closed",
+      });
+      await vi.waitFor(() => expect(steerFn).toHaveBeenCalledTimes(1));
+      queue.close();
+      resolveSteer(false);
+
+      await expect(pending).resolves.toEqual({
+        success: false,
+        error: "Process provider is no longer accepting messages",
+      });
+      expect(users).toHaveLength(0);
+      expect(queue.depth).toBe(0);
+
+      resolveIterator?.();
+      await process.abort();
     });
 
     it("rejects messages after the provider iterator ends", async () => {
