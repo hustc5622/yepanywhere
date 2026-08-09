@@ -28,6 +28,7 @@ import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { QuestionAnswerPanel } from "../components/QuestionAnswerPanel";
 import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
 import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
+import { SessionForkParentBanner } from "../components/SessionForkParentBanner";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
 import { SessionSearchBar } from "../components/SessionSearchBar";
@@ -2177,6 +2178,10 @@ function SessionPageContent({
           onClose={handleCloseSessionSearch}
           onSelectMessage={handleSelectMessage}
         />
+
+        {session?.forkParentSessionId && (
+          <SessionForkParentBanner basePath={basePath} session={session} />
+        )}
 
         {session?.parentSessionId && (
           <Link
