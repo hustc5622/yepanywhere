@@ -14,6 +14,8 @@
 import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import {
+  type AgentMapping,
+  type AgentStatus,
   type CodexEventMsgEntry,
   type CodexFunctionCallOutputPayload,
   type CodexFunctionCallPayload,
@@ -27,11 +29,14 @@ import {
   type ContextCumulativeUsage,
   SESSION_TITLE_MAX_LENGTH,
   type SessionQuestion,
+  type SessionSubagentThread,
+  type SubagentStatus,
   type UnifiedSession,
   type UrlProjectId,
   getModelContextWindow,
   parseCodexSessionEntry,
 } from "@yep-anywhere/shared";
+import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type {
   ContentBlock,
@@ -48,6 +53,7 @@ import {
   getCodexSessionManifest,
   invalidateCodexSessionManifest,
 } from "./codex-session-manifest.js";
+import { normalizeSession } from "./normalization.js";
 import {
   sanitizeCodexPublicUserPrompt,
   sanitizeCodexUserContentBlockText,
@@ -78,6 +84,7 @@ type CodexSessionFile = CodexSessionManifestEntry;
 
 const CODEX_SESSION_FILE_CACHE_TTL_MS = 5000;
 const CODEX_COMPACTION_EVENT_DEDUPE_WINDOW_MS = 5_000;
+const CODEX_SUBAGENT_TREE_MAX_NODES = 250;
 
 /**
  * Codex `model_provider` ids that run models locally (Ollama/LM Studio). These
@@ -124,6 +131,78 @@ function latestVisibleEntryTimestamp(
   }
 
   return latestTimestamp;
+}
+
+function normalizeCodexSubagentStatus(
+  status: unknown,
+): SubagentStatus | undefined {
+  if (typeof status === "string") {
+    switch (status) {
+      case "pending_init":
+        return "starting";
+      case "running":
+        return "running";
+      case "interrupted":
+        return "interrupted";
+      case "shutdown":
+        return "completed";
+      case "not_found":
+        return "failed";
+      default:
+        return undefined;
+    }
+  }
+  if (!status || typeof status !== "object" || Array.isArray(status)) {
+    return undefined;
+  }
+  if (Object.hasOwn(status, "completed")) return "completed";
+  if (Object.hasOwn(status, "errored")) return "failed";
+  return undefined;
+}
+
+function inferCodexChildLifecycle(entries: CodexSessionEntry[]): {
+  status?: SubagentStatus;
+  completedAt?: string;
+} {
+  let status: SubagentStatus | undefined;
+  let completedAt: string | undefined;
+
+  for (const entry of entries) {
+    if (entry.type !== "event_msg") continue;
+    switch (entry.payload.type) {
+      case "task_started":
+        status = "running";
+        completedAt = undefined;
+        break;
+      case "task_complete":
+        status = "completed";
+        completedAt = entry.timestamp;
+        break;
+      case "turn_aborted":
+        status = "interrupted";
+        completedAt = entry.timestamp;
+        break;
+    }
+  }
+
+  return { status, completedAt };
+}
+
+function codexSubagentToAgentStatus(status: SubagentStatus): AgentStatus {
+  switch (status) {
+    case "queued":
+    case "starting":
+    case "suspended":
+      return "pending";
+    case "running":
+    case "backgrounded":
+      return "running";
+    case "completed":
+      return "completed";
+    case "failed":
+    case "interrupted":
+      return "failed";
+  }
 }
 
 /**
@@ -264,6 +343,7 @@ export class CodexSessionReader implements ISessionReader {
       const cumulativeUsage = this.extractCumulativeTokenUsage(visibleEntries);
       const compactCount = this.countCompactions(visibleEntries);
       const compactEvents = this.extractCompactEvents(visibleEntries);
+      const subagent = getCodexSubagentMetadata(metaEntry.payload);
 
       // Skip sessions with no actual conversation messages
       if (messageCount === 0) return null;
@@ -285,6 +365,9 @@ export class CodexSessionReader implements ISessionReader {
         compactCount,
         compactEvents,
         provider,
+        ...(subagent.parentThreadId
+          ? { parentSessionId: subagent.parentThreadId }
+          : {}),
         ...(metaEntry.payload.forked_from_id
           ? { forkParentSessionId: metaEntry.payload.forked_from_id }
           : {}),
@@ -353,8 +436,13 @@ export class CodexSessionReader implements ISessionReader {
       // Logic to filter entries would go here if strict incremental loading is needed
     }
 
+    const subagentThreads = await this.getSubagentThreads(sessionId);
+
     return {
-      summary,
+      summary: {
+        ...summary,
+        ...(subagentThreads.length > 0 ? { subagentThreads } : {}),
+      },
       data: {
         provider: this.determineProviderFromEntries(entries),
         session: {
@@ -394,22 +482,186 @@ export class CodexSessionReader implements ISessionReader {
     }
   }
 
-  /**
-   * Codex doesn't have subagent sessions like Claude.
-   * Returns empty array for compatibility.
-   */
-  async getAgentMappings(): Promise<{ toolUseId: string; agentId: string }[]> {
-    return [];
+  /** Derive only protocol-proven spawn call -> child thread mappings. */
+  async getAgentMappings(sessionId?: string): Promise<AgentMapping[]> {
+    if (!sessionId) return [];
+    const loaded = await this.loadSessionEntries(sessionId);
+    if (!loaded) return [];
+
+    const mappings = new Map<string, AgentMapping>();
+    const activityByAgent = new Map<string, SubagentStatus>();
+
+    for (const entry of loaded.entries) {
+      if (entry.type !== "event_msg") continue;
+      if (entry.payload.type === "sub_agent_activity") {
+        if (entry.payload.kind === "started") {
+          activityByAgent.set(entry.payload.agent_thread_id, "running");
+        } else if (entry.payload.kind === "interrupted") {
+          activityByAgent.set(entry.payload.agent_thread_id, "interrupted");
+        }
+        continue;
+      }
+      if (
+        entry.payload.type !== "collab_agent_spawn_end" ||
+        !entry.payload.new_thread_id
+      ) {
+        continue;
+      }
+
+      const agentId = entry.payload.new_thread_id;
+      const status =
+        activityByAgent.get(agentId) ??
+        normalizeCodexSubagentStatus(entry.payload.status);
+      mappings.set(entry.payload.call_id, {
+        toolUseId: entry.payload.call_id,
+        agentId,
+        ...(entry.payload.new_agent_role
+          ? { agentType: entry.payload.new_agent_role }
+          : {}),
+        ...(status ? { status } : {}),
+      });
+    }
+
+    // Activity can trail the spawn completion, so apply final lifecycle states
+    // after the complete scan without inventing missing spawn relationships.
+    return [...mappings.values()].map((mapping) => ({
+      ...mapping,
+      ...(activityByAgent.get(mapping.agentId)
+        ? { status: activityByAgent.get(mapping.agentId) }
+        : {}),
+    }));
   }
 
   /**
-   * Codex doesn't have subagent sessions like Claude.
-   * Returns null for compatibility.
+   * Load a persisted direct child transcript. The parent id is mandatory and
+   * validated against session metadata so arbitrary session ids cannot be
+   * smuggled through the subagent endpoint.
    */
   async getAgentSession(
-    _agentId: string,
-  ): Promise<{ messages: Message[]; status: string } | null> {
-    return null;
+    agentId: string,
+    sessionId?: string,
+  ): Promise<{
+    messages: Message[];
+    status: AgentStatus;
+    agentType?: string;
+    descriptor?: {
+      agentId: string;
+      parentAgentId: string;
+      parentToolUseId?: string;
+      type?: string;
+      status: SubagentStatus;
+      startedAt?: string;
+      completedAt?: string;
+    };
+  } | null> {
+    if (!sessionId) return null;
+
+    const manifest = await getCodexSessionManifest(this.sessionsDir);
+    const child = this.getManifestSessionsForScope(manifest).find(
+      (entry) => entry.id === agentId,
+    );
+    if (
+      !child?.isSubagent ||
+      !child.parentThreadId ||
+      child.parentThreadId !== sessionId
+    ) {
+      return null;
+    }
+
+    const loaded = await this.getSession(
+      agentId,
+      "codex-subagent" as UrlProjectId,
+    );
+    if (!loaded) return null;
+
+    const normalized = normalizeSession(loaded);
+    if (
+      loaded.data.provider !== "codex" &&
+      loaded.data.provider !== "codex-oss"
+    ) {
+      return null;
+    }
+    const lifecycle = inferCodexChildLifecycle(loaded.data.session.entries);
+    const mappings = await this.getAgentMappings(sessionId);
+    const mapping = mappings.find((candidate) => candidate.agentId === agentId);
+    const detailedStatus = lifecycle.status ?? mapping?.status ?? "queued";
+    const agentType = child.agentRole ?? mapping?.agentType;
+
+    return {
+      messages: normalized.messages,
+      status: codexSubagentToAgentStatus(detailedStatus),
+      ...(agentType ? { agentType } : {}),
+      descriptor: {
+        agentId,
+        parentAgentId: sessionId,
+        ...(mapping?.toolUseId ? { parentToolUseId: mapping.toolUseId } : {}),
+        ...(agentType ? { type: agentType } : {}),
+        status: detailedStatus,
+        startedAt: child.timestamp,
+        ...(lifecycle.completedAt
+          ? { completedAt: lifecycle.completedAt }
+          : {}),
+      },
+    };
+  }
+
+  /** Build a bounded, cycle-safe descendant projection from persisted metadata. */
+  private async getSubagentThreads(
+    sessionId: string,
+  ): Promise<SessionSubagentThread[]> {
+    const manifest = await getCodexSessionManifest(this.sessionsDir);
+    const sessions = this.getManifestSessionsForScope(manifest);
+    const childrenByParent = new Map<string, CodexSessionManifestEntry[]>();
+
+    for (const session of sessions) {
+      if (!session.isSubagent || !session.parentThreadId) continue;
+      const children = childrenByParent.get(session.parentThreadId);
+      if (children) children.push(session);
+      else childrenByParent.set(session.parentThreadId, [session]);
+    }
+    for (const children of childrenByParent.values()) {
+      children.sort(
+        (a, b) =>
+          (timestampToMs(a.timestamp) ?? 0) -
+            (timestampToMs(b.timestamp) ?? 0) || a.id.localeCompare(b.id),
+      );
+    }
+
+    const result: SessionSubagentThread[] = [];
+    const visited = new Set<string>([sessionId]);
+    const pending: Array<{ child: CodexSessionManifestEntry; depth: number }> =
+      (childrenByParent.get(sessionId) ?? []).map((child) => ({
+        child,
+        depth: 1,
+      }));
+
+    while (
+      pending.length > 0 &&
+      result.length < CODEX_SUBAGENT_TREE_MAX_NODES
+    ) {
+      const next = pending.shift();
+      if (!next) break;
+      const child = next.child;
+      if (visited.has(child.id)) continue;
+      visited.add(child.id);
+      result.push({
+        sessionId: child.id,
+        parentSessionId: child.parentThreadId ?? sessionId,
+        depth: next.depth,
+        ...(child.agentNickname ? { agentNickname: child.agentNickname } : {}),
+        ...(child.agentRole ? { agentRole: child.agentRole } : {}),
+      });
+
+      const nestedChildren = childrenByParent.get(child.id) ?? [];
+      for (let index = nestedChildren.length - 1; index >= 0; index--) {
+        const nestedChild = nestedChildren[index];
+        if (nestedChild) {
+          pending.unshift({ child: nestedChild, depth: next.depth + 1 });
+        }
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -469,7 +721,7 @@ export class CodexSessionReader implements ISessionReader {
 
     const manifest = await getCodexSessionManifest(this.sessionsDir);
     const session = manifest.byId.get(sessionId);
-    if (!session || session.isSubagent) return null;
+    if (!session) return null;
 
     if (
       this.projectPath &&

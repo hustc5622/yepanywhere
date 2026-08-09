@@ -599,6 +599,60 @@ export const CodexTaskCompleteEventSchema = z.object({
 });
 
 /**
+ * Lifecycle state reported for a collaboration agent. Tuple variants in the
+ * Rust protocol serialize as single-key objects; keep the carried text opaque
+ * so callers cannot accidentally expose a child agent's final/error message.
+ */
+export const CodexCollabAgentStatusSchema = z.union([
+  z.enum(["pending_init", "running", "interrupted", "shutdown", "not_found"]),
+  z.object({ completed: z.string().nullable() }).passthrough(),
+  z.object({ errored: z.string() }).passthrough(),
+]);
+
+export type CodexCollabAgentStatus = z.infer<
+  typeof CodexCollabAgentStatusSchema
+>;
+
+/** Persisted beginning of a stable Codex collaboration spawn operation. */
+export const CodexCollabAgentSpawnBeginEventSchema = z
+  .object({
+    type: z.literal("collab_agent_spawn_begin"),
+    call_id: z.string(),
+    sender_thread_id: z.string(),
+    prompt: z.string(),
+    model: z.string(),
+    reasoning_effort: z.unknown(),
+  })
+  .passthrough();
+
+/** Persisted completion of a stable Codex collaboration spawn operation. */
+export const CodexCollabAgentSpawnEndEventSchema = z
+  .object({
+    type: z.literal("collab_agent_spawn_end"),
+    call_id: z.string(),
+    sender_thread_id: z.string(),
+    new_thread_id: z.string().nullable(),
+    new_agent_nickname: z.string().nullable().optional(),
+    new_agent_role: z.string().nullable().optional(),
+    prompt: z.string(),
+    model: z.string(),
+    reasoning_effort: z.unknown(),
+    status: CodexCollabAgentStatusSchema,
+  })
+  .passthrough();
+
+/** Persisted activity marker for a child agent. */
+export const CodexSubAgentActivityEventSchema = z
+  .object({
+    type: z.literal("sub_agent_activity"),
+    event_id: z.string(),
+    agent_thread_id: z.string(),
+    agent_path: z.string(),
+    kind: z.enum(["started", "interacted", "interrupted"]),
+  })
+  .passthrough();
+
+/**
  * Union of event message types.
  */
 export const CodexEventMsgPayloadSchema = z.discriminatedUnion("type", [
@@ -616,6 +670,9 @@ export const CodexEventMsgPayloadSchema = z.discriminatedUnion("type", [
   CodexThreadRolledBackEventSchema,
   CodexTaskStartedEventSchema,
   CodexTaskCompleteEventSchema,
+  CodexCollabAgentSpawnBeginEventSchema,
+  CodexCollabAgentSpawnEndEventSchema,
+  CodexSubAgentActivityEventSchema,
 ]);
 
 export type CodexEventMsgPayload = z.infer<typeof CodexEventMsgPayloadSchema>;
