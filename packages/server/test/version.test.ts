@@ -223,6 +223,71 @@ describe("GET /version", () => {
 
     expect(json.resumeProtocolVersion).toBeTypeOf("number");
     expect(Array.isArray(json.capabilities)).toBe(true);
+    expect(json.codexProtocol).toEqual({
+      version: "0.147.0",
+      schemaHash:
+        "sha256:e46a86223fe756a8d93a7acb1a0a8a6371381b6d0d11c41dbda5a978637865a3",
+      profile: "experimental",
+      experimentalApi: true,
+      unknownNotificationsTotal: expect.any(Number),
+      unknownServerRequestsTotal: expect.any(Number),
+      diagnostics: {
+        scope: "process_lifetime",
+        unknownNotificationsTotal: expect.any(Number),
+        unknownServerRequestsTotal: expect.any(Number),
+        bucketLimit: 32,
+        bucketOverflowTotal: expect.any(Number),
+        buckets: expect.any(Array),
+      },
+    });
+  });
+
+  it("exposes bounded fingerprint-only Codex compatibility diagnostics", async () => {
+    mockFetch(() => new Response(null, { status: 204 }));
+
+    const { createVersionRoutes } = await importVersion();
+    const { recordUnknownCodexNotification, recordUnknownCodexServerRequest } =
+      await import("../src/codex-events/diagnostics.js");
+    const rawMethod = "future/route?authorization=route-secret";
+    const rawRequest = "future/request//private/workspace";
+    const runtime = {
+      codexVersion: "untrusted-version-route-secret",
+      schemaHash: "untrusted-schema-/private/workspace",
+      profile: "experimental" as const,
+      experimentalApi: true,
+    };
+    recordUnknownCodexNotification(rawMethod, runtime);
+    recordUnknownCodexServerRequest(rawRequest, runtime);
+
+    const routes = createVersionRoutes();
+    const res = await routes.request("/");
+    const json = await res.json();
+    expect(json.codexProtocol.diagnostics).toMatchObject({
+      scope: "process_lifetime",
+      unknownNotificationsTotal: 1,
+      unknownServerRequestsTotal: 1,
+      bucketLimit: 32,
+      bucketOverflowTotal: 0,
+      buckets: [
+        expect.objectContaining({
+          methodFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
+          runtimeVersion: expect.stringMatching(/^other:sha256:[a-f0-9]{20}$/),
+          schemaFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
+        }),
+        expect.objectContaining({
+          methodFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
+          runtimeVersion: expect.stringMatching(/^other:sha256:[a-f0-9]{20}$/),
+          schemaFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
+        }),
+      ],
+    });
+    const serialized = JSON.stringify(json.codexProtocol.diagnostics);
+    expect(serialized).not.toContain(rawMethod);
+    expect(serialized).not.toContain(rawRequest);
+    expect(serialized).not.toContain(runtime.codexVersion);
+    expect(serialized).not.toContain(runtime.schemaHash);
+    expect(serialized).not.toContain("route-secret");
+    expect(serialized).not.toContain("/private/");
   });
 
   it("reports update-available for stale bridge binaries", async () => {

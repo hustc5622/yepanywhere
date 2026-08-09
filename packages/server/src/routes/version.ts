@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Hono } from "hono";
 import { type RuntimeBuildInfo, getRuntimeBuildInfo } from "../build-info.js";
+import {
+  type CodexEventDiagnostics,
+  getCodexEventDiagnostics,
+} from "../codex-events/diagnostics.js";
+import { CODEX_PROVIDER_RUNTIME_IDENTITY } from "../codex-events/runtime.js";
 import { isNewerSemver } from "../utils/semver.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -125,6 +130,19 @@ export interface VersionInfo {
   resumeProtocolVersion: number;
   /** Feature capabilities supported by this server. Used by clients to show/hide UI. */
   capabilities: string[];
+  /** Generated Codex protocol baseline and bounded compatibility diagnostics. */
+  codexProtocol: {
+    version: string;
+    schemaHash: string;
+    profile: "stable" | "experimental";
+    experimentalApi: boolean;
+    /** Process-lifetime compatibility metric; payloads are never exposed. */
+    unknownNotificationsTotal: number;
+    /** Process-lifetime compatibility metric for newer server requests. */
+    unknownServerRequestsTotal: number;
+    /** Bounded, fingerprint-only compatibility diagnostics. */
+    diagnostics: CodexEventDiagnostics;
+  };
   /** Device bridge availability and update state. */
   deviceBridgeState?: DeviceBridgeState;
   /** Installed managed bridge binary version when known. */
@@ -262,6 +280,7 @@ export function createVersionRoutes(options?: VersionRouteOptions): Hono {
       : null;
     const updateAvailable = latest ? isNewerSemver(baseVersion, latest) : false;
 
+    const codexDiagnostics = getCodexEventDiagnostics();
     const info: VersionInfo = {
       current,
       latest,
@@ -269,6 +288,15 @@ export function createVersionRoutes(options?: VersionRouteOptions): Hono {
       build,
       resumeProtocolVersion: RESUME_PROTOCOL_VERSION,
       capabilities,
+      codexProtocol: {
+        version: CODEX_PROVIDER_RUNTIME_IDENTITY.codexVersion,
+        schemaHash: CODEX_PROVIDER_RUNTIME_IDENTITY.schemaHash,
+        profile: CODEX_PROVIDER_RUNTIME_IDENTITY.profile,
+        experimentalApi: CODEX_PROVIDER_RUNTIME_IDENTITY.experimentalApi,
+        unknownNotificationsTotal: codexDiagnostics.unknownNotificationsTotal,
+        unknownServerRequestsTotal: codexDiagnostics.unknownServerRequestsTotal,
+        diagnostics: codexDiagnostics,
+      },
       deviceBridgeState: deviceBridgeStatus.state,
       deviceBridgeVersion: deviceBridgeStatus.installedVersion ?? null,
       latestDeviceBridgeVersion: deviceBridgeStatus.latestVersion ?? null,
