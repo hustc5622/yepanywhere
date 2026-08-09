@@ -403,7 +403,9 @@ export class FeishuOperationStore {
           presentation.terminalReason ??
           (isOpenState(operation.state)
             ? undefined
-            : (terminalReasonFromOperation(operation) ?? "request_missing")),
+            : presentation.result !== undefined
+              ? undefined
+              : (terminalReasonFromOperation(operation) ?? "request_missing")),
         updatedAt: now.toISOString(),
       }) as FeishuOperationRecord;
       await this.replace(next);

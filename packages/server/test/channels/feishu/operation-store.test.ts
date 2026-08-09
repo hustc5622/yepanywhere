@@ -151,6 +151,7 @@ describe("FeishuOperationStore", () => {
       brokerVersion: 2,
       displayResult: "approve_always",
     });
+    expect(synced?.terminalReason).toBeUndefined();
     expect(store.listOpen()).toEqual([]);
     expect(store.listTerminalAwaitingCardProjection()).toHaveLength(1);
 
