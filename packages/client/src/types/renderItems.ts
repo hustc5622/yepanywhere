@@ -1,84 +1,68 @@
+import type {
+  CommandRenderItem as SharedCommandRenderItem,
+  CompactionRenderItem as SharedCompactionRenderItem,
+  DynamicToolRenderItem as SharedDynamicToolRenderItem,
+  FileChangeRenderItem as SharedFileChangeRenderItem,
+  HookRenderItem as SharedHookRenderItem,
+  ImageRenderItem as SharedImageRenderItem,
+  InteractionRenderItem as SharedInteractionRenderItem,
+  McpToolRenderItem as SharedMcpToolRenderItem,
+  NativeRenderItem as SharedNativeRenderItem,
+  PlanRenderItem as SharedPlanRenderItem,
+  ReasoningRenderItem as SharedReasoningRenderItem,
+  ReviewRenderItem as SharedReviewRenderItem,
+  SessionSetupItem as SharedSessionSetupItem,
+  SleepRenderItem as SharedSleepRenderItem,
+  SubAgentRenderItem as SharedSubAgentRenderItem,
+  SystemItem as SharedSystemItem,
+  TextItem as SharedTextItem,
+  ThinkingItem as SharedThinkingItem,
+  ToolCallItem as SharedToolCallItem,
+  UnknownRenderItem as SharedUnknownRenderItem,
+  UserPromptItem as SharedUserPromptItem,
+  WarningRenderItem as SharedWarningRenderItem,
+  WebSearchRenderItem as SharedWebSearchRenderItem,
+  ToolResultData,
+} from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 
-/**
- * RenderItem types for the preprocessed message rendering system.
- *
- * Instead of rendering Message[] directly, we preprocess into RenderItem[]
- * that pairs tool_use with tool_result for unified display.
- */
-
+/** Client specialization of the shared provider-neutral render model. */
+export type NativeRenderItem = SharedNativeRenderItem<Message>;
+export type TextItem = SharedTextItem<Message>;
+export type ThinkingItem = SharedThinkingItem<Message>;
+export type ToolCallItem = SharedToolCallItem<Message>;
+export type UserPromptItem = Omit<SharedUserPromptItem<Message>, "content"> & {
+  content: string | ContentBlock[];
+};
+export type SessionSetupItem = Omit<
+  SharedSessionSetupItem<Message>,
+  "prompts"
+> & {
+  prompts: Array<string | ContentBlock[]>;
+};
+export type SystemItem = SharedSystemItem<Message>;
+export type PlanRenderItem = SharedPlanRenderItem<Message>;
+export type ReasoningRenderItem = SharedReasoningRenderItem<Message>;
+export type CommandRenderItem = SharedCommandRenderItem<Message>;
+export type FileChangeRenderItem = SharedFileChangeRenderItem<Message>;
+export type McpToolRenderItem = SharedMcpToolRenderItem<Message>;
+export type DynamicToolRenderItem = SharedDynamicToolRenderItem<Message>;
+export type WebSearchRenderItem = SharedWebSearchRenderItem<Message>;
+export type ImageRenderItem = SharedImageRenderItem<Message>;
+export type HookRenderItem = SharedHookRenderItem<Message>;
+export type ReviewRenderItem = SharedReviewRenderItem<Message>;
+export type SleepRenderItem = SharedSleepRenderItem<Message>;
+export type SubAgentRenderItem = SharedSubAgentRenderItem<Message>;
+export type CompactionRenderItem = SharedCompactionRenderItem<Message>;
+export type InteractionRenderItem = SharedInteractionRenderItem<Message>;
+export type WarningRenderItem = SharedWarningRenderItem<Message>;
+export type UnknownRenderItem = SharedUnknownRenderItem<Message>;
 export type RenderItem =
   | TextItem
   | ThinkingItem
   | ToolCallItem
   | UserPromptItem
   | SessionSetupItem
-  | SystemItem;
-
-/** Base fields shared by all render items */
-interface RenderItemBase {
-  /** Source JSONL messages that contributed to this item (for debugging) */
-  sourceMessages: Message[];
-  /** True if this item is from a Task subagent */
-  isSubagent?: boolean;
-}
-
-export interface TextItem extends RenderItemBase {
-  type: "text";
-  id: string;
-  text: string;
-  /** Codex assistant phase; commentary is an explicit model progress update. */
-  phase?: "commentary" | "final_answer";
-  /** True if this text is still being streamed */
-  isStreaming?: boolean;
-  /** Pre-rendered HTML from server (for completed messages) */
-  augmentHtml?: string;
-}
-
-export interface ThinkingItem extends RenderItemBase {
-  type: "thinking";
-  id: string;
-  thinking: string;
-  signature?: string;
-  status: "streaming" | "complete";
-}
-
-export interface ToolCallItem extends RenderItemBase {
-  type: "tool_call";
-  id: string; // tool_use.id
-  toolName: string; // tool_use.name
-  toolInput: unknown; // tool_use.input
-  toolResult?: ToolResultData; // undefined while pending
-  status: "pending" | "complete" | "error" | "aborted";
-  /** Live streaming output preview while the tool is still running. */
-  partialOutput?: string;
-}
-
-export interface ToolResultData {
-  content: string;
-  isError: boolean;
-  /** Structured result from JSONL toolUseResult field */
-  structured?: unknown;
-}
-
-export interface UserPromptItem extends RenderItemBase {
-  type: "user_prompt";
-  id: string;
-  content: string | ContentBlock[];
-}
-
-export interface SessionSetupItem extends RenderItemBase {
-  type: "session_setup";
-  id: string;
-  title: string;
-  prompts: Array<string | ContentBlock[]>;
-}
-
-export interface SystemItem extends RenderItemBase {
-  type: "system";
-  id: string;
-  subtype: "compact_boundary" | "status" | "init" | string;
-  content: string;
-  /** For status subtype: the current status (e.g., "compacting") */
-  status?: "compacting" | null;
-}
+  | SystemItem
+  | NativeRenderItem;
+export type { ToolResultData };

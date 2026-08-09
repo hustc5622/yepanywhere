@@ -36,6 +36,7 @@ import type {
   UploadedFile,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import { isGeneratedArtifactDownloadUrl } from "@yep-anywhere/shared";
 import { authEvents } from "../lib/authEvents";
 import type {
   AgentSession,
@@ -742,6 +743,13 @@ async function fetchBlob(
   };
 }
 
+function generatedArtifactApiPath(downloadUrl: string): string {
+  if (!isGeneratedArtifactDownloadUrl(downloadUrl)) {
+    throw new Error("Invalid generated artifact URL");
+  }
+  return downloadUrl.slice("/api".length);
+}
+
 async function uploadReportForm<T>(
   endpoint: string,
   file: File,
@@ -891,6 +899,9 @@ export const api = {
     fetchBlob(
       `/sessions/${encodeURIComponent(sessionId)}/codex-transcript?format=${format}`,
     ),
+
+  downloadGeneratedArtifact: async (downloadUrl: string) =>
+    await fetchBlob(generatedArtifactApiPath(downloadUrl)),
 
   // Provider API
   getProviders: () => fetchJSON<{ providers: ProviderInfo[] }>("/providers"),

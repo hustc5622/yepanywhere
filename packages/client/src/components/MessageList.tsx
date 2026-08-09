@@ -10,9 +10,9 @@ import {
   useState,
 } from "react";
 import { useOptionalI18n } from "../i18n";
+import type { InputRequestInteractionResolution } from "../lib/codexRenderItems";
 import {
   type ActiveToolApproval,
-  isPlanProgressItem,
   preprocessMessages,
 } from "../lib/preprocessMessages";
 import type { Message } from "../types";
@@ -94,6 +94,10 @@ interface Props {
   }) => void;
   /** Switch the rendered derived branch. */
   onSelectBranch?: (branchId: string) => void;
+  /** Resolve the active canonical interaction shown at the transcript tail. */
+  onResolveInteraction?: (
+    resolution: InputRequestInteractionResolution,
+  ) => void | Promise<void>;
   /** Branch prompt to bring back into view after switching. */
   focusBranchId?: string | null;
   /** Called after the selected branch prompt has been focused. */
@@ -130,6 +134,7 @@ export const MessageList = memo(function MessageList({
   onFollowingBottomChange,
   onEditUserPrompt,
   onSelectBranch,
+  onResolveInteraction,
   focusBranchId,
   onBranchFocused,
   targetMessageId,
@@ -220,10 +225,9 @@ export const MessageList = memo(function MessageList({
       }),
     [preprocessedItems, messages, markdownAugments, activeToolApproval],
   );
-  const visibleRenderItems = useMemo(
-    () => renderItems.filter((item) => !isPlanProgressItem(item)),
-    [renderItems],
-  );
+  // Plans are first-class timeline activity; the inspector remains a summary,
+  // not the only place where plan updates are visible.
+  const visibleRenderItems = renderItems;
   const focusedBranchItemId = useMemo(() => {
     if (!focusBranchId) return null;
     return (
@@ -649,6 +653,7 @@ export const MessageList = memo(function MessageList({
                   toggleThinkingExpanded={toggleThinkingExpanded}
                   sessionProvider={provider}
                   onSelectBranch={onSelectBranch}
+                  onResolveInteraction={onResolveInteraction}
                 />
               );
             })}

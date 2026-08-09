@@ -163,6 +163,17 @@ export interface Message {
   contextBefore?: ContextUsage;
   /** Codex app-server assistant message phase, when provided by Codex CLI. */
   codexMessagePhase?: "commentary" | "final_answer";
+  /** Native app-server item projection, when supplied by the canonical event spine. */
+  codexThreadItem?: {
+    type: string;
+    id?: string;
+    [key: string]: unknown;
+  };
+  codexThreadItemLifecycle?: "started" | "completed";
+  codexThreadId?: string;
+  codexTurnId?: string;
+  codexEventSequence?: number;
+  codexRawReasoningAllowed?: boolean;
   /** Allow any additional fields from SDK/server */
   [key: string]: unknown;
 }

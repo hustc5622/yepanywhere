@@ -19,6 +19,13 @@ export function isStalePendingInputError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const status = (err as { status?: number }).status;
   if (status === 404) return true;
+  if (status === 409) {
+    const code = (err as { code?: string }).code;
+    return (
+      code === "interaction_already_resolved" ||
+      code === "interaction_stale_version"
+    );
+  }
   if (status === 400) {
     const message = (err as { message?: string }).message ?? "";
     return (

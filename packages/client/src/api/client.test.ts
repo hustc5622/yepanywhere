@@ -182,6 +182,54 @@ describe("queued session API responses", () => {
   });
 });
 
+describe("generated artifact download", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("downloads only an authenticated server-managed artifact route", async () => {
+    const blob = new Blob(["%PDF-1.7"], { type: "application/pdf" });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      blob: async () => blob,
+    } as Response);
+    const downloadUrl = `/api/projects/project-1/sessions/session-1/generated-artifact/ga_${"a".repeat(32)}/${"b".repeat(64)}/report.pdf`;
+
+    await expect(api.downloadGeneratedArtifact(downloadUrl)).resolves.toEqual({
+      blob,
+      fileName: null,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      downloadUrl,
+      expect.objectContaining({
+        cache: "no-store",
+        credentials: "include",
+        headers: expect.objectContaining({ "X-Yep-Anywhere": "true" }),
+      }),
+    );
+  });
+
+  it.each([
+    "https://attacker.example/artifact",
+    "/api/projects/project-1/sessions/session-1/upload/../../secret",
+    "/api/projects/project-1/sessions/session-1/files/report.pdf",
+  ])("rejects an unmanaged artifact URL before fetching: %s", async (url) => {
+    await expect(api.downloadGeneratedArtifact(url)).rejects.toThrow(
+      "Invalid generated artifact URL",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("Codex structured input API", () => {
   const fetchMock = vi.fn<typeof fetch>();
   const skillInput = {
