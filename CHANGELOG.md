@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Check in a complete Codex app-server 0.147.0 stable/experimental protocol baseline with deterministic schema manifests and explicit coverage guards
 - Add a durable, redacted Codex event spine with replay, diagnostics, canonical transcripts, and shadow-by-default bridge/provider ingress
 - Centralize pending approvals and questions behind a durable at-most-once CAS interaction authority, with authenticated Codex sidecar claims and lifecycle recovery
+- Harden resident provider ownership with atomic worker admission, restart-safe terminal replay, fail-closed message queues, stable Codex turn controls, and redacted bridge diagnostics
 
 ### Fixed
 - Keep JSON and other non-media OpenCode uploads on the tool-readable local-path flow instead of forwarding unsupported MIME types as native model attachments
