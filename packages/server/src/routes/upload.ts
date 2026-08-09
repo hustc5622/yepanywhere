@@ -15,6 +15,7 @@ import { stream } from "hono/streaming";
 import type { WSContext, WSEvents } from "hono/ws";
 import type { ProjectScanner } from "../projects/scanner.js";
 import {
+  GeneratedArtifactAccessError,
   UPLOADS_DIR,
   UploadManager,
   isGeneratedArtifactStorageFilename,
@@ -35,6 +36,7 @@ export interface UploadDeps {
   /** Test/embedding override; must refer to the same root as uploadManager. */
   uploadsDir?: string;
   uploadManager?: UploadManager;
+  now?: () => number;
 }
 
 export function createUploadRoutes(deps: UploadDeps): Hono {
@@ -46,6 +48,7 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
       uploadsDir,
       maxUploadSizeBytes: deps.maxUploadSizeBytes,
     });
+  const now = deps.now ?? Date.now;
 
   const sendMessage = (ws: WSContext, msg: UploadServerMessage) => {
     ws.send(JSON.stringify(msg));
@@ -296,6 +299,68 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
     }),
   );
 
+  // Generated artifacts have a separate hash-bound route. Registry and
+  // retention are mandatory here; ordinary uploads never enter this branch.
+  routes.get(
+    "/projects/:projectId/sessions/:sessionId/generated-artifact/:artifactId/:sha256/:filename",
+    async (c) => {
+      const projectId = c.req.param("projectId") as string;
+      const sessionId = c.req.param("sessionId") as string;
+      const artifactId = c.req.param("artifactId") as string;
+      const sha256 = c.req.param("sha256") as string;
+      const fileName = c.req.param("filename") as string;
+      if (
+        !isUrlProjectId(projectId) ||
+        !isSafeUploadPathSegment(sessionId) ||
+        !/^ga_[a-f0-9]{32}$/.test(artifactId) ||
+        !/^[a-f0-9]{64}$/.test(sha256) ||
+        !isSafeGeneratedArtifactPublicFileName(fileName)
+      ) {
+        return c.json({ error: "Invalid generated artifact" }, 400);
+      }
+      try {
+        const result = await uploadManager.readGeneratedArtifactBytes(
+          { projectId, sessionId },
+          {
+            artifactId,
+            sha256: `sha256:${sha256}`,
+            fileName,
+          },
+          now(),
+        );
+        c.header("Content-Type", result.record.mimeType);
+        c.header("Content-Length", result.record.sizeBytes.toString());
+        c.header("Cache-Control", "private, no-store");
+        c.header("X-Content-Type-Options", "nosniff");
+        if (
+          !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(
+            result.record.mimeType,
+          ) ||
+          c.req.query("download") === "1"
+        ) {
+          c.header(
+            "Content-Disposition",
+            `attachment; filename*=UTF-8''${encodeRfc5987Value(fileName)}`,
+          );
+        }
+        const responseBytes = new Uint8Array(result.bytes.byteLength);
+        responseBytes.set(result.bytes);
+        return c.body(responseBytes);
+      } catch (error) {
+        if (error instanceof GeneratedArtifactAccessError) {
+          if (error.code === "EXPIRED") {
+            return c.json({ error: "Artifact expired" }, 410);
+          }
+          if (error.code === "INTEGRITY") {
+            return c.json({ error: "Artifact integrity check failed" }, 409);
+          }
+          return c.json({ error: "Artifact not found" }, 404);
+        }
+        return c.json({ error: "Artifact not found" }, 404);
+      }
+    },
+  );
+
   // GET endpoint: /projects/:projectId/sessions/:sessionId/upload/:filename
   // Serves uploaded files for viewing in the client
   routes.get(
@@ -462,6 +527,17 @@ function isSafeManagedUploadFilename(value: string): boolean {
     ) &&
     !hasUnsafeUploadPathCharacter(value.slice(37)) &&
     !value.includes("..")
+  );
+}
+
+function isSafeGeneratedArtifactPublicFileName(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 120 &&
+    value !== "." &&
+    value !== ".." &&
+    !value.includes("..") &&
+    !hasUnsafeUploadPathCharacter(value)
   );
 }
 
