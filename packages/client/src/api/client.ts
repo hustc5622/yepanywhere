@@ -1106,6 +1106,18 @@ export const api = {
       method: "DELETE",
     }),
 
+  executeCodexControl: (
+    sessionId: string,
+    request: { control: string; [key: string]: unknown },
+  ) =>
+    fetchJSON<{ control: string; data: unknown }>(
+      `/sessions/${encodeURIComponent(sessionId)}/codex-control`,
+      {
+        method: "POST",
+        body: JSON.stringify(request),
+      },
+    ),
+
   queueMessage: (
     sessionId: string,
     message: string,

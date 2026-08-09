@@ -124,6 +124,7 @@ import type { ModelInfoService } from "./services/ModelInfoService.js";
 import type { NetworkBindingService } from "./services/NetworkBindingService.js";
 import type { OhMyRouterBenchmarkService } from "./services/OhMyRouterBenchmarkService.js";
 import type { ServerSettingsService } from "./services/ServerSettingsService.js";
+import { SessionCommandService } from "./services/SessionCommandService.js";
 import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
 import { CodexSessionReader } from "./sessions/codex-reader.js";
@@ -268,6 +269,8 @@ export interface AppResult {
   runtimeController: RuntimeController;
   /** Provider-neutral pending-input application authority. */
   sessionInteractionService: SessionInteractionService;
+  /** Provider-neutral application boundary for session commands. */
+  sessionCommandService: SessionCommandService;
   /** Durable CAS authority used by every interaction channel. */
   interactionBroker: InteractionBroker;
   /** Project scanner for debug API access */
@@ -649,6 +652,11 @@ export function createApp(options: AppOptions): AppResult {
     interactionBroker: options.interactionBroker,
   });
   const interactionBroker = sessionInteractionService.getInteractionBroker();
+  const sessionCommandService = new SessionCommandService({
+    runtimeController,
+    sessionInteractionService,
+    sessionMetadataService: options.sessionMetadataService,
+  });
 
   // Bridge HTTP clients observe the shared upstream server (OpenCode/Codex) and
   // replay lifecycle changes onto the EventBus. Teach them which sessions the
@@ -1276,6 +1284,7 @@ export function createApp(options: AppOptions): AppResult {
       codexEventStoreSources: codexTranscriptStoreSources,
       opencodeBridgeService: options.opencodeBridgeService,
       sessionInteractionService,
+      sessionCommandService,
       sessionArchiveService: options.sessionArchiveService,
       claudeProjectsDir: options.projectsDir ?? CLAUDE_PROJECTS_DIR,
     }),
@@ -1627,6 +1636,7 @@ export function createApp(options: AppOptions): AppResult {
     supervisor,
     runtimeController,
     sessionInteractionService,
+    sessionCommandService,
     interactionBroker,
     scanner,
     readerFactory,

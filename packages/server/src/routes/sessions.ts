@@ -70,12 +70,17 @@ import type {
   RuntimeSessionStartResponse,
 } from "../runtime/types.js";
 import {
+  type CodexNativeControlRequest,
+  isCodexNativeControlMethod,
+} from "../sdk/providers/codex-controls.js";
+import {
   CodexModelSourceError,
   getCodexModelSourceRegistry,
 } from "../sdk/providers/codex-model-sources.js";
 import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
+import { SessionCommandService } from "../services/SessionCommandService.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
@@ -560,6 +565,8 @@ export interface SessionsDeps {
   runtimeController?: RuntimeController;
   /** Shared pending-input authority used by HTTP and channel adapters. */
   sessionInteractionService?: SessionInteractionService;
+  /** Shared application boundary used by HTTP and channel adapters. */
+  sessionCommandService?: SessionCommandService;
   supervisor: Supervisor;
   scanner: ProjectScanner;
   readerFactory: (project: Project) => ISessionReader;
@@ -1226,6 +1233,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       sessionMetadataService: deps.sessionMetadataService,
       eventBus: deps.eventBus,
     });
+  const sessionCommandService =
+    deps.sessionCommandService ??
+    new SessionCommandService({
+      runtimeController,
+      sessionInteractionService,
+      sessionMetadataService: deps.sessionMetadataService,
+    });
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
     deps.codexReaderFactory?.(projectPath) ??
     (deps.codexSessionsDir
@@ -1393,7 +1407,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Get pending input request from active process
     const activePendingInputRequest =
-      await sessionInteractionService.getPendingInput(sessionId, {
+      await sessionCommandService.getPendingInput(sessionId, {
         processSnapshot: process,
       });
     const pendingInputType =
@@ -1837,7 +1851,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // Get pending input request from active process (for tool approval prompts)
     // This ensures clients get pending requests immediately without waiting for SSE
     const activePendingInputRequest =
-      await sessionInteractionService.getPendingInput(sessionId, {
+      await sessionCommandService.getPendingInput(sessionId, {
         processSnapshot: process,
       });
     const livePendingInputType =
@@ -3148,6 +3162,30 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     });
   });
 
+  // POST /api/sessions/:sessionId/codex-control - Execute a bounded,
+  // capability-gated Codex app-server control through the authenticated API.
+  routes.post("/sessions/:sessionId/codex-control", async (c) => {
+    let request: CodexNativeControlRequest;
+    try {
+      request = await c.req.json<CodexNativeControlRequest>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (
+      !request ||
+      typeof request !== "object" ||
+      !isCodexNativeControlMethod((request as { control?: unknown }).control)
+    ) {
+      return c.json({ error: "Supported Codex control is required" }, 400);
+    }
+
+    const result = await sessionCommandService.executeCodexControl({
+      sessionId: c.req.param("sessionId"),
+      request,
+    });
+    return c.json(result.body, result.status);
+  });
+
   // DELETE /api/sessions/:sessionId/deferred/:tempId - Cancel a deferred message
   routes.delete("/sessions/:sessionId/deferred/:tempId", async (c) => {
     const sessionId = c.req.param("sessionId");
@@ -3179,52 +3217,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "Invalid or missing permission mode" }, 400);
     }
 
-    // The provider is updated before the local mode is published, so a
-    // rejection here means Yep's mode and the provider's mode would have
-    // drifted. Report it instead of letting an opaque 500 make the UI show a
-    // mode the agent never adopted.
-    let modeResult: Awaited<
-      ReturnType<typeof runtimeController.setPermissionMode>
-    >;
-    try {
-      modeResult = await runtimeController.setPermissionMode({
-        sessionId,
-        mode: body.mode,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      getLogger().warn(
-        {
-          event: "session_permission_mode_sync_failed",
-          sessionId,
-          mode: body.mode,
-          error: message,
-        },
-        "Provider rejected the permission mode change",
-      );
-      return c.json(
-        { error: `Failed to apply permission mode: ${message}` },
-        502,
-      );
-    }
-    if (!modeResult.ok) {
-      if (!deps.sessionMetadataService) {
-        return c.json({ error: "No active process for session" }, 404);
-      }
-      await persistSessionPermissionMode(deps, sessionId, body.mode);
-      return c.json({
-        permissionMode: body.mode,
-        modeVersion: 0,
-      });
-    }
-
-    const confirmedMode = modeResult.permissionMode ?? body.mode;
-    await persistSessionPermissionMode(deps, sessionId, confirmedMode);
-
-    return c.json({
-      permissionMode: confirmedMode,
-      modeVersion: modeResult.modeVersion ?? 0,
-    });
+    const result = await sessionCommandService.setPermissionMode(
+      sessionId,
+      body.mode,
+    );
+    return c.json(result.body, result.status);
   });
 
   // PUT /api/sessions/:sessionId/hold - Set hold (soft pause) mode
@@ -3263,7 +3260,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // round-trip is needed here.
     const process =
       await runtimeController.getProcessSnapshotForSession(sessionId);
-    const request = await sessionInteractionService.getPendingInput(sessionId, {
+    const request = await sessionCommandService.getPendingInput(sessionId, {
       processSnapshot: process,
     });
 
@@ -3294,10 +3291,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
-    const result = await sessionInteractionService.respondToInput(
-      sessionId,
-      body,
-    );
+    const result = await sessionCommandService.respondToInput(sessionId, body);
     return c.json(result.body, result.status);
   });
 

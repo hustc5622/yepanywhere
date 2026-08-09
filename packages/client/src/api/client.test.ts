@@ -222,3 +222,34 @@ describe("Codex transcript export", () => {
     );
   });
 });
+
+describe("Codex native controls", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("uses the authenticated bounded control endpoint", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ control: "skills/list", data: { data: [] } }),
+    } as Response);
+
+    await api.executeCodexControl("session/1", { control: "skills/list" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/session%2F1/codex-control",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ control: "skills/list" }),
+      }),
+    );
+  });
+});
