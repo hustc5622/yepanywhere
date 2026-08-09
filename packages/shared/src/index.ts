@@ -8,6 +8,36 @@ export {
 } from "./ideMetadata.js";
 
 export {
+  FeishuAccountConfigSchema,
+  FeishuAccountsFileSchema,
+  FeishuBindingsFileSchema,
+  FeishuConnectionStateSchema,
+  FeishuDomainSchema,
+  FeishuGroupSessionModeSchema,
+  FeishuPermissionModeSchema,
+  FeishuReplyModeSchema,
+  FeishuSecretRefSchema,
+  FeishuSessionBindingSchema,
+} from "./feishu-channel.js";
+export type {
+  FeishuAccountConfig,
+  FeishuAccountMetrics,
+  FeishuAccountPublicView,
+  FeishuAccountStatus,
+  FeishuAccountsFile,
+  FeishuBindingsFile,
+  FeishuConnectionState,
+  FeishuDomain,
+  FeishuGroupSessionMode,
+  FeishuPermissionMode,
+  FeishuReplyMode,
+  FeishuSecretRef,
+  FeishuSecretSource,
+  FeishuSecretStatus,
+  FeishuSessionBinding,
+} from "./feishu-channel.js";
+
+export {
   CODEX_THREAD_ITEM_RENDER_POLICY,
   CODEX_THREAD_ITEM_TYPES,
   NATIVE_RENDER_ITEM_TYPES,
