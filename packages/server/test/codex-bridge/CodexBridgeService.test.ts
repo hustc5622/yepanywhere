@@ -2094,7 +2094,7 @@ describe("CodexBridgeService", () => {
     }
   });
 
-  it("auto-resolves timed Codex questions after the terminal detaches", async () => {
+  it("keeps timed Codex questions pending after detach until an explicit answer", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     await waitFor(() => upstreamSocket !== null);
     const forwarded = waitForJson(client);
@@ -2123,10 +2123,22 @@ describe("CodexBridgeService", () => {
     await forwarded;
     client.close();
     await waitFor(() => bridge.getStatus().detachedConnectionCount === 1);
+    await delay(150);
+    expect(upstreamMessages).toEqual([]);
+    const pending = bridge.getPendingInputRequest("thread-timed-question");
+    expect(pending).toMatchObject({ type: "question" });
+    expect(
+      bridge.respondToInput(
+        "thread-timed-question",
+        pending?.id ?? "",
+        "approve",
+        { continue: "Wait" },
+      ),
+    ).toBe(true);
     await waitFor(() => upstreamMessages.length === 1);
     expect(upstreamMessages[0]).toEqual({
       id: "timed-question",
-      result: { answers: {} },
+      result: { answers: { continue: { answers: ["Wait"] } } },
     });
 
     upstreamSocket?.send(

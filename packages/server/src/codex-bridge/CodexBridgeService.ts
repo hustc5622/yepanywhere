@@ -149,8 +149,6 @@ interface PendingServerRequest {
   connection: BridgeConnection;
   createdAt: string;
   eventSessionId: string;
-  autoResolutionDeadline?: number;
-  autoResolutionTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface SessionRecord {
@@ -1084,7 +1082,6 @@ export class CodexBridgeService implements CodexBridgeController {
   ): void {
     if (connection.closed || !connection.downstreamAttached) return;
     connection.downstreamAttached = false;
-    this.resolveOverdueDetachedInputs(connection);
     if (this.shouldRetainDetachedConnection(connection)) {
       console.log(
         `[CodexBridge] Retaining detached connection ${connection.id} while Codex is active`,
@@ -1920,17 +1917,12 @@ export class CodexBridgeService implements CodexBridgeController {
       "waiting-input",
       view.pendingInputType,
     );
-    this.armAutoResolution(pending);
   }
 
   private resolvePendingRequest(
     pending: PendingServerRequest,
     _source: string,
   ): void {
-    if (pending.autoResolutionTimer) {
-      clearTimeout(pending.autoResolutionTimer);
-      pending.autoResolutionTimer = undefined;
-    }
     this.pendingByInputId.delete(pending.inputId);
     this.pendingInputBindings.delete(pending.inputId);
     pending.connection.pendingServerRequests.delete(pending.requestKey);
@@ -1960,44 +1952,6 @@ export class CodexBridgeService implements CodexBridgeController {
       );
     }
     this.maybeCloseDetachedConnection(pending.connection, "input-resolved");
-  }
-
-  private armAutoResolution(pending: PendingServerRequest): void {
-    if (pending.method !== "item/tool/requestUserInput") return;
-    const delayMs = pending.params.autoResolutionMs;
-    if (
-      typeof delayMs !== "number" ||
-      !Number.isFinite(delayMs) ||
-      delayMs < 0
-    ) {
-      return;
-    }
-    pending.autoResolutionDeadline = Date.now() + delayMs;
-    pending.autoResolutionTimer = setTimeout(() => {
-      pending.autoResolutionTimer = undefined;
-      if (
-        pending.connection.downstreamAttached ||
-        !this.pendingByInputId.has(pending.inputId)
-      ) {
-        return;
-      }
-      this.respondToInput(pending.threadId, pending.inputId, "approve", {});
-    }, delayMs);
-    pending.autoResolutionTimer.unref?.();
-  }
-
-  private resolveOverdueDetachedInputs(connection: BridgeConnection): void {
-    const now = Date.now();
-    for (const pending of Array.from(
-      connection.pendingServerRequests.values(),
-    )) {
-      if (
-        pending.autoResolutionDeadline !== undefined &&
-        pending.autoResolutionDeadline <= now
-      ) {
-        this.respondToInput(pending.threadId, pending.inputId, "approve", {});
-      }
-    }
   }
 
   private resolveLogicalRequest(
