@@ -1,7 +1,9 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { InputRequest } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildFeishuInputCard } from "../../../src/channels/feishu/input-request.js";
 import { FeishuDurableOutbox } from "../../../src/channels/feishu/outbox.js";
 
 describe("FeishuDurableOutbox", () => {
@@ -96,8 +98,8 @@ describe("FeishuDurableOutbox", () => {
       idempotencyKey: "secret-redaction",
       kind: "card_content_update",
       payload: {
-       cardId: "card-1",
-       content:
+        cardId: "card-1",
+        content:
           "Cookie: session=must-not-leak\nAuthorization: Basic <fixture-basic-credential>\nNPM_TOKEN=npm-fixture-must-not-leak\nSLACK=xoxb-0000000000-fixture-do-not-leak",
         sequence: 1,
       },
@@ -226,5 +228,46 @@ describe("FeishuDurableOutbox", () => {
       "Invalid Feishu outbound outbox",
     );
     expect(outbox.isOperational()).toBe(false);
+  });
+
+  it("persists only the redacted projection of an input card", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-outbox-"));
+    dirs.push(dataDir);
+    const outbox = new FeishuDurableOutbox({ dataDir });
+    await outbox.initialize(new Date("2026-08-08T00:00:00.000Z"));
+    const request: InputRequest = {
+      id: "question-fixture",
+      sessionId: "session-fixture",
+      type: "question",
+      prompt: "Enter token=fixture-must-not-leak",
+      timestamp: "2026-08-08T00:00:00.000Z",
+      toolInput: {
+        questions: [
+          {
+            id: "credential",
+            question: "NPM_TOKEN=fixture-must-not-leak",
+            options: [],
+            required: true,
+            inputType: "password",
+          },
+        ],
+      },
+    };
+    const card = buildFeishuInputCard(request, {
+      operationId: "int_11111111-1111-4111-8111-111111111111",
+      operationVersion: 0,
+    });
+    expect(JSON.stringify(card)).toContain("[REDACTED:secret]");
+    expect(JSON.stringify(card)).not.toContain("fixture-must-not-leak");
+
+    const record = await outbox.enqueue({
+      owner: "account-a",
+      idempotencyKey: "input-card-redacted",
+      kind: "input_card_update",
+      payload: { cardId: "card-fixture", card, sequence: 1 },
+    });
+    expect(JSON.stringify(record.payload.card)).toContain("[REDACTED:secret]");
+    const persisted = await readFile(outbox.filePath, "utf8");
+    expect(persisted).not.toContain("fixture-must-not-leak");
   });
 });
