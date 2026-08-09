@@ -270,6 +270,10 @@ function handle(message) {
     });
     return;
   }
+  if (message.method === "turn/interrupt") {
+    send(message.id, {});
+    return;
+  }
   if ([
     "skills/list",
     "review/start",
@@ -634,6 +638,54 @@ process.stdin.on("data", (chunk) => {
         restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
         restoreEnv("CODEX_FAKE_ACTIVE_TURN", previousActiveTurn);
         restoreEnv("CODEX_FAKE_STEER_TURN_ID", previousSteerTurnId);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("interrupts the exact active Codex turn through the stable API", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-interrupt-identity-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "thread.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousActiveTurn = process.env.CODEX_FAKE_ACTIVE_TURN;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_ACTIVE_TURN = "1";
+
+      try {
+        const nativeProvider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await nativeProvider.startSession({
+          cwd: tempDir,
+          initialMessage: { text: "start", uuid: "client-interrupt" },
+        });
+        await session.iterator.next();
+        await session.iterator.next();
+
+        await expect(session.interrupt?.()).resolves.toBeUndefined();
+        expect(
+          readMessageCapture(messageCapturePath).find(
+            ({ method }) => method === "turn/interrupt",
+          )?.params,
+        ).toEqual({ threadId: "thread-new", turnId: "turn-rewrite" });
+        expect(session.codexControls?.capabilities.experimentalApi).toBe(false);
+        expect(
+          readMessageCapture(messageCapturePath).some(
+            ({ method }) =>
+              method === "thread/backgroundTerminals/terminate" ||
+              method === "thread/backgroundTerminals/clean",
+          ),
+        ).toBe(false);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_ACTIVE_TURN", previousActiveTurn);
         rmSync(tempDir, { recursive: true, force: true });
       }
     });

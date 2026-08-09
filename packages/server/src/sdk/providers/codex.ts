@@ -88,6 +88,8 @@ import {
   DEFAULT_CODEX_MODEL_SOURCE,
   getCodexModelSourceRegistry,
 } from "./codex-model-sources.js";
+import type { TurnInterruptParams } from "./codex-protocol/generated/v2/TurnInterruptParams.js";
+import type { TurnInterruptResponse } from "./codex-protocol/generated/v2/TurnInterruptResponse.js";
 import type { TurnSteerParams } from "./codex-protocol/generated/v2/TurnSteerParams.js";
 import type { TurnSteerResponse } from "./codex-protocol/generated/v2/TurnSteerResponse.js";
 import type {
@@ -1577,6 +1579,22 @@ export class CodexProvider implements AgentProvider {
       isProcessAlive: () => activeClient?.isAlive() ?? false,
       get pid() {
         return activeClient?.pid;
+      },
+      interrupt: async () => {
+        const client = activeClient;
+        const threadId = runtimeState.threadId;
+        const turnId = runtimeState.activeTurnId;
+        if (
+          !client ||
+          !client.isAlive() ||
+          !runtimeState.ready ||
+          !threadId ||
+          !turnId
+        ) {
+          throw new Error("Codex turn interrupt requires an active turn");
+        }
+        const params: TurnInterruptParams = { threadId, turnId };
+        await client.request<TurnInterruptResponse>("turn/interrupt", params);
       },
       codexControls: {
         capabilities: CODEX_NATIVE_CAPABILITIES,
