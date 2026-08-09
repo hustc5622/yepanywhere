@@ -1,9 +1,9 @@
 #!/usr/bin/env tsx
 
 /**
- * Build script for npm package distribution
+ * Build script for the self-contained Node.js distribution bundle
  *
- * This script prepares a single bundle for npm publishing by:
+ * This script prepares a single bundle for local deployment and GitHub Release by:
  * 1. Building the shared package (types)
  * 2. Building the client (React app)
  * 3. Building the server (Node.js app)
@@ -435,21 +435,22 @@ step("Bundle OpenCode approval plugin", () => {
   log("  OpenCode plugin and installer bundled into staging");
 });
 
-// Generate package.json for publishing (in staging, not modifying original)
-step("Generate package.json for npm", () => {
-  log("Generating package.json for npm publishing...");
+// Generate the bundle package.json in staging without modifying the workspace.
+step("Generate bundle package.json", () => {
+  log("Generating bundle package.json...");
 
   const sourcePackageJsonPath = path.join(SERVER_PACKAGE, "package.json");
   const sourcePackageJson = JSON.parse(
     fs.readFileSync(sourcePackageJsonPath, "utf-8"),
   );
 
-  // Create a new package.json for publishing
+  // Create a package.json for the self-contained bundle. This repository does
+  // not publish the bundle to a package registry.
   // The bare `yepanywhere` name belongs to the upstream release line, which we
-  // have no publish rights to and do not want to shadow. Scoping the name means
-  // an accidental `npm publish` from this fork cannot land on upstream's
-  // package. The bin names are deliberately unchanged — redeploy-server.sh
-  // invokes `yepanywhere --codex-bridge-only` and friends.
+  // have no publish rights to and do not want to shadow. Scoping the name adds
+  // a second defense against registry mistakes. The bin names are deliberately
+  // unchanged — redeploy-server.sh invokes `yepanywhere --codex-bridge-only`
+  // and friends.
   const npmPackageJson: Record<string, unknown> = {
     name: "@hustc5622/yepanywhere",
     version: NPM_VERSION,
@@ -700,12 +701,13 @@ for (const result of results) {
 const allSuccess = results.every((r) => r.success);
 if (allSuccess) {
   log("\n✓ All build steps completed successfully!");
-  log("\nThe npm package is ready for publishing:");
+  log("\nThe self-contained bundle is ready:");
   log(`  Location: ${path.relative(ROOT_DIR, PUBLISHED_DIR)}`);
-  log("\nNext steps:");
-  log(`  1. cd ${path.relative(ROOT_DIR, PUBLISHED_DIR)}`);
-  log("  2. Test: npm pack");
-  log("  3. Publish: npm publish");
+  log("\nDistribution policy:");
+  log(
+    "  Attach the bundle to a ya-v* GitHub Release or use an authorized local deploy.",
+  );
+  log("  Do not publish this bundle to a package registry.");
   log("\nNote: packages/server/package.json is unchanged (workspace intact)");
 } else {
   error("\n✗ Build failed. See errors above.");
