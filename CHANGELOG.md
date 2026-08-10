@@ -7,6 +7,8 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+## [2026.8.2] - 2026-08-10
+
 ### Changed
 - Restore the pre-canonical session rendering and navigation experience while retaining the self-hosted Feishu/Lark channel backend, durable interactions, and safe deployment runtime
 - Run every OpenCode SQLite read on a dedicated worker thread with a query deadline, a soft budget, and structured `durationMs`/timeout diagnostics, so a slow scan of a multi-gigabyte `opencode.db` can no longer stall the API thread, WebSocket traffic, or heartbeat timers
