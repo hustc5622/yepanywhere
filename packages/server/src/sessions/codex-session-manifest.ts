@@ -17,10 +17,6 @@ export interface CodexSessionManifestEntry {
   mtime: number;
   size: number;
   isSubagent: boolean;
-  parentThreadId?: string;
-  agentNickname?: string;
-  agentRole?: string;
-  depth?: number;
 }
 
 export interface CodexSessionManifest {
@@ -219,7 +215,6 @@ async function readSessionManifestEntry(
       return null;
     }
 
-    const subagent = getCodexSubagentMetadata(meta);
     return {
       id: meta.id,
       cwd: meta.cwd,
@@ -227,11 +222,7 @@ async function readSessionManifestEntry(
       timestamp: meta.timestamp,
       mtime: stats.mtimeMs,
       size: stats.size,
-      isSubagent: subagent.isSubagent,
-      parentThreadId: subagent.parentThreadId,
-      agentNickname: subagent.agentNickname,
-      agentRole: subagent.agentRole,
-      depth: subagent.depth,
+      isSubagent: getCodexSubagentMetadata(meta).isSubagent,
     };
   } catch (error) {
     getLogger().debug(

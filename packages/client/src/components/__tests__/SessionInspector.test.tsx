@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { AppSessionSummary, SessionQuestion } from "@yep-anywhere/shared";
+import type { SessionQuestion } from "@yep-anywhere/shared";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
@@ -20,7 +20,6 @@ function renderInspector(
   messages: Message[],
   userQuestions?: SessionQuestion[],
   onClose?: () => void,
-  subagentThreads?: NonNullable<AppSessionSummary["subagentThreads"]>,
 ) {
   window.localStorage.setItem(UI_KEYS.locale, "en");
   return render(
@@ -35,7 +34,6 @@ function renderInspector(
           sessionId="session-1"
           provider={provider}
           status={{ owner: "none" }}
-          subagentThreads={subagentThreads}
           onSelectMessage={vi.fn()}
         />
       </I18nProvider>
@@ -186,117 +184,6 @@ describe("SessionInspector", () => {
     const link = screen.getByRole("link", { name: /Analyze in background/i });
     expect(link.textContent).toContain("completed");
     expect(link.textContent).not.toContain("running");
-  });
-
-  it("renders persisted Codex descendants as a navigable tree with canonical status", () => {
-    renderInspector(
-      "codex",
-      [
-        {
-          uuid: "spawn-child",
-          type: "system",
-          codexThreadId: "session-1",
-          codexThreadItemLifecycle: "completed",
-          codexThreadItem: {
-            type: "collabAgentToolCall",
-            id: "spawn-child",
-            tool: "spawnAgent",
-            status: "completed",
-            senderThreadId: "session-1",
-            receiverThreadIds: ["child-one"],
-            prompt: "must-not-leak child prompt",
-            agentsStates: {
-              "child-one": {
-                status: "running",
-                message: "must-not-leak agent result",
-              },
-            },
-          },
-        },
-        {
-          uuid: "nested-started",
-          type: "system",
-          codexThreadId: "child-one",
-          codexThreadItemLifecycle: "completed",
-          codexThreadItem: {
-            type: "subAgentActivity",
-            id: "nested-started",
-            kind: "started",
-            agentThreadId: "child-two",
-            agentPath: "/test-fixtures/codex/agents/must-not-leak",
-          },
-        },
-      ],
-      undefined,
-      undefined,
-      [
-        {
-          sessionId: "child-one",
-          parentSessionId: "session-1",
-          depth: 1,
-          agentNickname: "Scout",
-          agentRole: "explorer",
-        },
-        {
-          sessionId: "child-two",
-          parentSessionId: "child-one",
-          depth: 2,
-          agentNickname: "Builder",
-          agentRole: "worker",
-        },
-      ],
-    );
-
-    const scoutLink = screen.getByRole("link", { name: /Scout/i });
-    const builderLink = screen.getByRole("link", { name: /Builder/i });
-    expect(scoutLink.getAttribute("href")).toBe(
-      "/projects/project-1/sessions/child-one",
-    );
-    expect(builderLink.getAttribute("href")).toBe(
-      "/projects/project-1/sessions/child-two",
-    );
-    expect(scoutLink.textContent).toContain("explorer");
-    expect(scoutLink.textContent).toContain("running");
-    expect(builderLink.closest("li")?.getAttribute("data-depth")).toBe("2");
-    expect(
-      screen.queryByText("must-not-leak child prompt", { exact: false }),
-    ).toBeNull();
-    expect(
-      screen.queryByText("must-not-leak agent result", { exact: false }),
-    ).toBeNull();
-    expect(screen.queryByText("must-not-leak", { exact: false })).toBeNull();
-  });
-
-  it("shows canonical-only Codex children without creating a session link", () => {
-    renderInspector("codex", [
-      {
-        uuid: "spawn-live-only",
-        type: "system",
-        codexThreadId: "session-1",
-        codexThreadItemLifecycle: "completed",
-        codexThreadItem: {
-          type: "collabAgentToolCall",
-          id: "spawn-live-only",
-          tool: "spawnAgent",
-          status: "completed",
-          senderThreadId: "session-1",
-          receiverThreadIds: ["child-live-only"],
-          prompt: "must-not-display live prompt",
-          agentsStates: {
-            "child-live-only": { status: "pendingInit" },
-          },
-        },
-      },
-    ]);
-
-    expect(screen.getByText("child-live-only")).not.toBeNull();
-    expect(
-      screen.getByText("Transcript not available yet", { exact: false }),
-    ).not.toBeNull();
-    expect(screen.queryByRole("link", { name: /child-live-only/i })).toBeNull();
-    expect(
-      screen.queryByText("must-not-display live prompt", { exact: false }),
-    ).toBeNull();
   });
 
   it("does not show Codex channel metadata for Claude sessions", () => {

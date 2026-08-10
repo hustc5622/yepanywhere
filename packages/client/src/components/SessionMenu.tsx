@@ -124,7 +124,6 @@ export function SessionMenu({
   const [isCloning, setIsCloning] = useState(false);
   const [isTerminating, setIsTerminating] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
-  const [isExporting, setIsExporting] = useState(false);
   const [dropdownPosition, setDropdownPosition] = useState<{
     top: number;
     left?: number;
@@ -180,7 +179,7 @@ export function SessionMenu({
       if (useFixedPositioning && triggerRef.current) {
         const rect = triggerRef.current.getBoundingClientRect();
         const dropdownWidth = 190; // Approximate width of dropdown
-        const dropdownHeight = 272; // Approximate height including optional export/share rows
+        const dropdownHeight = 224; // Approximate height of dropdown (varies by options)
         const rightPosition = window.innerWidth - rect.right;
         const margin = 8;
 
@@ -280,29 +279,6 @@ export function SessionMenu({
       console.error("Failed to share session:", error);
     } finally {
       setIsSharing(false);
-    }
-  };
-
-  const handleExportCodexTranscript = async () => {
-    if (isExporting || provider !== "codex") return;
-    setIsExporting(true);
-    setIsOpen(false);
-    setDropdownPosition(null);
-    triggerRef.current?.blur();
-    try {
-      const { blob, fileName } = await api.downloadCodexTranscript(sessionId);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = fileName ?? `codex-transcript-${sessionId}.md`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-      showToast(t("sessionMenuTranscriptExported"), "success");
-    } catch (error) {
-      console.error("Failed to export Codex transcript:", error);
-      showToast(t("sessionMenuTranscriptExportFailed"), "error");
-    } finally {
-      setIsExporting(false);
     }
   };
 
@@ -409,30 +385,6 @@ export function SessionMenu({
             <line x1="10" y1="14" x2="21" y2="3" />
           </svg>
           {isSharing ? t("sessionMenuSharing") : t("sessionMenuShare")}
-        </button>
-      )}
-      {provider === "codex" && (
-        <button
-          type="button"
-          onClick={handleExportCodexTranscript}
-          disabled={isExporting}
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden="true"
-          >
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="7 10 12 15 17 10" />
-            <line x1="12" y1="15" x2="12" y2="3" />
-          </svg>
-          {isExporting
-            ? t("sessionMenuExportingTranscript")
-            : t("sessionMenuExportTranscript")}
         </button>
       )}
       <button

@@ -4,14 +4,11 @@ import { isStalePendingInputError } from "../pendingInputError";
 function apiError(
   status: number,
   message?: string,
-  code?: string,
-): Error & { status: number; code?: string } {
+): Error & { status: number } {
   const err = new Error(message ?? `Error ${status}`) as Error & {
     status: number;
-    code?: string;
   };
   err.status = status;
-  err.code = code;
   return err;
 }
 
@@ -45,28 +42,6 @@ describe("isStalePendingInputError", () => {
     expect(isStalePendingInputError(apiError(400, "Invalid JSON body"))).toBe(
       false,
     );
-  });
-
-  it("treats central broker CAS conflicts as stale", () => {
-    expect(
-      isStalePendingInputError(
-        apiError(
-          409,
-          "Interaction already resolved",
-          "interaction_already_resolved",
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      isStalePendingInputError(
-        apiError(
-          409,
-          "Interaction version is stale",
-          "interaction_stale_version",
-        ),
-      ),
-    ).toBe(true);
-    expect(isStalePendingInputError(apiError(409, "Conflict"))).toBe(false);
   });
 
   it("does not treat server/other errors as stale", () => {

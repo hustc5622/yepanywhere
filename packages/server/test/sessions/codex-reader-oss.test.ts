@@ -193,7 +193,6 @@ describe("CodexSessionReader - OSS Support", () => {
   it("keeps Codex collaboration children out of top-level session files", async () => {
     const parentId = randomUUID();
     const childId = randomUUID();
-    const grandchildId = randomUUID();
     await createSessionFile(parentId, "openai", "gpt-5");
 
     const now = new Date().toISOString();
@@ -216,9 +215,7 @@ describe("CodexSessionReader - OSS Support", () => {
                 thread_spawn: {
                   parent_thread_id: parentId,
                   depth: 1,
-                  agent_path: "/test-fixtures/codex/agents/review",
-                  agent_nickname: "Reviewer",
-                  agent_role: "reviewer",
+                  agent_path: "/root/review",
                 },
               },
             },
@@ -235,153 +232,11 @@ describe("CodexSessionReader - OSS Support", () => {
       ].join("\n")}\n`,
     );
 
-    await writeFile(
-      join(testDir, `${grandchildId}.jsonl`),
-      `${[
-        JSON.stringify({
-          type: "session_meta",
-          timestamp: now,
-          payload: {
-            id: grandchildId,
-            parent_thread_id: childId,
-            cwd: "/test/project",
-            timestamp: now,
-            source: {
-              subagent: {
-                thread_spawn: {
-                  parent_thread_id: childId,
-                  depth: 2,
-                  agent_path: "/test-fixtures/codex/agents/review/scout",
-                  agent_nickname: "Scout",
-                  agent_role: "explorer",
-                },
-              },
-            },
-          },
-        }),
-        JSON.stringify({
-          type: "event_msg",
-          timestamp: now,
-          payload: {
-            type: "user_message",
-            message: "Inspect one focused area",
-          },
-        }),
-      ].join("\n")}\n`,
-    );
-
     const sessions = await reader.listSessionFiles(testDir);
     expect(sessions.map((session) => session.sessionId)).toEqual([parentId]);
-
-    await expect(
-      reader.getSessionSummary(childId, "test-project" as UrlProjectId),
-    ).resolves.toMatchObject({ id: childId, parentSessionId: parentId });
-
-    const parent = await reader.getSession(
-      parentId,
-      "test-project" as UrlProjectId,
-    );
-    expect(parent?.summary.subagentThreads).toEqual([
-      {
-        sessionId: childId,
-        parentSessionId: parentId,
-        depth: 1,
-        agentNickname: "Reviewer",
-        agentRole: "reviewer",
-      },
-      {
-        sessionId: grandchildId,
-        parentSessionId: childId,
-        depth: 2,
-        agentNickname: "Scout",
-        agentRole: "explorer",
-      },
-    ]);
-    expect(JSON.stringify(parent?.summary)).not.toContain("agent_path");
-    expect(JSON.stringify(parent?.summary)).not.toContain(
-      "/test-fixtures/codex/agents/review",
-    );
-
-    const child = await reader.getAgentSession(childId, parentId);
-    expect(child).toMatchObject({
-      status: "pending",
-      agentType: "reviewer",
-      descriptor: {
-        agentId: childId,
-        parentAgentId: parentId,
-        type: "reviewer",
-        status: "queued",
-      },
-    });
-    expect(child?.messages).toHaveLength(1);
-    await expect(
-      reader.getAgentSession(childId, grandchildId),
-    ).resolves.toBeNull();
-  });
-
-  it("maps stable spawn call ids to child threads without carrying private payloads", async () => {
-    const parentId = randomUUID();
-    const childId = randomUUID();
-    const now = new Date().toISOString();
-    await writeFile(
-      join(testDir, `${parentId}.jsonl`),
-      `${[
-        JSON.stringify({
-          type: "session_meta",
-          timestamp: now,
-          payload: {
-            id: parentId,
-            cwd: "/test/project",
-            timestamp: now,
-            model_provider: "openai",
-          },
-        }),
-        JSON.stringify({
-          type: "event_msg",
-          timestamp: now,
-          payload: { type: "user_message", message: "Start a review" },
-        }),
-        JSON.stringify({
-          type: "event_msg",
-          timestamp: now,
-          payload: {
-            type: "collab_agent_spawn_end",
-            call_id: "spawn-call",
-            sender_thread_id: parentId,
-            new_thread_id: childId,
-            new_agent_role: "reviewer",
-            prompt: "must-not-leak child instructions",
-            model: "gpt-5.6",
-            reasoning_effort: "high",
-            status: "running",
-          },
-        }),
-        JSON.stringify({
-          type: "event_msg",
-          timestamp: now,
-          payload: {
-            type: "sub_agent_activity",
-            event_id: "activity-1",
-            agent_thread_id: childId,
-            agent_path: "/test-fixtures/codex/agents/private",
-            kind: "interrupted",
-          },
-        }),
-      ].join("\n")}\n`,
-    );
-
-    const mappings = await reader.getAgentMappings(parentId);
-    expect(mappings).toEqual([
-      {
-        toolUseId: "spawn-call",
-        agentId: childId,
-        agentType: "reviewer",
-        status: "interrupted",
-      },
-    ]);
-    expect(JSON.stringify(mappings)).not.toContain("must-not-leak");
-    expect(JSON.stringify(mappings)).not.toContain("/test-fixtures");
-    await expect(reader.getAgentMappings()).resolves.toEqual([]);
+    expect(
+      await reader.getSessionSummary(childId, "test-project" as UrlProjectId),
+    ).toBeNull();
   });
 
   const createRollbackSessionFile = async (sessionId: string) => {

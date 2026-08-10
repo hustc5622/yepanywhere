@@ -56,57 +56,6 @@ describe("Codex patch lifecycle session schema", () => {
   });
 });
 
-describe("Codex collaboration session schema", () => {
-  it("parses stable spawn and sub-agent activity events", () => {
-    const events = [
-      {
-        timestamp: "2026-08-08T01:00:00.000Z",
-        type: "event_msg",
-        payload: {
-          type: "collab_agent_spawn_begin",
-          call_id: "call-1",
-          sender_thread_id: "parent",
-          prompt: "internal child prompt",
-          model: "gpt-5.6",
-          reasoning_effort: "high",
-        },
-      },
-      {
-        timestamp: "2026-08-08T01:00:01.000Z",
-        type: "event_msg",
-        payload: {
-          type: "collab_agent_spawn_end",
-          call_id: "call-1",
-          sender_thread_id: "parent",
-          new_thread_id: "child",
-          new_agent_nickname: "Scout",
-          new_agent_role: "explorer",
-          prompt: "internal child prompt",
-          model: "gpt-5.6",
-          reasoning_effort: "high",
-          status: { completed: null },
-        },
-      },
-      {
-        timestamp: "2026-08-08T01:00:02.000Z",
-        type: "event_msg",
-        payload: {
-          type: "sub_agent_activity",
-          event_id: "activity-1",
-          agent_thread_id: "child",
-          agent_path: "/test-fixtures/codex/agents/scout",
-          kind: "started",
-        },
-      },
-    ] as const;
-
-    for (const event of events) {
-      expect(CodexSessionEntrySchema.parse(event)).toEqual(event);
-      expect(parseCodexSessionEntry(JSON.stringify(event))).toEqual(event);
-    }
-  });
-});
-
 describe("Codex local media session schema", () => {
   it("retains pinned input_audio rollout blocks for public normalization", () => {
     const raw = {

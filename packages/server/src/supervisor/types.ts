@@ -16,7 +16,6 @@ import type {
   SessionQuestion,
   SessionRetryStatus,
   SessionRuntime,
-  SessionSubagentThread,
   ThinkingConfig,
   UrlProjectId,
 } from "@yep-anywhere/shared";
@@ -130,8 +129,6 @@ export interface SessionSummary {
    * from session lists and surfaced inline under their parent instead.
    */
   parentSessionId?: string;
-  /** Safe persisted Codex descendant identities for detail-tree navigation. */
-  subagentThreads?: SessionSubagentThread[];
   /**
    * Source session for a provider-native edit fork. Codex persists this as
    * `forked_from_id`; its first-prompt fallback and OpenCode use Yep metadata.

@@ -28,39 +28,6 @@ function codexWaitPair(
 }
 
 describe("preprocessMessages", () => {
-  it("projects structured Codex overload retries as native warnings", () => {
-    const items = preprocessMessages([
-      {
-        id: "retry-1",
-        type: "system",
-        subtype: "warning",
-        content: "Server overloaded; retry later. token=raw",
-        codexRetryStatus: {
-          state: "queued",
-          category: "overloaded",
-          retryable: true,
-          attempt: 1,
-          nextAttempt: 2,
-          maxAttempts: 4,
-          retryInMs: 50,
-        },
-      },
-    ]);
-
-    expect(items).toMatchObject([
-      {
-        type: "warning",
-        id: "retry-1",
-        retrying: true,
-        status: "running",
-        retryStatus: { state: "queued", nextAttempt: 2, maxAttempts: 4 },
-      },
-    ]);
-    expect(items[0]?.type === "warning" ? items[0].message : "").not.toContain(
-      "token=raw",
-    );
-  });
-
   it("pairs tool_use with tool_result", () => {
     const messages: Message[] = [
       {

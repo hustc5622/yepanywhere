@@ -1,10 +1,4 @@
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "../../types";
 import type { RenderItem } from "../../types/renderItems";
@@ -32,36 +26,12 @@ vi.mock("../ProcessingIndicator", () => ({
 }));
 
 vi.mock("../RenderItemComponent", () => ({
-  RenderItemComponent: ({
-    item,
-    onResolveInteraction,
-  }: {
-    item: RenderItem;
-    onResolveInteraction?: (resolution: {
-      operationId: string;
-      version: number;
-      decisionId: string;
-    }) => void;
-  }) => (
+  RenderItemComponent: ({ item }: { item: RenderItem }) => (
     <div
       data-testid={`render-item-${item.id}`}
       data-phase={item.type === "text" ? item.phase : undefined}
     >
       {"content" in item ? String(item.content) : item.id}
-      {item.type === "interaction" && onResolveInteraction && (
-        <button
-          type="button"
-          onClick={() =>
-            onResolveInteraction({
-              operationId: item.operation.operationId,
-              version: item.operation.version,
-              decisionId: "accept",
-            })
-          }
-        >
-          resolve interaction
-        </button>
-      )}
     </div>
   ),
 }));
@@ -400,61 +370,6 @@ describe("MessageList question continuation", () => {
     );
     expect(screen.getByText("Continued after your answer")).toBeDefined();
     expect(document.querySelectorAll(".assistant-turn")).toHaveLength(2);
-  });
-
-  it("keeps plan progress in the primary transcript", () => {
-    render(
-      <MessageList
-        messages={[]}
-        preprocessedItems={[
-          assistantToolItem("plan-1", "UpdatePlan"),
-          assistantTextItem("answer", "2026-07-28T13:14:24.000Z"),
-        ]}
-      />,
-    );
-
-    expect(screen.getByTestId("render-item-plan-1")).toBeDefined();
-  });
-
-  it("forwards the production interaction resolver to timeline items", () => {
-    const onResolveInteraction = vi.fn();
-    render(
-      <MessageList
-        messages={[]}
-        preprocessedItems={[
-          {
-            type: "interaction",
-            id: "interaction-request-1-v2",
-            sourceMessages: [],
-            status: "pending",
-            operation: {
-              operationId: "request-1",
-              provider: "codex",
-              requestId: "request-1",
-              requestMethod: "item/commandExecution/requestApproval",
-              sessionId: "thread-1",
-              kind: "command_approval",
-              state: "open",
-              publicPayload: { prompt: "Allow command?" },
-              allowedActors: { mode: "requester_or_admin" },
-              allowedDecisions: [{ id: "accept" }],
-              createdAt: 0,
-              version: 2,
-            },
-          },
-        ]}
-        onResolveInteraction={onResolveInteraction}
-      />,
-    );
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "resolve interaction" }),
-    );
-    expect(onResolveInteraction).toHaveBeenCalledWith({
-      operationId: "request-1",
-      version: 2,
-      decisionId: "accept",
-    });
   });
 });
 

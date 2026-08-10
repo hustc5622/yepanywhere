@@ -15,7 +15,6 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { DevelopmentSettings } from "./DevelopmentSettings";
 import { DevicesSettings } from "./DevicesSettings";
 import { EmulatorSettings } from "./EmulatorSettings";
-import { FeishuSettings } from "./FeishuSettings";
 import { LibrarySettings } from "./LibrarySettings";
 import { LifecycleWebhooksSettings } from "./LifecycleWebhooksSettings";
 import { LocalAccessSettings } from "./LocalAccessSettings";
@@ -36,7 +35,6 @@ const CATEGORY_COMPONENTS: Record<string, React.ComponentType> = {
   devices: DevicesSettings,
   "local-access": LocalAccessSettings,
   providers: ProvidersSettings,
-  feishu: FeishuSettings,
   "source-control": SourceControlSettings,
   emulator: EmulatorSettings,
   about: AboutSettings,

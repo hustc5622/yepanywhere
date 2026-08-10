@@ -1,17 +1,12 @@
-import { isNativeRenderItemType } from "@yep-anywhere/shared";
 import { memo, useCallback } from "react";
 import { getMessageId } from "../lib/mergeMessages";
 import { canEditPersistedUserPrompt } from "../lib/sessionBranching";
-import type { NativeRenderItem, RenderItem } from "../types/renderItems";
+import type { RenderItem } from "../types/renderItems";
 import { SessionSetupBlock } from "./blocks/SessionSetupBlock";
 import { TextBlock } from "./blocks/TextBlock";
 import { ThinkingBlock } from "./blocks/ThinkingBlock";
 import { ToolCallRow } from "./blocks/ToolCallRow";
 import { UserPromptBlock } from "./blocks/UserPromptBlock";
-import {
-  type InteractionResolution,
-  NativeRenderItemRenderer,
-} from "./renderers/NativeRenderItemRenderer";
 
 interface Props {
   item: RenderItem;
@@ -30,11 +25,6 @@ interface Props {
   }) => void;
   /** Switch the rendered derived branch. */
   onSelectBranch?: (branchId: string) => void;
-  /** Explicit policy gate; raw reasoning stays hidden unless enabled upstream. */
-  showRawReasoning?: boolean;
-  onResolveInteraction?: (
-    resolution: InteractionResolution,
-  ) => void | Promise<void>;
 }
 
 function getMessageIdLike(message: Record<string, unknown>): string {
@@ -138,10 +128,7 @@ function buildDebugSnapshot(
                   }
                 : null,
     sourceSummary,
-    sourceMessages:
-      item.redaction && item.redaction.level !== "none"
-        ? `[${item.redaction.level.toUpperCase()}]`
-        : item.sourceMessages,
+    sourceMessages: item.sourceMessages,
     renderItem: item,
   };
 }
@@ -154,8 +141,6 @@ export const RenderItemComponent = memo(function RenderItemComponent({
   sessionProvider,
   onEditUserPrompt,
   onSelectBranch,
-  showRawReasoning = false,
-  onResolveInteraction,
 }: Props) {
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -183,16 +168,6 @@ export const RenderItemComponent = memo(function RenderItemComponent({
   );
 
   const renderContent = () => {
-    if (isNativeRenderItemType(item.type)) {
-      return (
-        <NativeRenderItemRenderer
-          item={item as NativeRenderItem}
-          showRawReasoning={showRawReasoning}
-          onResolveInteraction={onResolveInteraction}
-        />
-      );
-    }
-
     switch (item.type) {
       case "text":
         return (
@@ -279,6 +254,9 @@ export const RenderItemComponent = memo(function RenderItemComponent({
           </div>
         );
       }
+
+      default:
+        return null;
     }
   };
 

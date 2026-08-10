@@ -1,5 +1,4 @@
 import { memo } from "react";
-import { useOptionalI18n } from "../../i18n";
 
 interface Props {
   thinking: string;
@@ -14,7 +13,6 @@ export const ThinkingBlock = memo(function ThinkingBlock({
   isExpanded,
   onToggle,
 }: Props) {
-  const i18n = useOptionalI18n();
   const isStreaming = status === "streaming";
   const className = [
     "thinking-block",
@@ -36,11 +34,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
       }}
     >
       <summary className="collapsible__summary">
-        <span>
-          {isStreaming
-            ? (i18n?.t("nativeRenderThinkingStreaming") ?? "Thinking...")
-            : (i18n?.t("nativeRenderThinking") ?? "Thinking")}
-        </span>
+        <span>{isStreaming ? "Thinking..." : "Thinking"}</span>
         <span className="collapsible__icon">▸</span>
       </summary>
       <div className="collapsible__content">

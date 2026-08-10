@@ -284,7 +284,6 @@ export type {
   SessionLastTurnStatus,
   SessionRetryStatus,
   AppSessionSummary,
-  SessionSubagentThread,
   AppSession,
   // Agent session types
   AgentStatus,

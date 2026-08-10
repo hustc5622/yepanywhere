@@ -7,6 +7,9 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Changed
+- Restore the pre-canonical session rendering and navigation experience while retaining the self-hosted Feishu/Lark channel backend, durable interactions, and safe deployment runtime
+
 ### Fixed
 - Load `.env.deploy.local` in `scripts/install-launchagents.sh` so a standalone LaunchAgent reinstall no longer rebuilds the plist without the session-title, OpenCode model, and FCM credentials that `scripts/deploy.sh` already supplies
 

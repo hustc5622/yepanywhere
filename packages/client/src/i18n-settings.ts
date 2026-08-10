@@ -111,12 +111,6 @@ export function getSettingsCategories(
       description: t("settingsProvidersDescription"),
     },
     {
-      id: "feishu",
-      label: t("settingsFeishuTitle"),
-      icon: "💬",
-      description: t("settingsFeishuDescription"),
-    },
-    {
       id: "source-control",
       label: t("settingsSourceControlTitle"),
       icon: "⑂",
