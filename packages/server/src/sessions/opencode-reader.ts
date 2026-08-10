@@ -31,9 +31,10 @@ import {
 } from "./opencode-branch.js";
 import {
   OPENCODE_DB_PATH,
-  type OpenCodeDatabase,
-  withOpenCodeDb,
-  withOpenCodeDbResult,
+  type OpenCodeDbStatement,
+  queryOpenCodeRow,
+  queryOpenCodeRows,
+  runOpenCodeDbStatements,
 } from "./opencode-db.js";
 import { normalizeProviderGeneratedTitle } from "./provider-title-quality.js";
 import { sanitizePublicUserPrompt } from "./public-user-prompt.js";
@@ -1127,13 +1128,23 @@ function deriveOpenCodeCreatedByFromMetadata(
   return undefined;
 }
 
-const SESSION_STATS_SQL = `
+/**
+ * Per-session freshness counters for the session index.
+ *
+ * This deliberately does *not* compute `SUM(LENGTH(data))`. The consumer
+ * (`SessionIndexService` / `SessionContentIndexService`) only ever compares
+ * `indexedBytes` for equality to decide whether a cached entry is stale, so
+ * summing every message and part payload was paying a full read of the
+ * database's largest columns to produce a number nobody displays.
+ * `mapOpenCodeStatsRow` derives an equivalent change token from the row counts
+ * instead, and `mtime` already moves on any in-place edit.
+ */
+export const SESSION_STATS_SQL = `
   WITH message_stats AS (
     SELECT
       session_id,
       COUNT(*) AS message_count,
-      MAX(time_updated) AS message_updated,
-      SUM(LENGTH(data)) AS message_bytes
+      MAX(time_updated) AS message_updated
     FROM message
     GROUP BY session_id
   ),
@@ -1141,8 +1152,7 @@ const SESSION_STATS_SQL = `
     SELECT
       session_id,
       COUNT(*) AS part_count,
-      MAX(time_updated) AS part_updated,
-      SUM(LENGTH(data)) AS part_bytes
+      MAX(time_updated) AS part_updated
     FROM part
     GROUP BY session_id
   )
@@ -1155,14 +1165,33 @@ const SESSION_STATS_SQL = `
       COALESCE(part_stats.part_updated, 0)
     ) AS mtime,
     COALESCE(message_stats.message_count, 0) AS message_count,
-    COALESCE(part_stats.part_count, 0) AS part_count,
-    LENGTH(COALESCE(s.title, '')) +
-      LENGTH(COALESCE(s.model, '')) +
-      COALESCE(message_stats.message_bytes, 0) +
-      COALESCE(part_stats.part_bytes, 0) AS indexed_size
+    COALESCE(part_stats.part_count, 0) AS part_count
   FROM session s
   LEFT JOIN message_stats ON message_stats.session_id = s.id
   LEFT JOIN part_stats ON part_stats.session_id = s.id
+`;
+
+/**
+ * Single-session variant.
+ *
+ * `SESSION_STATS_SQL` aggregates `message`/`part` in full before its outer
+ * `WHERE` can select one row, so reusing it to answer "did session X change?"
+ * charged a whole-database scan per session. These correlated subqueries are
+ * driven by the existing `session_id` indexes and touch only that session.
+ */
+export const SINGLE_SESSION_STATS_SQL = `
+  SELECT
+    s.id,
+    s.directory AS directory,
+    MAX(
+      s.time_updated,
+      COALESCE((SELECT MAX(time_updated) FROM message WHERE session_id = s.id), 0),
+      COALESCE((SELECT MAX(time_updated) FROM part WHERE session_id = s.id), 0)
+    ) AS mtime,
+    (SELECT COUNT(*) FROM message WHERE session_id = s.id) AS message_count,
+    (SELECT COUNT(*) FROM part WHERE session_id = s.id) AS part_count
+  FROM session s
+  WHERE s.id = ? AND s.directory = ? AND s.time_archived IS NULL
 `;
 
 function mapOpenCodeStatsRow(
@@ -1171,13 +1200,19 @@ function mapOpenCodeStatsRow(
   if (!row) return null;
   const sessionId = asString(row.id);
   const mtime = asNumber(row.mtime);
-  const size = asNumber(row.indexed_size);
   const messageCount = asNumber(row.message_count) ?? 0;
-  if (!sessionId || mtime === undefined || size === undefined) return null;
+  const partCount = asNumber(row.part_count) ?? 0;
+  if (!sessionId || mtime === undefined) return null;
   return {
     sessionId,
     mtime,
-    size,
+    // A change token, not a byte count: the index services only compare it for
+    // equality. Together with `mtime` it moves on any append (counts change)
+    // and on any in-place edit (`mtime` is the MAX over session/message/part).
+    // The one case the old `SUM(LENGTH(data))` caught and this does not is an
+    // in-place edit stamped at the exact millisecond already cached, which
+    // costs a delayed refresh rather than wrong data.
+    size: messageCount * 1_000_000 + partCount,
     messageCount,
   };
 }
@@ -1230,17 +1265,16 @@ async function loadOpenCodeSessionStatsByDirectory(
     // Exclude subagent/task children (parent_id IS NOT NULL) and archived rows,
     // matching the per-project enumeration semantics. This runs a single pass
     // over the whole DB and buckets the rows by directory.
-    const result = await withOpenCodeDbResult(dbPath, (db) =>
-      db
-        .prepare(
-          `
-            ${SESSION_STATS_SQL}
-            WHERE s.time_archived IS NULL
-              AND s.parent_id IS NULL
-            ORDER BY mtime DESC
-          `,
-        )
-        .all(),
+    const result = await queryOpenCodeRows(
+      dbPath,
+      `
+        ${SESSION_STATS_SQL}
+        WHERE s.time_archived IS NULL
+          AND s.parent_id IS NULL
+        ORDER BY mtime DESC
+      `,
+      [],
+      { label: "opencode.sessionStatsSnapshot" },
     );
 
     if (!result.ok) {
@@ -1287,6 +1321,54 @@ export function invalidateOpenCodeSessionStatsCache(dbPath?: string): void {
   openCodeSessionStatsCache.clear();
 }
 
+const SESSION_SUMMARY_COLUMNS = `
+  id,
+  project_id,
+  parent_id,
+  directory,
+  title,
+  model,
+  metadata,
+  time_created,
+  time_updated,
+  tokens_input,
+  tokens_output,
+  tokens_reasoning,
+  tokens_cache_read,
+  tokens_cache_write
+`;
+
+/**
+ * Keep each `IN (...)` list well under SQLite's bound-parameter ceiling. The
+ * batch API sends every chunk in a single worker round trip, so chunking costs
+ * nothing beyond a few extra prepared statements.
+ */
+const SQL_PARAM_CHUNK_SIZE = 400;
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function placeholders(count: number): string {
+  return new Array(count).fill("?").join(", ");
+}
+
+function asRowArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
+}
+
+/** Pre-fetched inputs shared by every summary built in one request. */
+interface OpenCodeSummaryContext {
+  messagesBySession: Map<string, OpenCodeMessage[]>;
+  /** Keyed by message id; only user messages are fetched. */
+  partsByMessageId: Map<string, OpenCodeStoredPart[]>;
+  sessionRowsById: Map<string, OpenCodeSqliteSessionRow>;
+}
+
 export class OpenCodeSessionReader implements ISessionReader {
   private readonly dbPath: string;
   private readonly projectPath: string;
@@ -1325,38 +1407,11 @@ export class OpenCodeSessionReader implements ISessionReader {
     afterMessageId?: string,
     options?: GetSessionOptions,
   ): Promise<LoadedSession | null> {
-    const sqliteSession = await withOpenCodeDb<LoadedSession | undefined>(
-      this.dbPath,
-      undefined,
-      (db) => {
-        const summary = this.getSqliteSessionSummaryFromDb(
-          db,
-          sessionId,
-          projectId,
-        );
-        if (!summary) return undefined;
-
-        const branchData = this.loadSqliteBranchDataFromDb(
-          db,
-          sessionId,
-          options?.branchId,
-        );
-        const allMessages =
-          branchData?.messages ??
-          this.loadSqliteSessionEntriesFromDb(db, sessionId);
-        const messages = filterEntriesAfterMessage(allMessages, afterMessageId);
-
-        return {
-          summary,
-          data: {
-            provider: "opencode",
-            session: { messages },
-          },
-          ...(branchData?.branchState
-            ? { branchState: branchData.branchState }
-            : {}),
-        };
-      },
+    const sqliteSession = await this.loadSqliteSession(
+      sessionId,
+      projectId,
+      afterMessageId,
+      options,
     );
     if (sqliteSession) return sqliteSession;
 
@@ -1366,6 +1421,35 @@ export class OpenCodeSessionReader implements ISessionReader {
       afterMessageId,
       options,
     );
+  }
+
+  private async loadSqliteSession(
+    sessionId: string,
+    projectId: UrlProjectId,
+    afterMessageId?: string,
+    options?: GetSessionOptions,
+  ): Promise<LoadedSession | undefined> {
+    const summary = await this.getSqliteSessionSummary(sessionId, projectId);
+    if (!summary) return undefined;
+
+    const branchData = await this.loadSqliteBranchData(
+      sessionId,
+      options?.branchId,
+    );
+    const allMessages =
+      branchData?.messages ?? (await this.loadSqliteSessionEntries(sessionId));
+    const messages = filterEntriesAfterMessage(allMessages, afterMessageId);
+
+    return {
+      summary,
+      data: {
+        provider: "opencode",
+        session: { messages },
+      },
+      ...(branchData?.branchState
+        ? { branchState: branchData.branchState }
+        : {}),
+    };
   }
 
   async getSessionSummaryIfChanged(
@@ -1431,93 +1515,112 @@ export class OpenCodeSessionReader implements ISessionReader {
   private async listSqliteSessions(
     projectId: UrlProjectId,
   ): Promise<SessionSummary[] | undefined> {
-    return withOpenCodeDb<SessionSummary[] | undefined>(
+    // Exclude subagent/task children (parent_id IS NOT NULL). OpenCode
+    // spawns each subagent as its own session sharing the parent's
+    // directory, so without this filter they surface as independent
+    // sessions in every list. They remain directly fetchable by id (for
+    // navigation) and are surfaced inline under their parent instead.
+    const sessionResult = await queryOpenCodeRows(
       this.dbPath,
-      undefined,
-      (db) => {
-        // Exclude subagent/task children (parent_id IS NOT NULL). OpenCode
-        // spawns each subagent as its own session sharing the parent's
-        // directory, so without this filter they surface as independent
-        // sessions in every list. They remain directly fetchable by id (for
-        // navigation) and are surfaced inline under their parent instead.
-        const rows = db
-          .prepare(
-            `
-              SELECT id
-              FROM session
-              WHERE directory = ?
-                AND time_archived IS NULL
-                AND parent_id IS NULL
-              ORDER BY time_updated DESC
-            `,
-          )
-          .all(this.projectPath);
-
-        const summaries: SessionSummary[] = [];
-        for (const row of rows) {
-          const sessionId = asString(row.id);
-          if (!sessionId) continue;
-          const summary = this.getSqliteSessionSummaryFromDb(
-            db,
-            sessionId,
-            projectId,
-          );
-          if (summary) summaries.push(summary);
-        }
-
-        summaries.sort(
-          (a, b) =>
-            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-        );
-        return summaries;
-      },
+      `
+        SELECT ${SESSION_SUMMARY_COLUMNS}
+        FROM session
+        WHERE directory = ?
+          AND time_archived IS NULL
+          AND parent_id IS NULL
+        ORDER BY time_updated DESC
+      `,
+      [this.projectPath],
+      { label: "opencode.listSqliteSessions" },
     );
+    if (!sessionResult.ok) return undefined;
+
+    const rows = sessionResult.value
+      .map(mapSqliteSessionRow)
+      .filter((row): row is OpenCodeSqliteSessionRow => row !== null);
+    if (rows.length === 0) return [];
+
+    // One batched read for the whole project instead of a per-session query
+    // (and a per-message parts query) each time the list is rendered.
+    const context = await this.loadSummaryContext(rows);
+    const summaries: SessionSummary[] = [];
+    for (const row of rows) {
+      const summary = this.buildSqliteSessionSummary(row, projectId, context);
+      if (summary) summaries.push(summary);
+    }
+
+    summaries.sort(
+      (a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    );
+    return summaries;
   }
 
   private async getSqliteSessionSummary(
     sessionId: string,
     projectId: UrlProjectId,
   ): Promise<SessionSummary | null | undefined> {
-    return withOpenCodeDb<SessionSummary | null | undefined>(
+    const result = await queryOpenCodeRow(
       this.dbPath,
-      undefined,
-      (db) => this.getSqliteSessionSummaryFromDb(db, sessionId, projectId),
+      `
+        SELECT ${SESSION_SUMMARY_COLUMNS}
+        FROM session
+        WHERE id = ? AND directory = ? AND time_archived IS NULL
+      `,
+      [sessionId, this.projectPath],
+      { label: "opencode.getSqliteSessionSummary" },
     );
-  }
-
-  private getSqliteSessionSummaryFromDb(
-    db: OpenCodeDatabase,
-    sessionId: string,
-    projectId: UrlProjectId,
-  ): SessionSummary | null {
-    const row = mapSqliteSessionRow(
-      db
-        .prepare(
-          `
-            SELECT
-              id,
-              project_id,
-              parent_id,
-              directory,
-              title,
-              model,
-              metadata,
-              time_created,
-              time_updated,
-              tokens_input,
-              tokens_output,
-              tokens_reasoning,
-              tokens_cache_read,
-              tokens_cache_write
-            FROM session
-            WHERE id = ? AND directory = ? AND time_archived IS NULL
-          `,
-        )
-        .get(sessionId, this.projectPath),
-    );
+    if (!result.ok) return undefined;
+    const row = mapSqliteSessionRow(result.value ?? undefined);
     if (!row) return null;
 
-    const messages = this.loadSqliteMessagesFromDb(db, sessionId);
+    const context = await this.loadSummaryContext([row]);
+    return this.buildSqliteSessionSummary(row, projectId, context);
+  }
+
+  /**
+   * Batched inputs for one or more session summaries.
+   *
+   * Summaries need each session's messages, the parts of its *user* messages
+   * (for question text) and any parent session's metadata. Fetching those as
+   * three grouped reads keeps a project listing at a constant number of
+   * queries rather than `1 + sessions × (1 + messages)`.
+   */
+  private async loadSummaryContext(
+    rows: readonly OpenCodeSqliteSessionRow[],
+  ): Promise<OpenCodeSummaryContext> {
+    const sessionIds = rows.map((row) => row.id);
+    const messagesBySession = await this.loadMessagesForSessions(sessionIds);
+
+    const userMessageIds: string[] = [];
+    for (const messages of messagesBySession.values()) {
+      for (const message of messages) {
+        if (message.role === "user") userMessageIds.push(message.id);
+      }
+    }
+    const partsByMessageId = await this.loadPartsForMessages(userMessageIds);
+
+    const loadedIds = new Set(sessionIds);
+    const parentIds = [
+      ...new Set(
+        rows.flatMap((row) =>
+          row.parentId && !loadedIds.has(row.parentId) ? [row.parentId] : [],
+        ),
+      ),
+    ];
+    const parentRows = await this.loadSessionRowsByIds(parentIds);
+    for (const row of rows) parentRows.set(row.id, row);
+
+    return { messagesBySession, partsByMessageId, sessionRowsById: parentRows };
+  }
+
+  private buildSqliteSessionSummary(
+    row: OpenCodeSqliteSessionRow,
+    projectId: UrlProjectId,
+    context: OpenCodeSummaryContext,
+  ): SessionSummary | null {
+    const sessionId = row.id;
+    const messages = context.messagesBySession.get(sessionId) ?? [];
     if (messages.length === 0) return null;
 
     let firstUserMessageText: string | null = null;
@@ -1538,7 +1641,9 @@ export class OpenCodeSessionReader implements ISessionReader {
       if (!parsedModel.variantKnown && message.model) {
         reasoningEffort = getMessageReasoningEffort(message);
       }
-      const text = this.getSqliteMessageTextFromDb(db, message.id);
+      const text = extractMessageText(
+        context.partsByMessageId.get(message.id) ?? [],
+      );
       if (!text) continue;
 
       firstUserMessageText ??= text;
@@ -1570,7 +1675,7 @@ export class OpenCodeSessionReader implements ISessionReader {
     );
     const createdBy =
       deriveOpenCodeCreatedByFromMetadata(row.metadata) ??
-      this.getParentSqliteCreatedByFromDb(db, row.parentId);
+      this.getParentSqliteCreatedBy(row.parentId, context);
     const forkParentSessionId = readOpenCodeForkParentSessionId(row.metadata);
 
     return {
@@ -1594,73 +1699,197 @@ export class OpenCodeSessionReader implements ISessionReader {
     };
   }
 
-  private getParentSqliteCreatedByFromDb(
-    db: OpenCodeDatabase,
+  private getParentSqliteCreatedBy(
     parentId: string | null,
+    context: OpenCodeSummaryContext,
   ): SessionCreatedBy | undefined {
     if (!parentId) return undefined;
-    const parent = mapSqliteSessionRow(
-      db
-        .prepare(
-          `
-            SELECT
-              id,
-              project_id,
-              parent_id,
-              directory,
-              title,
-              model,
-              metadata,
-              time_created,
-              time_updated,
-              tokens_input,
-              tokens_output,
-              tokens_reasoning,
-              tokens_cache_read,
-              tokens_cache_write
-            FROM session
-            WHERE id = ?
-          `,
-        )
-        .get(parentId),
-    );
+    const parent = context.sessionRowsById.get(parentId);
     if (!parent) return undefined;
     return deriveOpenCodeCreatedByFromMetadata(parent.metadata);
   }
 
-  private loadSqliteSessionEntriesFromDb(
-    db: OpenCodeDatabase,
+  private async loadSessionRowsByIds(
+    sessionIds: readonly string[],
+  ): Promise<Map<string, OpenCodeSqliteSessionRow>> {
+    const rows = new Map<string, OpenCodeSqliteSessionRow>();
+    const uniqueIds = [...new Set(sessionIds)];
+    if (uniqueIds.length === 0) return rows;
+
+    const statements: OpenCodeDbStatement[] = chunk(
+      uniqueIds,
+      SQL_PARAM_CHUNK_SIZE,
+    ).map((ids) => ({
+      sql: `
+        SELECT ${SESSION_SUMMARY_COLUMNS}
+        FROM session
+        WHERE id IN (${placeholders(ids.length)})
+      `,
+      params: ids,
+    }));
+    const result = await runOpenCodeDbStatements(this.dbPath, statements, {
+      label: "opencode.loadSessionRowsByIds",
+    });
+    if (!result.ok) return rows;
+
+    for (const raw of result.value) {
+      for (const row of asRowArray(raw)) {
+        const mapped = mapSqliteSessionRow(row);
+        if (mapped) rows.set(mapped.id, mapped);
+      }
+    }
+    return rows;
+  }
+
+  private async loadMessagesForSessions(
+    sessionIds: readonly string[],
+  ): Promise<Map<string, OpenCodeMessage[]>> {
+    const bySession = new Map<string, OpenCodeMessage[]>();
+    const uniqueIds = [...new Set(sessionIds)];
+    if (uniqueIds.length === 0) return bySession;
+
+    const statements: OpenCodeDbStatement[] = chunk(
+      uniqueIds,
+      SQL_PARAM_CHUNK_SIZE,
+    ).map((ids) => ({
+      sql: `
+        SELECT id, session_id, time_created, time_updated, data
+        FROM message
+        WHERE session_id IN (${placeholders(ids.length)})
+        ORDER BY time_created ASC, id ASC
+      `,
+      params: ids,
+    }));
+    const result = await runOpenCodeDbStatements(this.dbPath, statements, {
+      label: "opencode.loadMessagesForSessions",
+    });
+    if (!result.ok) return bySession;
+
+    for (const raw of result.value) {
+      for (const row of asRowArray(raw)) {
+        const message = messageFromSqliteRow(row);
+        if (!message) continue;
+        const existing = bySession.get(message.sessionID);
+        if (existing) existing.push(message);
+        else bySession.set(message.sessionID, [message]);
+      }
+    }
+    return bySession;
+  }
+
+  private async loadPartsForMessages(
+    messageIds: readonly string[],
+  ): Promise<Map<string, OpenCodeStoredPart[]>> {
+    const byMessage = new Map<string, OpenCodeStoredPart[]>();
+    const uniqueIds = [...new Set(messageIds)];
+    if (uniqueIds.length === 0) return byMessage;
+
+    const statements: OpenCodeDbStatement[] = chunk(
+      uniqueIds,
+      SQL_PARAM_CHUNK_SIZE,
+    ).map((ids) => ({
+      sql: `
+        SELECT id, message_id, session_id, time_created, time_updated, data
+        FROM part
+        WHERE message_id IN (${placeholders(ids.length)})
+        ORDER BY time_created ASC, id ASC
+      `,
+      params: ids,
+    }));
+    const result = await runOpenCodeDbStatements(this.dbPath, statements, {
+      label: "opencode.loadPartsForMessages",
+    });
+    if (!result.ok) return byMessage;
+
+    for (const raw of result.value) {
+      for (const row of asRowArray(raw)) {
+        const part = partFromSqliteRow(row);
+        if (!part) continue;
+        const existing = byMessage.get(part.messageID);
+        if (existing) existing.push(part);
+        else byMessage.set(part.messageID, [part]);
+      }
+    }
+    return byMessage;
+  }
+
+  private async loadSqliteSessionEntries(
     sessionId: string,
-  ): OpenCodeSessionEntry[] {
-    return this.loadSqliteMessagesFromDb(db, sessionId).map((message) => ({
+  ): Promise<OpenCodeSessionEntry[]> {
+    const messagesBySession = await this.loadMessagesForSessions([sessionId]);
+    const messages = messagesBySession.get(sessionId) ?? [];
+    if (messages.length === 0) return [];
+
+    // One grouped parts read for the session instead of one query per message.
+    const partsByMessageId = await this.loadPartsForSessions([sessionId]);
+    return messages.map((message) => ({
       message,
-      parts: this.loadSqliteMessagePartsFromDb(db, message.id),
+      parts: partsByMessageId.get(message.id) ?? [],
     }));
   }
 
-  private loadSqliteBranchDataFromDb(
-    db: OpenCodeDatabase,
+  private async loadPartsForSessions(
+    sessionIds: readonly string[],
+  ): Promise<Map<string, OpenCodeStoredPart[]>> {
+    const byMessage = new Map<string, OpenCodeStoredPart[]>();
+    const uniqueIds = [...new Set(sessionIds)];
+    if (uniqueIds.length === 0) return byMessage;
+
+    const statements: OpenCodeDbStatement[] = chunk(
+      uniqueIds,
+      SQL_PARAM_CHUNK_SIZE,
+    ).map((ids) => ({
+      sql: `
+        SELECT id, message_id, session_id, time_created, time_updated, data
+        FROM part
+        WHERE session_id IN (${placeholders(ids.length)})
+        ORDER BY time_created ASC, id ASC
+      `,
+      params: ids,
+    }));
+    const result = await runOpenCodeDbStatements(this.dbPath, statements, {
+      label: "opencode.loadPartsForSessions",
+    });
+    if (!result.ok) return byMessage;
+
+    for (const raw of result.value) {
+      for (const row of asRowArray(raw)) {
+        const part = partFromSqliteRow(row);
+        if (!part) continue;
+        const existing = byMessage.get(part.messageID);
+        if (existing) existing.push(part);
+        else byMessage.set(part.messageID, [part]);
+      }
+    }
+    return byMessage;
+  }
+
+  private async loadSqliteBranchData(
     currentSessionId: string,
     selectedBranchId?: string,
-  ):
+  ): Promise<
     | {
         messages: OpenCodeSessionEntry[];
         branchState?: LoadedSession["branchState"];
       }
-    | undefined {
-    const metadataRows = db
-      .prepare(
-        `
-          SELECT id, parent_id, metadata, time_created
-          FROM session
-          WHERE directory = ? AND time_archived IS NULL
-        `,
-      )
-      .all(this.projectPath);
+    | undefined
+  > {
+    const metadataResult = await queryOpenCodeRows(
+      this.dbPath,
+      `
+        SELECT id, parent_id, metadata, time_created
+        FROM session
+        WHERE directory = ? AND time_archived IS NULL
+      `,
+      [this.projectPath],
+      { label: "opencode.loadSqliteBranchData.metadata" },
+    );
+    if (!metadataResult.ok) return undefined;
+
     const sessionMetadata: Array<
       OpenCodeBranchSessionMetadata & { createdAt?: string }
     > = [];
-    for (const row of metadataRows) {
+    for (const row of metadataResult.value) {
       const id = asString(row.id);
       if (!id) continue;
       const createdAtMs = asNumber(row.time_created);
@@ -1685,44 +1914,18 @@ export class OpenCodeSessionReader implements ISessionReader {
       return undefined;
     }
 
-    const placeholders = familyIds.map(() => "?").join(", ");
-    const partsByMessageId = new Map<string, OpenCodeStoredPart[]>();
-    for (const row of db
-      .prepare(
-        `
-          SELECT id, message_id, session_id, time_created, time_updated, data
-          FROM part
-          WHERE session_id IN (${placeholders})
-          ORDER BY time_created ASC, id ASC
-        `,
-      )
-      .all(...familyIds)) {
-      const part = partFromSqliteRow(row);
-      if (!part) continue;
-      const parts = partsByMessageId.get(part.messageID) ?? [];
-      parts.push(part);
-      partsByMessageId.set(part.messageID, parts);
-    }
+    const partsByMessageId = await this.loadPartsForSessions(familyIds);
+    const messagesBySession = await this.loadMessagesForSessions(familyIds);
 
     const entriesBySessionId = new Map<string, OpenCodeSessionEntry[]>();
-    for (const row of db
-      .prepare(
-        `
-          SELECT id, session_id, time_created, time_updated, data
-          FROM message
-          WHERE session_id IN (${placeholders})
-          ORDER BY time_created ASC, id ASC
-        `,
-      )
-      .all(...familyIds)) {
-      const message = messageFromSqliteRow(row);
-      if (!message) continue;
-      const entries = entriesBySessionId.get(message.sessionID) ?? [];
-      entries.push({
-        message,
-        parts: partsByMessageId.get(message.id) ?? [],
-      });
-      entriesBySessionId.set(message.sessionID, entries);
+    for (const [sessionId, messages] of messagesBySession) {
+      entriesBySessionId.set(
+        sessionId,
+        messages.map((message) => ({
+          message,
+          parts: partsByMessageId.get(message.id) ?? [],
+        })),
+      );
     }
 
     const metadataById = new Map(
@@ -1786,49 +1989,6 @@ export class OpenCodeSessionReader implements ISessionReader {
         );
       }
     }
-  }
-
-  private loadSqliteMessagesFromDb(
-    db: OpenCodeDatabase,
-    sessionId: string,
-  ): OpenCodeMessage[] {
-    return db
-      .prepare(
-        `
-          SELECT id, session_id, time_created, time_updated, data
-          FROM message
-          WHERE session_id = ?
-          ORDER BY time_created ASC, id ASC
-        `,
-      )
-      .all(sessionId)
-      .map(messageFromSqliteRow)
-      .filter((message): message is OpenCodeMessage => message !== null);
-  }
-
-  private loadSqliteMessagePartsFromDb(
-    db: OpenCodeDatabase,
-    messageId: string,
-  ): OpenCodeStoredPart[] {
-    return db
-      .prepare(
-        `
-          SELECT id, message_id, session_id, time_created, time_updated, data
-          FROM part
-          WHERE message_id = ?
-          ORDER BY time_created ASC, id ASC
-        `,
-      )
-      .all(messageId)
-      .map(partFromSqliteRow)
-      .filter((part): part is OpenCodeStoredPart => part !== null);
-  }
-
-  private getSqliteMessageTextFromDb(
-    db: OpenCodeDatabase,
-    messageId: string,
-  ): string | null {
-    return extractMessageText(this.loadSqliteMessagePartsFromDb(db, messageId));
   }
 
   private extractSqliteContextUsageFromMessages(
@@ -1910,20 +2070,13 @@ export class OpenCodeSessionReader implements ISessionReader {
   private async getSqliteSessionStats(
     sessionId: string,
   ): Promise<OpenCodeSqliteSessionStats | null | undefined> {
-    return withOpenCodeDb<OpenCodeSqliteSessionStats | null | undefined>(
+    const result = await queryOpenCodeRow(
       this.dbPath,
-      undefined,
-      (db) =>
-        mapOpenCodeStatsRow(
-          db
-            .prepare(
-              `
-                ${SESSION_STATS_SQL}
-                WHERE s.id = ? AND s.directory = ? AND s.time_archived IS NULL
-              `,
-            )
-            .get(sessionId, this.projectPath),
-        ),
+      SINGLE_SESSION_STATS_SQL,
+      [sessionId, this.projectPath],
+      { label: "opencode.getSqliteSessionStats" },
     );
+    if (!result.ok) return undefined;
+    return mapOpenCodeStatsRow(result.value ?? undefined);
   }
 }

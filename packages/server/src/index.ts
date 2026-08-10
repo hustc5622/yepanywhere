@@ -80,6 +80,8 @@ import {
   ServerSettingsService,
   SharingService,
 } from "./services/index.js";
+import { ensureOpenCodeDbIndexes } from "./sessions/opencode-db-indexes.js";
+import { OPENCODE_DB_PATH } from "./sessions/opencode-db.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
 import { TerminalService } from "./terminal/TerminalService.js";
 import { UploadManager } from "./uploads/manager.js";
@@ -868,6 +870,13 @@ async function startServer() {
   const opencodeProviderEnabled =
     config.enabledProviders.length === 0 ||
     config.enabledProviders.includes("opencode");
+  if (opencodeProviderEnabled) {
+    // OpenCode ships no `time_updated` index, so every incremental scan
+    // degrades into a full scan of message/part. Build the helper indexes in
+    // the background: session reads stay on the slow path until it finishes,
+    // but nothing blocks startup and a failure is non-fatal.
+    void ensureOpenCodeDbIndexes(OPENCODE_DB_PATH).catch(() => {});
+  }
   const opencodeMonitorDisabled = ["false", "0", "off", "disabled"].includes(
     (process.env.OPENCODE_SESSION_CHANGE_MONITOR ?? "").trim().toLowerCase(),
   );

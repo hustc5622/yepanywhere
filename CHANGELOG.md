@@ -9,9 +9,16 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ### Changed
 - Restore the pre-canonical session rendering and navigation experience while retaining the self-hosted Feishu/Lark channel backend, durable interactions, and safe deployment runtime
+- Run every OpenCode SQLite read on a dedicated worker thread with a query deadline, a soft budget, and structured `durationMs`/timeout diagnostics, so a slow scan of a multi-gigabyte `opencode.db` can no longer stall the API thread, WebSocket traffic, or heartbeat timers
+- Create `yep_`-prefixed `time_updated` helper indexes on `opencode.db` at startup, guarded by an upstream-schema check and disabled by `OPENCODE_DB_ENSURE_INDEXES=false`, turning incremental change scans from full table scans into covering-index range searches
 
 ### Fixed
 - Load `.env.deploy.local` in `scripts/install-launchagents.sh` so a standalone LaunchAgent reinstall no longer rebuilds the plist without the session-title, OpenCode model, and FCM credentials that `scripts/deploy.sh` already supplies
+- Stop resolving single-session OpenCode stats through a whole-database aggregation; the freshness check for one session no longer costs a full `message`/`part` scan, which dominated session listing and search latency
+- Drop the per-refresh `SUM(LENGTH(data))` over every OpenCode message and part, replacing the session-index change token with row counts that need no payload reads (forces one re-index of OpenCode sessions after upgrade)
+- Bound the OpenCode change-monitor replay window inside each `UNION` branch; it previously aggregated `session`, `message` and `part` in full on every drained poll
+- Replace the OpenCode replay fingerprint's full-row `SELECT *` with an aggregate digest, and batch the reader's per-message part lookups into grouped queries, removing the N+1 reads behind session detail and project listings
+- Fix an out-of-scope `base` reference that made an OpenCode subagent-listing test throw, and load `node:sqlite` through `process.getBuiltinModule` in tests so the OpenCode SQLite suites actually execute under Vitest instead of silently skipping
 
 ## [2026.8.1] - 2026-08-09
 

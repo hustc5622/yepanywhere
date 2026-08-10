@@ -30,7 +30,7 @@ import type { CodexSessionReader } from "./codex-reader.js";
 import { getCodexSessionManifest } from "./codex-session-manifest.js";
 import type { GeminiSessionReader } from "./gemini-reader.js";
 import type { KimiSessionReader } from "./kimi-reader.js";
-import { withOpenCodeDb } from "./opencode-db.js";
+import { queryOpenCodeRow } from "./opencode-db.js";
 import type { OpenCodeSessionReader } from "./opencode-reader.js";
 import { findSessionSummaryAcrossProviders } from "./provider-resolution.js";
 import type { ISessionReader } from "./types.js";
@@ -188,19 +188,15 @@ async function locateViaOpenCodeDb(
   sessionId: string,
 ): Promise<SessionLocation | null> {
   if (!deps.opencodeDbPath) return null;
-  const directory = await withOpenCodeDb<string | null>(
+  const result = await queryOpenCodeRow(
     deps.opencodeDbPath,
-    null,
-    (db) => {
-      const row = db
-        .prepare("SELECT directory FROM session WHERE id = ?")
-        .get(sessionId);
-      const value = row?.directory;
-      return typeof value === "string" && value.trim().length > 0
-        ? value.trim()
-        : null;
-    },
+    "SELECT directory FROM session WHERE id = ?",
+    [sessionId],
+    { label: "opencode.locateSession" },
   );
+  const value = result.ok ? result.value?.directory : undefined;
+  const directory =
+    typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
   if (!directory) return null;
   return {
     sessionId,
