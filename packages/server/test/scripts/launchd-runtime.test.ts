@@ -146,25 +146,56 @@ describe("LaunchAgent runtime isolation", () => {
     expect(readFileSync(join(runtimeDir, "keep.txt"), "utf8")).toBe("preserve");
   });
 
-  it("writes a no-start server plist against the isolated runtime", () => {
+  it("loads deploy env credentials into a no-start server plist", () => {
     const installScript = join(repoRoot, "scripts/install-launchagents.sh");
     copyFileSync(
       join(workspaceRoot, "scripts/install-launchagents.sh"),
       installScript,
     );
     chmodSync(installScript, 0o755);
+    // The installer sources the shared deploy-env loader so a standalone
+    // reinstall still picks up .env.deploy.local credentials.
+    const libDir = join(repoRoot, "scripts/lib");
+    mkdirSync(libDir, { recursive: true });
+    copyFileSync(
+      join(workspaceRoot, "scripts/lib/deploy-env.sh"),
+      join(libDir, "deploy-env.sh"),
+    );
+    writeFileSync(
+      join(repoRoot, ".env.deploy.local"),
+      [
+        "ALLOWED_HOSTS=ignored.example",
+        "SESSION_TITLE_LLM_API_KEY=fixture-title-key-from-file",
+        "OPENCODE_LLM_API_KEY=fixture-opencode-key-from-file",
+        `YEP_FCM_SERVICE_ACCOUNT_JSON='{"project_id":"fixture-project"}'`,
+      ].join("\n"),
+    );
     const fakeNode = join(fakeBin, "node");
     const fakeCodex = join(fakeBin, "codex");
     executable(fakeNode, "#!/usr/bin/env bash\nexit 0\n");
     executable(fakeCodex, "#!/usr/bin/env bash\nexit 0\n");
 
+    // Keep credentials inherited from the developer environment from masking
+    // whether the standalone installer loaded this sandbox's deploy env file.
+    const parentEnv = { ...process.env };
+    for (const key of [
+      "YEP_DEPLOY_ENV_FILE",
+      "YEP_FCM_SERVICE_ACCOUNT_FILE",
+      "YEP_FCM_SERVICE_ACCOUNT_JSON",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "SESSION_TITLE_LLM_API_KEY",
+      "LLM_API_KEY",
+      "OPENCODE_LLM_API_KEY",
+    ]) {
+      delete parentEnv[key];
+    }
     const result = spawnSync(
       "/bin/bash",
       [installScript, "--server-only", "--no-start"],
       {
         encoding: "utf8",
         env: {
-          ...process.env,
+          ...parentEnv,
           ALLOWED_HOSTS: "example.test,127.0.0.1",
           HOME: homeDir,
           PATH: `${fakeBin}:/usr/bin:/bin`,
@@ -189,6 +220,12 @@ describe("LaunchAgent runtime isolation", () => {
     expect(plist).toContain("<string>example.test,127.0.0.1</string>");
     expect(plist).toContain("<key>YEP_CODEX_PATH</key>");
     expect(plist).toContain(`<string>${fakeCodex}</string>`);
+    expect(plist).toContain("<key>SESSION_TITLE_LLM_API_KEY</key>");
+    expect(plist).toContain("<string>fixture-title-key-from-file</string>");
+    expect(plist).toContain("<key>OPENCODE_LLM_API_KEY</key>");
+    expect(plist).toContain("<string>fixture-opencode-key-from-file</string>");
+    expect(plist).toContain("<key>YEP_FCM_SERVICE_ACCOUNT_JSON</key>");
+    expect(plist).toContain("fixture-project");
     expect(readFileSync(join(runtimeDir, "marker.txt"), "utf8")).toBe("first");
   });
 });

@@ -7,6 +7,9 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Fixed
+- Load `.env.deploy.local` in `scripts/install-launchagents.sh` so a standalone LaunchAgent reinstall no longer rebuilds the plist without the session-title, OpenCode model, and FCM credentials that `scripts/deploy.sh` already supplies
+
 ## [2026.8.1] - 2026-08-09
 
 ### Added

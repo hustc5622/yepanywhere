@@ -9,6 +9,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+if [[ -t 1 ]]; then
+  C_GREEN="\033[32m"; C_YELLOW="\033[33m"; C_RED="\033[31m"; C_DIM="\033[2m"; C_RESET="\033[0m"
+else
+  C_GREEN=""; C_YELLOW=""; C_RED=""; C_DIM=""; C_RESET=""
+fi
+
+log()  { echo -e "${C_GREEN}==>${C_RESET} $*"; }
+warn() { echo -e "${C_YELLOW}!!${C_RESET}  $*" >&2; }
+err()  { echo -e "${C_RED}xx${C_RESET}  $*" >&2; }
+dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
+
+# The plist is rebuilt from the current environment, so the local deploy env
+# file must be loaded before any credential-bearing variable is resolved below.
+# Otherwise a standalone run silently drops secrets that scripts/deploy.sh
+# would have supplied, and the reinstalled LaunchAgent loses them.
+# shellcheck source=scripts/lib/deploy-env.sh
+source "$SCRIPT_DIR/lib/deploy-env.sh"
+load_deploy_env_file
+
 SERVER_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
 BRIDGE_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
 OPENCODE_BRIDGE_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
@@ -47,17 +66,6 @@ START_NOW=true
 INSTALL_SERVER=true
 INSTALL_CODEX_BRIDGE=true
 INSTALL_OPENCODE_BRIDGE=true
-
-if [[ -t 1 ]]; then
-  C_GREEN="\033[32m"; C_YELLOW="\033[33m"; C_RED="\033[31m"; C_DIM="\033[2m"; C_RESET="\033[0m"
-else
-  C_GREEN=""; C_YELLOW=""; C_RED=""; C_DIM=""; C_RESET=""
-fi
-
-log()  { echo -e "${C_GREEN}==>${C_RESET} $*"; }
-warn() { echo -e "${C_YELLOW}!!${C_RESET}  $*" >&2; }
-err()  { echo -e "${C_RED}xx${C_RESET}  $*" >&2; }
-dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 
 usage() {
   sed -n '2,6p' "$0" | sed 's/^# *//'

@@ -40,60 +40,11 @@ dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 source "$SCRIPT_DIR/lib/node.sh"
 # shellcheck source=scripts/lib/pnpm.sh
 source "$SCRIPT_DIR/lib/pnpm.sh"
+# shellcheck source=scripts/lib/deploy-env.sh
+source "$SCRIPT_DIR/lib/deploy-env.sh"
 
 LOADED_DEPLOY_ENV_FILE=""
 DISCOVERED_FCM_SERVICE_ACCOUNT_FILE=""
-
-trim_whitespace() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
-
-load_deploy_env_file() {
-  local env_file="${YEP_DEPLOY_ENV_FILE:-$REPO_ROOT/.env.deploy.local}"
-
-  if [[ ! -f "$env_file" ]]; then
-    if [[ -n "${YEP_DEPLOY_ENV_FILE:-}" ]]; then
-      err "YEP_DEPLOY_ENV_FILE was set, but the file does not exist: $env_file"
-      exit 1
-    fi
-    return
-  fi
-
-  local raw_line line key value
-  while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
-    line="$(trim_whitespace "$raw_line")"
-    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
-    if [[ "$line" == export[[:space:]]* ]]; then
-      line="$(trim_whitespace "${line#export}")"
-    fi
-    if [[ "$line" != *=* ]]; then
-      warn "Skipping invalid deploy env line in $env_file: $raw_line"
-      continue
-    fi
-
-    key="$(trim_whitespace "${line%%=*}")"
-    value="$(trim_whitespace "${line#*=}")"
-    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-      warn "Skipping invalid deploy env key in $env_file: $key"
-      continue
-    fi
-    if [[ -n "${!key+x}" ]]; then
-      continue
-    fi
-
-    if [[ ${#value} -ge 2 && "$value" == \"*\" && "$value" == *\" ]]; then
-      value="${value:1:$((${#value} - 2))}"
-    elif [[ ${#value} -ge 2 && "$value" == \'* && "$value" == *\' ]]; then
-      value="${value:1:$((${#value} - 2))}"
-    fi
-    export "$key=$value"
-  done <"$env_file"
-
-  LOADED_DEPLOY_ENV_FILE="$env_file"
-}
 
 resolve_local_path() {
   local value="$1"
