@@ -97,16 +97,28 @@ async function createOpenCodeDb(
   rows: Array<{ id: string; directory: string }>,
 ): Promise<string | null> {
   const specifier: string = "node:sqlite";
-  const sqlite = await import(specifier)
-    .then(
-      (mod) =>
-        (
-          mod as {
-            DatabaseSync?: new (path: string) => TestSqliteDatabase;
-          }
-        ).DatabaseSync ?? null,
-    )
-    .catch(() => null);
+  // Vitest routes a bare dynamic `import("node:sqlite")` through Vite's
+  // resolver, which fails to resolve it and silently disables every test that
+  // depends on a real database. `process.getBuiltinModule` bypasses the
+  // resolver; the dynamic import stays as a fallback for plain Node.
+  const getBuiltinModule = (
+    process as unknown as { getBuiltinModule?: (name: string) => unknown }
+  ).getBuiltinModule;
+  const builtin = getBuiltinModule?.call(process, specifier) as
+    | { DatabaseSync?: new (path: string) => TestSqliteDatabase }
+    | undefined;
+  const sqlite =
+    builtin?.DatabaseSync ??
+    (await import(specifier)
+      .then(
+        (mod) =>
+          (
+            mod as {
+              DatabaseSync?: new (path: string) => TestSqliteDatabase;
+            }
+          ).DatabaseSync ?? null,
+      )
+      .catch(() => null));
   if (!sqlite) return null;
 
   const dbPath = join(await tempDir("opencode-db"), "opencode.db");

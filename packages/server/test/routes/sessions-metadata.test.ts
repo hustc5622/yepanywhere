@@ -35,6 +35,17 @@ interface TestSqliteModule {
 
 async function loadSqliteModule(): Promise<TestSqliteModule | null> {
   const specifier: string = "node:sqlite";
+  // Vitest routes a bare dynamic `import("node:sqlite")` through Vite's
+  // resolver, which fails to resolve it and silently disables every test that
+  // depends on a real database. `process.getBuiltinModule` bypasses the
+  // resolver; the dynamic import stays as a fallback for plain Node.
+  const getBuiltinModule = (
+    process as unknown as { getBuiltinModule?: (name: string) => unknown }
+  ).getBuiltinModule;
+  const builtin = getBuiltinModule?.call(process, specifier) as
+    | { DatabaseSync?: TestSqliteModule["DatabaseSync"] }
+    | undefined;
+  if (builtin?.DatabaseSync) return { DatabaseSync: builtin.DatabaseSync };
   return import(specifier)
     .then((mod) => {
       const maybeModule = mod as {
