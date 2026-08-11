@@ -89,16 +89,30 @@ macOS 和 Windows 使用同一个入口管理开发与生产服务：
 pnpm yep
 ```
 
-入口会先让你选择目标系统，再提供相同的启动、停止、重启、状态和重构建操作。也可以直接执行单个操作：
+入口会自动识别 Windows 或 macOS，并显示中文菜单。也可以直接执行统一命令：
 
 ```bash
-pnpm yep status
 pnpm yep start-dev
+pnpm yep start-dev --fg
+pnpm yep stop-dev
+pnpm yep restart-dev
+pnpm yep start-prod
+pnpm yep stop-prod
 pnpm yep restart-prod
+pnpm yep stop
+pnpm yep status
 pnpm yep rebuild
+pnpm yep enable-autostart
+pnpm yep disable-autostart
 ```
 
-在 Windows 上需要 Windows PowerShell（系统自带）和 Node.js 20+；生产模式的登录自启会使用当前用户的计划任务。macOS 仍可直接使用 `bash yep.sh`，保持原有的 LaunchAgent 管理方式。
+`start-dev` 默认在后台以 `dev` Profile 运行，关闭原终端不会停止；只有 `start-dev --fg` 使用前台模式。生产服务默认沿用未命名 Profile 和端口 8022，也可通过环境变量显式指定 Profile 或数据目录：Windows 由当前用户的计划任务 `YepAnywhereServer` 管理，macOS 由一个带 `RunAtLoad`/`KeepAlive` 的 LaunchAgent 管理。macOS 也可直接运行 `bash yep.sh <命令>`。
+
+开发运行、生产运行和登录自启动是三个独立状态。`stop-prod` 只停止当前生产实例并保留自启动配置；`disable-autostart` 只删除下次登录自启动并保留当前实例；`stop` 停止开发与生产实例，但不改变自启动开关。`status` 会分别显示安装、加载、运行、自启动、PID、Profile、端口、日志和配置异常。
+
+`rebuild` 先在同一 `dist` 文件系统内创建唯一暂存目录，完成 Bundle 构建、`npm ci --omit=dev` 和运行时校验后，才停止并交换生产 Bundle、通过同一服务定义重启并核对 `buildId`。暂存阶段失败不会停止当前生产服务或触碰生产 Bundle。
+
+默认日志位于 `~/.yep-anywhere/logs/`：开发后台控制台使用 `dev-console.log`（Windows 分为 `.out.log` / `.err.log`）；macOS 生产服务使用 `server-launchd.out.log` / `server-launchd.err.log`，Windows 生产监督器使用 `server.out.log` / `server.err.log`。Windows 需要系统自带的 Windows PowerShell 和 Node.js 20+。
 
 完整部署使用 `pnpm run deploy -- --server-only`。`pnpm deploy` 是 pnpm 自带的 workspace 命令，不会调用本项目的部署脚本。
 

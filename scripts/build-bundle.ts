@@ -18,6 +18,7 @@ import * as path from "node:path";
 import {
   createRuntimeShrinkwrap,
   getRuntimeDependencies,
+  resolveBundleOutputDir,
 } from "./runtime-package.js";
 
 const ROOT_DIR = path.resolve(import.meta.dirname, "..");
@@ -27,7 +28,7 @@ const SERVER_DIST = path.join(SERVER_PACKAGE, "dist");
 const SHARED_DIST = path.join(ROOT_DIR, "packages/shared/dist");
 
 // Staging directory for npm publishing (keeps workspace package.json intact)
-const STAGING_DIR = path.join(ROOT_DIR, "dist/npm-package");
+const STAGING_DIR = resolveBundleOutputDir();
 
 // Version for npm package - set via NPM_VERSION env var (from git tag in CI) or fallback
 const NPM_VERSION = process.env.NPM_VERSION || "0.4.8";
@@ -297,7 +298,9 @@ step("Write build metadata", () => {
     `${JSON.stringify(BUILD_INFO, null, 2)}\n`,
   );
   log(`  Build id: ${BUILD_INFO.buildId}`);
-  log("  Written to: dist/npm-package/build-info.json");
+  log(
+    `  Written to: ${path.relative(ROOT_DIR, path.join(STAGING_DIR, "build-info.json"))}`,
+  );
 });
 
 // Copy server dist to staging
@@ -464,7 +467,9 @@ step("Generate package.json for npm", () => {
 
   log("  Package name: yepanywhere");
   log(`  Version: ${NPM_VERSION}`);
-  log("  Written to: dist/npm-package/package.json");
+  log(
+    `  Written to: ${path.relative(ROOT_DIR, path.join(STAGING_DIR, "package.json"))}`,
+  );
   log("  (Original packages/server/package.json unchanged)");
 });
 
@@ -474,7 +479,9 @@ step("Copy reproducible runtime lock", () => {
     path.join(STAGING_DIR, "npm-shrinkwrap.json"),
     `${JSON.stringify(shrinkwrap, null, 2)}\n`,
   );
-  log("  Written to: dist/npm-package/npm-shrinkwrap.json");
+  log(
+    `  Written to: ${path.relative(ROOT_DIR, path.join(STAGING_DIR, "npm-shrinkwrap.json"))}`,
+  );
 });
 
 // Copy README to staging
@@ -554,7 +561,7 @@ if (allSuccess) {
   log("\nThe npm package is ready for publishing:");
   log(`  Location: ${path.relative(ROOT_DIR, STAGING_DIR)}`);
   log("\nNext steps:");
-  log("  1. cd dist/npm-package");
+  log(`  1. cd ${path.relative(ROOT_DIR, STAGING_DIR)}`);
   log("  2. Test: npm pack");
   log("  3. Publish: npm publish");
   log("\nNote: packages/server/package.json is unchanged (workspace intact)");

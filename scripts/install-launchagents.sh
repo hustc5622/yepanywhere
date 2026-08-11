@@ -23,6 +23,7 @@ NODE_BIN="${YEP_LAUNCHD_NODE:-$(command -v node 2>/dev/null || true)}"
 CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
+SERVER_PLIST_PATH="${YEP_LAUNCHD_SERVER_PLIST:-$LAUNCH_AGENTS_DIR/$SERVER_LABEL.plist}"
 USER_DOMAIN="gui/$(id -u)"
 START_NOW=true
 INSTALL_SERVER=true
@@ -45,7 +46,7 @@ usage() {
   cat <<'EOF'
 
 Usage:
-  scripts/install-launchagents.sh [--server-only|--bridge-only|--claude-bridge-only] [--no-start]
+  scripts/install-launchagents.sh [--server-only|--bridge-only|--claude-bridge-only] [--no-start] [--server-plist PATH]
 
 Options:
   --server-only                Write/reload only the 8022 server LaunchAgent
@@ -54,6 +55,7 @@ Options:
   --claude-bridge-only         Write/reload only the 4520 Claude bridge LaunchAgent
   --bridges-only               Write/reload both bridge LaunchAgents
   --no-start                   Write plist file(s) without unloading or starting LaunchAgents
+  --server-plist PATH          Write the server definition to PATH
 
 Environment overrides:
   YEP_DEPLOY_PORT              Main server port (default: 8022)
@@ -89,6 +91,14 @@ while [[ $# -gt 0 ]]; do
     --no-start)
       START_NOW=false
       shift
+      ;;
+    --server-plist)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        err "--server-plist requires a path"
+        exit 2
+      fi
+      SERVER_PLIST_PATH="$2"
+      shift 2
       ;;
     --server-only)
       INSTALL_SERVER=true
@@ -163,7 +173,7 @@ SESSION_TITLE_API_BASE="${SESSION_TITLE_LLM_API_BASE:-${LLM_API_BASE:-}}"
 SESSION_TITLE_SUB_MODULE_VALUE="${SESSION_TITLE_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
 
 chmod +x "$CLI_JS" 2>/dev/null || true
-mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR" "$(dirname "$SERVER_PLIST_PATH")"
 
 LAUNCHD_PATH="${YEP_LAUNCHD_PATH:-${PATH:-/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin}}"
 NODE_DIR="$(dirname "$NODE_BIN")"
@@ -268,10 +278,11 @@ write_claude_bridge_plist() {
 }
 
 write_server_plist() {
-  local plist="$LAUNCH_AGENTS_DIR/$SERVER_LABEL.plist"
+  local plist="$SERVER_PLIST_PATH"
   local env_args=(
     "NODE_ENV" "production"
     "PATH" "$LAUNCHD_PATH"
+    "YEP_DEPLOY_PORT" "$SERVER_PORT"
     "BASE_PATH" "$SERVER_BASE_PATH"
     "ALLOWED_IMAGE_PATHS" "$SERVER_ALLOWED_IMAGE_PATHS"
     "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT"
@@ -281,6 +292,13 @@ write_server_plist() {
     "YEP_CLAUDE_BRIDGE_CONTROL_URL" "$CLAUDE_BRIDGE_URL"
     "YEP_CLAUDE_BRIDGE_PORT" "$CLAUDE_BRIDGE_PORT"
   )
+
+  if [[ -n "${YEP_ANYWHERE_PROFILE:-}" ]]; then
+    env_args+=("YEP_ANYWHERE_PROFILE" "$YEP_ANYWHERE_PROFILE")
+  fi
+  if [[ -n "${YEP_ANYWHERE_DATA_DIR:-}" ]]; then
+    env_args+=("YEP_ANYWHERE_DATA_DIR" "$YEP_ANYWHERE_DATA_DIR")
+  fi
 
   if [[ -n "$FCM_SERVICE_ACCOUNT_FILE" ]]; then
     env_args+=("YEP_FCM_SERVICE_ACCOUNT_FILE" "$FCM_SERVICE_ACCOUNT_FILE")

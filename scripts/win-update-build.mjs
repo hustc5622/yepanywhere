@@ -34,14 +34,8 @@ import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const [
-  jobFile,
-  portArg,
-  repoRoot,
-  npmPackageDir,
-  deployPs1,
-  runNpmCiArg,
-] = process.argv.slice(2);
+const [jobFile, portArg, repoRoot, npmPackageDir, deployPs1, runNpmCiArg] =
+  process.argv.slice(2);
 
 const port = Number(portArg) || 8022;
 const runNpmCi = runNpmCiArg !== "0";
@@ -74,9 +68,7 @@ function getListeningPids() {
         .stdout || "";
     const pids = new Set();
     for (const line of out.split(/\r?\n/)) {
-      const m = line.match(
-        /^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/,
-      );
+      const m = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/);
       if (m && Number(m[1]) === port) pids.add(Number(m[2]));
     }
     if (pids.size > 0) return [...pids];
@@ -180,11 +172,11 @@ function run(cmd, args, opts) {
 
       // 3) Install runtime dependencies.
       log("Running npm ci in dist/npm-package...");
-      await run(
-        "npm",
-        ["ci", "--omit=dev", "--no-audit", "--no-fund"],
-        { cwd: npmPackageDir, env: process.env, shell: true },
-      );
+      await run("npm", ["ci", "--omit=dev", "--no-audit", "--no-fund"], {
+        cwd: npmPackageDir,
+        env: process.env,
+        shell: true,
+      });
     } else {
       log("runNpmCi=0: skipping npm ci (restart-only path).");
     }

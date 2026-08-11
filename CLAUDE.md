@@ -38,14 +38,14 @@ pnpm dev
 # 开发模式自动刷新，无需操作
 
 # 如需更新生产模式：
-bash yep.sh rebuild
+pnpm yep rebuild
 ```
 
 ### 部署到生产
 
 ```bash
 # 重构建并重启生产模式
-bash yep.sh rebuild
+pnpm yep rebuild
 # 构建完成后会自动重启并验证生产模式
 ```
 
@@ -78,23 +78,14 @@ PORT=4000 pnpm dev  # 使用 4000、4001、4002
 
 **默认端口：8022**（当 `NODE_ENV=production` 时）
 
-生产模式运行打包后的独立 Bundle：
+生产模式运行打包后的独立 Bundle，并始终通过平台服务管理器启动：Windows 使用当前用户的计划任务 `YepAnywhereServer`，macOS 使用 LaunchAgent。
 
 ```bash
-# 启动生产模式（推荐：设置 NODE_ENV=production）
-NODE_ENV=production node dist/npm-package/dist/cli.js
+# 使用当前平台的生产服务定义
+pnpm yep start-prod
 
-# 或使用 yep.sh（会自动使用正确端口）
-bash yep.sh start-prod
-
-# 手动指定端口（覆盖默认值）
-NODE_ENV=production node dist/npm-package/dist/cli.js --port 9000
-
-# 或使用 PORT 环境变量
-NODE_ENV=production PORT=9000 node dist/npm-package/dist/cli.js
-
-# 修改 LaunchAgent 部署端口
-YEP_DEPLOY_PORT=9000 scripts/install-launchagents.sh
+# 修改服务定义使用的部署端口
+YEP_DEPLOY_PORT=9000 pnpm yep start-prod
 ```
 
 ### 端口选择规则
@@ -117,16 +108,13 @@ YEP_DEPLOY_PORT=9000 scripts/install-launchagents.sh
 
 ```bash
 # 开发模式（默认 3400）
-pnpm dev
+pnpm yep start-dev
 
 # 生产模式（默认 8022）
-NODE_ENV=production node dist/npm-package/dist/cli.js
+pnpm yep start-prod
 
-# 未设置 NODE_ENV（退回开发模式默认 3400）
-node dist/npm-package/dist/cli.js
-
-# 手动指定端口（覆盖默认值）
-NODE_ENV=production PORT=9000 node dist/npm-package/dist/cli.js
+# 为服务管理器指定生产端口
+YEP_DEPLOY_PORT=9000 pnpm yep start-prod
 ```
 
 ## 开发模式 vs 生产模式
@@ -135,14 +123,14 @@ NODE_ENV=production PORT=9000 node dist/npm-package/dist/cli.js
 
 **开发模式**：
 - 直接运行源代码，修改后自动重新编译
-- 命令：`pnpm dev` 或 `bash yep.sh start-dev`
+- 命令：`pnpm dev` 或 `pnpm yep start-dev`（默认后台；`--fg` 前台）
 - 代码位置：`packages/server/src/`, `packages/client/src/`
 - 默认端口：3400
 - 特点：Vite HMR 自动刷新，无需重构建
 
 **生产模式**：
 - 运行打包后的独立部署包
-- 命令：`NODE_ENV=production node dist/npm-package/dist/cli.js` 或 `bash yep.sh start-prod`
+- 命令：`pnpm yep start-prod`
 - 代码位置：`dist/npm-package/`（完整打包产物）
 - 默认端口：8022（需要 `NODE_ENV=production`）
 - 特点：需要重构建才能看到代码修改
@@ -167,10 +155,10 @@ NODE_ENV=production PORT=9000 node dist/npm-package/dist/cli.js
 
 真正的生产模式应该使用：
 ```bash
-NODE_ENV=production node dist/npm-package/dist/cli.js
+pnpm yep start-prod
 ```
 
-这才是可以独立部署的完整 Bundle。详细区别见 [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)。
+这会通过 Task Scheduler 或 launchd 运行可独立部署的完整 Bundle。详细区别见 [docs/DEPLOYMENT_MODES.md](docs/DEPLOYMENT_MODES.md)。
 
 ## 数据目录与 Profile
 
@@ -246,34 +234,42 @@ cd site && npm run build   # Astro check + build（或从根目录运行：pnpm 
 
 ## 本地部署与重构建
 
-### 使用 yep.sh（推荐）
+### 使用统一服务入口（推荐）
 
-`yep.sh` 是主要的项目管理工具，提供交互式菜单和命令行接口：
+`pnpm yep` 自动识别 Windows 或 macOS，并调用对应的 PowerShell 或 Bash 后端。两端提供相同的中文菜单和命令：
 
 ```bash
 # 交互式菜单
-bash yep.sh
+pnpm yep
 
 # 命令行模式
-bash yep.sh start-dev      # 启动开发模式
-bash yep.sh start-prod     # 启动生产模式
-bash yep.sh stop           # 停止所有服务
-bash yep.sh restart-dev    # 重启开发模式
-bash yep.sh restart-prod   # 重启生产模式
-bash yep.sh status         # 查看服务状态
-bash yep.sh rebuild        # 重构建项目
+pnpm yep start-dev         # 默认后台启动 dev Profile
+pnpm yep start-dev --fg    # 仅此形式以前台运行
+pnpm yep stop-dev          # 只停止已核实的开发进程
+pnpm yep restart-dev
+pnpm yep start-prod        # 通过平台服务管理器启动生产模式（默认未命名 Profile）
+pnpm yep stop-prod         # 保留登录自启动配置
+pnpm yep restart-prod
+pnpm yep stop              # 停止开发与生产实例，保留自启动配置
+pnpm yep status
+pnpm yep rebuild
+pnpm yep enable-autostart  # 不启动当前实例
+pnpm yep disable-autostart # 不停止当前实例
 ```
 
-**yep.sh rebuild 会自动执行**：
+开发运行、生产运行和登录自启动是独立状态。Windows 的生产定义是当前用户计划任务 `YepAnywhereServer`；macOS 的生产定义是同一 label 的 LaunchAgent，持久 plist 位于 `~/Library/LaunchAgents`，关闭自启动时人工生产运行使用数据目录中的会话 plist。`stop-prod` 不关闭自启动，`disable-autostart` 不停止当前实例，`stop` 也不修改自启动开关。
+
+`status` 分别报告定义是否安装、当前是否加载、开发/生产是否运行、登录自启动是否启用，并显示 PID、Profile、端口、日志与“配置异常”诊断。开发后台控制台日志位于 `~/.yep-anywhere/logs/`；macOS 生产日志是 `server-launchd.out.log` / `server-launchd.err.log`，Windows 生产监督器日志是 `server.out.log` / `server.err.log`。
+
+**`pnpm yep rebuild` 会自动执行**：
 1. `pnpm lint` - Biome linter 检查
 2. `pnpm typecheck` - TypeScript 类型检查
-3. `pnpm --filter client build` - 构建客户端
-4. `pnpm build:bundle` - 构建完整部署包
-5. `cd dist/npm-package && npm ci --omit=dev` - 按运行时锁安装依赖
-6. `chmod +x dist/npm-package/dist/cli.js` - 设置执行权限
-7. 自动重启生产模式（LaunchAgent 守护）并执行部署验证
+3. 在 `dist/npm-package-staging-*` 中运行 `pnpm build:bundle`
+4. 在暂存目录运行 `npm ci --omit=dev` 并校验运行时 Bundle
+5. 所有暂存检查通过后，才停止生产实例并交换到 `dist/npm-package`
+6. 通过同一 Task Scheduler/LaunchAgent 定义启动生产并核对 `buildId`
 
-**关键**：重构建完成后，必须重启生产模式服务才能应用新代码。`bash yep.sh rebuild` 会自动重启并验证生产模式，不再提示选择开发/生产重启模式。
+**关键**：暂存构建、依赖安装或校验失败时，当前生产服务和生产 Bundle 均保持不变。生产依赖只使用固定的 `npm ci --omit=dev`；服务启动路径不安装依赖。
 
 ### ⚠️ 重要：依赖安装方法
 
@@ -354,6 +350,8 @@ bash yep.sh restart-prod
 - `e2e-server.log`：E2E 测试期间的服务端日志
 - `server-launchd.out.log`：LaunchAgent 标准输出日志
 - `server-launchd.err.log`：LaunchAgent 错误输出日志
+- `server.out.log`：Windows `YepAnywhereServer` 计划任务的服务端标准输出
+- `server.err.log`：Windows `YepAnywhereServer` 计划任务的服务端错误输出
 
 **开发模式日志**：
 ```bash

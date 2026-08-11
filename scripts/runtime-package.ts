@@ -11,6 +11,16 @@ export const RUNTIME_LOCK_PATH = path.join(
   "scripts/runtime-package-lock.json",
 );
 
+export function resolveBundleOutputDir(
+  environment: Record<string, string | undefined> = process.env,
+  repoRoot = ROOT_DIR,
+): string {
+  const configuredOutput = environment.YEP_BUNDLE_OUTPUT_DIR;
+  return configuredOutput !== undefined
+    ? path.resolve(configuredOutput)
+    : path.join(repoRoot, "dist", "npm-package");
+}
+
 type Dependencies = Record<string, string>;
 
 interface PackageJson {
