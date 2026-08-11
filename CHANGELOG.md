@@ -8,6 +8,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- APK-local mobile shell connection and diagnostics panel with editable server address, retry/default recovery actions, an always-available connection shortcut, bilingual copy, and copyable app/WebView connection details
 - Process-level `CodexProjectionCache` with LRU/event-count waterlines and incremental projection replay; warm projections apply only events newer than the cached sequence instead of cold-reducing the full history
 - Cache-aware canonical source selection that validates projection prefixes after journal replacement while long-lived JSONL stores refresh only appended file bytes
 - Soft time budget (`budgetMs`/`startedMs`) on the canonical overlay with `CodexOverlayBudgetExceededError`; the route catches budget expiry at overlay checkpoints and falls back to legacy normalization
@@ -26,8 +27,15 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Update the built-in mobile shell `mini` node to its current connection endpoint
 
 ### Fixed
+- Make local 8022/4510/4520 deployment cutovers safe and deterministic: serialize CLI/UI deploys, wait for embedded active work, reject conflicting dev auxiliary ports before shutdown, reload bridge LaunchAgents from the promoted runtime, preserve the real previous bundle on duplicate syncs, and persist detached job exit results across the 8022 restart
+- Restore uploaded-image preview modals without re-exposing server-local paths by projecting managed attachments to validated, authenticated API URLs in live and persisted session messages
+- Keep the Reports page pointed at the repository-adjacent `research_tasks` directory after LaunchAgent runtime isolation by persisting an absolute `YEP_REPORTS_DIR`, reloading updated server plists at the coordinated restart point, and retaining a repository-root fallback
+- Keep the APK recovery panel visible until the embedded Yep Anywhere client sends its real ready signal, and migrate the retired `43.226.60.75:61874` default instead of letting persisted app data override the current endpoint
 - Keep canonical transcript export and Feishu/Lark projection on their original canonical journal paths so they are unaffected by the normal Session GET capability gate
 - Preserve in-progress agent, plan, and reasoning stream content when the canonical item-start snapshot still contains empty placeholder fields
+
+### Security
+- Restrict deploy env files, LaunchAgent plists/logs, and deployment job state to private permissions, and rotate oversized LaunchAgent logs during installation
 
 ## [2026.8.2] - 2026-08-10
 
