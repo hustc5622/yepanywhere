@@ -3,7 +3,7 @@
  *
  * Kimi persists sessions to
  *   ~/.kimi-code/sessions/<workspace>/session_<uuid>/agents/<agentId>/wire.jsonl
- * plus a sibling `state.json` with title / timestamps / workDir.
+ * plus a sibling `state.json` with title / timestamps / project cwd metadata.
  *
  * `wire.jsonl` is an append-only event log. The canonical transcript is
  * reconstructed from two record kinds:
@@ -214,16 +214,40 @@ export interface KimiSessionContent {
   records: KimiWireRecord[];
 }
 
-/** state.json alongside the agent wire logs. */
+/**
+ * state.json alongside the agent wire logs.
+ *
+ * Kimi Code <= 0.33 wrote ISO timestamps and `workDir` (v1). Kimi Code 0.34
+ * introduced state version 2, whose timestamps are epoch milliseconds and
+ * whose project directory is named `cwd`. Normalize both layouts here so the
+ * server's reader can keep one stable internal contract.
+ */
+const KimiSessionTimestampSchema = z.union([z.string(), z.number()]);
+
+function normalizeKimiSessionTimestamp(
+  value: string | number | undefined,
+): string | undefined {
+  if (typeof value !== "number") return value;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
 export const KimiSessionStateSchema = z
   .object({
-    createdAt: z.string().optional(),
-    updatedAt: z.string().optional(),
+    createdAt: KimiSessionTimestampSchema.optional(),
+    updatedAt: KimiSessionTimestampSchema.optional(),
     title: z.string().optional(),
     isCustomTitle: z.boolean().optional(),
     workDir: z.string().optional(),
+    cwd: z.string().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .transform((state) => ({
+    ...state,
+    createdAt: normalizeKimiSessionTimestamp(state.createdAt),
+    updatedAt: normalizeKimiSessionTimestamp(state.updatedAt),
+    workDir: state.workDir ?? state.cwd,
+  }));
 export type KimiSessionState = z.infer<typeof KimiSessionStateSchema>;
 
 // =============================================================================

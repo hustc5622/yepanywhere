@@ -306,8 +306,12 @@ export class FileWatcher {
 
   private parseKimiFileType(relativePath: string): FileChangeEvent["fileType"] {
     // Watching ~/.kimi-code/sessions - session logs are
-    // {workspace}/session_{uuid}/agents/{agentId}/wire.jsonl
-    if (relativePath.endsWith("wire.jsonl")) {
+    // {workspace}/session_{uuid}/agents/{agentId}/wire.jsonl and metadata is
+    // {workspace}/session_{uuid}/state.json. Both affect session listings.
+    if (
+      relativePath.endsWith("wire.jsonl") ||
+      path.basename(relativePath) === "state.json"
+    ) {
       return "session";
     }
     return "other";

@@ -1,9 +1,15 @@
 import type { ChildProcess } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ACPClient } from "../../../src/sdk/providers/acp/client.js";
+
+type ACPConnectionStub = {
+  loadSession: (params: unknown) => Promise<unknown>;
+  resumeSession: (params: unknown) => Promise<unknown>;
+};
 
 type ACPClientInternals = {
   process: ChildProcess | null;
+  connection: ACPConnectionStub | null;
 };
 
 function setChildState(
@@ -16,6 +22,10 @@ function setChildState(
   } | null,
 ): void {
   (client as unknown as ACPClientInternals).process = state as ChildProcess;
+}
+
+function setConnection(client: ACPClient, connection: ACPConnectionStub): void {
+  (client as unknown as ACPClientInternals).connection = connection;
 }
 
 describe("ACPClient process liveness", () => {
@@ -68,5 +78,42 @@ describe("ACPClient process liveness", () => {
     setChildState(client, state);
 
     expect(client.isAlive()).toBe(false);
+  });
+});
+
+describe("ACPClient session lifecycle", () => {
+  it("includes the required MCP server list when loading a session", async () => {
+    const loadSession = vi.fn().mockResolvedValue({});
+    const client = new ACPClient();
+    setConnection(client, {
+      loadSession,
+      resumeSession: vi.fn(),
+    });
+
+    await client.loadSession("session-1", "/tmp/project");
+
+    expect(loadSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      cwd: "/tmp/project",
+      mcpServers: [],
+    });
+  });
+
+  it("uses the stable session/resume method", async () => {
+    const resumeSession = vi.fn().mockResolvedValue({});
+    const client = new ACPClient();
+    setConnection(client, {
+      loadSession: vi.fn(),
+      resumeSession,
+    });
+
+    await expect(
+      client.resumeSession("session-1", "/tmp/project"),
+    ).resolves.toBe("session-1");
+    expect(resumeSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      cwd: "/tmp/project",
+      mcpServers: [],
+    });
   });
 });

@@ -261,13 +261,13 @@ export class ACPClient {
     await this.connection.loadSession({
       sessionId,
       cwd,
+      mcpServers: [],
     });
   }
 
   /**
    * Resume an existing session by ID.
-   * Uses the unstable session/resume method which may be supported even when
-   * session/load is not.
+   * Uses session/resume, which may be supported even when session/load is not.
    */
   async resumeSession(sessionId: string, cwd: string): Promise<string> {
     if (!this.connection) {
@@ -276,7 +276,7 @@ export class ACPClient {
 
     this.log.debug({ sessionId, cwd }, "Resuming existing ACP session");
 
-    const result = await this.connection.unstable_resumeSession({
+    const result = await this.connection.resumeSession({
       sessionId,
       cwd,
       mcpServers: [],

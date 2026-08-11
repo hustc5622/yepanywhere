@@ -446,6 +446,16 @@ export function createApp(options: AppOptions): AppResult {
   const readerCache = new Map<string, ISessionReader>();
   const maxReaderCacheSize = 500;
 
+  // Kimi readers cache their shared-tree directory scan briefly. Clear that
+  // cache on wire/state changes before the next project/session request so a
+  // watcher-driven index refresh cannot reconcile against a stale file list.
+  options.eventBus?.subscribe((event) => {
+    if (event.type !== "file-change" || event.provider !== "kimi") return;
+    for (const reader of readerCache.values()) {
+      if (reader instanceof KimiSessionReader) reader.invalidateCache();
+    }
+  });
+
   const getOrCreateReader = <T extends ISessionReader>(
     key: string,
     factory: () => T,

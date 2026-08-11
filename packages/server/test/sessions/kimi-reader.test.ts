@@ -115,6 +115,120 @@ const AGENT1_WIRE = jsonl([
   },
 ]);
 
+describe("KimiSessionReader state v2 discovery", () => {
+  it("lists a Kimi Code 0.34 session under its cwd project", async () => {
+    const sessionsDir = join(
+      tmpdir(),
+      `kimi-v2-${Math.random().toString(36).slice(2)}`,
+    );
+    const sessionId = "session_v2";
+    const sessionDir = join(sessionsDir, "wd_v2", sessionId);
+    const createdAt = Date.UTC(2026, 7, 11, 1, 2, 3);
+    const updatedAt = Date.UTC(2026, 7, 11, 1, 3, 4);
+
+    try {
+      await mkdir(join(sessionDir, "agents", "main"), { recursive: true });
+      await writeFile(
+        join(sessionDir, "state.json"),
+        JSON.stringify({
+          version: 2,
+          cwd: WORK_DIR,
+          title: "Kimi v2 session",
+          createdAt,
+          updatedAt,
+        }),
+      );
+      await writeFile(
+        join(sessionDir, "agents", "main", "wire.jsonl"),
+        jsonl([
+          {
+            type: "turn.prompt",
+            input: [{ type: "text", text: "create an API test" }],
+            origin: { kind: "user" },
+            time: createdAt,
+          },
+          {
+            type: "context.append_loop_event",
+            event: {
+              type: "content.part",
+              part: { type: "text", text: "Done" },
+            },
+            time: updatedAt,
+          },
+        ]),
+      );
+
+      const reader = new KimiSessionReader({
+        sessionsDir,
+        projectPath: WORK_DIR,
+      });
+      const sessions = await reader.listSessions(PROJECT_ID);
+
+      expect(sessions).toEqual([
+        expect.objectContaining({
+          id: sessionId,
+          provider: "kimi",
+          title: "Kimi v2 session",
+          createdAt: new Date(createdAt).toISOString(),
+          updatedAt: new Date(updatedAt).toISOString(),
+          messageCount: 2,
+        }),
+      ]);
+    } finally {
+      await rm(sessionsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes a warmed shared-tree scan after watcher invalidation", async () => {
+    const sessionsDir = join(
+      tmpdir(),
+      `kimi-invalidate-${Math.random().toString(36).slice(2)}`,
+    );
+    const writeSession = async (sessionId: string, title: string) => {
+      const sessionDir = join(sessionsDir, "wd_v2", sessionId);
+      await mkdir(join(sessionDir, "agents", "main"), { recursive: true });
+      await writeFile(
+        join(sessionDir, "state.json"),
+        JSON.stringify({
+          version: 2,
+          cwd: WORK_DIR,
+          title,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+      await writeFile(
+        join(sessionDir, "agents", "main", "wire.jsonl"),
+        jsonl([
+          {
+            type: "turn.prompt",
+            input: [{ type: "text", text: title }],
+            origin: { kind: "user" },
+            time: Date.now(),
+          },
+        ]),
+      );
+    };
+
+    try {
+      await writeSession("session_first", "First");
+      const reader = new KimiSessionReader({
+        sessionsDir,
+        projectPath: WORK_DIR,
+      });
+      expect(await reader.listSessions(PROJECT_ID)).toHaveLength(1);
+
+      await writeSession("session_second", "Second");
+      expect(await reader.listSessions(PROJECT_ID)).toHaveLength(1);
+
+      reader.invalidateCache();
+      expect(await reader.listSessions(PROJECT_ID)).toHaveLength(2);
+    } finally {
+      await rm(sessionsDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("KimiSessionReader subagent surfacing", () => {
   let sessionsDir: string;
   let reader: KimiSessionReader;

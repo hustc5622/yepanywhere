@@ -42,7 +42,7 @@
 └── sessions/
     └── wd_<slug>_<hash>/
         └── session_<uuid>/
-            ├── state.json              # createdAt/updatedAt/title/agents/workDir
+            ├── state.json              # title/agents；v1 为 workDir+ISO 时间，v2 为 cwd+毫秒时间戳
             └── agents/main/wire.jsonl  # 事件流
 ```
 
@@ -196,7 +196,7 @@ Kimi plan mode 会发多 option 审批（`plan_opt_<i>` 方案 A/B/C + Revise + 
 - **工具**：`context.append_loop_event` → `tool.call`（id/name/args）配对 `tool.result`（id/output/error）
 - **思考**：Kimi thinking 内容映射到 assistant 的 `thinking` block
 - **context usage**：`usage.record` 累计
-- **标题/时间**：`state.json` 的 `title`/`createdAt`/`updatedAt`
+- **标题/时间/项目**：兼容 `state.json` v1 的 `workDir` + ISO 时间，以及 Kimi CLI 0.34 v2 的 `cwd` + 毫秒时间戳；reader 内统一规范化后再按项目过滤
 - **多 agent**：一期仅读 `agents/main/wire.jsonl`，忽略子 agent（swarm）
 - **线性结构**：Kimi 会话为线性（无 DAG），对齐 Gemini reader 的处理
 

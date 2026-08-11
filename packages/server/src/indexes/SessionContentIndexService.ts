@@ -395,6 +395,11 @@ export class SessionContentIndexService {
 
     if (event.provider === "gemini") {
       this.markMatchingScopesDirty("gemini::");
+      return;
+    }
+
+    if (event.provider === "kimi") {
+      this.markMatchingScopesDirty("kimi::");
     }
   }
 

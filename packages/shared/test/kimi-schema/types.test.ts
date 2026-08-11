@@ -5,7 +5,52 @@ import {
   getKimiPromptText,
   inferKimiSubagentStatus,
   parseKimiBlobRef,
+  parseKimiSessionState,
 } from "../../src/kimi-schema/types.js";
+
+describe("parseKimiSessionState", () => {
+  it("keeps the legacy workDir and ISO timestamp layout", () => {
+    expect(
+      parseKimiSessionState(
+        JSON.stringify({
+          workDir: "/tmp/legacy-project",
+          createdAt: "2026-08-11T01:02:03.000Z",
+          updatedAt: "2026-08-11T01:03:04.000Z",
+          title: "Legacy session",
+        }),
+      ),
+    ).toMatchObject({
+      workDir: "/tmp/legacy-project",
+      createdAt: "2026-08-11T01:02:03.000Z",
+      updatedAt: "2026-08-11T01:03:04.000Z",
+      title: "Legacy session",
+    });
+  });
+
+  it("normalizes Kimi Code 0.34 state v2 cwd and epoch timestamps", () => {
+    const createdAt = Date.UTC(2026, 7, 11, 1, 2, 3);
+    const updatedAt = Date.UTC(2026, 7, 11, 1, 3, 4);
+
+    expect(
+      parseKimiSessionState(
+        JSON.stringify({
+          version: 2,
+          cwd: "/tmp/v2-project",
+          createdAt,
+          updatedAt,
+          title: "Version two session",
+        }),
+      ),
+    ).toMatchObject({
+      version: 2,
+      cwd: "/tmp/v2-project",
+      workDir: "/tmp/v2-project",
+      createdAt: new Date(createdAt).toISOString(),
+      updatedAt: new Date(updatedAt).toISOString(),
+      title: "Version two session",
+    });
+  });
+});
 
 describe("parseKimiBlobRef", () => {
   const hash = "a".repeat(64);

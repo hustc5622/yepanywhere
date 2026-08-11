@@ -1424,6 +1424,12 @@ export class KimiProvider implements AgentProvider {
         return null;
       }
 
+      case "usage_update":
+        // ACP usage updates are transport metadata, not transcript rows. Kimi's
+        // persisted step.end usage remains the authoritative source for the
+        // session summary/context indicator after each turn.
+        return null;
+
       default:
         this.log.trace(
           { updateType, update },

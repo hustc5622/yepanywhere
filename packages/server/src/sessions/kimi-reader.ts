@@ -3,7 +3,7 @@
  *
  * Kimi stores sessions under
  *   ~/.kimi-code/sessions/<workspace>/session_<uuid>/
- *     ├── state.json               (title / timestamps / workDir)
+ *     ├── state.json               (title / timestamps / workDir or cwd)
  *     └── agents/main/wire.jsonl   (append-only event log)
  *
  * The session id is the `session_<uuid>` directory name. Sessions are linear
@@ -58,7 +58,7 @@ import { createSessionQuestion } from "./user-questions.js";
 export interface KimiSessionReaderOptions {
   /** Base directory for Kimi sessions (~/.kimi-code/sessions). */
   sessionsDir: string;
-  /** Project cwd to filter sessions by (matched against state.json workDir). */
+  /** Project cwd to filter sessions by (normalized from state workDir/cwd). */
   projectPath?: string;
 }
 
@@ -96,6 +96,12 @@ export class KimiSessionReader implements ISessionReader {
   constructor(options: KimiSessionReaderOptions) {
     this.sessionsDir = options.sessionsDir;
     this.projectPath = options.projectPath;
+  }
+
+  /** Drop the short-lived directory scan after a Kimi watcher event. */
+  invalidateCache(): void {
+    this.sessionFileCache.clear();
+    this.cacheTimestamp = 0;
   }
 
   async listSessions(projectId: UrlProjectId): Promise<SessionSummary[]> {
@@ -208,17 +214,19 @@ export class KimiSessionReader implements ISessionReader {
     cachedMtime: number,
     cachedSize: number,
   ): Promise<{ summary: SessionSummary; mtime: number; size: number } | null> {
-    const entry = await this.findSessionFile(sessionId);
-    if (!entry) return null;
-
     try {
-      const stats = await stat(entry.filePath);
-      if (stats.mtimeMs === cachedMtime && stats.size === cachedSize) {
+      const fingerprint = await this.getSessionFileStats(sessionId);
+      if (!fingerprint) return null;
+      if (
+        fingerprint.mtime === cachedMtime &&
+        fingerprint.size === cachedSize
+      ) {
         return null;
       }
+
       const summary = await this.getSessionSummary(sessionId, projectId);
       if (!summary) return null;
-      return { summary, mtime: stats.mtimeMs, size: stats.size };
+      return { summary, ...fingerprint };
     } catch {
       return null;
     }
@@ -448,6 +456,39 @@ export class KimiSessionReader implements ISessionReader {
     return entry?.filePath ?? null;
   }
 
+  async getSessionFileStats(
+    sessionId: string,
+  ): Promise<{ mtime: number; size: number } | null> {
+    const entry = await this.findSessionFile(sessionId);
+    if (!entry) return null;
+
+    try {
+      const fingerprint = await this.getSessionFingerprint(
+        entry.filePath,
+        entry.sessionDir,
+      );
+      if (
+        fingerprint.mtime === entry.mtime &&
+        fingerprint.size === entry.size
+      ) {
+        return fingerprint;
+      }
+
+      const refreshedEntry = await this.readSessionMeta(
+        sessionId,
+        entry.sessionDir,
+      );
+      if (!refreshedEntry) return null;
+      this.sessionFileCache.set(sessionId, refreshedEntry);
+      return {
+        mtime: refreshedEntry.mtime,
+        size: refreshedEntry.size,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   getIndexScopeKey(sessionDir: string): string {
     return `kimi::${sessionDir}::${this.projectPath ?? "*"}`;
   }
@@ -519,7 +560,10 @@ export class KimiSessionReader implements ISessionReader {
   ): Promise<KimiSessionCacheEntry | null> {
     const filePath = join(sessionDir, "agents", "main", "wire.jsonl");
     try {
-      const stats = await stat(filePath);
+      const fingerprint = await this.getSessionFingerprint(
+        filePath,
+        sessionDir,
+      );
       let workDir: string | undefined;
       let title: string | undefined;
       let createdAt: string | undefined;
@@ -549,13 +593,33 @@ export class KimiSessionReader implements ISessionReader {
         title,
         createdAt,
         updatedAt,
-        mtime: stats.mtimeMs,
-        size: stats.size,
+        mtime: fingerprint.mtime,
+        size: fingerprint.size,
       };
     } catch {
       // No wire.jsonl — not a usable session.
       return null;
     }
+  }
+
+  /**
+   * Build the cache fingerprint from both transcript and state metadata.
+   * Kimi can update title/cwd/timestamps without touching wire.jsonl, so using
+   * only the wire stat would leave summary and search indexes stale forever.
+   */
+  private async getSessionFingerprint(
+    filePath: string,
+    sessionDir: string,
+  ): Promise<{ mtime: number; size: number }> {
+    const wireStats = await stat(filePath);
+    const stateStats = await stat(join(sessionDir, "state.json")).catch(
+      () => null,
+    );
+
+    return {
+      mtime: Math.max(wireStats.mtimeMs, stateStats?.mtimeMs ?? 0),
+      size: wireStats.size + (stateStats?.size ?? 0),
+    };
   }
 
   private async findSessionFile(

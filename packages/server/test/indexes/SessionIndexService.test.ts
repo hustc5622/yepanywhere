@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { toUrlProjectId } from "@yep-anywhere/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionIndexService } from "../../src/indexes/SessionIndexService.js";
+import { KimiSessionReader } from "../../src/sessions/kimi-reader.js";
 import { SessionReader } from "../../src/sessions/reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
 import type { SessionSummary } from "../../src/supervisor/types.js";
@@ -508,84 +509,185 @@ describe("SessionIndexService", () => {
       expect(sessions).toHaveLength(1);
     });
 
-    it("invalidates loaded codex scopes on codex file-change events", async () => {
+    it.each(["codex", "kimi"] as const)(
+      "invalidates loaded %s scopes on file-change events",
+      async (provider) => {
+        const eventBus = new EventBus();
+        const providerService = new SessionIndexService({
+          dataDir,
+          projectsDir,
+          eventBus,
+          fullValidationIntervalMs: 60000,
+        });
+        await providerService.initialize();
+
+        const providerSessionDir = join(testDir, `${provider}-sessions`);
+        await mkdir(providerSessionDir, { recursive: true });
+        const providerFile = join(providerSessionDir, "session-1.jsonl");
+        await writeFile(providerFile, "Original title\n");
+
+        const providerReader: ISessionReader = {
+          getIndexScopeKey: (sessionDir) =>
+            `${provider}::${sessionDir}::/tmp/project`,
+          listSessionFiles: async (sessionDir) => [
+            {
+              sessionId: "session-1",
+              filePath: join(sessionDir, "session-1.jsonl"),
+            },
+          ],
+          getSessionSummary: async (
+            sessionId: string,
+            projectId: string,
+          ): Promise<SessionSummary> => {
+            const title = (await readFile(providerFile, "utf-8")).trim();
+            const stats = await stat(providerFile);
+            return {
+              id: sessionId,
+              projectId,
+              title,
+              fullTitle: title,
+              createdAt: new Date(stats.mtimeMs).toISOString(),
+              updatedAt: new Date(stats.mtimeMs).toISOString(),
+              messageCount: 1,
+              ownership: { owner: "none" },
+              provider,
+            };
+          },
+          getAgentMappings: async () => [],
+          getAgentSession: async () => null,
+        };
+
+        const first = await providerService.getSessionsWithCache(
+          providerSessionDir,
+          projectId,
+          providerReader,
+        );
+        expect(first[0]?.title).toBe("Original title");
+
+        await writeFile(providerFile, "Updated title\n");
+
+        // Without an invalidation event, fast path keeps serving stale data.
+        const stale = await providerService.getSessionsWithCache(
+          providerSessionDir,
+          projectId,
+          providerReader,
+        );
+        expect(stale[0]?.title).toBe("Original title");
+
+        eventBus.emit({
+          type: "file-change",
+          provider,
+          path: providerFile,
+          relativePath: "workspace/session-1/agents/main/wire.jsonl",
+          changeType: "modify",
+          timestamp: new Date().toISOString(),
+          fileType: "session",
+        });
+
+        const refreshed = await providerService.getSessionsWithCache(
+          providerSessionDir,
+          projectId,
+          providerReader,
+        );
+        expect(refreshed[0]?.title).toBe("Updated title");
+      },
+    );
+
+    it("refreshes Kimi metadata when only state.json changes", async () => {
       const eventBus = new EventBus();
-      const codexService = new SessionIndexService({
+      const kimiService = new SessionIndexService({
         dataDir,
         projectsDir,
         eventBus,
         fullValidationIntervalMs: 60000,
       });
-      await codexService.initialize();
+      await kimiService.initialize();
 
-      const codexSessionDir = join(testDir, "codex-sessions");
-      await mkdir(codexSessionDir, { recursive: true });
-      const codexFile = join(codexSessionDir, "session-1.jsonl");
-      await writeFile(codexFile, "Original title\n");
-
-      const codexReader: ISessionReader = {
-        getIndexScopeKey: (sessionDir) => `codex::${sessionDir}::/tmp/project`,
-        listSessionFiles: async (sessionDir) => [
-          {
-            sessionId: "session-1",
-            filePath: join(sessionDir, "session-1.jsonl"),
-          },
-        ],
-        getSessionSummary: async (
-          sessionId: string,
-          projectId: string,
-        ): Promise<SessionSummary> => {
-          const title = (await readFile(codexFile, "utf-8")).trim();
-          const stats = await stat(codexFile);
-          return {
-            id: sessionId,
-            projectId,
+      const projectPath = "/test/project";
+      const kimiSessionsDir = join(testDir, "kimi-state-sessions");
+      const kimiSessionDir = join(kimiSessionsDir, "wd_test", "session_state");
+      const statePath = join(kimiSessionDir, "state.json");
+      const wirePath = join(kimiSessionDir, "agents", "main", "wire.jsonl");
+      const timestamp = Date.now();
+      const writeState = (title: string) =>
+        writeFile(
+          statePath,
+          JSON.stringify({
+            version: 2,
+            cwd: projectPath,
             title,
-            fullTitle: title,
-            createdAt: new Date(stats.mtimeMs).toISOString(),
-            updatedAt: new Date(stats.mtimeMs).toISOString(),
-            messageCount: 1,
-            ownership: { owner: "none" },
-            provider: "codex",
-          };
-        },
-        getAgentMappings: async () => [],
-        getAgentSession: async () => null,
-      };
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          }),
+        );
 
-      const first = await codexService.getSessionsWithCache(
-        codexSessionDir,
-        projectId,
-        codexReader,
+      await mkdir(join(kimiSessionDir, "agents", "main"), {
+        recursive: true,
+      });
+      await writeState("Old title");
+      await writeFile(
+        wirePath,
+        `${JSON.stringify({
+          type: "turn.prompt",
+          input: [{ type: "text", text: "hello" }],
+          origin: { kind: "user" },
+          time: timestamp,
+        })}\n`,
       );
-      expect(first[0]?.title).toBe("Original title");
 
-      await writeFile(codexFile, "Updated title\n");
-
-      // Without an invalidation event, fast path should keep serving stale data.
-      const stale = await codexService.getSessionsWithCache(
-        codexSessionDir,
+      const kimiReader = new KimiSessionReader({
+        sessionsDir: kimiSessionsDir,
+        projectPath,
+      });
+      const first = await kimiService.getSessionsWithCache(
+        kimiSessionsDir,
         projectId,
-        codexReader,
+        kimiReader,
       );
-      expect(stale[0]?.title).toBe("Original title");
+      expect(first[0]?.title).toBe("Old title");
 
+      await writeState("New title");
+      const future = new Date(Date.now() + 5000);
+      await utimes(statePath, future, future);
+      kimiReader.invalidateCache();
       eventBus.emit({
         type: "file-change",
-        provider: "codex",
-        path: codexFile,
-        relativePath: "2025/03/28/session-1.jsonl",
+        provider: "kimi",
+        path: statePath,
+        relativePath: "wd_test/session_state/state.json",
         changeType: "modify",
         timestamp: new Date().toISOString(),
         fileType: "session",
       });
 
-      const refreshed = await codexService.getSessionsWithCache(
-        codexSessionDir,
+      const refreshed = await kimiService.getSessionsWithCache(
+        kimiSessionsDir,
         projectId,
-        codexReader,
+        kimiReader,
       );
-      expect(refreshed[0]?.title).toBe("Updated title");
+      expect(refreshed[0]?.title).toBe("New title");
+
+      const cachedSummary = await kimiService.getSessionSummaryWithCache(
+        kimiSessionsDir,
+        projectId,
+        "session_state",
+        kimiReader,
+      );
+      expect(cachedSummary?.title).toBe("New title");
+
+      await writeState("Hot title");
+      const later = new Date(Date.now() + 10000);
+      await utimes(statePath, later, later);
+      kimiReader.invalidateCache();
+
+      const refreshedSummary = await kimiService.getSessionSummaryWithCache(
+        kimiSessionsDir,
+        projectId,
+        "session_state",
+        kimiReader,
+      );
+      expect(refreshedSummary?.title).toBe("Hot title");
+      kimiService.dispose();
     });
   });
 

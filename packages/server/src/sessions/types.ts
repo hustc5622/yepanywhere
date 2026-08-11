@@ -138,6 +138,16 @@ export interface ISessionReader {
   getSessionFilePath?(sessionId: string): Promise<string | null>;
 
   /**
+   * Return provider-aware change stats for index caching.
+   * Readers whose session metadata spans multiple files can aggregate those
+   * files into one mtime/size pair. The index falls back to getSessionFilePath
+   * when this method is not implemented.
+   */
+  getSessionFileStats?(
+    sessionId: string,
+  ): Promise<{ mtime: number; size: number } | null>;
+
+  /**
    * Enumerate session files in a directory with their IDs.
    * Used by SessionIndexService for providers where the session ID
    * can't be derived from the filename (e.g., Gemini JSON files).

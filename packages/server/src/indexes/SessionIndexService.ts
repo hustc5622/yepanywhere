@@ -173,6 +173,20 @@ export class SessionIndexService implements ISessionIndexService {
     return reader?.getIndexScopeKey?.(sessionDir) ?? sessionDir;
   }
 
+  private async getSessionFileStats(
+    reader: ISessionReader,
+    sessionId: string,
+    filePath: string,
+  ): Promise<SessionFileStat> {
+    const readerStats = await reader.getSessionFileStats?.(sessionId);
+    if (readerStats) {
+      return { mtimeMs: readerStats.mtime, size: readerStats.size };
+    }
+
+    const stats = await fs.stat(filePath);
+    return { mtimeMs: stats.mtimeMs, size: stats.size };
+  }
+
   /**
    * Evict oldest entries if cache exceeds max size.
    * Simple FIFO eviction since Map maintains insertion order.
@@ -642,6 +656,12 @@ export class SessionIndexService implements ISessionIndexService {
       return;
     }
 
+    if (event.provider === "kimi") {
+      // Kimi sessions also share one tree and are filtered by state.json cwd.
+      this.markMatchingScopesDirty("kimi::");
+      return;
+    }
+
     if (event.provider === "opencode") {
       // OpenCode sqlite indexes are also project-scoped over one shared DB.
       this.markMatchingScopesDirty("opencode::");
@@ -694,7 +714,11 @@ export class SessionIndexService implements ISessionIndexService {
 
       if (summary) {
         try {
-          const stats = await fs.stat(filePath);
+          const stats = await this.getSessionFileStats(
+            reader,
+            sessionId,
+            filePath,
+          );
           statCalls += 1;
           index.sessions[sessionId] = this.toCachedSummary(
             summary,
@@ -709,7 +733,11 @@ export class SessionIndexService implements ISessionIndexService {
       }
 
       try {
-        const stats = await fs.stat(filePath);
+        const stats = await this.getSessionFileStats(
+          reader,
+          sessionId,
+          filePath,
+        );
         statCalls += 1;
         index.sessions[sessionId] = this.toEmptyCachedSummary(
           stats.mtimeMs,
@@ -1186,7 +1214,7 @@ export class SessionIndexService implements ISessionIndexService {
       path.join(sessionDir, `${sessionId}.jsonl`);
 
     try {
-      const stats = await fs.stat(filePath);
+      const stats = await this.getSessionFileStats(reader, sessionId, filePath);
       const mtime = stats.mtimeMs;
       const size = stats.size;
 
@@ -1267,9 +1295,9 @@ export class SessionIndexService implements ISessionIndexService {
       (await reader.getSessionFilePath?.(sessionId)) ??
       path.join(sessionDir, `${sessionId}.jsonl`);
 
-    let stats: Awaited<ReturnType<typeof fs.stat>>;
+    let stats: SessionFileStat;
     try {
-      stats = await fs.stat(filePath);
+      stats = await this.getSessionFileStats(reader, sessionId, filePath);
     } catch {
       // The file is not at the expected path under this sessionDir. Readers
       // like ClaudeSessionReader can still resolve it across merged/additional

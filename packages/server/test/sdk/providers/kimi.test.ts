@@ -9,6 +9,7 @@ import type {
   SessionNotification,
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
+import { zSessionNotification } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACPClient } from "../../../src/sdk/providers/acp/client.js";
 import {
@@ -237,6 +238,22 @@ describe("KimiProvider ACP questions", () => {
 });
 
 describe("KimiProvider ACP updates", () => {
+  it("accepts Kimi 0.34 usage_update notifications without transcript noise", () => {
+    const notification = {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "usage_update" as const,
+        used: 22_994,
+        size: 1_048_576,
+      },
+    };
+
+    expect(zSessionNotification.safeParse(notification).success).toBe(true);
+    expect(
+      convertKimiUpdate(new KimiProvider(), notification.update),
+    ).toBeNull();
+  });
+
   it("streams cumulative thought snapshots under one stable message id", async () => {
     const provider = new KimiProvider();
     const updateQueue = [kimiThoughtChunk("User")];

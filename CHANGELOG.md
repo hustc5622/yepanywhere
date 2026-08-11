@@ -27,6 +27,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Update the built-in mobile shell `mini` node to its current connection endpoint
 
 ### Fixed
+- Restore Kimi CLI 0.34 session discovery by normalizing v2 `state.json` metadata (`cwd` and numeric timestamps), watching Kimi session files, invalidating summary/search indexes, and accepting the current ACP `usage_update` notification shape
 - Make local 8022/4510/4520 deployment cutovers safe and deterministic: serialize CLI/UI deploys, wait for embedded active work, reject conflicting dev auxiliary ports before shutdown, reload bridge LaunchAgents from the promoted runtime, preserve the real previous bundle on duplicate syncs, and persist detached job exit results across the 8022 restart
 - Restore uploaded-image preview modals without re-exposing server-local paths by projecting managed attachments to validated, authenticated API URLs in live and persisted session messages
 - Keep the Reports page pointed at the repository-adjacent `research_tasks` directory after LaunchAgent runtime isolation by persisting an absolute `YEP_REPORTS_DIR`, reloading updated server plists at the coordinated restart point, and retaining a repository-root fallback
