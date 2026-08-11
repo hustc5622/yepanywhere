@@ -193,9 +193,19 @@ export function createCodexTranscriptRoutes(
 }
 
 function jsonlSource(id: string, filePath: string): CodexTranscriptStoreSource {
+  // Share a single long-lived store instance per file path so that the
+  // incremental file refresh (stat + tail read) works across requests.
+  // The store hydrates once and then only reads new appended bytes on each
+  // subsequent replay, avoiding a full-file read on every session refresh.
+  let store: JsonlCodexEventStore | null = null;
   return {
     id,
-    createStore: () => new JsonlCodexEventStore({ filePath }),
+    createStore: () => {
+      if (!store) {
+        store = new JsonlCodexEventStore({ filePath });
+      }
+      return store;
+    },
   };
 }
 

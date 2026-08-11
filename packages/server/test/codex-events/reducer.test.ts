@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE,
+  type CodexEventEnvelope,
   createCanonicalCodexSessionState,
   reduceCodexEvent,
   reduceCodexEvents,
 } from "../../src/codex-events/index.js";
-import { testEvent } from "./helpers.js";
+import { testDraft, testEvent } from "./helpers.js";
 
 describe("canonical Codex event reducer", () => {
   it("projects started/completed lifecycles for every ThreadItem variant", () => {
@@ -264,6 +265,172 @@ describe("canonical Codex event reducer", () => {
     );
     expect(state.threads["thread-1"]?.turns["turn-1"]?.status).toBe(
       "completed",
+    );
+  });
+
+  it("returns the initial state for an empty event batch", () => {
+    const initial = createCanonicalCodexSessionState("session-1");
+    const state = reduceCodexEvents(initial, []);
+    expect(state).toEqual(initial);
+    expect(state.appliedEventIds).toHaveLength(0);
+    expect(state.observations).toHaveLength(0);
+  });
+
+  it("records an out-of-order anomaly when sequence goes backwards", () => {
+    // reduceCodexEvents sorts before applying, so out-of-order can only be
+    // observed via the single-event path (reduceCodexEvent) where the caller
+    // controls application order.
+    const initial = createCanonicalCodexSessionState("session-1");
+    const first = reduceCodexEvent(
+      initial,
+      testEvent(5, "turn/started", {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "inProgress", items: [], startedAt: 1 },
+      }),
+    );
+    const state = reduceCodexEvent(
+      first,
+      testEvent(2, "turn/completed", {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "completed", items: [], completedAt: 2 },
+      }),
+    );
+    expect(state.anomalies.map((a) => a.kind)).toContain("out_of_order");
+    expect(state.lastSequence).toBe(5);
+  });
+
+  it("records a session_mismatch anomaly for a foreign session id", () => {
+    const event = testEvent(1, "turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "inProgress", items: [], startedAt: 1 },
+    });
+    const state = reduceCodexEvent(
+      createCanonicalCodexSessionState("session-1"),
+      { ...event, sessionId: "session-other" },
+    );
+    expect(state.anomalies.map((a) => a.kind)).toContain("session_mismatch");
+    expect(state.threads).toEqual({});
+  });
+
+  it("projects multiple threads and turns independently", () => {
+    const events = [
+      testEvent(1, "turn/started", {
+        threadId: "thread-a",
+        turn: { id: "turn-a1", status: "inProgress", items: [], startedAt: 1 },
+      }),
+      testEvent(2, "turn/started", {
+        threadId: "thread-b",
+        turn: { id: "turn-b1", status: "inProgress", items: [], startedAt: 1 },
+      }),
+      testEvent(3, "turn/completed", {
+        threadId: "thread-a",
+        turn: { id: "turn-a1", status: "completed", items: [], completedAt: 2 },
+      }),
+    ];
+    const state = reduceCodexEvents(
+      createCanonicalCodexSessionState("session-1"),
+      events,
+    );
+    expect(state.threadOrder).toEqual(["thread-a", "thread-b"]);
+    expect(state.threads["thread-a"]?.turns["turn-a1"]?.status).toBe(
+      "completed",
+    );
+    expect(state.threads["thread-b"]?.turns["turn-b1"]?.status).toBe(
+      "in_progress",
+    );
+  });
+
+  it("reduces a client retry and records its bounded retry status", () => {
+    const event: CodexEventEnvelope = {
+      ...testDraft(
+        "item/tool/requestUserInput",
+        {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          retryStatus: {
+            state: "retrying",
+            category: "overloaded",
+            retryable: true,
+            attempt: 1,
+            nextAttempt: 2,
+            maxAttempts: 3,
+            retryInMs: 500,
+          },
+        },
+        {
+          direction: "client_response",
+          phase: "observed",
+          requestId: 7,
+          clientMessageId: "msg-1",
+          correlationId: "client-retry:7",
+        },
+      ),
+      persistedAtMs: 2_001,
+      sequence: 1,
+    };
+    const state = reduceCodexEvents(
+      createCanonicalCodexSessionState("session-1"),
+      [event],
+    );
+    expect(state.clientRetries).toHaveLength(1);
+    expect(state.clientRetries[0]).toMatchObject({
+      state: "retrying",
+      attempt: 1,
+      nextAttempt: 2,
+      maxAttempts: 3,
+    });
+  });
+
+  it("parity: reduceCodexEvent and reduceCodexEvents produce identical state", () => {
+    const events = [
+      testEvent(1, "turn/started", {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "inProgress", items: [], startedAt: 1 },
+      }),
+      testEvent(2, "item/started", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "item-1", type: "agentMessage" },
+        startedAtMs: 10,
+      }),
+      testEvent(3, "item/agentMessage/delta", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        delta: "hello",
+      }),
+      testEvent(4, "item/completed", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "item-1", type: "agentMessage", text: "hello" },
+        completedAtMs: 20,
+      }),
+      testEvent(5, "turn/completed", {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "completed", items: [], completedAt: 2 },
+      }),
+    ];
+
+    // Batch path
+    const batchState = reduceCodexEvents(
+      createCanonicalCodexSessionState("session-1"),
+      events,
+    );
+    // Single-event path
+    let singleState = createCanonicalCodexSessionState("session-1");
+    for (const event of events) {
+      singleState = reduceCodexEvent(singleState, event);
+    }
+
+    // Both paths must produce identical projection.
+    expect(singleState.appliedEventIds).toEqual(batchState.appliedEventIds);
+    expect(singleState.lastSequence).toBe(batchState.lastSequence);
+    expect(singleState.anomalies).toEqual(batchState.anomalies);
+    expect(singleState.observations).toEqual(batchState.observations);
+    expect(singleState.clientRetries).toEqual(batchState.clientRetries);
+    expect(singleState.unknownEvents).toEqual(batchState.unknownEvents);
+    expect(JSON.stringify(singleState.threads)).toBe(
+      JSON.stringify(batchState.threads),
     );
   });
 });

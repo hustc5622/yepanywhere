@@ -2,6 +2,7 @@ export * from "./classification.js";
 export * from "./diagnostics.js";
 export * from "./envelope.js";
 export * from "./ingress.js";
+export * from "./projection-cache.js";
 export * from "./redaction.js";
 export * from "./reducer.js";
 export * from "./rollout.js";

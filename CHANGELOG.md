@@ -7,6 +7,27 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Added
+- Process-level `CodexProjectionCache` with LRU/event-count waterlines and incremental projection replay; warm projections apply only events newer than the cached sequence instead of cold-reducing the full history
+- Cache-aware canonical source selection that validates projection prefixes after journal replacement while long-lived JSONL stores refresh only appended file bytes
+- Soft time budget (`budgetMs`/`startedMs`) on the canonical overlay with `CodexOverlayBudgetExceededError`; the route catches budget expiry at overlay checkpoints and falls back to legacy normalization
+- Structured diagnostic logging on the canonical overlay path: journal replay duration, overlay duration, total duration, cache hit/miss, event count, projected message count, and fallback outcome
+- Synthetic benchmark script `scripts/bench-codex-overlay.ts` covering 100/1k/2k/5k/10k/20k event scales with cold reduce, warm apply, overlay, budget exceeded, and RSS/heap delta measurements
+- Reducer parity tests covering empty events, out-of-order sequence, session mismatch, multi-thread/turn, client retry, and single-event vs batch-path equivalence
+
+### Changed
+- Skip canonical Codex overlay by default on normal Session GET; the web client does not consume canonical native-item fields, so a `view=canonical` query opt-in now gates the 11k-event projection that previously caused 48–52s TTFB and ~1 GB RSS on long sessions
+- Rewrite the canonical Codex event reducer as a linear batch builder that clones the initial projection once and uses `Set`-based dedupe indexes, eliminating per-event `structuredClone` of the entire state and O(N) array `includes` that made batch replay approach quadratic complexity
+- Pre-build semantic duplicate and legacy item-id indexes in the canonical session overlay so candidate matching no longer rescans the full message list per candidate
+- Fast-path `insertByTimestamp` by checking the tail element first, turning the common time-ordered append case from O(N²) into O(N)
+- `JsonlCodexEventStore` now tracks file size/mtime and only reads the appended tail on subsequent replays, avoiding a full-file `readFile` when a long journal has only grown
+- JSONL source factories now share a single `JsonlCodexEventStore` instance per file path so the incremental file refresh works across requests
+- Window canonical candidate construction by a recent-event lower bound when the caller only needs the tail, avoiding Message construction for old projection items while still replaying complete state
+
+### Fixed
+- Keep canonical transcript export and Feishu/Lark projection on their original canonical journal paths so they are unaffected by the normal Session GET capability gate
+- Preserve in-progress agent, plan, and reasoning stream content when the canonical item-start snapshot still contains empty placeholder fields
+
 ## [2026.8.2] - 2026-08-10
 
 ### Changed

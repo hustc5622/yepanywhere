@@ -1,4 +1,11 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import {
+  type FileHandle,
+  appendFile,
+  mkdir,
+  open,
+  stat,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   CODEX_EVENT_SCHEMA_NAME,
@@ -112,6 +119,12 @@ export interface JsonlCodexEventStoreOptions {
   onCorruptLine?: (details: { lineNumber: number; reason: string }) => void;
 }
 
+interface CodexEventFileSnapshot {
+  size: number;
+  mtimeMs: number;
+  identity: string;
+}
+
 /**
  * Optional append-only durable store. It hydrates its indexes once, serializes
  * concurrent appends, and uses the same replay contract as the in-memory
@@ -127,6 +140,9 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private loaded: Promise<void> | null = null;
   private appendTail: Promise<void> = Promise.resolve();
   private needsAppendSeparator = false;
+  private lastKnownFileSize = 0;
+  private lastKnownMtimeMs = 0;
+  private lastKnownFileIdentity: string | null = null;
 
   constructor(options: JsonlCodexEventStoreOptions) {
     if (!options.filePath.trim()) {
@@ -140,6 +156,10 @@ export class JsonlCodexEventStore implements CodexEventStore {
   async append(event: CodexEventDraft): Promise<CodexEventAppendResult> {
     await this.ensureLoaded();
     return await this.withAppendLock(async () => {
+      // A different process or store instance may have appended or replaced
+      // the journal since this instance loaded it. Refresh under the same lock
+      // used by local appends so sequence assignment and indexes stay current.
+      await this.refreshFromDisk();
       const existing = this.findExisting(event);
       if (existing) {
         return { event: structuredClone(existing), inserted: false };
@@ -162,6 +182,11 @@ export class JsonlCodexEventStore implements CodexEventStore {
       );
       this.needsAppendSeparator = false;
       this.index(persisted);
+      // Deliberately leave the file snapshot at its pre-append boundary. The
+      // next refresh will read this line (and any concurrent external lines)
+      // from that exact offset, deduplicating the event already indexed here.
+      // A post-append stat could otherwise advance past an external append
+      // that raced between our write and the stat, permanently hiding it.
       return { event: structuredClone(persisted), inserted: true };
     });
   }
@@ -176,16 +201,22 @@ export class JsonlCodexEventStore implements CodexEventStore {
 
   async replay(query: CodexEventReplayQuery): Promise<CodexEventEnvelope[]> {
     await this.ensureLoaded();
-    const after = query.afterSequence ?? 0;
-    const through = query.throughSequence ?? Number.MAX_SAFE_INTEGER;
-    return (this.eventsBySession.get(query.sessionId) ?? [])
-      .filter((event) => event.sequence > after && event.sequence <= through)
-      .map((event) => structuredClone(event));
+    return await this.withAppendLock(async () => {
+      await this.refreshFromDisk();
+      const after = query.afterSequence ?? 0;
+      const through = query.throughSequence ?? Number.MAX_SAFE_INTEGER;
+      return (this.eventsBySession.get(query.sessionId) ?? [])
+        .filter((event) => event.sequence > after && event.sequence <= through)
+        .map((event) => structuredClone(event));
+    });
   }
 
   async latestSequence(sessionId: string): Promise<number> {
     await this.ensureLoaded();
-    return this.eventsBySession.get(sessionId)?.at(-1)?.sequence ?? 0;
+    return await this.withAppendLock(async () => {
+      await this.refreshFromDisk();
+      return this.eventsBySession.get(sessionId)?.at(-1)?.sequence ?? 0;
+    });
   }
 
   private async ensureLoaded(): Promise<void> {
@@ -193,18 +224,187 @@ export class JsonlCodexEventStore implements CodexEventStore {
     await this.loaded;
   }
 
-  private async load(): Promise<void> {
-    let contents: string;
+  /**
+   * Check if the backing file has grown since the last load. If so, read only
+   * the new tail and index it, avoiding a full-file re-read on every replay.
+   *
+   * Truncate/rotate detection: if the file size is smaller than what we last
+   * saw, or the mtime went backwards, we fall back to a full reload.
+   */
+  private async refreshFromDisk(): Promise<void> {
+    let snapshot: CodexEventFileSnapshot;
     try {
-      contents = await readFile(this.filePath, "utf8");
+      snapshot = fileSnapshot(await stat(this.filePath));
     } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") return;
+      if (isNodeError(error) && error.code === "ENOENT") {
+        this.resetLoadedState();
+        return;
+      }
       throw error;
     }
+
+    // File hasn't changed since we last loaded it.
+    if (
+      snapshot.size === this.lastKnownFileSize &&
+      snapshot.mtimeMs === this.lastKnownMtimeMs &&
+      snapshot.identity === this.lastKnownFileIdentity
+    ) {
+      return;
+    }
+
+    // Replacement, truncation, or an in-place rewrite requires an atomic full
+    // reload. Size alone cannot identify rotation because the new file may be
+    // equal to or larger than the previous one.
+    if (
+      (this.lastKnownFileIdentity !== null &&
+        snapshot.identity !== this.lastKnownFileIdentity) ||
+      snapshot.size < this.lastKnownFileSize ||
+      snapshot.mtimeMs < this.lastKnownMtimeMs ||
+      (snapshot.size === this.lastKnownFileSize &&
+        snapshot.mtimeMs !== this.lastKnownMtimeMs)
+    ) {
+      this.loaded = this.load();
+      await this.loaded;
+      return;
+    }
+
+    // File grew: read only the new tail bytes.
+    if (snapshot.size > this.lastKnownFileSize) {
+      await this.loadTail(snapshot);
+    }
+  }
+
+  private async loadTail(
+    expectedSnapshot: CodexEventFileSnapshot,
+  ): Promise<void> {
+    const previousSize = this.lastKnownFileSize;
+    if (previousSize <= 0) {
+      // Never loaded before; fall back to full load.
+      this.loaded = this.load();
+      await this.loaded;
+      return;
+    }
+
+    const tailLength = expectedSnapshot.size - previousSize;
+    if (tailLength <= 0) return;
+
+    let tailContents: string;
+    let handle: FileHandle | null = null;
+    let openedSnapshot: CodexEventFileSnapshot | null = null;
+    let reloadRequired = false;
+    try {
+      handle = await open(this.filePath, "r");
+      openedSnapshot = fileSnapshot(await handle.stat());
+      if (
+        openedSnapshot.identity !== expectedSnapshot.identity ||
+        openedSnapshot.identity !== this.lastKnownFileIdentity ||
+        openedSnapshot.size < previousSize
+      ) {
+        reloadRequired = true;
+        tailContents = "";
+      } else {
+        const openedTailLength = openedSnapshot.size - previousSize;
+        const buffer = Buffer.alloc(openedTailLength);
+        let bytesRead = 0;
+        while (bytesRead < openedTailLength) {
+          const result = await handle.read(
+            buffer,
+            bytesRead,
+            openedTailLength - bytesRead,
+            previousSize + bytesRead,
+          );
+          if (result.bytesRead === 0) break;
+          bytesRead += result.bytesRead;
+        }
+        if (bytesRead !== openedTailLength) {
+          reloadRequired = true;
+          tailContents = "";
+        } else {
+          tailContents = buffer.toString("utf8");
+        }
+      }
+    } catch {
+      reloadRequired = true;
+      tailContents = "";
+    } finally {
+      await handle?.close();
+    }
+    if (reloadRequired || !openedSnapshot) {
+      this.loaded = this.load();
+      await this.loaded;
+      return;
+    }
+
+    // The previous file may have lacked a trailing newline, so the first byte
+    // of the new tail could be a continuation of a partial record. We handle
+    // this by skipping the first line if it doesn't parse (it's likely a
+    // partial record from the previous boundary).
+    const lines = tailContents.split("\n");
+    let skippedFirst = false;
+    const touchedSessions = new Set<string>();
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]?.trim();
+      if (!line) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line) as unknown;
+      } catch {
+        // Partial record at the boundary; skip it.
+        if (index === 0 && !skippedFirst) {
+          skippedFirst = true;
+          continue;
+        }
+        this.onCorruptLine?.({
+          lineNumber: -1,
+          reason: "invalid_json",
+        });
+        continue;
+      }
+      if (!isCodexEventEnvelope(parsed)) {
+        this.onCorruptLine?.({ lineNumber: -1, reason: "invalid_envelope" });
+        continue;
+      }
+      const existing = this.findExisting(parsed);
+      if (!existing) {
+        this.index(parsed);
+        touchedSessions.add(parsed.sessionId);
+      }
+    }
+    for (const sessionId of touchedSessions) {
+      this.sortSessionEvents(sessionId);
+    }
+    this.lastKnownFileSize = openedSnapshot.size;
+    this.lastKnownMtimeMs = openedSnapshot.mtimeMs;
+    this.lastKnownFileIdentity = openedSnapshot.identity;
+    this.needsAppendSeparator = !tailContents.endsWith("\n");
+  }
+
+  private async load(): Promise<void> {
+    let contents: string;
+    let handle: FileHandle | null = null;
+    let snapshot: CodexEventFileSnapshot;
+    try {
+      handle = await open(this.filePath, "r");
+      contents = await handle.readFile("utf8");
+      snapshot = fileSnapshot(await handle.stat());
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        this.resetLoadedState();
+        return;
+      }
+      throw error;
+    } finally {
+      await handle?.close();
+    }
+    this.resetLoadedState();
     // A valid JSONL file may omit its final newline, and a crashed writer may
     // leave a partial final record. Either way, the next append must start on
     // a fresh line or it would corrupt both the old tail and the new event.
     this.needsAppendSeparator = contents.length > 0 && !contents.endsWith("\n");
+
+    this.lastKnownFileSize = Buffer.byteLength(contents);
+    this.lastKnownMtimeMs = snapshot.mtimeMs;
+    this.lastKnownFileIdentity = snapshot.identity;
 
     const lines = contents.split("\n");
     for (let index = 0; index < lines.length; index += 1) {
@@ -233,13 +433,29 @@ export class JsonlCodexEventStore implements CodexEventStore {
       const existing = this.findExisting(parsed);
       if (!existing) this.index(parsed);
     }
-    for (const events of this.eventsBySession.values()) {
-      events.sort(
+    for (const sessionId of this.eventsBySession.keys()) {
+      this.sortSessionEvents(sessionId);
+    }
+  }
+
+  private resetLoadedState(): void {
+    this.eventsBySession.clear();
+    this.eventsByIdentity.clear();
+    this.eventsByDedupeKey.clear();
+    this.needsAppendSeparator = false;
+    this.lastKnownFileSize = 0;
+    this.lastKnownMtimeMs = 0;
+    this.lastKnownFileIdentity = null;
+  }
+
+  private sortSessionEvents(sessionId: string): void {
+    this.eventsBySession
+      .get(sessionId)
+      ?.sort(
         (left, right) =>
           left.sequence - right.sequence ||
           left.eventId.localeCompare(right.eventId),
       );
-    }
   }
 
   private findExisting(
@@ -307,6 +523,18 @@ function isCodexEventEnvelope(value: unknown): value is CodexEventEnvelope {
     event.payload?.safety === "safe" &&
     typeof event.source?.connectionId === "string"
   );
+}
+
+function fileSnapshot(stats: Stats): CodexEventFileSnapshot {
+  return {
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    identity: fileIdentity(stats),
+  };
+}
+
+function fileIdentity(stats: Stats): string {
+  return `${String(stats.dev)}:${String(stats.ino)}:${String(stats.birthtimeMs)}`;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

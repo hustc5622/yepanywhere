@@ -35,13 +35,43 @@ export function reduceCodexEvent(
   }
 
   const state = structuredClone(current);
+  const indexes = createReductionIndexes(state);
+  applyCodexEventMutable(state, event, indexes);
+  return state;
+}
+
+export function createReductionIndexes(state: CanonicalCodexSessionState): {
+  appliedEventIds: Set<string>;
+  appliedDedupeKeys: Set<string>;
+} {
+  return {
+    appliedEventIds: new Set(state.appliedEventIds),
+    appliedDedupeKeys: new Set(state.appliedDedupeKeys),
+  };
+}
+
+export function applyCodexEventMutable(
+  state: CanonicalCodexSessionState,
+  event: CodexEventEnvelope,
+  indexes: { appliedEventIds: Set<string>; appliedDedupeKeys: Set<string> },
+): void {
+  if (
+    indexes.appliedEventIds.has(event.eventId) ||
+    (event.dedupeKey !== undefined &&
+      indexes.appliedDedupeKeys.has(event.dedupeKey))
+  ) {
+    return;
+  }
+
   if (event.sequence < state.lastSequence) {
     addAnomaly(state, event, "out_of_order");
   }
   state.lastSequence = Math.max(state.lastSequence, event.sequence);
   state.appliedEventIds.push(event.eventId);
+  indexes.appliedEventIds.add(event.eventId);
   if (event.dedupeKey !== undefined) {
     state.appliedDedupeKeys.push(event.dedupeKey);
+    indexes.appliedDedupeKeys.add(event.dedupeKey);
   }
 
   const classification =
@@ -62,7 +92,7 @@ export function reduceCodexEvent(
 
   if (event.sessionId !== state.sessionId) {
     addAnomaly(state, event, "session_mismatch");
-    return state;
+    return;
   }
 
   if (classification && !classification.known) {
@@ -74,12 +104,12 @@ export function reduceCodexEvent(
       compatibility: classification.compatibility,
       payload: structuredClone(event.payload),
     });
-    return state;
+    return;
   }
 
   if (event.direction === "server_request") {
     reduceServerRequest(state, event);
-    return state;
+    return;
   }
   if (
     event.direction === "client_response" &&
@@ -87,7 +117,7 @@ export function reduceCodexEvent(
     event.correlationId.startsWith("client-retry:")
   ) {
     reduceClientRetry(state, event, asObject(event.payload.data));
-    return state;
+    return;
   }
   if (
     event.direction === "client_response" &&
@@ -95,9 +125,9 @@ export function reduceCodexEvent(
     event.correlationId.startsWith("server-request:")
   ) {
     reduceServerRequestResolved(state, event, asObject(event.payload.data));
-    return state;
+    return;
   }
-  if (event.direction !== "server_notification") return state;
+  if (event.direction !== "server_notification") return;
 
   const payload = asObject(event.payload.data);
   switch (event.method) {
@@ -156,7 +186,6 @@ export function reduceCodexEvent(
       reduceItemDelta(state, event, payload);
       break;
   }
-  return state;
 }
 
 function reduceClientRetry(
@@ -215,13 +244,17 @@ export function reduceCodexEvents(
   initial: CanonicalCodexSessionState,
   events: readonly CodexEventEnvelope[],
 ): CanonicalCodexSessionState {
-  return [...events]
-    .sort(
-      (left, right) =>
-        left.sequence - right.sequence ||
-        left.eventId.localeCompare(right.eventId),
-    )
-    .reduce(reduceCodexEvent, initial);
+  const state = structuredClone(initial);
+  const indexes = createReductionIndexes(state);
+  const sorted = [...events].sort(
+    (left, right) =>
+      left.sequence - right.sequence ||
+      left.eventId.localeCompare(right.eventId),
+  );
+  for (const event of sorted) {
+    applyCodexEventMutable(state, event, indexes);
+  }
+  return state;
 }
 
 export async function replayCodexSession(

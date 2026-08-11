@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -669,6 +675,100 @@ describe("Codex JSONL event store", () => {
         .assistantText,
     ).toBe("ab");
     expect(readFileSync(filePath, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("refreshes external appends before assigning the next local sequence", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-events-shared-"));
+    tempDirs.push(directory);
+    const filePath = join(directory, "events.jsonl");
+    const firstStore = new JsonlCodexEventStore({ filePath });
+    const secondStore = new JsonlCodexEventStore({ filePath });
+    const firstIngress = await CodexEventIngress.create({
+      store: firstStore,
+      runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+      sessionId: "thread-shared",
+      connectionId: "connection-first",
+    });
+    const secondIngress = await CodexEventIngress.create({
+      store: secondStore,
+      runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+      sessionId: "thread-shared",
+      connectionId: "connection-second",
+    });
+
+    await firstIngress.ingestNotification({
+      method: "warning",
+      params: { message: "first" },
+    });
+    expect(await secondStore.latestSequence("thread-shared")).toBe(1);
+    await firstIngress.ingestNotification({
+      method: "warning",
+      params: { message: "second" },
+    });
+    await secondIngress.ingestNotification({
+      method: "warning",
+      params: { message: "third" },
+    });
+
+    const replayed = await firstStore.replay({ sessionId: "thread-shared" });
+    expect(replayed.map((event) => event.sequence)).toEqual([1, 2, 3]);
+  });
+
+  it("replaces stale indexes after journal truncation, rotation, and deletion", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-events-refresh-"));
+    tempDirs.push(directory);
+    const filePath = join(directory, "events.jsonl");
+    const store = new JsonlCodexEventStore({ filePath });
+    const originalIngress = await CodexEventIngress.create({
+      store,
+      runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+      sessionId: "thread-refresh",
+      connectionId: "connection-original",
+    });
+    await originalIngress.ingestNotification({
+      method: "warning",
+      params: { message: `old-${"x".repeat(2_000)}` },
+    });
+    expect(await store.replay({ sessionId: "thread-refresh" })).toHaveLength(1);
+
+    const truncatedPath = join(directory, "truncated.jsonl");
+    const truncatedIngress = await CodexEventIngress.create({
+      store: new JsonlCodexEventStore({ filePath: truncatedPath }),
+      runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+      sessionId: "thread-refresh",
+      connectionId: "connection-truncated",
+    });
+    await truncatedIngress.ingestNotification({
+      method: "warning",
+      params: { message: "after-truncate" },
+    });
+    writeFileSync(filePath, readFileSync(truncatedPath));
+
+    let replayed = await store.replay({ sessionId: "thread-refresh" });
+    expect(replayed).toHaveLength(1);
+    expect(JSON.stringify(replayed)).toContain("after-truncate");
+    expect(JSON.stringify(replayed)).not.toContain("old-");
+
+    const rotatedPath = join(directory, "rotated.jsonl");
+    const rotatedIngress = await CodexEventIngress.create({
+      store: new JsonlCodexEventStore({ filePath: rotatedPath }),
+      runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+      sessionId: "thread-refresh",
+      connectionId: "connection-rotated",
+    });
+    await rotatedIngress.ingestNotification({
+      method: "warning",
+      params: { message: `after-rotate-${"y".repeat(3_000)}` },
+    });
+    renameSync(rotatedPath, filePath);
+
+    replayed = await store.replay({ sessionId: "thread-refresh" });
+    expect(replayed).toHaveLength(1);
+    expect(JSON.stringify(replayed)).toContain("after-rotate");
+    expect(JSON.stringify(replayed)).not.toContain("after-truncate");
+
+    rmSync(filePath);
+    expect(await store.replay({ sessionId: "thread-refresh" })).toEqual([]);
   });
 
   it("redacts correlated secret defaults and answers before JSONL persistence, including after replay", async () => {

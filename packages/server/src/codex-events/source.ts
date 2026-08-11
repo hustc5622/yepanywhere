@@ -1,3 +1,4 @@
+import type { CodexProjectionCache } from "./projection-cache.js";
 import type { CodexEventStore } from "./store.js";
 import type { CodexEventEnvelope } from "./types.js";
 
@@ -57,6 +58,47 @@ export async function selectCodexEventSource(
     const events = await source.createStore().replay({ sessionId });
     if (events.length > 0) {
       return { sourceId: source.id, events };
+    }
+  }
+  return null;
+}
+
+export interface SelectedCodexEventSourceWithCache {
+  sourceId: string;
+  events: CodexEventEnvelope[];
+  /** True when an existing compatible projection can consume this replay. */
+  warm: boolean;
+}
+
+/**
+ * Select the first complete journal containing the session while validating
+ * any cached projection against the journal's persisted prefix.
+ *
+ * The JSONL store performs incremental file-tail hydration internally, but the
+ * selector returns a complete in-memory replay because candidate timestamps,
+ * interactions, and generated-artifact provenance require historical events.
+ * The reducer cache still applies only sequences newer than its lastSequence.
+ */
+export async function selectCodexEventSourceWithCache(
+  sources: readonly CodexEventStoreSource[],
+  sessionId: string,
+  cache: CodexProjectionCache,
+): Promise<SelectedCodexEventSourceWithCache | null> {
+  for (const source of sources) {
+    const cachedSequence = cache.getLastSequence(source.id, sessionId);
+    const store = source.createStore();
+    const events = await store.replay({ sessionId });
+    let warm = cachedSequence > 0;
+    if (warm && !cache.matchesReplaySnapshot(source.id, sessionId, events)) {
+      cache.invalidate(source.id, sessionId);
+      warm = false;
+    }
+    if (events.length > 0) {
+      return {
+        sourceId: source.id,
+        events,
+        warm,
+      };
     }
   }
   return null;

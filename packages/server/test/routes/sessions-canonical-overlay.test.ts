@@ -51,7 +51,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
     ]);
 
     const response = await routes.request(
-      `/projects/${projectId}/sessions/${sessionId}`,
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
     );
 
     expect(response.status).toBe(200);
@@ -71,6 +71,48 @@ describe("sessions route canonical Codex refresh overlay", () => {
     });
     expect(JSON.stringify(body)).not.toContain("bridge answer");
     expect(bridgeReplay).not.toHaveBeenCalled();
+  });
+
+  it("preserves canonical output across warm reads and applies appended events", async () => {
+    const providerStore = await seededStore(
+      "thread-provider",
+      "turn-provider",
+      "agent-provider",
+      "provider answer",
+    );
+    const replay = vi.spyOn(providerStore, "replay");
+    const routes = createTestRoutes("provider answer", [
+      fixedSource("provider", providerStore),
+    ]);
+    const path = `/projects/${projectId}/sessions/${sessionId}?view=canonical`;
+
+    const first = await routes.request(path);
+    const second = await routes.request(path);
+    for (const response of [first, second]) {
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.messages[0]).toMatchObject({
+        codexCanonicalRefresh: true,
+        codexThreadItem: { id: "agent-provider" },
+      });
+    }
+
+    await providerStore.append(
+      testDraft(
+        "future/item/delta",
+        { opaque: true },
+        { sessionId, eventId: "future-event" },
+      ),
+    );
+    const appended = await routes.request(path);
+    const appendedBody = await appended.json();
+    expect(
+      appendedBody.messages.some(
+        (message: { warningKind?: string }) =>
+          message.warningKind === "unknown_codex_notification",
+      ),
+    ).toBe(true);
+    expect(replay).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the normalized legacy response unchanged without a journal", async () => {
@@ -94,6 +136,38 @@ describe("sessions route canonical Codex refresh overlay", () => {
     expect(body.messages[0].codexCanonicalRefresh).toBeUndefined();
   });
 
+  it("defaults to legacy normalization even when a canonical journal exists", async () => {
+    // A populated provider journal must NOT trigger canonical overlay
+    // unless the caller explicitly opts in via view=canonical.
+    const providerStore = await seededStore(
+      "thread-provider",
+      "turn-provider",
+      "agent-provider",
+      "provider answer",
+    );
+    const routes = createTestRoutes("legacy answer", [
+      fixedSource("provider", providerStore),
+    ]);
+
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}`,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]).toMatchObject({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "legacy answer" }],
+      },
+    });
+    expect(body.messages[0].codexThreadItem).toBeUndefined();
+    expect(body.messages[0].codexCanonicalRefresh).toBeUndefined();
+    expect(body.messages[0].codexThreadId).toBeUndefined();
+  });
+
   it("falls back to normalized rollout when the canonical journal is unreadable", async () => {
     const failingStore = {
       replay: vi.fn(async () => {
@@ -105,7 +179,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
     ]);
 
     const response = await routes.request(
-      `/projects/${projectId}/sessions/${sessionId}`,
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
     );
 
     expect(response.status).toBe(200);
@@ -114,6 +188,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
       { type: "text", text: "legacy fallback" },
     ]);
     expect(body.messages[0]?.codexCanonicalRefresh).toBeUndefined();
+    expect(failingStore.replay).toHaveBeenCalledOnce();
   });
 
   it("keeps canonical refresh responses path-free without mutating rollout input", async () => {
@@ -152,7 +227,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
     );
 
     const response = await routes.request(
-      `/projects/${projectId}/sessions/${sessionId}`,
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
     );
 
     expect(response.status).toBe(200);
@@ -250,7 +325,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
       },
     );
     const response = await routes.request(
-      `/projects/${projectId}/sessions/${sessionId}`,
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
     );
     const body = await response.json();
     const artifactMessage = body.messages.find(
@@ -258,6 +333,18 @@ describe("sessions route canonical Codex refresh overlay", () => {
         Array.isArray(message.codexGeneratedArtifacts),
     );
     expect(artifactMessage?.codexGeneratedArtifacts).toEqual(live.artifacts);
+
+    const warmResponse = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
+    );
+    const warmBody = await warmResponse.json();
+    const warmArtifactMessage = warmBody.messages.find(
+      (message: { codexGeneratedArtifacts?: unknown }) =>
+        Array.isArray(message.codexGeneratedArtifacts),
+    );
+    expect(warmArtifactMessage?.codexGeneratedArtifacts).toEqual(
+      live.artifacts,
+    );
 
     const artifact = live.artifacts[0];
     if (!artifact) throw new Error("missing live artifact");
@@ -270,7 +357,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
     );
     await rename(registryPath, `${registryPath}.missing`);
     const missingResponse = await routes.request(
-      `/projects/${projectId}/sessions/${sessionId}`,
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
     );
     expect(JSON.stringify(await missingResponse.json())).not.toContain(
       artifact.id,

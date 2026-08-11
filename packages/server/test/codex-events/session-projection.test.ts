@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type CodexEventEnvelope,
   type CodexEventStore,
+  CodexProjectionCache,
   overlayCanonicalCodexSessionMessages,
   selectCodexEventSource,
+  selectCodexEventSourceWithCache,
 } from "../../src/codex-events/index.js";
 import type { Message } from "../../src/supervisor/types.js";
 import { testEvent } from "./helpers.js";
@@ -60,6 +62,174 @@ describe("canonical Codex persisted session projection", () => {
         text: "hello from Codex",
         phase: "final_answer",
       },
+    });
+  });
+
+  it("keeps item identity matches stable when earlier synthetic rows are inserted", () => {
+    const legacy: Message[] = [
+      {
+        id: "legacy-target",
+        uuid: "legacy-target",
+        type: "assistant",
+        itemId: "target",
+        timestamp: new Date(10_000).toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "legacy target" }],
+        },
+      },
+    ];
+    const events = [
+      testEvent(
+        1,
+        "item/completed",
+        {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "unmatched",
+            type: "agentMessage",
+            text: "unmatched",
+          },
+        },
+        { eventId: "unmatched-event" },
+      ),
+      testEvent(
+        2,
+        "item/completed",
+        {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "target",
+            type: "agentMessage",
+            text: "canonical target",
+          },
+        },
+        { eventId: "target-event" },
+      ),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      legacy,
+      events,
+    );
+
+    expect(result.messages).toHaveLength(2);
+    expect(
+      result.messages.find((message) => message.uuid === "legacy-target")
+        ?.codexThreadItem,
+    ).toMatchObject({ id: "target" });
+    expect(
+      result.messages.find((message) => message.uuid !== "legacy-target")
+        ?.codexThreadItem,
+    ).toMatchObject({ id: "unmatched" });
+  });
+
+  it("windows candidate construction to the recent event tail", () => {
+    const events = Array.from({ length: 5 }, (_, index) =>
+      testEvent(
+        index + 1,
+        "item/completed",
+        {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: `item-${index + 1}`,
+            type: "agentMessage",
+            text: `answer-${index + 1}`,
+          },
+        },
+        { eventId: `event-${index + 1}` },
+      ),
+    );
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+      { maxCandidateCount: 2 },
+    );
+
+    expect(
+      result.messages.map((message) => message.codexEventSequence),
+    ).toEqual([4, 5]);
+  });
+
+  it("keeps an old item whose lifecycle was touched inside the recent window", () => {
+    const events = [
+      testEvent(1, "item/started", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "active-item", type: "agentMessage", text: "" },
+      }),
+      testEvent(2, "item/completed", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "older-item", type: "agentMessage", text: "older" },
+      }),
+      testEvent(3, "item/agentMessage/delta", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "active-item",
+        delta: "recent text",
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+      { maxCandidateCount: 1 },
+    );
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.codexThreadItem).toMatchObject({
+      id: "active-item",
+    });
+    expect(JSON.stringify(result.messages[0])).toContain("recent text");
+  });
+
+  it("keeps an old interaction request resolved inside the recent window", () => {
+    const request = {
+      ...testEvent(
+        1,
+        "item/tool/requestUserInput",
+        { threadId: "thread-1", turnId: "turn-1", itemId: "question-1" },
+        { direction: "server_request", eventId: "request-event" },
+      ),
+      requestId: "request-1",
+      correlationId: "server-request:request-1",
+    } satisfies CodexEventEnvelope;
+    const olderItem = testEvent(2, "item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "older-item", type: "agentMessage", text: "older" },
+    });
+    const response = {
+      ...testEvent(
+        3,
+        "item/tool/requestUserInput",
+        { result: { answers: {} } },
+        { direction: "client_response", eventId: "response-event" },
+      ),
+      phase: "resolved" as const,
+      requestId: "request-1",
+      correlationId: "server-request:request-1",
+    } satisfies CodexEventEnvelope;
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      [request, olderItem, response],
+      { maxCandidateCount: 1 },
+    );
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      warningKind: "codex_interaction",
+      codexInteraction: { status: "resolved", resolvedSequence: 3 },
     });
   });
 
@@ -332,6 +502,100 @@ describe("canonical Codex persisted session projection", () => {
     });
     expect(provider.replay).toHaveBeenCalledOnce();
     expect(bridge.replay).not.toHaveBeenCalled();
+  });
+
+  it("returns a complete replay on warm cache hits and invalidates changed prefixes", async () => {
+    const original = testEvent(1, "warning", { message: "original" });
+    const replacement = testEvent(
+      1,
+      "warning",
+      { message: "replacement" },
+      { eventId: "replacement-event" },
+    );
+    let replayed = [original];
+    const store = {
+      replay: vi.fn(async () => structuredClone(replayed)),
+    } as unknown as CodexEventStore;
+    const sources = [{ id: "provider", createStore: () => store }];
+    const cache = new CodexProjectionCache();
+
+    const cold = await selectCodexEventSourceWithCache(
+      sources,
+      "session-1",
+      cache,
+    );
+    expect(cold).toMatchObject({ warm: false, events: [original] });
+    if (!cold) throw new Error("missing cold source");
+    cache.apply(cold.sourceId, "session-1", cold.events);
+
+    const warm = await selectCodexEventSourceWithCache(
+      sources,
+      "session-1",
+      cache,
+    );
+    expect(warm).toMatchObject({ warm: true, events: [original] });
+
+    replayed = [replacement];
+    const rotated = await selectCodexEventSourceWithCache(
+      sources,
+      "session-1",
+      cache,
+    );
+    expect(rotated).toMatchObject({ warm: false, events: [replacement] });
+    expect(cache.getLastSequence("provider", "session-1")).toBe(0);
+  });
+
+  it("keeps a warm projection when the replay contains deduplicated rows", async () => {
+    const accepted = testEvent(
+      1,
+      "warning",
+      { message: "accepted" },
+      { eventId: "accepted-event", dedupeKey: "same-notification" },
+    );
+    const duplicate = testEvent(
+      2,
+      "warning",
+      { message: "duplicate" },
+      { eventId: "duplicate-event", dedupeKey: "same-notification" },
+    );
+    const store = fixedStore([accepted, duplicate]);
+    const sources = [{ id: "provider", createStore: () => store.store }];
+    const cache = new CodexProjectionCache();
+    cache.apply("provider", "session-1", [accepted, duplicate]);
+
+    const selected = await selectCodexEventSourceWithCache(
+      sources,
+      "session-1",
+      cache,
+    );
+
+    expect(selected).toMatchObject({
+      warm: true,
+      events: [accepted, duplicate],
+    });
+    expect(cache.getLastSequence("provider", "session-1")).toBe(2);
+  });
+
+  it("evicts least-recently-used projections at the event-count waterline", () => {
+    const cache = new CodexProjectionCache({
+      maxEntries: 4,
+      maxTotalEvents: 1,
+    });
+    cache.apply("provider", "session-1", [
+      testEvent(1, "warning", { message: "first" }),
+    ]);
+    cache.apply("provider", "session-2", [
+      testEvent(
+        1,
+        "warning",
+        { message: "second" },
+        { sessionId: "session-2" },
+      ),
+    ]);
+
+    expect(cache.size).toBe(1);
+    expect(cache.getLastSequence("provider", "session-1")).toBe(0);
+    expect(cache.getLastSequence("provider", "session-2")).toBe(1);
   });
 
   it("preserves the legacy fallback when no canonical journal exists", () => {

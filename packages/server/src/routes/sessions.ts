@@ -33,9 +33,11 @@ import type { FeishuDurableInbox } from "../channels/feishu/inbox.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import {
   type CodexEventStoreSource,
+  CodexOverlayBudgetExceededError,
+  CodexProjectionCache,
   normalizeCodexEventStoreSources,
   overlayCanonicalCodexSessionMessages,
-  selectCodexEventSource,
+  selectCodexEventSourceWithCache,
 } from "../codex-events/index.js";
 import {
   type SessionInputResponseBody,
@@ -151,6 +153,8 @@ export interface SessionsDeps {
   codexBridgeService?: CodexBridgeController;
   /** Ordered, independently sequenced canonical journals for persisted refresh. */
   codexEventStoreSources?: readonly CodexEventStoreSource[];
+  /** Process-level projection cache for incremental canonical replay. */
+  codexProjectionCache?: CodexProjectionCache;
   /** Reads restart-safe generated manifests from the managed upload root. */
   generatedArtifactUploadManager?: Pick<
     UploadManager,
@@ -695,6 +699,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const codexEventStoreSources = normalizeCodexEventStoreSources(
     deps.codexEventStoreSources ?? [],
   );
+  const codexProjectionCache =
+    deps.codexProjectionCache ?? new CodexProjectionCache();
   const generatedArtifactUploadManager =
     deps.generatedArtifactUploadManager ?? new UploadManager();
   const runtimeController =
@@ -1206,6 +1212,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   //   ?aroundMessageId=<id> - return a bounded window centered on a target message
   //   ?afterWindowMessageId=<id> - return the next bounded window after a cursor
   //   ?branchId=<id> - derived branch id to render
+  //   ?view=canonical - explicitly request canonical overlay; default is legacy
   routes.get("/projects/:projectId/sessions/:sessionId", async (c) => {
     const projectId = c.req.param("projectId");
     const requestedSessionId = c.req.param("sessionId");
@@ -1216,6 +1223,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const afterWindowMessageId = c.req.query("afterWindowMessageId");
     const branchId = c.req.query("branchId");
     const maxMessagesParam = c.req.query("maxMessages");
+    const viewParam = c.req.query("view");
+    const canonicalViewRequested = viewParam === "canonical";
     const tailCompactions =
       tailCompactionsParam !== undefined
         ? Number.parseInt(tailCompactionsParam, 10)
@@ -1314,16 +1323,29 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     let session = loadedSession ? normalizeSession(loadedSession) : null;
 
+    // Compute maxMessages early so the canonical overlay can window its
+    // candidate construction.
+    const boundedMaxMessages =
+      maxMessages !== undefined && !Number.isNaN(maxMessages) && maxMessages > 0
+        ? maxMessages
+        : undefined;
+
     if (
       session &&
+      canonicalViewRequested &&
       isCodexProviderName(session.provider) &&
       codexEventStoreSources.length > 0
     ) {
+      const canonicalStartedMs = Date.now();
       try {
-        const selected = await selectCodexEventSource(
+        const canonicalBudgetMs = 2_000;
+        const selectStartedMs = Date.now();
+        const selected = await selectCodexEventSourceWithCache(
           codexEventStoreSources,
           sessionId,
+          codexProjectionCache,
         );
+        const journalReplayMs = Date.now() - selectStartedMs;
         if (selected) {
           let generatedArtifacts: GeneratedArtifactManifest[] = [];
           try {
@@ -1340,6 +1362,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               "Canonical Codex generated artifacts unavailable on refresh",
             );
           }
+          const overlayStartedMs = Date.now();
+          const canWindowCanonicalTail =
+            boundedMaxMessages !== undefined &&
+            afterMessageId === undefined &&
+            beforeMessageId === undefined &&
+            aroundMessageId === undefined &&
+            afterWindowMessageId === undefined &&
+            branchId === undefined;
           const overlay = overlayCanonicalCodexSessionMessages(
             sessionId,
             session.messages,
@@ -1348,15 +1378,47 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               appendUnmatched: afterMessageId === undefined,
               ...(afterMessageId === undefined ? {} : { afterMessageId }),
               generatedArtifacts,
+              sourceId: selected.sourceId,
+              projectionCache: codexProjectionCache,
+              startedMs: canonicalStartedMs,
+              budgetMs: canonicalBudgetMs,
+              ...(!canWindowCanonicalTail
+                ? {}
+                : { maxCandidateCount: boundedMaxMessages }),
             },
           );
           session = { ...session, messages: overlay.messages };
+          getLogger().debug(
+            {
+              sessionId,
+              sourceId: selected.sourceId,
+              warm: selected.warm,
+              eventCount: overlay.eventCount,
+              projectedMessageCount: overlay.projectedMessageCount,
+              journalReplayMs,
+              overlayMs: Date.now() - overlayStartedMs,
+              totalMs: Date.now() - canonicalStartedMs,
+              cacheSize: codexProjectionCache.size,
+            },
+            "Canonical Codex overlay completed",
+          );
         }
-      } catch {
+      } catch (error) {
+        const isBudgetExceeded =
+          error instanceof CodexOverlayBudgetExceededError;
         // Refresh remains available from the provider rollout if a canonical
-        // journal is temporarily unreadable or exceeds its safety bound.
+        // journal is temporarily unreadable, exceeds its safety bound, or
+        // blows the soft time budget.
         getLogger().warn(
-          { sessionId },
+          {
+            sessionId,
+            eventCount:
+              error instanceof CodexOverlayBudgetExceededError
+                ? error.eventCount
+                : undefined,
+            budgetExceeded: isBudgetExceeded,
+            totalMs: Date.now() - canonicalStartedMs,
+          },
           "Canonical Codex session overlay unavailable; using legacy normalization",
         );
       }
@@ -1526,10 +1588,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // tailCompactions slices to last N compact boundaries; skip when afterMessageId is
     // present since that's a different use case (incremental forward-fetch)
     let paginationInfo: PaginationInfo | undefined;
-    const boundedMaxMessages =
-      maxMessages !== undefined && !Number.isNaN(maxMessages) && maxMessages > 0
-        ? maxMessages
-        : undefined;
     if (aroundMessageId && !afterMessageId) {
       const sliced = sliceAroundMessage(
         session.messages,
