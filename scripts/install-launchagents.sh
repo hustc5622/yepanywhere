@@ -240,7 +240,9 @@ prepare_private_log() {
     return 1
   fi
   if [[ -f "$path" ]]; then
-    size="$(stat -f '%z' "$path" 2>/dev/null || stat -c '%s' "$path" 2>/dev/null || printf '0')"
+    if ! size="$(stat -f '%z' "$path" 2>/dev/null)"; then
+      size="$(stat -c '%s' "$path" 2>/dev/null || printf '0')"
+    fi
   fi
   if (( max_bytes > 0 && size > max_bytes )); then
     [[ -f "$path.2" ]] && mv -f "$path.2" "$path.3"
