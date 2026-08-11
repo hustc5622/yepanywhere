@@ -1457,7 +1457,12 @@ function convertCodexMessagePayload(
     .map((block) =>
       "text" in block && typeof block.text === "string" ? block.text : "",
     )
-    .join("");
+    // Codex emits local-media labels as separate input_text items around the
+    // input_image/input_audio item. Keep those user-input boundaries so a
+    // preceding managed-upload line cannot absorb the next media marker into
+    // its private path during public projection. Assistant output fragments
+    // remain byte-for-byte concatenated.
+    .join(payload.role === "user" ? "\n" : "");
 
   if (
     payload.role === "user" &&

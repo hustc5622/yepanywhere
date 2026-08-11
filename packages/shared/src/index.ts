@@ -211,6 +211,7 @@ export type {
   UploadClientMessage,
   UploadServerMessage,
 } from "./upload.js";
+export { isManagedUploadDownloadUrl } from "./upload.js";
 
 // SDK schema types (type-only, no Zod runtime)
 export type {

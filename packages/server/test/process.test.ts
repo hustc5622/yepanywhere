@@ -1649,6 +1649,10 @@ describe("Process", () => {
     });
 
     it("publishes attachment metadata without server paths in history and SSE", async () => {
+      const managedPath =
+        "/Users/test/.yep-anywhere/uploads/proj-1/sess-1/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+      const downloadUrl =
+        "/api/projects/proj-1/sessions/sess-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },
       ]);
@@ -1671,11 +1675,12 @@ describe("Process", () => {
         text: "Here is a screenshot",
         attachments: [
           {
-            id: "file-1",
+            id: "123e4567-e89b-12d3-a456-426614174000",
             originalName: "screenshot.png",
+            name: "123e4567-e89b-12d3-a456-426614174000_screenshot.png",
             size: 1024,
             mimeType: "image/png",
-            path: "/uploads/screenshot.png",
+            path: managedPath,
           },
         ],
       });
@@ -1691,11 +1696,10 @@ describe("Process", () => {
       expect(content).toContain("screenshot.png");
       expect(content).toContain("1.0 KB");
       expect(content).toContain("image/png");
-      expect(content).toContain("[managed attachment]");
-      expect(content).not.toContain("/uploads/screenshot.png");
-      expect(JSON.stringify(emittedMessages)).not.toContain(
-        "/uploads/screenshot.png",
-      );
+      expect(content).toContain(downloadUrl);
+      expect(content).not.toContain(managedPath);
+      expect(JSON.stringify(emittedMessages)).toContain(downloadUrl);
+      expect(JSON.stringify(emittedMessages)).not.toContain(managedPath);
     });
 
     it("publishes a safe initial attachment projection", async () => {

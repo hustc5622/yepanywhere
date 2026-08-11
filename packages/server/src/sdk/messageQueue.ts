@@ -1,9 +1,10 @@
+import { isManagedUploadDownloadUrl } from "@yep-anywhere/shared";
 import type { QueuedUserMessage, UserMessage } from "./types.js";
 
 export const MANAGED_ATTACHMENT_MARKER = "[managed attachment]";
 
 const MANAGED_UPLOAD_LINE_PATTERN =
-  /^- ([\p{L}\p{N} ._()+@-]{1,160}) \(((?:0|[1-9]\d*)(?:\.\d)? (?:B|KB|MB|GB)), ([A-Za-z0-9!#$&^_.+/-]{1,120})\): [^\r\n]+$/u;
+  /^- ([\p{L}\p{N} ._()+@-]{1,160}) \(((?:0|[1-9]\d*)(?:\.\d)? (?:B|KB|MB|GB)), ([A-Za-z0-9!#$&^_.+/-]{1,120})\): ([^\r\n]{1,2048})$/u;
 
 export interface UserPromptProjection {
   /** Provider-only prompt; may contain server-local managed paths. */
@@ -120,6 +121,33 @@ function safeMimeLabel(value: string): string {
   );
 }
 
+/**
+ * Convert an internal managed-upload path to its authenticated, path-free API
+ * route. Unknown locations fail closed to MANAGED_ATTACHMENT_MARKER.
+ */
+function managedUploadDownloadUrl(value: string): string | null {
+  const location = value.trim();
+  const existingPublicLocation: unknown = location;
+  if (isManagedUploadDownloadUrl(existingPublicLocation)) {
+    return existingPublicLocation;
+  }
+
+  const parts = location.split(/[\\/]/u);
+  if (parts.at(-4) !== "uploads") return null;
+
+  const projectId = parts.at(-3);
+  const sessionId = parts.at(-2);
+  const fileName = parts.at(-1);
+  if (!projectId || !sessionId || !fileName) return null;
+
+  const candidate = `/api/projects/${encodeURIComponent(
+    projectId,
+  )}/sessions/${encodeURIComponent(sessionId)}/upload/${encodeURIComponent(
+    fileName,
+  )}`;
+  return isManagedUploadDownloadUrl(candidate) ? candidate : null;
+}
+
 /** Construct provider-only and public views from one structured message. */
 export function buildUserPromptProjection(
   message: Pick<UserMessage, "text" | "attachments" | "documents">,
@@ -136,7 +164,8 @@ export function buildUserPromptProjection(
     const publicLines = message.attachments.map((file) => {
       const name = safeAttachmentLabel(file.originalName || file.name);
       const mimeType = safeMimeLabel(file.mimeType);
-      return `- ${name} (${formatSize(file.size)}, ${mimeType}): ${MANAGED_ATTACHMENT_MARKER}`;
+      const location = managedUploadDownloadUrl(file.path);
+      return `- ${name} (${formatSize(file.size)}, ${mimeType}): ${location ?? MANAGED_ATTACHMENT_MARKER}`;
     });
     internalPrompt += `\n\nUser uploaded files:\n${internalLines.join("\n")}`;
     publicPrompt += `\n\nUser uploaded files:\n${publicLines.join("\n")}`;
@@ -194,8 +223,9 @@ export function sanitizeManagedAttachmentPrompt(text: string): string {
         if (!match?.[1] || !match[2] || !match[3]) return [];
         const name = safeAttachmentLabel(match[1]);
         const mimeType = safeMimeLabel(match[3]);
+        const location = match[4] ? managedUploadDownloadUrl(match[4]) : null;
         return [
-          `- ${name} (${match[2]}, ${mimeType}): ${MANAGED_ATTACHMENT_MARKER}`,
+          `- ${name} (${match[2]}, ${mimeType}): ${location ?? MANAGED_ATTACHMENT_MARKER}`,
         ];
       });
     return `${text.slice(0, uploadIndex)}${uploadMarker}${safeLines.join("\n")}${

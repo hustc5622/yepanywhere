@@ -1,3 +1,4 @@
+import { isManagedUploadDownloadUrl } from "@yep-anywhere/shared";
 import { memo, useState } from "react";
 import { useFetchedImage } from "../../hooks/useRemoteImage";
 import {
@@ -97,6 +98,9 @@ function isImageMimeType(mimeType: string): boolean {
  * Path format: /.../.yep-anywhere/uploads/{projectId}/{sessionId}/{filename}
  */
 function getUploadUrl(filePath: string): string | null {
+  const publicLocation: unknown = filePath;
+  if (isManagedUploadDownloadUrl(publicLocation)) return publicLocation;
+
   // Split path and get last 3 components: projectId, sessionId, filename
   const parts = filePath.split("/");
   if (parts.length < 3) return null;
@@ -249,8 +253,38 @@ function mergeUploadedFiles(
 ): UploadedFileInfo[] {
   const seen = new Set<string>();
   const merged: UploadedFileInfo[] = [];
+  const remainingSecondary = [...secondary];
 
-  for (const file of [...primary, ...secondary]) {
+  for (const file of primary) {
+    if (seen.has(file.path)) continue;
+    seen.add(file.path);
+
+    const companionIndex = remainingSecondary.findIndex(
+      (candidate) =>
+        candidate.path === file.path ||
+        (!file.previewUrl &&
+          isImageMimeType(file.mimeType) &&
+          isImageMimeType(candidate.mimeType) &&
+          Boolean(candidate.previewUrl)),
+    );
+    if (companionIndex === -1) {
+      merged.push(file);
+      continue;
+    }
+
+    const [companion] = remainingSecondary.splice(companionIndex, 1);
+    if (!companion) {
+      merged.push(file);
+      continue;
+    }
+    seen.add(companion.path);
+    merged.push({
+      ...file,
+      ...(companion.previewUrl ? { previewUrl: companion.previewUrl } : {}),
+    });
+  }
+
+  for (const file of remainingSecondary) {
     if (seen.has(file.path)) continue;
     seen.add(file.path);
     merged.push(file);

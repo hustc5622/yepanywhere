@@ -130,6 +130,66 @@ describe("UserPromptBlock", () => {
     expect(screen.getByRole("alert").textContent).toContain("File not found");
   });
 
+  it("opens path-free managed upload URLs from public prompts", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "Synthetic preview failure" }), {
+        status: 503,
+        statusText: "Unavailable",
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const downloadUrl =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+    const content = `Check this image.\n\nUser uploaded files:\n- screenshot.png (1 KB, image/png): ${downloadUrl}`;
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /screenshot\.png/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(downloadUrl, {
+        credentials: "include",
+      });
+    });
+    expect(screen.getByRole("dialog")).toBeDefined();
+  });
+
+  it("merges persisted Codex image data into the named managed attachment", () => {
+    const downloadUrl =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+    const content: ContentBlock[] = [
+      {
+        type: "text",
+        text: `Check this image.\n\nUser uploaded files:\n- screenshot.png (1 KB, image/png): ${downloadUrl}`,
+      },
+      {
+        type: "input_image",
+        image_url: "data:image/png;base64,AAAA",
+        mime_type: "image/png",
+      },
+    ];
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /screenshot\.png/i }),
+    ).toBeDefined();
+    expect(screen.queryByText(/pasted-image-1\.png/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /screenshot\.png/i }));
+    expect(screen.getByRole("img", { name: /screenshot\.png/i })).toBeDefined();
+  });
+
   it("renders injected skill blocks as clickable skill references", () => {
     const content = `<skill>
 <name>git-commit-push</name>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MessageQueue,
+  buildUserPromptProjection,
   getUserPromptProjection,
   sanitizeManagedAttachmentPrompt,
 } from "../../src/sdk/messageQueue.js";
@@ -92,6 +93,33 @@ describe("MessageQueue lifecycle", () => {
     expect(projection.publicPrompt).not.toContain("C:\\managed");
     expect(projection.publicPrompt).not.toContain("folder: confidential");
     expect(projection.publicPrompt).not.toContain("leaked-line");
+  });
+
+  it("projects valid managed uploads to path-free authenticated URLs", () => {
+    const managedPath =
+      "/Users/test/.yep-anywhere/uploads/cHJvamVjdA/session-1/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+    const downloadUrl =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+    const projection = buildUserPromptProjection({
+      text: "inspect",
+      attachments: [
+        {
+          id: "123e4567-e89b-12d3-a456-426614174000",
+          originalName: "screenshot.png",
+          name: "123e4567-e89b-12d3-a456-426614174000_screenshot.png",
+          size: 1024,
+          mimeType: "image/png",
+          path: managedPath,
+        },
+      ],
+    });
+
+    expect(projection.internalPrompt).toContain(managedPath);
+    expect(projection.publicPrompt).toContain(downloadUrl);
+    expect(projection.publicPrompt).not.toContain("/Users/test");
+    expect(sanitizeManagedAttachmentPrompt(projection.publicPrompt)).toBe(
+      projection.publicPrompt,
+    );
   });
 
   it("fails closed on ambiguous labels without scanning ordinary prose", () => {

@@ -19,6 +19,20 @@ describe("public user prompt projection", () => {
     expect(projected).not.toContain(managedPath);
   });
 
+  it("retains a safe download reference for a valid managed upload", () => {
+    const managedPath =
+      "/test/runtime/uploads/cHJvamVjdA/session-1/123e4567-e89b-12d3-a456-426614174000_report.pdf";
+    const prompt = `Review\n\nUser uploaded files:\n- report.pdf (2.0 KB, application/pdf): ${managedPath}`;
+
+    const projected = sanitizePublicUserPrompt(prompt);
+
+    expect(projected).toContain(
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_report.pdf",
+    );
+    expect(projected).not.toContain(managedPath);
+    expect(sanitizePublicUserPrompt(projected)).toBe(projected);
+  });
+
   it("projects pinned Codex local-media tags without scanning ordinary paths", () => {
     const imagePath = "/test/runtime/media/private.png";
     const ordinary = "Compare /workspace/project/a.ts with C:\\repo\\b.ts";

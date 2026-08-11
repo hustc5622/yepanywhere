@@ -2091,7 +2091,10 @@ describe("Codex Normalization", () => {
 
 describe("Codex public prompt projection", () => {
   it("keeps managed media paths out of normalized user content without mutating rollout", () => {
-    const uploadPath = "/test/runtime/uploads/report.pdf";
+    const uploadPath =
+      "/test/runtime/uploads/cHJvamVjdA/session-1/123e4567-e89b-12d3-a456-426614174000_report.pdf";
+    const downloadUrl =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_report.pdf";
     const imagePath = "/test/runtime/media/shot.png";
     const prompt = `Review /workspace/project/README.md\n\nUser uploaded files:\n- report.pdf (2.0 KB, application/pdf): ${uploadPath}`;
     const entries: CodexSessionEntry[] = [
@@ -2124,6 +2127,7 @@ describe("Codex public prompt projection", () => {
     const serialized = JSON.stringify(normalized);
 
     expect(serialized).toContain("[managed attachment]");
+    expect(serialized).toContain(downloadUrl);
     expect(serialized).toContain("/workspace/project/README.md");
     expect(serialized).not.toContain(uploadPath);
     expect(serialized).not.toContain(imagePath);
