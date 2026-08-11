@@ -17,6 +17,7 @@ $ServiceConfigPath = if ($env:YEP_SERVICE_CONFIG_PATH) {
   Join-Path $env:USERPROFILE ".yep-anywhere/service-config.json"
 }
 $CurrentUserId = "$env:USERDOMAIN\$env:USERNAME"
+$CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $ExpectedTaskArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunProdScript`" -ConfigPath `"$ServiceConfigPath`""
 
 $ServiceConfig = $null
@@ -472,8 +473,14 @@ function Test-TaskSettings($task) {
 }
 
 function Test-CurrentTaskUser($userId) {
-  return -not [string]::IsNullOrWhiteSpace([string]$userId) -and
-    [string]::Equals([string]$userId, $CurrentUserId, [StringComparison]::OrdinalIgnoreCase)
+  if ([string]::IsNullOrWhiteSpace([string]$userId)) { return $false }
+  try {
+    $account = New-Object Security.Principal.NTAccount([string]$userId)
+    $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
+    return [string]::Equals($sid, $CurrentUserSid, [StringComparison]::OrdinalIgnoreCase)
+  } catch {
+    return $false
+  }
 }
 
 function Test-TaskPrincipal($task) {
@@ -482,7 +489,7 @@ function Test-TaskPrincipal($task) {
 
 function Test-TaskHasAnyEnabledLogonTrigger($task) {
   if (-not $task) { return $false }
-  foreach ($trigger in @($task.Triggers)) {
+  foreach ($trigger in @($task.Triggers | Where-Object { $null -ne $_ })) {
     $className = if ($trigger.CimClass) { [string]$trigger.CimClass.CimClassName } else { "" }
     if ((Test-ContainsIgnoreCase $className "LogonTrigger") -and $trigger.Enabled -ne $false) {
       return $true
@@ -496,7 +503,7 @@ function Test-TaskDefinition($task) {
       -not (Test-TaskPrincipal $task) -or
       -not (Test-TaskSettings $task)) { return $false }
   $logonTriggerCount = 0
-  foreach ($trigger in @($task.Triggers)) {
+  foreach ($trigger in @($task.Triggers | Where-Object { $null -ne $_ })) {
     $className = if ($trigger.CimClass) { [string]$trigger.CimClass.CimClassName } else { "" }
     if (-not (Test-ContainsIgnoreCase $className "LogonTrigger") -or
         $trigger.Enabled -eq $false -or

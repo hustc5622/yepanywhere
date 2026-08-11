@@ -1143,6 +1143,54 @@ function Start-ScheduledTask { Write-Output '__UNEXPECTED_START__' }
     );
   });
 
+  it("Task Scheduler 规范化为本地用户名和 null Triggers 时仍识别人工任务", async () => {
+    const stateDir = await mkdtemp(
+      path.join(tmpdir(), "yep-normalized-manual-task-"),
+    );
+    tempDirs.push(stateDir);
+    const configPath = path.join(stateDir, "service-config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        Version: 1,
+        ServerPort: "61990",
+        BasePath: "/",
+        Profile: null,
+        DataDir: null,
+        AllowedImagePaths: null,
+        CodexPort: "4510",
+        ClaudePort: "4520",
+      }),
+      "utf8",
+    );
+    const harness = `
+function netstat { }
+function Get-ScheduledTask {
+  return [pscustomobject]@{
+    State = 'Ready'
+    Principal = [pscustomobject]@{ UserId = $env:USERNAME }
+    Actions = @([pscustomobject]@{
+      Execute = (Get-Command powershell.exe).Source
+      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
+    })
+    Settings = [pscustomobject]@{ MultipleInstances = 'IgnoreNew'; RestartCount = 999; RestartInterval = 'PT1M'; ExecutionTimeLimit = 'PT0S' }
+    Triggers = $null
+  }
+}
+function Get-ScheduledTaskInfo { return [pscustomobject]@{ LastTaskResult = 0 } }
+& ${psLiteral(yepScript)} status
+`;
+    const result = await runPowerShellCommand(harness, {
+      YEP_LAUNCHD_LOG_DIR: stateDir,
+      YEP_SERVICE_CONFIG_PATH: configPath,
+    });
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain("生产自启动：已关闭");
+    expect(result.stdout).not.toContain("生产自启动：配置异常");
+  });
+
   it("近似任务动作、错误工作目录或 Parallel 设置会被判异常且拒绝停止", async () => {
     const variants = ["fake-exe", "backup-script", "wrong-cwd", "parallel"];
     for (const variant of variants) {
