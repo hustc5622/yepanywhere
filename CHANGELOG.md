@@ -23,6 +23,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - `JsonlCodexEventStore` now tracks file size/mtime and only reads the appended tail on subsequent replays, avoiding a full-file `readFile` when a long journal has only grown
 - JSONL source factories now share a single `JsonlCodexEventStore` instance per file path so the incremental file refresh works across requests
 - Window canonical candidate construction by a recent-event lower bound when the caller only needs the tail, avoiding Message construction for old projection items while still replaying complete state
+- Update the built-in mobile shell `mini` node to its current connection endpoint
 
 ### Fixed
 - Keep canonical transcript export and Feishu/Lark projection on their original canonical journal paths so they are unaffected by the normal Session GET capability gate
