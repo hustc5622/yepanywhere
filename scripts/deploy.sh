@@ -42,6 +42,8 @@ source "$SCRIPT_DIR/lib/node.sh"
 source "$SCRIPT_DIR/lib/pnpm.sh"
 # shellcheck source=scripts/lib/deploy-env.sh
 source "$SCRIPT_DIR/lib/deploy-env.sh"
+# shellcheck source=scripts/lib/deploy-lock.sh
+source "$SCRIPT_DIR/lib/deploy-lock.sh"
 
 LOADED_DEPLOY_ENV_FILE=""
 DISCOVERED_FCM_SERVICE_ACCOUNT_FILE=""
@@ -88,7 +90,7 @@ Options:
   --server-only       Deploy only the server bundle
   --dev-server        Replace 8022 with dev hot reload after active turns become idle
   --allow-yep-session-interrupt
-                      Allow --dev-server to interrupt active Yep-managed work
+                      Allow an 8022 restart/dev cutover to interrupt active Yep-managed work
   --codex-bridge-only Deploy only the 4510 Codex bridge sidecar
   --opencode-bridge-only
                       Deploy only the 4520 OpenCode CLI bridge sidecar
@@ -112,6 +114,8 @@ APK options passed through:
 
 Native push deploy config:
   YEP_DEPLOY_ENV_FILE              Env file to load (default: .env.deploy.local)
+  YEP_REPORTS_DIR                  Absolute or repository-relative Reports directory
+                                   (default: sibling research_tasks directory)
   ALLOWED_IMAGE_PATHS              Extra local media paths for /api/local-image
                                    (default: /tmp,$HOME/Downloads)
   ALLOWED_HOSTS                    Comma-separated public hostnames/IPs accepted by the server
@@ -145,6 +149,13 @@ EOF
 }
 
 load_deploy_env_file
+if [[ -z "${YEP_REPORTS_DIR:-}" && -n "${RESEARCH_TASKS_DIR:-}" ]]; then
+  export YEP_REPORTS_DIR="$RESEARCH_TASKS_DIR"
+fi
+if [[ -z "${YEP_REPORTS_DIR:-}" ]]; then
+  export YEP_REPORTS_DIR="$(dirname "$REPO_ROOT")/research_tasks"
+fi
+normalize_path_env_var "YEP_REPORTS_DIR"
 normalize_path_env_var "YEP_ANDROID_GOOGLE_SERVICES_JSON"
 normalize_path_env_var "YEP_ANDROID_GOOGLE_SERVICES_TARGET"
 normalize_path_env_var "YEP_FCM_SERVICE_ACCOUNT_FILE"
@@ -167,6 +178,7 @@ SYNC_NATIVE_PUSH_LAUNCHAGENT="${YEP_SYNC_NATIVE_PUSH_LAUNCHAGENT:-true}"
 REQUIRE_SESSION_TITLE_GENERATION="${YEP_REQUIRE_SESSION_TITLE_GENERATION:-false}"
 SYNC_SESSION_TITLE_LAUNCHAGENT="${YEP_SYNC_SESSION_TITLE_LAUNCHAGENT:-true}"
 SERVER_ALLOWED_IMAGE_PATHS="${ALLOWED_IMAGE_PATHS:-/tmp,$HOME/Downloads}"
+SERVER_REPORTS_DIR="$YEP_REPORTS_DIR"
 NEED_SERVER_LAUNCHAGENT_SYNC=false
 SERVER_LAUNCHAGENT_SYNC_REASONS=()
 
@@ -599,6 +611,53 @@ check_local_media_preflight() {
   fi
 }
 
+check_reports_preflight() {
+  $DO_SERVER || return 0
+
+  local server_label="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
+  local expected="$SERVER_REPORTS_DIR"
+  local launchd_state=""
+  local plist="$HOME/Library/LaunchAgents/$server_label.plist"
+  local plist_content=""
+
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+    local user_domain="gui/$(id -u)"
+    launchd_state="$(launchctl print "$user_domain/$server_label" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$launchd_state" ]]; then
+    if [[ "$launchd_state" == *"YEP_REPORTS_DIR"* && "$launchd_state" == *"$expected"* ]]; then
+      dim "reports config: LaunchAgent $server_label uses $expected"
+      return 0
+    fi
+
+    if server_deploy_restarts; then
+      mark_server_launchagent_sync_needed "reports directory"
+      dim "reports config: LaunchAgent $server_label will be updated with YEP_REPORTS_DIR=$expected"
+    else
+      warn "reports config in loaded LaunchAgent $server_label does not include YEP_REPORTS_DIR=$expected."
+      dim "server deploy is build-only, so LaunchAgent env was not auto-synced"
+    fi
+    return 0
+  fi
+
+  if [[ -f "$plist" ]]; then
+    plist_content="$(cat "$plist")"
+    if [[ "$plist_content" == *"<key>YEP_REPORTS_DIR</key>"* && "$plist_content" == *"$expected"* ]]; then
+      dim "reports config: LaunchAgent plist uses $expected"
+      return 0
+    fi
+
+    if server_deploy_restarts; then
+      mark_server_launchagent_sync_needed "reports directory"
+      dim "reports config: LaunchAgent plist will be updated with YEP_REPORTS_DIR=$expected"
+    else
+      warn "reports config in $plist does not include YEP_REPORTS_DIR=$expected."
+      dim "server deploy is build-only, so LaunchAgent env was not auto-synced"
+    fi
+  fi
+}
+
 ensure_server_bundle_for_launchagent_sync() {
   local cli_js="$REPO_ROOT/dist/npm-package/dist/cli.js"
 
@@ -625,10 +684,11 @@ sync_server_launchagent_env_if_needed() {
     dim "reasons: ${SERVER_LAUNCHAGENT_SYNC_REASONS[*]}"
   fi
   dim "4510 Codex bridge and 4520 OpenCode bridge are not touched"
-  # The following server deploy performs the one intentional start after it
-  # has stopped the old process and arranged the bridge sidecars. Starting
-  # here as well creates a start → immediate stop → start race, and can leave
-  # launchd reporting a running job before the server is actually ready.
+  # The following server deploy reloads this plist and performs the one
+  # intentional start after it has stopped the old process and arranged the
+  # bridge sidecars. Starting here as well creates a start → immediate stop →
+  # start race, and can leave launchd reporting a running job before the server
+  # is actually ready.
   scripts/install-launchagents.sh --server-only --no-start
 }
 
@@ -658,7 +718,8 @@ start_dev_server() {
   fi
 
   : >"$dev_log"
-  PORT="$server_port" \
+  env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
+    PORT="$server_port" \
     BASE_PATH="${server_base_path:-/}" \
     ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
     nohup pnpm "${dev_args[@]}" >"$dev_log" 2>&1 &
@@ -666,7 +727,10 @@ start_dev_server() {
   disown "$dev_pid" 2>/dev/null || true
 
   log "Waiting for ${server_base_url}/api/version ..."
-  for _ in $(seq 1 120); do
+  local waiting_announced=false
+  local startup_checks=0
+  local preflight_checks=0
+  while true; do
     if grep -Fq "Starting hot reload on " "$dev_log" &&
       dev_server_ready \
       "${server_base_url}/api/version" \
@@ -676,11 +740,29 @@ start_dev_server() {
       echo "Deploy complete."
       return 0
     fi
-    if grep -Fq "YEP_DEV_8022_WAITING_FOR_IDLE" "$dev_log"; then
-      log "8022 dev hot reload cutover is queued."
-      dim "active embedded-runtime turns will finish before 8022 is replaced"
-      dim "follow progress: tail -f $dev_log"
-      return 0
+    if grep -Fq "Starting hot reload on " "$dev_log"; then
+      startup_checks=$((startup_checks + 1))
+      if [[ "$startup_checks" -ge 120 ]]; then
+        err "Dev hot reload started but did not become healthy within 30s."
+        tail -80 "$dev_log" >&2 || true
+        return 1
+      fi
+    elif grep -Fq "YEP_DEV_8022_WAITING_FOR_IDLE" "$dev_log"; then
+      if ! $waiting_announced; then
+        log "8022 dev hot reload cutover is queued."
+        dim "active embedded-runtime turns will finish before 8022 is replaced"
+        dim "follow progress: tail -f $dev_log"
+        waiting_announced=true
+      fi
+      # Keep this deploy process and its shared lock alive until the queued
+      # cutover is actually ready, so another deploy cannot race it.
+    else
+      preflight_checks=$((preflight_checks + 1))
+      if [[ "$preflight_checks" -ge 120 ]]; then
+        err "Dev hot reload preflight did not complete within 30s."
+        tail -80 "$dev_log" >&2 || true
+        return 1
+      fi
     fi
     if ! kill -0 "$dev_pid" 2>/dev/null; then
       err "Dev hot reload process exited before ${server_base_url}/api/version became ready."
@@ -689,10 +771,6 @@ start_dev_server() {
     fi
     sleep 0.25
   done
-
-  err "Dev hot reload did not answer ${server_base_url}/api/version within 30s."
-  tail -80 "$dev_log" >&2 || true
-  return 1
 }
 
 dev_frontend_ready() {
@@ -856,6 +934,7 @@ if ! $DO_SERVER && ! $DO_CODEX_BRIDGE && ! $DO_OPENCODE_BRIDGE && ! $DO_APK; the
   exit 2
 fi
 
+acquire_deploy_lock
 ensure_project_node
 
 log "Deploy plan"
@@ -885,6 +964,8 @@ if ! $DO_DEV_SERVER; then
   check_native_push_preflight
   log "Checking session title deploy prerequisites ..."
   check_session_title_preflight
+  log "Checking reports deploy configuration ..."
+  check_reports_preflight
   log "Checking local media deploy prerequisites ..."
   check_local_media_preflight
 fi
@@ -909,6 +990,8 @@ elif $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; then
   log "Deploying server services ..."
   if ! $DO_SERVER; then
     SERVER_ARGS+=(--no-restart)
+  elif $ALLOW_YEP_SESSION_INTERRUPT && ! server_args_contain "--allow-yep-session-interrupt"; then
+    SERVER_ARGS+=(--allow-yep-session-interrupt)
   fi
   if [[ ${#SERVER_ARGS[@]} -gt 0 ]]; then
     scripts/redeploy-server.sh "${SERVER_ARGS[@]}"

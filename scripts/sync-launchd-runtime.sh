@@ -67,6 +67,29 @@ if [[ -e "$PREVIOUS_BUNDLE_DIR" ]] && ! is_runtime_bundle "$PREVIOUS_BUNDLE_DIR"
   fail "Refusing to replace an unrecognized previous runtime: $PREVIOUS_BUNDLE_DIR"
 fi
 
+bundles_match() {
+  local source="$1"
+  local target="$2"
+
+  cmp -s "$source/package.json" "$target/package.json" || return 1
+  cmp -s "$source/dist/cli.js" "$target/dist/cli.js" || return 1
+  if [[ -f "$source/build-info.json" || -f "$target/build-info.json" ]]; then
+    [[ -f "$source/build-info.json" && -f "$target/build-info.json" ]] || return 1
+    cmp -s "$source/build-info.json" "$target/build-info.json" || return 1
+  fi
+}
+
+if [[ -d "$RUNTIME_BUNDLE_DIR/node_modules" ]] &&
+  bundles_match "$SOURCE_BUNDLE_DIR" "$RUNTIME_BUNDLE_DIR"; then
+  chmod +x "$RUNTIME_BUNDLE_DIR/dist/cli.js"
+  printf 'runtime=%s\n' "$RUNTIME_BUNDLE_DIR"
+  printf 'unchanged=true\n'
+  if [[ -d "$PREVIOUS_BUNDLE_DIR" ]]; then
+    printf 'previous=%s\n' "$PREVIOUS_BUNDLE_DIR"
+  fi
+  exit 0
+fi
+
 STAGING_DIR="$(mktemp -d "$RUNTIME_PARENT/.${RUNTIME_NAME}.sync.XXXXXX")"
 RETIRED_PREVIOUS_DIR=""
 CURRENT_MOVED=false

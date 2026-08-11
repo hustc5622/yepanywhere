@@ -14,7 +14,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   classifyDevCutover,
+  classifyMaintenanceOwner,
+  findDuplicateDevPort,
   formatDevCutoverWait,
+  hasUnknownViteOwner,
 } from "./dev-8022-cutover.js";
 import { exitIfUnsafeHome } from "./safe-home.js";
 
@@ -232,6 +235,7 @@ async function getWorkerActivity(serverBaseUrl) {
 
 async function waitForSafeCutover(serverBaseUrl, port) {
   let lastMessage = "";
+  let unknownChecks = 0;
 
   while (getListenPids(port).length > 0) {
     const activity = await getWorkerActivity(serverBaseUrl);
@@ -241,9 +245,16 @@ async function waitForSafeCutover(serverBaseUrl, port) {
     }
 
     if (cutover === "unknown") {
+      unknownChecks += 1;
+      if (unknownChecks >= 10) {
+        throw new Error(
+          `${serverBaseUrl}/api/status/workers remained unavailable while waiting for a safe cutover.`,
+        );
+      }
       await sleep(1000);
       continue;
     }
+    unknownChecks = 0;
 
     const message = formatDevCutoverWait(activity);
     if (message !== lastMessage) {
@@ -350,6 +361,66 @@ async function getBridgeStatus(bridgeControlUrl) {
   }
 }
 
+async function preflightAuxiliaryPorts({
+  port,
+  maintenancePort,
+  vitePort,
+  runtimePort,
+  bridgePort,
+  opencodeBridgePort,
+}) {
+  const duplicate = findDuplicateDevPort([
+    ["server", port],
+    ["maintenance", maintenancePort],
+    ["vite", vitePort],
+    ["runtime", runtimePort],
+    ["codex bridge", bridgePort],
+    ["opencode bridge", opencodeBridgePort],
+  ]);
+  if (duplicate) {
+    throw new Error(
+      `Invalid dev port configuration: ${duplicate.names.join(" and ")} both use ${duplicate.port}.`,
+    );
+  }
+
+  let maintenanceOwned = false;
+  if (maintenancePort !== 0) {
+    const maintenancePids = getListenPids(maintenancePort);
+    let maintenanceStatus = null;
+    if (maintenancePids.length > 0) {
+      try {
+        maintenanceStatus = await fetchJson(
+          `http://127.0.0.1:${maintenancePort}/status`,
+        );
+      } catch {
+        // A listener without the expected status payload belongs to another
+        // service and must never receive our POST /reload request.
+      }
+    }
+    const owner = classifyMaintenanceOwner({
+      listenPids: maintenancePids,
+      status: maintenanceStatus,
+      mainServerPort: port,
+    });
+    if (owner === "conflict") {
+      throw new Error(
+        `Maintenance port ${maintenancePort} is occupied by PID(s) ${maintenancePids.join(", ")}, but it is not the maintenance service for server ${port}. Choose a free MAINTENANCE_PORT before replacing ${port}.`,
+      );
+    }
+    maintenanceOwned = owner === "owned";
+  }
+
+  const vitePids = getListenPids(vitePort);
+  const repoVitePids = getRepoClientVitePids(vitePort);
+  if (hasUnknownViteOwner(vitePids, repoVitePids)) {
+    throw new Error(
+      `Vite port ${vitePort} is occupied by unrelated PID(s) ${vitePids.join(", ")}. Choose a free VITE_PORT before replacing ${port}.`,
+    );
+  }
+
+  return { maintenanceOwned };
+}
+
 function printPids(label, pids) {
   if (pids.length === 0) {
     console.log(`${label}: none`);
@@ -442,8 +513,13 @@ async function stopRepoClientVitePids(vitePort, pids) {
  * Falls back to stopServerPids (direct SIGTERM) if the maintenance endpoint is
  * unreachable or doesn't release the port in time.
  */
-async function stopServerGracefully(maintenancePort, port, pids) {
-  if (maintenancePort === 0) {
+async function stopServerGracefully(
+  maintenancePort,
+  port,
+  pids,
+  maintenanceOwned,
+) {
+  if (maintenancePort === 0 || !maintenanceOwned) {
     await stopServerPids(port, pids);
     return;
   }
@@ -451,7 +527,10 @@ async function stopServerGracefully(maintenancePort, port, pids) {
   const url = `http://127.0.0.1:${maintenancePort}/reload`;
   console.log(`Asking server to shut down gracefully via ${url}`);
   try {
-    await fetch(url, { method: "POST" });
+    const response = await fetch(url, { method: "POST" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
   } catch (error) {
     console.warn(
       `Graceful reload via maintenance endpoint failed (${
@@ -541,6 +620,7 @@ async function main() {
     `http://127.0.0.1:${opencodeBridgePort}`;
   const serverBaseUrl = `http://127.0.0.1:${port}${basePath}`;
   let releaseCutoverLock = null;
+  let auxiliaryPorts = { maintenanceOwned: false };
 
   let serverPids = getListenPids(port);
   const bridgePids = getListenPids(bridgePort);
@@ -556,9 +636,22 @@ async function main() {
   console.log(`  opencode bridge: ${opencodeBridgeControlUrl}`);
   console.log(`  agent runtime: ${runtimeControlUrl}`);
   printPids(`  ${port} listener`, serverPids);
+  if (maintenancePort !== 0) {
+    printPids(`  ${maintenancePort} listener`, getListenPids(maintenancePort));
+  }
+  printPids(`  ${vitePort} listener`, getListenPids(vitePort));
   printPids(`  ${runtimePort} listener`, getListenPids(runtimePort));
   printPids(`  ${bridgePort} listener`, bridgePids);
   printPids(`  ${opencodeBridgePort} listener`, opencodeBridgePids);
+
+  auxiliaryPorts = await preflightAuxiliaryPorts({
+    port,
+    maintenancePort,
+    vitePort,
+    runtimePort,
+    bridgePort,
+    opencodeBridgePort,
+  });
 
   const runtimeStatus = await getRuntimeStatus(
     runtimeControlUrl,
@@ -631,6 +724,14 @@ async function main() {
   if (serverPids.length > 0) {
     let activity = await getWorkerActivity(serverBaseUrl);
     if (
+      classifyDevCutover(activity) === "unknown" &&
+      !options.allowYepSessionInterrupt
+    ) {
+      throw new Error(
+        `${serverBaseUrl}/api/status/workers could not be verified. Refusing to replace an unknown listener on ${port}; check PORT/BASE_PATH or explicitly pass --allow-yep-session-interrupt.`,
+      );
+    }
+    if (
       classifyDevCutover(activity) === "wait" &&
       options.waitForYepSessions &&
       !options.allowYepSessionInterrupt
@@ -659,6 +760,17 @@ async function main() {
       );
     }
 
+    // Re-check after a potentially long idle wait. Another process may have
+    // claimed an auxiliary port while the cutover was queued.
+    auxiliaryPorts = await preflightAuxiliaryPorts({
+      port,
+      maintenancePort,
+      vitePort,
+      runtimePort,
+      bridgePort,
+      opencodeBridgePort,
+    });
+
     const devSupervisorPids = getDevSupervisorPidsForServerPids(serverPids);
     if (devSupervisorPids.length > 0) {
       await stopDevSupervisorPids(port, vitePort, devSupervisorPids);
@@ -666,7 +778,12 @@ async function main() {
     }
 
     if (serverPids.length > 0) {
-      await stopServerGracefully(maintenancePort, port, serverPids);
+      await stopServerGracefully(
+        maintenancePort,
+        port,
+        serverPids,
+        auxiliaryPorts.maintenanceOwned,
+      );
     }
 
     const bridgePidsAfter = getListenPids(bridgePort);

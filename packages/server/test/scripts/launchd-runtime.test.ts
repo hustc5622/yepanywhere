@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -97,6 +98,13 @@ describe("LaunchAgent runtime isolation", () => {
       `previous=${join(realpathSync(dirname(runtimeDir)), `${basename(runtimeDir)}.previous`)}`,
     );
 
+    const unchanged = runSync();
+    expect(unchanged.status).toBe(0);
+    expect(unchanged.stdout).toContain("unchanged=true");
+    expect(
+      readFileSync(join(`${runtimeDir}.previous`, "marker.txt"), "utf8"),
+    ).toBe("first");
+
     writeBundle("third");
     expect(runSync().status).toBe(0);
     expect(readFileSync(join(runtimeDir, "marker.txt"), "utf8")).toBe("third");
@@ -161,6 +169,10 @@ describe("LaunchAgent runtime isolation", () => {
       join(workspaceRoot, "scripts/lib/deploy-env.sh"),
       join(libDir, "deploy-env.sh"),
     );
+    copyFileSync(
+      join(workspaceRoot, "scripts/lib/deploy-lock.sh"),
+      join(libDir, "deploy-lock.sh"),
+    );
     writeFileSync(
       join(repoRoot, ".env.deploy.local"),
       [
@@ -186,23 +198,27 @@ describe("LaunchAgent runtime isolation", () => {
       "SESSION_TITLE_LLM_API_KEY",
       "LLM_API_KEY",
       "OPENCODE_LLM_API_KEY",
+      "YEP_DEPLOY_ENV_FILE_PRECEDENCE",
+      "YEP_REPORTS_DIR",
+      "RESEARCH_TASKS_DIR",
     ]) {
       delete parentEnv[key];
     }
+    const installEnv = {
+      ...parentEnv,
+      ALLOWED_HOSTS: "example.test,127.0.0.1",
+      HOME: homeDir,
+      PATH: `${fakeBin}:/usr/bin:/bin`,
+      YEP_CODEX_PATH: fakeCodex,
+      YEP_LAUNCHD_NODE: fakeNode,
+      YEP_LAUNCHD_RUNTIME_DIR: runtimeDir,
+    };
     const result = spawnSync(
       "/bin/bash",
       [installScript, "--server-only", "--no-start"],
       {
         encoding: "utf8",
-        env: {
-          ...parentEnv,
-          ALLOWED_HOSTS: "example.test,127.0.0.1",
-          HOME: homeDir,
-          PATH: `${fakeBin}:/usr/bin:/bin`,
-          YEP_CODEX_PATH: fakeCodex,
-          YEP_LAUNCHD_NODE: fakeNode,
-          YEP_LAUNCHD_RUNTIME_DIR: runtimeDir,
-        },
+        env: installEnv,
       },
     );
 
@@ -216,6 +232,10 @@ describe("LaunchAgent runtime isolation", () => {
     expect(plist).toContain(
       `<string>${join(runtimeDir, "dist/cli.js")}</string>`,
     );
+    expect(plist).toContain("<key>YEP_REPORTS_DIR</key>");
+    expect(plist).toContain(
+      `<string>${join(dirname(repoRoot), "research_tasks")}</string>`,
+    );
     expect(plist).toContain("<key>ALLOWED_HOSTS</key>");
     expect(plist).toContain("<string>example.test,127.0.0.1</string>");
     expect(plist).toContain("<key>YEP_CODEX_PATH</key>");
@@ -227,5 +247,53 @@ describe("LaunchAgent runtime isolation", () => {
     expect(plist).toContain("<key>YEP_FCM_SERVICE_ACCOUNT_JSON</key>");
     expect(plist).toContain("fixture-project");
     expect(readFileSync(join(runtimeDir, "marker.txt"), "utf8")).toBe("first");
+    expect(statSync(plistPath).mode & 0o777).toBe(0o600);
+    expect(
+      statSync(join(homeDir, ".yep-anywhere/logs/server-launchd.out.log"))
+        .mode & 0o777,
+    ).toBe(0o600);
+    const serverStdoutLog = join(
+      homeDir,
+      ".yep-anywhere/logs/server-launchd.out.log",
+    );
+    writeFileSync(serverStdoutLog, "oversized fixture log");
+
+    const filePrecedenceResult = spawnSync(
+      "/bin/bash",
+      [installScript, "--server-only", "--no-start"],
+      {
+        encoding: "utf8",
+        env: {
+          ...installEnv,
+          YEP_DEPLOY_ENV_FILE_PRECEDENCE: "true",
+          YEP_LAUNCHD_LOG_MAX_BYTES: "1",
+        },
+      },
+    );
+    expect(filePrecedenceResult.status).toBe(0);
+    expect(readFileSync(plistPath, "utf8")).toContain(
+      "<string>ignored.example</string>",
+    );
+    expect(readFileSync(`${serverStdoutLog}.1`, "utf8")).toBe(
+      "oversized fixture log",
+    );
+
+    const configuredReportsDir = "fixtures/custom-reports";
+    const overrideResult = spawnSync(
+      "/bin/bash",
+      [installScript, "--server-only", "--no-start"],
+      {
+        encoding: "utf8",
+        env: {
+          ...installEnv,
+          YEP_REPORTS_DIR: configuredReportsDir,
+        },
+      },
+    );
+    expect(overrideResult.status).toBe(0);
+    const overriddenPlist = readFileSync(plistPath, "utf8");
+    expect(overriddenPlist).toContain(
+      `<string>${repoRoot}/${configuredReportsDir}</string>`,
+    );
   });
 });

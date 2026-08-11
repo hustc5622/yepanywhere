@@ -133,6 +133,7 @@ export function DevelopmentSettings() {
   }, [restarting, connected]);
 
   const handleRestartServer = async () => {
+    if (unsafeToRestart) return;
     setRestarting(true);
     await reloadBackend();
   };
@@ -178,12 +179,32 @@ export function DevelopmentSettings() {
   }, [refreshDeployment, shouldProbeDeployment]);
 
   useEffect(() => {
-    if (deployJob?.status !== "running") return;
+    if (deployJob?.status !== "running" || !deployJob.id) return;
     const interval = window.setInterval(() => {
-      void refreshDeployment();
+      void api
+        .getDeploymentJob(deployJob.id)
+        .then(({ job }) => {
+          setDeployJob(job);
+          if (isTerminalDeployJob(job)) {
+            localStorage.removeItem(LAST_DEPLOY_JOB_KEY);
+            if (job.status === "succeeded") {
+              void refetchVersionFresh();
+            }
+            void refreshDeployment();
+          }
+        })
+        .catch(() => {
+          // A server deploy temporarily makes the API unavailable. Keep the
+          // running job visible and retry the lightweight job endpoint.
+        });
     }, 2500);
     return () => window.clearInterval(interval);
-  }, [deployJob?.status, refreshDeployment]);
+  }, [
+    deployJob?.id,
+    deployJob?.status,
+    refetchVersionFresh,
+    refreshDeployment,
+  ]);
 
   const handleStartDeployment = async (
     action: DeploymentActionId,
@@ -326,7 +347,7 @@ export function DevelopmentSettings() {
                 </p>
                 {unsafeToRestart && (
                   <p className="settings-warning">
-                    {t("developmentInterruptedWarning", {
+                    {t("deploymentWaitForIdleWarning", {
                       count: workerActivity.activeWorkers,
                       suffix: workerActivity.activeWorkers !== 1 ? "s " : " ",
                     })}
@@ -365,19 +386,13 @@ export function DevelopmentSettings() {
                 </button>
                 <button
                   type="button"
-                  className={`settings-button settings-button-secondary ${unsafeToRestart ? "settings-button-danger" : ""}`}
-                  onClick={() =>
-                    void handleStartDeployment("server-dev", {
-                      allowSessionInterrupt: unsafeToRestart,
-                    })
-                  }
+                  className="settings-button settings-button-secondary"
+                  onClick={() => void handleStartDeployment("server-dev")}
                   disabled={!deployStatus?.available || deployRunning}
                 >
                   {startingAction === "server-dev"
                     ? t("deploymentStarting")
-                    : unsafeToRestart
-                      ? t("deploymentStartDevServerAnyway")
-                      : t("deploymentStartDevServer")}
+                    : t("deploymentStartDevServer")}
                 </button>
               </div>
             </div>
@@ -680,7 +695,7 @@ export function DevelopmentSettings() {
                 </p>
                 {unsafeToRestart && (
                   <p className="settings-warning">
-                    {t("developmentInterruptedWarning", {
+                    {t("developmentRestartBlockedWarning", {
                       count: workerActivity.activeWorkers,
                       suffix: workerActivity.activeWorkers !== 1 ? "s " : " ",
                     })}
@@ -689,15 +704,13 @@ export function DevelopmentSettings() {
               </div>
               <button
                 type="button"
-                className={`settings-button ${unsafeToRestart ? "settings-button-danger" : ""}`}
+                className="settings-button"
                 onClick={handleRestartServer}
-                disabled={restarting}
+                disabled={restarting || unsafeToRestart}
               >
                 {restarting
                   ? t("developmentRestarting")
-                  : unsafeToRestart
-                    ? t("developmentRestartAnyway")
-                    : t("developmentRestart")}
+                  : t("developmentRestart")}
               </button>
             </div>
           </div>

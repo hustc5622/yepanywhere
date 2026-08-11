@@ -94,6 +94,44 @@ describe("Reports routes", () => {
     });
   });
 
+  it("anchors the default reports directory to the deployed repository", async () => {
+    const repoRoot = path.join(tempDir, "workspace", "yepanywhere");
+    const reportsRoot = path.join(tempDir, "workspace", "research_tasks");
+    await mkdir(repoRoot, { recursive: true });
+    await mkdir(reportsRoot, { recursive: true });
+    await writeFile(
+      path.join(reportsRoot, "deployment-report.md"),
+      "# Deployment Report",
+    );
+
+    const previousEnv = {
+      YEP_DEPLOY_REPO_ROOT: process.env.YEP_DEPLOY_REPO_ROOT,
+      YEP_REPORTS_DIR: process.env.YEP_REPORTS_DIR,
+      RESEARCH_TASKS_DIR: process.env.RESEARCH_TASKS_DIR,
+    };
+    process.env.YEP_DEPLOY_REPO_ROOT = repoRoot;
+    Reflect.deleteProperty(process.env, "YEP_REPORTS_DIR");
+    Reflect.deleteProperty(process.env, "RESEARCH_TASKS_DIR");
+
+    try {
+      const response = await createReportsRoutes().request("/");
+      expect(response.status).toBe(200);
+      const json = (await response.json()) as ReportsListResponse;
+      expect(json.rootPath).toBe(reportsRoot);
+      expect(json.documents.map((document) => document.path)).toEqual([
+        "deployment-report.md",
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) {
+          Reflect.deleteProperty(process.env, key);
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
   it("keeps prompt and intermediate markdown artifacts out of the list", async () => {
     await writeFile(path.join(tempDir, "README.md"), "# Workspace notes");
     await writeFile(path.join(tempDir, "field-guide.md"), "# Field Guide");

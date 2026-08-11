@@ -28,22 +28,37 @@ export function createServerAdminRoutes(deps: ServerAdminDeps): Hono {
       dataDir: deps.dataDir,
     }).available;
     if (process.env.NODE_ENV === "production" && deployAvailable) {
-      const response = c.json({
-        ok: true,
-        message: "Server restart deploy job starting...",
-      });
-
-      setTimeout(() => {
-        void startDeploymentJob(
+      try {
+        const job = await startDeploymentJob(
           { dataDir: deps.dataDir },
-          { action: "server" },
-        ).catch((err) => {
-          const message = err instanceof Error ? err.message : String(err);
-          console.error("[ServerAdmin] Failed to start restart job:", message);
+          { action: "server-restart" },
+        );
+        return c.json({
+          ok: true,
+          message: "Server restart deploy job started.",
+          jobId: job.id,
         });
-      }, 100);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const status =
+          (err as { status?: number }).status === 409 ? (409 as const) : 500;
+        console.error("[ServerAdmin] Failed to start restart job:", message);
+        return c.json({ error: message }, status);
+      }
+    }
 
-      return response;
+    if (deps.runtimeController?.mode !== "external") {
+      const activity = await deps.runtimeController?.getWorkerActivity();
+      if (activity?.hasActiveWork) {
+        return c.json(
+          {
+            error: "Server has active embedded-runtime work",
+            activeWorkers: activity.activeWorkers,
+            queueLength: activity.queueLength,
+          },
+          409,
+        );
+      }
     }
 
     // Respond before restarting.

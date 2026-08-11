@@ -16,6 +16,8 @@
 #                                      # rebuild + restart only the 4520 sidecar
 #   scripts/redeploy-server.sh --embedded-codex-bridge
 #                                      # legacy: run 4510 inside 8022
+#   scripts/redeploy-server.sh --allow-yep-session-interrupt
+#                                      # force 8022 cutover even with active work
 #
 # Assumes:
 #   - You want to keep the relay process and frp tunnel running. This script
@@ -55,6 +57,8 @@ dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 source "$SCRIPT_DIR/lib/node.sh"
 # shellcheck source=scripts/lib/pnpm.sh
 source "$SCRIPT_DIR/lib/pnpm.sh"
+# shellcheck source=scripts/lib/deploy-lock.sh
+source "$SCRIPT_DIR/lib/deploy-lock.sh"
 
 # ----- args -----
 DO_BUILD=true
@@ -62,6 +66,7 @@ DO_RESTART=true
 USE_CODEX_BRIDGE_SIDECAR=true
 RESTART_CODEX_BRIDGE=false
 RESTART_OPENCODE_BRIDGE=false
+ALLOW_YEP_SESSION_INTERRUPT=false
 SERVER_PORT="${YEP_DEPLOY_PORT:-8022}"
 SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
 SERVER_ALLOWED_IMAGE_PATHS="${ALLOWED_IMAGE_PATHS:-/tmp,$HOME/Downloads}"
@@ -73,12 +78,15 @@ else
 fi
 SERVER_BASE_URL="http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
 SERVER_LAUNCHD_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
+SERVER_LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVER_LAUNCHD_LABEL}.plist"
 SERVER_LAUNCHD_LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
 SERVER_CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
 LAUNCHD_RUNTIME_DIR="${YEP_LAUNCHD_RUNTIME_DIR:-$HOME/.yep-anywhere/runtime/npm-package}"
 LAUNCHD_SERVER_CLI_JS="$LAUNCHD_RUNTIME_DIR/dist/cli.js"
 CODEX_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
 OPENCODE_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
+CODEX_BRIDGE_LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${CODEX_BRIDGE_LAUNCHD_LABEL}.plist"
+OPENCODE_BRIDGE_LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${OPENCODE_BRIDGE_LAUNCHD_LABEL}.plist"
 for arg in "$@"; do
   case "$arg" in
     --restart)    DO_BUILD=false ;;
@@ -93,6 +101,9 @@ for arg in "$@"; do
       ;;
     --restart-opencode-bridge)
       RESTART_OPENCODE_BRIDGE=true
+      ;;
+    --allow-yep-session-interrupt)
+      ALLOW_YEP_SESSION_INTERRUPT=true
       ;;
     --embedded-codex-bridge|--no-preserve-codex-bridge)
       USE_CODEX_BRIDGE_SIDECAR=false
@@ -110,21 +121,13 @@ for arg in "$@"; do
 done
 
 # ----- preflight -----
+acquire_deploy_lock
 ensure_project_node
 
 # Pull version from the monorepo root package.json so the bundle reports the
 # real version (build-bundle.ts otherwise falls back to a hardcoded string).
 NPM_VERSION="$(node -p "require('./package.json').version")"
 log "Monorepo version: ${NPM_VERSION}"
-
-# Count running SDK children before we kill the server so the user knows
-# what they're about to interrupt. Shown only, not used to abort.
-if $DO_RESTART; then
-  SDK_COUNT="$(pgrep -fa 'claude-agent-sdk' 2>/dev/null | grep -c . || true)"
-  if [[ "$SDK_COUNT" -gt 0 ]]; then
-    warn "About to kill the running yepanywhere server. ${SDK_COUNT} active SDK claude subprocess(es) will be terminated."
-  fi
-fi
 
 pid_sets_overlap() {
   local a="$1"
@@ -138,6 +141,72 @@ pid_sets_overlap() {
     done
   done
   return 1
+}
+
+server_activity_state() {
+  local response
+
+  if ! lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    printf '%s' "stopped"
+    return 0
+  fi
+  if ! response="$(curl -fsS --max-time 3 "${SERVER_BASE_URL}/api/status/workers" 2>/dev/null)"; then
+    printf '%s' "unknown"
+    return 0
+  fi
+
+  printf '%s' "$response" | node -e '
+let raw = "";
+process.stdin.on("data", (chunk) => raw += chunk);
+process.stdin.on("end", () => {
+  try {
+    const data = JSON.parse(raw);
+    const active = data.runtimeMode !== "external" &&
+      (data.hasActiveWork === true || Number(data.queueLength || 0) > 0);
+    process.stdout.write(active ? "active" : "idle");
+  } catch {
+    process.stdout.write("unknown");
+  }
+});
+'
+}
+
+wait_for_yep_sessions_before_cutover() {
+  local state announced=false elapsed=0
+
+  if $ALLOW_YEP_SESSION_INTERRUPT; then
+    warn "Active Yep-managed work may be interrupted because --allow-yep-session-interrupt was provided."
+    return 0
+  fi
+
+  while true; do
+    state="$(server_activity_state)"
+    case "$state" in
+      stopped|idle)
+        if $announced; then
+          log "Yep-managed work is idle; continuing the 8022 cutover."
+        fi
+        return 0
+        ;;
+      active)
+        if ! $announced; then
+          log "Waiting for active Yep-managed work before replacing 8022 ..."
+          echo "YEP_DEPLOY_WAITING_FOR_IDLE"
+          dim "use --allow-yep-session-interrupt only when an intentional interruption is acceptable"
+          announced=true
+        elif (( elapsed % 30 == 0 )); then
+          dim "still waiting for active work (${elapsed}s)"
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+        ;;
+      *)
+        err "Port ${SERVER_PORT} is listening, but ${SERVER_BASE_URL}/api/status/workers could not be verified."
+        err "Refusing to stop an unverified service. Check the configured port/base path, or use --allow-yep-session-interrupt to force the cutover."
+        return 1
+        ;;
+    esac
+  done
 }
 
 wait_port_released() {
@@ -217,6 +286,27 @@ kickstart_launchd_label() {
   # `-k` here: it introduces a second forced termination during deployment
   # and makes the launch sequence race the process cleanup above.
   launchctl kickstart "$(launchd_domain)/${label}"
+}
+
+reload_launchd_label_from_plist() {
+  local label="$1"
+  local plist="$2"
+  local domain
+  domain="$(launchd_domain)"
+
+  [[ -f "$plist" ]] || return 1
+
+  # kickstart only restarts the definition already cached by launchd. Reload
+  # the plist after the old process has been safely stopped so environment
+  # changes written during deploy take effect without a start-stop-start race.
+  if launchd_label_loaded "$label"; then
+    if ! launchctl bootout "$domain/$label" >/dev/null 2>&1; then
+      launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || return 1
+    fi
+  fi
+
+  launchctl enable "$domain/$label" >/dev/null 2>&1 || true
+  launchctl bootstrap "$domain" "$plist"
 }
 
 launchd_label_pid() {
@@ -351,6 +441,7 @@ start_server_fallback() {
   if ! $USE_CODEX_BRIDGE_SIDECAR; then
     BASE_PATH="${SERVER_BASE_PATH:-/}" \
       ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+      env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
       nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
     return 0
   fi
@@ -365,7 +456,7 @@ start_server_fallback() {
       YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
       YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
       YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$OPENCODE_BRIDGE_UPSTREAM_URL" \
-      env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+      env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
       nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
   else
     BASE_PATH="${SERVER_BASE_PATH:-/}" \
@@ -376,7 +467,7 @@ start_server_fallback() {
       YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
       YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
       YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
-      env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+      env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
       nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
   fi
 }
@@ -403,13 +494,21 @@ start_codex_bridge_sidecar() {
   local bridge_url="$2"
   local node_bin
 
-  if launchd_label_loaded "$CODEX_BRIDGE_LAUNCHD_LABEL"; then
-    log "Starting Codex bridge LaunchAgent ${CODEX_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
-    kickstart_launchd_label "$CODEX_BRIDGE_LAUNCHD_LABEL"
+  if [[ "$(uname -s)" == "Darwin" && -f "$CODEX_BRIDGE_LAUNCHD_PLIST" ]] &&
+    command -v launchctl >/dev/null 2>&1; then
+    log "Reloading Codex bridge LaunchAgent ${CODEX_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
+    if ! reload_launchd_label_from_plist "$CODEX_BRIDGE_LAUNCHD_LABEL" "$CODEX_BRIDGE_LAUNCHD_PLIST"; then
+      warn "Could not reload Codex bridge LaunchAgent; using a direct sidecar process."
+      node_bin="$(server_node_bin)" || return 1
+      YEP_CODEX_BRIDGE_PORT="$bridge_port" \
+        env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
+        nohup "$node_bin" "$SERVER_CLI_JS" --codex-bridge-only >/tmp/yep-codex-bridge.log 2>&1 & disown
+    fi
   else
     node_bin="$(server_node_bin)" || return 1
     log "Starting Codex bridge sidecar on ${bridge_url} (logs: /tmp/yep-codex-bridge.log) ..."
     YEP_CODEX_BRIDGE_PORT="$bridge_port" \
+      env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
       nohup "$node_bin" "$SERVER_CLI_JS" --codex-bridge-only >/tmp/yep-codex-bridge.log 2>&1 & disown
   fi
 
@@ -435,10 +534,29 @@ start_opencode_bridge_sidecar() {
   local using_launchd=false
   local node_bin
 
-  if launchd_label_loaded "$OPENCODE_BRIDGE_LAUNCHD_LABEL"; then
+  if [[ "$(uname -s)" == "Darwin" && -f "$OPENCODE_BRIDGE_LAUNCHD_PLIST" ]] &&
+    command -v launchctl >/dev/null 2>&1; then
     using_launchd=true
-    log "Starting OpenCode bridge LaunchAgent ${OPENCODE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
-    kickstart_launchd_label "$OPENCODE_BRIDGE_LAUNCHD_LABEL"
+    log "Reloading OpenCode bridge LaunchAgent ${OPENCODE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
+    if ! reload_launchd_label_from_plist "$OPENCODE_BRIDGE_LAUNCHD_LABEL" "$OPENCODE_BRIDGE_LAUNCHD_PLIST"; then
+      warn "Could not reload OpenCode bridge LaunchAgent; using a direct sidecar process."
+      using_launchd=false
+      node_bin="$(server_node_bin)" || return 1
+      if [[ -n "$opencode_bridge_upstream_url" ]]; then
+        YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
+          YEP_SERVER_URL="$server_url" \
+          YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
+          YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$opencode_bridge_upstream_url" \
+          env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
+          nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
+      else
+        YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
+          YEP_SERVER_URL="$server_url" \
+          YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
+          env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
+          nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
+      fi
+    fi
   else
     node_bin="$(server_node_bin)" || return 1
     log "Starting OpenCode CLI bridge sidecar on ${bridge_url} (logs: /tmp/yep-opencode-bridge.log) ..."
@@ -447,13 +565,13 @@ start_opencode_bridge_sidecar() {
         YEP_SERVER_URL="$server_url" \
         YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
         YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$opencode_bridge_upstream_url" \
-        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+        env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
         nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
     else
       YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
         YEP_SERVER_URL="$server_url" \
         YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
-        env -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+        env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
         nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
     fi
   fi
@@ -530,6 +648,27 @@ sync_launchd_runtime_if_installed() {
   YEP_LAUNCHD_RUNTIME_DIR="$LAUNCHD_RUNTIME_DIR" "$SCRIPT_DIR/sync-launchd-runtime.sh"
 }
 
+refresh_installed_bridge_launchagents() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+
+  local codex_installed=false
+  local opencode_installed=false
+  [[ -f "$CODEX_BRIDGE_LAUNCHD_PLIST" ]] && codex_installed=true
+  [[ -f "$OPENCODE_BRIDGE_LAUNCHD_PLIST" ]] && opencode_installed=true
+  if ! $codex_installed && ! $opencode_installed; then
+    return 0
+  fi
+
+  log "Refreshing installed bridge LaunchAgent definitions without restarting them ..."
+  if $codex_installed && $opencode_installed; then
+    "$SCRIPT_DIR/install-launchagents.sh" --bridges-only --no-start
+  elif $codex_installed; then
+    "$SCRIPT_DIR/install-launchagents.sh" --bridge-only --no-start
+  else
+    "$SCRIPT_DIR/install-launchagents.sh" --opencode-bridge-only --no-start
+  fi
+}
+
 ensure_bundle_ready() {
   if [[ ! -f "$SERVER_CLI_JS" ]]; then
     err "Expected $SERVER_CLI_JS, but it's missing. Rebuild before restarting."
@@ -547,7 +686,7 @@ ensure_bundle_ready() {
 if $DO_BUILD; then
   ensure_pnpm
   log "Building bundle (NPM_VERSION=${NPM_VERSION}) ..."
-  NPM_VERSION="$NPM_VERSION" pnpm build:bundle
+  BASE_PATH="${SERVER_BASE_PATH:-/}" NPM_VERSION="$NPM_VERSION" pnpm build:bundle
 
   # build-bundle.ts stages the self-contained package but does not install its
   # runtime dependencies. Local deployment must do that before promotion.
@@ -574,8 +713,15 @@ fi
 if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
   ensure_bundle_ready
 fi
+if $DO_BUILD || $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
+  refresh_installed_bridge_launchagents
+fi
 
 # ----- restart -----
+if $DO_RESTART; then
+  wait_for_yep_sessions_before_cutover
+fi
+
 if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
   CODEX_BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
   CODEX_BRIDGE_HTTP_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${CODEX_BRIDGE_PORT}}}"
@@ -748,10 +894,20 @@ if $DO_RESTART; then
   # APK / direct-mode tcp tunnel callers are unaffected — they hit ws://host:8022
   # which still serves /yep/api/ws; only the URL prefix changes, not the port.
   STARTED_SERVER_WITH_LAUNCHAGENT=false
-  if launchd_label_loaded "$SERVER_LAUNCHD_LABEL"; then
-    dim "using LaunchAgent ${SERVER_LAUNCHD_LABEL}; abnormal exits are restarted with launchd throttling"
-    kickstart_launchd_label "$SERVER_LAUNCHD_LABEL"
-    STARTED_SERVER_WITH_LAUNCHAGENT=true
+  if [[ "$(uname -s)" == "Darwin" && -f "$SERVER_LAUNCHD_PLIST" ]] &&
+    command -v launchctl >/dev/null 2>&1; then
+    if launchd_label_loaded "$SERVER_LAUNCHD_LABEL"; then
+      dim "reloading LaunchAgent ${SERVER_LAUNCHD_LABEL} from $SERVER_LAUNCHD_PLIST"
+    else
+      dim "loading LaunchAgent ${SERVER_LAUNCHD_LABEL} from $SERVER_LAUNCHD_PLIST"
+    fi
+    if reload_launchd_label_from_plist "$SERVER_LAUNCHD_LABEL" "$SERVER_LAUNCHD_PLIST"; then
+      dim "using LaunchAgent ${SERVER_LAUNCHD_LABEL}; abnormal exits are restarted with launchd throttling"
+      STARTED_SERVER_WITH_LAUNCHAGENT=true
+    else
+      warn "Could not reload LaunchAgent ${SERVER_LAUNCHD_LABEL}; using direct server process"
+      start_server_fallback
+    fi
   else
     dim "LaunchAgent ${SERVER_LAUNCHD_LABEL} is not loaded; using direct server process"
     start_server_fallback

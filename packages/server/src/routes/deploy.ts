@@ -16,6 +16,7 @@ const __dirname = path.dirname(__filename);
 
 const MAX_LOG_BYTES = 96 * 1024;
 const MAX_JOBS = 20;
+let deploymentStartInFlight = false;
 
 export type DeploymentActionId =
   | "full"
@@ -75,6 +76,14 @@ export interface DeploymentJob {
 
 interface DeploymentJobRecord extends Omit<DeploymentJob, "log"> {
   logPath: string;
+  resultPath?: string;
+}
+
+interface DeploymentJobResult {
+  finishedAt: string;
+  exitCode: number | null;
+  signal: string | null;
+  error?: string;
 }
 
 export interface DeploymentStatusResponse {
@@ -229,12 +238,15 @@ export function getDeploymentAvailability(options?: DeployRoutesOptions): {
 } {
   for (const repoRoot of getCandidateRepoRoots(options?.repoRoot)) {
     const scriptPath = path.join(repoRoot, "scripts", "deploy.sh");
-    if (fs.existsSync(scriptPath)) {
+    try {
+      fs.accessSync(scriptPath, fs.constants.X_OK);
       return {
         available: true,
         repoRoot,
         scriptPath,
       };
+    } catch {
+      // Try the next candidate root.
     }
   }
 
@@ -317,6 +329,11 @@ function appendOptionalRestartTargetArgs(
   args: string[],
   targets: DeploymentRestartTargets,
 ): void {
+  if (targets.server === false && action.supportsRestartTargets) {
+    throw new Error(
+      "Use the services-restart action to restart sidecars without the web/API server.",
+    );
+  }
   if (!hasRestartTargets(targets)) return;
   if (!action.supportsRestartTargets) {
     throw new Error(
@@ -324,11 +341,6 @@ function appendOptionalRestartTargetArgs(
     );
   }
 
-  if (targets.server === false) {
-    throw new Error(
-      "Use the services-restart action to restart sidecars without the web/API server.",
-    );
-  }
   if (targets.codexBridge) {
     args.push("--restart-codex-bridge");
   }
@@ -351,7 +363,8 @@ export function buildDeployArgs(input: StartDeploymentRequest): {
   }
 
   const args = [...action.args];
-  const buildType = input.buildType === "debug" ? "debug" : "release";
+  const parsedBuildType = parseApkBuildType(input.buildType);
+  const buildType = parsedBuildType ?? "release";
   const deviceId = validateDeviceId(input.deviceId);
 
   if (action.supportsSkipChecks && input.skipChecks) {
@@ -376,6 +389,9 @@ export function buildDeployArgs(input: StartDeploymentRequest): {
   }
 
   if (deviceId) {
+    if (!action.supportsInstall && action.id !== "apk-install-existing") {
+      throw new Error("deviceId is not supported for this action.");
+    }
     args.push("--device", deviceId);
   }
 
@@ -520,9 +536,15 @@ function getLogsDir(dataDir?: string): string {
 }
 
 async function ensureDeployDirs(dataDir?: string): Promise<void> {
-  await Promise.all([
-    fsp.mkdir(getJobsDir(dataDir), { recursive: true }),
-    fsp.mkdir(getLogsDir(dataDir), { recursive: true }),
+  const deployDir = getDeployDir(dataDir);
+  const jobsDir = getJobsDir(dataDir);
+  const logsDir = getLogsDir(dataDir);
+  await fsp.mkdir(jobsDir, { recursive: true, mode: 0o700 });
+  await fsp.mkdir(logsDir, { recursive: true, mode: 0o700 });
+  await Promise.allSettled([
+    fsp.chmod(deployDir, 0o700),
+    fsp.chmod(jobsDir, 0o700),
+    fsp.chmod(logsDir, 0o700),
   ]);
 }
 
@@ -534,6 +556,7 @@ async function readJobRecord(
   dataDir: string | undefined,
   id: string,
 ): Promise<DeploymentJobRecord | null> {
+  if (!/^[A-Za-z0-9_-]{1,80}$/u.test(id)) return null;
   try {
     const raw = await fsp.readFile(getJobPath(dataDir, id), "utf-8");
     return JSON.parse(raw) as DeploymentJobRecord;
@@ -547,10 +570,14 @@ async function writeJobRecord(
   record: DeploymentJobRecord,
 ): Promise<void> {
   await ensureDeployDirs(dataDir);
-  await fsp.writeFile(
-    getJobPath(dataDir, record.id),
-    JSON.stringify(record, null, 2),
-  );
+  const jobPath = getJobPath(dataDir, record.id);
+  const tempPath = `${jobPath}.tmp-${process.pid}-${randomUUID()}`;
+  await fsp.writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  await fsp.chmod(tempPath, 0o600).catch(() => undefined);
+  await fsp.rename(tempPath, jobPath);
+  await fsp.chmod(jobPath, 0o600).catch(() => undefined);
 }
 
 function isProcessRunning(pid: number | undefined): boolean {
@@ -581,14 +608,45 @@ async function readLogTail(logPath: string): Promise<string> {
   }
 }
 
+async function readJobResult(
+  resultPath: string | undefined,
+): Promise<DeploymentJobResult | null> {
+  if (!resultPath) return null;
+  try {
+    const raw = await fsp.readFile(resultPath, "utf-8");
+    const result = JSON.parse(raw) as Partial<DeploymentJobResult>;
+    if (
+      typeof result.finishedAt !== "string" ||
+      (typeof result.exitCode !== "number" && result.exitCode !== null) ||
+      (typeof result.signal !== "string" && result.signal !== null)
+    ) {
+      return null;
+    }
+    return result as DeploymentJobResult;
+  } catch {
+    return null;
+  }
+}
+
 async function hydrateJob(
   dataDir: string | undefined,
   record: DeploymentJobRecord,
 ): Promise<DeploymentJob> {
   let current = record;
   const log = await readLogTail(record.logPath);
+  const result = await readJobResult(record.resultPath);
 
-  if (record.status === "running" && !isProcessRunning(record.pid)) {
+  if (record.status === "running" && result) {
+    current = {
+      ...record,
+      status: result.exitCode === 0 ? "succeeded" : "failed",
+      updatedAt: result.finishedAt,
+      finishedAt: result.finishedAt,
+      exitCode: result.exitCode,
+      signal: result.signal,
+    };
+    await writeJobRecord(dataDir, current);
+  } else if (record.status === "running" && !isProcessRunning(record.pid)) {
     const now = new Date().toISOString();
     current = {
       ...record,
@@ -601,7 +659,7 @@ async function hydrateJob(
     await writeJobRecord(dataDir, current);
   }
 
-  const { logPath: _logPath, ...job } = current;
+  const { logPath: _logPath, resultPath: _resultPath, ...job } = current;
   return { ...job, log };
 }
 
@@ -641,6 +699,7 @@ async function pruneOldJobs(dataDir: string | undefined): Promise<void> {
     await Promise.allSettled([
       fsp.unlink(getJobPath(dataDir, stale.id)),
       fsp.unlink(stale.logPath),
+      ...(stale.resultPath ? [fsp.unlink(stale.resultPath)] : []),
     ]);
   }
 }
@@ -771,93 +830,118 @@ export async function startDeploymentJob(
   options: DeployRoutesOptions | undefined,
   input: StartDeploymentRequest,
 ): Promise<DeploymentJob> {
-  const availability = getDeploymentAvailability(options);
-  if (
-    !availability.available ||
-    !availability.repoRoot ||
-    !availability.scriptPath
-  ) {
-    throw new Error(availability.reason ?? "Remote deploy is not available.");
-  }
-
-  const currentJob = await findCurrentJob(options?.dataDir);
-  if (currentJob) {
-    const error = new Error("A deploy job is already running.") as Error & {
+  if (deploymentStartInFlight) {
+    const error = new Error("A deploy job is already starting.") as Error & {
       status?: number;
     };
     error.status = 409;
     throw error;
   }
+  deploymentStartInFlight = true;
 
-  const { action, args } = buildDeployArgs(input);
-  await ensureDeployDirs(options?.dataDir);
+  try {
+    const availability = getDeploymentAvailability(options);
+    if (
+      !availability.available ||
+      !availability.repoRoot ||
+      !availability.scriptPath
+    ) {
+      throw new Error(availability.reason ?? "Remote deploy is not available.");
+    }
 
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const logPath = path.join(getLogsDir(options?.dataDir), `${id}.log`);
-  const command = ["scripts/deploy.sh", ...args].map(quoteCommandArg).join(" ");
-  await fsp.writeFile(
-    logPath,
-    `$ ${command}\nstartedAt=${now}\nrepoRoot=${availability.repoRoot}\n\n`,
-  );
+    const currentJob = await findCurrentJob(options?.dataDir);
+    if (currentJob) {
+      const error = new Error("A deploy job is already running.") as Error & {
+        status?: number;
+      };
+      error.status = 409;
+      throw error;
+    }
 
-  const record: DeploymentJobRecord = {
-    id,
-    action: action.id,
-    args,
-    command,
-    status: "running",
-    startedAt: now,
-    updatedAt: now,
-    logPath,
-  };
-  await writeJobRecord(options?.dataDir, record);
+    const { action, args } = buildDeployArgs(input);
+    await ensureDeployDirs(options?.dataDir);
 
-  const logFd = fs.openSync(logPath, "a");
-  const child = spawn(availability.scriptPath, args, {
-    cwd: availability.repoRoot,
-    detached: true,
-    env: process.env,
-    stdio: ["ignore", logFd, logFd],
-  });
-  fs.closeSync(logFd);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const logPath = path.join(getLogsDir(options?.dataDir), `${id}.log`);
+    const resultPath = path.join(getJobsDir(options?.dataDir), `${id}.result`);
+    const runnerPath = path.join(
+      availability.repoRoot,
+      "scripts",
+      "run-deploy-job.mjs",
+    );
+    if (!fs.existsSync(runnerPath)) {
+      throw new Error(`Deploy job runner was not found: ${runnerPath}`);
+    }
+    const command = ["scripts/deploy.sh", ...args]
+      .map(quoteCommandArg)
+      .join(" ");
+    await fsp.writeFile(
+      logPath,
+      `$ ${command}\nstartedAt=${now}\nrepoRoot=${availability.repoRoot}\n\n`,
+      { mode: 0o600 },
+    );
+    await fsp.chmod(logPath, 0o600).catch(() => undefined);
 
-  const spawnedRecord: DeploymentJobRecord = {
-    ...record,
-    pid: child.pid,
-    updatedAt: new Date().toISOString(),
-  };
-  await writeJobRecord(options?.dataDir, spawnedRecord);
-  await pruneOldJobs(options?.dataDir);
+    const record: DeploymentJobRecord = {
+      id,
+      action: action.id,
+      args,
+      command,
+      status: "running",
+      startedAt: now,
+      updatedAt: now,
+      logPath,
+      resultPath,
+    };
+    await writeJobRecord(options?.dataDir, record);
 
-  child.on("exit", (exitCode, signal) => {
-    const finishedAt = new Date().toISOString();
-    void writeJobRecord(options?.dataDir, {
-      ...spawnedRecord,
-      status: exitCode === 0 ? "succeeded" : "failed",
-      exitCode,
-      signal,
-      updatedAt: finishedAt,
-      finishedAt,
+    const logFd = fs.openSync(logPath, "a");
+    const child = spawn(
+      process.execPath,
+      [runnerPath, resultPath, availability.scriptPath, ...args],
+      {
+        cwd: availability.repoRoot,
+        detached: true,
+        env: {
+          ...process.env,
+          YEP_DEPLOY_ENV_FILE_PRECEDENCE: "true",
+        },
+        stdio: ["ignore", logFd, logFd],
+      },
+    );
+    fs.closeSync(logFd);
+
+    const spawnedRecord: DeploymentJobRecord = {
+      ...record,
+      pid: child.pid,
+      updatedAt: new Date().toISOString(),
+    };
+    child.once("error", (err) => {
+      const finishedAt = new Date().toISOString();
+      fs.appendFileSync(
+        logPath,
+        `\n[deploy-api] spawn error: ${err.message}\n`,
+      );
+      void writeJobRecord(options?.dataDir, {
+        ...spawnedRecord,
+        status: "failed",
+        exitCode: null,
+        signal: null,
+        updatedAt: finishedAt,
+        finishedAt,
+      });
     });
-  });
 
-  child.on("error", (err) => {
-    const finishedAt = new Date().toISOString();
-    fs.appendFileSync(logPath, `\n[deploy-api] spawn error: ${err.message}\n`);
-    void writeJobRecord(options?.dataDir, {
-      ...spawnedRecord,
-      status: "failed",
-      exitCode: null,
-      signal: null,
-      updatedAt: finishedAt,
-      finishedAt,
-    });
-  });
+    await writeJobRecord(options?.dataDir, spawnedRecord);
+    await pruneOldJobs(options?.dataDir);
 
-  child.unref();
+    child.unref();
 
-  return hydrateJob(options?.dataDir, spawnedRecord);
+    return hydrateJob(options?.dataDir, spawnedRecord);
+  } finally {
+    deploymentStartInFlight = false;
+  }
 }
 
 export function createDeployRoutes(options?: DeployRoutesOptions): Hono {

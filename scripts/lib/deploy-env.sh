@@ -18,6 +18,7 @@ trim_whitespace() {
 
 load_deploy_env_file() {
   local env_file="${YEP_DEPLOY_ENV_FILE:-$REPO_ROOT/.env.deploy.local}"
+  local file_precedence="${YEP_DEPLOY_ENV_FILE_PRECEDENCE:-false}"
 
   if [[ ! -f "$env_file" ]]; then
     if [[ -n "${YEP_DEPLOY_ENV_FILE:-}" ]]; then
@@ -25,6 +26,13 @@ load_deploy_env_file() {
       exit 1
     fi
     return
+  fi
+
+  # These files routinely contain API keys and service-account JSON. Tighten
+  # an existing permissive mode before reading it; this is idempotent and does
+  # not change the file contents.
+  if ! chmod 600 "$env_file" 2>/dev/null; then
+    warn "Could not restrict deploy env permissions to 600: $env_file"
   fi
 
   local raw_line line key value
@@ -45,7 +53,13 @@ load_deploy_env_file() {
       warn "Skipping invalid deploy env key in $env_file: $key"
       continue
     fi
-    if [[ -n "${!key+x}" ]]; then
+    case "$key" in
+      YEP_DEPLOY_ENV_FILE_PRECEDENCE|YEP_DEPLOY_LOCK_HELD|YEP_DEPLOY_LOCK_OWNED)
+        warn "Skipping reserved deploy env key in $env_file: $key"
+        continue
+        ;;
+    esac
+    if [[ -n "${!key+x}" && "$file_precedence" != "true" ]]; then
       continue
     fi
 

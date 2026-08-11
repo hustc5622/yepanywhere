@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   startDeployment: vi.fn(),
   updateServerSetting: vi.fn(),
   uploadNativeLogs: vi.fn(),
+  unsafeToRestart: false,
   version: null as { current: string; capabilities: string[] } | null,
 }));
 
@@ -52,8 +53,8 @@ vi.mock("../../hooks/useReloadNotifications", () => ({
     pendingReloads: { backend: false },
     connected: true,
     reloadBackend: mocks.reloadBackend,
-    unsafeToRestart: false,
-    workerActivity: { activeWorkers: 0 },
+    unsafeToRestart: mocks.unsafeToRestart,
+    workerActivity: { activeWorkers: mocks.unsafeToRestart ? 2 : 0 },
   }),
 }));
 vi.mock("../../hooks/useSchemaValidation", () => ({
@@ -87,6 +88,7 @@ describe("DevelopmentSettings", () => {
   beforeEach(() => {
     localStorage.clear();
     mocks.version = null;
+    mocks.unsafeToRestart = false;
     mocks.getDeploymentStatus.mockResolvedValue({
       available: true,
       actions: [],
@@ -165,6 +167,48 @@ describe("DevelopmentSettings", () => {
             codexBridge: true,
             opencodeBridge: true,
           },
+        }),
+      );
+    });
+  });
+
+  it("queues a dev cutover without forcing active session interruption", async () => {
+    mocks.version = {
+      current: "0.4.29",
+      capabilities: ["deployment"],
+    };
+    mocks.unsafeToRestart = true;
+    const job = {
+      id: "deploy-job-2",
+      action: "server-dev",
+      args: ["--dev-server"],
+      command: "scripts/deploy.sh --dev-server",
+      status: "running",
+      startedAt: "2026-08-04T09:00:00.000Z",
+      updatedAt: "2026-08-04T09:00:00.000Z",
+    };
+    mocks.startDeployment.mockResolvedValue({ job });
+    mocks.getDeploymentJob.mockResolvedValue({ job });
+
+    render(
+      <MemoryRouter>
+        <DevelopmentSettings />
+      </MemoryRouter>,
+    );
+
+    const button = screen.getByRole("button", {
+      name: "deploymentStartDevServer",
+    });
+    await waitFor(() => {
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(mocks.startDeployment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "server-dev",
+          allowSessionInterrupt: undefined,
         }),
       );
     });

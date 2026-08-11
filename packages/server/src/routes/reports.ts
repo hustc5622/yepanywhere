@@ -102,11 +102,14 @@ interface ResolvedReportImage {
 }
 
 function getReportsRoot(configuredDir?: string): string {
+  const deployRepoRoot = process.env.YEP_DEPLOY_REPO_ROOT;
   const raw =
     configuredDir ||
     process.env.YEP_REPORTS_DIR ||
     process.env.RESEARCH_TASKS_DIR ||
-    "../research_tasks";
+    (deployRepoRoot
+      ? resolve(deployRepoRoot, "../research_tasks")
+      : "../research_tasks");
   return resolve(process.cwd(), raw);
 }
 

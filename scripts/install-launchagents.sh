@@ -5,6 +5,7 @@
 # and deploys exit successfully and remain under the user's control.
 
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -26,6 +27,8 @@ dim()  { echo -e "${C_DIM}    $*${C_RESET}"; }
 # would have supplied, and the reinstalled LaunchAgent loses them.
 # shellcheck source=scripts/lib/deploy-env.sh
 source "$SCRIPT_DIR/lib/deploy-env.sh"
+# shellcheck source=scripts/lib/deploy-lock.sh
+source "$SCRIPT_DIR/lib/deploy-lock.sh"
 load_deploy_env_file
 
 SERVER_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
@@ -59,6 +62,14 @@ SOURCE_BUNDLE_DIR="$REPO_ROOT/dist/npm-package"
 SOURCE_CLI_JS="$SOURCE_BUNDLE_DIR/dist/cli.js"
 LAUNCHD_RUNTIME_DIR="${YEP_LAUNCHD_RUNTIME_DIR:-$HOME/.yep-anywhere/runtime/npm-package}"
 CLI_JS="$LAUNCHD_RUNTIME_DIR/dist/cli.js"
+REPORTS_DIR_INPUT="${YEP_REPORTS_DIR:-${RESEARCH_TASKS_DIR:-}}"
+case "$REPORTS_DIR_INPUT" in
+  "") SERVER_REPORTS_DIR="$(dirname "$REPO_ROOT")/research_tasks" ;;
+  /*) SERVER_REPORTS_DIR="$REPORTS_DIR_INPUT" ;;
+  "~") SERVER_REPORTS_DIR="$HOME" ;;
+  "~/"*) SERVER_REPORTS_DIR="$HOME/${REPORTS_DIR_INPUT#~/}" ;;
+  *) SERVER_REPORTS_DIR="$REPO_ROOT/$REPORTS_DIR_INPUT" ;;
+esac
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
 USER_DOMAIN="gui/$(id -u)"
@@ -87,6 +98,9 @@ Environment overrides:
   YEP_DEPLOY_BASE_PATH         Main server base path (default: /yep)
   ALLOWED_IMAGE_PATHS          Extra local media paths for /api/local-image
                                (default: /tmp,$HOME/Downloads)
+  YEP_REPORTS_DIR              Absolute or repository-relative Reports directory
+                               (default: sibling research_tasks directory)
+  RESEARCH_TASKS_DIR           Legacy fallback when YEP_REPORTS_DIR is unset
   YEP_CODEX_BRIDGE_PORT        Codex bridge port (default: 4510)
   YEP_OPENCODE_BRIDGE_PORT       OpenCode bridge port (default: 4520)
   YEP_OPENCODE_SERVER_START_PORT OpenCode managed server start port (default: 4521)
@@ -98,6 +112,8 @@ Environment overrides:
   YEP_LAUNCHD_RUNTIME_DIR      Bundle copy used by LaunchAgents
                                (default: ~/.yep-anywhere/runtime/npm-package)
   YEP_LAUNCHD_LOG_DIR          LaunchAgent stdout/stderr log directory
+  YEP_LAUNCHD_LOG_MAX_BYTES    Rotate each LaunchAgent log before install when
+                               it exceeds this size (default: 52428800)
   ALLOWED_HOSTS                Comma-separated public hostnames/IPs accepted by the server
   YEP_FCM_SERVICE_ACCOUNT_FILE Firebase service account JSON path for Android native push
   YEP_FCM_SERVICE_ACCOUNT_JSON Raw Firebase service account JSON for Android native push
@@ -190,6 +206,8 @@ if [[ ! -f "$SOURCE_CLI_JS" ]]; then
   exit 1
 fi
 
+acquire_deploy_lock
+
 if [[ ! -d "$SOURCE_BUNDLE_DIR/node_modules" ]]; then
   warn "Runtime dependencies are missing from $SOURCE_BUNDLE_DIR/node_modules."
   warn "Run scripts/deploy.sh --server-only before relying on the LaunchAgents."
@@ -210,6 +228,43 @@ OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
 
 chmod +x "$SOURCE_CLI_JS" 2>/dev/null || true
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+chmod 700 "$LOG_DIR" 2>/dev/null || true
+
+prepare_private_log() {
+  local path="$1"
+  local max_bytes="${YEP_LAUNCHD_LOG_MAX_BYTES:-52428800}"
+  local size=0
+
+  if [[ ! "$max_bytes" =~ ^[0-9]+$ ]]; then
+    err "YEP_LAUNCHD_LOG_MAX_BYTES must be a non-negative integer: $max_bytes"
+    return 1
+  fi
+  if [[ -f "$path" ]]; then
+    size="$(stat -f '%z' "$path" 2>/dev/null || stat -c '%s' "$path" 2>/dev/null || printf '0')"
+  fi
+  if (( max_bytes > 0 && size > max_bytes )); then
+    [[ -f "$path.2" ]] && mv -f "$path.2" "$path.3"
+    [[ -f "$path.1" ]] && mv -f "$path.1" "$path.2"
+    mv "$path" "$path.1"
+    chmod 600 "$path.1" "$path.2" "$path.3" 2>/dev/null || true
+    dim "rotated $path (${size} bytes)"
+  fi
+  touch "$path"
+  chmod 600 "$path"
+}
+
+if $INSTALL_SERVER; then
+  prepare_private_log "$LOG_DIR/server-launchd.out.log"
+  prepare_private_log "$LOG_DIR/server-launchd.err.log"
+fi
+if $INSTALL_CODEX_BRIDGE; then
+  prepare_private_log "$LOG_DIR/codex-bridge-launchd.out.log"
+  prepare_private_log "$LOG_DIR/codex-bridge-launchd.err.log"
+fi
+if $INSTALL_OPENCODE_BRIDGE; then
+  prepare_private_log "$LOG_DIR/opencode-bridge-launchd.out.log"
+  prepare_private_log "$LOG_DIR/opencode-bridge-launchd.err.log"
+fi
 
 log "Syncing LaunchAgent runtime outside the repository ..."
 YEP_LAUNCHD_RUNTIME_DIR="$LAUNCHD_RUNTIME_DIR" "$SCRIPT_DIR/sync-launchd-runtime.sh"
@@ -289,6 +344,7 @@ write_header() {
     printf '%s\n' '  <key>StandardErrorPath</key>'
     printf '  <string>%s</string>\n' "$(xml_escape "$stderr_path")"
   } >"$path"
+  chmod 600 "$path"
 }
 
 append_env() {
@@ -398,6 +454,7 @@ write_server_plist() {
     "BASE_PATH" "$SERVER_BASE_PATH"
     "ALLOWED_IMAGE_PATHS" "$SERVER_ALLOWED_IMAGE_PATHS"
     "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT"
+    "YEP_REPORTS_DIR" "$SERVER_REPORTS_DIR"
     "YEP_CODEX_BRIDGE_MODE" "external"
     "YEP_CODEX_BRIDGE_CONTROL_URL" "$BRIDGE_URL"
     "YEP_CODEX_BRIDGE_PORT" "$BRIDGE_PORT"
@@ -519,6 +576,7 @@ fi
 log "Installed LaunchAgents."
 if $INSTALL_SERVER; then
   dim "server: $SERVER_LABEL -> http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
+  dim "reports: $SERVER_REPORTS_DIR"
 else
   dim "server: skipped"
 fi
