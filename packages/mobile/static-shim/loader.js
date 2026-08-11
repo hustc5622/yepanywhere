@@ -34,10 +34,11 @@
     TCP_NODES[2].origin
   ];
   var DEPRECATED_DEFAULT_TCP_ORIGINS = [
-    "http://123.56.106.49:37160"
+    "http://123.56.106.49:37160",
+    "http://43.226.60.75:61874"
   ];
   var NODE_HISTORY_LIMIT = 8;
-  var FRAME_LOAD_FALLBACK_MS = 6000;
+  var APP_READY_TIMEOUT_MS = 12000;
   var SLOW_STATUS_MS = 8000;
   // The longest iframe-side native request timeout is 60 seconds (log upload).
   // Keep a small grace period, then release the source WindowProxy even if the
@@ -55,13 +56,145 @@
       origin: "https://air.yueyuan.uk"
     }
   };
+  var STRINGS = {
+    en: {
+      documentTitle: "Yep Anywhere",
+      connection: "Connection",
+      close: "Close",
+      loading: "Loading Yep Anywhere",
+      serverNode: "Server node",
+      connect: "Connect",
+      savedNodes: "Saved nodes",
+      httpsRelay: "HTTPS relay",
+      retry: "Retry",
+      useDefault: "Use default",
+      diagnostics: "Diagnostics",
+      currentTarget: "Current target",
+      defaultTarget: "Default target",
+      connectionState: "Connection state",
+      network: "Network",
+      frameLoad: "Frame load",
+      attemptStarted: "Attempt started",
+      appVersion: "App version",
+      androidWebView: "Android / WebView",
+      nativeBridge: "Native bridge",
+      copyDiagnostics: "Copy diagnostics",
+      copied: "Copied",
+      openAnyway: "Open page anyway",
+      connectingViaTcp: "Connecting via TCP",
+      connectingViaHttps: "Connecting via HTTPS relay",
+      connectingTo: "Connecting to {target}",
+      waitingForApp: "WebView load event received; waiting for Yep Anywhere",
+      stillConnecting: "Still connecting to {target}",
+      connectionFailed: "Could not verify Yep Anywhere at {target}",
+      connectionFailedHint:
+        "The server may be offline or the address may have changed. Update the address or retry.",
+      invalidNode: "Enter a server as host:port or http(s)://host:port",
+      ready: "Ready",
+      connecting: "Connecting",
+      failed: "Timed out",
+      unverified: "Opened without verification",
+      online: "Online",
+      offline: "Offline",
+      seen: "Seen",
+      notSeen: "Not seen",
+      available: "Available",
+      unavailable: "Unavailable",
+      unknown: "Unknown",
+      never: "Never"
+    },
+    "zh-CN": {
+      documentTitle: "Yep Anywhere",
+      connection: "连接设置",
+      close: "关闭",
+      loading: "正在加载 Yep Anywhere",
+      serverNode: "服务器地址",
+      connect: "连接",
+      savedNodes: "已保存地址",
+      httpsRelay: "HTTPS 中继",
+      retry: "重试",
+      useDefault: "恢复默认",
+      diagnostics: "诊断信息",
+      currentTarget: "当前地址",
+      defaultTarget: "默认地址",
+      connectionState: "连接状态",
+      network: "系统网络",
+      frameLoad: "网页加载事件",
+      attemptStarted: "开始时间",
+      appVersion: "App 版本",
+      androidWebView: "Android / WebView",
+      nativeBridge: "原生桥",
+      copyDiagnostics: "复制诊断",
+      copied: "已复制",
+      openAnyway: "仍然打开网页",
+      connectingViaTcp: "正在通过 TCP 连接",
+      connectingViaHttps: "正在通过 HTTPS 中继连接",
+      connectingTo: "正在连接 {target}",
+      waitingForApp: "WebView 已触发加载事件，正在等待 Yep Anywhere 就绪",
+      stillConnecting: "仍在连接 {target}",
+      connectionFailed: "无法确认 {target} 上的 Yep Anywhere 已就绪",
+      connectionFailedHint: "服务器可能已离线或地址已变化，请修改地址或重试。",
+      invalidNode: "请输入 host:端口 或 http(s)://host:端口",
+      ready: "已连接",
+      connecting: "连接中",
+      failed: "连接超时",
+      unverified: "未验证打开",
+      online: "网络在线",
+      offline: "网络离线",
+      seen: "已触发",
+      notSeen: "未触发",
+      available: "可用",
+      unavailable: "不可用",
+      unknown: "未知",
+      never: "无"
+    }
+  };
+  var language = /^zh(?:-|$)/i.test(window.navigator.language || "")
+    ? "zh-CN"
+    : "en";
   var loaded = false;
-  var frameLoadFallbackTimer = null;
+  var appReadyTimer = null;
   var slowStatusTimer = null;
   var activeChannel = DEFAULT_CHANNEL;
   var activeTarget = null;
+  var connectionState = "connecting";
+  var attemptStartedAt = null;
+  var frameLoadedAt = null;
+  var appReadyAt = null;
+  var nativeDiagnostics = null;
   var pendingNativePushFrames = {};
   var pendingNativePushTimers = {};
+
+  function t(key, values) {
+    var table = STRINGS[language] || STRINGS.en;
+    var template = table[key] || STRINGS.en[key] || key;
+    if (!values) return template;
+
+    return template.replace(/\{([^}]+)\}/g, function (_match, name) {
+      return Object.prototype.hasOwnProperty.call(values, name)
+        ? String(values[name])
+        : "";
+    });
+  }
+
+  function applyTranslations() {
+    document.documentElement.lang = language;
+    document.title = t("documentTitle");
+
+    var textNodes = document.querySelectorAll("[data-i18n]");
+    for (var index = 0; index < textNodes.length; index += 1) {
+      var key = textNodes[index].getAttribute("data-i18n");
+      if (key) textNodes[index].textContent = t(key);
+    }
+
+    var labelledNodes = document.querySelectorAll("[data-i18n-label]");
+    for (var labelIndex = 0; labelIndex < labelledNodes.length; labelIndex += 1) {
+      var labelKey = labelledNodes[labelIndex].getAttribute("data-i18n-label");
+      if (!labelKey) continue;
+      labelledNodes[labelIndex].setAttribute("aria-label", t(labelKey));
+      labelledNodes[labelIndex].setAttribute("title", t(labelKey));
+    }
+  }
 
   function logNativePush(message) {
     try {
@@ -100,6 +233,14 @@
   function writeStorage(key, value) {
     try {
       window.localStorage.setItem(key, value);
+    } catch (_err) {
+      // Storage can be unavailable in restricted WebView modes.
+    }
+  }
+
+  function removeStorage(key) {
+    try {
+      window.localStorage.removeItem(key);
     } catch (_err) {
       // Storage can be unavailable in restricted WebView modes.
     }
@@ -187,14 +328,18 @@
       label: node.label,
       nodeOrigin: node.origin,
       origin: node.origin,
-      status: "Connecting to " + displayLabel
+      status: t("connectingTo", { target: displayLabel })
     };
   }
 
   function getStoredActiveNode() {
     var value = readStorage(ACTIVE_NODE_STORAGE_KEY);
     var node = value ? normalizeNodeInput(value) : null;
-    return node && !isDeprecatedDefaultNode(node.origin) ? node : null;
+    if (node && isDeprecatedDefaultNode(node.origin)) {
+      removeStorage(ACTIVE_NODE_STORAGE_KEY);
+      return null;
+    }
+    return node;
   }
 
   function storeActiveNode(origin) {
@@ -262,7 +407,7 @@
       channel: channel,
       label: CHANNELS[channel].label,
       origin: CHANNELS[channel].origin,
-      status: CHANNELS[channel].status
+      status: t("connectingViaHttps")
     };
   }
 
@@ -353,6 +498,158 @@
     if (error) error.textContent = text || "";
   }
 
+  function readNativeDiagnostics() {
+    try {
+      if (
+        window.YepNativePush &&
+        typeof window.YepNativePush.getShellDiagnostics === "function"
+      ) {
+        var value = window.YepNativePush.getShellDiagnostics();
+        nativeDiagnostics = typeof value === "string" ? JSON.parse(value) : value;
+      }
+    } catch (error) {
+      nativeDiagnostics = {
+        error: error && error.message ? error.message : "native diagnostics failed"
+      };
+    }
+  }
+
+  function formatTimestamp(value) {
+    if (!value) return t("never");
+    try {
+      return new Date(value).toLocaleString(language);
+    } catch (_err) {
+      return value;
+    }
+  }
+
+  function getConnectionStateLabel() {
+    if (connectionState === "ready") return t("ready");
+    if (connectionState === "failed") return t("failed");
+    if (connectionState === "unverified") return t("unverified");
+    return t("connecting");
+  }
+
+  function getDiagnosticSnapshot() {
+    return {
+      capturedAt: new Date().toISOString(),
+      connectionState: connectionState,
+      currentTarget: activeTarget ? activeTarget.origin : null,
+      defaultTarget: DEFAULT_TCP_ORIGIN,
+      storedChannel: readStorage(CHANNEL_STORAGE_KEY),
+      storedNode: readStorage(ACTIVE_NODE_STORAGE_KEY),
+      attemptStartedAt: attemptStartedAt,
+      frameLoadedAt: frameLoadedAt,
+      appReadyAt: appReadyAt,
+      appReadyTimeoutMs: APP_READY_TIMEOUT_MS,
+      navigatorOnline: window.navigator.onLine,
+      language: language,
+      nativeBridgeAvailable: !!window.YepNativePush,
+      native: nativeDiagnostics,
+      userAgent: window.navigator.userAgent
+    };
+  }
+
+  function setDiagnosticText(selector, value) {
+    var element = document.querySelector(selector);
+    if (element) element.textContent = value;
+  }
+
+  function renderDiagnostics() {
+    if (!nativeDiagnostics) readNativeDiagnostics();
+
+    setDiagnosticText(
+      "[data-diagnostic-target]",
+      activeTarget ? activeTarget.origin : t("unknown")
+    );
+    setDiagnosticText("[data-diagnostic-default]", DEFAULT_TCP_ORIGIN);
+    setDiagnosticText("[data-diagnostic-state]", getConnectionStateLabel());
+    setDiagnosticText(
+      "[data-diagnostic-network]",
+      window.navigator.onLine ? t("online") : t("offline")
+    );
+    setDiagnosticText(
+      "[data-diagnostic-frame]",
+      frameLoadedAt ? t("seen") + " · " + formatTimestamp(frameLoadedAt) : t("notSeen")
+    );
+    setDiagnosticText(
+      "[data-diagnostic-attempt]",
+      formatTimestamp(attemptStartedAt)
+    );
+    setDiagnosticText(
+      "[data-diagnostic-version]",
+      nativeDiagnostics && nativeDiagnostics.appVersion
+        ? nativeDiagnostics.appVersion +
+            (nativeDiagnostics.versionCode
+              ? " (" + nativeDiagnostics.versionCode + ")"
+              : "")
+        : t("unknown")
+    );
+    setDiagnosticText(
+      "[data-diagnostic-webview]",
+      nativeDiagnostics
+        ? [
+            nativeDiagnostics.androidSdk
+              ? "SDK " + nativeDiagnostics.androidSdk
+              : null,
+            nativeDiagnostics.webViewVersion || null
+          ]
+            .filter(Boolean)
+            .join(" · ") || t("unknown")
+        : t("unknown")
+    );
+    setDiagnosticText(
+      "[data-diagnostic-bridge]",
+      window.YepNativePush ? t("available") : t("unavailable")
+    );
+
+    if (document.body) {
+      document.body.setAttribute("data-connection-state", connectionState);
+    }
+  }
+
+  function fallbackCopyText(text) {
+    var textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    var copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (_err) {
+      copied = false;
+    }
+    textarea.remove();
+    return copied;
+  }
+
+  function copyDiagnostics(button) {
+    var text = JSON.stringify(getDiagnosticSnapshot(), null, 2);
+    var copyPromise = null;
+    if (window.navigator.clipboard && window.navigator.clipboard.writeText) {
+      copyPromise = window.navigator.clipboard.writeText(text);
+    } else {
+      copyPromise = fallbackCopyText(text)
+        ? Promise.resolve()
+        : Promise.reject(new Error("clipboard unavailable"));
+    }
+
+    copyPromise
+      .then(function () {
+        if (!button) return;
+        button.textContent = t("copied");
+        window.setTimeout(function () {
+          button.textContent = t("copyDiagnostics");
+        }, 1600);
+      })
+      .catch(function () {
+        updateNodeError(text);
+      });
+  }
+
   function renderConnectionControls() {
     var input = document.querySelector("[data-node-input]");
     var nodeLabel =
@@ -396,6 +693,8 @@
         "shell-loader__channel-button" +
         (activeChannel === "http" ? " is-active" : "");
     }
+
+    renderDiagnostics();
   }
 
   function postChannelStatus() {
@@ -416,9 +715,9 @@
   }
 
   function clearTimers() {
-    if (frameLoadFallbackTimer !== null) {
-      window.clearTimeout(frameLoadFallbackTimer);
-      frameLoadFallbackTimer = null;
+    if (appReadyTimer !== null) {
+      window.clearTimeout(appReadyTimer);
+      appReadyTimer = null;
     }
     if (slowStatusTimer !== null) {
       window.clearTimeout(slowStatusTimer);
@@ -428,18 +727,67 @@
 
   function resetLoading(target) {
     loaded = false;
+    connectionState = "connecting";
+    attemptStartedAt = new Date().toISOString();
+    frameLoadedAt = null;
+    appReadyAt = null;
     clearTimers();
-    if (document.body) document.body.classList.remove("is-loaded");
+    if (document.body) {
+      document.body.classList.remove("is-loaded", "has-connection-error");
+      document.body.classList.add("is-panel-open");
+    }
     updateStatus(target.status);
     updateNodeError("");
     renderConnectionControls();
   }
 
   function markLoaded() {
-    if (loaded || !document.body) return;
+    if (!document.body || connectionState === "ready") return;
     loaded = true;
+    connectionState = "ready";
+    appReadyAt = new Date().toISOString();
+    configureNativeSessionWatcher(activeTarget);
     clearTimers();
     document.body.classList.add("is-loaded");
+    document.body.classList.remove("is-panel-open", "has-connection-error");
+    renderConnectionControls();
+  }
+
+  function markConnectionFailed() {
+    if (loaded || !document.body) return;
+    connectionState = "failed";
+    clearTimers();
+    document.body.classList.add("has-connection-error", "is-panel-open");
+    updateStatus(
+      t("connectionFailed", {
+        target: activeTarget
+          ? activeTarget.displayLabel || activeTarget.label
+          : t("unknown")
+      })
+    );
+    updateNodeError(t("connectionFailedHint"));
+    renderConnectionControls();
+  }
+
+  function openSettings() {
+    if (!document.body) return;
+    document.body.classList.add("is-panel-open");
+    renderConnectionControls();
+  }
+
+  function closeSettings() {
+    if (!loaded || !document.body) return;
+    document.body.classList.remove("is-panel-open");
+  }
+
+  function openUnverifiedPage() {
+    if (!document.body) return;
+    loaded = true;
+    connectionState = "unverified";
+    clearTimers();
+    document.body.classList.add("is-loaded");
+    document.body.classList.remove("is-panel-open", "has-connection-error");
+    renderConnectionControls();
   }
 
   function updateSlowStatus() {
@@ -448,25 +796,23 @@
       if (loaded || !document.body) return;
       updateStatus(
         activeTarget
-          ? "Still connecting to " + (activeTarget.displayLabel || activeTarget.label)
-          : "Still connecting"
+          ? t("stillConnecting", {
+              target: activeTarget.displayLabel || activeTarget.label
+            })
+          : t("connecting")
       );
     }, SLOW_STATUS_MS);
   }
 
-  function markLoadedEventually() {
-    if (frameLoadFallbackTimer !== null) return;
-    frameLoadFallbackTimer = window.setTimeout(
-      markLoaded,
-      FRAME_LOAD_FALLBACK_MS
-    );
+  function startAppReadyTimeout() {
+    if (appReadyTimer !== null) window.clearTimeout(appReadyTimer);
+    appReadyTimer = window.setTimeout(markConnectionFailed, APP_READY_TIMEOUT_MS);
   }
 
   function loadTarget(target, options) {
     if (!target) target = targetFromChannel(DEFAULT_CHANNEL);
     activeTarget = target;
     activeChannel = target.channel;
-    configureNativeSessionWatcher(target);
 
     if (!options || options.persist !== false) {
       storeChannel(target.channel);
@@ -480,16 +826,18 @@
 
     var frame = document.getElementById("app-frame");
     if (!frame) {
-      markLoadedEventually();
+      markConnectionFailed();
       return;
     }
 
     frame.onload = function () {
+      frameLoadedAt = new Date().toISOString();
+      if (!loaded) updateStatus(t("waitingForApp"));
       renderConnectionControls();
-      markLoadedEventually();
     };
     frame.src = getFrameUrl(target, options && options.path);
     updateSlowStatus();
+    startAppReadyTimeout();
     renderConnectionControls();
   }
 
@@ -673,17 +1021,38 @@
   function loadNode(value, options) {
     var target = targetFromNodeInput(value);
     if (!target) {
-      updateNodeError("Enter a node as host:port");
+      updateNodeError(t("invalidNode"));
       return;
     }
 
     loadTarget(target, options);
   }
 
+  function retryActiveTarget() {
+    loadTarget(
+      activeTarget || getStoredTarget() || targetFromChannel(DEFAULT_CHANNEL),
+      { path: getCurrentFramePath(), persist: false }
+    );
+  }
+
+  function useDefaultTarget() {
+    removeStorage(ACTIVE_NODE_STORAGE_KEY);
+    storeChannel(DEFAULT_CHANNEL);
+    loadTarget(targetFromNodeInput(DEFAULT_TCP_ORIGIN), {
+      path: getCurrentFramePath()
+    });
+  }
+
   function bindConnectionControls() {
     var form = document.querySelector("[data-node-form]");
     var input = document.querySelector("[data-node-input]");
     var httpButton = document.querySelector("[data-http-channel]");
+    var retryButton = document.querySelector("[data-retry-connection]");
+    var defaultButton = document.querySelector("[data-use-default]");
+    var openSettingsButton = document.querySelector("[data-open-settings]");
+    var closeSettingsButton = document.querySelector("[data-close-settings]");
+    var copyDiagnosticsButton = document.querySelector("[data-copy-diagnostics]");
+    var openAnywayButton = document.querySelector("[data-open-anyway]");
 
     if (form && input) {
       form.addEventListener("submit", function (event) {
@@ -702,11 +1071,32 @@
       });
     }
 
+    if (retryButton) retryButton.addEventListener("click", retryActiveTarget);
+    if (defaultButton) defaultButton.addEventListener("click", useDefaultTarget);
+    if (openSettingsButton) {
+      openSettingsButton.addEventListener("click", openSettings);
+    }
+    if (closeSettingsButton) {
+      closeSettingsButton.addEventListener("click", closeSettings);
+    }
+    if (copyDiagnosticsButton) {
+      copyDiagnosticsButton.addEventListener("click", function () {
+        copyDiagnostics(copyDiagnosticsButton);
+      });
+    }
+    if (openAnywayButton) {
+      openAnywayButton.addEventListener("click", openUnverifiedPage);
+    }
+
+    window.addEventListener("online", renderConnectionControls);
+    window.addEventListener("offline", renderConnectionControls);
+
     renderConnectionControls();
   }
 
   function bindFrameLoad() {
     var frame = document.getElementById("app-frame");
+    applyTranslations();
     if (frame) {
       window.addEventListener("message", function (event) {
         if (event.source !== frame.contentWindow) return;
@@ -723,6 +1113,12 @@
         }
 
         if (event.data.type === APP_READY_MESSAGE) {
+          if (activeTarget && event.origin !== activeTarget.origin) {
+            logNativePush(
+              "ignored app-ready from unexpected origin=" + event.origin
+            );
+            return;
+          }
           markLoaded();
           postChannelStatus();
           return;
@@ -743,8 +1139,6 @@
           }
         }
       });
-    } else {
-      markLoadedEventually();
     }
     bindConnectionControls();
     loadTarget(
@@ -755,13 +1149,10 @@
     );
   }
 
-  window.addEventListener("load", markLoadedEventually, { once: true });
   window.addEventListener("hashchange", function () {
-    var frame = document.getElementById("app-frame");
-    if (!frame) return;
-    frame.src = getFrameUrl(
-      activeTarget || targetFromChannel(DEFAULT_CHANNEL)
-    );
+    loadTarget(activeTarget || targetFromChannel(DEFAULT_CHANNEL), {
+      persist: false
+    });
   });
 
   if (document.readyState === "loading") {

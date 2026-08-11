@@ -330,6 +330,25 @@ class MainActivity : TauriActivity() {
     private val webView: WebView
   ) {
     @JavascriptInterface
+    fun getShellDiagnostics(): String {
+      val webViewPackage =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          WebView.getCurrentWebViewPackage()
+        } else {
+          null
+        }
+      return JSONObject()
+        .put("appVersion", BuildConfig.VERSION_NAME)
+        .put("versionCode", BuildConfig.VERSION_CODE)
+        .put("androidSdk", Build.VERSION.SDK_INT)
+        .put("device", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+        .put("webViewPackage", webViewPackage?.packageName ?: JSONObject.NULL)
+        .put("webViewVersion", webViewPackage?.versionName ?: JSONObject.NULL)
+        .put("nativeLogEntries", YepLog.entryCount())
+        .toString()
+    }
+
+    @JavascriptInterface
     fun getStatus(callbackId: String) {
       val status = activity.nativePushStatusJson()
       Log.i(

@@ -50,13 +50,16 @@
         position: fixed;
         inset: 0;
         z-index: 2;
-        display: grid;
-        place-items: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: auto;
         padding:
-          env(safe-area-inset-top)
-          env(safe-area-inset-right)
-          env(safe-area-inset-bottom)
-          env(safe-area-inset-left);
+          calc(env(safe-area-inset-top) + 16px)
+          calc(env(safe-area-inset-right) + 16px)
+          calc(env(safe-area-inset-bottom) + 16px)
+          calc(env(safe-area-inset-left) + 16px);
+        box-sizing: border-box;
         background: #faf9f5;
         opacity: 1;
         visibility: visible;
@@ -66,11 +69,86 @@
       }
 
       .shell-loader__content {
+        position: relative;
         display: grid;
         justify-items: center;
-        gap: 14px;
-        width: calc(100% - 40px);
-        max-width: 360px;
+        gap: 12px;
+        width: 100%;
+        max-width: 400px;
+        margin: auto;
+        padding: 20px;
+        box-sizing: border-box;
+        border: 1px solid rgba(95, 107, 122, 0.14);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.72);
+        box-shadow: 0 20px 60px rgba(32, 36, 44, 0.12);
+      }
+
+      .shell-loader__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+      }
+
+      .shell-loader__title {
+        color: #20242c;
+        font-size: 16px;
+        font-weight: 720;
+      }
+
+      .shell-loader__close {
+        display: none;
+        min-width: 36px;
+        min-height: 32px;
+        border: 1px solid rgba(95, 107, 122, 0.2);
+        border-radius: 8px;
+        padding: 0 10px;
+        background: transparent;
+        color: #5f6b7a;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      body.is-loaded .shell-loader__close {
+        display: block;
+      }
+
+      .shell-toolbar {
+        position: fixed;
+        z-index: 4;
+        top: calc(env(safe-area-inset-top) + 8px);
+        right: calc(env(safe-area-inset-right) + 8px);
+        display: none;
+        align-items: center;
+        gap: 7px;
+        min-height: 34px;
+        border: 1px solid rgba(95, 107, 122, 0.22);
+        border-radius: 999px;
+        padding: 0 12px;
+        background: rgba(250, 249, 245, 0.9);
+        color: #20242c;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 680;
+        box-shadow: 0 8px 24px rgba(32, 36, 44, 0.16);
+        backdrop-filter: blur(12px);
+      }
+
+      body.is-loaded:not(.is-panel-open) .shell-toolbar {
+        display: flex;
+      }
+
+      .shell-toolbar__dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #16a34a;
+      }
+
+      body[data-connection-state="unverified"] .shell-toolbar__dot {
+        background: #d97706;
       }
 
       .shell-loader__mark {
@@ -94,6 +172,12 @@
         border-top-color: #20242c;
         border-radius: 999px;
         animation: shell-spin 760ms linear infinite;
+      }
+
+      body.has-connection-error .shell-loader__spinner {
+        border-color: rgba(180, 35, 24, 0.18);
+        border-top-color: #b42318;
+        animation: none;
       }
 
       .shell-loader__status {
@@ -146,7 +230,9 @@
 
       .shell-loader__node-submit,
       .shell-loader__channel-button,
-      .shell-loader__history-button {
+      .shell-loader__history-button,
+      .shell-loader__action-button,
+      .shell-loader__diagnostic-button {
         min-height: 36px;
         border: 1px solid rgba(95, 107, 122, 0.22);
         border-radius: 8px;
@@ -166,7 +252,9 @@
       }
 
       .shell-loader__channel-button,
-      .shell-loader__history-button {
+      .shell-loader__history-button,
+      .shell-loader__action-button,
+      .shell-loader__diagnostic-button {
         background: rgba(255, 255, 255, 0.72);
         color: #374151;
       }
@@ -202,11 +290,69 @@
         text-align: center;
       }
 
+      .shell-loader__actions {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+        width: 100%;
+      }
+
+      .shell-loader__action-button {
+        min-width: 0;
+        padding: 0 8px;
+      }
+
+      .shell-loader__diagnostics {
+        width: 100%;
+        border-top: 1px solid rgba(95, 107, 122, 0.14);
+        padding-top: 10px;
+        color: #374151;
+        font-size: 12px;
+      }
+
+      .shell-loader__diagnostics summary {
+        cursor: pointer;
+        font-weight: 680;
+        line-height: 24px;
+      }
+
+      .shell-loader__diagnostic-list {
+        display: grid;
+        grid-template-columns: minmax(92px, auto) minmax(0, 1fr);
+        gap: 6px 10px;
+        margin: 10px 0;
+      }
+
+      .shell-loader__diagnostic-list dt {
+        color: #6b7280;
+      }
+
+      .shell-loader__diagnostic-list dd {
+        min-width: 0;
+        margin: 0;
+        overflow-wrap: anywhere;
+        text-align: right;
+      }
+
+      .shell-loader__diagnostic-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .shell-loader__open-anyway {
+        display: none;
+      }
+
+      body.has-connection-error .shell-loader__open-anyway {
+        display: block;
+      }
+
       body.is-loaded iframe {
         opacity: 1;
       }
 
-      body.is-loaded .shell-loader {
+      body.is-loaded:not(.is-panel-open) .shell-loader {
         opacity: 0;
         visibility: hidden;
         pointer-events: none;
@@ -228,6 +374,28 @@
 
         .shell-loader {
           background: #232323;
+        }
+
+        .shell-loader__content {
+          border-color: rgba(229, 231, 235, 0.14);
+          background: rgba(30, 30, 30, 0.9);
+          box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+        }
+
+        .shell-loader__title {
+          color: #f4f4f5;
+        }
+
+        .shell-loader__close {
+          border-color: rgba(229, 231, 235, 0.18);
+          color: #c9ced6;
+        }
+
+        .shell-toolbar {
+          border-color: rgba(229, 231, 235, 0.18);
+          background: rgba(35, 35, 35, 0.9);
+          color: #f4f4f5;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
         }
 
         .shell-loader__mark {
@@ -267,7 +435,9 @@
         }
 
         .shell-loader__channel-button,
-        .shell-loader__history-button {
+        .shell-loader__history-button,
+        .shell-loader__action-button,
+        .shell-loader__diagnostic-button {
           border-color: rgba(229, 231, 235, 0.18);
           background: rgba(255, 255, 255, 0.08);
           color: #e5e7eb;
@@ -284,6 +454,15 @@
         .shell-loader__node-error {
           color: #fca5a5;
         }
+
+        .shell-loader__diagnostics {
+          border-top-color: rgba(229, 231, 235, 0.14);
+          color: #e5e7eb;
+        }
+
+        .shell-loader__diagnostic-list dt {
+          color: #aeb6c2;
+        }
       }
 
       @media (prefers-reduced-motion: reduce) {
@@ -299,8 +478,38 @@
     </style>
   </head>
   <body>
+    <button
+      class="shell-toolbar"
+      type="button"
+      data-open-settings
+      data-i18n-label="connection"
+    >
+      <span class="shell-toolbar__dot" aria-hidden="true"></span>
+      <span data-i18n="connection">Connection</span>
+    </button>
     <div class="shell-loader">
-      <div class="shell-loader__content">
+      <div
+        class="shell-loader__content"
+        role="dialog"
+        aria-labelledby="shell-loader-title"
+      >
+        <div class="shell-loader__header">
+          <div
+            class="shell-loader__title"
+            id="shell-loader-title"
+            data-i18n="connection"
+          >
+            Connection
+          </div>
+          <button
+            class="shell-loader__close"
+            type="button"
+            data-close-settings
+            data-i18n="close"
+          >
+            Close
+          </button>
+        </div>
         <div class="shell-loader__mark" aria-hidden="true">Y</div>
         <div class="shell-loader__spinner" aria-hidden="true"></div>
         <div
@@ -308,11 +517,16 @@
           data-loader-status
           role="status"
           aria-live="polite"
+          data-i18n="loading"
         >
           Loading Yep Anywhere
         </div>
         <form class="shell-loader__node-form" data-node-form>
-          <label class="shell-loader__node-label" for="shell-node-input">
+          <label
+            class="shell-loader__node-label"
+            for="shell-node-input"
+            data-i18n="serverNode"
+          >
             Server node
           </label>
           <div class="shell-loader__node-row">
@@ -328,7 +542,11 @@
               placeholder="43.226.60.75:46789"
               aria-describedby="shell-node-error"
             />
-            <button class="shell-loader__node-submit" type="submit">
+            <button
+              class="shell-loader__node-submit"
+              type="submit"
+              data-i18n="connect"
+            >
               Connect
             </button>
           </div>
@@ -343,14 +561,75 @@
           class="shell-loader__history"
           data-node-history
           aria-label="Saved nodes"
+          data-i18n-label="savedNodes"
         ></div>
-        <button
-          class="shell-loader__channel-button"
-          type="button"
-          data-http-channel
-        >
-          HTTPS relay
-        </button>
+        <div class="shell-loader__actions">
+          <button
+            class="shell-loader__channel-button"
+            type="button"
+            data-http-channel
+            data-i18n="httpsRelay"
+          >
+            HTTPS relay
+          </button>
+          <button
+            class="shell-loader__action-button"
+            type="button"
+            data-retry-connection
+            data-i18n="retry"
+          >
+            Retry
+          </button>
+          <button
+            class="shell-loader__action-button"
+            type="button"
+            data-use-default
+            data-i18n="useDefault"
+          >
+            Use default
+          </button>
+        </div>
+        <details class="shell-loader__diagnostics">
+          <summary data-i18n="diagnostics">Diagnostics</summary>
+          <dl class="shell-loader__diagnostic-list">
+            <dt data-i18n="currentTarget">Current target</dt>
+            <dd data-diagnostic-target>Unknown</dd>
+            <dt data-i18n="defaultTarget">Default target</dt>
+            <dd data-diagnostic-default>Unknown</dd>
+            <dt data-i18n="connectionState">Connection state</dt>
+            <dd data-diagnostic-state>Connecting</dd>
+            <dt data-i18n="network">Network</dt>
+            <dd data-diagnostic-network>Unknown</dd>
+            <dt data-i18n="frameLoad">Frame load</dt>
+            <dd data-diagnostic-frame>Not seen</dd>
+            <dt data-i18n="attemptStarted">Attempt started</dt>
+            <dd data-diagnostic-attempt>Never</dd>
+            <dt data-i18n="appVersion">App version</dt>
+            <dd data-diagnostic-version>Unknown</dd>
+            <dt data-i18n="androidWebView">Android / WebView</dt>
+            <dd data-diagnostic-webview>Unknown</dd>
+            <dt data-i18n="nativeBridge">Native bridge</dt>
+            <dd data-diagnostic-bridge>Unknown</dd>
+          </dl>
+          <div class="shell-loader__diagnostic-actions">
+            <button
+              class="shell-loader__diagnostic-button"
+              type="button"
+              data-copy-diagnostics
+              data-i18n="copyDiagnostics"
+            >
+              Copy diagnostics
+            </button>
+            <button
+              class="shell-loader__diagnostic-button shell-loader__open-anyway"
+              type="button"
+              data-open-anyway
+              data-i18n="openAnyway"
+            >
+              Open page anyway
+            </button>
+          </div>
+        </details>
       </div>
     </div>
     <iframe
