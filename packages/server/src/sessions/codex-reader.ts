@@ -29,6 +29,7 @@ import {
   getModelContextWindow,
   parseCodexSessionEntry,
 } from "@yep-anywhere/shared";
+
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type {
   ContentBlock,
@@ -48,6 +49,7 @@ import {
   getCodexSessionManifest,
   invalidateCodexSessionManifest,
 } from "./codex-session-manifest.js";
+
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -56,6 +58,16 @@ import type {
 } from "./types.js";
 import { isSyntheticUserPromptText } from "./user-prompt-classification.js";
 import { createSessionQuestion } from "./user-questions.js";
+
+function normalizeCodexSessionSource(source: unknown): string | undefined {
+  if (typeof source === "string") return source;
+  if (!source || typeof source !== "object") return undefined;
+  if ("subagent" in source || "subAgent" in source) return "subagent";
+  if ("custom" in source && typeof source.custom === "string") {
+    return source.custom;
+  }
+  return undefined;
+}
 
 export interface CodexSessionReaderOptions {
   /**
@@ -226,7 +238,7 @@ export class CodexSessionReader implements ISessionReader {
         serviceTier: runtimeConfig.serviceTier,
         originator: metaEntry.payload.originator,
         cliVersion: metaEntry.payload.cli_version,
-        source: metaEntry.payload.source,
+        source: normalizeCodexSessionSource(metaEntry.payload.source),
         approvalPolicy: turnContext?.payload.approval_policy,
         sandboxPolicy: turnContext?.payload.sandbox_policy
           ? {

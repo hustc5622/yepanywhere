@@ -102,8 +102,8 @@ interface SessionListItemProps {
 
 type SessionCreationIndicatorKind = "yep" | "terminal" | "unknown";
 
-function normalizeCreationValue(value: string | undefined): string {
-  return value?.trim().toLowerCase() ?? "";
+function normalizeCreationValue(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
 function getSessionCreationIndicator({

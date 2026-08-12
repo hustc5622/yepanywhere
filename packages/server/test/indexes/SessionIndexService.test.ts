@@ -680,6 +680,71 @@ describe("SessionIndexService", () => {
   });
 
   describe("persistence", () => {
+    it("rebuilds a version 7 index that cached an object session source", async () => {
+      const legacySessionDir = join(projectsDir, "legacy-source");
+      await mkdir(legacySessionDir, { recursive: true });
+      const filePath = join(legacySessionDir, "session-1.jsonl");
+      await writeFile(filePath, "{}\n");
+      const stats = await stat(filePath);
+      const legacyIndex = {
+        version: 7,
+        projectId,
+        sessions: {
+          "session-1": {
+            title: "Legacy source",
+            fullTitle: "Legacy source",
+            createdAt: new Date(stats.mtimeMs).toISOString(),
+            updatedAt: new Date(stats.mtimeMs).toISOString(),
+            messageCount: 1,
+            indexedBytes: stats.size,
+            fileMtime: stats.mtimeMs,
+            provider: "codex",
+            source: { subagent: { other: "guardian" } },
+          },
+        },
+      };
+      await writeFile(
+        service.getIndexPath(legacySessionDir),
+        JSON.stringify(legacyIndex),
+      );
+
+      let parseCalls = 0;
+      const legacyReader: ISessionReader = {
+        listSessionFiles: async () => [{ sessionId: "session-1", filePath }],
+        getSessionSummary: async (
+          sessionId: string,
+          projectId: string,
+        ): Promise<SessionSummary> => {
+          parseCalls += 1;
+          return {
+            id: sessionId,
+            projectId,
+            title: "Rebuilt source",
+            fullTitle: "Rebuilt source",
+            createdAt: new Date(stats.mtimeMs).toISOString(),
+            updatedAt: new Date(stats.mtimeMs).toISOString(),
+            messageCount: 1,
+            ownership: { owner: "none" },
+            provider: "codex",
+            source: "subagent",
+          };
+        },
+        getAgentMappings: async () => [],
+        getAgentSession: async () => null,
+      };
+
+      const newService = new SessionIndexService({ dataDir, projectsDir });
+      await newService.initialize();
+      const sessions = await newService.getSessionsWithCache(
+        legacySessionDir,
+        projectId,
+        legacyReader,
+      );
+
+      expect(parseCalls).toBe(1);
+      expect(sessions[0]?.source).toBe("subagent");
+    });
+
     it("persists index to disk and reloads", async () => {
       await createSession("session-1", "Persistent session");
 

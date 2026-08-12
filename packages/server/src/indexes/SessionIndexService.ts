@@ -68,12 +68,12 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
-  version: 7;
+  version: 8;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 7;
+const CURRENT_VERSION = 8;
 
 interface SessionFileStat {
   mtimeMs: number;

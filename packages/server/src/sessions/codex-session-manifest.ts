@@ -243,9 +243,11 @@ function isSubagentSessionMeta(
 
   const subagentSource = source as {
     subagent?: { thread_spawn?: { parent_thread_id?: string } };
+    subAgent?: { thread_spawn?: { parent_thread_id?: string } };
   };
 
   return (
-    typeof subagentSource.subagent?.thread_spawn?.parent_thread_id === "string"
+    typeof (subagentSource.subagent ?? subagentSource.subAgent)?.thread_spawn
+      ?.parent_thread_id === "string"
   );
 }

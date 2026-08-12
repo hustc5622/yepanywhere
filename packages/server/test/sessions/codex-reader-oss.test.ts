@@ -696,4 +696,90 @@ describe("CodexSessionReader - OSS Support", () => {
     );
     expect(summary?.originator).toBe("yep-anywhere");
   });
+
+  it.each(["subagent", "subAgent"])(
+    "normalizes %s session metadata source for list consumers",
+    async (sourceKey) => {
+      const sessionId = `subagent-source-${sourceKey}`;
+      const now = new Date().toISOString();
+      await writeFile(
+        join(testDir, `${sessionId}.jsonl`),
+        `${[
+          JSON.stringify({
+            type: "session_meta",
+            timestamp: now,
+            payload: {
+              id: sessionId,
+              cwd: "/test/project",
+              timestamp: now,
+              model_provider: "openai",
+              source: {
+                [sourceKey]: {
+                  other: "guardian",
+                },
+              },
+            },
+          }),
+          JSON.stringify({
+            type: "event_msg",
+            timestamp: now,
+            payload: {
+              type: "user_message",
+              message: "Review this change",
+            },
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const summary = await reader.getSessionSummary(
+        sessionId,
+        "test-project" as UrlProjectId,
+      );
+
+      expect(summary?.source).toBe("subagent");
+    },
+  );
+
+  it("filters lower- and camel-case subagent sessions from top-level listings", async () => {
+    const now = new Date().toISOString();
+    const sessionMeta = (id: string, source?: Record<string, unknown>) =>
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: now,
+        payload: {
+          id,
+          cwd: "/test/project",
+          timestamp: now,
+          model_provider: "openai",
+          ...(source
+            ? {
+                forked_from_id: "parent-session",
+                source,
+              }
+            : {}),
+        },
+      });
+
+    await Promise.all([
+      writeFile(
+        join(testDir, "top-level.jsonl"),
+        `${sessionMeta("top-level")}\n`,
+      ),
+      ...["subagent", "subAgent"].map((sourceKey) =>
+        writeFile(
+          join(testDir, `${sourceKey}.jsonl`),
+          `${sessionMeta(sourceKey, {
+            [sourceKey]: {
+              thread_spawn: {
+                parent_thread_id: "parent-session",
+              },
+            },
+          })}\n`,
+        ),
+      ),
+    ]);
+
+    const files = await reader.listSessionFiles(testDir);
+    expect(files.map((file) => file.sessionId)).toEqual(["top-level"]);
+  });
 });

@@ -287,7 +287,9 @@ export function ProcessInfoModal({
           />
           <InfoRow
             label={t("processInfoLabelSessionSource")}
-            value={sessionSource}
+            value={
+              typeof sessionSource === "string" ? sessionSource : undefined
+            }
           />
           <InfoRow
             label={t("processInfoLabelApprovalPolicy")}

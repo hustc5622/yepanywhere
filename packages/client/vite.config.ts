@@ -56,6 +56,10 @@ export default defineConfig({
   clearScreen: false,
   base: basePath,
   build: {
+    // Mermaid and document previews are lazy-loaded, but a few of their
+    // minified chunks legitimately exceed Vite's generic 500 kB default.
+    // Keep warning if an on-demand chunk grows beyond the current ceiling.
+    chunkSizeWarningLimit: 750,
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -93,7 +97,10 @@ export default defineConfig({
           ) {
             return "preview-libs";
           }
-          return "vendor";
+          // Let Rollup place remaining dependencies according to their import
+          // graph. Forcing every React consumer into a generic vendor chunk
+          // creates a vendor -> vendor-react -> vendor cycle.
+          return;
         },
       },
     },

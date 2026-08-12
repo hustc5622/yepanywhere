@@ -34,4 +34,18 @@ describe("Bundle 输出目录", () => {
       requireResolver()({ YEP_BUNDLE_OUTPUT_DIR: stagingDir }, repoRoot),
     ).toBe(stagingDir);
   });
+
+  it("approves only the locked native runtime install scripts", () => {
+    const getRuntimeAllowScripts = (
+      runtimePackage as typeof runtimePackage & {
+        getRuntimeAllowScripts?: () => Record<string, boolean>;
+      }
+    ).getRuntimeAllowScripts;
+
+    expect(getRuntimeAllowScripts).toBeTypeOf("function");
+    expect(getRuntimeAllowScripts?.()).toEqual({
+      "bcrypt@6.0.0": true,
+      "node-pty@1.1.0": true,
+    });
+  });
 });

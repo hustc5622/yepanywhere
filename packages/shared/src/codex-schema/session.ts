@@ -30,7 +30,8 @@ export const CodexSessionMetaPayloadSchema = z.object({
   originator: z.string().optional(), // e.g. "codex_exec"
   cli_version: z.string().optional(),
   instructions: z.string().optional(),
-  source: z.string().optional(), // e.g. "exec"
+  source: z.unknown().optional(), // e.g. "exec" or a provider-defined descriptor
+  forked_from_id: z.string().optional(),
   model_provider: z.string().optional(), // e.g. "openai"
 });
 

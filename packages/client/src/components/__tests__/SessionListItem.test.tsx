@@ -94,4 +94,14 @@ describe("SessionListItem archive feedback", () => {
       ).toBeTruthy();
     });
   });
+
+  it("renders an unknown creation source when runtime data is not a string", () => {
+    renderItem({
+      sessionSource: {
+        subagent: { other: "guardian" },
+      } as unknown as string,
+    });
+
+    expect(screen.getByText("未知")).toBeTruthy();
+  });
 });

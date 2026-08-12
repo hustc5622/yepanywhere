@@ -63,6 +63,19 @@ export function getRuntimeDependencies(): Dependencies {
   return dependencies;
 }
 
+export function getRuntimeAllowScripts(): Record<string, boolean> {
+  const dependencies = getRuntimeDependencies();
+  return Object.fromEntries(
+    ["bcrypt", "node-pty"].map((name) => {
+      const version = dependencies[name];
+      if (!version) {
+        throw new Error(`Missing approved runtime dependency: ${name}`);
+      }
+      return [`${name}@${version}`, true];
+    }),
+  );
+}
+
 export function getRuntimeLock(): PackageLock {
   if (!fs.existsSync(RUNTIME_LOCK_PATH)) {
     throw new Error(

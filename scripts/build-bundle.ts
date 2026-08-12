@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {
   createRuntimeShrinkwrap,
+  getRuntimeAllowScripts,
   getRuntimeDependencies,
   resolveBundleOutputDir,
 } from "./runtime-package.js";
@@ -443,6 +444,7 @@ step("Generate package.json for npm", () => {
       "npm-shrinkwrap.json",
     ],
     dependencies: getRuntimeDependencies(),
+    allowScripts: getRuntimeAllowScripts(),
     repository: {
       type: "git",
       url: "git+https://github.com/kzahel/yepanywhere.git",
