@@ -349,6 +349,18 @@ function Get-RootManagedEntries($entries) {
   return @($roots)
 }
 
+function Invoke-TaskkillTree($processId) {
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& taskkill.exe /PID ([int]$processId) /T /F 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  return [pscustomobject]@{ ExitCode = $exitCode; Output = @($output) }
+}
+
 function Stop-VerifiedMode($mode, $ports, $knownEntries = $null, $knownSnapshot = $null) {
   if ($null -eq $knownEntries) {
     $verified = @(Get-VerifiedEntries $mode)
@@ -364,8 +376,9 @@ function Stop-VerifiedMode($mode, $ports, $knownEntries = $null, $knownSnapshot 
   $processSnapshot = @($snapshotResult.Processes)
   $killFailed = $false
   foreach ($entry in $killTargets) {
-    $killOutput = @(& taskkill.exe /PID ([int]$entry.Pid) /T /F 2>&1)
-    $killExitCode = $LASTEXITCODE
+    $killResult = Invoke-TaskkillTree ([int]$entry.Pid)
+    $killOutput = @($killResult.Output)
+    $killExitCode = [int]$killResult.ExitCode
     if ($killExitCode -eq 0) {
       Write-Detail "已停止 $mode 进程 PID $($entry.Pid)（$($entry.Role)）。"
     } elseif (Get-Process -Id ([int]$entry.Pid) -ErrorAction SilentlyContinue) {
@@ -377,6 +390,24 @@ function Stop-VerifiedMode($mode, $ports, $knownEntries = $null, $knownSnapshot 
   }
 
   $remaining = @()
+  for ($attempt = 0; $attempt -lt 8; $attempt++) {
+    $remaining = @(Get-RemainingManagedPids $processSnapshot)
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 250
+  }
+  foreach ($processId in @($remaining)) {
+    $snapshotEntry = @($processSnapshot | Where-Object { [int]$_.Pid -eq [int]$processId }) | Select-Object -First 1
+    if (-not $snapshotEntry -or @(Get-RemainingManagedPids @($snapshotEntry)).Count -eq 0) { continue }
+    $killResult = Invoke-TaskkillTree ([int]$processId)
+    if ([int]$killResult.ExitCode -eq 0) {
+      Write-Detail "已停止 $mode 残留进程 PID $processId。"
+    } elseif (@(Get-RemainingManagedPids @($snapshotEntry)).Count -gt 0) {
+      $killFailed = $true
+      Write-WarningMessage "停止残留 PID $processId 失败（taskkill 退出码 $($killResult.ExitCode)）：$(@($killResult.Output) -join ' ')"
+    } else {
+      Write-Detail "残留进程 PID $processId 已在停止期间退出。"
+    }
+  }
   for ($attempt = 0; $attempt -lt 8; $attempt++) {
     $remaining = @(Get-RemainingManagedPids $processSnapshot)
     if ($remaining.Count -eq 0) { break }

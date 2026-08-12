@@ -182,6 +182,58 @@ describe.skipIf(!bash)("macOS 服务脚本", () => {
     expect(result.stdout).toContain("enable-launchd");
   });
 
+  it("交互菜单逐项分发全部选择并在 0 后退出", async () => {
+    const yepScript = toBashPath(path.join(repoRoot, "yep.sh"));
+    const script = `
+source "$1"
+start_dev() { printf '__CALL__start-dev:%s\\n' "$*"; }
+stop_dev() { printf '__CALL__stop-dev\\n'; }
+start_prod() { printf '__CALL__start-prod\\n'; }
+stop_prod() { printf '__CALL__stop-prod\\n'; }
+restart_prod() { printf '__CALL__restart-prod\\n'; }
+status() { printf '__CALL__status\\n'; }
+rebuild() { printf '__CALL__rebuild\\n'; }
+enable_autostart() { printf '__CALL__enable-autostart\\n'; }
+disable_autostart() { printf '__CALL__disable-autostart\\n'; }
+stop_all() { printf '__CALL__stop\\n'; }
+show_menu <<'EOF'
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+0
+EOF
+printf '__CALL__returned\\n'
+`;
+    const result = await runBash(["-c", script, "yep-menu-test", yepScript]);
+    const calls = result.stdout
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("__CALL__"));
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(calls).toEqual([
+      "__CALL__start-dev:",
+      "__CALL__start-dev:--fg",
+      "__CALL__stop-dev",
+      "__CALL__start-prod",
+      "__CALL__stop-prod",
+      "__CALL__restart-prod",
+      "__CALL__status",
+      "__CALL__rebuild",
+      "__CALL__enable-autostart",
+      "__CALL__disable-autostart",
+      "__CALL__stop",
+      "__CALL__returned",
+    ]);
+  });
+
   it("start-dev 默认后台运行、关闭 stdin 并保存 dev PID 元数据", async () => {
     const fakeMac = await createFakeMacEnvironment();
     const nohupLog = path.join(fakeMac.root, "nohup.log");

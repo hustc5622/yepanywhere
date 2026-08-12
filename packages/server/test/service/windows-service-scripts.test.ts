@@ -187,6 +187,57 @@ describe.skipIf(process.platform !== "win32")("Windows 服务脚本", () => {
     expect(result.stdout).not.toContain("Show service");
   });
 
+  it("交互菜单逐项分发全部选择并在 q 后退出", async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), "yep-menu-dispatch-"));
+    tempDirs.push(stateDir);
+    const markerPath = path.join(stateDir, "menu.log");
+    const harness = `
+. ${psLiteral(yepScript)} help
+$global:choices = @('1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'd', 'h', 'q')
+$global:choiceIndex = 0
+function Add-MenuMarker([string]$value) {
+  [IO.File]::AppendAllText($env:YEP_TEST_MENU_MARKER, $value + [Environment]::NewLine)
+}
+function Read-Host { $choice = $global:choices[$global:choiceIndex]; $global:choiceIndex++; return $choice }
+function Cmd-StartDev { Add-MenuMarker 'start-dev'; return $true }
+function Cmd-StopDev { Add-MenuMarker 'stop-dev'; return $true }
+function Cmd-RestartDev { Add-MenuMarker 'restart-dev'; return $true }
+function Cmd-StartProd { Add-MenuMarker 'start-prod'; return $true }
+function Cmd-StopProd { Add-MenuMarker 'stop-prod'; return $true }
+function Cmd-RestartProd { Add-MenuMarker 'restart-prod'; return $true }
+function Cmd-Stop { Add-MenuMarker 'stop'; return $true }
+function Cmd-Status { Add-MenuMarker 'status'; return $true }
+function Cmd-Rebuild { Add-MenuMarker 'rebuild'; return $true }
+function Cmd-EnableAutostart { Add-MenuMarker 'enable-autostart'; return $true }
+function Cmd-DisableAutostart { Add-MenuMarker 'disable-autostart'; return $true }
+function Show-Help { Add-MenuMarker 'help' }
+Show-Menu
+Add-MenuMarker 'returned'
+`;
+
+    const result = await runPowerShellCommand(harness, {
+      YEP_TEST_MENU_MARKER: markerPath,
+    });
+    const markers = (await readFile(markerPath, "utf8")).trim().split(/\r?\n/);
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(markers).toEqual([
+      "start-dev",
+      "stop-dev",
+      "restart-dev",
+      "start-prod",
+      "stop-prod",
+      "restart-prod",
+      "stop",
+      "status",
+      "rebuild",
+      "enable-autostart",
+      "disable-autostart",
+      "help",
+      "returned",
+    ]);
+  });
+
   it("stop-dev 拒绝结束无法确认身份的端口占用进程", async () => {
     const stateDir = await mkdtemp(path.join(tmpdir(), "yep-service-state-"));
     tempDirs.push(stateDir);
@@ -293,9 +344,16 @@ function Get-ScheduledTask {
     State = $global:taskState
     Principal = [pscustomobject]@{ UserId = "$env:USERDOMAIN\\$env:USERNAME" }
     Actions = @([pscustomobject]@{
-      Execute = 'powershell.exe'
-      Arguments = '-File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      Execute = (Get-Command powershell.exe).Source
+      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
     })
+    Settings = [pscustomobject]@{
+      MultipleInstances = 'IgnoreNew'
+      RestartCount = 999
+      RestartInterval = 'PT1M'
+      ExecutionTimeLimit = 'PT0S'
+    }
     Triggers = @()
   }
 }
@@ -872,6 +930,63 @@ function Start-Sleep { }
     expect(existsSync(stateFile)).toBe(true);
   });
 
+  it("taskkill 报 PID 不存在且同一进程已退出时 stop-prod 成功", async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), "yep-stop-vanished-"));
+    tempDirs.push(stateDir);
+    const fixedStart = "2026-08-11T00:00:00Z";
+    const vanishedPid = 2147483000;
+    const stateFile = path.join(stateDir, "prod-process.json");
+    await writeFile(
+      stateFile,
+      JSON.stringify({
+        Processes: [
+          {
+            Pid: vanishedPid,
+            Role: "supervisor",
+            StartTimeUtc: fixedStart,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const harness = `
+$global:fixedStart = [DateTime]::Parse('${fixedStart}')
+$global:getProcessCalls = 0
+function netstat { }
+function Get-ScheduledTask { return $null }
+function Get-Process {
+  param($Id, $ErrorAction)
+  if ($Id -eq ${vanishedPid}) {
+    $global:getProcessCalls++
+    if ($global:getProcessCalls -le 2) {
+      return [pscustomobject]@{ Id = ${vanishedPid}; StartTime = $global:fixedStart; ProcessName = 'powershell' }
+    }
+  }
+  return $null
+}
+function Get-CimInstance {
+  param($ClassName, $Filter, $ErrorAction)
+  return [pscustomobject]@{
+    ProcessId = ${vanishedPid}
+    ParentProcessId = 0
+    CommandLine = '${runProdScript.replaceAll("'", "''")}'
+  }
+}
+function Start-Sleep { }
+& ${psLiteral(yepScript)} stop-prod
+`;
+
+    const result = await runPowerShellCommand(harness, {
+      YEP_LAUNCHD_LOG_DIR: stateDir,
+      YEP_SERVICE_CONFIG_PATH: path.join(stateDir, "service-config.json"),
+    });
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(result.stderr).not.toContain("NativeCommandError");
+    expect(result.stdout).toContain("已在停止期间退出");
+    expect(existsSync(stateFile)).toBe(false);
+  });
+
   it("stop-prod 只终止已核实的生产根进程而不重复 taskkill 子进程", async () => {
     const stateDir = await mkdtemp(path.join(tmpdir(), "yep-stop-tree-"));
     tempDirs.push(stateDir);
@@ -939,7 +1054,7 @@ function Start-Sleep { }
     expect(existsSync(stateFile)).toBe(false);
   });
 
-  it("stop-prod 用停止前快照发现根进程退出后重挂父进程的残留子进程", async () => {
+  it("stop-prod 用停止前快照清理根进程退出后重挂父进程的残留子进程", async () => {
     const stateDir = await mkdtemp(
       path.join(tmpdir(), "yep-reparented-child-"),
     );
@@ -956,17 +1071,21 @@ function Start-Sleep { }
     const harness = `
 $global:fixedStart = [DateTime]::Parse('${fixedStart}')
 $global:rootKilled = $false
+$global:childKilled = $false
 function netstat { }
 function Get-ScheduledTask { return $null }
 function Get-Process {
   param($Id, $ErrorAction)
   if ($Id -eq 100 -and -not $global:rootKilled) { return [pscustomobject]@{ Id = 100; StartTime = $global:fixedStart; ProcessName = 'powershell' } }
-  if ($Id -eq 101) { return [pscustomobject]@{ Id = 101; StartTime = $global:fixedStart.AddSeconds(1); ProcessName = 'node' } }
+  if ($Id -eq 101 -and -not $global:childKilled) { return [pscustomobject]@{ Id = 101; StartTime = $global:fixedStart.AddSeconds(1); ProcessName = 'node' } }
   return $null
 }
 function Get-CimInstance {
   param($ClassName, $Filter, $ErrorAction)
-  $items = @([pscustomobject]@{ ProcessId = 101; ParentProcessId = $(if ($global:rootKilled) { 0 } else { 100 }); CommandLine = 'node child-worker.js' })
+  $items = @()
+  if (-not $global:childKilled) {
+    $items += [pscustomobject]@{ ProcessId = 101; ParentProcessId = $(if ($global:rootKilled) { 0 } else { 100 }); CommandLine = 'node child-worker.js' }
+  }
   if (-not $global:rootKilled) {
     $items = @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; CommandLine = '${runProdScript.replaceAll("'", "''")}' }) + $items
   }
@@ -976,7 +1095,13 @@ function Get-CimInstance {
   }
   return $items
 }
-function taskkill.exe { $global:rootKilled = $true; & cmd.exe /c exit 0 }
+function taskkill.exe {
+  param($PidFlag, $TargetPid, $TreeFlag, $ForceFlag)
+  if ([int]$TargetPid -eq 100) { $global:rootKilled = $true }
+  if ([int]$TargetPid -eq 101) { $global:childKilled = $true }
+  Write-Output "__KILL__$TargetPid"
+  & cmd.exe /c exit 0
+}
 function Start-Sleep { }
 & ${psLiteral(yepScript)} stop-prod
 `;
@@ -985,9 +1110,9 @@ function Start-Sleep { }
       YEP_SERVICE_CONFIG_PATH: path.join(stateDir, "service-config.json"),
     });
 
-    expect(result.code).toBe(1);
-    expect(result.stdout).toContain("101");
-    expect(existsSync(stateFile)).toBe(true);
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain("已停止 prod 残留进程 PID 101");
+    expect(existsSync(stateFile)).toBe(false);
   });
 
   it("start-prod 修复缺失配置时保留登录自启动意图且核验安装结果", async () => {
