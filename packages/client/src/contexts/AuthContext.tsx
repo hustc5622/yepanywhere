@@ -3,7 +3,7 @@
  *
  * Provides:
  * - Auth status checking on mount
- * - Login/logout/setup functions
+ * - Login/logout/password-management functions
  * - Redirect to login when unauthenticated
  */
 
@@ -19,35 +19,29 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { authEvents } from "../lib/authEvents";
 
-interface AuthContextValue {
+export interface AuthContextValue {
   /** Whether user is authenticated */
   isAuthenticated: boolean;
-  /** Whether account setup is required (no account exists) */
-  isSetupMode: boolean;
   /** Whether auth check is in progress */
   isLoading: boolean;
   /** Whether auth is enabled in settings */
   authEnabled: boolean;
-  /** Whether auth is disabled by --auth-disable flag (for recovery) */
-  authDisabledByEnv: boolean;
-  /** Path to auth.json file (for recovery instructions) */
-  authFilePath: string;
   /** Whether the server has a desktop auth token (Tauri app) */
   hasDesktopToken: boolean;
   /** Whether unauthenticated localhost access is allowed */
   localhostOpen: boolean;
+  /** Whether this request may perform localhost-only password management */
+  localManagementAllowed: boolean;
   /** Login with password */
   login: (password: string) => Promise<void>;
   /** Logout current session */
   logout: () => Promise<void>;
   /** Enable auth with a password (from settings) */
-  enableAuth: (password: string) => Promise<void>;
-  /** Disable auth (requires authenticated session) */
-  disableAuth: () => Promise<void>;
-  /** Create initial account (setup mode only) - deprecated, use enableAuth */
-  setupAccount: (password: string) => Promise<void>;
+  enableAuth: (adminPassword: string, newPassword: string) => Promise<void>;
+  /** Disable auth after administrator confirmation */
+  disableAuth: (adminPassword: string) => Promise<void>;
   /** Change password */
-  changePassword: (newPassword: string) => Promise<void>;
+  changePassword: (adminPassword: string, newPassword: string) => Promise<void>;
   /** Toggle unauthenticated localhost access */
   setLocalhostOpen: (open: boolean) => Promise<void>;
   /** Re-check auth status */
@@ -62,13 +56,11 @@ interface AuthProviderProps {
 
 export function AuthProvider({ children }: AuthProviderProps) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isSetupMode, setIsSetupMode] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [authEnabled, setAuthEnabled] = useState(false);
-  const [authDisabledByEnv, setAuthDisabledByEnv] = useState(false);
-  const [authFilePath, setAuthFilePath] = useState("");
   const [hasDesktopToken, setHasDesktopToken] = useState(false);
   const [localhostOpen, setLocalhostOpenState] = useState(false);
+  const [localManagementAllowed, setLocalManagementAllowed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -76,12 +68,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
     try {
       const status = await api.getAuthStatus();
       setAuthEnabled(status.enabled);
-      setAuthDisabledByEnv(status.disabledByEnv);
-      setAuthFilePath(status.authFilePath);
       setIsAuthenticated(status.authenticated);
-      setIsSetupMode(status.setupRequired);
-      setHasDesktopToken(status.hasDesktopToken ?? false);
-      setLocalhostOpenState(status.localhostOpen ?? false);
+      setHasDesktopToken(status.hasDesktopToken);
+      setLocalhostOpenState(status.localhostOpen);
+      setLocalManagementAllowed(status.localManagementAllowed);
     } catch (error) {
       // If we get a network error or the endpoint doesn't exist,
       // assume auth is not enabled (for backward compatibility)
@@ -90,9 +80,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
         error,
       );
       setIsAuthenticated(true);
-      setIsSetupMode(false);
       setAuthEnabled(false);
-      setAuthDisabledByEnv(false);
+      setLocalManagementAllowed(false);
     } finally {
       setIsLoading(false);
     }
@@ -119,24 +108,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
       !isLoading &&
       !isAuthenticated &&
       authEnabled &&
-      !authDisabledByEnv &&
       location.pathname !== "/login"
     ) {
       navigate("/login", { state: { from: location.pathname } });
     }
-  }, [
-    isLoading,
-    isAuthenticated,
-    authEnabled,
-    authDisabledByEnv,
-    location.pathname,
-    navigate,
-  ]);
+  }, [isLoading, isAuthenticated, authEnabled, location.pathname, navigate]);
 
   const login = useCallback(async (password: string) => {
     await api.login(password);
     setIsAuthenticated(true);
-    setIsSetupMode(false);
     // Clear the global login required flag so connections can resume
     authEvents.clearLoginRequired();
   }, []);
@@ -147,32 +127,30 @@ export function AuthProvider({ children }: AuthProviderProps) {
     navigate("/login");
   }, [navigate]);
 
-  const enableAuth = useCallback(async (password: string) => {
-    await api.enableAuth(password);
-    setAuthEnabled(true);
-    setIsAuthenticated(false);
-    setIsSetupMode(false);
-    // The useEffect will redirect to /login with { from: location.pathname }
-  }, []);
+  const enableAuth = useCallback(
+    async (adminPassword: string, newPassword: string) => {
+      await api.enableAuth(adminPassword, newPassword);
+      setAuthEnabled(true);
+      setIsAuthenticated(false);
+      // The useEffect will redirect to /login with { from: location.pathname }
+    },
+    [],
+  );
 
-  const disableAuth = useCallback(async () => {
-    await api.disableAuth();
+  const disableAuth = useCallback(async (adminPassword: string) => {
+    await api.disableAuth(adminPassword);
     setAuthEnabled(false);
     setIsAuthenticated(true); // No auth needed after disabling
   }, []);
 
-  const setupAccount = useCallback(async (password: string) => {
-    await api.setupAccount(password);
-    setAuthEnabled(true);
-    setIsAuthenticated(true);
-    setIsSetupMode(false);
-    // Clear the global login required flag so connections can resume
-    authEvents.clearLoginRequired();
-  }, []);
-
-  const changePassword = useCallback(async (newPassword: string) => {
-    await api.changePassword(newPassword);
-  }, []);
+  const changePassword = useCallback(
+    async (adminPassword: string, newPassword: string) => {
+      await api.changePassword(adminPassword, newPassword);
+      setAuthEnabled(true);
+      setIsAuthenticated(false);
+    },
+    [],
+  );
 
   const setLocalhostOpen = useCallback(async (open: boolean) => {
     await api.setLocalhostAccess(open);
@@ -183,18 +161,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
     <AuthContext.Provider
       value={{
         isAuthenticated,
-        isSetupMode,
         isLoading,
         authEnabled,
-        authDisabledByEnv,
-        authFilePath,
         hasDesktopToken,
         localhostOpen,
+        localManagementAllowed,
         login,
         logout,
         enableAuth,
         disableAuth,
-        setupAccount,
         changePassword,
         setLocalhostOpen,
         checkAuth,

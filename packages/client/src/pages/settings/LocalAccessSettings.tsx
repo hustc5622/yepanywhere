@@ -13,6 +13,7 @@ import { useNetworkBinding } from "../../hooks/useNetworkBinding";
 import { useServerInfo } from "../../hooks/useServerInfo";
 import { useServerSettings } from "../../hooks/useServerSettings";
 import { useI18n } from "../../i18n";
+import { LocalAccessAuthCard } from "./LocalAccessAuthCard";
 
 function MobileShellChannelSettings() {
   const { t } = useI18n();
@@ -94,11 +95,7 @@ export function LocalAccessSettings() {
   const [selectedInterface, setSelectedInterface] = useState<string>("");
   const [customIp, setCustomIp] = useState("");
 
-  // Auth form state (merged into same form)
-  const [requirePassword, setRequirePassword] = useState(false);
   const [localhostOpenToggle, setLocalhostOpenToggle] = useState(false);
-  const [authPassword, setAuthPassword] = useState("");
-  const [authPasswordConfirm, setAuthPasswordConfirm] = useState("");
 
   // Allowed hosts form state
   const [allowAllHostsToggle, setAllowAllHostsToggle] = useState(false);
@@ -109,13 +106,12 @@ export function LocalAccessSettings() {
   const [hasChanges, setHasChanges] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
 
-  // Initialize form from binding, auth, and settings state when it loads
+  // Initialize the network form from binding, auth, and settings state.
   const [formInitialized, setFormInitialized] = useState(false);
   if (binding && auth && serverSettings && !formInitialized) {
     setLocalhostPort(String(binding.localhost.port));
     setNetworkEnabled(binding.network.enabled);
     setSelectedInterface(binding.network.host ?? "");
-    setRequirePassword(auth.authEnabled);
     setLocalhostOpenToggle(auth.localhostOpen);
     // Initialize allowed hosts from server settings
     const ah = serverSettings.allowedHosts;
@@ -146,13 +142,11 @@ export function LocalAccessSettings() {
     return hostsString || undefined;
   };
 
-  // Track changes - includes auth and allowed hosts changes
+  // Track network, localhost-open, and allowed-host changes.
   const checkForChanges = (
     newPort: string,
     newNetworkEnabled: boolean,
     newInterface: string,
-    newRequirePassword: boolean,
-    newPassword: string,
     newAllowAllHosts: boolean,
     newCustomHosts: string[],
     newLocalhostOpen: boolean,
@@ -161,8 +155,6 @@ export function LocalAccessSettings() {
     const portChanged = newPort !== String(binding.localhost.port);
     const networkEnabledChanged = newNetworkEnabled !== binding.network.enabled;
     const interfaceChanged = newInterface !== (binding.network.host ?? "");
-    const authChanged = newRequirePassword !== auth.authEnabled;
-    const passwordEntered = newPassword.length > 0;
     const localhostOpenChanged = newLocalhostOpen !== auth.localhostOpen;
     const newValue = getAllowedHostsValue(newAllowAllHosts, newCustomHosts);
     const oldValue = serverSettings.allowedHosts;
@@ -171,8 +163,6 @@ export function LocalAccessSettings() {
       portChanged ||
       networkEnabledChanged ||
       interfaceChanged ||
-      authChanged ||
-      passwordEntered ||
       localhostOpenChanged ||
       allowedHostsChanged
     );
@@ -183,8 +173,6 @@ export function LocalAccessSettings() {
     port?: string;
     networkEnabled?: boolean;
     iface?: string;
-    requirePw?: boolean;
-    password?: string;
     allowAll?: boolean;
     customHosts?: string[];
     localhostOpen?: boolean;
@@ -194,8 +182,6 @@ export function LocalAccessSettings() {
         overrides.port ?? localhostPort,
         overrides.networkEnabled ?? networkEnabled,
         overrides.iface ?? selectedInterface,
-        overrides.requirePw ?? requirePassword,
-        overrides.password ?? authPassword,
         overrides.allowAll ?? allowAllHostsToggle,
         overrides.customHosts ?? customHosts,
         overrides.localhostOpen ?? localhostOpenToggle,
@@ -212,21 +198,6 @@ export function LocalAccessSettings() {
     if (Number.isNaN(portNum) || portNum < 1 || portNum > 65535) {
       setFormError(t("localAccessErrorPortRange"));
       return;
-    }
-
-    // Validate password if enabling or changing auth
-    const enablingAuth = requirePassword && !auth.authEnabled;
-    const changingPassword =
-      requirePassword && auth.authEnabled && authPassword.length > 0;
-    if (enablingAuth || changingPassword) {
-      if (authPassword.length < 6) {
-        setFormError(t("localAccessErrorPasswordLength"));
-        return;
-      }
-      if (authPassword !== authPasswordConfirm) {
-        setFormError(t("localAccessErrorPasswordMismatch"));
-        return;
-      }
     }
 
     const effectiveInterface =
@@ -246,19 +217,6 @@ export function LocalAccessSettings() {
         };
       }
       const result = await updateBinding(bindingUpdate);
-
-      // Apply auth changes
-      if (enablingAuth) {
-        await auth.enableAuth(authPassword);
-        setAuthPassword("");
-        setAuthPasswordConfirm("");
-      } else if (changingPassword) {
-        await auth.changePassword(authPassword);
-        setAuthPassword("");
-        setAuthPasswordConfirm("");
-      } else if (!requirePassword && auth.authEnabled) {
-        await auth.disableAuth();
-      }
 
       // Apply localhost access changes (desktop token floor bypass)
       if (localhostOpenToggle !== auth.localhostOpen) {
@@ -312,9 +270,6 @@ export function LocalAccessSettings() {
         </section>
       );
     }
-
-    // Show password fields when auth is enabled or being enabled
-    const showPasswordFields = requirePassword;
 
     return (
       <section className="settings-section">
@@ -570,117 +525,25 @@ export function LocalAccessSettings() {
             )}
           </div>
 
-          {/* Authentication - consolidated into one card */}
-          {!auth.authDisabledByEnv && (
-            <div className="settings-item settings-item-stacked">
-              <div className="settings-item-row">
-                <div className="settings-item-info">
-                  <strong>{t("localAccessRequirePasswordTitle")}</strong>
-                  <p>{t("localAccessRequirePasswordDescription")}</p>
-                </div>
-                <label className="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={requirePassword}
-                    onChange={(e) => {
-                      setRequirePassword(e.target.checked);
-                      updateHasChanges({ requirePw: e.target.checked });
-                    }}
-                  />
-                  <span className="toggle-slider" />
-                </label>
-              </div>
-
-              {/* Password fields - shown when auth is on */}
-              {showPasswordFields && (
-                <div className="settings-nested-content">
-                  {/* Hidden username field to prevent Chrome from using port as username */}
-                  <input
-                    type="text"
-                    name="username"
-                    autoComplete="username"
-                    style={{
-                      position: "absolute",
-                      visibility: "hidden",
-                      pointerEvents: "none",
-                    }}
-                    tabIndex={-1}
-                  />
-                  <div className="settings-item">
-                    <div className="settings-item-info">
-                      <strong>{t("localAccessPasswordTitle")}</strong>
-                      <p>
-                        {auth.authEnabled
-                          ? t("localAccessPasswordKeepCurrent")
-                          : t("localAccessPasswordMinLength")}
-                      </p>
-                    </div>
-                    <input
-                      type="password"
-                      className="settings-input"
-                      value={authPassword}
-                      onChange={(e) => {
-                        setAuthPassword(e.target.value);
-                        updateHasChanges({ password: e.target.value });
-                      }}
-                      autoComplete="new-password"
-                      placeholder={
-                        auth.authEnabled
-                          ? t("localAccessPasswordNewPlaceholder")
-                          : t("localAccessPasswordPlaceholder")
-                      }
-                    />
-                  </div>
-                  {authPassword.length > 0 && (
-                    <div className="settings-item">
-                      <div className="settings-item-info">
-                        <strong>{t("localAccessConfirmPasswordTitle")}</strong>
-                      </div>
-                      <input
-                        type="password"
-                        className="settings-input"
-                        value={authPasswordConfirm}
-                        onChange={(e) => setAuthPasswordConfirm(e.target.value)}
-                        autoComplete="new-password"
-                        placeholder={t("localAccessConfirmPasswordPlaceholder")}
-                      />
-                    </div>
-                  )}
-                  {!auth.authEnabled && (
-                    <p className="form-hint">
-                      {t("localAccessPasswordResetHint")}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
           {/* Allow Localhost Access - shown in desktop mode when password auth is off */}
-          {auth.hasDesktopToken &&
-            !requirePassword &&
-            !auth.authDisabledByEnv && (
-              <div className="settings-item">
-                <div className="settings-item-info">
-                  <strong>{t("localAccessLocalhostOpenTitle")}</strong>
-                  <p>{t("localAccessLocalhostOpenDescription")}</p>
-                </div>
-                <label className="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={localhostOpenToggle}
-                    onChange={(e) => {
-                      setLocalhostOpenToggle(e.target.checked);
-                      updateHasChanges({ localhostOpen: e.target.checked });
-                    }}
-                  />
-                  <span className="toggle-slider" />
-                </label>
+          {auth.hasDesktopToken && !auth.authEnabled && (
+            <div className="settings-item">
+              <div className="settings-item-info">
+                <strong>{t("localAccessLocalhostOpenTitle")}</strong>
+                <p>{t("localAccessLocalhostOpenDescription")}</p>
               </div>
-            )}
-
-          {auth.authDisabledByEnv && (
-            <p className="form-warning">{t("localAccessAuthDisabled")}</p>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={localhostOpenToggle}
+                  onChange={(e) => {
+                    setLocalhostOpenToggle(e.target.checked);
+                    updateHasChanges({ localhostOpen: e.target.checked });
+                  }}
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
           )}
 
           {/* Apply button - always visible */}
@@ -697,6 +560,8 @@ export function LocalAccessSettings() {
             </button>
           </div>
         </form>
+
+        <LocalAccessAuthCard auth={auth} />
 
         {/* Logout - shown when auth is enabled */}
         {auth.authEnabled && auth.isAuthenticated && (

@@ -175,11 +175,34 @@ describe.skipIf(!bash)("macOS 服务脚本", () => {
       "rebuild",
       "enable-autostart",
       "disable-autostart",
+      "setup-admin-password",
       "help",
     ]) {
       expect(result.stdout).toContain(command);
     }
     expect(result.stdout).toContain("enable-launchd");
+  });
+
+  it("setup-admin-password 转发到同一个源码 Node CLI", async () => {
+    const fakeMac = await createFakeMacEnvironment();
+    const pnpmLog = path.join(fakeMac.root, "pnpm-admin.log");
+    await createExecutable(
+      path.join(fakeMac.binDir, "pnpm"),
+      '#!/usr/bin/env bash\nprintf "%s\\n" "$*" > "$YEP_TEST_PNPM_LOG"\n',
+    );
+
+    const result = await runBash(["./yep.sh", "setup-admin-password"], {
+      pathPrefix: fakeMac.binDir,
+      environment: {
+        ...fakeMac.environment,
+        YEP_TEST_PNPM_LOG: toBashPath(pnpmLog),
+      },
+    });
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    await expect(readFile(pnpmLog, "utf8")).resolves.toBe(
+      "--filter @yep-anywhere/server exec tsx --conditions source src/cli.ts --setup-admin-password\n",
+    );
   });
 
   it("交互菜单逐项分发全部选择并在 0 后退出", async () => {

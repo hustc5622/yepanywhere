@@ -1,33 +1,26 @@
-/**
- * CLI setup commands for headless authentication configuration.
- *
- * These commands allow setting up auth without the web interface,
- * useful for headless/automated deployments.
- */
+import { AdminPasswordService } from "./auth/AdminPasswordService.js";
+import type { PasswordPrompt } from "./cli-password-prompt.js";
 
-import { AuthService } from "./auth/AuthService.js";
-import { getDataDir } from "./config.js";
-
-export interface SetupAuthOptions {
-  password: string;
+export interface SetupAdminPasswordOptions {
+  prompt: PasswordPrompt;
+  adminPasswordService?: AdminPasswordService;
 }
 
-/**
- * Set up local cookie-based authentication.
- * Creates or updates the password in auth.json.
- */
-export async function setupAuth(options: SetupAuthOptions): Promise<void> {
-  const { password } = options;
-
-  if (!password || password.length < 6) {
-    throw new Error("Password must be at least 6 characters");
+export async function setupAdminPassword(
+  options: SetupAdminPasswordOptions,
+): Promise<void> {
+  const adminPasswordService =
+    options.adminPasswordService ?? new AdminPasswordService();
+  console.log(`管理员密码文件：${adminPasswordService.getFilePath()}`);
+  if (await adminPasswordService.isConfigured()) {
+    console.log("此操作会重置整个项目共用的管理员密码。");
   }
-
-  const dataDir = getDataDir();
-  const authService = new AuthService({ dataDir });
-  await authService.initialize();
-
-  await authService.enableAuth(password);
-  console.log("Local authentication configured successfully.");
-  console.log(`Auth file: ${authService.getFilePath()}`);
+  const password = await options.prompt.readHidden("新管理员密码：");
+  const confirmation = await options.prompt.readHidden("确认管理员密码：");
+  if (password !== confirmation) {
+    throw new Error("两次输入的管理员密码不一致");
+  }
+  await adminPasswordService.setPassword(password);
+  console.log("管理员密码已保存。");
+  console.log("请妥善保存管理员密码；本项目不保存可找回的明文密码。");
 }

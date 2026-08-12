@@ -79,4 +79,66 @@ describe("fetchJSON errors", () => {
       },
     });
   });
+
+  it("does not read or attach the removed setup-required header", async () => {
+    const removedHeader = ["X", "Setup", "Required"].join("-");
+    const removedProperty = ["setup", "Required"].join("");
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      headers: new Headers({ [removedHeader]: "true" }),
+      json: async () => ({ error: "Authentication required" }),
+    } as Response);
+
+    const error = await fetchJSON("/auth/login").catch((cause) => cause);
+
+    expect(error).toMatchObject({ status: 401 });
+    expect(error).not.toHaveProperty(removedProperty);
+  });
+});
+
+describe("authentication API", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it.each([
+    [
+      () => api.enableAuth("admin-password", "login-password"),
+      "/auth/enable",
+      { adminPassword: "admin-password", newPassword: "login-password" },
+    ],
+    [
+      () => api.changePassword("admin-password", "next-password"),
+      "/auth/change-password",
+      { adminPassword: "admin-password", newPassword: "next-password" },
+    ],
+    [
+      () => api.disableAuth("admin-password"),
+      "/auth/disable",
+      { adminPassword: "admin-password" },
+    ],
+  ])(
+    "sends only approved password fields to %s",
+    async (invoke, routePath, body) => {
+      await invoke();
+
+      const [url, options] = fetchMock.mock.calls[0] ?? [];
+      expect(String(url)).toContain(routePath);
+      expect(JSON.parse(String(options?.body))).toEqual(body);
+    },
+  );
 });

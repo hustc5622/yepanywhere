@@ -376,11 +376,8 @@ export class WireProtocol {
           if (response.status >= 400) {
             const error = new Error(
               `API error: ${response.status}`,
-            ) as Error & { status: number; setupRequired?: boolean };
+            ) as Error & { status: number };
             error.status = response.status;
-            if (response.headers?.["X-Setup-Required"] === "true") {
-              error.setupRequired = true;
-            }
             reject(error);
           } else {
             resolve(response.body as T);

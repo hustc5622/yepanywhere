@@ -39,13 +39,11 @@
 | Localhost/LAN，remote access enabled，无 cookie | `createWsRelayRoutes` | `srp_required` | `unauthenticated` | none | false |
 | Direct encrypted WS（SecureConnection，无 relay） | `createWsRelayRoutes` | `srp_required` | `unauthenticated` | after SRP | true after SRP |
 | Relay encrypted WS | `createAcceptRelayConnection` | `srp_required` | `unauthenticated` | after SRP | true after SRP |
-| `AUTH_DISABLED=true` dev mode | `createWsRelayRoutes` | 只由 remote-access + cookie 推导，不因 bypass 改变 | depends on policy | depends on SRP | depends on SRP |
 
 说明：
 
 - Relay 永远以 `srp_required` 开始（`packages/server/src/routes/ws-relay.ts`）。
 - Local trusted path 只有在 policy 可信时，才会在没有 SRP key 的情况下设置 `authState = "authenticated"`。
-- `AUTH_DISABLED` middleware bypass 不等于已建立 SRP transport auth。
 
 ## SRP Required Flow
 

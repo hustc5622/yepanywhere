@@ -1,7 +1,7 @@
 /**
  * Smoke test for the remote terminal WebSocket flow.
  *
- * - Connects to /api/ws (no auth since AUTH_DISABLED=true).
+ * - Connects to /api/ws using the server's configured authentication state.
  * - Sends terminal_open with a fresh terminalId.
  * - Sends a couple of stdin lines, prints echoed output.
  * - Sends terminal_close (no kill).

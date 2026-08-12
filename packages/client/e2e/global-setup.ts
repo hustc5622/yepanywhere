@@ -159,7 +159,6 @@ export default async function globalSetup() {
         LOG_FILE: "e2e-server.log",
         LOG_LEVEL: serverLogLevel, // Override in targeted tests when log assertions are needed.
         LOG_FILE_LEVEL: serverFileLogLevel,
-        AUTH_DISABLED: "true",
         HTTPS_SELF_SIGNED: "", // force HTTP so health check URL works
         NODE_ENV: "production",
         CLAUDE_SESSIONS_DIR: E2E_CLAUDE_SESSIONS_DIR,

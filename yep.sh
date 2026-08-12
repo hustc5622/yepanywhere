@@ -70,6 +70,13 @@ print_warning() { echo -e "${YELLOW}⚠${NC} $*"; }
 print_info() { echo -e "${CYAN}ℹ${NC} $*"; }
 print_header() { echo -e "\n${BLUE}===${NC} $* ${BLUE}===${NC}\n"; }
 
+setup_admin_password() {
+    (
+        cd "$PROJECT_ROOT" || exit 1
+        pnpm --filter @yep-anywhere/server exec tsx --conditions source src/cli.ts --setup-admin-password
+    )
+}
+
 normalize_base_path() {
     local raw="${1:-/}"
     if [[ -z "$raw" || "$raw" == "/" ]]; then
@@ -842,6 +849,7 @@ Yep Anywhere 服务进程管理（macOS）
   rebuild            暂存构建、安装依赖、校验后交换并重启生产
   enable-autostart   安装或修复登录自启动，不启动当前实例
   disable-autostart  删除登录自启动，不停止当前实例
+  setup-admin-password 设置或重置当前系统用户的全局管理员密码
   help               显示帮助
 
 兼容别名:
@@ -904,6 +912,7 @@ main() {
         rebuild) rebuild "$@" ;;
         enable-autostart|enable-launchd) enable_autostart "$@" ;;
         disable-autostart) disable_autostart "$@" ;;
+        setup-admin-password) setup_admin_password "$@" ;;
         menu) show_menu ;;
         help|-h|--help) show_help ;;
         *)

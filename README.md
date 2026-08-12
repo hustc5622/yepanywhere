@@ -120,7 +120,7 @@ pnpm yep disable-autostart
 
 服务器运行在你的机器上，客户端会直接连接服务器的 WebSocket。你可以从手机通过自己的网络访问它，例如 Tailscale、局域网 IP，或者带 SSL 终止的反向代理/隧道（如 Caddy）。
 
-如需密码保护，可在设置中启用基于 cookie 的认证；无头环境也可以运行 `yepanywhere --setup-auth "<password>"`。更多细节见 [远程访问文档](docs/project/remote-access.md)。
+如需密码保护，先在服务器项目目录运行 `pnpm yep setup-admin-password`，为当前系统用户设置所有 Profile 共用的管理员密码；再从服务器本机的 loopback 页面，在现有“设置 → 本地访问”中启用或修改普通登录密码。远程用户只能使用普通登录密码，运行时没有认证绕过开关。更多细节见 [远程访问文档](docs/project/remote-access.md)。
 
 ## 为什么不用手机终端？
 

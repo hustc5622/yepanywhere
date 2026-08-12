@@ -78,6 +78,7 @@ $ProdLogDir = if ($env:YEP_LAUNCHD_LOG_DIR) {
 $DevStateFile = Join-Path $LogDir "dev-process.json"
 $ProdStateFile = Join-Path $ProdLogDir "prod-process.json"
 $CliJs = Join-Path $RepoRoot "dist/npm-package/dist/cli.js"
+$TsxCommand = Join-Path $RepoRoot "node_modules/.bin/tsx.cmd"
 
 function Write-Info($message) { Write-Host "==> $message" -ForegroundColor Green }
 function Write-WarningMessage($message) { Write-Host "警告：$message" -ForegroundColor Yellow }
@@ -930,11 +931,59 @@ function Show-Help {
   rebuild           暂存构建、验证、交换并重启生产模式
   enable-autostart  启用生产模式登录自启动，不启动当前实例
   disable-autostart 关闭生产模式登录自启动，不停止当前实例
+  setup-admin-password 设置或重置当前系统用户的全局管理员密码
   help              显示本帮助
 
 端口：开发 $DevMainPort/$DevMaintPort/$DevVitePort；生产 $ServerPort；桥接 $CodexPort/$ClaudePort
 日志：$LogDir
 "@
+}
+
+function Convert-SecureStringToUtf8Base64 {
+  param([Security.SecureString]$SecureValue)
+
+  $bstr = [IntPtr]::Zero
+  $chars = $null
+  $bytes = $null
+  try {
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+    $charCount = [Runtime.InteropServices.Marshal]::ReadInt32($bstr, -4) / 2
+    $chars = New-Object char[] $charCount
+    [Runtime.InteropServices.Marshal]::Copy($bstr, $chars, 0, $charCount)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($chars)
+    return [Convert]::ToBase64String($bytes)
+  } finally {
+    if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+    if ($chars) { [Array]::Clear($chars, 0, $chars.Length) }
+    if ($bstr -ne [IntPtr]::Zero) {
+      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+  }
+}
+
+function Cmd-SetupAdminPassword {
+  $password = $null
+  $confirmation = $null
+  $encodedPassword = $null
+  $encodedConfirmation = $null
+  Push-Location $RepoRoot
+  try {
+    $password = Read-Host "新管理员密码" -AsSecureString
+    $confirmation = Read-Host "确认管理员密码" -AsSecureString
+    $encodedPassword = Convert-SecureStringToUtf8Base64 $password
+    $encodedConfirmation = Convert-SecureStringToUtf8Base64 $confirmation
+    @($encodedPassword, $encodedConfirmation) |
+      & $TsxCommand --conditions source packages/server/src/cli.ts --setup-admin-password-stdin |
+      Out-Host
+    $exitCode = $LASTEXITCODE
+    return $exitCode -eq 0
+  } finally {
+    $encodedPassword = $null
+    $encodedConfirmation = $null
+    if ($password) { $password.Dispose() }
+    if ($confirmation) { $confirmation.Dispose() }
+    Pop-Location
+  }
 }
 
 function Show-Menu {
@@ -990,11 +1039,12 @@ switch ($command) {
   "rebuild" { $success = Cmd-Rebuild }
   "enable-autostart" { $success = Cmd-EnableAutostart }
   "disable-autostart" { $success = Cmd-DisableAutostart }
+  "setup-admin-password" { $success = Cmd-SetupAdminPassword }
   "help" { Show-Help }
   "" { Show-Menu }
   default {
     Write-ErrorMessage "未知命令：$command"
-    Write-Host "可用命令：start-dev stop-dev restart-dev start-prod stop-prod restart-prod stop status rebuild enable-autostart disable-autostart help"
+    Write-Host "可用命令：start-dev stop-dev restart-dev start-prod stop-prod restart-prod stop status rebuild enable-autostart disable-autostart setup-admin-password help"
     exit 2
   }
 }

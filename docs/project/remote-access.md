@@ -159,3 +159,9 @@ systemctl --user start claude-tunnel
 - 远程访问始终使用 HTTPS；上面的方案都能提供 HTTPS。
 - 建议额外添加认证层，例如 basic auth、Cloudflare Access 等。
 - 服务器默认只监听 localhost。远程访问方案应 tunnel 到 localhost，而不是直接监听所有网卡。
+
+### Yep Anywhere 登录密码
+
+在服务器项目目录运行 `pnpm yep setup-admin-password`，设置或重置当前系统用户所有 Profile 共用的管理员密码。然后从服务器电脑的 loopback 页面打开现有“设置 → 本地访问”，使用管理员密码启用、修改或关闭普通登录密码。远程用户只能使用普通登录密码登录；运行时没有认证绕过开关。
+
+管理员操作要求 socket 对端和请求 URL 主机都为 loopback。同机反向代理必须保留外部 `Host`，不得把远程密码管理请求改写成 loopback 主机；否则 Node 服务无法区分该请求与真正的本机请求。

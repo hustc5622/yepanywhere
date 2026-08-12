@@ -42,15 +42,12 @@ export class DirectConnection implements Connection {
         authEvents.signalLoginRequired();
       }
 
-      const setupRequired = res.headers.get("X-Setup-Required") === "true";
       const error = new Error(
         `API error: ${res.status} ${res.statusText}`,
       ) as Error & {
         status: number;
-        setupRequired?: boolean;
       };
       error.status = res.status;
-      if (setupRequired) error.setupRequired = true;
       throw error;
     }
 

@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { AdminPasswordService } from "../../src/auth/AdminPasswordService.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const yepScript = path.join(repoRoot, "scripts", "yep.ps1");
@@ -180,11 +181,92 @@ describe.skipIf(process.platform !== "win32")("Windows 服务脚本", () => {
       "rebuild",
       "enable-autostart",
       "disable-autostart",
+      "setup-admin-password",
       "help",
     ]) {
       expect(result.stdout).toContain(command);
     }
     expect(result.stdout).not.toContain("Show service");
+  });
+
+  it("setup-admin-password 通过 PowerShell 隐藏输入设置管理员密码", async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), "yep-admin-command-"));
+    tempDirs.push(stateDir);
+    const password = "测试-integration-only-admin-password";
+    const adminFilePath = path.join(stateDir, ".yep-anywhere", "admin.json");
+    const harness = `
+function Read-Host {
+  param([string]$Prompt, [switch]$AsSecureString)
+  if (-not $AsSecureString) { throw 'Expected hidden PowerShell input' }
+  return ConvertTo-SecureString ${psLiteral(password)} -AsPlainText -Force
+}
+. ${psLiteral(yepScript)} help
+if (-not (Cmd-SetupAdminPassword)) { exit 1 }
+`;
+
+    const result = await runPowerShellCommand(harness, {
+      APPDATA: stateDir,
+      HOME: stateDir,
+      LOCALAPPDATA: stateDir,
+      USERPROFILE: stateDir,
+      YEP_SERVICE_CONFIG_PATH: path.join(stateDir, "service-config.json"),
+    });
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(`${result.stdout}${result.stderr}`).not.toContain(password);
+    expect(`${result.stdout}${result.stderr}`).not.toContain(
+      Buffer.from(password, "utf8").toString("base64"),
+    );
+    const adminPasswordService = new AdminPasswordService({
+      filePath: adminFilePath,
+    });
+    await expect(adminPasswordService.verifyPassword(password)).resolves.toBe(
+      true,
+    );
+  });
+
+  it("setup-admin-password 输入不一致时失败且不写入管理员配置", async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), "yep-admin-mismatch-"));
+    tempDirs.push(stateDir);
+    const password = "first-integration-password";
+    const confirmation = "second-integration-password";
+    const adminFilePath = path.join(stateDir, ".yep-anywhere", "admin.json");
+    const harness = `
+$global:passwordInputs = @(
+  (ConvertTo-SecureString ${psLiteral(password)} -AsPlainText -Force),
+  (ConvertTo-SecureString ${psLiteral(confirmation)} -AsPlainText -Force)
+)
+$global:passwordInputIndex = 0
+function Read-Host {
+  param([string]$Prompt, [switch]$AsSecureString)
+  if (-not $AsSecureString) { throw 'Expected hidden PowerShell input' }
+  $value = $global:passwordInputs[$global:passwordInputIndex]
+  $global:passwordInputIndex++
+  return $value
+}
+. ${psLiteral(yepScript)} help
+if (Cmd-SetupAdminPassword) { exit 1 }
+`;
+
+    const result = await runPowerShellCommand(harness, {
+      APPDATA: stateDir,
+      HOME: stateDir,
+      LOCALAPPDATA: stateDir,
+      USERPROFILE: stateDir,
+      YEP_SERVICE_CONFIG_PATH: path.join(stateDir, "service-config.json"),
+    });
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    const output = `${result.stdout}${result.stderr}`;
+    for (const value of [password, confirmation]) {
+      expect(output).not.toContain(value);
+      expect(output).not.toContain(
+        Buffer.from(value, "utf8").toString("base64"),
+      );
+    }
+    await expect(readFile(adminFilePath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("交互菜单逐项分发全部选择并在 q 后退出", async () => {

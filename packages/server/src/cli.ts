@@ -88,16 +88,14 @@ OPTIONS:
   --https-self-signed   Enable HTTPS using a self-signed certificate
                         stored in the app data directory
   --open                Open the dashboard in your default browser on startup
-  --auth-disable        Disable authentication (bypass auth even if enabled in settings)
-                        Emergency recovery mode; re-enable auth after fixing config
   --codex-bridge-only   Start only the Codex CLI bridge sidecar
   --claude-bridge-only  Start only the Claude terminal bridge sidecar
   claude                Start or attach to a Yep-managed Claude session
 
 SETUP OPTIONS (for headless installation):
-  --setup-auth <password>
-                        Set up local authentication with the given password
-                        (min 6 characters). Exits after setup.
+  --setup-admin-password
+                        Set or reset the global administrator password interactively.
+                        Exits after setup.
 
 ENVIRONMENT VARIABLES:
   NODE_ENV                      Environment mode: production or development
@@ -106,7 +104,6 @@ ENVIRONMENT VARIABLES:
   HOST                          Host/interface to bind (default: localhost)
   YEP_ANYWHERE_DATA_DIR         Data directory override
   YEP_ANYWHERE_PROFILE          Profile name (creates ~/.yep-anywhere-{profile}/)
-  AUTH_DISABLED                 Disable auth (bypass even if enabled in settings)
   HTTPS_SELF_SIGNED             Enable HTTPS with a self-signed certificate
   LOG_LEVEL                     Log level: fatal, error, warn, info, debug, trace
   LOG_PRETTY                    Pretty-print console logs (default: true)
@@ -141,11 +138,8 @@ EXAMPLES:
   # Use development profile (separate data directory)
   YEP_ANYWHERE_PROFILE=dev yepanywhere
 
-  # Reset local auth password (headless recovery)
-  yepanywhere --setup-auth "mypassword123"
-
-  # Emergency auth bypass (temporary)
-  yepanywhere --auth-disable
+  # Set or reset the global administrator password
+  yepanywhere --setup-admin-password
 
   # Start a Yep-managed Claude session from the terminal
   yepanywhere claude "fix the failing tests"
@@ -253,13 +247,6 @@ if (claudeWrapperInvocation) {
     args.splice(httpsSelfSignedIndex, 1);
   }
 
-  // Parse --auth-disable flag
-  const authDisableIndex = args.indexOf("--auth-disable");
-  if (authDisableIndex !== -1) {
-    process.env.AUTH_DISABLED = "true";
-    args.splice(authDisableIndex, 1);
-  }
-
   // Parse --codex-bridge-only flag
   const codexBridgeOnlyIndex = args.indexOf("--codex-bridge-only");
   const codexBridgeOnly = codexBridgeOnlyIndex !== -1;
@@ -274,17 +261,30 @@ if (claudeWrapperInvocation) {
     args.splice(claudeBridgeOnlyIndex, 1);
   }
 
-  // Parse --setup-auth flag
-  const setupAuthIndex = args.indexOf("--setup-auth");
-  let setupAuthPassword: string | undefined;
-  if (setupAuthIndex !== -1) {
-    const passwordValue = args[setupAuthIndex + 1];
-    if (!passwordValue || passwordValue.startsWith("-")) {
-      console.error("Error: --setup-auth requires a password value");
-      process.exit(1);
-    }
-    setupAuthPassword = passwordValue;
-    args.splice(setupAuthIndex, 2);
+  // Parse the administrator setup flags. The stdin variant is reserved for
+  // the Windows PowerShell wrapper, which performs the hidden input itself.
+  const setupAdminPasswordIndex = args.indexOf("--setup-admin-password");
+  const setupAdminPasswordStdinIndex = args.indexOf(
+    "--setup-admin-password-stdin",
+  );
+  const setupAdminPassword =
+    setupAdminPasswordIndex !== -1 || setupAdminPasswordStdinIndex !== -1;
+  const setupAdminPasswordFromStdin = setupAdminPasswordStdinIndex !== -1;
+  if (setupAdminPasswordIndex !== -1) {
+    args.splice(setupAdminPasswordIndex, 1);
+  }
+  if (setupAdminPasswordStdinIndex !== -1) {
+    args.splice(args.indexOf("--setup-admin-password-stdin"), 1);
+  }
+  if (
+    setupAdminPassword &&
+    (args.length > 0 ||
+      (setupAdminPasswordIndex !== -1 && setupAdminPasswordFromStdin))
+  ) {
+    console.error(
+      "Error: Unknown arguments after --setup-admin-password. Password values are not accepted on the command line.",
+    );
+    process.exit(1);
   }
 
   // If there are unknown arguments, show error and help
@@ -304,8 +304,8 @@ if (claudeWrapperInvocation) {
   }
 
   // Handle setup commands (exit after completion)
-  if (setupAuthPassword) {
-    runSetup(setupAuthPassword);
+  if (setupAdminPassword) {
+    runSetupAdminPassword(setupAdminPasswordFromStdin);
   } else if (codexBridgeOnly) {
     runCodexBridgeOnly();
   } else if (claudeBridgeOnly) {
@@ -318,13 +318,20 @@ if (claudeWrapperInvocation) {
   }
 }
 
-async function runSetup(authPassword: string | undefined): Promise<never> {
+async function runSetupAdminPassword(fromStdin: boolean): Promise<never> {
   try {
-    const { setupAuth } = await import("./cli-setup.js");
-
-    if (authPassword) {
-      await setupAuth({ password: authPassword });
-    }
+    const [
+      { setupAdminPassword },
+      { createBase64StdinPasswordPrompt, createTerminalPasswordPrompt },
+    ] = await Promise.all([
+      import("./cli-setup.js"),
+      import("./cli-password-prompt.js"),
+    ]);
+    await setupAdminPassword({
+      prompt: fromStdin
+        ? createBase64StdinPasswordPrompt()
+        : createTerminalPasswordPrompt(),
+    });
 
     process.exit(0);
   } catch (error) {

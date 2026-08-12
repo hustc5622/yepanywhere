@@ -9,6 +9,7 @@ import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { createApp } from "./app.js";
 import { SessionArchiveService } from "./archive/index.js";
+import { AdminPasswordService } from "./auth/AdminPasswordService.js";
 import { AuthService } from "./auth/AuthService.js";
 import { getRuntimeBuildInfo } from "./build-info.js";
 import { CodexBridgeHttpClient } from "./codex-bridge/CodexBridgeHttpClient.js";
@@ -463,6 +464,7 @@ const authService = new AuthService({
   sessionTtlMs: config.authSessionTtlMs,
   cookieSecret: config.authCookieSecret,
 });
+const adminPasswordService = new AdminPasswordService();
 const installService = new InstallService({
   dataDir: config.dataDir,
 });
@@ -543,9 +545,7 @@ async function startServer() {
   modelInfoService.warmProvider("claude-ollama").catch(() => {});
 
   // Log auth status
-  if (config.authDisabled) {
-    console.log("[Auth] Cookie auth disabled by --auth-disable flag");
-  } else if (authService.isEnabled()) {
+  if (authService.isEnabled()) {
     console.log("[Auth] Cookie auth enabled (configured in settings)");
   } else {
     console.log("[Auth] Cookie auth not enabled (enable in Settings)");
@@ -635,7 +635,7 @@ async function startServer() {
     nativePushService,
     recentsService,
     authService,
-    authDisabled: config.authDisabled,
+    adminPasswordService,
     desktopAuthToken: config.desktopAuthToken,
     // Note: frontendProxy not passed - will be added below
     serverHost: "127.0.0.1", // Always report localhost as main binding

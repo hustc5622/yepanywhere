@@ -149,8 +149,6 @@ export interface Config {
   /** Allowed directory prefixes for serving local markdown/text files. Empty = disabled. */
   allowedLocalFilePaths: string[];
 
-  /** Whether cookie-based auth is disabled by env var (--auth-disable or AUTH_DISABLED=true). Used for recovery. */
-  authDisabled: boolean;
   /** Cookie signing secret. Auto-generated if not provided. */
   authCookieSecret?: string;
   /** Session TTL in milliseconds. Default: 30 days */
@@ -437,8 +435,6 @@ export function loadConfig(): Config {
     allowedLocalFilePaths: Array.from(
       new Set([codexHomeDir, ...extraAllowedLocalFilePaths]),
     ),
-    // Auth disabled override (for recovery if user forgets password)
-    authDisabled: process.env.AUTH_DISABLED === "true",
     authCookieSecret: process.env.AUTH_COOKIE_SECRET,
     authSessionTtlMs:
       parseIntOrDefault(process.env.AUTH_SESSION_TTL_DAYS, 30) *

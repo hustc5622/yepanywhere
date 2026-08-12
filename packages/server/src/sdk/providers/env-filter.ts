@@ -29,7 +29,6 @@ const EXCLUDED_VARS = new Set([
   "FORCE_COLOR",
   // Auth/maintenance ports (internal to yep-anywhere)
   "MAINTENANCE_PORT",
-  "AUTH_DISABLED",
   // Proxy debug (internal)
   "PROXY_DEBUG",
   // Prevent nested session detection when server runs inside Claude Code

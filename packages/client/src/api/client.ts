@@ -263,7 +263,6 @@ export interface ApiError extends Error {
   path?: string;
   details?: unknown;
   runtime?: SessionRuntime;
-  setupRequired?: boolean;
 }
 
 export interface SessionOptions {
@@ -308,20 +307,11 @@ export function getDesktopAuthToken(): string | null {
 }
 
 export interface AuthStatus {
-  /** Whether auth is enabled in settings */
   enabled: boolean;
-  /** Whether user has a valid session (or auth is disabled) */
   authenticated: boolean;
-  /** Whether initial account setup is needed */
-  setupRequired: boolean;
-  /** Whether auth is bypassed by --auth-disable flag (for recovery) */
-  disabledByEnv: boolean;
-  /** Path to auth.json file (for recovery instructions) */
-  authFilePath: string;
-  /** Whether the server has a desktop auth token (Tauri app) */
   hasDesktopToken: boolean;
-  /** Whether unauthenticated localhost access is allowed */
   localhostOpen: boolean;
+  localManagementAllowed: boolean;
 }
 
 export async function fetchJSON<T>(
@@ -376,8 +366,6 @@ export async function fetchJSON<T>(
       // Response body wasn't JSON, use default message
     }
 
-    // Include setup required info in error for auth handling
-    const setupRequired = res.headers.get("X-Setup-Required") === "true";
     const error = new Error(errorMessage) as ApiError;
     error.status = res.status;
     if (typeof errorBody?.code === "string") error.code = errorBody.code;
@@ -389,7 +377,6 @@ export async function fetchJSON<T>(
     if (errorBody?.runtime !== undefined) {
       error.runtime = errorBody.runtime as SessionRuntime;
     }
-    if (setupRequired) error.setupRequired = true;
     throw error;
   }
 
@@ -1398,24 +1385,16 @@ export const api = {
   // Auth API
   getAuthStatus: () => fetchJSON<AuthStatus>("/auth/status"),
 
-  /** Enable auth with a password (fresh setup while auth is currently disabled) */
-  enableAuth: (password: string) =>
+  enableAuth: (adminPassword: string, newPassword: string) =>
     fetchJSON<{ success: boolean }>("/auth/enable", {
       method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ adminPassword, newPassword }),
     }),
 
-  /** Disable auth (requires authenticated session) */
-  disableAuth: () =>
+  disableAuth: (adminPassword: string) =>
     fetchJSON<{ success: boolean }>("/auth/disable", {
       method: "POST",
-    }),
-
-  /** @deprecated Use enableAuth instead */
-  setupAccount: (password: string) =>
-    fetchJSON<{ success: boolean }>("/auth/setup", {
-      method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ adminPassword }),
     }),
 
   login: (password: string) =>
@@ -1429,10 +1408,10 @@ export const api = {
       method: "POST",
     }),
 
-  changePassword: (newPassword: string) =>
+  changePassword: (adminPassword: string, newPassword: string) =>
     fetchJSON<{ success: boolean }>("/auth/change-password", {
       method: "POST",
-      body: JSON.stringify({ newPassword }),
+      body: JSON.stringify({ adminPassword, newPassword }),
     }),
 
   /** Toggle unauthenticated localhost access (desktop token floor bypass) */

@@ -9,6 +9,7 @@ import {
   type ArchivedSessionRecord,
   type SessionArchiveService,
 } from "./archive/index.js";
+import type { AdminPasswordService } from "./auth/AdminPasswordService.js";
 import type { AuthService } from "./auth/AuthService.js";
 import { createAuthRoutes } from "./auth/routes.js";
 import type { CodexBridgeController } from "./codex-bridge/types.js";
@@ -160,8 +161,8 @@ export interface AppOptions {
   maxQueueSize?: number;
   /** AuthService for cookie-based auth (optional) */
   authService?: AuthService;
-  /** Whether auth is disabled by env var (--auth-disable). Bypasses all auth. */
-  authDisabled?: boolean;
+  /** System-user-wide administrator credential service. */
+  adminPasswordService?: AdminPasswordService;
   /** Desktop auth token for Tauri app. Requests with matching X-Desktop-Token header bypass auth. */
   desktopAuthToken?: string;
   /** Server host (for server-info endpoint) */
@@ -321,12 +322,11 @@ export function createApp(options: AppOptions): AppResult {
 
   // Auth middleware (if authService is provided)
   // The middleware checks authService.isEnabled() dynamically
-  if (options.authService) {
+  if (options.authService && options.adminPasswordService) {
     app.use(
       "/api/*",
       createAuthMiddleware({
         authService: options.authService,
-        authDisabled: options.authDisabled,
         desktopAuthToken: options.desktopAuthToken,
       }),
     );
@@ -334,12 +334,12 @@ export function createApp(options: AppOptions): AppResult {
 
   // Auth routes (always mounted if authService is provided)
   // This allows checking auth status and enabling/disabling from settings
-  if (options.authService) {
+  if (options.authService && options.adminPasswordService) {
     app.route(
       "/api/auth",
       createAuthRoutes({
         authService: options.authService,
-        authDisabled: options.authDisabled,
+        adminPasswordService: options.adminPasswordService,
         desktopAuthToken: options.desktopAuthToken,
       }),
     );

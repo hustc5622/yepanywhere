@@ -170,7 +170,10 @@ pnpm yep start-prod
 - `notifications.json`：最后已读时间戳
 - `push-subscriptions.json`：Web Push 订阅
 - `vapid.json`：Push 使用的 VAPID key
-- `auth.json`：鉴权状态（密码哈希、会话）
+- `auth.json`：当前 Profile 的普通登录密码哈希、localhost 开放状态和会话
+- `admin.json`：当前系统用户所有 Profile 共用的管理员密码哈希
+
+管理员密码只通过服务器项目目录中的 `pnpm yep setup-admin-password` 设置或重置。普通登录密码只能从服务器本机 loopback 页面上的“设置 → 本地访问”管理；远程客户端只能使用普通登录密码，运行时没有认证绕过开关。
 
 ### 运行多个实例
 
@@ -255,6 +258,7 @@ pnpm yep status
 pnpm yep rebuild
 pnpm yep enable-autostart  # 不启动当前实例
 pnpm yep disable-autostart # 不停止当前实例
+pnpm yep setup-admin-password # 设置或重置当前系统用户的全局管理员密码
 ```
 
 开发运行、生产运行和登录自启动是独立状态。Windows 的生产定义是当前用户计划任务 `YepAnywhereServer`；macOS 的生产定义是同一 label 的 LaunchAgent，持久 plist 位于 `~/Library/LaunchAgents`，关闭自启动时人工生产运行使用数据目录中的会话 plist。`stop-prod` 不关闭自启动，`disable-autostart` 不停止当前实例，`stop` 也不修改自启动开关。
