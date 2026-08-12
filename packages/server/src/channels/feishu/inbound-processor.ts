@@ -102,6 +102,18 @@ interface AcceptedMessage {
   role: "user" | "admin";
 }
 
+interface AcceptedInboundEvent {
+  account: FeishuAccountConfig;
+  api?: FeishuMessageApi;
+  event: unknown;
+  botIdentity: NonNullable<FeishuInboundEnvelope["botIdentity"]>;
+  header: FeishuInboundEventHeader;
+  record: FeishuInboxRecord;
+  /** Recovery replays preserve one durable inbox row per dispatch task. */
+  recovered?: boolean;
+  role: "user" | "admin";
+}
+
 interface FeishuCommand {
   name: FeishuCommandName;
   argument?: string;
@@ -124,10 +136,11 @@ export class FeishuInboundProcessor {
   private readonly skillSelectionManager?: FeishuSkillSelectionManager;
   private readonly statusRegistry?: FeishuStatusRegistry;
   private readonly onOutcome?: FeishuInboundProcessorOptions["onOutcome"];
-  private readonly scheduler: FeishuScopeScheduler<
-    AcceptedMessage,
-    FeishuInboundOutcome
+  private readonly ingressScheduler: FeishuScopeScheduler<
+    AcceptedInboundEvent,
+    void
   >;
+  private readonly scopeScheduler: FeishuScopeScheduler<AcceptedMessage, void>;
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly queueDepthByAccount = new Map<string, number>();
   private shuttingDown = false;
@@ -142,10 +155,15 @@ export class FeishuInboundProcessor {
     this.skillSelectionManager = options.skillSelectionManager;
     this.statusRegistry = options.statusRegistry;
     this.onOutcome = options.onOutcome;
-    this.scheduler = new FeishuScopeScheduler({
+    this.ingressScheduler = new FeishuScopeScheduler({
       debounceMs: options.debounceMs,
+      onMessageBatch: (_ingressKey, messages) =>
+        this.normalizeAndDispatchBatch(messages),
+    });
+    this.scopeScheduler = new FeishuScopeScheduler({
+      debounceMs: 0,
       onMessageBatch: (scopeKey, messages) =>
-        this.dispatchMessageBatch(scopeKey, messages),
+        this.dispatchMessageBatchWithOutcome(scopeKey, messages),
     });
   }
 
@@ -218,10 +236,11 @@ export class FeishuInboundProcessor {
     );
     if (!received.duplicate || received.record.status === "received") {
       this.track(received.record, () =>
-        this.normalizeAndSchedule({
+        this.enqueueInbound({
           account: envelope.account,
           event: envelope.event,
           botIdentity,
+          header,
           api: envelope.api,
           record: received.record,
           role: policy.role,
@@ -321,12 +340,14 @@ export class FeishuInboundProcessor {
           continue;
         }
         this.track(record, () =>
-          this.normalizeAndSchedule({
+          this.enqueueInbound({
             account: context.account,
             event,
             botIdentity: context.botIdentity,
+            header,
             api: context.api,
             record,
+            recovered: true,
             role: policy.role,
           }),
         );
@@ -339,21 +360,82 @@ export class FeishuInboundProcessor {
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
-    await this.scheduler.shutdown();
+    await this.ingressScheduler.shutdown();
     await Promise.allSettled(this.inFlight.values());
+    await this.scopeScheduler.shutdown();
     this.inFlight.clear();
     this.mediaDownloader?.stopRetentionCleanup();
     this.skillSelectionManager?.shutdown();
   }
 
-  private async normalizeAndSchedule(input: {
-    account: FeishuAccountConfig;
-    event: unknown;
-    botIdentity: NonNullable<FeishuInboundEnvelope["botIdentity"]>;
-    api?: FeishuMessageApi;
-    record: FeishuInboxRecord;
-    role: "user" | "admin";
-  }): Promise<void> {
+  /**
+   * Enter the per-chat debounce window before relation expansion or any REST
+   * lookup. A merge-forward can take materially longer to normalize than the
+   * adjacent text that describes what to do with it; starting the window after
+   * normalization lets the text overtake its material and creates two turns.
+   */
+  private async enqueueInbound(input: AcceptedInboundEvent): Promise<void> {
+    this.adjustQueueDepth(input.account.id, 1);
+    try {
+      const ingressKey = resolveFeishuIngressKey(input.account, input.header);
+      const commandHint = parseRawFeishuCommand(
+        input.event,
+        input.header,
+        input.botIdentity.openId,
+      );
+      if (commandHint) {
+        // Commands have a separate fast admission path. Their authoritative
+        // scope and content are still established by normal normalization,
+        // then the scope scheduler applies control priority.
+        await this.normalizeAndDispatchBatch([input]);
+      } else if (input.recovered) {
+        // Recovery can admit many old rows in one event-loop turn. Keep them
+        // serialized by scope, but do not reinterpret that restart-time
+        // proximity as evidence that the original messages were one request.
+        await this.ingressScheduler.enqueueControl(ingressKey, () =>
+          this.normalizeAndDispatchBatch([input]),
+        );
+      } else {
+        await this.ingressScheduler.enqueueMessage(ingressKey, input);
+      }
+    } finally {
+      this.adjustQueueDepth(input.account.id, -1);
+    }
+  }
+
+  private async normalizeAndDispatchBatch(
+    batch: AcceptedInboundEvent[],
+  ): Promise<void> {
+    // Promise.all preserves receive order while preventing one expensive
+    // merge-forward expansion from serially delaying unrelated normalization
+    // work already admitted to this batch.
+    const normalized = await Promise.all(
+      batch.map((input) => this.normalizeInbound(input)),
+    );
+    const accepted = normalized.filter(
+      (message): message is AcceptedMessage => message !== undefined,
+    );
+
+    // Submit every operation synchronously so the zero-delay scope scheduler
+    // can batch regular messages by authoritative scope while control commands
+    // retain their normal/high priority lane.
+    await Promise.all(
+      accepted.map((message) => {
+        const command = parseFeishuCommand(message.normalized.content);
+        return command
+          ? this.scopeScheduler.enqueueControl(
+              message.scope.key,
+              () => this.dispatchCommandWithOutcome(message, command),
+              { priority: command.name === "stop" ? "high" : "normal" },
+            )
+          : this.scopeScheduler.enqueueMessage(message.scope.key, message);
+      }),
+    );
+  }
+
+  private async normalizeInbound(
+    input: AcceptedInboundEvent,
+  ): Promise<AcceptedMessage | undefined> {
     const normalizationStartedAt = Date.now();
     let normalized: FeishuNormalizedInboundMessage;
     try {
@@ -370,7 +452,7 @@ export class FeishuInboundProcessor {
         failed: true,
       });
       await this.failRecord(input.record.key, "NORMALIZATION_FAILED");
-      return;
+      return undefined;
     }
     this.statusRegistry?.recordNormalization(input.account.id, {
       durationMs: Date.now() - normalizationStartedAt,
@@ -386,7 +468,7 @@ export class FeishuInboundProcessor {
     ) {
       if (!input.api?.getChatMode) {
         await this.failRecord(input.record.key, "NORMALIZATION_FAILED");
-        return;
+        return undefined;
       }
       try {
         chatMode = await input.api.getChatMode(normalized.chatId);
@@ -394,7 +476,7 @@ export class FeishuInboundProcessor {
         // A root_id can be either a normal group reply or a topic root. Do not
         // guess and risk projecting a topic response into the main chat.
         await this.failRecord(input.record.key, "NORMALIZATION_FAILED");
-        return;
+        return undefined;
       }
     }
     const scope = resolveFeishuScope({
@@ -402,7 +484,7 @@ export class FeishuInboundProcessor {
       message: normalized,
       chatMode,
     });
-    const accepted: AcceptedMessage = {
+    return {
       account: input.account,
       api: input.api,
       normalized,
@@ -410,19 +492,30 @@ export class FeishuInboundProcessor {
       scope,
       role: input.role,
     };
-    const command = parseFeishuCommand(normalized.content);
-    this.adjustQueueDepth(input.account.id, 1);
+  }
+
+  private async dispatchMessageBatchWithOutcome(
+    scopeKey: string,
+    messages: AcceptedMessage[],
+  ): Promise<void> {
     try {
-      const outcome = command
-        ? await this.scheduler.enqueueControl(
-            scope.key,
-            () => this.dispatchCommand(accepted, command),
-            { priority: command.name === "stop" ? "high" : "normal" },
-          )
-        : await this.scheduler.enqueueMessage(scope.key, accepted);
+      const outcome = await this.dispatchMessageBatch(scopeKey, messages);
       await this.onOutcome?.(outcome);
-    } finally {
-      this.adjustQueueDepth(input.account.id, -1);
+    } catch {
+      // dispatchMessageBatch owns the durable failure transition for every
+      // member of the batch.
+    }
+  }
+
+  private async dispatchCommandWithOutcome(
+    message: AcceptedMessage,
+    command: FeishuCommand,
+  ): Promise<void> {
+    try {
+      const outcome = await this.dispatchCommand(message, command);
+      await this.onOutcome?.(outcome);
+    } catch {
+      // dispatchCommand owns its durable failure transition.
     }
   }
 
@@ -539,6 +632,7 @@ export class FeishuInboundProcessor {
             origin,
             body,
             requireImmediate: true,
+            allowSteer: false,
           });
       if (!result.ok || result.status !== 200) {
         throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
@@ -1120,6 +1214,64 @@ function isMergeForwardEvent(event: unknown): boolean {
     typeof message === "object" &&
     (message as { message_type?: unknown }).message_type === "merge_forward"
   );
+}
+
+function resolveFeishuIngressKey(
+  account: Pick<FeishuAccountConfig, "id" | "groupSessionMode">,
+  header: FeishuInboundEventHeader,
+): string {
+  if (header.chatType === "p2p") {
+    return `${account.id}:p2p:${header.chatId}`;
+  }
+  if (account.groupSessionMode === "thread-when-available" && header.threadId) {
+    return `${account.id}:thread:${header.chatId}:${header.threadId}`;
+  }
+  // A root_id is not necessarily a topic/thread ID. Batch ambiguous roots at
+  // chat granularity, then split by resolveFeishuScope after normalization.
+  return `${account.id}:group-ingress:${header.chatId}`;
+}
+
+function parseRawFeishuCommand(
+  event: unknown,
+  header: Pick<FeishuInboundEventHeader, "messageType">,
+  botOpenId: string,
+): FeishuCommand | undefined {
+  if (header.messageType !== "text" || !event || typeof event !== "object") {
+    return undefined;
+  }
+  const message = (event as { message?: unknown }).message;
+  if (!message || typeof message !== "object") return undefined;
+  const rawMessage = message as {
+    content?: unknown;
+    mentions?: unknown;
+  };
+  if (typeof rawMessage.content !== "string") return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawMessage.content);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const parsedText = (parsed as { text?: unknown }).text;
+  if (typeof parsedText !== "string") return undefined;
+  let text = parsedText;
+
+  if (Array.isArray(rawMessage.mentions)) {
+    for (const value of rawMessage.mentions) {
+      if (!value || typeof value !== "object") continue;
+      const mention = value as { id?: unknown; key?: unknown };
+      const id =
+        mention.id && typeof mention.id === "object"
+          ? (mention.id as { open_id?: unknown })
+          : undefined;
+      if (id?.open_id === botOpenId && typeof mention.key === "string") {
+        text = text.replaceAll(mention.key, "");
+      }
+    }
+  }
+  return parseFeishuCommand(text);
 }
 
 function parseFeishuCommand(content: string): FeishuCommand | undefined {

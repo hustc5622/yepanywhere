@@ -53,6 +53,11 @@ export interface ProcessQueueMessageResult {
   error?: string;
 }
 
+export interface ProcessQueueMessageOptions {
+  /** False preserves one queued provider turn for one external reply surface. */
+  allowSteer?: boolean;
+}
+
 /**
  * IMPORTANT: Never filter out messages by type before emitting to SSE!
  *
@@ -1103,7 +1108,10 @@ export class Process {
    *
    * @returns Object with success status and queue position or error
    */
-  async queueMessage(message: UserMessage): Promise<ProcessQueueMessageResult> {
+  async queueMessage(
+    message: UserMessage,
+    options: ProcessQueueMessageOptions = {},
+  ): Promise<ProcessQueueMessageResult> {
     // Check if process is terminated or transport failed
     if (this._state.type === "terminated") {
       return {
@@ -1138,7 +1146,11 @@ export class Process {
 
     if (this.messageQueue) {
       // If provider supports in-turn steering, prefer that over queue-after-turn behavior.
-      if (this._state.type === "in-turn" && this.steerFn) {
+      if (
+        options.allowSteer !== false &&
+        this._state.type === "in-turn" &&
+        this.steerFn
+      ) {
         let steerResult: AgentSteerResult = false;
         try {
           steerResult = await this.steerFn(messageWithUuid);

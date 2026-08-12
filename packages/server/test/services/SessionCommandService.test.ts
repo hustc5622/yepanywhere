@@ -343,6 +343,7 @@ describe("SessionCommandService runtime boundary", () => {
         projectId: "unused-for-owned-session",
         sessionId: snapshot.sessionId,
         requireImmediate: true,
+        allowSteer: false,
         body: {
           message: "$fixture-skill continue",
           codexInputs: [
@@ -366,6 +367,7 @@ describe("SessionCommandService runtime boundary", () => {
       expect.objectContaining({
         sessionId: snapshot.sessionId,
         requireImmediate: true,
+        allowSteer: false,
         permissionMode: "default",
         message: expect.objectContaining({
           text: "$fixture-skill continue",

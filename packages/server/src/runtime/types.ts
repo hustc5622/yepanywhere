@@ -168,6 +168,8 @@ export interface QueueRuntimeMessageRequest {
   modelSettings?: ModelSettings;
   /** Reject if this message would require a queued process restart. */
   requireImmediate?: boolean;
+  /** False queues behind an active turn instead of using provider steering. */
+  allowSteer?: boolean;
 }
 
 export interface RuntimeInputResponseRequest {

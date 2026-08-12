@@ -342,6 +342,38 @@ describe("Process", () => {
       await process.abort();
     });
 
+    it("queues behind the active turn when steering is explicitly disabled", async () => {
+      let resolveIterator: () => void;
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () =>
+          new Promise((resolve) => {
+            resolveIterator = () => resolve({ done: true, value: undefined });
+          }),
+      };
+      const queue = new MessageQueue();
+      const steerFn = vi.fn(async () => true);
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        idleTimeoutMs: 100,
+        queue,
+        steerFn,
+      });
+
+      const result = await process.queueMessage(
+        { text: "keep a separate reply turn" },
+        { allowSteer: false },
+      );
+
+      expect(result).toMatchObject({ success: true, position: 1 });
+      expect(steerFn).not.toHaveBeenCalled();
+      expect(process.queueDepth).toBe(1);
+
+      resolveIterator?.();
+      await process.abort();
+    });
+
     it("passes provider-only inputs to steer while publishing only the safe projection", async () => {
       let resolveIterator: () => void;
       const iterator: AsyncIterator<SDKMessage> = {

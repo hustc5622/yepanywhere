@@ -132,10 +132,15 @@ export interface QueueSessionMessageCommandInput {
   body: QueueSessionMessageBody;
   /** Reject atomically if accepting this message requires a queued restart. */
   requireImmediate?: boolean;
+  /** Keep this input as its own provider turn instead of steering an active one. */
+  allowSteer?: boolean;
 }
 
 export interface SendSessionMessageCommandInput
-  extends ResumeSessionCommandInput {}
+  extends ResumeSessionCommandInput {
+  /** Keep this input as its own provider turn instead of steering an active one. */
+  allowSteer?: boolean;
+}
 
 export interface SessionCommandOrigin {
   createdBy?: SessionCreatedBy;
@@ -1294,6 +1299,7 @@ export class SessionCommandService {
       message: userMessage,
       permissionMode: effectivePermissionMode,
       requireImmediate: input.requireImmediate,
+      allowSteer: input.allowSteer,
       modelSettings: {
         model,
         thinking,
@@ -1367,6 +1373,7 @@ export class SessionCommandService {
         sessionId: input.sessionId,
         body: input.body,
         requireImmediate: input.requireImmediate,
+        allowSteer: input.allowSteer,
       });
     }
     return this.resume(input);

@@ -1010,7 +1010,7 @@ export class Supervisor {
     message: UserMessage,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
-    admission?: { requireImmediate?: boolean },
+    admission?: { requireImmediate?: boolean; allowSteer?: boolean },
   ): Promise<
     | { success: true; process: Process; restarted: boolean }
     | { success: false; error: string }
@@ -1117,7 +1117,9 @@ export class Supervisor {
       await process.syncPermissionMode(permissionMode);
     }
 
-    const result = await process.queueMessage(message);
+    const result = await process.queueMessage(message, {
+      allowSteer: admission?.allowSteer,
+    });
     if (result.success) {
       return { success: true, process, restarted: false };
     }

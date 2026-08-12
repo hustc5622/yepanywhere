@@ -53,6 +53,19 @@ function immediateAdmissionArgs(
   return requireImmediate ? [{ requireImmediate: true }] : [];
 }
 
+function queueAdmissionArgs(input: {
+  requireImmediate?: boolean;
+  allowSteer?: boolean;
+}): [] | [{ requireImmediate?: true; allowSteer?: false }] {
+  if (!input.requireImmediate && input.allowSteer !== false) return [];
+  return [
+    {
+      ...(input.requireImmediate ? { requireImmediate: true as const } : {}),
+      ...(input.allowSteer === false ? { allowSteer: false as const } : {}),
+    },
+  ];
+}
+
 export class EmbeddedRuntimeController implements RuntimeController {
   readonly mode = "embedded" as const;
   private readonly journalSubscriptions = new Map<string, () => void>();
@@ -268,7 +281,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
       input.message,
       input.permissionMode,
       input.modelSettings,
-      ...immediateAdmissionArgs(input.requireImmediate),
+      ...queueAdmissionArgs(input),
     );
     if (!result.success) return result;
     await this.ensureJournalSubscription(result.process.sessionId);

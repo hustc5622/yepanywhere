@@ -204,7 +204,9 @@ describe("FeishuInboundProcessor", () => {
     ]);
 
     expect(accepted.filter((result) => result.duplicate)).toHaveLength(1);
-    expect(api.resolveUserNames).toHaveBeenCalledTimes(1);
+    await eventually(() =>
+      expect(api.resolveUserNames).toHaveBeenCalledTimes(1),
+    );
     names.resolve(new Map([["ou_user", "User"]]));
     await eventually(() => expect(outcomes).toHaveLength(1));
 
@@ -215,6 +217,133 @@ describe("FeishuInboundProcessor", () => {
       status: "completed",
       attempts: 1,
     });
+  });
+
+  it("batches merge-forward material with its adjacent instruction before slow expansion can reorder them", async () => {
+    const fixture = await createFixture(dataDirs);
+    const outcomes: FeishuInboundOutcome[] = [];
+    const forwardedItems =
+      deferred<Awaited<ReturnType<FeishuMessageApi["fetchMessageItems"]>>>();
+    const api: FeishuMessageApi = {
+      fetchMessageItems: vi.fn((messageId) => {
+        expect(messageId).toBe("om_slow_material");
+        return forwardedItems.promise;
+      }),
+    };
+    const processor = new FeishuInboundProcessor({
+      sessionCommandService:
+        fixture.commands as unknown as SessionCommandService,
+      bindingStore: fixture.bindings,
+      inbox: fixture.inbox,
+      debounceMs: 25,
+      onOutcome: (outcome) => outcomes.push(outcome),
+    });
+    processors.push(processor);
+
+    await Promise.all([
+      processor.accept({
+        account: fixture.account,
+        event: makeMergeForwardEvent("om_slow_material"),
+        botIdentity: BOT,
+        api,
+      }),
+      processor.accept({
+        account: fixture.account,
+        event: makeEvent("om_fast_instruction", "Summarize that topic"),
+        botIdentity: BOT,
+      }),
+    ]);
+
+    await eventually(() =>
+      expect(api.fetchMessageItems).toHaveBeenCalledOnce(),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    expect(fixture.commands.start).not.toHaveBeenCalled();
+    expect(fixture.commands.send).not.toHaveBeenCalled();
+
+    forwardedItems.resolve([
+      {
+        message_id: "om_forwarded_topic",
+        upper_message_id: "om_slow_material",
+        msg_type: "text",
+        body: { content: JSON.stringify({ text: "Forwarded topic material" }) },
+        sender: { id: "ou_author" },
+        create_time: "1000",
+      },
+    ]);
+    await eventually(() => expect(outcomes).toHaveLength(1));
+
+    expect(fixture.commands.start).toHaveBeenCalledTimes(1);
+    expect(fixture.commands.send).not.toHaveBeenCalled();
+    const prompt = fixture.commands.start.mock.calls[0]?.[0].body.message;
+    expect(prompt).toContain("## 飞书消息 1/2");
+    expect(prompt).toContain("## 飞书消息 2/2");
+    expect(prompt.indexOf("Forwarded topic material")).toBeLessThan(
+      prompt.indexOf("Summarize that topic"),
+    );
+  });
+
+  it("keeps stop commands on the priority lane while merge-forward normalization is blocked", async () => {
+    const fixture = await createFixture(dataDirs);
+    const now = new Date().toISOString();
+    await fixture.bindings.upsert({
+      version: 1,
+      scopeKey: `${fixture.account.id}:p2p:oc_chat`,
+      accountId: fixture.account.id,
+      chatId: "oc_chat",
+      projectId: "project-real",
+      projectPath: fixture.projectPath,
+      sessionId: "session-active",
+      provider: "codex",
+      permissionMode: "default",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const forwardedItems =
+      deferred<Awaited<ReturnType<FeishuMessageApi["fetchMessageItems"]>>>();
+    const api: FeishuMessageApi = {
+      fetchMessageItems: vi.fn(() => forwardedItems.promise),
+    };
+    const outcomes: FeishuInboundOutcome[] = [];
+    const processor = new FeishuInboundProcessor({
+      sessionCommandService:
+        fixture.commands as unknown as SessionCommandService,
+      bindingStore: fixture.bindings,
+      inbox: fixture.inbox,
+      debounceMs: 25,
+      onOutcome: (outcome) => outcomes.push(outcome),
+    });
+    processors.push(processor);
+
+    await processor.accept({
+      account: fixture.account,
+      event: makeMergeForwardEvent("om_blocked_forward"),
+      botIdentity: BOT,
+      api,
+    });
+    await eventually(() => expect(api.fetchMessageItems).toHaveBeenCalled());
+    await processor.accept({
+      account: fixture.account,
+      event: makeEvent("om_priority_stop", "/stop"),
+      botIdentity: BOT,
+    });
+
+    await eventually(() =>
+      expect(fixture.commands.interrupt).toHaveBeenCalledWith("session-active"),
+    );
+    expect(fixture.commands.send).not.toHaveBeenCalled();
+
+    forwardedItems.resolve([
+      {
+        message_id: "om_forwarded_after_stop",
+        upper_message_id: "om_blocked_forward",
+        msg_type: "text",
+        body: { content: JSON.stringify({ text: "Run after stop" }) },
+        sender: { id: "ou_author" },
+      },
+    ]);
+    await eventually(() => expect(outcomes).toHaveLength(2));
+    expect(fixture.commands.send).toHaveBeenCalledTimes(1);
   });
 
   it("drops redelivery while the first provider dispatch is not terminal", async () => {
@@ -580,6 +709,46 @@ describe("FeishuInboundProcessor", () => {
     expect(fixture.commands.send).not.toHaveBeenCalled();
   });
 
+  it("serializes recovered rows without merging restart-time neighbors into one request", async () => {
+    const fixture = await createFixture(dataDirs);
+    for (const messageId of ["om_recover_first", "om_recover_second"]) {
+      await fixture.inbox.receive({
+        accountId: fixture.account.id,
+        eventId: `evt_${messageId}`,
+        eventType: "im.message.receive_v1",
+        messageId,
+      });
+    }
+    const outcomes: FeishuInboundOutcome[] = [];
+    const processor = createProcessor(fixture, outcomes);
+    processors.push(processor);
+    const api: FeishuMessageApi = {
+      fetchMessageItems: vi.fn(async () => []),
+      fetchMessageEvent: vi.fn(async (messageId) =>
+        makeEvent(messageId, `Recovered ${messageId}`),
+      ),
+    };
+
+    await processor.recover(() => ({
+      account: fixture.account,
+      botIdentity: BOT,
+      api,
+    }));
+    await eventually(() => expect(outcomes).toHaveLength(2));
+
+    expect(fixture.commands.start).toHaveBeenCalledTimes(1);
+    expect(fixture.commands.send).toHaveBeenCalledTimes(1);
+    expect(fixture.commands.send).toHaveBeenCalledWith(
+      expect.objectContaining({ allowSteer: false }),
+    );
+    expect(fixture.commands.start.mock.calls[0]?.[0].body.message).toContain(
+      "Recovered om_recover_first",
+    );
+    expect(fixture.commands.send.mock.calls[0]?.[0].body.message).toContain(
+      "Recovered om_recover_second",
+    );
+  });
+
   it("converges a crash after binding persistence but before the dispatch marker", async () => {
     const fixture = await createFixture(dataDirs);
     const scopeKey = `${fixture.account.id}:p2p:oc_chat`;
@@ -853,6 +1022,7 @@ describe("FeishuInboundProcessor", () => {
           codexEventAccountId: "team-bot",
         },
         requireImmediate: true,
+        allowSteer: false,
       }),
     );
     expect(fixture.bindings.list()[0]).toMatchObject({
@@ -1889,6 +2059,15 @@ function makeEvent(
       content: JSON.stringify({ text }),
     },
   };
+}
+
+function makeMergeForwardEvent(messageId: string): unknown {
+  const event = makeEvent(messageId, "") as {
+    message: { message_type: string; content: string };
+  };
+  event.message.message_type = "merge_forward";
+  event.message.content = "{}";
+  return event;
 }
 
 async function acceptCommand(
