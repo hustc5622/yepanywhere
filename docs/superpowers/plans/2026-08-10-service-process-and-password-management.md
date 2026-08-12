@@ -1,5 +1,7 @@
 # Yep Anywhere 跨平台服务进程与前端密码管理实施计划
 
+> **历史计划说明（2026-08-12）：** 第一阶段服务进程管理已实施。本文件第 340 行起的旧第二阶段方案已被 [2026-08-12-simplified-password-management.md](./2026-08-12-simplified-password-management.md) 完整取代，包含独立密码页、三状态模型、多个维护命令、文件锁和远程安全传输矩阵的内容不得再执行。第二阶段只以新计划和已批准设计为准。
+
 > **面向执行代理：** 实施时必须逐任务使用 `superpowers:test-driven-development`；按阶段执行可使用 `superpowers:executing-plans`，在声称完成前必须使用 `superpowers:verification-before-completion`。本文件当前仅供评审，未获用户批准前不得编码。
 
 **目标：** 在不扩大已批准设计范围的前提下，完成 Windows/macOS 服务进程管理，以及由独立管理员密码保护的前端登录密码管理。
