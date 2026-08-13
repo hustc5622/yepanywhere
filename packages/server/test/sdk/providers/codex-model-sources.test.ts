@@ -87,6 +87,21 @@ describe("CodexModelSourceRegistry", () => {
     expect(deepseekArgs).toContain(
       'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"',
     );
+    expect(deepseekArgs).toContain(
+      "model_providers.deepseek.requires_openai_auth=false",
+    );
+    expect(deepseekArgs).toContain(
+      "model_providers.deepseek.supports_websockets=false",
+    );
+    expect(deepseekArgs).toContain(
+      "model_providers.deepseek.request_max_retries=8",
+    );
+    expect(deepseekArgs).toContain(
+      "model_providers.deepseek.stream_max_retries=8",
+    );
+    expect(deepseekArgs).toContain(
+      "model_providers.deepseek.stream_idle_timeout_ms=600000",
+    );
     // Pin the neutral service tier so a global OpenAI-only tier does not leak.
     expect(deepseekArgs).toContain('service_tier="default"');
     expect(
@@ -94,7 +109,7 @@ describe("CodexModelSourceRegistry", () => {
     ).toBe(true);
   });
 
-  it("materializes a valid catalog with the model's context window", () => {
+  it("materializes both DeepSeek models with their current limits", () => {
     const registry = withKey();
     const catalogPath = registry.materializeCatalog(
       registry.require("deepseek"),
@@ -102,12 +117,28 @@ describe("CodexModelSourceRegistry", () => {
     expect(catalogPath).toBeTruthy();
     expect(existsSync(catalogPath as string)).toBe(true);
     const parsed = JSON.parse(readFileSync(catalogPath as string, "utf8"));
-    expect(parsed.models.map((model: { slug: string }) => model.slug)).toEqual([
-      "deepseek-v4-flash",
-      "deepseek-v4-pro",
+    expect(parsed.models).toEqual([
+      expect.objectContaining({
+        slug: "deepseek-v4-flash",
+        context_window: 1_000_000,
+        default_reasoning_level: "high",
+        supported_reasoning_levels: [
+          { effort: "low", description: "Fast responses" },
+          { effort: "high", description: "Deeper reasoning" },
+          { effort: "max", description: "Maximum reasoning" },
+        ],
+      }),
+      expect.objectContaining({
+        slug: "deepseek-v4-pro",
+        context_window: 1_000_000,
+        default_reasoning_level: "high",
+        supported_reasoning_levels: [
+          { effort: "low", description: "Fast responses" },
+          { effort: "high", description: "Deeper reasoning" },
+          { effort: "max", description: "Maximum reasoning" },
+        ],
+      }),
     ]);
-    expect(parsed.models[0].context_window).toBe(1_000_000);
-    expect(parsed.models[1].context_window).toBe(1_000_000);
   });
 
   it("maps a model slug back to its owning custom source", () => {
@@ -134,6 +165,8 @@ describe("CodexModelSourceRegistry", () => {
         modelProvider: "deepseek",
         providerModelId: "deepseek-v4-pro",
         contextWindow: 1_000_000,
+        maxOutputTokens: 384_000,
+        defaultReasoningEffort: "high",
       }),
     ]);
   });

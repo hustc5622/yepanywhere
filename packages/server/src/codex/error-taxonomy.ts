@@ -42,6 +42,11 @@ export interface ClassifyCodexErrorOptions {
   correlationId?: string;
 }
 
+/** Safe wire fallback used while the app-server still owns an automatic retry. */
+export function formatCodexRetryWarning(error: CanonicalCodexError): string {
+  return `${error.publicMessage} Codex is retrying automatically; keep this turn running.`;
+}
+
 interface ErrorDescriptor {
   code: CanonicalCodexErrorCode;
   retryable: boolean;
