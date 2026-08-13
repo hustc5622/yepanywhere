@@ -35,6 +35,12 @@ provider（`<dataDir>/codex-events/events.jsonl`）与 bridge（`<dataDir>/codex
 - pending input 解决后的活动回退基于 `turnActive` 跟踪，不再无条件回退 `in-turn`。
 - 会话在 thread 元数据（cwd）到达前不对外暴露（`projectPathKnown` 门禁），避免被错误归档到 bridge 进程的 cwd 对应项目。
 
+## Codex bridge 执行接管
+
+- Yep 恢复 Codex Session 前先查询 4510 的 `/sessions/:id/active`。若 Session 仍有外部 TUI 连接，provider 复用该连接的 `clear|light|full` MCP profile，并通过 4510 `/status` 返回的 WebSocket 地址连接对应的常驻 app-server，不再启动独立的 `codex app-server --listen stdio://`；`cf` 的独立代理/MCP 环境因此不会被默认 profile 覆盖。
+- `thread/resume` 返回仍在进行的 turn 时，首条 Web 输入使用带 `expectedTurnId` 的 `turn/steer`；如果 turn 在检查与提交之间已经结束，则重新读取 thread 后安全退回 `turn/start`。
+- 4510 所有权探测、认证或 WebSocket 连接失败时按 `CODEX_BRIDGE_UNAVAILABLE` 明确失败。此路径 fail closed，不会为了“重试”而创建一个可能同时写入同一 thread 的 app-server。
+
 ## OpenCode bridge 状态机要点
 
 - `session.status` 支持完整 `idle|busy|retry` union；retry 携带 attempt/next/action 透传到 `retryStatus`，UI 可显示"重试中"而非静默 spinner。
@@ -46,13 +52,14 @@ provider（`<dataDir>/codex-events/events.jsonl`）与 bridge（`<dataDir>/codex
 
 客户端编辑历史 prompt 时附带 `rollbackTarget: { timestamp, text }`；服务端在 resume 路由用 `computeCodexRollbackNumTurns`（`packages/server/src/sessions/codex-rollback.ts`）基于持久化 turn 树计算 `thread/rollback` 圈数，客户端渲染项计数仅作 fallback。日志事件：`codex_rollback_numturns_resolved` / `codex_rollback_numturns_resolution_failed`。
 
-## 外部 OpenCode 实例（默认 `opencode` TUI）的审批接入
+## 外部 OpenCode 实例（默认 `opencode` TUI）的消息与审批接入
 
 背景：新版 opencode（≥1.2.x）的默认 TUI **不监听任何端口**（server 跑在进程内 Bun Worker，TUI 走进程内 RPC），4520 bridge 的 `/global/event` SSE 只能看见 bridge 托管的 4521 server（即 `of` / `opencode attach` 的会话）。直接跑 `opencode` 的会话与审批对 bridge 完全不可见；上游也没有 server 注册表可发现（`permission.ask` 阻塞插件钩子已在 v1.2.27 被上游删除）。
 
 方案：**全局转发插件 + bridge 外部实例 API**。
 
 - 插件源：`packages/server/resources/opencode-plugin/yep-bridge.ts`；安装：`scripts/install-opencode-yep-plugin.sh`（复制到 `~/.config/opencode/plugin/yep-bridge.ts`，opencode 对所有实例自动加载）。安装脚本是幂等的；`scripts/redeploy-server.sh` 每次成功构建 bundle 后会同步该版本，首次安装 OpenCode bridge LaunchAgent 时也会同步，避免运行时继续加载旧的手工副本。
-- 插件行为：实例启动时 `POST /external/instances` 注册（instanceId + directory）；`event` 钩子把 permission/question/session.\* 事件 `POST /external/events` 转给 4520；同时对 `GET /external/instances/:id/decisions?waitMs=25000` 长轮询，取到决策后用**进程内 SDK client** 应用（permission → `postSessionIdPermissionsPermissionId`；question → 底层 hey-api client 直调 `/question/:id/reply|reject`）。TUI 弹窗与 Yep 前端谁先答都行，`permission.replied` 事件双向对账。
-- bridge 侧（`OpenCodeBridgeService`）：`SessionRecord.instanceId` 标记外部实例会话（cwd 用插件上报的真实 directory）；`respondToInput` 对带 instanceId 的 pending 走决策队列而非 HTTP 回复；外部会话不参与托管 server 的 status 对账，改用**长轮询心跳**判活（静默 90s 置 idle，10min 遗忘）。
+- 插件行为：实例启动时 `POST /external/instances` 注册（instanceId + directory）；`event` 钩子把 permission/question/session.\* 事件 `POST /external/events` 转给 4520；同时对 `GET /external/instances/:id/decisions?waitMs=25000` 长轮询。响应除审批决策外还可带有幂等 command，插件通过**进程内 SDK client**执行 prompt、Session permission PATCH 与 abort，并分别 ACK；因此 Web 恢复默认 TUI Session 时，消息仍在原 OpenCode 进程的 `InstanceState` 中运行。
+- bridge 侧（`OpenCodeBridgeService`）：`SessionRecord.instanceId` / `externalOwner` 标记外部实例会话（cwd 用插件上报的真实 directory）；`respondToInput` 对外部 pending 走决策队列，provider prompt 走带超时和 ACK 的 command 队列；外部会话不参与 4521 的 status 对账，改用**长轮询心跳**判活。所有权或 ACK 不确定时 fail closed，不静默切换到 4521；插件停止心跳 90s 后才释放原进程所有权。
+- bridge 重启后，外部所有权元数据会短暂保留；插件在长轮询中重报已经观察到的 sessionId 以重新绑定。恢复窗口内无法确认原进程时拒绝执行，避免 sidecar 切换期间发生双写。
 - 防重复上报：Yep 托管的 opencode 进程（bridge 4521 + provider per-session serve）注入一次性启动标记 `YEP_MANAGED_OPENCODE=1`，并用 `YEP_MANAGED_OPENCODE_SERVER_PORT` 绑定当前 `serve --port`。插件只对命令与端口都匹配的 server 保持沉默，初始化后立即从 `process.env` 删除这两个标记，避免 agent 启动的服务、工具和嵌套 `opencode run` 继承 managed 身份。兼容旧 launcher 时，没有 port 标记也只允许 `serve` 命令静默；`YEP_OPENCODE_PLUGIN_DISABLE=1` 仍是可继承的硬开关；`YEP_OPENCODE_BRIDGE_URL` 覆盖 bridge 地址。

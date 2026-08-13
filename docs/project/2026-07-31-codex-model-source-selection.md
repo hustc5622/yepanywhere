@@ -9,7 +9,7 @@
 首期目标源：
 
 - OpenAI 官方源，继续使用现有 ChatGPT / Codex 登录状态
-- DeepSeek API，首期只开放 `deepseek-v4-flash`
+- DeepSeek API，当前开放 `deepseek-v4-flash` 与 `deepseek-v4-pro`
 
 相关文档：
 
@@ -38,7 +38,7 @@ Codex CLI 和 Codex app-server 已经具备自定义模型提供方能力，但 
 | provider 配置 | 由服务端受控注册表生成 app-server `-c` 覆盖 | 不允许浏览器传入任意 URL、密钥或 catalog 路径 |
 | 模型目录 | 每个模型源使用自己的 app-server 启动配置与缓存 | Codex `model/list` 没有 provider 过滤参数，模型管理器在进程启动时绑定 provider/catalog |
 | 会话恢复 | 始终恢复到会话原有模型源 | 不允许普通 resume/edit 请求把既有 Codex thread 静默迁移到另一个 provider |
-| DeepSeek 首期模型 | 只展示 `deepseek-v4-flash` | 2026-07-31 的 DeepSeek 官方说明仍标注 `deepseek-v4-pro` 预计 2026 年 8 月初支持 Codex |
+| DeepSeek 开放模型 | 展示 `deepseek-v4-flash` + `deepseek-v4-pro` | 2026-08-13 起两者都通过 Codex Responses API 开放；原生思考档位为 `low/high/max` |
 
 这不是单纯的 UI 下拉框改动。要形成可靠能力，需要同时扩展模型发现、共享类型、API、Supervisor、Codex app-server 启动、session metadata、恢复逻辑和 Codex reader。
 
@@ -178,7 +178,7 @@ DeepSeek 官方 Codex 集成说明当前包含：
 - provider ID 为 `deepseek`。
 - Base URL 为 `https://api.deepseek.com/`。
 - 需要独立的 `models.json` 向 Codex 声明模型能力。
-- 2026-07-31 页面提示只有 `deepseek-v4-flash` 已支持 Codex。
+- 2026-07-31 页面提示只有 `deepseek-v4-flash` 已支持 Codex；2026-08-13 起 `deepseek-v4-pro` 一并开放。
 - 官方 catalog 中模型的 `minimal_client_version` 为 `0.144.0`。
 
 本机调研时安装的版本是 `codex-cli 0.144.5`，满足该最低版本。产品实现仍需要显式做版本/能力错误提示，不能假设所有部署机器版本相同。
@@ -662,7 +662,7 @@ catalog 更新需要代码审查，至少记录：
 - UI allowlist
 - 内容 hash 或版本 ID
 
-即使 catalog 暂时含有 `deepseek-v4-pro`，首期也通过 `allowedModelIds` 只暴露 `deepseek-v4-flash`。
+catalog 与 UI allowlist（`allowedModelIds`）解耦：即使 catalog 含有更多模型，也只有 allowlist 内的模型会出现在 picker。当前 allowlist 为 `deepseek-v4-flash` + `deepseek-v4-pro`。
 
 ### 8.4 按 source 查询模型
 
@@ -951,24 +951,16 @@ DEEPSEEK_API_KEY=<your-key>
 
 ### 10.3 模型开放策略
 
-首期：
+当前开放（2026-08-13 更新，`deepseek-codex-2026-08-13` catalog）：
 
 ```text
 deepseek-v4-flash
-```
-
-暂不开放：
-
-```text
 deepseek-v4-pro
 ```
 
-开放 Pro 的条件：
+两个模型都对外声明官方 Responses API 支持的 `low/high/max` 思考档位，默认 `high`。Codex 会话的 reasoning effort 在发送给 app-server 前按模型源解析：兼容请求 `medium` / `xhigh` 依照 DeepSeek 官方映射收敛到 `high`，`minimal` 收敛到 `low`，未知的更高档位收敛到 `max`，其他未知值回退到模型默认 `high`。见 `CodexModelSourceRegistry.resolveReasoningEffort`。
 
-1. DeepSeek 官方 Codex 页面明确标为已支持。
-2. 更新/核对 model catalog。
-3. 用当前支持的 Codex CLI 版本完成工具调用、reasoning、长上下文和 resume 回归。
-4. 更新 source allowlist 和文档调研日期。
+> 首期（2026-07-31）只开放 `deepseek-v4-flash`；`deepseek-v4-pro` 在 DeepSeek 官方确认 Codex 支持并完成 tool-call / reasoning / resume 回归后于 2026-08-13 放开。
 
 ### 10.4 Codex 版本
 
@@ -1354,7 +1346,7 @@ pnpm test
 3. 在设置页展示 source health、CLI 版本、Key 是否存在、catalog 版本和最近 model/list 错误。
 4. 为外部创建的 custom provider session 提供“注册同名 source 后恢复”的引导。
 5. 把 OpenCode 的 channel grouping 和 Codex model source 抽象成 provider-neutral model routing metadata；只有出现第二个需要相同能力的 provider 时再泛化，首期不提前扩大公共协议。
-6. 在 DeepSeek 官方确认后开放 `deepseek-v4-pro`，保持 catalog 和 UI allowlist 分离。
+6. 在 DeepSeek 官方确认后开放更多模型（`deepseek-v4-pro` 已于 2026-08-13 开放），保持 catalog 和 UI allowlist 分离。
 
 ---
 

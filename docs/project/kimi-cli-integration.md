@@ -25,7 +25,7 @@
 
 - `session/new`、`session/load`（回放历史）、`session/resume`（不回放，轻量续接）
 - `prompt`、`cancel`、`session/set_mode`、`authenticate`
-- `configOptions`：模型选择 + 4 种 mode
+- `configOptions`：模型选择 + 按模型声明的 thinking 档位（如 low/high/max）+ 4 种 mode
 - `terminal-auth`：`kimi acp --login` 设备码登录
 
 **未暴露**：fork、undo、turnIndex、rewind、rollback（已 grep 确认 `acp-adapter/src` 无此能力）。
@@ -112,7 +112,7 @@ Kimi 对"修改 session 内容"用 **fork（copy-on-write 分支）**：
 
 | 文件 | 改动 |
 | --- | --- |
-| `packages/server/src/sdk/providers/kimi.ts` ⭐ | 以 `gemini-acp.ts` 为骨架。`args=["acp"]`；复用 `ACPClient`；`session/resume` 续接；审批映射（§4）；mode 映射（§4.1）；auth 读 `~/.kimi-code/config.toml`；模型读 `config.toml [models.*]` |
+| `packages/server/src/sdk/providers/kimi.ts` ⭐ | 以 `gemini-acp.ts` 为骨架。`args=["acp"]`；复用 `ACPClient`；`session/resume` 续接；审批映射（§4）；mode 映射（§4.1）；auth 读 `~/.kimi-code/config.toml`；模型及可选思考档位读 `config.toml [models.*]`，创建/恢复后通过 ACP `thinking` config option 应用并校验 |
 | `packages/server/src/sdk/providers/types.ts:16` | `ProviderName` 加 `"kimi"` |
 | `packages/server/src/sdk/providers/index.ts` | 导出 `kimiProvider`；`getProvider` case `"kimi"`；`getAllProviders` 追加 |
 
@@ -140,7 +140,7 @@ Kimi 对"修改 session 内容"用 **fork（copy-on-write 分支）**：
 | `packages/client/src/providers/implementations/KimiProvider.ts` ⭐ | 仿 `GeminiACPProvider.ts`：`id="kimi"`、displayName、capabilities（`supportsDag/supportsCloning=false`）、metadata |
 | `packages/client/src/providers/registry.ts` | 注册 `kimi: new KimiProvider()` |
 | `packages/client/src/components/ProviderBadge.tsx` | 加 kimi 图标/配色 |
-| `packages/client/src/components/NewSessionForm.tsx` | provider 选项加 kimi；模型/mode/thinking 下拉 |
+| `packages/client/src/components/NewSessionForm.tsx` | provider 选项加 kimi；模型/mode/thinking 下拉；thinking 选项随当前模型的 `support_efforts` 切换 |
 | `packages/client/src/components/tools/summaries.ts` 等 | 视工具渲染需要补 kimi 分支 |
 
 ### Layer F — 校验 / 测试
@@ -195,6 +195,7 @@ Kimi plan mode 会发多 option 审批（`plan_opt_<i>` 方案 A/B/C + Revise + 
 - **消息**：以 `context.append_message` 为主，`role: user/assistant`，content 为 block 数组（text / tool_use / tool_result / thinking）
 - **工具**：`context.append_loop_event` → `tool.call`（id/name/args）配对 `tool.result`（id/output/error）
 - **思考**：Kimi thinking 内容映射到 assistant 的 `thinking` block
+- **思考档位**：`config.update.thinkingEffort` 写入 session summary，供历史会话恢复和新会话默认值复用
 - **context usage**：`usage.record` 累计
 - **标题/时间/项目**：兼容 `state.json` v1 的 `workDir` + ISO 时间，以及 Kimi CLI 0.34 v2 的 `cwd` + 毫秒时间戳；reader 内统一规范化后再按项目过滤
 - **多 agent**：一期仅读 `agents/main/wire.jsonl`，忽略子 agent（swarm）
@@ -209,7 +210,7 @@ Kimi plan mode 会发多 option 审批（`plan_opt_<i>` 方案 A/B/C + Revise + 
 | **P0 PoC** | Layer A 最小（ProviderName）+ Layer B（`kimi.ts` 连接/session/prompt/审批） | 能在 Yep 新建 kimi 会话、多轮对话、敏感操作弹审批并接管 |
 | **P1 历史** | Layer C（reader + scanner）+ Layer A schema | 项目列表出现 kimi 会话、历史 transcript 正确渲染、resume 续接 |
 | **P2 配置+UI** | Layer D + Layer E | `ENABLED_PROVIDERS=kimi` 可控、client 完整展示、模型/mode 选择 |
-| **P3 打磨** | thinking/effort（low/high/max）、plan_review 多选审批、工具渲染细节 | 功能对齐 Codex（除 fork） |
+| **P3 打磨** | thinking/effort（low/high/max，已接入）、plan_review 多选审批、工具渲染细节 | 功能对齐 Codex（除 fork） |
 | **未来** | fork/branch（见 §9） | — |
 
 ---
@@ -223,7 +224,7 @@ kimi acp
 # 登录（审批/首次）
 kimi acp --login        # 或 kimi login
 
-# 模型：-m 或 ACP configOptions；auth：~/.kimi-code/config.toml 有 provider/api_key 即已配置
+# 模型：-m；思考档位：ACP session/set_config_option；auth：~/.kimi-code/config.toml 有 provider/api_key 即已配置
 
 # 启用 provider
 ENABLED_PROVIDERS=claude,codex,kimi pnpm dev
@@ -241,7 +242,7 @@ KIMI_SESSIONS_DIR=/tmp/kimi-sessions
 | `@agentclientprotocol/sdk` 版本 | Yep 现有版本需与 Kimi 的 `0.23.0` 兼容 | 实现时先跑握手，必要时对齐 SDK 版本 |
 | wire.jsonl 格式演进 | Kimi 升级可能改事件结构 | schema 用 zod 宽松解析 + 未知事件忽略；`protocol_version` 打点 |
 | 旧 `acceptEdits` 数据 | Kimi 无精确对应 mode | 映射到 Kimi `default`，由 Yep 保留旧的局部自动批准语义；新会话不再展示 |
-| 模型/thinking 档位来源 | 需从 `config.toml` 或 `configOptions` 读取 | P0 先读 config.toml，P3 接 ACP configOptions |
+| 模型目录与活动会话的 thinking 选项可能漂移 | picker 从 `config.toml` 的 `capabilities` / `support_efforts` / `default_effort`（含 model `overrides`）构建 | 创建或恢复后用 ACP `thinking` config option 应用，并校验返回的 `currentValue`；不一致时显式报错 |
 | resume 可靠性 | ACP `session/resume` 失败需回退 | 对齐 gemini-acp：resume 失败则 `session/new` |
 
 ---

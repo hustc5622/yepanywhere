@@ -38,6 +38,8 @@ Yep Anywhere 是一个面向移动端优先的 coding agent 监督器。核心�
 
 涉及 Codex CLI、Codex app-server、remote bridge、session rollback/branch、Codex JSONL/session 解析或 Codex 工具展示改动时，先查看仓库内已有的 Codex CLI 参考源码，不要凭印象实现。参考源码位于 `references/codex/`；其中 app-server 相关实现重点看 `references/codex/codex-rs/app-server*`，CLI/TUI 相关实现重点看 `references/codex/codex-rs/cli` 和 `references/codex/codex-rs/tui`。本项目自身的 Codex 实现入口通常在 `packages/server/src/codex-bridge/`、`packages/server/src/sdk/providers/codex*`、`packages/server/src/sessions/codex-*`、`packages/client/src/lib/codex*` 和 `packages/shared/src/codex-schema/`。
 
+涉及 ZCode（zcode provider、app-server 协议、session fork/attachments/mcp/bridge）改动时，协议事实一律以本机真实 CLI（`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`）的只读探测和 bundle 源码为准，不要凭印象实现；所有 params schema 都是 strict，改任何请求结构前先用临时 app-server 探测（参考 `scripts/smoke-zcode-app-server.ts` 的写法）。实现入口：`packages/server/src/sdk/providers/zcode*`、`packages/server/src/sessions/zcode-*`、`packages/shared/src/zcode-schema/`、`packages/server/src/zcode-bridge/`。ZCode bridge 采用 hook 插件（`packages/server/resources/zcode-plugin/`），需用户手动运行 `scripts/install-zcode-yep-plugin.sh` 安装后才生效；不要代替用户安装（会改写 `~/.zcode` 配置）。read-only smoke：`pnpm test:zcode-app-server-smoke -- --read-only --summary`；会发起模型请求或写诊断 session 的 smoke 必须先取得用户明确授权。
+
 Android 模拟器/真机和 ChromeOS streaming 是产品功能，但不是默认验证路径。只有在用户要求，或任务直接涉及 device-bridge/mobile-shell 行为时，才使用 adb、emulator、APK 安装、ChromeOS testbed 或设备 streaming 流程。
 
 ## 端口与 Profile
@@ -61,7 +63,7 @@ PORT=4000 YEP_ANYWHERE_PROFILE=dev pnpm dev
 - `YEP_ANYWHERE_PROFILE`：创建 `~/.yep-anywhere-{profile}/`。
 - `YEP_ANYWHERE_DATA_DIR`：显式覆盖数据目录。
 - `CLAUDE_CONFIG_DIR`：Claude Code 配置/session 根目录，默认 `~/.claude`。
-- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`opencode`、`kimi`。
+- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`opencode`、`kimi`、`zcode`。
 - `VOICE_INPUT=false`：在服务端禁用语音输入按钮。
 
 ## 验证

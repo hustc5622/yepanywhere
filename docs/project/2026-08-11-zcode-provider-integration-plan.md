@@ -1,6 +1,6 @@
 # Yep Anywhere ZCode Provider 调研报告与分阶段开发计划
 
-> 文档状态：调研完成，核心接入待开发
+> 文档状态：P0–P4 已完成；原 P5 中的 fork、mcp/list、bridge 已于 2026-08-13 以 v1 形态落地（详见 `2026-08-12-zcode-support-current-state.md` §15，含真实 CLI 探测证据与剩余差距清单）
 >
 > 调研基线日期：2026-08-11
 >
@@ -1161,21 +1161,138 @@ P5 不属于本次核心 Goal 的完成条件。每个子阶段应单独创建 g
 
 | 阶段 | 状态 | 关键变更 | 验收命令与结果 | 真实环境证据 | 遗留风险 |
 | --- | --- | --- | --- | --- | --- |
-| P0 | pending | — | — | — | — |
-| P1 | pending | — | — | — | — |
-| P2 | pending | — | — | — | — |
+| P0 | ✅ 通过（2026-08-12 真实契约修复） | shared `zcode-schema/protocol.ts`（移除 `jsonrpc` 要求，新增 workspace identity/model ref/runtime model/session params/snapshot/event envelope schema）；server `zcode-protocol/`（types、client、discovery、config）；test `setup-env.ts` 添加 `ZCODE` scrub prefix；3 个测试文件（protocol/discovery/config）；`scripts/smoke-zcode-app-server.ts` + 根 `package.json` script；`CHANGELOG.md [Unreleased]` | `corepack pnpm --filter @yep-anywhere/server test -- test/sdk/providers/zcode-protocol.test.ts test/sdk/providers/zcode-discovery.test.ts test/sdk/providers/zcode-config.test.ts` → 59/59 passed, exit 0；`corepack pnpm typecheck` → exit 0；`corepack pnpm exec biome check` zcode files → no errors；`corepack pnpm test:zcode-app-server-smoke -- --read-only --summary` → `ZCode CLI found: version=0.16.1` / `smoke passed: models=0, sessions=9` | 真实 CLI read-only smoke 通过（workspace/readState + session/list 不超时） | 真实模型 smoke 待授权；Windows/Linux discovery adapter 未覆盖 |
+| P1 | ✅ 代码门禁通过，真实集成门禁待验（2026-08-12 真实契约修复） | shared `zcode-schema/session.ts`（`ZCodeSessionContent`/`ZCodeStoredMessage`）；server `zcode-protocol/events.ts`（event → SDKMessage 纯函数转换器：真实 type/payload envelope、text/reasoning/tool delta 聚合、message.upserted 去重、unknown event 安全忽略）；server `zcode.ts`（`ZCodeProvider implements AgentProvider`：真实 workspace identity、session/create 发送 workspace 非 cwd、snapshot 解析 result.session.sessionId、session/resume 用 sessionId、session/send 用 content 字符串、setModel 用 model:{providerId,modelId}、workspace/updateProviderRegistry 用真实 registry 结构）；类型系统接线；client UI；i18n；2 个测试文件（provider 14 tests / events 21 tests） | `corepack pnpm --filter @yep-anywhere/server test -- test/sdk/providers/zcode.test.ts test/sdk/providers/zcode-events.test.ts` → 35/35 passed；P0 回归 59/59 passed（总 94/94）；`corepack pnpm typecheck` → exit 0；`corepack pnpm exec biome check` → no errors | 真实模型 smoke 未运行——需用户明确授权后才能运行（固定 prompt、临时 workspace、会在 ZCode 数据库留下诊断 session） | 真实模型 smoke 待授权；真实审批语义未验证 |
+| P2 | ✅ 通过 | server `zcode-db.ts`（`ZCODE_DB_PATH` 常量）；server `zcode-reader.ts`（`ZCodeSessionReader implements ISessionReader`：只读查询 session/message/part 表、change detection、listSessionFiles、indexScopeKey）；server `zcode-scanner.ts`（`ZCodeSessionScanner`：`listProjects`/`getSessionsForProject`/cache）；扩充 `normalization.ts` `convertZCodeMessages`（text/reasoning/tool/step）；扩充 `zcode-schema/session.ts`（匹配实际 SQLite schema）；接线 `provider-resolution.ts`（`createZCodeSource`/`mayHaveZCodeSessions`/`buildCandidateGroups`）、`scanner.ts`（`enableZCode`/merge block/`getOrCreateProject`）、`app.ts`（`readerFactory`/`zcodeReaderFactory`/`processSessionSourceFactory`/route deps）、`provider-catalog.ts`（`zcodePaths`/`zcodeScanner`）、`supervisor/types.ts`（`hasZCodeSessions`）；3 个测试文件（reader 12 tests / scanner 9 tests / normalization 11 tests） | `corepack pnpm --filter @yep-anywhere/server test -- test/sessions/zcode-normalization.test.ts test/projects/zcode-scanner.test.ts test/sessions/zcode-reader.test.ts` → 32/32 passed；P0+P1 回归 87/87 passed（总 121/121）；`corepack pnpm typecheck` → exit 0；`corepack pnpm exec biome check` → no errors；`git diff --check` → exit 0 | 未运行真实 SQLite read-only smoke——本机 `~/.zcode/cli/db/db.sqlite` 存在但 smoke 留作 P4 真实环境门禁 | 增量 change detection（`scanSessionChanges`）未实现（P5）；`ZCodeSessionChangeMonitor` 未实现（P5）；`FocusedSessionWatchManager` zcodeScanner 接线未实现（P5） |
 | P3 | pending | — | — | — | — |
 | P4 | pending | — | — | — | — |
 
-每次记录至少包含：
+### P0 执行详情（2026-08-11，ZCode Desktop 3.7.5 / CLI 0.16.1）
 
-- 日期与 ZCode Desktop/CLI version；
-- 修改文件范围；
-- 实际运行的命令和 exit code；
-- 测试数量/失败原因；
-- 未运行项及原因；
-- dirty worktree 中与本阶段重叠的既有改动如何保护；
-- 是否需要用户授权的下一步。
+**修改文件范围**：
+
+新增文件：
+
+- `packages/shared/src/zcode-schema/protocol.ts`（Zod schema + 版本比较 helper）
+- `packages/shared/src/zcode-schema/index.ts`（barrel）
+- `packages/server/src/sdk/providers/zcode-protocol/types.ts`（内部类型 + `ZCodeProtocolError` / `ZCodeServerError` 类）
+- `packages/server/src/sdk/providers/zcode-protocol/client.ts`（`ZCodeProtocolClient` + 内联 `AsyncQueue`）
+- `packages/server/src/sdk/providers/zcode-protocol/discovery.ts`（CLI 发现 + 版本探测 + 兼容性门禁）
+- `packages/server/src/sdk/providers/zcode-protocol/config.ts`（白名单配置适配器 + 复合 ID catalog）
+- `packages/server/test/sdk/providers/zcode-protocol.test.ts`（17 tests）
+- `packages/server/test/sdk/providers/zcode-discovery.test.ts`（16 tests）
+- `packages/server/test/sdk/providers/zcode-config.test.ts`（21 tests）
+- `scripts/smoke-zcode-app-server.ts`（`--read-only` smoke 脚本）
+
+修改文件：
+
+- `packages/shared/src/index.ts`（ZCode schema 导出块）
+- `packages/server/test/setup-env.ts`（`ZCODE` scrub prefix）
+- `package.json`（`test:zcode-app-server-smoke` script）
+- `CHANGELOG.md`（`[Unreleased] > Added`）
+
+**实际运行的命令和 exit code**：
+
+- `corepack pnpm --filter @yep-anywhere/server test -- test/sdk/providers/zcode-protocol.test.ts test/sdk/providers/zcode-discovery.test.ts test/sdk/providers/zcode-config.test.ts` → exit 0，54 tests passed
+- `corepack pnpm --filter @yep-anywhere/shared build` → exit 0
+- `corepack pnpm typecheck` → exit 0
+- `corepack pnpm exec biome check`（zcode 文件范围）→ no errors
+- `git diff --check` → exit 0
+
+**测试数量/失败原因**：
+
+- `zcode-protocol.test.ts`：17/17 passed（request/response、timeout、notifications、server requests、stdout edge cases、stderr redaction、process lifecycle、notify、early exit）
+- `zcode-discovery.test.ts`：16/16 passed（isZCodeCjsBundle、resolveZCodeLaunchCommand、findZCodeCliPath、probeZCodeCliVersion、discoverZCodeCli 兼容性门禁）
+- `zcode-config.test.ts`：21/21 passed（多 provider 解析、inline/env/runtime-headers secret source、unknown kind fail-closed、composite ID catalog、secret sentinel regression、重复 model ID 消歧）
+
+**未运行项及原因**：
+
+- `corepack pnpm test:zcode-app-server-smoke -- --read-only`：会启动真实 app-server 子进程。本机已安装 ZCode Desktop 3.7.5 / CLI 0.16.1，但该 smoke 属于真实环境门禁，留作 P1 阶段一并运行。
+- `corepack pnpm test`（全量测试）：P0 不要求全量回归，聚焦测试 + typecheck + biome 已通过。P4 会做全量回归。
+- `corepack pnpm test:e2e`：不适用 P0（无浏览器 E2E 用例）。
+
+**dirty worktree 中与本阶段重叠的既有改动如何保护**：
+
+会话开始时 `git status --short` 显示 clean。会话期间出现 Kimi 相关 dirty 改动（`kimi-schema/types.ts`、`kimi.test.ts`、`normalization.ts` 等），这些是并行的 Kimi 工作产出，不属于本 P0 任务。P0 只编辑 ZCode 相关文件，未回滚或覆盖任何 Kimi 改动。typecheck 在 Kimi dirty 改动存在时也通过（说明 Kimi 改动自洽）。
+
+**是否需要用户授权的下一步**：
+
+P1 需要用户明确授权后才能运行真实模型 smoke（固定 prompt、临时 workspace、预计在 ZCode 数据库留下诊断 session）。P1 的 fake app-server 测试不需要授权。
+
+### P1 执行详情（2026-08-11，ZCode Desktop 3.7.5 / CLI 0.16.1）
+
+**修改文件范围**：
+
+新增文件：
+
+- `packages/shared/src/zcode-schema/session.ts`（`ZCodeSessionContent`/`ZCodeStoredMessage` 最小定义）
+- `packages/server/src/sdk/providers/zcode-protocol/events.ts`（event → SDKMessage 纯函数转换器）
+- `packages/server/src/sdk/providers/zcode.ts`（`ZCodeProvider implements AgentProvider`）
+- `packages/server/test/sdk/providers/zcode.test.ts`（14 tests）
+- `packages/server/test/sdk/providers/zcode-events.test.ts`（19 tests）
+- `packages/client/src/providers/implementations/ZCodeProvider.ts`（client provider metadata）
+
+修改文件（类型系统接线）：
+
+- `packages/shared/src/types.ts`（`ProviderName` + `ALL_PROVIDERS` 加 `"zcode"`）
+- `packages/server/src/sdk/providers/types.ts`（server-local `ProviderName` 加 `"zcode"`)
+- `packages/shared/src/session/UnifiedSession.ts`（加 `zcode` union member）
+- `packages/server/src/sessions/normalization.ts`（`normalizeSession` switch 加 `case "zcode"` + `convertZCodeMessages`）
+- `packages/server/src/sessions/provider-groups.ts`（`ProviderGroup` 加 `"zcode"` + `normalizeProviderGroup`）
+- `packages/server/src/sessions/provider-resolution.ts`（`SessionSource.kind` 加 `"zcode"` + `getSourceForGroup` case）
+- `packages/server/src/watcher/EventBus.ts`（`WatchProvider` 加 `"zcode"`）
+- `packages/server/src/watcher/FileWatcher.ts`（`parseFileType` switch 加 `case "zcode"`）
+- `packages/server/src/watcher/FocusedSessionWatchManager.ts`（`WatchProvider` 加 `"zcode"`）
+- `packages/server/src/archive/SessionArchiveService.ts`（`ArchiveProvider` 加 `"zcode"`)
+- `packages/shared/src/zcode-schema/index.ts`（barrel 加 `session.js`）
+- `packages/shared/src/index.ts`（导出 `ZCodeSessionContent`/`ZCodeStoredMessage`）
+
+修改文件（provider 注册）：
+
+- `packages/server/src/sdk/providers/index.ts`（import + export `zcodeProvider`；`getAllProviders` + `getProvider`）
+
+修改文件（client UI）：
+
+- `packages/client/src/components/ProviderBadge.tsx`（`PROVIDER_COLORS` + `PROVIDER_LABELS`）
+- `packages/client/src/components/NewSessionForm.tsx`（`NEW_SESSION_PROVIDER_ACCENTS`）
+- `packages/client/src/pages/GlobalSessionsPage.tsx`（`PROVIDER_COLORS`）
+- `packages/client/src/styles/index.css`（`--provider-zcode` + `.provider-option-dot.provider-zcode`）
+- `packages/client/src/providers/registry.ts`（加 `zcode` entry）
+
+修改文件（i18n）：
+
+- `packages/client/src/i18n/en.json` + `zh-CN.json`（ZCode mode labels/descriptions）
+
+**实际运行的命令和 exit code**：
+
+- `corepack pnpm --filter @yep-anywhere/server test -- test/sdk/providers/zcode.test.ts test/sdk/providers/zcode-events.test.ts` → exit 0，33 tests passed
+- P0 回归：`corepack pnpm --filter @yep-anywhere/server test -- test/sdk/providers/zcode-protocol.test.ts test/sdk/providers/zcode-discovery.test.ts test/sdk/providers/zcode-config.test.ts` → exit 0，54 tests passed
+- 总计 5 个测试文件 87 tests passed
+- `corepack pnpm typecheck` → exit 0
+- `corepack pnpm exec biome check`（zcode 文件范围）→ no errors
+- `git diff --check` → exit 0
+
+**测试数量/失败原因**：
+
+- `zcode.test.ts`：14/14 passed（create + send + text delta 聚合、resume、tool lifecycle、permission allow/deny、user input、unsupported browser request、secret safety、getAvailableModels）
+- `zcode-events.test.ts`：19/19 passed（session lifecycle、turn lifecycle、text/reasoning/tool streaming 聚合、tool.updated、message.upserted 去重、unknown event 安全忽略、model.streaming error、permission events、direct method）
+- P0 测试无回归（54/54 passed）
+
+**未运行项及原因**：
+
+- 真实模型 smoke：需用户明确授权（固定 prompt、临时 workspace、会在 ZCode 数据库留下诊断 session）。P1 标为"代码门禁通过、真实集成门禁待验"。
+- `corepack pnpm test`（全量测试）：P1 不要求全量回归，聚焦测试 + typecheck + biome 已通过。P4 会做全量回归。
+- `corepack pnpm test:e2e`：不适用 P1。
+- `corepack pnpm test:zcode-app-server-smoke -- --read-only`：留作真实环境门禁运行。
+
+**dirty worktree 保护**：
+
+P1 继续只编辑 ZCode 相关文件。会话期间 Kimi 相关 dirty 改动仍然存在，未被回滚或覆盖。typecheck 在 Kimi dirty 改动存在时也通过。
+
+**是否需要用户授权的下一步**：
+
+- P2（历史 reader/scanner/normalization）不需要用户授权，可继续推进。
+- 真实模型 smoke 是 P4 的门禁，需要用户明确授权后才能运行。
 
 ## 14. 新 Codex session 的 Goal Prompt
 
