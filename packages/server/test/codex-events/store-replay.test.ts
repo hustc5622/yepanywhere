@@ -88,6 +88,31 @@ describe("Codex event envelope and store", () => {
     ).toEqual([second.event]);
   });
 
+  it("filters replay by method before returning cloned events", async () => {
+    const store = new InMemoryCodexEventStore();
+    const appended = await store.appendMany([
+      testDraft("turn/completed", { turn: { id: "turn-1", status: "failed" } }),
+      testDraft("item/completed", { item: { id: "item-1" } }),
+      testDraft(
+        "error",
+        { turnId: "turn-1", willRetry: false, error: { message: "failed" } },
+        { eventId: "event-error" },
+      ),
+    ]);
+
+    const replayed = await store.replay({
+      sessionId: "session-1",
+      methods: ["error", "turn/completed"],
+    });
+
+    expect(replayed.map((event) => event.method)).toEqual([
+      "turn/completed",
+      "error",
+    ]);
+    expect(replayed.map((event) => event.sequence)).toEqual([1, 3]);
+    expect(replayed[0]).not.toBe(appended[0]?.event);
+  });
+
   it("produces deep-equal live and replay projections", async () => {
     let now = 10_000;
     const store = new InMemoryCodexEventStore({ now: () => now++ });

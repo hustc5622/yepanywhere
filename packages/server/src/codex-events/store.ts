@@ -27,6 +27,8 @@ export interface CodexEventReplayQuery {
   sessionId: string;
   afterSequence?: number;
   throughSequence?: number;
+  /** Filter before cloning so lightweight readers do not materialize a full session journal. */
+  methods?: readonly string[];
 }
 
 export interface CodexEventStore {
@@ -50,6 +52,10 @@ export interface InMemoryCodexEventStoreOptions {
 export class InMemoryCodexEventStore implements CodexEventStore {
   private readonly now: () => number;
   private readonly eventsBySession = new Map<string, CodexEventEnvelope[]>();
+  private readonly eventsBySessionMethod = new Map<
+    string,
+    CodexEventEnvelope[]
+  >();
   private readonly eventsByIdentity = new Map<string, CodexEventEnvelope>();
   private readonly eventsByDedupeKey = new Map<string, CodexEventEnvelope>();
 
@@ -81,6 +87,10 @@ export class InMemoryCodexEventStore implements CodexEventStore {
     };
     sessionEvents.push(persisted);
     this.eventsBySession.set(event.sessionId, sessionEvents);
+    const methodKey = this.methodKey(event.sessionId, event.method);
+    const methodEvents = this.eventsBySessionMethod.get(methodKey) ?? [];
+    methodEvents.push(persisted);
+    this.eventsBySessionMethod.set(methodKey, methodEvents);
     this.eventsByIdentity.set(identityKey, persisted);
     if (event.dedupeKey) {
       this.eventsByDedupeKey.set(
@@ -102,7 +112,18 @@ export class InMemoryCodexEventStore implements CodexEventStore {
   async replay(query: CodexEventReplayQuery): Promise<CodexEventEnvelope[]> {
     const after = query.afterSequence ?? 0;
     const through = query.throughSequence ?? Number.MAX_SAFE_INTEGER;
-    return (this.eventsBySession.get(query.sessionId) ?? [])
+    const methods = query.methods ? new Set(query.methods) : null;
+    const events = methods
+      ? [...methods]
+          .flatMap(
+            (method) =>
+              this.eventsBySessionMethod.get(
+                this.methodKey(query.sessionId, method),
+              ) ?? [],
+          )
+          .sort(compareStoredEvents)
+      : (this.eventsBySession.get(query.sessionId) ?? []);
+    return events
       .filter((event) => event.sequence > after && event.sequence <= through)
       .map((event) => structuredClone(event));
   }
@@ -113,6 +134,10 @@ export class InMemoryCodexEventStore implements CodexEventStore {
 
   private identityKey(sessionId: string, identity: string): string {
     return `${sessionId}\0${identity}`;
+  }
+
+  private methodKey(sessionId: string, method: string): string {
+    return `${sessionId}\0${method}`;
   }
 }
 
@@ -165,6 +190,10 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private readonly rotateKeepSegments: number;
   private readonly onRotate?: JsonlCodexEventStoreOptions["onRotate"];
   private readonly eventsBySession = new Map<string, CodexEventEnvelope[]>();
+  private readonly eventsBySessionMethod = new Map<
+    string,
+    CodexEventEnvelope[]
+  >();
   private readonly eventsByIdentity = new Map<string, CodexEventEnvelope>();
   private readonly eventsByDedupeKey = new Map<string, CodexEventEnvelope>();
   private loaded: Promise<void> | null = null;
@@ -247,7 +276,18 @@ export class JsonlCodexEventStore implements CodexEventStore {
       await this.refreshFromDisk();
       const after = query.afterSequence ?? 0;
       const through = query.throughSequence ?? Number.MAX_SAFE_INTEGER;
-      return (this.eventsBySession.get(query.sessionId) ?? [])
+      const methods = query.methods ? new Set(query.methods) : null;
+      const events = methods
+        ? [...methods]
+            .flatMap(
+              (method) =>
+                this.eventsBySessionMethod.get(
+                  this.methodKey(query.sessionId, method),
+                ) ?? [],
+            )
+            .sort(compareStoredEvents)
+        : (this.eventsBySession.get(query.sessionId) ?? []);
+      return events
         .filter((event) => event.sequence > after && event.sequence <= through)
         .map((event) => structuredClone(event));
     });
@@ -634,6 +674,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
 
   private resetLoadedState(): void {
     this.eventsBySession.clear();
+    this.eventsBySessionMethod.clear();
     this.eventsByIdentity.clear();
     this.eventsByDedupeKey.clear();
     this.needsAppendSeparator = false;
@@ -670,6 +711,10 @@ export class JsonlCodexEventStore implements CodexEventStore {
     const events = this.eventsBySession.get(event.sessionId) ?? [];
     events.push(event);
     this.eventsBySession.set(event.sessionId, events);
+    const methodKey = this.methodKey(event.sessionId, event.method);
+    const methodEvents = this.eventsBySessionMethod.get(methodKey) ?? [];
+    methodEvents.push(event);
+    this.eventsBySessionMethod.set(methodKey, methodEvents);
     this.eventsByIdentity.set(
       this.identityKey(event.sessionId, event.eventId),
       event,
@@ -699,6 +744,19 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private identityKey(sessionId: string, identity: string): string {
     return `${sessionId}\0${identity}`;
   }
+
+  private methodKey(sessionId: string, method: string): string {
+    return `${sessionId}\0${method}`;
+  }
+}
+
+function compareStoredEvents(
+  left: CodexEventEnvelope,
+  right: CodexEventEnvelope,
+): number {
+  return (
+    left.sequence - right.sequence || left.eventId.localeCompare(right.eventId)
+  );
 }
 
 function isCodexEventEnvelope(value: unknown): value is CodexEventEnvelope {

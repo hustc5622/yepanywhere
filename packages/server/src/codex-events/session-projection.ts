@@ -1,8 +1,15 @@
 import { createHash } from "node:crypto";
 import {
   type GeneratedArtifactManifest,
+  type SessionLastTurnStatus,
+  type SessionRetryStatus,
   isGeneratedArtifactDownloadUrl,
 } from "@yep-anywhere/shared";
+import {
+  type CanonicalCodexError,
+  classifyCodexError,
+  formatCodexRetryWarning,
+} from "../codex/error-taxonomy.js";
 import type { Message } from "../supervisor/types.js";
 import type { CodexProjectionCache } from "./projection-cache.js";
 import { reduceCodexEvents } from "./reducer.js";
@@ -52,6 +59,12 @@ export interface CanonicalCodexSessionOverlayResult {
   projectedMessageCount: number;
   /** True when the overlay completed within the budget. */
   budgetExceeded: boolean;
+  /** Latest native provider turn health reconstructed from the same journal. */
+  turnHealth?: {
+    lastTurnStatus?: SessionLastTurnStatus;
+    lastErrorMessage?: string;
+    retryStatus?: SessionRetryStatus;
+  };
 }
 
 /** Thrown when the overlay exceeds its soft time budget, enabling legacy fallback. */
@@ -68,7 +81,7 @@ interface CanonicalMessageCandidate {
   message: Message;
   sequence: number;
   occurredAtMs: number;
-  kind: "item" | "unknown" | "retry" | "interaction";
+  kind: "item" | "unknown" | "retry" | "provider_error" | "interaction";
   originalItemId?: string;
   nativeType?: string;
 }
@@ -284,6 +297,52 @@ export function overlayCanonicalCodexSessionMessages(
     eventCount: sortedEvents.length,
     projectedMessageCount: candidates.length,
     budgetExceeded: false,
+    ...providerTurnHealth(sortedEvents, candidates),
+  };
+}
+
+/**
+ * Merge only durable provider error notifications into a legacy rollout.
+ *
+ * Unlike the full canonical projection, this path does not reduce native
+ * items or load generated artifacts. It is intentionally small enough for
+ * the default session GET while still making failures survive a refresh.
+ */
+export function overlayCodexProviderErrorMessages(
+  sessionId: string,
+  legacyMessages: readonly Message[],
+  events: readonly CodexEventEnvelope[],
+  options: { maxEvents?: number } = {},
+): CanonicalCodexSessionOverlayResult {
+  const maxEvents = options.maxEvents ?? DEFAULT_MAX_REFRESH_EVENTS;
+  if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) {
+    throw new RangeError(
+      "Codex provider error overlay maxEvents must be positive",
+    );
+  }
+  if (events.length > maxEvents) {
+    throw new RangeError("Codex provider error overlay event limit exceeded");
+  }
+  if (events.some((event) => event.sessionId !== sessionId)) {
+    throw new Error("Codex provider error overlay cannot mix session journals");
+  }
+
+  const sortedEvents = [...events].sort(compareEvents);
+  const candidates = buildProviderErrorCandidates(sortedEvents);
+  const messages = [...legacyMessages];
+  const existingMessageUuids = new Set(messages.map((message) => message.uuid));
+  for (const candidate of candidates) {
+    if (existingMessageUuids.has(candidate.message.uuid)) continue;
+    insertByTimestamp(messages, candidate.message, candidate.occurredAtMs);
+    existingMessageUuids.add(candidate.message.uuid);
+  }
+
+  return {
+    messages,
+    eventCount: sortedEvents.length,
+    projectedMessageCount: candidates.length,
+    budgetExceeded: false,
+    ...providerTurnHealth(sortedEvents, candidates),
   };
 }
 
@@ -452,6 +511,10 @@ function buildCanonicalMessageCandidates(
   }
 
   candidates.push(
+    ...buildProviderErrorCandidates(events, minCandidateSequence, checkBudget),
+  );
+
+  candidates.push(
     ...buildInteractionCandidates(events, minCandidateSequence, checkBudget),
   );
   checkBudget?.();
@@ -485,6 +548,9 @@ function deriveCandidateWindowStart(
   touchSequences.push(
     ...projection.unknownEvents.map((event) => event.sequence),
     ...projection.clientRetries.map((retry) => retry.sequence),
+    ...events.flatMap((event) =>
+      isProviderErrorCandidateEvent(event) ? [event.sequence] : [],
+    ),
   );
 
   const responsesByCorrelation = new Map<string, number>();
@@ -521,6 +587,272 @@ function deriveCandidateWindowStart(
   if (touchSequences.length <= maxCandidateCount) return undefined;
   touchSequences.sort((left, right) => left - right);
   return touchSequences[touchSequences.length - maxCandidateCount];
+}
+
+function buildProviderErrorCandidates(
+  events: readonly CodexEventEnvelope[],
+  minCandidateSequence?: number,
+  checkBudget?: () => void,
+): CanonicalMessageCandidate[] {
+  const candidates: CanonicalMessageCandidate[] = [];
+  const retryableErrorsByTurn = new Map<string, CanonicalCodexError>();
+  const terminalTurns = new Map<
+    string,
+    {
+      sequence: number;
+      codexError: CanonicalCodexError;
+      retryExhausted: boolean;
+    }
+  >();
+
+  for (let index = 0; index < events.length; index += 1) {
+    if ((index & 0xff) === 0) checkBudget?.();
+    const event = events[index];
+    if (!event || event.direction !== "server_notification") continue;
+
+    const payload = asObject(event.payload.data);
+    if (event.method === "error") {
+      const turnId = event.turnId ?? readString(payload, "turnId");
+      const threadId = event.threadId ?? readString(payload, "threadId");
+      const turnKey = providerErrorTurnKey(event, threadId, turnId);
+      const classified = classifyCodexError(
+        payload?.error ?? event.payload.data,
+        {
+          ...(turnId ? { correlationId: turnId } : {}),
+        },
+      );
+      const willRetry = payload?.willRetry === true;
+
+      if (willRetry) {
+        retryableErrorsByTurn.set(turnKey, classified);
+        if (
+          minCandidateSequence === undefined ||
+          event.sequence >= minCandidateSequence
+        ) {
+          candidates.push(
+            providerErrorCandidate(event, classified, {
+              willRetry: true,
+              threadId,
+              turnId,
+            }),
+          );
+        }
+        continue;
+      }
+
+      const retryCause = retryableErrorsByTurn.get(turnKey);
+      const retryExhausted =
+        classified.category === "unknown" && retryCause !== undefined;
+      const effectiveError = retryExhausted ? retryCause : classified;
+      retryableErrorsByTurn.delete(turnKey);
+      terminalTurns.set(turnKey, {
+        sequence: event.sequence,
+        codexError: effectiveError,
+        retryExhausted,
+      });
+      if (
+        minCandidateSequence === undefined ||
+        event.sequence >= minCandidateSequence
+      ) {
+        candidates.push(
+          providerErrorCandidate(event, effectiveError, {
+            willRetry: false,
+            retryExhausted,
+            threadId,
+            turnId,
+          }),
+        );
+      }
+      continue;
+    }
+
+    if (event.method !== "turn/completed") continue;
+    const turn = asObject(payload?.turn);
+    if (readString(turn, "status") !== "failed") continue;
+    const turnId = event.turnId ?? readString(turn, "id");
+    const threadId = event.threadId ?? readString(payload, "threadId");
+    const turnKey = providerErrorTurnKey(event, threadId, turnId);
+    const priorTerminal = terminalTurns.get(turnKey);
+    if (
+      priorTerminal !== undefined &&
+      (minCandidateSequence === undefined ||
+        priorTerminal.sequence >= minCandidateSequence)
+    ) {
+      continue;
+    }
+
+    const classified = classifyCodexError(turn?.error ?? event.payload.data, {
+      ...(turnId ? { correlationId: turnId } : {}),
+    });
+    const retryCause = retryableErrorsByTurn.get(turnKey);
+    const retryExhausted =
+      priorTerminal?.retryExhausted ??
+      (classified.category === "unknown" && retryCause !== undefined);
+    const effectiveError =
+      priorTerminal?.codexError ??
+      (retryExhausted && retryCause ? retryCause : classified);
+    retryableErrorsByTurn.delete(turnKey);
+    terminalTurns.set(turnKey, {
+      sequence: event.sequence,
+      codexError: effectiveError,
+      retryExhausted,
+    });
+    if (
+      minCandidateSequence === undefined ||
+      event.sequence >= minCandidateSequence
+    ) {
+      candidates.push(
+        providerErrorCandidate(event, effectiveError, {
+          willRetry: false,
+          retryExhausted,
+          threadId,
+          turnId,
+        }),
+      );
+    }
+  }
+
+  return candidates;
+}
+
+function providerErrorCandidate(
+  event: CodexEventEnvelope,
+  codexError: CanonicalCodexError,
+  options: {
+    willRetry: boolean;
+    retryExhausted?: boolean;
+    threadId?: string;
+    turnId?: string;
+  },
+): CanonicalMessageCandidate {
+  const occurredAtMs = eventTime(event);
+  const shared = {
+    uuid: canonicalMessageId("provider-error", event.eventId),
+    ...(occurredAtMs > 0
+      ? { timestamp: new Date(occurredAtMs).toISOString() }
+      : {}),
+    codexError,
+    willRetry: options.willRetry,
+    ...(options.threadId
+      ? { threadId: safeIdentity(options.threadId, "thread") }
+      : {}),
+    ...(options.turnId ? { turnId: safeIdentity(options.turnId, "turn") } : {}),
+    codexEventSequence: event.sequence,
+    codexCanonicalRefresh: true,
+    _source: "jsonl",
+  };
+
+  return {
+    kind: "provider_error",
+    sequence: event.sequence,
+    occurredAtMs,
+    message: options.willRetry
+      ? {
+          ...shared,
+          type: "system",
+          subtype: "warning",
+          content: formatCodexRetryWarning(codexError),
+          warning: formatCodexRetryWarning(codexError),
+          warningKind: "codex_provider_retry",
+        }
+      : {
+          ...shared,
+          type: "error",
+          error: codexError.publicMessage,
+          ...(options.retryExhausted ? { codexRetryExhausted: true } : {}),
+        },
+  };
+}
+
+function providerErrorTurnKey(
+  event: CodexEventEnvelope,
+  threadId: string | undefined,
+  turnId: string | undefined,
+): string {
+  return turnId ?? threadId ?? event.correlationId;
+}
+
+function isProviderErrorCandidateEvent(event: CodexEventEnvelope): boolean {
+  if (event.direction !== "server_notification") return false;
+  if (event.method === "error") return true;
+  if (event.method !== "turn/completed") return false;
+  const payload = asObject(event.payload.data);
+  return readString(asObject(payload?.turn), "status") === "failed";
+}
+
+function providerTurnHealth(
+  events: readonly CodexEventEnvelope[],
+  candidates: readonly CanonicalMessageCandidate[],
+):
+  | Pick<CanonicalCodexSessionOverlayResult, "turnHealth">
+  | Record<string, never> {
+  let lastTerminalSequence = -1;
+  let lastTurnStatus: SessionLastTurnStatus | undefined;
+  let lastRetrySequence = -1;
+
+  for (const event of events) {
+    if (event.direction !== "server_notification") continue;
+    const payload = asObject(event.payload.data);
+    if (event.method === "error") {
+      if (payload?.willRetry === true) {
+        lastRetrySequence = Math.max(lastRetrySequence, event.sequence);
+      } else if (event.sequence >= lastTerminalSequence) {
+        lastTerminalSequence = event.sequence;
+        lastTurnStatus = "failed";
+      }
+      continue;
+    }
+    if (event.method !== "turn/completed") continue;
+    const status = readString(asObject(payload?.turn), "status");
+    if (
+      (status === "completed" ||
+        status === "failed" ||
+        status === "interrupted") &&
+      event.sequence >= lastTerminalSequence
+    ) {
+      lastTerminalSequence = event.sequence;
+      lastTurnStatus = status;
+    }
+  }
+
+  const retryCandidate = [...candidates]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.kind === "provider_error" &&
+        candidate.message.willRetry === true &&
+        candidate.sequence === lastRetrySequence,
+    );
+  const errorCandidate = [...candidates]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.kind === "provider_error" &&
+        candidate.message.type === "error" &&
+        candidate.sequence <= lastTerminalSequence,
+    );
+  const retryIsCurrent = lastRetrySequence > lastTerminalSequence;
+  if (!lastTurnStatus && !retryIsCurrent) return {};
+
+  return {
+    turnHealth: {
+      ...(lastTurnStatus ? { lastTurnStatus } : {}),
+      ...(lastTurnStatus === "failed" &&
+      typeof errorCandidate?.message.error === "string"
+        ? { lastErrorMessage: errorCandidate.message.error }
+        : {}),
+      ...(retryIsCurrent && retryCandidate
+        ? {
+            retryStatus: {
+              message:
+                typeof retryCandidate.message.warning === "string"
+                  ? retryCandidate.message.warning
+                  : undefined,
+            },
+          }
+        : {}),
+    },
+  };
 }
 
 function buildInteractionCandidates(

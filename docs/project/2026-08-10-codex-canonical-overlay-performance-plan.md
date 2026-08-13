@@ -224,6 +224,11 @@ route 在 overlay 之后才运行 `sliceAtCompactBoundaries()`。这意味着：
 5. 飞书继续使用 provider live event / rich-card projection，不依赖网页 Session GET 的 overlay。
 6. generated artifact 下载与 manifest 路径单独做回归验证；不要假设“客户端未搜索到字段”就等于所有外部 API 消费者都不存在。
 
+2026-08-13 补充：普通 Session GET 仍不执行 canonical item reducer，但会从同一 journal
+轻量合并 `error` 与 `turn/completed`，以免 provider 重试/失败在刷新后消失。store 按
+`sessionId + method` 建索引，在 clone 前过滤；该路径不构建 native item、interaction 或
+artifact candidate，也不恢复原先的全量 overlay 成本。
+
 为什么推荐 capability gate，而不是直接删除 overlay：
 
 - 可以保持现有 canonical API 能力供调试、未来 UI 或外部客户端使用；

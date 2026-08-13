@@ -20,6 +20,7 @@ import {
   replayCodexSession,
   resolveCodexEventProjectionMode,
 } from "../../src/codex-events/index.js";
+import { testDraft } from "./helpers.js";
 
 const tempDirs: string[] = [];
 
@@ -675,6 +676,34 @@ describe("Codex JSONL event store", () => {
         .assistantText,
     ).toBe("ab");
     expect(readFileSync(filePath, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("reopens JSONL journals with method-filtered replay in sequence order", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-events-filtered-"));
+    tempDirs.push(directory);
+    const filePath = join(directory, "events.jsonl");
+    const writer = new JsonlCodexEventStore({ filePath });
+    await writer.appendMany([
+      testDraft("turn/completed", { turn: { id: "turn-1", status: "failed" } }),
+      testDraft("item/completed", { item: { id: "item-1" } }),
+      testDraft(
+        "error",
+        { turnId: "turn-1", willRetry: false, error: { message: "failed" } },
+        { eventId: "event-error" },
+      ),
+    ]);
+
+    const reopened = new JsonlCodexEventStore({ filePath });
+    const replayed = await reopened.replay({
+      sessionId: "session-1",
+      methods: ["error", "turn/completed"],
+    });
+
+    expect(replayed.map((event) => event.method)).toEqual([
+      "turn/completed",
+      "error",
+    ]);
+    expect(replayed.map((event) => event.sequence)).toEqual([1, 3]);
   });
 
   it("refreshes external appends before assigning the next local sequence", async () => {

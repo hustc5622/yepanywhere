@@ -63,6 +63,26 @@ export async function selectCodexEventSource(
   return null;
 }
 
+/**
+ * Select the provider-first journal while materializing only events needed to
+ * reconstruct user-visible provider failures.
+ */
+export async function selectCodexProviderErrorEventSource(
+  sources: readonly CodexEventStoreSource[],
+  sessionId: string,
+): Promise<SelectedCodexEventSource | null> {
+  for (const source of sources) {
+    const store = source.createStore();
+    if ((await store.latestSequence(sessionId)) < 1) continue;
+    const events = await store.replay({
+      sessionId,
+      methods: ["error", "turn/completed"],
+    });
+    return { sourceId: source.id, events };
+  }
+  return null;
+}
+
 export interface SelectedCodexEventSourceWithCache {
   sourceId: string;
   events: CodexEventEnvelope[];
