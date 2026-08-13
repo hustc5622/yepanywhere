@@ -1079,6 +1079,12 @@ export class CodexProvider implements AgentProvider {
                 "Skipped malformed canonical Codex event-store line",
               );
             },
+            ...(this.eventSpineConfig.storeRotation
+              ? { rotation: this.eventSpineConfig.storeRotation }
+              : {}),
+            ...(this.eventSpineConfig.onStoreRotate
+              ? { onRotate: this.eventSpineConfig.onStoreRotate }
+              : {}),
           })
         : new InMemoryCodexEventStore());
   }
@@ -5137,6 +5143,17 @@ function selectCanonicalGeneratedArtifactSourceItem(
 }
 
 /**
+ * Parse a positive-integer env override, ignoring unset or malformed values.
+ */
+function parsePositiveIntegerEnv(
+  value: string | undefined,
+): number | undefined {
+  if (!value?.trim()) return undefined;
+  const parsed = Number(value.trim());
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
  * Default Codex provider instance.
  */
 export const codexProvider = new CodexProvider({
@@ -5147,5 +5164,25 @@ export const codexProvider = new CodexProvider({
     durableStorePath:
       process.env.YEP_CODEX_EVENT_STORE_PATH?.trim() ||
       join(getDataDir(), "codex-events", "events.jsonl"),
+    storeRotation: {
+      maxBytes: parsePositiveIntegerEnv(
+        process.env.YEP_CODEX_EVENT_STORE_ROTATE_BYTES,
+      ),
+      keepSegments: parsePositiveIntegerEnv(
+        process.env.YEP_CODEX_EVENT_STORE_KEEP_SEGMENTS,
+      ),
+    },
+    onStoreRotate: ({ from, to, pruned }) => {
+      log.info(
+        {
+          event: "codex_event_store_rotated",
+          from,
+          to,
+          prunedCount: pruned.length,
+          pruned,
+        },
+        "Rotated canonical Codex event journal",
+      );
+    },
   },
 });

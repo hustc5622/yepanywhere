@@ -15,6 +15,17 @@ export interface CodexEventRolloutConfig {
   legacySessionIds?: readonly string[];
   legacyAccountIds?: readonly string[];
   durableStorePath?: string;
+  /** Size-based rotation for the durable JSONL store, when one is configured. */
+  storeRotation?: {
+    maxBytes?: number;
+    keepSegments?: number;
+  };
+  /** Observes durable-store rotations for diagnostics. */
+  onStoreRotate?: (details: {
+    from: string;
+    to: string;
+    pruned: string[];
+  }) => void;
   store?: CodexEventStore;
 }
 

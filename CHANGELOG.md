@@ -15,6 +15,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Structured diagnostic logging on the canonical overlay path: journal replay duration, overlay duration, total duration, cache hit/miss, event count, projected message count, and fallback outcome
 - Synthetic benchmark script `scripts/bench-codex-overlay.ts` covering 100/1k/2k/5k/10k/20k event scales with cold reduce, warm apply, overlay, budget exceeded, and RSS/heap delta measurements
 - Reducer parity tests covering empty events, out-of-order sequence, session mismatch, multi-thread/turn, client retry, and single-event vs batch-path equivalence
+- Size-based rotation for the canonical Codex event journals: when the active `events.jsonl` reaches `YEP_CODEX_EVENT_STORE_ROTATE_BYTES` (default 256 MiB) the next append renames it to a timestamped segment (`events.{yyyyMMddHHmmssSSS}.jsonl`) and prunes closed segments beyond `YEP_CODEX_EVENT_STORE_KEEP_SEGMENTS` (default 3). Cold loads transparently aggregate retained segments in chronological order, per-session sequences stay continuous across segment boundaries, and rotations are logged via `codex_event_store_rotated`. Applies to both the provider journal and the 4510 bridge journal, bounding their disk growth (previously ~190 MB/day, unbounded)
 
 ### Changed
 - Skip canonical Codex overlay by default on normal Session GET; the web client does not consume canonical native-item fields, so a `view=canonical` query opt-in now gates the 11k-event projection that previously caused 48–52s TTFB and ~1 GB RSS on long sessions
@@ -36,6 +37,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Keep the APK recovery panel visible until the embedded Yep Anywhere client sends its real ready signal, and migrate the retired `43.226.60.75:61874` default instead of letting persisted app data override the current endpoint
 - Keep canonical transcript export and Feishu/Lark projection on their original canonical journal paths so they are unaffected by the normal Session GET capability gate
 - Preserve in-progress agent, plan, and reasoning stream content when the canonical item-start snapshot still contains empty placeholder fields
+- Load the canonical Codex event journal in bounded chunks instead of a single `readFile`: once `events.jsonl` grew past the runtime's maximum string length (~512 MiB) every cold store load threw `RangeError: Cannot create a string longer than 0x1fffffe8 characters`, which surfaced as new Codex sessions failing immediately after `thread/start` (`API error: 500`). A failed cold load also no longer poisons the store for the process lifetime — the next caller retries instead of rethrowing the cached rejection
 
 ### Security
 - Restrict deploy env files, LaunchAgent plists/logs, and deployment job state to private permissions, and rotate oversized LaunchAgent logs during installation

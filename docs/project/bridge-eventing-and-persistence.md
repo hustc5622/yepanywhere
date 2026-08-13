@@ -24,6 +24,10 @@
 
 现状：session 元数据（threadId、projectPath、title、messageCount、turn 状态、completedTurnIds、是否已发过 session-created）以 500ms 去抖原子写入 `<dataDir>/codex-bridge/sessions.json`，bridge 启动时恢复为 idle/无连接状态。live 连接状态不持久化，由 TUI 重连后的通知流重建。
 
+## Canonical 事件 journal 轮转
+
+provider（`<dataDir>/codex-events/events.jsonl`）与 bridge（`<dataDir>/codex-bridge/codex-events.jsonl`）的 canonical event journal 都是 `JsonlCodexEventStore` 管理的 append-only JSONL。2026-08-13 起支持按大小轮转：活跃文件达到 `YEP_CODEX_EVENT_STORE_ROTATE_BYTES`（默认 256 MiB）时，下一次 append 先把它重命名为 `{base}.{yyyyMMddHHmmssSSS}.jsonl` 段文件，并只保留最近 `YEP_CODEX_EVENT_STORE_KEEP_SEGMENTS` 个段（默认 3，超出的最旧段直接删除）。冷加载按时间序聚合所有保留段 + 活跃文件，进程内索引跨段保持 sequence 连续；只读实例通过 identity/大小变化检测自动全量重载。轮转会打 `codex_event_store_rotated` 日志。在此之前 journal 无界增长（实测约 190 MB/天），曾因单文件超过 V8 字符串上限（512 MiB）导致 Codex 新建会话全线 500。
+
 ## Codex bridge 状态机要点
 
 - `turn/completed` 解析 `turn.status`（completed/interrupted/failed）与 `turn.error`，记录到 `lastTurnStatus` / `lastErrorMessage` 并透传到 session view。

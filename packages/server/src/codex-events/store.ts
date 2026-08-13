@@ -4,9 +4,13 @@ import {
   appendFile,
   mkdir,
   open,
+  readdir,
+  rename,
+  rm,
   stat,
 } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import {
   CODEX_EVENT_SCHEMA_NAME,
   CODEX_EVENT_SCHEMA_VERSION,
@@ -117,6 +121,19 @@ export interface JsonlCodexEventStoreOptions {
   now?: () => number;
   /** Called for a malformed historical line. No raw line is exposed. */
   onCorruptLine?: (details: { lineNumber: number; reason: string }) => void;
+  /** Full-load read chunk size in bytes. Overridable for tests. */
+  loadChunkBytes?: number;
+  /**
+   * Size-based journal rotation. When the active file reaches `maxBytes`,
+   * the next append first renames it to a timestamped segment and prunes
+   * closed segments beyond `keepSegments`. `maxBytes <= 0` disables rotation.
+   */
+  rotation?: {
+    maxBytes?: number;
+    keepSegments?: number;
+  };
+  /** Called after a successful rotation with the pruned segment paths. */
+  onRotate?: (details: { from: string; to: string; pruned: string[] }) => void;
 }
 
 interface CodexEventFileSnapshot {
@@ -124,6 +141,15 @@ interface CodexEventFileSnapshot {
   mtimeMs: number;
   identity: string;
 }
+
+/** Full-load read chunk size; keeps any single journal loadable regardless of total size. */
+const DEFAULT_LOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/** Default rotation waterline: 256 MiB per active journal. */
+const DEFAULT_ROTATE_MAX_BYTES = 256 * 1024 * 1024;
+
+/** Default number of closed segments retained after rotation. */
+const DEFAULT_ROTATE_KEEP_SEGMENTS = 3;
 
 /**
  * Optional append-only durable store. It hydrates its indexes once, serializes
@@ -134,6 +160,10 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private readonly filePath: string;
   private readonly now: () => number;
   private readonly onCorruptLine?: JsonlCodexEventStoreOptions["onCorruptLine"];
+  private readonly loadChunkBytes: number;
+  private readonly rotateMaxBytes: number;
+  private readonly rotateKeepSegments: number;
+  private readonly onRotate?: JsonlCodexEventStoreOptions["onRotate"];
   private readonly eventsBySession = new Map<string, CodexEventEnvelope[]>();
   private readonly eventsByIdentity = new Map<string, CodexEventEnvelope>();
   private readonly eventsByDedupeKey = new Map<string, CodexEventEnvelope>();
@@ -151,6 +181,17 @@ export class JsonlCodexEventStore implements CodexEventStore {
     this.filePath = options.filePath;
     this.now = options.now ?? Date.now;
     this.onCorruptLine = options.onCorruptLine;
+    this.loadChunkBytes = Math.max(
+      1,
+      options.loadChunkBytes ?? DEFAULT_LOAD_CHUNK_BYTES,
+    );
+    this.rotateMaxBytes =
+      options.rotation?.maxBytes ?? DEFAULT_ROTATE_MAX_BYTES;
+    this.rotateKeepSegments = Math.max(
+      0,
+      options.rotation?.keepSegments ?? DEFAULT_ROTATE_KEEP_SEGMENTS,
+    );
+    this.onRotate = options.onRotate;
   }
 
   async append(event: CodexEventDraft): Promise<CodexEventAppendResult> {
@@ -160,6 +201,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
       // the journal since this instance loaded it. Refresh under the same lock
       // used by local appends so sequence assignment and indexes stay current.
       await this.refreshFromDisk();
+      await this.rotateIfNeeded();
       const existing = this.findExisting(event);
       if (existing) {
         return { event: structuredClone(existing), inserted: false };
@@ -221,7 +263,15 @@ export class JsonlCodexEventStore implements CodexEventStore {
 
   private async ensureLoaded(): Promise<void> {
     this.loaded ??= this.load();
-    await this.loaded;
+    try {
+      await this.loaded;
+    } catch (error) {
+      // A failed cold load must not poison the store for the rest of the
+      // process lifetime. Drop the cached promise so the next caller retries
+      // (e.g. after an unreadable journal has been rotated away).
+      this.loaded = null;
+      throw error;
+    }
   }
 
   /**
@@ -237,7 +287,11 @@ export class JsonlCodexEventStore implements CodexEventStore {
       snapshot = fileSnapshot(await stat(this.filePath));
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
-        this.resetLoadedState();
+        // The active journal may have been rotated away by the writer
+        // process: fall back to a full load, which picks up the retained
+        // segment files (or resets to empty when nothing exists).
+        this.loaded = this.load();
+        await this.loaded;
         return;
       }
       throw error;
@@ -278,13 +332,6 @@ export class JsonlCodexEventStore implements CodexEventStore {
     expectedSnapshot: CodexEventFileSnapshot,
   ): Promise<void> {
     const previousSize = this.lastKnownFileSize;
-    if (previousSize <= 0) {
-      // Never loaded before; fall back to full load.
-      this.loaded = this.load();
-      await this.loaded;
-      return;
-    }
-
     const tailLength = expectedSnapshot.size - previousSize;
     if (tailLength <= 0) return;
 
@@ -297,7 +344,11 @@ export class JsonlCodexEventStore implements CodexEventStore {
       openedSnapshot = fileSnapshot(await handle.stat());
       if (
         openedSnapshot.identity !== expectedSnapshot.identity ||
-        openedSnapshot.identity !== this.lastKnownFileIdentity ||
+        // A null identity baseline means the journal started empty or was
+        // just rotated by this instance: the active file's whole contents are
+        // exactly the tail to read, and already-indexed lines dedupe below.
+        (this.lastKnownFileIdentity !== null &&
+          openedSnapshot.identity !== this.lastKnownFileIdentity) ||
         openedSnapshot.size < previousSize
       ) {
         reloadRequired = true;
@@ -380,62 +431,205 @@ export class JsonlCodexEventStore implements CodexEventStore {
   }
 
   private async load(): Promise<void> {
-    let contents: string;
+    const journalFiles = await this.listJournalFiles();
+    // Hydrate from a clean slate. A failed read mid-load leaves partial
+    // indexes, but the error propagates and the next caller retries a full
+    // load (ensureLoaded no longer caches rejections).
+    this.resetLoadedState();
+    if (journalFiles.length === 0) {
+      return;
+    }
+    for (const file of journalFiles) {
+      const result = await this.loadJournalFile(file);
+      if (file === this.filePath && result) {
+        // A valid JSONL file may omit its final newline, and a crashed writer
+        // may leave a partial final record. Either way, the next append must
+        // start on a fresh line or it corrupts both the old tail and the new
+        // event.
+        this.needsAppendSeparator =
+          result.bytesRead > 0 && !result.endsWithNewline;
+        this.lastKnownFileSize = result.bytesRead;
+        this.lastKnownMtimeMs = result.snapshot.mtimeMs;
+        this.lastKnownFileIdentity = result.snapshot.identity;
+      }
+    }
+    for (const sessionId of this.eventsBySession.keys()) {
+      this.sortSessionEvents(sessionId);
+    }
+  }
+
+  /**
+   * Read one journal file in bounded chunks rather than a single readFile: a
+   * journal larger than the runtime's maximum string length must still load.
+   * The decoder keeps multi-byte characters intact across chunks. Returns
+   * null when the file vanished (e.g. a segment pruned by another process).
+   */
+  private async loadJournalFile(filePath: string): Promise<{
+    snapshot: CodexEventFileSnapshot;
+    bytesRead: number;
+    endsWithNewline: boolean;
+  } | null> {
     let handle: FileHandle | null = null;
-    let snapshot: CodexEventFileSnapshot;
     try {
-      handle = await open(this.filePath, "r");
-      contents = await handle.readFile("utf8");
-      snapshot = fileSnapshot(await handle.stat());
+      handle = await open(filePath, "r");
+      const snapshot = fileSnapshot(await handle.stat());
+      const decoder = new StringDecoder("utf8");
+      const chunk = Buffer.allocUnsafe(this.loadChunkBytes);
+      let bytesRead = 0;
+      let endsWithNewline = false;
+      let carry = "";
+      let lineNumber = 0;
+      while (true) {
+        const result = await handle.read(chunk, 0, chunk.length, bytesRead);
+        if (result.bytesRead === 0) break;
+        bytesRead += result.bytesRead;
+        endsWithNewline = chunk[result.bytesRead - 1] === 0x0a;
+        carry += decoder.write(chunk.subarray(0, result.bytesRead));
+        let newlineIndex = carry.indexOf("\n");
+        while (newlineIndex >= 0) {
+          const line = carry.slice(0, newlineIndex);
+          carry = carry.slice(newlineIndex + 1);
+          lineNumber += 1;
+          this.indexLoadedLine(line, lineNumber);
+          newlineIndex = carry.indexOf("\n");
+        }
+      }
+      carry += decoder.end();
+      if (carry.length > 0) {
+        lineNumber += 1;
+        this.indexLoadedLine(carry, lineNumber);
+      }
+      return { snapshot, bytesRead, endsWithNewline };
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
-        this.resetLoadedState();
-        return;
+        return null;
       }
       throw error;
     } finally {
       await handle?.close();
     }
-    this.resetLoadedState();
-    // A valid JSONL file may omit its final newline, and a crashed writer may
-    // leave a partial final record. Either way, the next append must start on
-    // a fresh line or it would corrupt both the old tail and the new event.
-    this.needsAppendSeparator = contents.length > 0 && !contents.endsWith("\n");
+  }
 
-    this.lastKnownFileSize = Buffer.byteLength(contents);
-    this.lastKnownMtimeMs = snapshot.mtimeMs;
-    this.lastKnownFileIdentity = snapshot.identity;
+  /**
+   * Rename the active journal to a timestamped segment once it reaches the
+   * configured waterline, then prune closed segments beyond the retention
+   * count. In-memory indexes deliberately keep the rotated events so replay,
+   * dedupe, and per-session sequences stay continuous within this process.
+   */
+  private async rotateIfNeeded(): Promise<void> {
+    if (!(this.rotateMaxBytes > 0)) return;
+    if (this.lastKnownFileSize < this.rotateMaxBytes) return;
+    const segmentPath = await this.nextSegmentPath();
+    await rename(this.filePath, segmentPath);
+    // The active journal starts over; the next append recreates it and the
+    // following refresh reads the new file from offset 0, deduplicating the
+    // lines this instance already indexed.
+    this.lastKnownFileSize = 0;
+    this.lastKnownMtimeMs = 0;
+    this.lastKnownFileIdentity = null;
+    this.needsAppendSeparator = false;
+    const pruned = await this.pruneSegments();
+    this.onRotate?.({ from: this.filePath, to: segmentPath, pruned });
+  }
 
-    const lines = contents.split("\n");
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index]?.trim();
-      if (!line) continue;
-      let parsed: unknown;
+  /** Segment names carry a fixed-width UTC timestamp so name order is time order. */
+  private async nextSegmentPath(): Promise<string> {
+    const stamp = new Date(this.now()).toISOString().replace(/\D/g, "");
+    for (let attempt = 1; ; attempt += 1) {
+      const suffix = attempt === 1 ? "" : `-${attempt}`;
+      const candidate = join(
+        dirname(this.filePath),
+        `${this.segmentBaseName()}.${stamp}${suffix}.jsonl`,
+      );
       try {
-        parsed = JSON.parse(line) as unknown;
+        await stat(candidate);
+      } catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT") {
+          return candidate;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async pruneSegments(): Promise<string[]> {
+    const segments = await this.listSegmentFiles();
+    const excess = segments.length - this.rotateKeepSegments;
+    if (excess <= 0) return [];
+    const pruned: string[] = [];
+    for (const segment of segments.slice(0, excess)) {
+      try {
+        await rm(segment);
+        pruned.push(segment);
       } catch {
-        this.onCorruptLine?.({
-          lineNumber: index + 1,
-          // Modern runtimes may include a source excerpt in JSON.parse errors.
-          // Keep the callback diagnostic fixed so corrupt secret-bearing lines
-          // can never be copied into logs.
-          reason: "invalid_json",
-        });
-        continue;
+        // Best-effort: a locked or already-removed segment must not block appends.
       }
-      if (!isCodexEventEnvelope(parsed)) {
-        this.onCorruptLine?.({
-          lineNumber: index + 1,
-          reason: "invalid_envelope",
-        });
-        continue;
+    }
+    return pruned;
+  }
+
+  /** Closed segments in chronological order followed by the active journal. */
+  private async listJournalFiles(): Promise<string[]> {
+    const segments = await this.listSegmentFiles();
+    try {
+      await stat(this.filePath);
+      return [...segments, this.filePath];
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return segments;
       }
-      const existing = this.findExisting(parsed);
-      if (!existing) this.index(parsed);
+      throw error;
     }
-    for (const sessionId of this.eventsBySession.keys()) {
-      this.sortSessionEvents(sessionId);
+  }
+
+  private async listSegmentFiles(): Promise<string[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(dirname(this.filePath));
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
     }
+    const pattern = new RegExp(
+      `^${escapeRegExp(this.segmentBaseName())}\\.\\d{17}(-\\d+)?\\.jsonl$`,
+    );
+    return entries
+      .filter((entry) => pattern.test(entry))
+      .sort()
+      .map((entry) => join(dirname(this.filePath), entry));
+  }
+
+  private segmentBaseName(): string {
+    return basename(this.filePath, ".jsonl");
+  }
+
+  private indexLoadedLine(rawLine: string, lineNumber: number): void {
+    const line = rawLine.trim();
+    if (!line) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      this.onCorruptLine?.({
+        lineNumber,
+        // Modern runtimes may include a source excerpt in JSON.parse errors.
+        // Keep the callback diagnostic fixed so corrupt secret-bearing lines
+        // can never be copied into logs.
+        reason: "invalid_json",
+      });
+      return;
+    }
+    if (!isCodexEventEnvelope(parsed)) {
+      this.onCorruptLine?.({
+        lineNumber,
+        reason: "invalid_envelope",
+      });
+      return;
+    }
+    const existing = this.findExisting(parsed);
+    if (!existing) this.index(parsed);
   }
 
   private resetLoadedState(): void {
@@ -539,4 +733,8 @@ function fileIdentity(stats: Stats): string {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
