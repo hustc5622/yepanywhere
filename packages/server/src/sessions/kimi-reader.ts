@@ -34,7 +34,6 @@ import {
   getModelContextWindow,
   inferKimiSubagentStatus,
   isKimiLoopEventRecord,
-  isKimiModelConfigRecord,
   isKimiTurnPromptRecord,
   parseKimiSessionState,
   parseKimiWireJsonl,
@@ -79,6 +78,7 @@ interface KimiSessionCacheEntry {
 interface KimiWireDerived {
   records: KimiWireRecord[];
   model: string | undefined;
+  reasoningEffort: string | undefined;
   messageCount: number;
   contextUsage: ContextUsage | undefined;
   cumulativeUsage: ContextCumulativeUsage | undefined;
@@ -163,6 +163,7 @@ export class KimiSessionReader implements ISessionReader {
         cumulativeUsage: derived.cumulativeUsage,
         provider: "kimi",
         model: derived.model,
+        reasoningEffort: derived.reasoningEffort,
       };
     } catch {
       return null;
@@ -641,6 +642,7 @@ export class KimiSessionReader implements ISessionReader {
     const records = parseKimiWireJsonl(content);
 
     let model: string | undefined;
+    let reasoningEffort: string | undefined;
     let firstPromptText: string | undefined;
     let messageCount = 0;
     let turnCount = 0;
@@ -662,8 +664,20 @@ export class KimiSessionReader implements ISessionReader {
     let lastContextInput: number | undefined;
 
     for (const record of records) {
-      if (isKimiModelConfigRecord(record)) {
-        model = record.modelAlias;
+      if (record.type === "config.update") {
+        const config = record as {
+          modelAlias?: unknown;
+          thinkingEffort?: unknown;
+        };
+        if (typeof config.modelAlias === "string" && config.modelAlias) {
+          model = config.modelAlias;
+        }
+        if (
+          typeof config.thinkingEffort === "string" &&
+          config.thinkingEffort
+        ) {
+          reasoningEffort = config.thinkingEffort;
+        }
         continue;
       }
       if (isKimiTurnPromptRecord(record)) {
@@ -736,6 +750,7 @@ export class KimiSessionReader implements ISessionReader {
     return {
       records,
       model,
+      reasoningEffort,
       messageCount,
       contextUsage,
       cumulativeUsage,

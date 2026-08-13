@@ -18,9 +18,11 @@ import {
   ClientSideConnection,
   type ContentBlock,
   type InitializeResponse,
+  type PromptResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification,
+  type SetSessionConfigOptionResponse,
   ndJsonStream,
 } from "@agentclientprotocol/sdk";
 import { getLogger } from "../../../logging/logger.js";
@@ -302,6 +304,34 @@ export class ACPClient {
   }
 
   /**
+   * Set a select-valued configuration option for an active ACP session.
+   *
+   * Kimi exposes its model-specific thinking effort through the standard
+   * `thinking` config option (`category: "thought_level"`). The full response
+   * is returned so callers can verify that the agent accepted, rather than
+   * silently clamped, the requested value.
+   */
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: string,
+    value: string,
+  ): Promise<SetSessionConfigOptionResponse> {
+    if (!this.connection) {
+      throw new Error("ACPClient not connected. Call connect() first.");
+    }
+
+    this.log.debug(
+      { sessionId, configId, value },
+      "Setting ACP session config option",
+    );
+    return this.connection.setSessionConfigOption({
+      sessionId,
+      configId,
+      value,
+    });
+  }
+
+  /**
    * Send a prompt to the agent and get a response.
    *
    * Accepts either a plain string (wrapped into a single `text` block) or a
@@ -316,7 +346,7 @@ export class ACPClient {
   async prompt(
     sessionId: string,
     content: string | readonly ContentBlock[],
-  ): Promise<unknown> {
+  ): Promise<PromptResponse> {
     if (!this.connection) {
       throw new Error("ACPClient not connected. Call connect() first.");
     }

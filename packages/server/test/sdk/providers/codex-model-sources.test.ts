@@ -59,6 +59,9 @@ describe("CodexModelSourceRegistry", () => {
     expect(() =>
       registry.assertModelSelectable("deepseek", "deepseek-v4-flash"),
     ).not.toThrow();
+    expect(() =>
+      registry.assertModelSelectable("deepseek", "deepseek-v4-pro"),
+    ).not.toThrow();
   });
 
   it("blocks selecting a source that is unavailable", () => {
@@ -99,13 +102,18 @@ describe("CodexModelSourceRegistry", () => {
     expect(catalogPath).toBeTruthy();
     expect(existsSync(catalogPath as string)).toBe(true);
     const parsed = JSON.parse(readFileSync(catalogPath as string, "utf8"));
-    expect(parsed.models[0].slug).toBe("deepseek-v4-flash");
+    expect(parsed.models.map((model: { slug: string }) => model.slug)).toEqual([
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
+    ]);
     expect(parsed.models[0].context_window).toBe(1_000_000);
+    expect(parsed.models[1].context_window).toBe(1_000_000);
   });
 
   it("maps a model slug back to its owning custom source", () => {
     const registry = withKey();
     expect(registry.findModelSource("deepseek-v4-flash")).toBe("deepseek");
+    expect(registry.findModelSource("deepseek-v4-pro")).toBe("deepseek");
     // OpenAI live models have no catalog owner.
     expect(registry.findModelSource("gpt-5.6-sol")).toBeUndefined();
     expect(registry.findModelSource(undefined)).toBeUndefined();
@@ -121,6 +129,63 @@ describe("CodexModelSourceRegistry", () => {
         providerModelId: "deepseek-v4-flash",
         contextWindow: 1_000_000,
       }),
+      expect.objectContaining({
+        id: "deepseek/deepseek-v4-pro",
+        modelProvider: "deepseek",
+        providerModelId: "deepseek-v4-pro",
+        contextWindow: 1_000_000,
+      }),
     ]);
+  });
+
+  it("uses DeepSeek's advertised tiers and official compatibility mapping", () => {
+    const registry = withKey();
+    // DeepSeek advertises low/high/max; supported tiers pass through.
+    expect(
+      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "low"),
+    ).toBe("low");
+    expect(
+      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "high"),
+    ).toBe("high");
+    expect(
+      registry.resolveReasoningEffort("deepseek", "deepseek-v4-pro", "max"),
+    ).toBe("max");
+    // The official compatibility table maps medium/xhigh to high.
+    expect(
+      registry.resolveReasoningEffort(
+        "deepseek",
+        "deepseek-v4-flash",
+        "medium",
+      ),
+    ).toBe("high");
+    expect(
+      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "xhigh"),
+    ).toBe("high");
+    // Unknown higher tiers clamp to the highest advertised tier.
+    expect(
+      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "ultra"),
+    ).toBe("max");
+    // Unknown values fall back to the model's default.
+    expect(
+      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "bogus"),
+    ).toBe("high");
+    // Missing request is passed through (no effort to resolve).
+    expect(
+      registry.resolveReasoningEffort(
+        "deepseek",
+        "deepseek-v4-flash",
+        undefined,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("keeps the full tier set for the built-in openai source", () => {
+    const registry = withKey();
+    expect(registry.resolveReasoningEffort("openai", undefined, "xhigh")).toBe(
+      "xhigh",
+    );
+    expect(registry.resolveReasoningEffort("openai", undefined, "max")).toBe(
+      "max",
+    );
   });
 });

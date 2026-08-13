@@ -20,13 +20,17 @@ import type {
   GeminiUserMessage,
   KimiContentPartEvent,
   KimiSessionContent,
+  KimiStepEndEvent,
   KimiToolCallEvent,
   KimiToolResultEvent,
+  KimiTurnEndedRecord,
   OpenCodeSessionEntry,
   OpenCodeStoredPart,
   SessionBranchOption,
   SessionBranchState,
   UnifiedSession,
+  ZCodeSessionContent,
+  ZCodeStoredMessage,
 } from "@yep-anywhere/shared";
 import {
   getGeminiUserMessageText,
@@ -36,6 +40,7 @@ import {
   getModelContextWindow,
   isConversationEntry,
   isKimiLoopEventRecord,
+  isKimiTurnEndedRecord,
   isKimiTurnPromptRecord,
 } from "@yep-anywhere/shared";
 import {
@@ -458,6 +463,16 @@ export function normalizeSession(loaded: LoadedSession): Session {
         ...summary,
         messages: convertKimiMessages(data.session),
       });
+    case "zcode": {
+      const messages = convertZCodeMessages(data.session);
+      return sanitizePublicNormalizedSession({
+        ...summary,
+        branchState: loaded.branchState,
+        messages: loaded.branchState
+          ? annotateBranchMessages(messages, loaded.branchState)
+          : messages,
+      });
+    }
   }
 }
 
@@ -2338,6 +2353,7 @@ export function convertKimiMessages(session: KimiSessionContent): Message[] {
   let assistantTs: number | undefined;
   let assistantSeq = 0;
   let userSeq = 0;
+  let lastStepEnd: KimiStepEndEvent | undefined;
 
   const appendAssistantPart = (
     part:
@@ -2379,9 +2395,39 @@ export function convertKimiMessages(session: KimiSessionContent): Message[] {
     assistantTs = undefined;
   };
 
+  const appendTurnError = (record: KimiTurnEndedRecord) => {
+    const error = record.error;
+    if (!error) return;
+    const errorText =
+      error.message?.trim() ||
+      (error.code === "provider.filtered"
+        ? "Provider safety policy blocked the response."
+        : error.name || error.code);
+    if (!errorText) return;
+
+    flushAssistant();
+    const turnKey =
+      record.turnId === undefined
+        ? `${userSeq}-${messages.length}`
+        : String(record.turnId);
+    messages.push({
+      uuid: `${sid}-turn-${turnKey}-error`,
+      type: "error",
+      error: errorText,
+      content: errorText,
+      errorCode: error.code,
+      retryable: error.retryable,
+      finishReason: lastStepEnd?.finishReason,
+      providerFinishReason: lastStepEnd?.providerFinishReason,
+      rawFinishReason: lastStepEnd?.rawFinishReason,
+      timestamp: toIso(record.time),
+    });
+  };
+
   for (const record of session.records) {
     if (isKimiTurnPromptRecord(record)) {
       flushAssistant();
+      lastStepEnd = undefined;
       messages.push({
         uuid: `${sid}-user-${userSeq++}`,
         type: "user",
@@ -2391,6 +2437,11 @@ export function convertKimiMessages(session: KimiSessionContent): Message[] {
         },
         timestamp: toIso(record.time),
       });
+      continue;
+    }
+
+    if (isKimiTurnEndedRecord(record)) {
+      appendTurnError(record);
       continue;
     }
 
@@ -2443,6 +2494,10 @@ export function convertKimiMessages(session: KimiSessionContent): Message[] {
           },
           timestamp: toIso(record.time),
         });
+        break;
+      }
+      case "step.end": {
+        lastStepEnd = event as KimiStepEndEvent;
         break;
       }
       default:
@@ -2785,3 +2840,139 @@ function normalizeOpenCodeToolInput(
 
   return normalized;
 }
+
+// --- ZCode Conversion Logic ---
+
+/**
+ * Convert a persisted ZCode session into normalized Messages.
+ * Full implementation: maps stored messages to Message objects with text,
+ * reasoning (thinking), and tool (tool_use + tool_result) parts.
+ * Unknown part types are safely ignored.
+ */
+export function convertZCodeMessages(session: ZCodeSessionContent): Message[] {
+  const messages: Message[] = [];
+  const sid = session.sessionId;
+
+  for (const stored of session.messages) {
+    const role = stored.role === "user" ? "user" : "assistant";
+    const blocks: ContentBlock[] = [];
+    const toolResults: Array<{
+      toolUseId: string;
+      content: string;
+      isError: boolean;
+    }> = [];
+
+    for (const part of stored.parts) {
+      const partType = part?.type;
+      if (typeof partType !== "string") continue;
+
+      switch (partType) {
+        case "text": {
+          const text = typeof part.text === "string" ? part.text : "";
+          if (text) {
+            blocks.push({ type: "text", text });
+          }
+          break;
+        }
+        case "reasoning": {
+          const thinking = typeof part.text === "string" ? part.text : "";
+          if (thinking) {
+            blocks.push({ type: "thinking", thinking });
+          }
+          break;
+        }
+        case "tool": {
+          const callId =
+            typeof part.callID === "string" ? part.callID : part.id;
+          const toolName =
+            typeof part.tool === "string" ? part.tool : "Unknown";
+          const state = part.state as Record<string, unknown> | undefined;
+          const status =
+            typeof state?.status === "string" ? state.status : "pending";
+          const input = state?.input;
+          const output = state?.output;
+          const isError = status === "error";
+
+          // Emit tool_use block.
+          blocks.push({
+            type: "tool_use",
+            id: callId,
+            name: toolName,
+            input: input ?? {},
+            status,
+          });
+
+          // Emit tool_result if completed or error.
+          if (status === "completed" || status === "error") {
+            toolResults.push({
+              toolUseId: callId,
+              content:
+                typeof output === "string"
+                  ? output
+                  : JSON.stringify(output ?? ""),
+              isError,
+            });
+          }
+          break;
+        }
+        case "step-start":
+        case "step-finish":
+        case "timeline":
+        case "file":
+        case "snapshot":
+        case "patch":
+        case "compaction":
+        case "retry":
+        case "agent":
+        case "subagent":
+          // Metadata-only parts — no transcript content in P2.
+          break;
+        default:
+          // Unknown part type — safely ignored.
+          break;
+      }
+    }
+
+    // Emit assistant message with content blocks.
+    if (blocks.length > 0) {
+      messages.push({
+        type: role,
+        uuid: stored.id,
+        session_id: sid,
+        ...(typeof stored.createdAt === "number"
+          ? { timestamp: new Date(stored.createdAt).toISOString() }
+          : {}),
+        message: {
+          role,
+          content: blocks,
+          ...(stored.model ? { model: stored.model } : {}),
+        },
+      });
+    }
+
+    // Emit tool results as separate user messages (matching Codex/OpenCode pattern).
+    for (const tr of toolResults) {
+      messages.push({
+        type: "user",
+        session_id: sid,
+        tool_use_id: tr.toolUseId,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: tr.toolUseId,
+              content: tr.content,
+              ...(tr.isError ? { status: "error" } : {}),
+            },
+          ],
+        },
+      });
+    }
+  }
+
+  return messages;
+}
+
+// Suppress unused import — ZCodeStoredMessage is used for type safety.
+void (null as unknown as ZCodeStoredMessage);

@@ -698,6 +698,8 @@ function safeErrorSignal(
       return "permission denied";
     case "attachment":
       return "attachment failed";
+    case "bridge":
+      return "Codex bridge unavailable";
     case "process_exit":
       return "Codex app-server process exited";
     case "sandbox":

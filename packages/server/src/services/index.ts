@@ -58,3 +58,10 @@ export {
   type OpenCodeSessionChangeScanner,
   type OpenCodeSessionChangeSource,
 } from "./OpenCodeSessionChangeMonitor.js";
+
+export {
+  ZCodeSessionChangeMonitor,
+  type ZCodeSessionChangeMonitorOptions,
+  type ZCodeSessionChangeScanner,
+  type ZCodeSessionChangeSource,
+} from "./ZCodeSessionChangeMonitor.js";

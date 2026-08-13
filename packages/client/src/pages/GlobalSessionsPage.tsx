@@ -16,6 +16,7 @@ import {
 import { PageHeader } from "../components/PageHeader";
 import { SessionListItem } from "../components/SessionListItem";
 import { SessionListSkeleton } from "../components/Skeleton";
+import { ZCodeBridgeApprovals } from "../components/ZCodeBridgeApprovals";
 import { useToastContext } from "../contexts/ToastContext";
 import { useDrafts } from "../hooks/useDrafts";
 import { useGlobalSessions } from "../hooks/useGlobalSessions";
@@ -44,6 +45,7 @@ const PROVIDER_COLORS: Record<ProviderName, string> = {
   "gemini-acp": "#4285f4", // Same as gemini
   opencode: "#9333ea", // Purple for OpenCode
   kimi: "var(--provider-kimi)", // Kimi KMBlue
+  zcode: "var(--provider-zcode)", // ZCode
 };
 
 const getSessionListTitle = (session: GlobalSessionItem): string | null =>
@@ -726,6 +728,9 @@ export function GlobalSessionsPage() {
 
         <main className="page-scroll-container">
           <div className="page-content-inner">
+            {/* Pending approvals from external `zcode tui` sessions */}
+            <ZCodeBridgeApprovals />
+
             {/* Filter bar */}
             <div className="filter-bar">
               <form onSubmit={handleSearch} className="filter-search-form">

@@ -108,7 +108,7 @@ function asNumber(value: unknown): number | undefined {
  * extremely unlikely missed suppression-bypass for not reading megabytes of
  * JSON on every drained page.
  */
-const SESSION_DIGEST_SQL = `
+export const SESSION_DIGEST_SQL = `
   SELECT
     s.id AS id,
     s.time_updated AS session_updated,

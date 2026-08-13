@@ -77,11 +77,40 @@ describe("provider-specific historical message editing", () => {
     });
   });
 
-  it("only enables OpenCode editing after the authoritative disk message arrives", () => {
+  it("only enables OpenCode/ZCode editing after the authoritative disk message arrives", () => {
     expect(canEditPersistedUserPrompt("opencode", "jsonl")).toBe(true);
     expect(canEditPersistedUserPrompt("opencode", "sdk")).toBe(false);
     expect(canEditPersistedUserPrompt("opencode", undefined)).toBe(false);
+    expect(canEditPersistedUserPrompt("zcode", "jsonl")).toBe(true);
+    expect(canEditPersistedUserPrompt("zcode", "sdk")).toBe(false);
+    expect(canEditPersistedUserPrompt("zcode", undefined)).toBe(false);
     expect(canEditPersistedUserPrompt("claude", "sdk")).toBe(true);
+  });
+
+  it("resolves ZCode edits to the provider-agnostic fork submission", () => {
+    expect(supportsHistoricalMessageEditing("zcode")).toBe(true);
+    expect(
+      resolveSessionEditSubmission("zcode", {
+        uuid: "msg_user_native",
+        parentUuid: "not-the-boundary",
+      }),
+    ).toEqual({
+      kind: "opencode-fork",
+      resumeSessionAt: "msg_user_native",
+      optimisticTruncate: false,
+      refreshSameSessionBranches: false,
+    });
+    // Editing the first ZCode prompt is still a fork attempt; the server
+    // fails closed when no predecessor exists.
+    expect(
+      resolveSessionEditSubmission("zcode", {
+        uuid: "msg_first_native",
+        parentUuid: null,
+      }),
+    ).toMatchObject({
+      kind: "opencode-fork",
+      resumeSessionAt: "msg_first_native",
+    });
   });
 
   it("does not expose editing for unrelated providers", () => {

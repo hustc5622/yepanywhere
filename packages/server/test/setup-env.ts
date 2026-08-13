@@ -25,6 +25,8 @@ const SCRUB_PREFIXES = [
   // Gateway/AI-title credentials.
   "LLM_",
   "SESSION_TITLE_",
+  // ZCode config/CLI path env vars (YEP_ZCODE_CLI_PATH, ZCODE_*).
+  "ZCODE",
 ];
 
 const SCRUB_EXACT = new Set([

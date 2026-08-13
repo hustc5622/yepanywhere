@@ -15,7 +15,8 @@ export type ProviderName =
   | "gemini"
   | "gemini-acp"
   | "opencode"
-  | "kimi";
+  | "kimi"
+  | "zcode";
 
 /**
  * All provider names in display order.
@@ -31,6 +32,7 @@ export const ALL_PROVIDERS: readonly ProviderName[] = [
   "gemini-acp",
   "opencode",
   "kimi",
+  "zcode",
 ] as const;
 
 /**
@@ -737,4 +739,76 @@ export type UserQuestionAnswers = Record<string, UserQuestionAnswer>;
 export interface MarkdownAugment {
   /** Pre-rendered HTML with shiki syntax highlighting */
   html: string;
+}
+
+/**
+ * Provider-neutral MCP server status snapshot (read-only introspection).
+ *
+ * The wire fields are the safe subset Yep exposes to clients — a provider
+ * never echoes raw provider configuration (endpoints, credentials, headers)
+ * back through this shape.
+ */
+export interface ProviderMcpServerStatus {
+  /** Provider-native lifecycle status (ZCode: connecting|connected|disabled|disconnected|failed|untrusted). */
+  status: string;
+  /** Transport kind when known (e.g. "stdio", "http", "sse"). */
+  transport?: string;
+  /** Number of tools the server currently advertises. */
+  toolCount?: number;
+  /** Provider-native last-update timestamp (ISO string). */
+  updatedAt?: string;
+  /** Human-readable failure summary, when the provider reports one. */
+  error?: string;
+}
+
+// =============================================================================
+// ZCode bridge (external `zcode tui` sessions via the hook plugin)
+// =============================================================================
+
+/** An external `zcode tui` session observed through the bridge hook plugin. */
+export interface ZCodeBridgeExternalSession {
+  sessionId: string;
+  cwd?: string;
+  permissionMode?: string;
+  /** ISO timestamp of the SessionStart hook. */
+  startedAt: string;
+  /** ISO timestamp of the most recent hook event for this session. */
+  lastSeenAt: string;
+}
+
+/** A tool approval an external ZCode session is waiting on. */
+export interface ZCodeBridgePendingInput {
+  id: string;
+  kind: "permission";
+  sessionId: string;
+  cwd?: string;
+  toolName: string;
+  toolInput?: unknown;
+  permissionSuggestions?: unknown[];
+  /** ISO timestamp of the PermissionRequest hook. */
+  createdAt: string;
+}
+
+/**
+ * Client decision for a bridge pending input. `allow` may carry an
+ * `updatedInput` rewrite; `deny` may carry a reason `message`.
+ */
+export type ZCodeBridgeDecision =
+  | { behavior: "allow"; updatedInput?: unknown }
+  | { behavior: "deny"; message?: string };
+
+/**
+ * Provider-neutral goal lifecycle shapes. `response` is the provider-rendered
+ * status text (e.g. ZCode's CLI-formatted goal summary); `startedTurn` flags
+ * that a set/replace immediately began a model turn.
+ */
+export type ProviderGoalAction =
+  | "set"
+  | "replace"
+  | "pause"
+  | "resume"
+  | "clear";
+export interface ProviderGoalState {
+  response: string;
+  startedTurn?: boolean;
 }

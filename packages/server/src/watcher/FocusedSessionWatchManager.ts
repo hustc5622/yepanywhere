@@ -2,10 +2,17 @@ import * as fs from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
+import type { ZCodeSessionInfo } from "../projects/zcode-scanner.js";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project } from "../supervisor/types.js";
 
-type WatchProvider = "claude" | "codex" | "gemini" | "opencode" | "kimi";
+type WatchProvider =
+  | "claude"
+  | "codex"
+  | "gemini"
+  | "opencode"
+  | "kimi"
+  | "zcode";
 type ChangeSource = "fs-watch" | "poll";
 
 interface CodexSessionInfo {
@@ -78,6 +85,9 @@ export interface FocusedSessionWatchManagerOptions {
   opencodeScanner?: {
     getSessionsForProject(projectPath: string): Promise<OpenCodeSessionInfo[]>;
   };
+  zcodeScanner?: {
+    getSessionsForProject(projectPath: string): Promise<ZCodeSessionInfo[]>;
+  };
   pollMs?: number;
   debounceMs?: number;
 }
@@ -105,6 +115,7 @@ export class FocusedSessionWatchManager {
   private readonly codexScanner: FocusedSessionWatchManagerOptions["codexScanner"];
   private readonly geminiScanner: FocusedSessionWatchManagerOptions["geminiScanner"];
   private readonly opencodeScanner: FocusedSessionWatchManagerOptions["opencodeScanner"];
+  private readonly zcodeScanner: FocusedSessionWatchManagerOptions["zcodeScanner"];
   private readonly pollMs: number;
   private readonly debounceMs: number;
   private readonly targets = new Map<string, SessionWatchTarget>();
@@ -115,6 +126,7 @@ export class FocusedSessionWatchManager {
     this.codexScanner = options.codexScanner;
     this.geminiScanner = options.geminiScanner;
     this.opencodeScanner = options.opencodeScanner;
+    this.zcodeScanner = options.zcodeScanner;
     this.pollMs = Math.max(250, options.pollMs ?? 1500);
     this.debounceMs = Math.max(50, options.debounceMs ?? 200);
   }
@@ -328,14 +340,17 @@ export class FocusedSessionWatchManager {
         return;
       }
 
-      // OpenCode uses one database file for every session. A database mtime
-      // alone therefore tells us only that *some* OpenCode session changed.
-      // Re-resolve the selected row and emit only when its time_updated value
-      // changed too. Without this guard, one active `of` session repeatedly
-      // refreshes every other OpenCode session currently open in Yep.
-      if (target.provider === "opencode") {
+      // OpenCode and ZCode both use one database file for every session. A
+      // database mtime alone therefore tells us only that *some* session
+      // changed. Re-resolve the selected row and emit only when its
+      // time_updated value changed too. Without this guard, one active
+      // session repeatedly refreshes every other session currently open in Yep.
+      if (target.provider === "opencode" || target.provider === "zcode") {
         const resolved = await this.resolveSessionFile(target);
-        if (!resolved || resolved.provider !== "opencode") {
+        if (
+          !resolved ||
+          (resolved.provider !== "opencode" && resolved.provider !== "zcode")
+        ) {
           await this.ensureWatching(target);
           return;
         }
@@ -447,6 +462,21 @@ export class FocusedSessionWatchManager {
           };
         }
       }
+
+      if (provider === "zcode") {
+        const sessions =
+          (await this.zcodeScanner?.getSessionsForProject(project.path)) ?? [];
+        const match = sessions.find(
+          (session) => session.id === target.sessionId,
+        );
+        if (match) {
+          return {
+            filePath: match.filePath,
+            provider,
+            sessionMtime: match.mtime,
+          };
+        }
+      }
     }
 
     return null;
@@ -468,6 +498,7 @@ export class FocusedSessionWatchManager {
     pushCandidate("codex");
     pushCandidate("gemini");
     pushCandidate("opencode");
+    pushCandidate("zcode");
     return candidates;
   }
 

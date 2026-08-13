@@ -136,6 +136,17 @@ export interface ProcessConstructorOptions extends ProcessOptions {
   setModelFn?: (model?: string) => Promise<void>;
   /** Function to change the provider-native permission/session mode */
   setPermissionModeFn?: (mode: PermissionMode) => Promise<void>;
+  /** Function to trigger a provider-native context compaction mid-session */
+  compactFn?: () => Promise<void>;
+  /** Function to change the provider-native reasoning effort mid-session */
+  setReasoningEffortFn?: (effort: string) => Promise<void>;
+  /** Function to read the provider-native session goal status */
+  getGoalFn?: () => Promise<import("@yep-anywhere/shared").ProviderGoalState>;
+  /** Function to run a provider-native goal lifecycle action */
+  goalActionFn?: (
+    action: import("@yep-anywhere/shared").ProviderGoalAction,
+    objective?: string,
+  ) => Promise<import("@yep-anywhere/shared").ProviderGoalState>;
   /**
    * Function returning a structured breakdown of current context-window usage
    * (system prompt, tools, skills, MCP servers, memory files...). SDK 0.2.7+.
@@ -237,6 +248,17 @@ export class Process {
 
   /** Function to change model mid-session (SDK 0.2.7+) */
   private setModelFn: ((model?: string) => Promise<void>) | null;
+  private compactFn: (() => Promise<void>) | null;
+  private setReasoningEffortFn: ((effort: string) => Promise<void>) | null;
+  private getGoalFn:
+    | (() => Promise<import("@yep-anywhere/shared").ProviderGoalState>)
+    | null;
+  private goalActionFn:
+    | ((
+        action: import("@yep-anywhere/shared").ProviderGoalAction,
+        objective?: string,
+      ) => Promise<import("@yep-anywhere/shared").ProviderGoalState>)
+    | null;
 
   /** Function to change the provider-native permission/session mode */
   private setPermissionModeFn: ((mode: PermissionMode) => Promise<void>) | null;
@@ -327,6 +349,10 @@ export class Process {
     this.supportedCommandsFn = options.supportedCommandsFn ?? null;
     this._pidResolver = options.pid;
     this.setModelFn = options.setModelFn ?? null;
+    this.compactFn = options.compactFn ?? null;
+    this.setReasoningEffortFn = options.setReasoningEffortFn ?? null;
+    this.getGoalFn = options.getGoalFn ?? null;
+    this.goalActionFn = options.goalActionFn ?? null;
     this.setPermissionModeFn = options.setPermissionModeFn ?? null;
     this.getContextUsageFn = options.getContextUsageFn ?? null;
     this.initializationResultFn = options.initializationResultFn ?? null;
@@ -634,6 +660,91 @@ export class Process {
       this._resolvedModel = model;
     }
     return true;
+  }
+
+  get supportsCompact(): boolean {
+    return this.compactFn !== null;
+  }
+
+  /**
+   * Trigger a provider-native context compaction. Returns false when the
+   * provider does not support it, so the route can surface a 4xx.
+   */
+  async compact(): Promise<boolean> {
+    if (!this.compactFn) return false;
+    getLogger().info(
+      {
+        event: "session_compact",
+        sessionId: this._sessionId,
+        processId: this.id,
+      },
+      "Compacting session context",
+    );
+    await this.compactFn();
+    return true;
+  }
+
+  get supportsReasoningEffortChange(): boolean {
+    return this.setReasoningEffortFn !== null;
+  }
+
+  /**
+   * Change the provider-native reasoning effort mid-session. Returns false
+   * when unsupported; provider failures (e.g. a level the model does not
+   * advertise) propagate so the route can surface them.
+   */
+  async setReasoningEffort(effort: string): Promise<boolean> {
+    if (!this.setReasoningEffortFn) return false;
+    getLogger().info(
+      {
+        event: "reasoning_effort_change",
+        sessionId: this._sessionId,
+        processId: this.id,
+        previousEffort: this.resolvedReasoningEffort ?? null,
+        newEffort: effort,
+      },
+      "Changing provider reasoning effort",
+    );
+    await this.setReasoningEffortFn(effort);
+    this._resolvedReasoningEffort = effort;
+    return true;
+  }
+
+  get supportsGoal(): boolean {
+    return this.getGoalFn !== null && this.goalActionFn !== null;
+  }
+
+  /**
+   * Read the provider-native session goal. Returns null when unsupported.
+   */
+  async getGoal(): Promise<
+    import("@yep-anywhere/shared").ProviderGoalState | null
+  > {
+    if (!this.getGoalFn) return null;
+    return this.getGoalFn();
+  }
+
+  /**
+   * Run a provider-native goal lifecycle action. Returns null when
+   * unsupported; provider failures propagate so the route can surface them.
+   */
+  async goalAction(
+    action: import("@yep-anywhere/shared").ProviderGoalAction,
+    objective?: string,
+  ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null> {
+    if (!this.goalActionFn) return null;
+    getLogger().info(
+      {
+        event: "session_goal_action",
+        sessionId: this._sessionId,
+        processId: this.id,
+        action,
+        // Never log the objective text — it is user content.
+        hasObjective: objective !== undefined,
+      },
+      "Session goal action",
+    );
+    return this.goalActionFn(action, objective);
   }
 
   /**

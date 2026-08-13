@@ -51,6 +51,7 @@ export interface Project {
   hasGeminiSessions?: boolean; // whether this project also has Gemini sessions
   hasOpenCodeSessions?: boolean; // whether this project also has OpenCode sessions
   hasKimiSessions?: boolean; // whether this project also has Kimi sessions
+  hasZCodeSessions?: boolean; // whether this project also has ZCode sessions
   activeOwnedCount: number; // sessions owned by this server
   activeExternalCount: number; // sessions controlled by external processes
   lastActivity: string | null; // ISO timestamp of most recent session update

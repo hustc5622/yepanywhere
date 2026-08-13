@@ -14,12 +14,15 @@ import {
 } from "./provider-groups.js";
 import { ClaudeSessionReader } from "./reader.js";
 import type { ISessionReader } from "./types.js";
+import { ZCODE_DB_PATH } from "./zcode-db.js";
+import { ZCodeSessionReader } from "./zcode-reader.js";
 
 export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
   opencodePaths: Set<string>;
   kimiPaths: Set<string>;
+  zcodePaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
 }
 
@@ -35,6 +38,8 @@ export interface ProviderResolutionDeps {
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
+  zcodeDbPath?: string;
+  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   allowStaleSessionCache?: boolean;
   /** Yep sidecar lineage used when a stable provider API cannot persist it. */
   sessionMetadataService?: {
@@ -46,7 +51,7 @@ export interface SessionSource {
   provider: ProviderName;
   reader: ISessionReader;
   sessionDir: string;
-  kind: "primary" | "codex" | "gemini" | "opencode" | "kimi";
+  kind: "primary" | "codex" | "gemini" | "opencode" | "kimi" | "zcode";
 }
 
 export interface ResolvedSessionSummary {
@@ -99,6 +104,23 @@ function mayHaveKimiSessions(
     provider === "codex" ||
     provider === "gemini" ||
     provider === "opencode"
+  );
+}
+
+function mayHaveZCodeSessions(
+  project: Project,
+  catalog?: ProviderProjectCatalog,
+): boolean {
+  if (catalog) {
+    return catalog.zcodePaths.has(canonicalizeProjectPath(project.path));
+  }
+  const provider = normalizeProviderGroup(project.provider);
+  return (
+    provider === "claude" ||
+    provider === "codex" ||
+    provider === "gemini" ||
+    provider === "opencode" ||
+    provider === "kimi"
   );
 }
 
@@ -198,6 +220,22 @@ function createKimiSource(
   };
 }
 
+function createZCodeSource(
+  project: Project,
+  deps: ProviderResolutionDeps,
+): SessionSource | null {
+  const dbPath = deps.zcodeDbPath ?? ZCODE_DB_PATH;
+  const reader =
+    deps.zcodeReaderFactory?.(project.path) ??
+    new ZCodeSessionReader({ dbPath, projectPath: project.path });
+  return {
+    provider: "zcode",
+    reader,
+    sessionDir: dbPath,
+    kind: "zcode",
+  };
+}
+
 function buildCandidateGroups(
   project: Project,
   preferredProvider: ProviderName | string | undefined,
@@ -227,6 +265,9 @@ function buildCandidateGroups(
   if (mayHaveKimiSessions(project, catalog)) {
     pushGroup("kimi");
   }
+  if (mayHaveZCodeSessions(project, catalog)) {
+    pushGroup("zcode");
+  }
 
   return groups;
 }
@@ -248,6 +289,8 @@ function getSourceForGroup(
       return createGeminiSource(project, deps, catalog);
     case "kimi":
       return createKimiSource(project, deps);
+    case "zcode":
+      return createZCodeSource(project, deps);
   }
 }
 

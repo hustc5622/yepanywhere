@@ -551,6 +551,23 @@ export class CodexBridgeService implements CodexBridgeController {
     );
   }
 
+  private getSessionExecutionProfile(
+    sessionId: string,
+  ): CodexBridgeUpstreamProfile | null {
+    const record = this.sessions.get(sessionId);
+    if (!record) return null;
+    const candidates = Array.from(record.connectionIds)
+      .map((connectionId) => this.connections.get(connectionId))
+      .filter((connection): connection is BridgeConnection =>
+        Boolean(connection && !connection.closed),
+      );
+    return (
+      candidates.find((connection) => connection.downstreamAttached)?.profile ??
+      candidates[0]?.profile ??
+      null
+    );
+  }
+
   getPendingInputRequest(
     sessionId: string,
   ): CodexBridgePendingInput["request"] | null {
@@ -776,8 +793,12 @@ export class CodexBridgeService implements CodexBridgeController {
         return;
       }
       if (req.method === "GET" && pathParts[2] === "active") {
+        const active = this.isSessionActive(sessionId);
         writeJson(res, 200, {
-          active: this.isSessionActive(sessionId),
+          active,
+          ...(active
+            ? { mcpProfile: this.getSessionExecutionProfile(sessionId) }
+            : {}),
         });
         return;
       }

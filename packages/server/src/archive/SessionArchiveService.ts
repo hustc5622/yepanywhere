@@ -14,7 +14,12 @@ import { withWritableOpenCodeDb } from "../sessions/opencode-db.js";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 
-export type ArchiveProvider = "claude" | "codex" | "opencode" | "kimi";
+export type ArchiveProvider =
+  | "claude"
+  | "codex"
+  | "opencode"
+  | "kimi"
+  | "zcode";
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {
@@ -152,7 +157,7 @@ export class SessionArchiveService {
     const existing = this.manifest.sessions[params.sessionId];
     if (existing) {
       const primaryExists =
-        existing.provider === "opencode" ||
+        isSqliteArchiveProvider(existing.provider) ||
         (await fileExists(existing.files[0]?.archivePath));
       if (primaryExists) {
         throw new ArchiveError(
@@ -186,14 +191,16 @@ export class SessionArchiveService {
       createdAt: params.summary?.createdAt,
       updatedAt: params.summary?.updatedAt,
       messageCount: params.summary?.messageCount,
-      storagePath: provider === "opencode" ? params.sessionFilePath : undefined,
+      storagePath: isSqliteArchiveProvider(provider)
+        ? params.sessionFilePath
+        : undefined,
       archivedAt: new Date().toISOString(),
       reason: params.reason,
       files,
     };
 
-    if (provider === "opencode") {
-      await setOpenCodeSessionArchived({
+    if (isSqliteArchiveProvider(provider)) {
+      await setSqliteSessionArchived({
         dbPath: params.sessionFilePath,
         sessionId: params.sessionId,
         projectPath: params.project.path,
@@ -216,14 +223,14 @@ export class SessionArchiveService {
       );
     }
 
-    if (record.provider === "opencode") {
+    if (isSqliteArchiveProvider(record.provider)) {
       if (!record.storagePath) {
         throw new ArchiveError(
           "restore_failed",
-          `Cannot restore ${sessionId}; missing OpenCode database path`,
+          `Cannot restore ${sessionId}; missing provider database path`,
         );
       }
-      await setOpenCodeSessionUnarchived({
+      await setSqliteSessionUnarchived({
         dbPath: record.storagePath,
         sessionId,
         projectPath: record.projectPath,
@@ -305,7 +312,7 @@ export class SessionArchiveService {
       join(archiveSessionDir, basename(sessionFilePath)),
     );
 
-    if (provider === "opencode") {
+    if (isSqliteArchiveProvider(provider)) {
       return [];
     }
 
@@ -411,7 +418,13 @@ function normalizeArchiveProvider(
   return group === "gemini" ? null : group;
 }
 
-async function setOpenCodeSessionArchived(params: {
+function isSqliteArchiveProvider(
+  provider: ArchiveProvider,
+): provider is "opencode" | "zcode" {
+  return provider === "opencode" || provider === "zcode";
+}
+
+async function setSqliteSessionArchived(params: {
   dbPath: string;
   sessionId: string;
   projectPath: string;
@@ -420,23 +433,18 @@ async function setOpenCodeSessionArchived(params: {
   const result = await withWritableOpenCodeDb<
     "archived" | "already_archived" | "not_found" | "unavailable"
   >(params.dbPath, "unavailable", (db) => {
-    const row =
-      db
-        .prepare(
-          "SELECT time_archived FROM session WHERE id = ? AND directory = ?",
-        )
-        .get(params.sessionId, params.projectPath) ??
-      db
-        .prepare("SELECT time_archived FROM session WHERE id = ?")
-        .get(params.sessionId);
+    const row = db
+      .prepare(
+        "SELECT time_archived FROM session WHERE id = ? AND directory = ?",
+      )
+      .get(params.sessionId, params.projectPath);
 
     if (!row) return "not_found";
     if (typeof row.time_archived === "number") return "already_archived";
 
-    db.prepare("UPDATE session SET time_archived = ? WHERE id = ?").run(
-      params.archivedAtMs,
-      params.sessionId,
-    );
+    db.prepare(
+      "UPDATE session SET time_archived = ? WHERE id = ? AND directory = ?",
+    ).run(params.archivedAtMs, params.sessionId, params.projectPath);
     return "archived";
   });
 
@@ -450,16 +458,16 @@ async function setOpenCodeSessionArchived(params: {
   if (result === "not_found") {
     throw new ArchiveError(
       "session_not_found",
-      `OpenCode session not found for ${params.sessionId}`,
+      `SQLite session not found for ${params.sessionId}`,
     );
   }
   throw new ArchiveError(
     "archive_failed",
-    "OpenCode database is not available for archive",
+    "Provider database is not available for archive",
   );
 }
 
-async function setOpenCodeSessionUnarchived(params: {
+async function setSqliteSessionUnarchived(params: {
   dbPath: string;
   sessionId: string;
   projectPath: string;
@@ -467,17 +475,15 @@ async function setOpenCodeSessionUnarchived(params: {
   const result = await withWritableOpenCodeDb<
     "restored" | "not_found" | "unavailable"
   >(params.dbPath, "unavailable", (db) => {
-    const row =
-      db
-        .prepare("SELECT id FROM session WHERE id = ? AND directory = ?")
-        .get(params.sessionId, params.projectPath) ??
-      db.prepare("SELECT id FROM session WHERE id = ?").get(params.sessionId);
+    const row = db
+      .prepare("SELECT id FROM session WHERE id = ? AND directory = ?")
+      .get(params.sessionId, params.projectPath);
 
     if (!row) return "not_found";
 
-    db.prepare("UPDATE session SET time_archived = NULL WHERE id = ?").run(
-      params.sessionId,
-    );
+    db.prepare(
+      "UPDATE session SET time_archived = NULL WHERE id = ? AND directory = ?",
+    ).run(params.sessionId, params.projectPath);
     return "restored";
   });
 
@@ -485,12 +491,12 @@ async function setOpenCodeSessionUnarchived(params: {
   if (result === "not_found") {
     throw new ArchiveError(
       "restore_failed",
-      `OpenCode session not found for ${params.sessionId}`,
+      `SQLite session not found for ${params.sessionId}`,
     );
   }
   throw new ArchiveError(
     "restore_failed",
-    "OpenCode database is not available for restore",
+    "Provider database is not available for restore",
   );
 }
 

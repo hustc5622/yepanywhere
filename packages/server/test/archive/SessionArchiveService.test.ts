@@ -129,6 +129,72 @@ describe("SessionArchiveService", () => {
     expect(await readFile(sessionPath, "utf-8")).toContain("session_meta");
   });
 
+  it("archives one ZCode row without moving its shared SQLite database", async () => {
+    const sqlite = process.getBuiltinModule?.("node:sqlite") as
+      | typeof import("node:sqlite")
+      | undefined;
+    if (!sqlite) throw new Error("node:sqlite unavailable");
+    const { DatabaseSync } = sqlite;
+    const dbPath = join(testDir, "zcode", "db.sqlite");
+    await mkdir(join(testDir, "zcode"), { recursive: true });
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (
+        id TEXT PRIMARY KEY,
+        directory TEXT NOT NULL,
+        time_archived INTEGER
+      );
+      INSERT INTO session (id, directory) VALUES
+        ('zcode-1', '/tmp/project'),
+        ('zcode-2', '/tmp/project');
+    `);
+    db.close();
+
+    const project: Project = {
+      ...createProject(),
+      provider: "zcode",
+      sessionDir: dbPath,
+    };
+    const summary = {
+      ...createSummary("zcode-1"),
+      provider: "zcode" as const,
+    };
+
+    const record = await service.archiveSession({
+      sessionId: "zcode-1",
+      provider: "zcode",
+      project,
+      summary,
+      sessionFilePath: dbPath,
+      reason: "manual",
+    });
+
+    expect((await stat(dbPath)).isFile()).toBe(true);
+    expect(record.files).toEqual([]);
+    expect(record.storagePath).toBe(dbPath);
+    const archivedDb = new DatabaseSync(dbPath, { readOnly: true });
+    expect(
+      archivedDb
+        .prepare("SELECT time_archived FROM session WHERE id = 'zcode-1'")
+        .get()?.time_archived,
+    ).toEqual(expect.any(Number));
+    expect(
+      archivedDb
+        .prepare("SELECT time_archived FROM session WHERE id = 'zcode-2'")
+        .get()?.time_archived,
+    ).toBeNull();
+    archivedDb.close();
+
+    await service.restoreSession("zcode-1");
+    const restoredDb = new DatabaseSync(dbPath, { readOnly: true });
+    expect(
+      restoredDb
+        .prepare("SELECT time_archived FROM session WHERE id = 'zcode-1'")
+        .get()?.time_archived,
+    ).toBeNull();
+    restoredDb.close();
+  });
+
   it("schedules the next run for 04:00 Beijing time", () => {
     expect(
       getDelayUntilNextBeijingHour(4, new Date("2026-06-24T19:30:00.000Z")),

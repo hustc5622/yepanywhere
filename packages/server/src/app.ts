@@ -66,6 +66,7 @@ import {
   encodeProjectId,
 } from "./projects/paths.js";
 import { ProjectScanner } from "./projects/scanner.js";
+import { ZCodeSessionScanner } from "./projects/zcode-scanner.js";
 import {
   type NativePushService,
   PushNotifier,
@@ -115,6 +116,7 @@ import { createSettingsRoutes } from "./routes/settings.js";
 import { createSharingRoutes } from "./routes/sharing.js";
 import { type UploadDeps, createUploadRoutes } from "./routes/upload.js";
 import { createVersionRoutes } from "./routes/version.js";
+import { createZCodeBridgeRoutes } from "./routes/zcode-bridge.js";
 import { EmbeddedRuntimeController } from "./runtime/EmbeddedRuntimeController.js";
 import type { RuntimeController } from "./runtime/types.js";
 import {
@@ -145,11 +147,14 @@ import {
 } from "./sessions/provider-resolution.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
 import type { ISessionReader } from "./sessions/types.js";
+import { ZCODE_DB_PATH } from "./sessions/zcode-db.js";
+import { ZCodeSessionReader } from "./sessions/zcode-reader.js";
 import { ExternalSessionTracker } from "./supervisor/ExternalSessionTracker.js";
 import { Supervisor } from "./supervisor/Supervisor.js";
 import type { Project, SessionSummary } from "./supervisor/types.js";
 import type { EventBus } from "./watcher/index.js";
 import { LifecycleWebhookService } from "./webhooks/LifecycleWebhookService.js";
+import { ZCodeBridgeService } from "./zcode-bridge/ZCodeBridgeService.js";
 
 export interface AppOptions {
   /** Legacy SDK interface for mock SDK (for testing) */
@@ -419,6 +424,7 @@ export function createApp(options: AppOptions): AppResult {
   const geminiScanner = new GeminiSessionScanner();
   const opencodeScanner = new OpenCodeSessionScanner();
   const kimiScanner = new KimiSessionScanner();
+  const zcodeScanner = new ZCodeSessionScanner();
   const scanner = new ProjectScanner({
     projectsDir: options.projectsDir,
     remoteExecutors:
@@ -427,6 +433,7 @@ export function createApp(options: AppOptions): AppResult {
     geminiScanner,
     opencodeScanner,
     kimiScanner,
+    zcodeScanner,
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
     cacheTtlMs: options.projectScanCacheTtlMs,
@@ -546,6 +553,24 @@ export function createApp(options: AppOptions): AppResult {
               projectPath: project.path,
             }),
         );
+      case "zcode": {
+        const mis = options.modelInfoService;
+        return getOrCreateReader(
+          `zcode::${project.path}`,
+          () =>
+            new ZCodeSessionReader({
+              projectPath: project.path,
+              getContextWindow: mis
+                ? (model, provider, sessionId) =>
+                    mis.getContextWindow(model, provider, sessionId)
+                : undefined,
+              getForkParentSessionId: (sessionId) =>
+                options.sessionMetadataService?.getForkParentSessionId?.(
+                  sessionId,
+                ),
+            }),
+        );
+      }
       // Fallback keeps the switch exhaustive over ProviderName; unknown
       // providers read as Claude (matches the client's GenericProvider).
       default: {
@@ -608,6 +633,20 @@ export function createApp(options: AppOptions): AppResult {
           projectPath,
         }),
     );
+  const zcodeReaderFactory = (projectPath: string): ZCodeSessionReader =>
+    getOrCreateReader(`zcode-extra::${ZCODE_DB_PATH}::${projectPath}`, () => {
+      const mis = options.modelInfoService;
+      return new ZCodeSessionReader({
+        dbPath: ZCODE_DB_PATH,
+        projectPath,
+        getContextWindow: mis
+          ? (model, provider, sessionId) =>
+              mis.getCachedContextWindow(model, provider, sessionId)
+          : undefined,
+        getForkParentSessionId: (sessionId) =>
+          options.sessionMetadataService?.getForkParentSessionId?.(sessionId),
+      });
+    });
   const getSessionSummary = async (sessionId: string, projectId: string) => {
     const project = await scanner.getProject(projectId);
     if (!project) return null;
@@ -624,7 +663,9 @@ export function createApp(options: AppOptions): AppResult {
         geminiReaderFactory,
         geminiHashToCwd: geminiScanner.getHashToCwd(),
         opencodeDbPath: OPENCODE_DB_PATH,
+        zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
       },
@@ -693,7 +734,9 @@ export function createApp(options: AppOptions): AppResult {
     geminiSessionsDir: GEMINI_TMP_DIR,
     geminiReaderFactory,
     opencodeDbPath: OPENCODE_DB_PATH,
+    zcodeDbPath: ZCODE_DB_PATH,
     opencodeReaderFactory,
+    zcodeReaderFactory,
     kimiSessionsDir: KIMI_SESSIONS_DIR,
     kimiReaderFactory,
   });
@@ -820,7 +863,9 @@ export function createApp(options: AppOptions): AppResult {
                 geminiReaderFactory,
                 geminiHashToCwd: providerCatalog.geminiHashToCwd,
                 opencodeDbPath: OPENCODE_DB_PATH,
+                zcodeDbPath: ZCODE_DB_PATH,
                 opencodeReaderFactory,
+                zcodeReaderFactory,
                 kimiSessionsDir: KIMI_SESSIONS_DIR,
                 kimiReaderFactory,
                 // Recovery must observe files written while the server was down.
@@ -902,7 +947,9 @@ export function createApp(options: AppOptions): AppResult {
             geminiReaderFactory,
             geminiHashToCwd: geminiScanner.getHashToCwd(),
             opencodeDbPath: OPENCODE_DB_PATH,
+            zcodeDbPath: ZCODE_DB_PATH,
             opencodeReaderFactory,
+            zcodeReaderFactory,
             kimiSessionsDir: KIMI_SESSIONS_DIR,
             kimiReaderFactory,
           },
@@ -969,7 +1016,9 @@ export function createApp(options: AppOptions): AppResult {
         geminiReaderFactory,
         geminiHashToCwd: geminiScanner.getHashToCwd(),
         opencodeDbPath: OPENCODE_DB_PATH,
+        zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
       };
@@ -1288,7 +1337,9 @@ export function createApp(options: AppOptions): AppResult {
       opencodeScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       codexBridgeService: options.codexBridgeService,
@@ -1316,7 +1367,9 @@ export function createApp(options: AppOptions): AppResult {
       opencodeScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       serverSettingsService: options.serverSettingsService,
@@ -1367,6 +1420,11 @@ export function createApp(options: AppOptions): AppResult {
               reader: kimiReaderFactory(project.path),
               sessionDir: KIMI_SESSIONS_DIR,
             };
+          case "zcode":
+            return {
+              reader: zcodeReaderFactory(project.path),
+              sessionDir: ZCODE_DB_PATH,
+            };
           default:
             return {
               reader: readerFactory(project),
@@ -1399,7 +1457,9 @@ export function createApp(options: AppOptions): AppResult {
       opencodeScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       codexBridgeService: options.codexBridgeService,
@@ -1428,7 +1488,9 @@ export function createApp(options: AppOptions): AppResult {
       opencodeScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       eventBus: options.eventBus,
@@ -1460,7 +1522,9 @@ export function createApp(options: AppOptions): AppResult {
         opencodeScanner,
         kimiScanner,
         opencodeDbPath: OPENCODE_DB_PATH,
+        zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
       }),
@@ -1493,7 +1557,9 @@ export function createApp(options: AppOptions): AppResult {
         opencodeScanner,
         kimiScanner,
         opencodeDbPath: OPENCODE_DB_PATH,
+        zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
       }),
@@ -1518,6 +1584,13 @@ export function createApp(options: AppOptions): AppResult {
       modelInfoService: options.modelInfoService,
       enabledProviders: options.enabledProviders,
     }),
+  );
+
+  // ZCode bridge routes (external `zcode tui` session observation and
+  // tool-approval forwarding from the hook plugin)
+  app.route(
+    "/api/zcode-bridge",
+    createZCodeBridgeRoutes({ bridge: new ZCodeBridgeService() }),
   );
 
   // Server settings routes

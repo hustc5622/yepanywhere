@@ -1,0 +1,86 @@
+{
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "__YEP_NODE__",
+          "args": ["__YEP_HOOK_ENTRY__"],
+          "async": true
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "__YEP_NODE__",
+          "args": ["__YEP_HOOK_ENTRY__"],
+          "async": true
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "__YEP_NODE__",
+          "args": ["__YEP_HOOK_ENTRY__"],
+          "async": true
+        }
+      ]
+    }
+  ],
+  "PermissionRequest": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "__YEP_NODE__",
+          "args": ["__YEP_HOOK_ENTRY__"],
+          "timeoutMs": 45000
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "__YEP_NODE__",
+          "args": ["__YEP_HOOK_ENTRY__"],
+          "async": true
+        }
+      ]
+    }
+  ],
+  "PostToolUseFailure": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "__YEP_NODE__",
+          "args": ["__YEP_HOOK_ENTRY__"],
+          "async": true
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "__YEP_NODE__",
+          "args": ["__YEP_HOOK_ENTRY__"],
+          "async": true
+        }
+      ]
+    }
+  ]
+}

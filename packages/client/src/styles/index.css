@@ -20,6 +20,7 @@
   --provider-gemini: #4285f4;
   --provider-opencode: #9333ea;
   --provider-kimi: #1783ff;
+  --provider-zcode: #6366f1;
 
   /* Semantic Colors */
   --thinking-color: var(--app-claude-orange);
@@ -9250,6 +9251,10 @@ button.context-usage-indicator--button:focus-visible {
   background: var(--provider-kimi);
 }
 
+.provider-option-dot.provider-zcode {
+  background: var(--provider-zcode);
+}
+
 .provider-option-dot.provider-local {
   background: #8b5cf6; /* Purple for local */
 }
@@ -9720,6 +9725,123 @@ button.context-usage-indicator--button:focus-visible {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   line-height: 1.45;
+}
+
+.new-session-mcp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.new-session-mcp-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.new-session-mcp-name {
+  font-weight: 600;
+}
+
+.new-session-mcp-meta {
+  color: var(--text-muted);
+}
+
+.new-session-mcp-error {
+  color: var(--danger, #d64545);
+}
+
+.zcode-bridge-approvals {
+  margin-bottom: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border-color, #3a3a3a);
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-elevated, #1c1c1e);
+}
+
+.zcode-bridge-approvals-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 var(--space-2);
+}
+
+.zcode-bridge-approvals-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.zcode-bridge-approval {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.zcode-bridge-approval-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.zcode-bridge-approval-tool {
+  font-weight: 600;
+}
+
+.zcode-bridge-approval-session {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zcode-bridge-approval-input {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs, 0.75rem);
+  word-break: break-all;
+}
+
+.zcode-bridge-approval-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.zcode-bridge-approval-button {
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-color, #3a3a3a);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.zcode-bridge-approval-button.approve {
+  background: var(--app-yep-green);
+  border-color: transparent;
+  color: #fff;
+}
+
+.zcode-bridge-approval-button.deny {
+  color: var(--danger, #d64545);
+  border-color: var(--danger, #d64545);
+}
+
+.zcode-bridge-approval-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .mode-options {

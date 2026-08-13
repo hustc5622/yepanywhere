@@ -15,7 +15,10 @@ import type {
   NewSessionDefaults,
   OpenCodeSessionConfig,
   PendingInputType,
+  ProviderGoalAction,
+  ProviderGoalState,
   ProviderInfo,
+  ProviderMcpServerStatus,
   ProviderName,
   RemoteExecutorConfig,
   ReportCommentAnchor,
@@ -35,6 +38,9 @@ import type {
   ThinkingOption,
   UploadedFile,
   UserQuestionAnswers,
+  ZCodeBridgeDecision,
+  ZCodeBridgeExternalSession,
+  ZCodeBridgePendingInput,
 } from "@yep-anywhere/shared";
 import { authEvents } from "../lib/authEvents";
 import type {
@@ -900,6 +906,34 @@ export const api = {
       `/providers/${encodeURIComponent(name)}${options?.fresh ? "?fresh=1" : ""}`,
     ),
 
+  /**
+   * Read-only ZCode MCP server status snapshot for a project's workspace.
+   * The server spawns a short-lived app-server and queries mcp/list in
+   * "status" mode; no MCP connections are opened.
+   */
+  listZCodeMcpServers: (projectId: string) =>
+    fetchJSON<{ servers: Record<string, ProviderMcpServerStatus> }>(
+      `/providers/zcode/mcp-servers?projectId=${encodeURIComponent(projectId)}`,
+    ),
+
+  // ZCode bridge (external `zcode tui` sessions observed via the hook plugin)
+  listZCodeBridgeSessions: () =>
+    fetchJSON<{
+      sessions: ZCodeBridgeExternalSession[];
+      installed: boolean;
+    }>("/zcode-bridge/sessions"),
+
+  listZCodeBridgePendingInputs: () =>
+    fetchJSON<{ pendingInputs: ZCodeBridgePendingInput[] }>(
+      "/zcode-bridge/pending-inputs",
+    ),
+
+  decideZCodeBridgePendingInput: (id: string, decision: ZCodeBridgeDecision) =>
+    fetchJSON<{ accepted: boolean }>(
+      `/zcode-bridge/pending-inputs/${encodeURIComponent(id)}/decision`,
+      { method: "POST", body: JSON.stringify(decision) },
+    ),
+
   getProjects: () => fetchJSON<{ projects: Project[] }>("/projects"),
 
   /**
@@ -1175,7 +1209,14 @@ export const api = {
 
   getProcessModels: (processId: string) =>
     fetchJSON<{
-      models: Array<{ id: string; name: string; description?: string }>;
+      models: Array<{
+        id: string;
+        name: string;
+        description?: string;
+        /** Per-model reasoning/thought levels (e.g. ZCode thought levels). */
+        supportedReasoningEfforts?: Array<{ reasoningEffort: string }>;
+        defaultReasoningEffort?: string;
+      }>;
     }>(`/processes/${processId}/models`),
 
   setProcessModel: (processId: string, model?: string) =>
@@ -1186,6 +1227,34 @@ export const api = {
     }>(`/processes/${processId}/model`, {
       method: "POST",
       body: JSON.stringify({ model }),
+    }),
+
+  /** Trigger a provider-native context compaction (ZCode session/compact). */
+  compactProcess: (processId: string) =>
+    fetchJSON<{ success: boolean }>(`/processes/${processId}/compact`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+
+  /** Change the provider-native reasoning effort mid-session (ZCode thought level). */
+  setProcessReasoningEffort: (processId: string, effort: string) =>
+    fetchJSON<{ success: boolean; effort: string }>(
+      `/processes/${processId}/reasoning-effort`,
+      { method: "POST", body: JSON.stringify({ effort }) },
+    ),
+
+  /**
+   * Goal lifecycle actions (ZCode session/goal). `show` returns the
+   * provider-rendered status text; set/replace require an objective and may
+   * start a turn immediately (startedTurn).
+   */
+  processGoal: (
+    processId: string,
+    body: { action: ProviderGoalAction | "show"; objective?: string },
+  ) =>
+    fetchJSON<ProviderGoalState>(`/processes/${processId}/goal`, {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 
   respondToInput: (

@@ -119,6 +119,8 @@ export const KimiStepEndEventSchema = z.object({
   step: z.number().optional(),
   usage: KimiStepUsageSchema.optional(),
   finishReason: z.string().optional(),
+  providerFinishReason: z.string().optional(),
+  rawFinishReason: z.string().optional(),
   messageId: z.string().optional(),
 });
 
@@ -185,6 +187,27 @@ export const KimiUsageRecordSchema = z.object({
   time: z.number().optional(),
 });
 
+export const KimiTurnEndedErrorSchema = z
+  .object({
+    code: z.string(),
+    message: z.string().optional(),
+    name: z.string().optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
+    retryable: z.boolean().optional(),
+  })
+  .passthrough();
+
+/** Terminal outcome for one Kimi turn, including provider-level failures. */
+export const KimiTurnEndedRecordSchema = z.object({
+  type: z.literal("turn.ended"),
+  turnId: z.union([z.string(), z.number()]).optional(),
+  reason: z.string().optional(),
+  error: KimiTurnEndedErrorSchema.optional(),
+  durationMs: z.number().optional(),
+  time: z.number().optional(),
+});
+export type KimiTurnEndedRecord = z.infer<typeof KimiTurnEndedRecordSchema>;
+
 /** Discriminated where possible; unknown record types pass through. */
 export type KimiWireRecord =
   | z.infer<typeof KimiMetadataRecordSchema>
@@ -192,6 +215,7 @@ export type KimiWireRecord =
   | z.infer<typeof KimiTurnPromptRecordSchema>
   | z.infer<typeof KimiLoopEventRecordSchema>
   | z.infer<typeof KimiUsageRecordSchema>
+  | KimiTurnEndedRecord
   | ({ type: string } & Record<string, unknown>);
 
 /**
@@ -302,6 +326,10 @@ function coerceKimiRecord(raw: { type: string }): KimiWireRecord {
     }
     case "usage.record": {
       const r = KimiUsageRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "turn.ended": {
+      const r = KimiTurnEndedRecordSchema.safeParse(raw);
       return r.success ? r.data : raw;
     }
     default:
@@ -424,6 +452,12 @@ export function isKimiLoopEventRecord(
   record: KimiWireRecord,
 ): record is z.infer<typeof KimiLoopEventRecordSchema> {
   return record.type === "context.append_loop_event";
+}
+
+export function isKimiTurnEndedRecord(
+  record: KimiWireRecord,
+): record is KimiTurnEndedRecord {
+  return record.type === "turn.ended";
 }
 
 export function isKimiModelConfigRecord(

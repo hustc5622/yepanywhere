@@ -13,6 +13,7 @@ import {
   tryMapLocalPathToRemote,
   tryMapRemotePathToLocal,
 } from "../sdk/remote-path-mapping.js";
+import { ZCODE_DB_PATH } from "../sessions/zcode-db.js";
 import type { Project } from "../supervisor/types.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
 import { CODEX_SESSIONS_DIR, CodexSessionScanner } from "./codex-scanner.js";
@@ -31,6 +32,7 @@ import {
   normalizeProjectPathForDedup,
   readCwdFromSessionFile,
 } from "./paths.js";
+import { ZCodeSessionScanner } from "./zcode-scanner.js";
 
 export interface ScannerOptions {
   projectsDir?: string; // override for testing
@@ -41,10 +43,12 @@ export interface ScannerOptions {
   geminiScanner?: GeminiSessionScanner | null; // shared provider scanner
   opencodeScanner?: OpenCodeSessionScanner | null; // shared provider scanner
   kimiScanner?: KimiSessionScanner | null; // shared provider scanner
+  zcodeScanner?: ZCodeSessionScanner | null; // shared provider scanner
   enableCodex?: boolean; // whether to include Codex projects (default: true)
   enableGemini?: boolean; // whether to include Gemini projects (default: true)
   enableOpenCode?: boolean; // whether to include OpenCode projects (default: true)
   enableKimi?: boolean; // whether to include Kimi projects (default: true)
+  enableZCode?: boolean; // whether to include ZCode projects (default: true)
   projectMetadataService?: ProjectMetadataService; // for persisting added projects
   /** Remote Claude executors whose shared stores should also be scanned. */
   remoteExecutors?: RemoteExecutorConfig[];
@@ -73,10 +77,12 @@ export class ProjectScanner {
   private geminiScanner: GeminiSessionScanner | null;
   private opencodeScanner: OpenCodeSessionScanner | null;
   private kimiScanner: KimiSessionScanner | null;
+  private zcodeScanner: ZCodeSessionScanner | null;
   private enableCodex: boolean;
   private enableGemini: boolean;
   private enableOpenCode: boolean;
   private enableKimi: boolean;
+  private enableZCode: boolean;
   private projectMetadataService: ProjectMetadataService | null;
   private cacheTtlMs: number;
   private cacheDirty = true;
@@ -93,6 +99,7 @@ export class ProjectScanner {
     this.enableGemini = options.enableGemini ?? true;
     this.enableOpenCode = options.enableOpenCode ?? true;
     this.enableKimi = options.enableKimi ?? true;
+    this.enableZCode = options.enableZCode ?? true;
     this.codexScanner = this.enableCodex
       ? (options.codexScanner ??
         new CodexSessionScanner({
@@ -114,6 +121,9 @@ export class ProjectScanner {
           sessionsDir: options.kimiSessionsDir ?? KIMI_SESSIONS_DIR,
         }))
       : null;
+    this.zcodeScanner = this.enableZCode
+      ? (options.zcodeScanner ?? new ZCodeSessionScanner())
+      : null;
     this.projectMetadataService = options.projectMetadataService ?? null;
     this.cacheTtlMs = Math.max(0, options.cacheTtlMs ?? 5000);
 
@@ -125,14 +135,19 @@ export class ProjectScanner {
         }
         if (
           event.type === "session-updated" &&
-          event.trigger === "opencode-db-reconcile"
+          (event.trigger === "opencode-db-reconcile" ||
+            event.trigger === "zcode-db-reconcile")
         ) {
-          // OpenCode stores all projects in one SQLite database. A reconcile
-          // event may be the first evidence of a project created by an
-          // external CLI, so invalidate both cache layers before title/event
-          // consumers resolve the encoded project ID.
+          // OpenCode and ZCode store all projects in one SQLite database. A
+          // reconcile event may be the first evidence of a project created by
+          // an external CLI, so invalidate both cache layers before
+          // title/event consumers resolve the encoded project ID.
           this.invalidateCache();
-          this.opencodeScanner?.invalidateCache();
+          if (event.trigger === "opencode-db-reconcile") {
+            this.opencodeScanner?.invalidateCache();
+          } else {
+            this.zcodeScanner?.invalidateCache();
+          }
         }
       });
     }
@@ -367,6 +382,8 @@ export class ProjectScanner {
       this.opencodeScanner?.invalidateCache();
     } else if (event.provider === "kimi") {
       this.kimiScanner?.invalidateCache();
+    } else if (event.provider === "zcode") {
+      this.zcodeScanner?.invalidateCache();
     }
   }
 
@@ -637,6 +654,41 @@ export class ProjectScanner {
       }
     }
 
+    // Merge ZCode projects if enabled
+    if (this.zcodeScanner) {
+      const zcodeProjects = await this.zcodeScanner.listProjects();
+      for (const zcodeProject of zcodeProjects) {
+        const projectPath = canonicalizeProjectPath(zcodeProject.path);
+        const existing = projects.find(
+          (project) => canonicalizeProjectPath(project.path) === projectPath,
+        );
+        if (existing) {
+          existing.hasZCodeSessions = true;
+          existing.sessionCount += zcodeProject.sessionCount;
+          if (
+            zcodeProject.lastActivity &&
+            (!existing.lastActivity ||
+              zcodeProject.lastActivity > existing.lastActivity)
+          ) {
+            existing.lastActivity = zcodeProject.lastActivity;
+          }
+          continue;
+        }
+        seenPaths.add(projectPath);
+        projects.push({
+          ...zcodeProject,
+          id: encodeProjectId(projectPath),
+          path: projectPath,
+          name: basename(projectPath),
+          hasCodexSessions: false,
+          hasGeminiSessions: false,
+          hasOpenCodeSessions: false,
+          hasKimiSessions: false,
+          hasZCodeSessions: true,
+        });
+      }
+    }
+
     // Merge manually added projects (from ProjectMetadataService)
     if (this.projectMetadataService) {
       const addedProjects = this.projectMetadataService.getAllProjects();
@@ -789,6 +841,15 @@ export class ProjectScanner {
           provider = "kimi";
         }
       }
+
+      // Check if ZCode sessions exist (only if no Codex/Gemini/OpenCode/Kimi sessions)
+      if (provider === "claude" && this.zcodeScanner) {
+        const zcodeSessions =
+          await this.zcodeScanner.getSessionsForProject(projectPath);
+        if (zcodeSessions.length > 0) {
+          provider = "zcode";
+        }
+      }
     }
 
     // Create a virtual project entry
@@ -803,6 +864,8 @@ export class ProjectScanner {
       sessionDir = OPENCODE_DB_PATH;
     } else if (provider === "kimi") {
       sessionDir = KIMI_SESSIONS_DIR;
+    } else if (provider === "zcode") {
+      sessionDir = ZCODE_DB_PATH;
     } else {
       sessionDir = this.getClaudeSessionDirForProject(projectPath);
     }
@@ -817,6 +880,7 @@ export class ProjectScanner {
       hasGeminiSessions: provider === "gemini",
       hasOpenCodeSessions: provider === "opencode",
       hasKimiSessions: provider === "kimi",
+      hasZCodeSessions: provider === "zcode",
       activeOwnedCount: 0,
       activeExternalCount: 0,
       lastActivity: null,

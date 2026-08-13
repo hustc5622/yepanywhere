@@ -94,6 +94,15 @@ const CASES: ErrorCase[] = [
     retryable: true,
   },
   {
+    name: "bridge-owned session reconnect failure",
+    input: new Error("Codex bridge execution failed", {
+      cause: new Error("Unexpected server response: 401"),
+    }),
+    code: "CODEX_BRIDGE_UNAVAILABLE",
+    category: "bridge",
+    retryable: true,
+  },
+  {
     name: "native sandbox error",
     input: {
       codexErrorInfo: "sandboxError",

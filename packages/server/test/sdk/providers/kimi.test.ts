@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
   ContentBlock,
+  PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
@@ -14,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACPClient } from "../../../src/sdk/providers/acp/client.js";
 import {
   KimiProvider,
+  parseKimiModelCatalog,
   resolveKimiImageSupport,
   toKimiAcpMode,
 } from "../../../src/sdk/providers/kimi.js";
@@ -36,14 +38,14 @@ function convertKimiUpdate(
 
 function streamKimiUpdates(
   provider: KimiProvider,
-  promptPromise: Promise<unknown>,
+  promptPromise: Promise<PromptResponse>,
   updateQueue: SessionNotification[],
   signal: AbortSignal,
 ): AsyncIterableIterator<SDKMessage> {
   return (
     provider as unknown as {
       yieldUpdates(
-        promptPromise: Promise<unknown>,
+        promptPromise: Promise<PromptResponse>,
         updateQueue: SessionNotification[],
         sessionId: string,
         signal: AbortSignal,
@@ -61,6 +63,92 @@ function kimiThoughtChunk(text: string): SessionNotification {
     },
   };
 }
+
+describe("KimiProvider model thinking metadata", () => {
+  it("projects each model's exact ACP thinking choices", () => {
+    const models = parseKimiModelCatalog(`
+[models."custom-kimi/kimi-k3"]
+model = "kimi-k3"
+capabilities = ["thinking", "always_thinking"]
+support_efforts = ["low", "high", "max"]
+default_effort = "high"
+
+[models."custom/reasoning-toggle"]
+model = "reasoning-toggle"
+capabilities = ["thinking"]
+support_efforts = ["low", "medium", "high"]
+
+[models."custom/boolean-thinking"]
+model = "boolean-model"
+capabilities = ["thinking"]
+
+[models."custom/overridden"]
+model = "overridden-model"
+capabilities = ["thinking"]
+support_efforts = ["low", "high", "max"]
+default_effort = "max"
+
+[models."custom/overridden".overrides]
+capabilities = ["thinking", "always_thinking"]
+support_efforts = ["low", "high"]
+default_effort = "high"
+
+[models."custom/plain"]
+model = "plain-model"
+capabilities = ["tool_use"]
+`);
+
+    expect(models).toEqual([
+      {
+        id: "custom-kimi/kimi-k3",
+        name: "kimi-k3",
+        supportedReasoningEfforts: [
+          { reasoningEffort: "low" },
+          { reasoningEffort: "high" },
+          { reasoningEffort: "max" },
+        ],
+        defaultReasoningEffort: "high",
+        supportsEffort: true,
+      },
+      {
+        id: "custom/reasoning-toggle",
+        name: "reasoning-toggle",
+        supportedReasoningEfforts: [
+          { reasoningEffort: "off" },
+          { reasoningEffort: "low" },
+          { reasoningEffort: "medium" },
+          { reasoningEffort: "high" },
+        ],
+        defaultReasoningEffort: "medium",
+        supportsEffort: true,
+      },
+      {
+        id: "custom/boolean-thinking",
+        name: "boolean-thinking",
+        supportedReasoningEfforts: [
+          { reasoningEffort: "off" },
+          { reasoningEffort: "on" },
+        ],
+        defaultReasoningEffort: "on",
+        supportsEffort: false,
+      },
+      {
+        id: "custom/overridden",
+        name: "overridden",
+        supportedReasoningEfforts: [
+          { reasoningEffort: "low" },
+          { reasoningEffort: "high" },
+        ],
+        defaultReasoningEffort: "high",
+        supportsEffort: true,
+      },
+      {
+        id: "custom/plain",
+        name: "plain",
+      },
+    ]);
+  });
+});
 
 describe("KimiProvider permission modes", () => {
   afterEach(() => {
@@ -118,6 +206,181 @@ describe("KimiProvider permission modes", () => {
     expect(setSessionMode).toHaveBeenLastCalledWith("session-1", "auto");
 
     session.abort();
+  });
+
+  it("applies and reports the selected thinking effort before startup", async () => {
+    vi.spyOn(ACPClient.prototype, "connect").mockResolvedValue();
+    vi.spyOn(ACPClient.prototype, "initialize").mockResolvedValue(
+      {} as Awaited<ReturnType<ACPClient["initialize"]>>,
+    );
+    vi.spyOn(ACPClient.prototype, "newSession").mockResolvedValue("session-1");
+    const callOrder: string[] = [];
+    const setSessionConfigOption = vi
+      .spyOn(ACPClient.prototype, "setSessionConfigOption")
+      .mockImplementation(async () => {
+        callOrder.push("thinking");
+        return {
+          configOptions: [
+            {
+              type: "select",
+              id: "thinking",
+              name: "Thinking",
+              category: "thought_level",
+              currentValue: "max",
+              options: [
+                { value: "low", name: "Thinking Low" },
+                { value: "high", name: "Thinking High" },
+                { value: "max", name: "Thinking Max" },
+              ],
+            },
+          ],
+        };
+      });
+    vi.spyOn(ACPClient.prototype, "setSessionMode").mockImplementation(
+      async () => {
+        callOrder.push("mode");
+      },
+    );
+    vi.spyOn(ACPClient.prototype, "close").mockImplementation(() => {});
+
+    const session = await new KimiProvider({
+      kimiPath: process.execPath,
+    }).startSession({
+      cwd: process.cwd(),
+      model: "custom-kimi/kimi-k3",
+      reasoningEffort: "max",
+    });
+
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "system",
+        subtype: "init",
+        session_id: "session-1",
+        model: "custom-kimi/kimi-k3",
+        reasoningEffort: "max",
+      },
+    });
+    expect(setSessionConfigOption).toHaveBeenCalledWith(
+      "session-1",
+      "thinking",
+      "max",
+    );
+    expect(callOrder).toEqual(["thinking", "mode"]);
+
+    session.abort();
+  });
+
+  it("fails visibly when Kimi clamps the requested thinking effort", async () => {
+    vi.spyOn(ACPClient.prototype, "connect").mockResolvedValue();
+    vi.spyOn(ACPClient.prototype, "initialize").mockResolvedValue(
+      {} as Awaited<ReturnType<ACPClient["initialize"]>>,
+    );
+    vi.spyOn(ACPClient.prototype, "newSession").mockResolvedValue("session-1");
+    vi.spyOn(ACPClient.prototype, "setSessionConfigOption").mockResolvedValue({
+      configOptions: [
+        {
+          type: "select",
+          id: "thinking",
+          name: "Thinking",
+          category: "thought_level",
+          currentValue: "high",
+          options: [{ value: "high", name: "Thinking High" }],
+        },
+      ],
+    });
+    vi.spyOn(ACPClient.prototype, "close").mockImplementation(() => {});
+
+    const session = await new KimiProvider({
+      kimiPath: process.execPath,
+    }).startSession({
+      cwd: process.cwd(),
+      reasoningEffort: "max",
+    });
+
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "error",
+        error: 'Kimi ACP did not apply thinking effort "max" (active: "high")',
+      },
+    });
+  });
+});
+
+describe("KimiProvider prompt completion", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockKimiSessionStart() {
+    vi.spyOn(ACPClient.prototype, "connect").mockResolvedValue();
+    vi.spyOn(ACPClient.prototype, "initialize").mockResolvedValue(
+      {} as Awaited<ReturnType<ACPClient["initialize"]>>,
+    );
+    vi.spyOn(ACPClient.prototype, "newSession").mockResolvedValue("session-1");
+    vi.spyOn(ACPClient.prototype, "setSessionMode").mockResolvedValue();
+    vi.spyOn(ACPClient.prototype, "close").mockImplementation(() => {});
+  }
+
+  it("surfaces an ACP refusal as an error before completing the turn", async () => {
+    mockKimiSessionStart();
+    vi.spyOn(ACPClient.prototype, "prompt").mockResolvedValue({
+      stopReason: "refusal",
+    });
+
+    const session = await new KimiProvider({
+      kimiPath: process.execPath,
+    }).startSession({
+      cwd: process.cwd(),
+      initialMessage: { text: "inspect the project" },
+    });
+
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: { type: "system", subtype: "init" },
+    });
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: { type: "user" },
+    });
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "error",
+        session_id: "session-1",
+        error:
+          "Kimi did not complete the turn: the response was refused or blocked.",
+        errorCode: "kimi.acp.refusal",
+        stopReason: "refusal",
+      },
+    });
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: { type: "result", session_id: "session-1" },
+    });
+
+    session.abort();
+  });
+
+  it("propagates an ACP prompt rejection through the visible error channel", async () => {
+    mockKimiSessionStart();
+    vi.spyOn(ACPClient.prototype, "prompt").mockRejectedValue(
+      new Error("ACP prompt transport failed"),
+    );
+
+    const session = await new KimiProvider({
+      kimiPath: process.execPath,
+    }).startSession({
+      cwd: process.cwd(),
+      initialMessage: { text: "inspect the project" },
+    });
+
+    await session.iterator.next();
+    await session.iterator.next();
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "error",
+        error: "ACP prompt transport failed",
+      },
+    });
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      done: true,
+    });
   });
 });
 
@@ -259,8 +522,8 @@ describe("KimiProvider ACP updates", () => {
     const updateQueue = [kimiThoughtChunk("User")];
     const abortController = new AbortController();
     let finishPrompt: (() => void) | undefined;
-    const promptPromise = new Promise<void>((resolve) => {
-      finishPrompt = resolve;
+    const promptPromise = new Promise<PromptResponse>((resolve) => {
+      finishPrompt = () => resolve({ stopReason: "end_turn" });
     });
     const iterator = streamKimiUpdates(
       provider,

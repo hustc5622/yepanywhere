@@ -489,6 +489,10 @@ export class Supervisor {
       supportedCommands,
       setModel,
       setPermissionMode: setProviderPermissionMode,
+      compact,
+      setReasoningEffort,
+      getGoal,
+      goalAction,
       getContextUsage,
       initializationResult,
     } = result;
@@ -516,6 +520,10 @@ export class Supervisor {
       supportedCommandsFn: supportedCommands,
       setModelFn: setModel,
       setPermissionModeFn: setProviderPermissionMode,
+      compactFn: compact,
+      setReasoningEffortFn: setReasoningEffort,
+      getGoalFn: getGoal,
+      goalActionFn: goalAction,
       getContextUsageFn: getContextUsage,
       initializationResultFn: initializationResult,
       permissionMode: effectiveMode,
@@ -649,6 +657,10 @@ export class Supervisor {
       supportedCommands,
       setModel,
       setPermissionMode: setProviderPermissionMode,
+      compact,
+      setReasoningEffort,
+      getGoal,
+      goalAction,
       getContextUsage,
       initializationResult,
     } = result;
@@ -675,6 +687,10 @@ export class Supervisor {
       supportedCommandsFn: supportedCommands,
       setModelFn: setModel,
       setPermissionModeFn: setProviderPermissionMode,
+      compactFn: compact,
+      setReasoningEffortFn: setReasoningEffort,
+      getGoalFn: getGoal,
+      goalActionFn: goalAction,
       getContextUsageFn: getContextUsage,
       initializationResultFn: initializationResult,
       permissionMode: effectiveMode,
@@ -693,8 +709,11 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message, messageUuid, message.tempId);
 
+    // OpenCode and ZCode both edit-fork around a native message boundary and
+    // preserve the source session, so the supervisor must re-key the process
+    // onto the fork's native id once the provider reports it.
     const isOpenCodeFork =
-      activeProvider.name === "opencode" &&
+      (activeProvider.name === "opencode" || activeProvider.name === "zcode") &&
       Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
     const isCodexFork =
       activeProvider.name === "codex" &&

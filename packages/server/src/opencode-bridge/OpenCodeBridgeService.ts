@@ -60,7 +60,10 @@ import {
   opencodeBridgeOwnership,
 } from "./session-state.js";
 import type {
+  ExternalOpenCodeCommand,
+  ExternalOpenCodeCommandAck,
   ExternalOpenCodeDecision,
+  ExternalOpenCodePromptCommand,
   OpenCodeApprovalProtocol,
   OpenCodeBridgeController,
   OpenCodeBridgeInputResponse,
@@ -76,6 +79,8 @@ const EXTERNAL_INSTANCE_STALE_MS = 90_000;
 const EXTERNAL_INSTANCE_FORGET_MS = 10 * 60_000;
 /** Upper bound for the plugin decision long-poll. */
 const EXTERNAL_DECISION_MAX_WAIT_MS = 25_000;
+/** Commands must be accepted by the in-process SDK transport promptly. */
+const EXTERNAL_COMMAND_CONFIRM_TIMEOUT_MS = 30_000;
 
 type PermissionMode =
   | "default"
@@ -157,6 +162,10 @@ interface SessionRecord {
    * the bridge-managed server.
    */
   instanceId?: string;
+  /** Survives sidecar restarts so an unknown owner fails closed briefly. */
+  externalOwner?: boolean;
+  /** Set only after restore while waiting for the plugin to re-announce. */
+  externalOwnerMissingSince?: number;
 }
 
 /**
@@ -179,6 +188,7 @@ interface PersistedSessionRecord {
   messageCount?: number;
   lastTurnStatus?: SessionLastTurnStatus;
   lastErrorMessage?: string;
+  externalOwner?: boolean;
 }
 
 function retryStatusEquals(
@@ -208,6 +218,8 @@ interface ExternalOpenCodeInstance {
   lastSeenAt: number;
   /** Unacknowledged decisions. Entries remain available across long-polls. */
   decisions: Map<string, ExternalOpenCodeDecision>;
+  /** Unacknowledged commands. Entries remain available across long-polls. */
+  commands: Map<string, ExternalOpenCodeCommand>;
   waiters: Array<() => void>;
 }
 
@@ -216,6 +228,15 @@ interface ExternalDecisionWaiter {
   resolve: () => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+interface ExternalCommandWaiter {
+  promise: Promise<ExternalOpenCodeCommandAck>;
+  resolve: (ack: ExternalOpenCodeCommandAck) => void;
+  timer: NodeJS.Timeout;
+  instanceId: string;
+  sessionId: string;
+  kind: ExternalOpenCodeCommand["kind"];
 }
 
 interface StartSessionResponse {
@@ -320,6 +341,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
   private pendingInputs = new Map<string, OpenCodeBridgePendingInput>();
   private externalInstances = new Map<string, ExternalOpenCodeInstance>();
   private externalDecisionWaiters = new Map<string, ExternalDecisionWaiter>();
+  private externalCommandWaiters = new Map<string, ExternalCommandWaiter>();
   private readonly eventNotifier = new BridgeEventNotifier();
   private inputResponses = new Map<string, Promise<boolean>>();
   private eventAbortController: AbortController | null = null;
@@ -441,6 +463,14 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       );
     }
     this.externalDecisionWaiters.clear();
+    for (const [commandId, waiter] of this.externalCommandWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({
+        ok: false,
+        error: `OpenCode bridge stopped before confirming ${commandId}`,
+      });
+    }
+    this.externalCommandWaiters.clear();
     this.stopOpenCodeEventStream();
     if (this.server) {
       const server = this.server;
@@ -883,6 +913,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         directory: directory ?? process.cwd(),
         lastSeenAt: Date.now(),
         decisions: new Map(),
+        commands: new Map(),
         waiters: [],
       };
       this.externalInstances.set(instanceId, instance);
@@ -891,6 +922,31 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     instance.lastSeenAt = Date.now();
     if (directory) instance.directory = directory;
     return instance;
+  }
+
+  private bindExternalSessions(
+    instanceId: string,
+    sessionIds: readonly string[],
+  ): void {
+    let changed = false;
+    for (const sessionId of sessionIds) {
+      const record = this.sessions.get(sessionId);
+      if (!record) continue;
+      if (
+        record.instanceId !== instanceId ||
+        record.externalOwner !== true ||
+        record.externalOwnerMissingSince !== undefined
+      ) {
+        record.instanceId = instanceId;
+        record.externalOwner = true;
+        record.externalOwnerMissingSince = undefined;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.eventNotifier.notify();
+      this.schedulePersist();
+    }
   }
 
   private enqueueExternalDecision(
@@ -912,6 +968,97 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
     if (!instance) return;
     instance.lastSeenAt = Date.now();
     instance.decisions.delete(decisionId);
+  }
+
+  private async submitExternalCommand(
+    sessionId: string,
+    command: ExternalOpenCodeCommand,
+  ): Promise<ExternalOpenCodeCommandAck> {
+    const record = this.sessions.get(sessionId);
+    if (!record?.externalOwner || !record.instanceId) {
+      return {
+        ok: false,
+        error: "The original OpenCode process is not connected to the bridge",
+      };
+    }
+    const instance = this.externalInstances.get(record.instanceId);
+    if (
+      !instance ||
+      Date.now() - instance.lastSeenAt >= EXTERNAL_INSTANCE_STALE_MS
+    ) {
+      return {
+        ok: false,
+        error: "The original OpenCode process stopped sending heartbeats",
+      };
+    }
+
+    const existing = this.externalCommandWaiters.get(command.id);
+    if (existing) return await existing.promise;
+
+    let resolveWaiter!: (ack: ExternalOpenCodeCommandAck) => void;
+    const promise = new Promise<ExternalOpenCodeCommandAck>((resolve) => {
+      resolveWaiter = resolve;
+    });
+    const timer = setTimeout(() => {
+      const waiter = this.externalCommandWaiters.get(command.id);
+      if (!waiter || waiter.timer !== timer) return;
+      this.externalCommandWaiters.delete(command.id);
+      this.externalInstances
+        .get(waiter.instanceId)
+        ?.commands.delete(command.id);
+      const error = `The original OpenCode process did not accept command ${command.id} in time`;
+      if (command.kind === "prompt") {
+        this.finishSessionLifecycle(sessionId, "failed", error);
+      }
+      resolveWaiter({ ok: false, error });
+    }, EXTERNAL_COMMAND_CONFIRM_TIMEOUT_MS);
+    timer.unref?.();
+    this.externalCommandWaiters.set(command.id, {
+      promise,
+      resolve: resolveWaiter,
+      timer,
+      instanceId: instance.id,
+      sessionId,
+      kind: command.kind,
+    });
+    instance.commands.set(command.id, command);
+    if (command.kind === "prompt") {
+      this.dispatchOpenCodeLifecycle(sessionId, {
+        type: "start-turn",
+        now: Date.now(),
+      });
+      this.updateSessionState(sessionId, {
+        activity: "in-turn",
+        active: true,
+        pendingInputType: undefined,
+        lastTurnStatus: undefined,
+        lastErrorMessage: undefined,
+        retryStatus: undefined,
+      });
+    }
+    const waiters = instance.waiters.splice(0);
+    for (const waiter of waiters) waiter();
+    return await promise;
+  }
+
+  private acknowledgeExternalCommand(
+    instanceId: string,
+    commandId: string,
+    ack: ExternalOpenCodeCommandAck,
+  ): void {
+    const waiter = this.externalCommandWaiters.get(commandId);
+    if (!waiter || waiter.instanceId !== instanceId) return;
+    this.externalCommandWaiters.delete(commandId);
+    clearTimeout(waiter.timer);
+    this.externalInstances.get(instanceId)?.commands.delete(commandId);
+    if (!ack.ok && waiter.kind === "prompt") {
+      this.finishSessionLifecycle(
+        waiter.sessionId,
+        "failed",
+        ack.error ?? "The original OpenCode process rejected the command",
+      );
+    }
+    waiter.resolve(ack);
   }
 
   private waitForExternalDecisionConfirmation(
@@ -987,30 +1134,44 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
    * Long-poll endpoint body: waits up to `waitMs` for queued decisions. The
    * poll doubles as the instance liveness heartbeat.
    */
-  private async collectExternalDecisions(
+  private async collectExternalActions(
     instanceId: string,
     waitMs: number,
-  ): Promise<ExternalOpenCodeDecision[]> {
-    const instance = this.touchExternalInstance(instanceId);
-    if (instance.decisions.size > 0) {
-      return [...instance.decisions.values()];
+    directory?: string,
+    sessionIds: readonly string[] = [],
+  ): Promise<{
+    decisions: ExternalOpenCodeDecision[];
+    commands: ExternalOpenCodeCommand[];
+  }> {
+    const instance = this.touchExternalInstance(instanceId, directory);
+    this.bindExternalSessions(instanceId, sessionIds);
+    const snapshot = () => ({
+      decisions: [...instance.decisions.values()],
+      commands: [...instance.commands.values()],
+    });
+    if (instance.decisions.size > 0 || instance.commands.size > 0) {
+      return snapshot();
     }
     const boundedWait = Math.min(
       Math.max(waitMs, 0),
       EXTERNAL_DECISION_MAX_WAIT_MS,
     );
-    if (boundedWait === 0) return [];
-    return await new Promise<ExternalOpenCodeDecision[]>((resolve) => {
+    if (boundedWait === 0) return snapshot();
+    return await new Promise<{
+      decisions: ExternalOpenCodeDecision[];
+      commands: ExternalOpenCodeCommand[];
+    }>((resolve) => {
       const timer = setTimeout(() => {
         const index = instance.waiters.indexOf(waiter);
         if (index >= 0) instance.waiters.splice(index, 1);
-        resolve([]);
+        resolve(snapshot());
       }, boundedWait);
       timer.unref?.();
       const waiter = () => {
         clearTimeout(timer);
         this.touchExternalInstance(instanceId);
-        resolve([...instance.decisions.values()]);
+        this.bindExternalSessions(instanceId, sessionIds);
+        resolve(snapshot());
       };
       instance.waiters.push(waiter);
     });
@@ -1023,6 +1184,18 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
    */
   private sweepExternalInstances(): void {
     const now = Date.now();
+    for (const record of this.sessions.values()) {
+      if (
+        record.externalOwner &&
+        !record.instanceId &&
+        record.externalOwnerMissingSince !== undefined &&
+        now - record.externalOwnerMissingSince >= EXTERNAL_INSTANCE_STALE_MS
+      ) {
+        record.externalOwner = undefined;
+        record.externalOwnerMissingSince = undefined;
+        this.schedulePersist();
+      }
+    }
     for (const [instanceId, instance] of this.externalInstances) {
       const age = now - instance.lastSeenAt;
       if (age < EXTERNAL_INSTANCE_STALE_MS) continue;
@@ -1052,6 +1225,25 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       }
       if (age > EXTERNAL_INSTANCE_FORGET_MS) {
         this.externalInstances.delete(instanceId);
+      }
+      if (age >= EXTERNAL_INSTANCE_STALE_MS) {
+        for (const record of this.sessions.values()) {
+          if (record.instanceId !== instanceId) continue;
+          record.instanceId = undefined;
+          record.externalOwner = undefined;
+          record.externalOwnerMissingSince = undefined;
+        }
+        for (const [commandId, waiter] of this.externalCommandWaiters) {
+          if (waiter.instanceId !== instanceId) continue;
+          this.externalCommandWaiters.delete(commandId);
+          clearTimeout(waiter.timer);
+          instance.commands.delete(commandId);
+          waiter.resolve({
+            ok: false,
+            error: "The original OpenCode process stopped sending heartbeats",
+          });
+        }
+        this.schedulePersist();
       }
     }
   }
@@ -1139,6 +1331,24 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       return;
     }
     if (
+      req.method === "POST" &&
+      parts[0] === "external" &&
+      parts[1] === "instances" &&
+      parts[2] &&
+      parts[3] === "commands" &&
+      parts[4] &&
+      parts[5] === "ack"
+    ) {
+      const body = asRecord(await readJsonBody(req));
+      const ok = body?.ok === true;
+      this.acknowledgeExternalCommand(parts[2], parts[4], {
+        ok,
+        ...(typeof body?.error === "string" ? { error: body.error } : {}),
+      });
+      writeJson(res, 200, { ok: true });
+      return;
+    }
+    if (
       req.method === "GET" &&
       url.pathname.startsWith("/external/instances/") &&
       url.pathname.endsWith("/decisions")
@@ -1151,11 +1361,19 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         return;
       }
       const waitMs = Number.parseInt(url.searchParams.get("waitMs") ?? "0", 10);
-      const decisions = await this.collectExternalDecisions(
+      const sessionIds = url.searchParams
+        .getAll("sessionId")
+        .filter((value) => value.length > 0);
+      const actions = await this.collectExternalActions(
         instanceId,
         Number.isFinite(waitMs) ? waitMs : 0,
+        url.searchParams.get("directory") ?? undefined,
+        sessionIds,
       );
-      writeJson(res, 200, { decisions });
+      writeJson(res, 200, {
+        decisions: actions.decisions,
+        ...(actions.commands.length > 0 ? { commands: actions.commands } : {}),
+      });
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
@@ -1205,6 +1423,47 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
 
     if (parts[0] === "sessions" && parts[1]) {
       const sessionId = parts[1];
+      if (req.method === "GET" && parts[2] === "execution") {
+        this.sweepExternalInstances();
+        const record = this.sessions.get(sessionId);
+        const instance = record?.instanceId
+          ? this.externalInstances.get(record.instanceId)
+          : undefined;
+        writeJson(res, 200, {
+          owner: record?.externalOwner
+            ? "external-plugin"
+            : record
+              ? "managed-server"
+              : "unknown",
+          available: Boolean(
+            record?.externalOwner &&
+              instance &&
+              Date.now() - instance.lastSeenAt < EXTERNAL_INSTANCE_STALE_MS,
+          ),
+        });
+        return;
+      }
+
+      if (req.method === "POST" && parts[2] === "external-command") {
+        if (
+          req.headers.origin !== undefined ||
+          readHeader(req, "x-yep-anywhere") !== "true"
+        ) {
+          writeJson(res, 403, { error: "External command control denied" });
+          return;
+        }
+        const command = parseExternalOpenCodeCommand(
+          await readJsonBody(req),
+          sessionId,
+        );
+        if (!command) {
+          writeJson(res, 400, { error: "Invalid external OpenCode command" });
+          return;
+        }
+        const ack = await this.submitExternalCommand(sessionId, command);
+        writeJson(res, ack.ok ? 200 : 409, ack);
+        return;
+      }
       if (req.method === "POST" && parts[2] === "terminal") {
         const body = asRecord(await readJsonBody(req));
         const kind = readString(body, "kind");
@@ -1540,6 +1799,8 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       let attributionChanged = false;
       if (origin?.instanceId && !existing.instanceId) {
         existing.instanceId = origin.instanceId;
+        existing.externalOwner = true;
+        existing.externalOwnerMissingSince = undefined;
         attributionChanged = true;
       }
       if (origin?.directory && existing.cwd !== origin.directory) {
@@ -1590,6 +1851,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       lastErrorMessage: effectiveState.lastErrorMessage,
       retryStatus: effectiveState.retryStatus,
       instanceId: origin?.instanceId,
+      externalOwner: Boolean(origin?.instanceId),
     });
     this.eventNotifier.notify();
     this.schedulePersist();
@@ -1954,6 +2216,7 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         messageCount: record.messageCount,
         lastTurnStatus: record.lastTurnStatus,
         lastErrorMessage: record.lastErrorMessage,
+        externalOwner: record.externalOwner,
       }));
     const payload = JSON.stringify({ version: 1, sessions: records });
     const writeSnapshot = async (): Promise<void> => {
@@ -2016,6 +2279,10 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
         active: false,
         lastTurnStatus: stored.lastTurnStatus,
         lastErrorMessage: stored.lastErrorMessage,
+        externalOwner: stored.externalOwner,
+        externalOwnerMissingSince: stored.externalOwner
+          ? Date.now()
+          : undefined,
       });
     }
   }
@@ -2044,6 +2311,9 @@ export class OpenCodeBridgeService implements OpenCodeBridgeController {
       active:
         record.active ??
         (record.activity === "in-turn" || record.activity === "waiting-input"),
+      executionOwner: record.externalOwner
+        ? "external-plugin"
+        : "managed-server",
     };
   }
 
@@ -3705,6 +3975,103 @@ function parseOpenCodeBridgeInputResponse(
     value === "deny"
     ? value
     : null;
+}
+
+function parseExternalOpenCodeCommand(
+  value: unknown,
+  expectedSessionId: string,
+): ExternalOpenCodeCommand | null {
+  const record = asRecord(value);
+  const id = readString(record, "id");
+  const kind = readString(record, "kind");
+  const sessionId = readString(record, "sessionId");
+  if (!id || sessionId !== expectedSessionId) return null;
+  if (kind === "abort") return { id, kind, sessionId };
+
+  const permission = parseExternalOpenCodePermission(record?.permission);
+  if (
+    Object.prototype.hasOwnProperty.call(record, "permission") &&
+    permission === undefined
+  ) {
+    return null;
+  }
+  if (kind === "permission") {
+    return permission ? { id, kind, sessionId, permission } : null;
+  }
+  if (kind !== "prompt") return null;
+
+  const payload = asRecord(record?.payload);
+  if (!Array.isArray(payload?.parts) || payload.parts.length === 0) return null;
+  const parts: ExternalOpenCodePromptCommand["payload"]["parts"] = [];
+  for (const rawPart of payload.parts) {
+    const part = asRecord(rawPart);
+    if (part?.type === "text" && typeof part.text === "string") {
+      parts.push({ type: "text", text: part.text });
+      continue;
+    }
+    if (
+      part?.type === "file" &&
+      typeof part.mime === "string" &&
+      typeof part.url === "string"
+    ) {
+      parts.push({
+        type: "file",
+        mime: part.mime,
+        url: part.url,
+        ...(typeof part.filename === "string"
+          ? { filename: part.filename }
+          : {}),
+      });
+      continue;
+    }
+    return null;
+  }
+  const rawModel = asRecord(payload.model);
+  const providerID = readString(rawModel, "providerID");
+  const modelID = readString(rawModel, "modelID");
+  return {
+    id,
+    kind,
+    sessionId,
+    payload: {
+      parts,
+      ...(providerID && modelID ? { model: { providerID, modelID } } : {}),
+      ...(typeof payload.variant === "string"
+        ? { variant: payload.variant }
+        : {}),
+    },
+    ...(permission ? { permission } : {}),
+  };
+}
+
+function parseExternalOpenCodePermission(value: unknown):
+  | Array<{
+      permission: string;
+      pattern: "*";
+      action: "allow" | "ask" | "deny";
+    }>
+  | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return undefined;
+  const result: Array<{
+    permission: string;
+    pattern: "*";
+    action: "allow" | "ask" | "deny";
+  }> = [];
+  for (const item of value) {
+    const rule = asRecord(item);
+    const permission = readString(rule, "permission");
+    const action = readString(rule, "action");
+    if (
+      !permission ||
+      rule?.pattern !== "*" ||
+      (action !== "allow" && action !== "ask" && action !== "deny")
+    ) {
+      return undefined;
+    }
+    result.push({ permission, pattern: "*", action });
+  }
+  return result;
 }
 
 function unwrapOpenCodeEvent(

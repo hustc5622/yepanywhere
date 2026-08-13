@@ -250,5 +250,130 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
     });
   });
 
+  // POST /api/processes/:processId/compact - Trigger a provider-native
+  // context compaction (currently ZCode session/compact).
+  routes.post("/:processId/compact", async (c) => {
+    const processId = c.req.param("processId");
+
+    const process = await runtimeController.getProcess(processId);
+    if (!process) {
+      return c.json({ error: "Process not found" }, 404);
+    }
+
+    try {
+      const { success } = await runtimeController.compact(processId);
+      if (!success) {
+        return c.json(
+          { error: "Context compaction not supported for this process" },
+          400,
+        );
+      }
+      return c.json({ success: true });
+    } catch (error) {
+      return c.json(
+        { error: error instanceof Error ? error.message : "Compact failed" },
+        502,
+      );
+    }
+  });
+
+  // POST /api/processes/:processId/reasoning-effort - Change the
+  // provider-native reasoning effort mid-session (currently ZCode
+  // session/setThoughtLevel). Body: { effort: string }
+  routes.post("/:processId/reasoning-effort", async (c) => {
+    const processId = c.req.param("processId");
+
+    const process = await runtimeController.getProcess(processId);
+    if (!process) {
+      return c.json({ error: "Process not found" }, 404);
+    }
+
+    const body = await c.req.json<{ effort?: string }>();
+    const effort = body.effort?.trim();
+    if (!effort) {
+      return c.json({ error: "effort is required" }, 400);
+    }
+
+    try {
+      const { success } = await runtimeController.setReasoningEffort(
+        processId,
+        effort,
+      );
+      if (!success) {
+        return c.json(
+          {
+            error: "Reasoning effort switching not supported for this process",
+          },
+          400,
+        );
+      }
+      return c.json({ success: true, effort });
+    } catch (error) {
+      return c.json(
+        {
+          error:
+            error instanceof Error ? error.message : "Effort switch failed",
+        },
+        400,
+      );
+    }
+  });
+
+  // POST /api/processes/:processId/goal - Goal lifecycle actions (currently
+  // ZCode session/goal). Body: { action: "show"|"set"|"replace"|"pause"|
+  // "resume"|"clear", objective?: string }. set/replace require objective.
+  routes.post("/:processId/goal", async (c) => {
+    const processId = c.req.param("processId");
+
+    const process = await runtimeController.getProcess(processId);
+    if (!process) {
+      return c.json({ error: "Process not found" }, 404);
+    }
+
+    const body = await c.req.json<{
+      action?: string;
+      objective?: string;
+    }>();
+    const action = body.action;
+    if (
+      action !== "show" &&
+      action !== "set" &&
+      action !== "replace" &&
+      action !== "pause" &&
+      action !== "resume" &&
+      action !== "clear"
+    ) {
+      return c.json({ error: "Invalid action" }, 400);
+    }
+    const objective = body.objective?.trim();
+    if ((action === "set" || action === "replace") && !objective) {
+      return c.json(
+        { error: "objective is required for set/replace actions" },
+        400,
+      );
+    }
+
+    try {
+      const result =
+        action === "show"
+          ? await runtimeController.getGoal(processId)
+          : await runtimeController.goalAction(processId, action, objective);
+      if (!result) {
+        return c.json(
+          { error: "Goal actions not supported for this process" },
+          400,
+        );
+      }
+      return c.json(result);
+    } catch (error) {
+      return c.json(
+        {
+          error: error instanceof Error ? error.message : "Goal action failed",
+        },
+        502,
+      );
+    }
+  });
+
   return routes;
 }

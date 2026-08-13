@@ -371,6 +371,43 @@ export class HttpRuntimeController implements RuntimeController {
     });
   }
 
+  async compact(processId: string): Promise<{ success: boolean }> {
+    return this.request(`/processes/${encode(processId)}/compact`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async setReasoningEffort(
+    processId: string,
+    effort: string,
+  ): Promise<{ success: boolean }> {
+    return this.request(`/processes/${encode(processId)}/reasoning-effort`, {
+      method: "POST",
+      body: JSON.stringify({ effort }),
+    });
+  }
+
+  async getGoal(
+    processId: string,
+  ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null> {
+    return this.request(`/processes/${encode(processId)}/goal`, {
+      method: "POST",
+      body: JSON.stringify({ action: "show" }),
+    });
+  }
+
+  async goalAction(
+    processId: string,
+    action: import("@yep-anywhere/shared").ProviderGoalAction,
+    objective?: string,
+  ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null> {
+    return this.request(`/processes/${encode(processId)}/goal`, {
+      method: "POST",
+      body: JSON.stringify({ action, objective }),
+    });
+  }
+
   async getContextUsage(
     sessionId: string,
   ): Promise<ContextStatusSdkPayload | null> {

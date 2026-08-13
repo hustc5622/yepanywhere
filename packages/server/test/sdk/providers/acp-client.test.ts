@@ -5,6 +5,7 @@ import { ACPClient } from "../../../src/sdk/providers/acp/client.js";
 type ACPConnectionStub = {
   loadSession: (params: unknown) => Promise<unknown>;
   resumeSession: (params: unknown) => Promise<unknown>;
+  setSessionConfigOption?: (params: unknown) => Promise<unknown>;
 };
 
 type ACPClientInternals = {
@@ -114,6 +115,27 @@ describe("ACPClient session lifecycle", () => {
       sessionId: "session-1",
       cwd: "/tmp/project",
       mcpServers: [],
+    });
+  });
+
+  it("sets a select-valued session config option", async () => {
+    const setSessionConfigOption = vi.fn().mockResolvedValue({
+      configOptions: [],
+    });
+    const client = new ACPClient();
+    setConnection(client, {
+      loadSession: vi.fn(),
+      resumeSession: vi.fn(),
+      setSessionConfigOption,
+    });
+
+    await expect(
+      client.setSessionConfigOption("session-1", "thinking", "max"),
+    ).resolves.toEqual({ configOptions: [] });
+    expect(setSessionConfigOption).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      configId: "thinking",
+      value: "max",
     });
   });
 });

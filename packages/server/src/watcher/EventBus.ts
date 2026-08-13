@@ -17,7 +17,13 @@ import type { SessionOwnership, SessionSummary } from "../supervisor/types.js";
 export type FileChangeType = "create" | "modify" | "delete";
 
 /** Provider that owns the watched directory */
-export type WatchProvider = "claude" | "gemini" | "codex" | "opencode" | "kimi";
+export type WatchProvider =
+  | "claude"
+  | "gemini"
+  | "codex"
+  | "opencode"
+  | "kimi"
+  | "zcode";
 
 export interface FileChangeEvent {
   type: "file-change";
@@ -188,7 +194,10 @@ export interface SessionUpdatedEvent {
   sessionId: string;
   projectId: UrlProjectId;
   /** Optional producer identity for diagnostics and downstream dedup logs. */
-  trigger?: "opencode-db-reconcile" | "codex-plan-updated";
+  trigger?:
+    | "opencode-db-reconcile"
+    | "codex-plan-updated"
+    | "zcode-db-reconcile";
   /** New title (derived from first user message) */
   title?: string | null;
   /** New message count */

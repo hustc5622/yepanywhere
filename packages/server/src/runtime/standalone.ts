@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { loadConfig } from "../config.js";
 import {
+  codexProvider,
   configureClaudeRemoteExecutors,
   configureClaudeSessionFileObserver,
   getProvider,
@@ -48,6 +49,12 @@ export async function runAgentRuntimeOnly(
   options: AgentRuntimeStandaloneOptions = {},
 ): Promise<AgentRuntimeStandaloneHandle> {
   const config = loadConfig();
+  codexProvider.configureBridgeExecution({
+    mode: config.codexBridgeMode,
+    controlUrl: config.codexBridgeControlUrl,
+    authToken: config.desktopAuthToken,
+    authTokenFile: config.runtimeTokenFile,
+  });
   opencodeProvider.configureBridgeControlUrl(config.opencodeBridgeControlUrl);
   const host = options.host ?? "127.0.0.1";
   if (!isLoopbackHost(host)) {

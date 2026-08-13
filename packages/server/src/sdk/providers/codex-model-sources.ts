@@ -49,6 +49,8 @@ export interface CodexModelSourceCatalogModel {
     reasoningEffort: string;
     description?: string;
   }>;
+  /** Provider-native compatibility mapping for legacy/client tier names. */
+  reasoningEffortAliases?: Readonly<Record<string, string>>;
 }
 
 export interface CodexModelSourceCatalog {
@@ -106,17 +108,19 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
     },
     requiredEnv: "DEEPSEEK_API_KEY",
     catalog: {
-      managedId: "deepseek-codex-2026-07-31",
+      // Bumped when the managed catalog contents change so the materialized
+      // `<dataDir>/codex-model-catalogs/<managedId>.json` file is refreshed.
+      managedId: "deepseek-codex-2026-08-13",
       provenance: {
         upstreamUrl:
           "https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex",
-        fetchedOn: "2026-07-31",
+        fetchedOn: "2026-08-13",
         minimalClientVersion: "0.144.0",
       },
-      // First-phase allowlist only exposes DeepSeek V4 Flash. `deepseek-v4-pro`
-      // is intentionally omitted until DeepSeek officially confirms Codex
-      // support and we re-run the tool-call/resume regression (see design §10.3).
-      allowedModelIds: ["deepseek-v4-flash"],
+      // DeepSeek V4 Flash + V4 Pro over the Codex Responses API. The official
+      // 2026-08-13 capability table advertises low/high/max; legacy medium and
+      // xhigh requests map to high (see design §10.3).
+      allowedModelIds: ["deepseek-v4-flash", "deepseek-v4-pro"],
       models: [
         {
           slug: "deepseek-v4-flash",
@@ -124,12 +128,35 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
           description: "DeepSeek V4 Flash via the Codex Responses API.",
           contextWindow: 1_000_000,
           maxOutputTokens: 384_000,
-          defaultReasoningEffort: "medium",
+          defaultReasoningEffort: "high",
           supportedReasoningEfforts: [
             { reasoningEffort: "low", description: "Fast responses" },
-            { reasoningEffort: "medium", description: "Balanced" },
             { reasoningEffort: "high", description: "Deeper reasoning" },
+            { reasoningEffort: "max", description: "Maximum reasoning" },
           ],
+          reasoningEffortAliases: {
+            minimal: "low",
+            medium: "high",
+            xhigh: "high",
+          },
+        },
+        {
+          slug: "deepseek-v4-pro",
+          displayName: "DeepSeek V4 Pro",
+          description: "DeepSeek V4 Pro via the Codex Responses API.",
+          contextWindow: 1_000_000,
+          maxOutputTokens: 384_000,
+          defaultReasoningEffort: "high",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low", description: "Fast responses" },
+            { reasoningEffort: "high", description: "Deeper reasoning" },
+            { reasoningEffort: "max", description: "Maximum reasoning" },
+          ],
+          reasoningEffortAliases: {
+            minimal: "low",
+            medium: "high",
+            xhigh: "high",
+          },
         },
       ],
     },
@@ -268,6 +295,60 @@ export class CodexModelSourceRegistry {
         "invalid_codex_model_for_provider",
       );
     }
+  }
+
+  /**
+   * Resolve the reasoning effort to send to a source's app-server.
+   *
+   * Built-in OpenAI accepts the full standard tier set (low/medium/high/xhigh/
+   * max/ultra). Custom sources (e.g. DeepSeek) only advertise a subset of
+   * tiers, so a GPT-only tier such as `xhigh` must never be passed through
+   * verbatim: higher tiers clamp to the source's highest supported level and
+   * unknown values fall back to the model's default. This keeps DeepSeek
+   * sessions on `low/medium/high` regardless of which client path set the
+   * effort (new session, resume, fork, queued message, or a stale `xhigh`
+   * read back from a previous turn).
+   */
+  resolveReasoningEffort(
+    sourceId: string,
+    modelSlug: string | undefined,
+    requested: string | undefined,
+  ): string | undefined {
+    if (!requested) return requested;
+    const trimmedRequested = requested.trim();
+    if (!trimmedRequested) return undefined;
+    const definition = CODEX_MODEL_SOURCE_DEFINITIONS[sourceId];
+    // Built-in source: no catalog constraints; keep the requested tier.
+    if (!definition?.catalog) return trimmedRequested;
+
+    const catalogModel =
+      definition.catalog.models.find((model) => model.slug === modelSlug) ??
+      definition.catalog.models[0];
+    if (!catalogModel) return trimmedRequested;
+
+    const supported = (catalogModel.supportedReasoningEfforts ?? []).map(
+      (option) => option.reasoningEffort,
+    );
+    if (supported.includes(trimmedRequested)) return trimmedRequested;
+
+    const aliased = catalogModel.reasoningEffortAliases?.[trimmedRequested];
+    if (aliased && supported.includes(aliased)) return aliased;
+
+    // Remaining higher GPT-only tiers clamp to the source's highest advertised
+    // tier. Provider-native aliases above take precedence (DeepSeek xhigh,
+    // for example, intentionally maps to high rather than max).
+    const HIGHER_TIERS = new Set(["xhigh", "max", "ultra"]);
+    if (HIGHER_TIERS.has(trimmedRequested)) {
+      const highest = supported[supported.length - 1];
+      if (highest) return highest;
+    }
+
+    // Unknown or unsupported values fall back to the model's advertised
+    // default, then its first supported tier.
+    const modelDefault = catalogModel.defaultReasoningEffort?.trim();
+    if (modelDefault && supported.includes(modelDefault)) return modelDefault;
+    if (supported.length > 0) return supported[0];
+    return undefined;
   }
 
   /**

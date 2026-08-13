@@ -29,6 +29,7 @@ import { normalizeSession } from "../sessions/normalization.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { resolveSessionSources } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
+import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { Project } from "../supervisor/types.js";
 import { buildProviderProjectCatalog } from "./provider-catalog.js";
 
@@ -45,7 +46,9 @@ export interface SearchDeps {
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   opencodeScanner?: OpenCodeSessionScanner;
   opencodeDbPath?: string;
+  zcodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiScanner?: KimiSessionScanner;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;

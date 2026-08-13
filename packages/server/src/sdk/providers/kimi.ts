@@ -27,6 +27,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type {
   ContentBlock,
+  PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
@@ -65,11 +66,23 @@ const KIMI_HOME = process.env.KIMI_CODE_HOME ?? join(homedir(), ".kimi-code");
 /** Kimi global config file. */
 const KIMI_CONFIG_PATH = join(KIMI_HOME, "config.toml");
 
+const KIMI_K3_REASONING_EFFORTS = ["low", "high", "max"] as const;
+
 /**
  * Fallback model list used when config.toml cannot be parsed. The real
  * catalog is derived from `[models."..."]` sections in config.toml.
  */
-const KIMI_FALLBACK_MODELS: ModelInfo[] = [{ id: "kimi-k3", name: "Kimi K3" }];
+const KIMI_FALLBACK_MODELS: ModelInfo[] = [
+  {
+    id: "kimi-k3",
+    name: "Kimi K3",
+    supportedReasoningEfforts: KIMI_K3_REASONING_EFFORTS.map(
+      (reasoningEffort) => ({ reasoningEffort }),
+    ),
+    defaultReasoningEffort: "high",
+    supportsEffort: true,
+  },
+];
 
 export type KimiAcpMode = "default" | "plan" | "auto" | "yolo";
 
@@ -124,36 +137,103 @@ interface KimiSessionState {
  */
 export type KimiImageSupport = "supported" | "unsupported" | "unknown";
 
-/**
- * Read the `capabilities` list of one `[models."<alias>"]` section.
- * Returns null when the section (or the key) is absent — Kimi then relies on
- * catalog detection rather than on a declaration.
- */
-function parseKimiModelCapabilities(
+/** Return the body of one model alias section or one of its sub-sections. */
+function getKimiModelSectionBody(
   configToml: string,
   modelId: string,
-): string[] | null {
+  subsection?: string,
+): string | null {
   const escaped = modelId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedSubsection = subsection?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const sectionRe = new RegExp(
-    `^\\s*\\[models\\.(?:"${escaped}"|${escaped})\\]\\s*$`,
+    `^\\s*\\[models\\.(?:"${escaped}"|${escaped})${escapedSubsection ? `\\.${escapedSubsection}` : ""}\\]\\s*$`,
     "m",
   );
   const start = sectionRe.exec(configToml);
   if (!start) return null;
 
   const rest = configToml.slice(start.index + start[0].length);
-  // Stop at the next top-level section so a sibling model's list is not read.
   const nextSection = /^\s*\[[^\]]+\]\s*$/m.exec(rest);
-  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+  return nextSection ? rest.slice(0, nextSection.index) : rest;
+}
 
-  const capsRe = /^\s*capabilities\s*=\s*\[([^\]]*)\]/m;
-  const caps = capsRe.exec(body);
-  if (!caps) return null;
+function parseKimiStringListField(
+  sectionBody: string | null,
+  field: string,
+): string[] | undefined {
+  if (sectionBody === null) return undefined;
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(
+    `^\\s*${escapedField}\\s*=\\s*\\[([^\\]]*)\\]`,
+    "m",
+  ).exec(sectionBody);
+  if (!match) return undefined;
 
-  return (caps[1] ?? "")
-    .split(",")
-    .map((entry) => entry.trim().replace(/^["']|["']$/g, ""))
-    .filter(Boolean);
+  return Array.from(
+    new Set(
+      (match[1] ?? "")
+        .split(",")
+        .map((entry) => entry.trim().replace(/^["']|["']$/g, ""))
+        .filter(Boolean),
+    ),
+  );
+}
+
+function parseKimiStringField(
+  sectionBody: string | null,
+  field: string,
+): string | undefined {
+  if (sectionBody === null) return undefined;
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*${escapedField}\\s*=\\s*["']([^"']+)["']`, "m").exec(
+    sectionBody,
+  )?.[1];
+}
+
+/**
+ * Read the `capabilities` list of one `[models."<alias>"]` section.
+ * Returns null when the section (or the key) is absent — Kimi then relies on
+ * catalog detection rather than on a declaration. Model override values take
+ * precedence, matching Kimi's `effectiveModelAlias` behavior.
+ */
+function parseKimiModelCapabilities(
+  configToml: string,
+  modelId: string,
+): string[] | null {
+  const base = getKimiModelSectionBody(configToml, modelId);
+  const overrides = getKimiModelSectionBody(configToml, modelId, "overrides");
+  return (
+    parseKimiStringListField(overrides, "capabilities") ??
+    parseKimiStringListField(base, "capabilities") ??
+    null
+  );
+}
+
+/** Read `support_efforts = [...]` from one Kimi model alias section. */
+function parseKimiModelSupportEfforts(
+  configToml: string,
+  modelId: string,
+): string[] {
+  const base = getKimiModelSectionBody(configToml, modelId);
+  const overrides = getKimiModelSectionBody(configToml, modelId, "overrides");
+  return (
+    parseKimiStringListField(overrides, "support_efforts") ??
+    parseKimiStringListField(base, "support_efforts") ??
+    []
+  );
+}
+
+/** Read `default_effort = "..."` from one Kimi model alias section. */
+function parseKimiModelDefaultEffort(
+  configToml: string,
+  modelId: string,
+): string | undefined {
+  const base = getKimiModelSectionBody(configToml, modelId);
+  const overrides = getKimiModelSectionBody(configToml, modelId, "overrides");
+  return (
+    parseKimiStringField(overrides, "default_effort") ??
+    parseKimiStringField(base, "default_effort")
+  );
 }
 
 /** Read `default_model = "..."` from config.toml. */
@@ -208,6 +288,83 @@ function parseKimiModelWireId(
 
   const modelRe = /^\s*model\s*=\s*["']([^"']+)["']/m;
   return modelRe.exec(body)?.[1] ?? null;
+}
+
+const KIMI_TOGGLEABLE_THINKING_MODELS = new Set([
+  "kimi-for-coding",
+  "kimi-code",
+]);
+
+/**
+ * Build the model metadata consumed by Yep's new-session reasoning picker.
+ * This mirrors Kimi's ACP model catalog: effort-capable models expose their
+ * ordered `support_efforts`; toggleable models expose on/off; and an explicit
+ * `always_thinking` capability removes the unsupported off option.
+ */
+function getKimiReasoningMetadata(
+  configToml: string,
+  modelId: string,
+): Pick<
+  ModelInfo,
+  "supportedReasoningEfforts" | "defaultReasoningEffort" | "supportsEffort"
+> {
+  const capabilities = parseKimiModelCapabilities(configToml, modelId) ?? [];
+  const wireModelId = parseKimiModelWireId(configToml, modelId) ?? modelId;
+  const lowerWireModelId = wireModelId.toLowerCase();
+  const thinkingSupported =
+    capabilities.includes("thinking") ||
+    capabilities.includes("always_thinking") ||
+    lowerWireModelId.includes("thinking") ||
+    lowerWireModelId.includes("reason") ||
+    KIMI_TOGGLEABLE_THINKING_MODELS.has(wireModelId);
+  if (!thinkingSupported) return {};
+
+  const alwaysThinking = capabilities.includes("always_thinking");
+  const efforts = parseKimiModelSupportEfforts(configToml, modelId);
+  if (efforts.length === 0) {
+    return {
+      supportedReasoningEfforts: (alwaysThinking ? ["on"] : ["off", "on"]).map(
+        (reasoningEffort) => ({ reasoningEffort }),
+      ),
+      defaultReasoningEffort: "on",
+      supportsEffort: false,
+    };
+  }
+
+  const configuredDefault = parseKimiModelDefaultEffort(configToml, modelId);
+  const defaultReasoningEffort =
+    configuredDefault && efforts.includes(configuredDefault)
+      ? configuredDefault
+      : efforts[Math.floor(efforts.length / 2)];
+  const selectableEfforts = alwaysThinking ? efforts : ["off", ...efforts];
+  return {
+    supportedReasoningEfforts: selectableEfforts.map((reasoningEffort) => ({
+      reasoningEffort,
+    })),
+    defaultReasoningEffort,
+    supportsEffort: true,
+  };
+}
+
+/** Parse the configured Kimi model aliases and their ACP thinking controls. */
+export function parseKimiModelCatalog(configToml: string): ModelInfo[] {
+  const ids = new Set<string>();
+  const sectionRe = /^\s*\[models\.(?:"([^"]+)"|([^\]\s.]+))\]/gm;
+  let match: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: standard regex loop
+  while ((match = sectionRe.exec(configToml)) !== null) {
+    const id = match[1] ?? match[2];
+    if (id) ids.add(id);
+  }
+
+  return Array.from(ids, (id) => {
+    const tail = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+    return {
+      id,
+      name: tail,
+      ...getKimiReasoningMetadata(configToml, id),
+    };
+  });
 }
 
 /**
@@ -599,8 +756,9 @@ export class KimiProvider implements AgentProvider {
     "auto",
     "bypassPermissions",
   ] as const;
-  // Kimi exposes thinking effort levels via config; a simple toggle is not
-  // the right surface, so keep it off for the initial integration.
+  // Kimi exposes exact model-specific effort values through ACP configOptions,
+  // not Claude's generic off/auto/on toggle. NewSessionForm renders those
+  // values from each model's supportedReasoningEfforts metadata instead.
   readonly supportsThinkingToggle = false;
   readonly supportsSlashCommands = false;
 
@@ -663,33 +821,11 @@ export class KimiProvider implements AgentProvider {
     }
     try {
       const config = readFileSync(KIMI_CONFIG_PATH, "utf-8");
-      const models = this.parseModelIds(config);
+      const models = parseKimiModelCatalog(config);
       return models.length > 0 ? models : KIMI_FALLBACK_MODELS;
     } catch {
       return KIMI_FALLBACK_MODELS;
     }
-  }
-
-  /**
-   * Extract model alias ids from `[models."<id>"]` TOML section headers.
-   * Lightweight, dependency-free — sufficient for the picker.
-   */
-  private parseModelIds(configToml: string): ModelInfo[] {
-    const ids = new Set<string>();
-    const sectionRe = /^\s*\[models\.(?:"([^"]+)"|([^\]\s.]+))\]/gm;
-    let match: RegExpExecArray | null;
-    // biome-ignore lint/suspicious/noAssignInExpressions: standard regex loop
-    while ((match = sectionRe.exec(configToml)) !== null) {
-      const id = match[1] ?? match[2];
-      if (id) ids.add(id);
-    }
-    return Array.from(ids, (id) => ({ id, name: this.modelDisplayName(id) }));
-  }
-
-  /** Human-friendly label for a model alias id like "custom-kimi/kimi-k3". */
-  private modelDisplayName(id: string): string {
-    const tail = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
-    return tail;
   }
 
   /** Read config.toml, or null when it is missing/unreadable. */
@@ -789,9 +925,7 @@ export class KimiProvider implements AgentProvider {
 
     // `kimi acp` runs the ACP server; the global `-m` flag (accepted before
     // the subcommand) selects the model alias for this invocation. Thinking
-    // effort is not exposed as a CLI flag, so it falls back to the model's
-    // config.toml default; per-session effort override would require ACP
-    // configOptions support in ACPClient.
+    // effort is applied after session creation through ACP configOptions.
     const args: string[] = [];
     if (options.model) {
       args.push("-m", options.model);
@@ -877,6 +1011,35 @@ export class KimiProvider implements AgentProvider {
       }
 
       sessionState.sessionId = sessionId;
+      let resolvedReasoningEffort: string | undefined;
+      const requestedReasoningEffort = options.reasoningEffort?.trim();
+      if (requestedReasoningEffort) {
+        const configResult = await client.setSessionConfigOption(
+          sessionId,
+          "thinking",
+          requestedReasoningEffort,
+        );
+        const thinkingOption = configResult.configOptions.find(
+          (option) =>
+            option.id === "thinking" || option.category === "thought_level",
+        );
+        if (!thinkingOption || thinkingOption.type !== "select") {
+          throw new Error(
+            "Kimi ACP did not return a thinking configuration option",
+          );
+        }
+        if (thinkingOption.currentValue !== requestedReasoningEffort) {
+          throw new Error(
+            `Kimi ACP did not apply thinking effort "${requestedReasoningEffort}" (active: "${thinkingOption.currentValue}")`,
+          );
+        }
+        resolvedReasoningEffort = thinkingOption.currentValue;
+        this.log.debug(
+          { sessionId, reasoningEffort: resolvedReasoningEffort },
+          "Kimi ACP thinking effort applied",
+        );
+      }
+
       const kimiMode = toKimiAcpMode(sessionState.permissionMode);
       await client.setSessionMode(sessionId, kimiMode);
       this.log.debug(
@@ -889,6 +1052,8 @@ export class KimiProvider implements AgentProvider {
         subtype: "init",
         session_id: sessionId,
         cwd: options.cwd,
+        model: options.model,
+        reasoningEffort: resolvedReasoningEffort,
       } as SDKMessage;
 
       const messageGen = queue.generator();
@@ -971,8 +1136,28 @@ export class KimiProvider implements AgentProvider {
         )) {
           yield msg;
         }
+        // `yieldUpdates` drains streaming notifications, while the ACP prompt
+        // response carries the authoritative terminal reason. Kimi maps both
+        // provider safety filtering and prompt-hook blocking to `refusal`.
+        // Surface that terminal state instead of reporting a clean turn after
+        // the model's short fallback text. Awaiting here also rethrows prompt
+        // transport failures that the drain loop only observes for liveness.
+        const promptResult = await promptPromise;
+        if (promptResult.stopReason === "refusal") {
+          yield {
+            type: "error",
+            session_id: sessionId,
+            error:
+              "Kimi did not complete the turn: the response was refused or blocked.",
+            errorCode: "kimi.acp.refusal",
+            stopReason: promptResult.stopReason,
+          } as SDKMessage;
+        }
         this.log.debug(
-          { durationMs: Date.now() - promptStart },
+          {
+            durationMs: Date.now() - promptStart,
+            stopReason: promptResult.stopReason,
+          },
           "Kimi prompt complete",
         );
 
@@ -1128,20 +1313,20 @@ export class KimiProvider implements AgentProvider {
    * Async generator yielding session updates as SDKMessages.
    */
   private async *yieldUpdates(
-    promptPromise: Promise<unknown>,
+    promptPromise: Promise<PromptResponse>,
     updateQueue: SessionNotification[],
     sessionId: string,
     signal: AbortSignal,
   ): AsyncIterableIterator<SDKMessage> {
     let promptDone = false;
-    promptPromise
-      .then(() => {
+    void promptPromise.then(
+      () => {
         promptDone = true;
-      })
-      .catch((err) => {
+      },
+      () => {
         promptDone = true;
-        this.log.error({ err }, "Kimi prompt error");
-      });
+      },
+    );
 
     let assistantTextBuffer = "";
     let assistantMessageId: string | null = null;

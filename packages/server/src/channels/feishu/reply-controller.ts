@@ -129,6 +129,12 @@ const FEISHU_CODEX_ERROR_COPY = {
     publicMessage: "附件无法读取或处理。",
     nextAction: "请重新上传，或改用受支持的格式和大小。",
   },
+  CODEX_BRIDGE_UNAVAILABLE: {
+    category: "bridge",
+    retryable: true,
+    publicMessage: "Yep 无法重新连接到当前 Session 所属的 Codex 进程。",
+    nextAction: "请检查 Codex bridge 后重试。",
+  },
   CODEX_PROCESS_EXITED: {
     category: "process_exit",
     retryable: true,

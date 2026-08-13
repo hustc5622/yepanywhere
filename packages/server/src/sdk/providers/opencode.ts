@@ -43,6 +43,10 @@ import {
   resolveOpenCodeGatewayConfig,
   resolveOpenCodeOpenAICompatibleBaseURL,
 } from "../../opencode-bridge/gateway-config.js";
+import type {
+  ExternalOpenCodeCommand,
+  ExternalOpenCodePromptCommand,
+} from "../../opencode-bridge/types.js";
 import {
   OPENCODE_ACTIVE_RECONCILE_INTERVAL_MS,
   OPENCODE_IDLE_QUIET_WINDOW_MS,
@@ -207,6 +211,13 @@ interface OpenCodeRuntimeRef {
   sharedServer?: boolean;
   alive?: boolean;
   sessionId?: string;
+  externalBridge?: boolean;
+  permissionMode?: PermissionMode;
+}
+
+interface ExternalOpenCodeExecutionTarget {
+  controlUrl: string;
+  sessionId: string;
 }
 
 interface OpenCodeConfigProvidersResponse {
@@ -215,9 +226,15 @@ interface OpenCodeConfigProvidersResponse {
     models?: Record<
       string,
       {
+        name?: string;
         api?: {
           id?: string;
           npm?: string;
+        };
+        limit?: {
+          context?: number;
+          input?: number;
+          output?: number;
         };
         variants?: Record<string, unknown>;
       }
@@ -391,6 +408,44 @@ function isInvalidLegacyAdaptiveVariant(
   const thinking =
     isRecord(config) && isRecord(config.thinking) ? config.thinking : undefined;
   return thinking?.type === "enabled";
+}
+
+function normalizeExternalOpenCodeVariant(
+  value: string | undefined,
+): string | undefined {
+  const variant = value?.trim();
+  return variant && variant !== "default" ? variant : undefined;
+}
+
+function createExternalOpenCodeCommandId(
+  kind: ExternalOpenCodeCommand["kind"],
+  clientMessageId?: string,
+): string {
+  return [
+    "yep",
+    kind,
+    clientMessageId?.trim() || Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10),
+  ].join(":");
+}
+
+async function waitForExternalOpenCodePoll(
+  signal: AbortSignal,
+  delayMs: number,
+): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    timer.unref?.();
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -615,22 +670,41 @@ export class OpenCodeProvider implements AgentProvider {
 
   /**
    * Get available OpenCode models.
-   * Queries the OpenCode CLI for available models.
+   * Prefers the connected catalog of the bridge-managed runtime, then falls
+   * back to the OpenCode CLI when the shared server is unavailable.
    */
   async getAvailableModels(): Promise<ModelInfo[]> {
-    const opencodePath = await this.findOpenCodePath();
-    if (!opencodePath) {
-      return [];
-    }
-
-    // Yep and terminal clients must see the same catalog resolved by the
-    // user's OpenCode configuration. A synthetic default entry deliberately
-    // omits a model override so new Yep sessions inherit config.model exactly
-    // like `opencode` / `opencode attach`.
+    // A synthetic default entry deliberately omits a model override so new
+    // Yep sessions inherit config.model exactly like `opencode` / `opencode
+    // attach`.
     const configuredDefault: ModelInfo = {
       id: "default",
       name: "Default (OpenCode config)",
     };
+
+    // The CLI and the resident 4521 server can inherit different environment
+    // credentials (for example separate LaunchAgents). Only the resident
+    // server's connected providers can execute a Yep prompt, so its catalog is
+    // authoritative whenever 4520 is available. Using the CLI catalog here
+    // previously exposed disconnected entries such as
+    // deepseek/deepseek-v4-pro even though only
+    // ohmyrouter/deepseek-v4-pro was executable by 4521.
+    const sharedBaseUrl = await this.resolveBridgeManagedServer();
+    if (sharedBaseUrl) {
+      const runtimeModels = await this.loadOpenCodeRuntimeModels(sharedBaseUrl);
+      if (runtimeModels !== null) {
+        const enriched =
+          await this.enrichWithGatewayContextWindows(runtimeModels);
+        return [
+          configuredDefault,
+          ...enriched.filter((model) => model.id !== "default"),
+        ];
+      }
+    }
+
+    const opencodePath = await this.findOpenCodePath();
+    if (!opencodePath) return [];
+
     const cliModels = await this.loadOpenCodeCliModels(opencodePath);
     if (cliModels.length > 0) {
       const enriched = await this.enrichWithGatewayContextWindows(cliModels);
@@ -754,52 +828,110 @@ export class OpenCodeProvider implements AgentProvider {
       const metadata = extractFirstJsonObject(
         lines.slice(index + 1, nextHeaderIndex).join("\n"),
       );
-      const api = isRecord(metadata?.api) ? metadata.api : undefined;
-      const protocol = requestProtocolForOpenCodeNpm(api?.npm);
-      const variantConfigs = isRecord(metadata?.variants)
-        ? metadata.variants
-        : undefined;
-      const variants = variantConfigs
-        ? Object.keys(variantConfigs)
-            .filter(
-              (reasoningEffort) =>
-                !isInvalidLegacyAdaptiveVariant(
-                  header.modelId,
-                  { api, variants: variantConfigs },
-                  reasoningEffort,
-                ),
-            )
-            .map((reasoningEffort) => ({
-              reasoningEffort,
-            }))
-        : [];
-      const byProtocol: ReasoningEffortsByProtocol = {};
-      if (protocol && variants.length > 0) byProtocol[protocol] = variants;
-
-      const limits = extractOpenCodeModelLimits(metadata);
-
-      models.push({
-        id: header.catalogId,
-        name: this.formatModelName(header.catalogId),
-        ...(limits.contextWindow !== undefined
-          ? { contextWindow: limits.contextWindow }
-          : {}),
-        ...(limits.maxOutputTokens !== undefined
-          ? { maxOutputTokens: limits.maxOutputTokens }
-          : {}),
-        ...(variants.length > 0
-          ? {
-              supportedReasoningEfforts: variants,
-              ...(protocol
-                ? { supportedReasoningEffortsByProtocol: byProtocol }
-                : {}),
-            }
-          : {}),
-      });
+      models.push(
+        this.buildOpenCodeModelInfo(header.catalogId, header.modelId, metadata),
+      );
       index = nextHeaderIndex - 1;
     }
 
     return models;
+  }
+
+  private buildOpenCodeModelInfo(
+    catalogId: string,
+    modelId: string,
+    metadata: Record<string, unknown> | null,
+  ): ModelInfo {
+    const api = isRecord(metadata?.api) ? metadata.api : undefined;
+    const protocol = requestProtocolForOpenCodeNpm(api?.npm);
+    const variantConfigs = isRecord(metadata?.variants)
+      ? metadata.variants
+      : undefined;
+    const variants = variantConfigs
+      ? Object.keys(variantConfigs)
+          .filter(
+            (reasoningEffort) =>
+              !isInvalidLegacyAdaptiveVariant(
+                modelId,
+                { api, variants: variantConfigs },
+                reasoningEffort,
+              ),
+          )
+          .map((reasoningEffort) => ({ reasoningEffort }))
+      : [];
+    const byProtocol: ReasoningEffortsByProtocol = {};
+    if (protocol && variants.length > 0) byProtocol[protocol] = variants;
+
+    const limits = extractOpenCodeModelLimits(metadata);
+    return {
+      id: catalogId,
+      name: this.formatModelName(catalogId),
+      ...(limits.contextWindow !== undefined
+        ? { contextWindow: limits.contextWindow }
+        : {}),
+      ...(limits.maxOutputTokens !== undefined
+        ? { maxOutputTokens: limits.maxOutputTokens }
+        : {}),
+      ...(variants.length > 0
+        ? {
+            supportedReasoningEfforts: variants,
+            ...(protocol
+              ? { supportedReasoningEffortsByProtocol: byProtocol }
+              : {}),
+          }
+        : {}),
+    };
+  }
+
+  /** Read only the providers that this concrete OpenCode server can execute. */
+  private async loadOpenCodeRuntimeModels(
+    baseUrl: string,
+    cwd?: string,
+  ): Promise<ModelInfo[] | null> {
+    try {
+      const response = await fetch(
+        this.openCodeUrl(baseUrl, "/config/providers", cwd),
+        {
+          headers: {
+            Accept: "application/json",
+            ...this.openCodeDirectoryHeaders(cwd),
+          },
+          signal: AbortSignal.timeout(5_000),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`OpenCode returned ${response.status}`);
+      }
+
+      const payload =
+        (await response.json()) as OpenCodeConfigProvidersResponse;
+      if (!Array.isArray(payload.providers)) {
+        throw new Error("OpenCode response omitted providers");
+      }
+
+      const models: ModelInfo[] = [];
+      for (const provider of payload.providers) {
+        const providerId = provider.id?.trim();
+        if (!providerId || !provider.models) continue;
+        for (const [modelId, rawModel] of Object.entries(provider.models)) {
+          if (!modelId) continue;
+          models.push(
+            this.buildOpenCodeModelInfo(
+              `${providerId}/${modelId}`,
+              modelId,
+              isRecord(rawModel) ? rawModel : null,
+            ),
+          );
+        }
+      }
+      return models;
+    } catch (error) {
+      getLogger().debug(
+        { baseUrl, cwd, error },
+        "Failed to read connected OpenCode runtime models",
+      );
+      return null;
+    }
   }
 
   /**
@@ -835,7 +967,9 @@ export class OpenCodeProvider implements AgentProvider {
         return pidRef.value;
       },
       isProcessAlive: () => {
-        if (runtimeRef.sharedServer) return runtimeRef.alive === true;
+        if (runtimeRef.sharedServer || runtimeRef.externalBridge) {
+          return runtimeRef.alive === true;
+        }
         const child = processRef.value;
         return child
           ? child.exitCode === null && child.signalCode === null
@@ -848,6 +982,25 @@ export class OpenCodeProvider implements AgentProvider {
       // /config would persist a Yep-only override into the user's project and
       // change what attached `of` clients see.
       setPermissionMode: async (mode: PermissionMode) => {
+        if (runtimeRef.externalBridge && runtimeRef.sessionId) {
+          runtimeRef.permissionMode = mode;
+          const ack = await this.sendExternalOpenCodeCommand(
+            runtimeRef.sessionId,
+            {
+              id: createExternalOpenCodeCommandId("permission"),
+              kind: "permission",
+              sessionId: runtimeRef.sessionId,
+              permission: this.buildOpenCodeSessionPermission(mode),
+            },
+          );
+          if (!ack.ok) {
+            throw new Error(
+              ack.error ??
+                "The original OpenCode process rejected the permission update",
+            );
+          }
+          return;
+        }
         const { baseUrl, cwd, sessionId: nativeSessionId } = runtimeRef;
         if (!baseUrl || !cwd || !nativeSessionId) {
           throw new Error(
@@ -869,19 +1022,29 @@ export class OpenCodeProvider implements AgentProvider {
         : {
             supportedModels: () => this.getAvailableModels(),
             setModel: async (model?: string) => {
-              if (!runtimeRef.baseUrl) return;
-              const normalizedModel =
+              let normalizedModel =
                 await this.resolveOpenCodeModelOption(model);
+              if (runtimeRef.baseUrl) {
+                normalizedModel = await this.resolveOpenCodeRuntimeModel(
+                  runtimeRef.baseUrl,
+                  runtimeRef.cwd,
+                  normalizedModel,
+                );
+              }
               // Model selection is carried by each prompt. Updating /config
               // would persist a Yep-only override into the project and also
               // change the model observed by attached `of` clients.
               runtimeRef.currentModel = normalizedModel;
-              runtimeRef.currentVariant = await this.resolveOpenCodeVariant(
-                runtimeRef.baseUrl,
-                runtimeRef.cwd,
-                normalizedModel,
-                options.reasoningEffort,
-              );
+              runtimeRef.currentVariant = runtimeRef.externalBridge
+                ? normalizeExternalOpenCodeVariant(options.reasoningEffort)
+                : runtimeRef.baseUrl
+                  ? await this.resolveOpenCodeVariant(
+                      runtimeRef.baseUrl,
+                      runtimeRef.cwd,
+                      normalizedModel,
+                      options.reasoningEffort,
+                    )
+                  : undefined;
             },
           }),
     };
@@ -901,6 +1064,37 @@ export class OpenCodeProvider implements AgentProvider {
     runtimeRef: OpenCodeRuntimeRef,
   ): AsyncIterableIterator<SDKMessage> {
     const log = getLogger();
+    if (options.resumeSessionId && !options.resumeSessionAt) {
+      try {
+        const externalTarget = await this.resolveExternalOpenCodeExecution(
+          options.resumeSessionId,
+        );
+        if (externalTarget) {
+          yield* this.runExternalOpenCodeSession(
+            cwd,
+            queue,
+            signal,
+            options,
+            runtimeRef,
+            externalTarget,
+          );
+          return;
+        }
+      } catch (error) {
+        yield {
+          type: "error",
+          session_id: options.resumeSessionId,
+          error: `Cannot safely resume the original OpenCode process: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        } as SDKMessage;
+        yield {
+          type: "result",
+          session_id: options.resumeSessionId,
+        } as SDKMessage;
+        return;
+      }
+    }
     // Explicit legacy managed configs require an isolated env overlay. Normal
     // Yep sessions use the 4520-managed server and the user's global config,
     // exactly like `of`.
@@ -1026,11 +1220,14 @@ export class OpenCodeProvider implements AgentProvider {
       "OpenCode server ready",
     );
 
+    const runtimeSelectedModel = options.opencodeConfig
+      ? selectedModel
+      : await this.resolveOpenCodeRuntimeModel(baseUrl, cwd, selectedModel);
     const configApplied = await this.configureServer(
       baseUrl,
       options,
       cwd,
-      selectedModel,
+      runtimeSelectedModel,
     );
     if (!configApplied.ok) {
       serverProcess?.kill("SIGTERM");
@@ -3393,6 +3590,48 @@ export class OpenCodeProvider implements AgentProvider {
     return normalized;
   }
 
+  /**
+   * Reconcile a saved/picker model with the providers connected to the server
+   * that will execute the turn. A provider-qualified model is preserved when
+   * it is available. If its provider is disconnected and exactly one
+   * connected provider exposes the same bare model ID, use that executable
+   * model instead. This keeps old sessions recoverable after provider/env
+   * changes without guessing when multiple routes are possible.
+   */
+  private async resolveOpenCodeRuntimeModel(
+    baseUrl: string,
+    cwd: string | undefined,
+    model: string | null,
+  ): Promise<string | null> {
+    if (!model) return null;
+    const runtimeModels = await this.loadOpenCodeRuntimeModels(baseUrl, cwd);
+    if (!runtimeModels) return model;
+
+    const modelIds = runtimeModels.map((item) => item.id);
+    if (modelIds.includes(model)) return model;
+
+    const parsed = this.parseOpenCodeModelOption(model);
+    if (
+      parsed &&
+      modelIds.some((id) => id.startsWith(`${parsed.providerID}/`))
+    ) {
+      return model;
+    }
+
+    const bareModelId = parsed?.modelID ?? model;
+    const suffixMatches = modelIds.filter(
+      (id) => id.slice(id.indexOf("/") + 1) === bareModelId,
+    );
+    if (suffixMatches.length !== 1) return model;
+
+    const resolvedModel = suffixMatches[0] ?? model;
+    getLogger().info(
+      { requestedModel: model, resolvedModel, cwd },
+      "Remapped unavailable OpenCode model to its sole connected provider",
+    );
+    return resolvedModel;
+  }
+
   private parseOpenCodeModelOption(
     model: string | null | undefined,
   ): OpenCodeModelRef | null {
@@ -3633,6 +3872,7 @@ export class OpenCodeProvider implements AgentProvider {
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
+            "x-yep-anywhere": "true",
           },
           body: JSON.stringify({ kind, error }),
           signal: AbortSignal.timeout(3_000),
@@ -3789,6 +4029,267 @@ export class OpenCodeProvider implements AgentProvider {
       // do not inherit managed-server identity.
       YEP_MANAGED_OPENCODE_SERVER_PORT: String(managedServerPort),
     };
+  }
+
+  private async resolveExternalOpenCodeExecution(
+    sessionId: string,
+  ): Promise<ExternalOpenCodeExecutionTarget | null> {
+    const controlUrl = this.bridgeControlUrl;
+    if (!controlUrl) return null;
+    const response = await fetch(
+      `${controlUrl}/sessions/${encodeURIComponent(sessionId)}/execution`,
+      {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(3_000),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(
+        `4520 bridge ownership probe returned ${response.status}`,
+      );
+    }
+    const payload = (await response.json()) as {
+      owner?: unknown;
+      available?: unknown;
+    };
+    if (payload.owner !== "external-plugin") return null;
+    if (payload.available !== true) {
+      throw new Error(
+        "the direct OpenCode TUI that owns this session is not currently reachable",
+      );
+    }
+    return { controlUrl, sessionId };
+  }
+
+  private async *runExternalOpenCodeSession(
+    cwd: string,
+    queue: MessageQueue,
+    signal: AbortSignal,
+    options: StartSessionOptions,
+    runtimeRef: OpenCodeRuntimeRef,
+    target: ExternalOpenCodeExecutionTarget,
+  ): AsyncIterableIterator<SDKMessage> {
+    const sessionId = target.sessionId;
+    if (options.opencodeConfig) {
+      throw new Error(
+        "A direct OpenCode TUI session cannot be resumed with a Yep-only managed configuration",
+      );
+    }
+    const selectedModel = await this.resolveOpenCodeModelOption(options.model);
+    runtimeRef.externalBridge = true;
+    runtimeRef.sharedServer = false;
+    runtimeRef.alive = true;
+    runtimeRef.cwd = cwd;
+    runtimeRef.sessionId = sessionId;
+    runtimeRef.currentModel = selectedModel;
+    runtimeRef.currentVariant = normalizeExternalOpenCodeVariant(
+      options.reasoningEffort,
+    );
+    runtimeRef.permissionMode = options.permissionMode;
+
+    const abortHandler = () => {
+      runtimeRef.alive = false;
+      void this.sendExternalOpenCodeCommand(sessionId, {
+        id: createExternalOpenCodeCommandId("abort"),
+        kind: "abort",
+        sessionId,
+      });
+    };
+    signal.addEventListener("abort", abortHandler, { once: true });
+
+    getLogger().info(
+      {
+        event: "opencode_external_process_selected",
+        sessionId,
+        bridgeControlUrl: target.controlUrl,
+      },
+      "Routing OpenCode turns through the SDK client embedded in the original process",
+    );
+
+    yield {
+      type: "system",
+      subtype: "init",
+      session_id: sessionId,
+      cwd,
+      model: selectedModel ?? undefined,
+      reasoningEffort: options.reasoningEffort ?? "default",
+    } as SDKMessage;
+
+    try {
+      const messageGen = queue.generator();
+      let isFirstNewMessage = true;
+      let permissionSynchronized = false;
+      for await (const message of messageGen) {
+        if (signal.aborted) break;
+        let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
+        if (isFirstNewMessage && options.globalInstructions) {
+          const prefix = `[Global context]\n${options.globalInstructions}\n\n---\n\n`;
+          internalPrompt = `${prefix}${internalPrompt}`;
+          publicPrompt = `${prefix}${publicPrompt}`;
+        }
+        isFirstNewMessage = false;
+
+        yield {
+          type: "user",
+          uuid: message.uuid,
+          session_id: sessionId,
+          message: { role: "user", content: publicPrompt },
+        } as SDKMessage;
+
+        const payload = this.buildOpenCodeMessagePayload(
+          internalPrompt,
+          runtimeRef.currentModel,
+          runtimeRef.currentVariant,
+          this.buildOpenCodeFileParts(message),
+        );
+        const command: ExternalOpenCodePromptCommand = {
+          id: createExternalOpenCodeCommandId("prompt", message.uuid),
+          kind: "prompt",
+          sessionId,
+          payload,
+          ...(permissionSynchronized
+            ? {}
+            : {
+                permission: this.buildOpenCodeSessionPermission(
+                  runtimeRef.permissionMode,
+                ),
+              }),
+        };
+        const ack = await this.sendExternalOpenCodeCommand(
+          sessionId,
+          command,
+          signal,
+        );
+        if (!ack.ok) {
+          throw new Error(
+            ack.error ?? "The original OpenCode process rejected the prompt",
+          );
+        }
+        permissionSynchronized = true;
+        await this.waitForExternalOpenCodeTurn(sessionId, signal);
+        yield {
+          type: "result",
+          session_id: sessionId,
+          clientUserMessageId: message.uuid,
+        } as SDKMessage;
+      }
+    } catch (error) {
+      if (!signal.aborted) {
+        yield {
+          type: "error",
+          session_id: sessionId,
+          error: `Original OpenCode process failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        } as SDKMessage;
+        yield { type: "result", session_id: sessionId } as SDKMessage;
+      }
+    } finally {
+      signal.removeEventListener("abort", abortHandler);
+      runtimeRef.alive = false;
+      runtimeRef.externalBridge = undefined;
+      runtimeRef.sharedServer = undefined;
+      runtimeRef.cwd = undefined;
+      runtimeRef.sessionId = undefined;
+    }
+  }
+
+  private async sendExternalOpenCodeCommand(
+    sessionId: string,
+    command: ExternalOpenCodeCommand,
+    signal?: AbortSignal,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const controlUrl = this.bridgeControlUrl;
+    if (!controlUrl) {
+      return { ok: false, error: "The 4520 OpenCode bridge is not configured" };
+    }
+    try {
+      const response = await fetch(
+        `${controlUrl}/sessions/${encodeURIComponent(sessionId)}/external-command`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "x-yep-anywhere": "true",
+          },
+          body: JSON.stringify(command),
+          signal,
+        },
+      );
+      const body = (await response.json().catch(() => null)) as {
+        ok?: unknown;
+        error?: unknown;
+      } | null;
+      return {
+        ok: response.ok && body?.ok === true,
+        ...(typeof body?.error === "string"
+          ? { error: body.error }
+          : response.ok
+            ? {}
+            : { error: `4520 bridge returned ${response.status}` }),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "The 4520 OpenCode bridge request failed",
+      };
+    }
+  }
+
+  private async waitForExternalOpenCodeTurn(
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const controlUrl = this.bridgeControlUrl;
+    if (!controlUrl)
+      throw new Error("The 4520 OpenCode bridge is not configured");
+    const deadline = Date.now() + this.timeout;
+    while (!signal.aborted && Date.now() < deadline) {
+      const response = await fetch(
+        `${controlUrl}/sessions/${encodeURIComponent(sessionId)}/view`,
+        {
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(3_000),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(
+          `4520 bridge lifecycle probe returned ${response.status}`,
+        );
+      }
+      const body = (await response.json()) as {
+        sessionView?: {
+          active?: unknown;
+          session?: {
+            lastTurnStatus?: unknown;
+            lastErrorMessage?: unknown;
+          };
+        } | null;
+      };
+      const view = body.sessionView;
+      const turnStatus = view?.session?.lastTurnStatus;
+      if (
+        view?.active === false &&
+        (turnStatus === "completed" ||
+          turnStatus === "failed" ||
+          turnStatus === "interrupted")
+      ) {
+        if (turnStatus === "completed") return;
+        const detail = view?.session?.lastErrorMessage;
+        throw new Error(
+          typeof detail === "string"
+            ? detail
+            : `OpenCode turn ended as ${turnStatus}`,
+        );
+      }
+      await waitForExternalOpenCodePoll(signal, 250);
+    }
+    if (signal.aborted) throw new Error("OpenCode turn was aborted");
+    throw new Error("Timed out waiting for the original OpenCode turn");
   }
 
   private formatOpenCodeError(error: unknown): string | null {

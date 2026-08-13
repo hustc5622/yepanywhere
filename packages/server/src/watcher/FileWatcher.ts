@@ -301,6 +301,9 @@ export class FileWatcher {
         return this.parseOpenCodeFileType(relativePath);
       case "kimi":
         return this.parseKimiFileType(relativePath);
+      case "zcode":
+        // P2: parse ZCode SQLite session file types.
+        return "other";
     }
   }
 

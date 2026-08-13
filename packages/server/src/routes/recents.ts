@@ -21,6 +21,7 @@ import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { findSessionSummaryAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
+import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { Project } from "../supervisor/types.js";
 
 export interface RecentsDeps {
@@ -38,7 +39,9 @@ export interface RecentsDeps {
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   opencodeScanner?: OpenCodeSessionScanner;
   opencodeDbPath?: string;
+  zcodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiScanner?: KimiSessionScanner;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;

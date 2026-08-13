@@ -1,0 +1,6 @@
+{
+  "name": "yep-bridge",
+  "version": "0.1.0",
+  "description": "Yep Anywhere bridge: forwards ZCode hook events (session lifecycle and permission requests) to the Yep server so external `zcode tui` sessions can be supervised and approved remotely.",
+  "hooks": "./hooks/hooks.json"
+}

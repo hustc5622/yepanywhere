@@ -2744,6 +2744,105 @@ describe("OpenCodeBridgeService", () => {
     }
   });
 
+  it("delivers prompt commands to the external instance and waits for its ACK", async () => {
+    const bridgePort = await getFreePort();
+    const bridge = new OpenCodeBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: bridgePort,
+      serverUrl: "http://127.0.0.1:3400",
+      opencodeServerUrl: "http://127.0.0.1:1",
+    });
+    await bridge.start();
+    const base = `http://127.0.0.1:${bridgePort}`;
+    try {
+      await fetch(`${base}/external/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instanceId: "inst-command",
+          directory: "/tmp/project-command",
+          event: {
+            type: "session.created",
+            properties: {
+              info: {
+                id: "ses_command",
+                title: "Command session",
+                time: { created: Date.now(), updated: Date.now() },
+              },
+            },
+          },
+        }),
+      });
+      await expect(
+        fetch(`${base}/sessions/ses_command/execution`).then((response) =>
+          response.json(),
+        ),
+      ).resolves.toMatchObject({
+        owner: "external-plugin",
+        available: true,
+      });
+
+      const commandResponse = fetch(
+        `${base}/sessions/ses_command/external-command`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-yep-anywhere": "true",
+          },
+          body: JSON.stringify({
+            id: "cmd-prompt-1",
+            kind: "prompt",
+            sessionId: "ses_command",
+            payload: {
+              parts: [{ type: "text", text: "continue in the TUI" }],
+              model: { providerID: "openai", modelID: "gpt-test" },
+            },
+            permission: [{ permission: "*", pattern: "*", action: "ask" }],
+          }),
+        },
+      );
+
+      const poll = await fetch(
+        `${base}/external/instances/inst-command/decisions?waitMs=1000&directory=${encodeURIComponent(
+          "/tmp/project-command",
+        )}&sessionId=ses_command`,
+      );
+      await expect(poll.json()).resolves.toMatchObject({
+        decisions: [],
+        commands: [
+          {
+            id: "cmd-prompt-1",
+            kind: "prompt",
+            sessionId: "ses_command",
+            payload: {
+              parts: [{ type: "text", text: "continue in the TUI" }],
+            },
+          },
+        ],
+      });
+      expect(bridge.isSessionActive("ses_command")).toBe(true);
+
+      const ack = await fetch(
+        `${base}/external/instances/inst-command/commands/cmd-prompt-1/ack`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ok: true }),
+        },
+      );
+      expect(ack.status).toBe(200);
+      await expect(commandResponse).resolves.toMatchObject({ status: 200 });
+      const emptyPoll = await fetch(
+        `${base}/external/instances/inst-command/decisions?waitMs=0`,
+      );
+      await expect(emptyPoll.json()).resolves.toEqual({ decisions: [] });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it("shuts down while an external instance continuously long-polls", async () => {
     const bridgePort = await getFreePort();
     const bridge = new OpenCodeBridgeService({

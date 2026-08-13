@@ -5,6 +5,7 @@ export type CodexErrorCategory =
   | "quota"
   | "permission"
   | "attachment"
+  | "bridge"
   | "process_exit"
   | "sandbox"
   | "unknown";
@@ -16,6 +17,7 @@ export type CanonicalCodexErrorCode =
   | "CODEX_QUOTA_EXCEEDED"
   | "CODEX_PERMISSION_DENIED"
   | "CODEX_ATTACHMENT_FAILED"
+  | "CODEX_BRIDGE_UNAVAILABLE"
   | "CODEX_PROCESS_EXITED"
   | "CODEX_SANDBOX_DENIED"
   | "CODEX_UNKNOWN";
@@ -84,6 +86,13 @@ const ERROR_DESCRIPTORS: Record<CodexErrorCategory, ErrorDescriptor> = {
     retryable: false,
     publicMessage: "The attachment could not be read or processed.",
     nextAction: "Upload it again or use a supported format and size.",
+  },
+  bridge: {
+    code: "CODEX_BRIDGE_UNAVAILABLE",
+    retryable: true,
+    publicMessage:
+      "Yep could not reconnect to the Codex process that owns this session.",
+    nextAction: "Check the Codex bridge, then try again.",
   },
   process_exit: {
     code: "CODEX_PROCESS_EXITED",
@@ -165,6 +174,16 @@ function classifySignals(signals: ErrorSignals): CodexErrorCategory {
   const text = signals.text.join("\n");
   if (/\bno rollout found(?: for thread id)?\b/i.test(text)) {
     return "no_rollout";
+  }
+  // Transport ownership is more specific than any nested HTTP/auth/process
+  // signal. A 401/close from 4510 is a bridge reconnect failure, not an
+  // instruction for the user to sign back into their Codex account.
+  if (
+    /\bCodex bridge\b|\bbridge-owned Codex\b|\boriginal Codex process\b/i.test(
+      text,
+    )
+  ) {
+    return "bridge";
   }
 
   if (signals.codexErrorInfo.has("unauthorized")) return "auth";

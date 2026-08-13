@@ -38,6 +38,26 @@ describe("provider permission modes", () => {
     expect(normalizeProviderPermissionMode("opencode", "plan")).toBe("default");
   });
 
+  it("excludes ZCode auto, whose native mode denies every tool call", () => {
+    // ZCode CLI 0.16.1 denies all tools in native `auto`
+    // (`mode.auto.unimplemented`), and its own picker offers only
+    // build/edit/plan/yolo.
+    expect(getProviderPermissionModes("zcode")).toEqual([
+      "default",
+      "acceptEdits",
+      "plan",
+      "bypassPermissions",
+    ]);
+    expect(getProviderPermissionModes("zcode")).not.toContain("auto");
+    // DEFAULT_PERMISSION_MODE is "auto", so an unset mode must not resolve to it.
+    expect(normalizeProviderPermissionMode("zcode", undefined)).toBe("default");
+    expect(normalizeProviderPermissionMode("zcode", "auto")).toBe("default");
+    expect(normalizeProviderPermissionMode("zcode", "plan")).toBe("plan");
+    expect(normalizeProviderPermissionMode("zcode", "acceptEdits")).toBe(
+      "acceptEdits",
+    );
+  });
+
   it("collapses Gemini auto and plan aliases to its default policy", () => {
     expect(getProviderPermissionModes("gemini-acp")).toEqual([
       "default",

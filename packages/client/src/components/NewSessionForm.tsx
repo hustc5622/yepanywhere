@@ -9,6 +9,7 @@ import {
   type OpenCodeRequestProtocol,
   type OpenCodeSessionConfig,
   type ProviderInfo,
+  type ProviderMcpServerStatus,
   type ProviderName,
   getNewSessionProviderDefaults,
   getOpenCodeModelDefaultLimits,
@@ -90,6 +91,7 @@ const NEW_SESSION_PROVIDER_ACCENTS = {
   "gemini-acp": "var(--provider-gemini)",
   opencode: "var(--provider-opencode)",
   kimi: "var(--provider-kimi)",
+  zcode: "var(--provider-zcode)",
 } satisfies Record<ProviderName, string>;
 
 export function getNewSessionProviderAccent(
@@ -384,6 +386,9 @@ export function NewSessionForm({
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<
     string | null
   >(null);
+  const [kimiReasoningEffort, setKimiReasoningEffort] = useState<string | null>(
+    null,
+  );
   const [opencodeReasoningEffort, setOpenCodeReasoningEffort] = useState<
     string | null
   >(null);
@@ -410,6 +415,40 @@ export function NewSessionForm({
   >({});
   const [interimTranscript, setInterimTranscript] = useState("");
   const [isSavingDefaults, setIsSavingDefaults] = useState(false);
+
+  // ZCode MCP server status snapshot. Loaded once per provider selection
+  // (no polling) purely as informational context for new sessions.
+  const [zcodeMcpServers, setZcodeMcpServers] = useState<Record<
+    string,
+    ProviderMcpServerStatus
+  > | null>(null);
+  const [zcodeMcpLoading, setZcodeMcpLoading] = useState(false);
+  const [zcodeMcpError, setZcodeMcpError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedProvider !== "zcode") return;
+    let cancelled = false;
+    setZcodeMcpServers(null);
+    setZcodeMcpError(null);
+    setZcodeMcpLoading(true);
+    api
+      .listZCodeMcpServers(projectId)
+      .then((response) => {
+        if (cancelled) return;
+        setZcodeMcpServers(response.servers);
+        setZcodeMcpLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setZcodeMcpError(
+          error instanceof Error ? error.message : String(error),
+        );
+        setZcodeMcpLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProvider, projectId]);
 
   // Object URLs keep their backing Blob alive for the lifetime of the page.
   // Removal and successful submission revoke them below; this cleanup covers
@@ -483,6 +522,15 @@ export function NewSessionForm({
     standard: t("newSessionCodexMcpStandardDescription"),
     full: t("newSessionCodexMcpFullDescription"),
   };
+  // ZCode mcp/list lifecycle statuses (real CLI 0.16.1 enum).
+  const zcodeMcpStatusLabels: Record<string, string> = {
+    connecting: t("newSessionZcodeMcpStatusConnecting"),
+    connected: t("newSessionZcodeMcpStatusConnected"),
+    disabled: t("newSessionZcodeMcpStatusDisabled"),
+    disconnected: t("newSessionZcodeMcpStatusDisconnected"),
+    failed: t("newSessionZcodeMcpStatusFailed"),
+    untrusted: t("newSessionZcodeMcpStatusUntrusted"),
+  };
   // Get models and capabilities for the currently selected provider.
   const availableModels: ModelInfo[] = selectedProviderInfo?.models ?? [];
   const selectedModelInfo = availableModels.find(
@@ -504,6 +552,13 @@ export function NewSessionForm({
         : [],
     [selectedModelInfo, selectedProvider],
   );
+  const kimiReasoningEfforts = useMemo(
+    () =>
+      selectedProvider === "kimi"
+        ? getModelReasoningEfforts(selectedModelInfo)
+        : [],
+    [selectedModelInfo, selectedProvider],
+  );
   const effectiveCodexReasoningEffort =
     selectedProvider === "codex"
       ? resolveModelReasoningEffort(
@@ -516,6 +571,10 @@ export function NewSessionForm({
               : undefined),
         )
       : undefined;
+  const effectiveKimiReasoningEffort =
+    selectedProvider === "kimi" && kimiReasoningEfforts.length > 0
+      ? resolveModelReasoningEffort(selectedModelInfo, kimiReasoningEffort)
+      : undefined;
   const effectiveOpenCodeReasoningEffort =
     selectedProvider === "opencode" && opencodeReasoningEffort
       ? opencodeReasoningEffort
@@ -523,7 +582,9 @@ export function NewSessionForm({
   const selectedReasoningEffort =
     selectedProvider === "codex" && thinkingMode === "on"
       ? effectiveCodexReasoningEffort
-      : effectiveOpenCodeReasoningEffort;
+      : selectedProvider === "kimi"
+        ? effectiveKimiReasoningEffort
+        : effectiveOpenCodeReasoningEffort;
   const getEffortLabel = useCallback(
     (effort: string): string => {
       return isEffortLevel(effort) ? t(EFFORT_LABEL_KEYS[effort]) : effort;
@@ -640,6 +701,30 @@ export function NewSessionForm({
     );
   }, []);
   const showOpenCodeReasoningSelector = selectedProvider === "opencode";
+  const kimiReasoningOptions = useMemo((): FilterOption<string>[] => {
+    return kimiReasoningEfforts.map((option) => {
+      const effort = option.reasoningEffort;
+      const label =
+        effort === "off"
+          ? t("newSessionThinkingOff")
+          : t("newSessionThinkingOn", {
+              level:
+                effort === "on"
+                  ? t("processInfoDefaultModel")
+                  : getEffortLabel(effort),
+            });
+      return {
+        value: effort,
+        label,
+        description: option.description,
+      };
+    });
+  }, [getEffortLabel, kimiReasoningEfforts, t]);
+  const handleKimiReasoningSelect = useCallback((selected: string[]) => {
+    setKimiReasoningEffort(selected[0] ?? null);
+  }, []);
+  const showKimiReasoningSelector =
+    selectedProvider === "kimi" && kimiReasoningOptions.length > 0;
 
   // Default to true for backwards compatibility with providers that don't set these flags
   const permissionModes = getProviderPermissionModes(
@@ -706,6 +791,11 @@ export function NewSessionForm({
         providerName === "codex"
           ? (savedDefaults?.codexMcpMode ?? "standard")
           : "standard",
+      );
+      setKimiReasoningEffort(
+        providerName === "kimi"
+          ? (savedDefaults?.reasoningEffort ?? null)
+          : null,
       );
 
       if (providerName === "opencode") {
@@ -1618,7 +1708,9 @@ export function NewSessionForm({
     ? (savedProviderDefaults?.thinking ?? undefined) === thinkingForRequest
     : true;
   const reasoningEffortDefaultsMatch =
-    selectedProvider === "codex" || selectedProvider === "opencode"
+    selectedProvider === "codex" ||
+    selectedProvider === "opencode" ||
+    selectedProvider === "kimi"
       ? (savedProviderDefaults?.reasoningEffort ?? undefined) ===
         selectedReasoningEffort
       : true;
@@ -1906,6 +1998,31 @@ export function NewSessionForm({
           </div>
         </div>
       )}
+      {showKimiReasoningSelector && compact && (
+        <div className="new-session-effort-control">
+          <span className="new-session-effort-label">
+            {t("newSessionThinkingControlTitle")}
+          </span>
+          <div className="new-session-effort-options">
+            {kimiReasoningOptions.map((option) => {
+              const selected = effectiveKimiReasoningEffort === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`new-session-effort-option ${selected ? "selected" : ""}`}
+                  onClick={() => setKimiReasoningEffort(option.value)}
+                  disabled={isStarting}
+                  aria-pressed={selected}
+                  aria-label={`${t("newSessionThinkingControlTitle")}: ${option.label}`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {pendingFiles.length > 0 && (
         <div className="pending-files-list">
           {pendingFiles.map((pf) => {
@@ -2018,7 +2135,9 @@ export function NewSessionForm({
 
       {/* Model / Thinking Selection */}
       {selectedProvider &&
-        (modelOptions.length > 0 || supportsThinkingToggle) && (
+        (modelOptions.length > 0 ||
+          supportsThinkingToggle ||
+          showKimiReasoningSelector) && (
           <div className="new-session-model-section">
             <div className="new-session-model-controls">
               {modelOptions.length > 0 && (
@@ -2094,6 +2213,25 @@ export function NewSessionForm({
                     accentColor={selectedProviderAccent}
                     multiSelect={false}
                     placeholder={t("newSessionEffortTitle")}
+                    align="right"
+                  />
+                </div>
+              )}
+              {showKimiReasoningSelector && (
+                <div className="new-session-config-field">
+                  <h3>{t("newSessionThinkingControlTitle")}</h3>
+                  <FilterDropdown
+                    label={t("newSessionThinkingControlTitle")}
+                    options={kimiReasoningOptions}
+                    selected={
+                      effectiveKimiReasoningEffort
+                        ? [effectiveKimiReasoningEffort]
+                        : []
+                    }
+                    onChange={handleKimiReasoningSelect}
+                    accentColor={selectedProviderAccent}
+                    multiSelect={false}
+                    placeholder={t("newSessionThinkingControlTitle")}
                     align="right"
                   />
                 </div>
@@ -2314,6 +2452,44 @@ export function NewSessionForm({
                 </button>
               ))}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Read-only ZCode MCP server status snapshot, informational only */}
+      {selectedProvider === "zcode" && (
+        <div className="new-session-mcp-section">
+          <h3>{t("newSessionZcodeMcpTitle")}</h3>
+          {zcodeMcpLoading ? (
+            <p className="settings-hint">{t("newSessionZcodeMcpLoading")}</p>
+          ) : zcodeMcpError ? (
+            <p className="new-session-limit-error" role="alert">
+              {t("newSessionZcodeMcpError", { message: zcodeMcpError })}
+            </p>
+          ) : !zcodeMcpServers || Object.keys(zcodeMcpServers).length === 0 ? (
+            <p className="settings-hint">{t("newSessionZcodeMcpNone")}</p>
+          ) : (
+            <ul className="new-session-mcp-list">
+              {Object.entries(zcodeMcpServers).map(([name, server]) => (
+                <li key={name} className="new-session-mcp-item">
+                  <span className="new-session-mcp-name">{name}</span>
+                  <span className="new-session-mcp-meta">
+                    {zcodeMcpStatusLabels[server.status] ?? server.status}
+                    {server.toolCount !== undefined
+                      ? ` · ${t("newSessionZcodeMcpToolCount", {
+                          count: server.toolCount,
+                        })}`
+                      : ""}
+                    {server.transport ? ` · ${server.transport}` : ""}
+                  </span>
+                  {server.error && (
+                    <span className="new-session-mcp-error">
+                      {server.error}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       )}

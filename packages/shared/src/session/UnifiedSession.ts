@@ -3,6 +3,7 @@ import type { CodexSessionEntry } from "../codex-schema/index.js";
 import type { GeminiSessionFile } from "../gemini-schema/session.js";
 import type { KimiSessionContent } from "../kimi-schema/types.js";
 import type { OpenCodeSessionContent } from "../opencode-schema/session.js";
+import type { ZCodeSessionContent } from "../zcode-schema/session.js";
 
 /**
  * Claude session file content - array of JSONL entries.
@@ -24,4 +25,5 @@ export type UnifiedSession =
   | { provider: "codex-oss"; session: CodexSessionContent }
   | { provider: "gemini"; session: GeminiSessionFile }
   | { provider: "opencode"; session: OpenCodeSessionContent }
-  | { provider: "kimi"; session: KimiSessionContent };
+  | { provider: "kimi"; session: KimiSessionContent }
+  | { provider: "zcode"; session: ZCodeSessionContent };

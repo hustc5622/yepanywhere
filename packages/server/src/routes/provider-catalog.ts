@@ -3,6 +3,7 @@ import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
+import type { ZCodeSessionScanner } from "../projects/zcode-scanner.js";
 import type { Project } from "../supervisor/types.js";
 
 export interface ProviderCatalogDeps {
@@ -10,6 +11,7 @@ export interface ProviderCatalogDeps {
   geminiScanner?: GeminiSessionScanner;
   opencodeScanner?: OpenCodeSessionScanner;
   kimiScanner?: KimiSessionScanner;
+  zcodeScanner?: ZCodeSessionScanner;
   projects?: Project[];
 }
 
@@ -18,6 +20,7 @@ export interface ProviderProjectCatalog {
   geminiPaths: Set<string>;
   opencodePaths: Set<string>;
   kimiPaths: Set<string>;
+  zcodePaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
 }
 
@@ -68,6 +71,14 @@ export async function buildProviderProjectCatalog(
         )
         .map((project) => canonicalizeProjectPath(project.path)),
     );
+    const zcodePaths = new Set(
+      deps.projects
+        .filter(
+          (project) =>
+            project.hasZCodeSessions === true || project.provider === "zcode",
+        )
+        .map((project) => canonicalizeProjectPath(project.path)),
+    );
 
     const needsCodexScan = deps.projects.some(
       (project) =>
@@ -90,37 +101,51 @@ export async function buildProviderProjectCatalog(
       (project) =>
         project.provider !== "kimi" && project.hasKimiSessions === undefined,
     );
+    const needsZCodeScan = deps.projects.some(
+      (project) =>
+        project.provider !== "zcode" && project.hasZCodeSessions === undefined,
+    );
 
     if (
       !needsCodexScan &&
       !needsGeminiScan &&
       !needsOpenCodeScan &&
-      !needsKimiScan
+      !needsKimiScan &&
+      !needsZCodeScan
     ) {
       return {
         codexPaths,
         geminiPaths,
         opencodePaths,
         kimiPaths,
+        zcodePaths,
         geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
       };
     }
 
-    const [codexProjects, geminiProjects, openCodeProjects, kimiProjects] =
-      await Promise.all([
-        needsCodexScan
-          ? (deps.codexScanner?.listProjects() ?? Promise.resolve([]))
-          : Promise.resolve([]),
-        needsGeminiScan
-          ? (deps.geminiScanner?.listProjects() ?? Promise.resolve([]))
-          : Promise.resolve([]),
-        needsOpenCodeScan
-          ? (deps.opencodeScanner?.listProjects() ?? Promise.resolve([]))
-          : Promise.resolve([]),
-        needsKimiScan
-          ? (deps.kimiScanner?.listProjects() ?? Promise.resolve([]))
-          : Promise.resolve([]),
-      ]);
+    const [
+      codexProjects,
+      geminiProjects,
+      openCodeProjects,
+      kimiProjects,
+      zcodeProjects,
+    ] = await Promise.all([
+      needsCodexScan
+        ? (deps.codexScanner?.listProjects() ?? Promise.resolve([]))
+        : Promise.resolve([]),
+      needsGeminiScan
+        ? (deps.geminiScanner?.listProjects() ?? Promise.resolve([]))
+        : Promise.resolve([]),
+      needsOpenCodeScan
+        ? (deps.opencodeScanner?.listProjects() ?? Promise.resolve([]))
+        : Promise.resolve([]),
+      needsKimiScan
+        ? (deps.kimiScanner?.listProjects() ?? Promise.resolve([]))
+        : Promise.resolve([]),
+      needsZCodeScan
+        ? (deps.zcodeScanner?.listProjects() ?? Promise.resolve([]))
+        : Promise.resolve([]),
+    ]);
 
     for (const project of codexProjects) {
       codexPaths.add(canonicalizeProjectPath(project.path));
@@ -137,23 +162,33 @@ export async function buildProviderProjectCatalog(
     for (const project of kimiProjects) {
       kimiPaths.add(canonicalizeProjectPath(project.path));
     }
+    for (const project of zcodeProjects) {
+      zcodePaths.add(canonicalizeProjectPath(project.path));
+    }
 
     return {
       codexPaths,
       geminiPaths,
       opencodePaths,
       kimiPaths,
+      zcodePaths,
       geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     };
   }
 
-  const [codexProjects, geminiProjects, openCodeProjects, kimiProjects] =
-    await Promise.all([
-      deps.codexScanner?.listProjects() ?? Promise.resolve([]),
-      deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
-      deps.opencodeScanner?.listProjects() ?? Promise.resolve([]),
-      deps.kimiScanner?.listProjects() ?? Promise.resolve([]),
-    ]);
+  const [
+    codexProjects,
+    geminiProjects,
+    openCodeProjects,
+    kimiProjects,
+    zcodeProjects,
+  ] = await Promise.all([
+    deps.codexScanner?.listProjects() ?? Promise.resolve([]),
+    deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
+    deps.opencodeScanner?.listProjects() ?? Promise.resolve([]),
+    deps.kimiScanner?.listProjects() ?? Promise.resolve([]),
+    deps.zcodeScanner?.listProjects() ?? Promise.resolve([]),
+  ]);
 
   return {
     codexPaths: new Set(
@@ -169,6 +204,9 @@ export async function buildProviderProjectCatalog(
     ),
     kimiPaths: new Set(
       kimiProjects.map((project) => canonicalizeProjectPath(project.path)),
+    ),
+    zcodePaths: new Set(
+      zcodeProjects.map((project) => canonicalizeProjectPath(project.path)),
     ),
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
   };

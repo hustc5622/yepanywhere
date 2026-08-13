@@ -269,4 +269,80 @@ describe("Yep OpenCode bridge plugin", () => {
 
     expect(outcome).toBe("returned");
   });
+
+  it("applies external prompt commands through the in-process SDK client", async () => {
+    setOpenCodeArgv();
+    vi.stubEnv("YEP_MANAGED_OPENCODE", "");
+    vi.stubEnv("YEP_OPENCODE_PLUGIN_DISABLE", "");
+    let delivered = false;
+    const fetchMock = vi.fn(
+      async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/decisions?") && !delivered) {
+          delivered = true;
+          return new Response(
+            JSON.stringify({
+              decisions: [],
+              commands: [
+                {
+                  id: "cmd-1",
+                  kind: "prompt",
+                  sessionId: "ses_direct",
+                  payload: {
+                    parts: [{ type: "text", text: "continue" }],
+                    model: { providerID: "openai", modelID: "gpt-test" },
+                  },
+                  permission: [
+                    { permission: "*", pattern: "*", action: "ask" },
+                  ],
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (url.includes("/commands/cmd-1/ack")) {
+          expect(JSON.parse(String(init?.body))).toEqual({ ok: true });
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/external/instances")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return await new Promise<Response>(() => undefined);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const raw = {
+      patch: vi.fn().mockResolvedValue({}),
+      post: vi.fn().mockResolvedValue({}),
+    };
+
+    const hooks = await YepBridge({
+      client: { _client: raw },
+      directory: "/repo",
+    });
+    await vi.waitFor(() => {
+      expect(raw.patch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/session/{sessionID}",
+          path: { sessionID: "ses_direct" },
+        }),
+      );
+      expect(raw.post).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/session/{sessionID}/prompt_async",
+          path: { sessionID: "ses_direct" },
+          body: expect.objectContaining({
+            parts: [{ type: "text", text: "continue" }],
+          }),
+        }),
+      );
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).includes("/commands/cmd-1/ack"),
+        ),
+      ).toBe(true);
+    });
+    await hooks.dispose?.();
+  });
 });

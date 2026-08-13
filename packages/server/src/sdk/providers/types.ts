@@ -22,7 +22,8 @@ export type ProviderName =
   | "gemini"
   | "gemini-acp"
   | "opencode"
-  | "kimi";
+  | "kimi"
+  | "zcode";
 
 /**
  * Authentication status for a provider.
@@ -158,6 +159,34 @@ export interface AgentSession {
    */
   setPermissionMode?: (mode: PermissionMode) => Promise<void>;
   /**
+   * Trigger a provider-native context compaction for this session
+   * (e.g. ZCode `session/compact`). Providers without a compact capability
+   * omit this.
+   */
+  compact?: () => Promise<void>;
+  /**
+   * Change the provider-native reasoning effort / thought level mid-session
+   * (e.g. ZCode `session/setThoughtLevel`). Providers without a mid-session
+   * level API omit this. Implementations must fail closed when the level is
+   * not supported by the session's current model.
+   */
+  setReasoningEffort?: (effort: string) => Promise<void>;
+  /**
+   * Read the provider-native session goal status (e.g. ZCode
+   * `session/goal {action: "show"}`). The `response` field is the
+   * provider-rendered status text.
+   */
+  getGoal?: () => Promise<import("@yep-anywhere/shared").ProviderGoalState>;
+  /**
+   * Run a provider-native goal lifecycle action. `set`/`replace` require an
+   * objective and may start a model turn immediately (startedTurn) — that is
+   * the intended behavior of an explicit user action.
+   */
+  goalAction?: (
+    action: import("@yep-anywhere/shared").ProviderGoalAction,
+    objective?: string,
+  ) => Promise<import("@yep-anywhere/shared").ProviderGoalState>;
+  /**
    * Live context-window breakdown: how many tokens system prompt, tools,
    * skills, MCP servers, memory files, etc. each consume.
    * Returns null if the provider/SDK does not support it.
@@ -236,4 +265,15 @@ export interface AgentProvider {
   getAvailableModels(options?: {
     waitForRefresh?: boolean;
   }): Promise<ModelInfo[]>;
+
+  /**
+   * List MCP server statuses for a workspace, when the provider can report
+   * them. Read-only introspection: providers must never open MCP connections
+   * here. Unsupported providers simply omit this method.
+   */
+  listMcpServers?(
+    cwd: string,
+  ): Promise<
+    Record<string, import("@yep-anywhere/shared").ProviderMcpServerStatus>
+  >;
 }

@@ -4,9 +4,61 @@ import {
   getKimiPromptImages,
   getKimiPromptText,
   inferKimiSubagentStatus,
+  isKimiTurnEndedRecord,
   parseKimiBlobRef,
   parseKimiSessionState,
+  parseKimiWireJsonl,
 } from "../../src/kimi-schema/types.js";
+
+describe("parseKimiWireJsonl", () => {
+  it("preserves terminal provider errors and raw filter reasons", () => {
+    const records = parseKimiWireJsonl(
+      [
+        JSON.stringify({
+          type: "context.append_loop_event",
+          event: {
+            type: "step.end",
+            finishReason: "filtered",
+            providerFinishReason: "filtered",
+            rawFinishReason: "content_filter",
+          },
+          time: 1,
+        }),
+        JSON.stringify({
+          type: "turn.ended",
+          turnId: 0,
+          reason: "failed",
+          error: {
+            code: "provider.filtered",
+            message: "Provider safety policy blocked the response.",
+            name: "ProviderFilteredError",
+            retryable: false,
+          },
+          time: 2,
+        }),
+      ].join("\n"),
+    );
+
+    expect(records[0]).toMatchObject({
+      event: {
+        finishReason: "filtered",
+        providerFinishReason: "filtered",
+        rawFinishReason: "content_filter",
+      },
+    });
+    expect(isKimiTurnEndedRecord(records[1])).toBe(true);
+    expect(records[1]).toMatchObject({
+      type: "turn.ended",
+      turnId: 0,
+      reason: "failed",
+      error: {
+        code: "provider.filtered",
+        message: "Provider safety policy blocked the response.",
+        retryable: false,
+      },
+    });
+  });
+});
 
 describe("parseKimiSessionState", () => {
   it("keeps the legacy workDir and ISO timestamp layout", () => {

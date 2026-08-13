@@ -34,6 +34,7 @@ import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
+import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type {
@@ -75,8 +76,10 @@ export interface ProjectsDeps {
   opencodeScanner?: OpenCodeSessionScanner;
   /** OpenCode sqlite database path (defaults to ~/.local/share/opencode/opencode.db) */
   opencodeDbPath?: string;
+  zcodeDbPath?: string;
   /** Optional shared OpenCode reader factory for cross-provider session lookups */
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   /** Kimi scanner for checking if a project has Kimi sessions */
   kimiScanner?: KimiSessionScanner;
   /** Kimi sessions directory */

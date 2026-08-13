@@ -83,6 +83,10 @@ export interface SessionMenuProps {
   onClone?: (newSessionId: string) => void | Promise<void>;
   /** Called to terminate the session's process */
   onTerminate?: () => void | Promise<void>;
+  /** Called to trigger a provider-native context compaction (ZCode). */
+  onCompact?: () => void | Promise<void>;
+  /** Called to open the provider-native goal lifecycle dialog (ZCode). */
+  onGoal?: () => void;
   /** Use "..." icon instead of chevron */
   useEllipsisIcon?: boolean;
   /** Whether session sharing is configured */
@@ -112,6 +116,8 @@ export function SessionMenu({
   onRename,
   onClone,
   onTerminate,
+  onCompact,
+  onGoal,
   sharingConfigured,
   onShare,
   useEllipsisIcon = false,
@@ -123,6 +129,7 @@ export function SessionMenu({
   const [isOpen, setIsOpen] = useState(false);
   const [isCloning, setIsCloning] = useState(false);
   const [isTerminating, setIsTerminating] = useState(false);
+  const [isCompacting, setIsCompacting] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
   const [dropdownPosition, setDropdownPosition] = useState<{
     top: number;
@@ -249,6 +256,21 @@ export function SessionMenu({
       console.error("Failed to terminate session:", error);
     } finally {
       setIsTerminating(false);
+    }
+  };
+
+  const handleCompact = async () => {
+    if (isCompacting || !onCompact) return;
+    setIsCompacting(true);
+    setIsOpen(false);
+    setDropdownPosition(null);
+    triggerRef.current?.blur();
+    try {
+      await onCompact();
+    } catch (error) {
+      console.error("Failed to compact session:", error);
+    } finally {
+      setIsCompacting(false);
     }
   };
 
@@ -385,6 +407,43 @@ export function SessionMenu({
             <line x1="10" y1="14" x2="21" y2="3" />
           </svg>
           {isSharing ? t("sessionMenuSharing") : t("sessionMenuShare")}
+        </button>
+      )}
+      {onCompact && (
+        <button type="button" onClick={handleCompact} disabled={isCompacting}>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-hidden="true"
+          >
+            <path d="M4 14h6v6" />
+            <path d="M20 10h-6V4" />
+            <path d="M14 10l7-7" />
+            <path d="M3 21l7-7" />
+          </svg>
+          {isCompacting ? t("sessionMenuCompacting") : t("sessionMenuCompact")}
+        </button>
+      )}
+      {onGoal && (
+        <button type="button" onClick={() => handleAction(onGoal)}>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <circle cx="12" cy="12" r="6" />
+            <circle cx="12" cy="12" r="2" />
+          </svg>
+          {t("sessionMenuGoal")}
         </button>
       )}
       <button

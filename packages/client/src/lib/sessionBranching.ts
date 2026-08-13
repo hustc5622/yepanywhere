@@ -105,22 +105,26 @@ export function supportsHistoricalMessageEditing(
     provider == null ||
     provider === "claude" ||
     provider === "codex" ||
-    provider === "opencode"
+    provider === "opencode" ||
+    provider === "zcode"
   );
 }
 
 /**
- * OpenCode can only fork at an authoritative native message ID. Its live echo
- * temporarily carries a Yep UUID, so editing stays unavailable until the
- * persisted message replaces that echo. Other supported providers retain
- * their existing edit behavior.
+ * OpenCode and ZCode can only fork at an authoritative native message ID.
+ * Their live echo temporarily carries a Yep UUID, so editing stays
+ * unavailable until the persisted message replaces that echo. Other
+ * supported providers retain their existing edit behavior.
  */
 export function canEditPersistedUserPrompt(
   provider: ProviderName | string | undefined | null,
   source: "sdk" | "jsonl" | undefined,
 ): boolean {
   if (!supportsHistoricalMessageEditing(provider)) return false;
-  return !isOpenCodeProvider(provider) || source === "jsonl";
+  return (
+    (!isOpenCodeProvider(provider) && provider !== "zcode") ||
+    source === "jsonl"
+  );
 }
 
 export function resolveSessionEditSubmission(
@@ -138,10 +142,12 @@ export function resolveSessionEditSubmission(
       : { kind: "invalid-codex-boundary" };
   }
 
-  if (isOpenCodeProvider(provider)) {
+  if (isOpenCodeProvider(provider) || provider === "zcode") {
     return {
+      // The "opencode-fork" submission shape is provider-agnostic: SessionPage
+      // only consumes `resumeSessionAt` and navigates to the returned fork id.
       kind: "opencode-fork",
-      // OpenCode's native fork excludes this message and everything after it.
+      // The native fork excludes this message and everything after it.
       // This must be the persisted user message's own native ID.
       resumeSessionAt: edit.uuid,
       optimisticTruncate: false,

@@ -90,6 +90,27 @@ export function useProviderPermissionModeConfig(
     };
   }
 
+  if (provider === "zcode") {
+    return {
+      labels: {
+        ...genericLabels,
+        default: t("modeZcodeDefaultLabel"),
+        acceptEdits: t("modeZcodeAcceptEditsLabel"),
+        plan: t("modeZcodePlanLabel"),
+        bypassPermissions: t("modeZcodeBypassPermissionsLabel"),
+      },
+      descriptions: {
+        ...genericDescriptions,
+        default: t("modeZcodeDefaultDescription"),
+        acceptEdits: t("modeZcodeAcceptEditsDescription"),
+        plan: t("modeZcodePlanDescription"),
+        bypassPermissions: t("modeZcodeBypassPermissionsDescription"),
+      },
+      title: t("newSessionZcodePermissionTitle"),
+      description: t("newSessionZcodePermissionDescription"),
+    };
+  }
+
   if (provider === "gemini-acp") {
     return {
       labels: {

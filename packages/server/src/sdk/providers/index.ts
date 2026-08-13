@@ -30,6 +30,7 @@ import { codexProvider } from "./codex.js";
 export {
   CodexProvider,
   codexProvider,
+  type CodexBridgeExecutionConfig,
   type CodexProviderConfig,
 } from "./codex.js";
 
@@ -73,6 +74,14 @@ export {
   type KimiProviderConfig,
 } from "./kimi.js";
 
+// ZCode provider (uses `zcode app-server` for JSON-RPC over stdio)
+import { zcodeProvider } from "./zcode.js";
+export {
+  ZCodeProvider,
+  zcodeProvider,
+  type ZCodeProviderConfig,
+} from "./zcode.js";
+
 /**
  * Get all available provider instances.
  * Useful for provider detection UI.
@@ -86,6 +95,7 @@ export function getAllProviders(): AgentProvider[] {
     geminiACPProvider,
     opencodeProvider,
     kimiProvider,
+    zcodeProvider,
   ];
 }
 
@@ -112,6 +122,8 @@ export function getProvider(name: ProviderName): AgentProvider | null {
       return opencodeProvider;
     case "kimi":
       return kimiProvider;
+    case "zcode":
+      return zcodeProvider;
     default:
       return null;
   }

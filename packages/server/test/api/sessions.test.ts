@@ -567,6 +567,73 @@ describe("Sessions API", () => {
       );
     });
 
+    it("returns the ZCode fork id and records edit-fork lineage", async () => {
+      const sessionMetadataService = {
+        getProvider: vi.fn(() => "zcode"),
+        getExecutor: vi.fn(() => undefined),
+        setProvider: vi.fn(async () => undefined),
+        setForkParentSessionId: vi.fn(async () => undefined),
+        setCreatedBy: vi.fn(async () => undefined),
+        setProjectLocation: vi.fn(async () => undefined),
+      };
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+        sessionMetadataService:
+          sessionMetadataService as unknown as SessionMetadataService,
+      });
+      const resumeSpy = vi
+        .spyOn(supervisor, "resumeSession")
+        .mockResolvedValue({
+          id: "process-zcode-fork",
+          sessionId: "ses_zcode_fork",
+          permissionMode: "acceptEdits",
+          modeVersion: 3,
+        } as unknown as Awaited<ReturnType<typeof supervisor.resumeSession>>);
+
+      const res = await app.request(
+        `/api/projects/${projectId}/sessions/sess-existing/resume`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Yep-Anywhere": "true",
+          },
+          body: JSON.stringify({
+            message: "edited ZCode prompt",
+            mode: "acceptEdits",
+            resumeSessionAt: "msg_zcode_user",
+          }),
+        },
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        sessionId: "ses_zcode_fork",
+        forkParentSessionId: "sess-existing",
+        processId: "process-zcode-fork",
+      });
+      expect(resumeSpy).toHaveBeenCalledWith(
+        "sess-existing",
+        expect.any(String),
+        expect.objectContaining({ text: "edited ZCode prompt" }),
+        "acceptEdits",
+        expect.objectContaining({
+          providerName: "zcode",
+          resumeSessionAt: "msg_zcode_user",
+          rollbackNumTurns: undefined,
+        }),
+        { requireImmediate: true },
+      );
+      expect(sessionMetadataService.setProvider).toHaveBeenCalledWith(
+        "ses_zcode_fork",
+        "zcode",
+      );
+      expect(
+        sessionMetadataService.setForkParentSessionId,
+      ).toHaveBeenCalledWith("ses_zcode_fork", "sess-existing");
+    });
+
     it("returns 400 for non-integer rollbackNumTurns", async () => {
       const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
 

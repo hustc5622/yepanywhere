@@ -287,6 +287,179 @@ describe("OpenCodeProvider", () => {
     ]);
   });
 
+  it("lists only models connected to the bridge-managed OpenCode runtime", async () => {
+    let runtimeUrl = "";
+
+    await withTestServer(
+      (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        res.setHeader("content-type", "application/json");
+        if (req.method === "GET" && url.pathname === "/status") {
+          res.end(JSON.stringify({ opencodeServerUrl: runtimeUrl }));
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/config/providers") {
+          res.end(
+            JSON.stringify({
+              providers: [
+                {
+                  id: "ohmyrouter",
+                  models: {
+                    "deepseek-v4-pro": {
+                      api: { npm: "@ai-sdk/anthropic" },
+                      limit: { context: 200_000, output: 32_000 },
+                      variants: { high: { effort: "high" } },
+                    },
+                  },
+                },
+                {
+                  id: "opencode",
+                  models: {
+                    "big-pickle": {
+                      api: { npm: "@ai-sdk/openai-compatible" },
+                      limit: { context: 128_000, output: 16_000 },
+                    },
+                  },
+                },
+              ],
+            }),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+      },
+      async (bridgeControlUrl) => {
+        runtimeUrl = bridgeControlUrl;
+        const provider = new OpenCodeProvider({ bridgeControlUrl });
+        const methods = provider as unknown as {
+          loadOpenCodeCliModels: (path: string) => Promise<ModelInfo[]>;
+        };
+        const cliSpy = vi.spyOn(methods, "loadOpenCodeCliModels");
+
+        await expect(provider.getAvailableModels()).resolves.toEqual([
+          { id: "default", name: "Default (OpenCode config)" },
+          {
+            id: "ohmyrouter/deepseek-v4-pro",
+            name: "ohmyrouter / deepseek-v4-pro",
+            contextWindow: 200_000,
+            maxOutputTokens: 32_000,
+            supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+            supportedReasoningEffortsByProtocol: {
+              anthropic: [{ reasoningEffort: "high" }],
+            },
+          },
+          {
+            id: "opencode/big-pickle",
+            name: "opencode / big-pickle",
+            contextWindow: 128_000,
+            maxOutputTokens: 16_000,
+          },
+        ]);
+        expect(cliSpy).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("does not fall back to a different CLI catalog when the runtime has no connected providers", async () => {
+    let runtimeUrl = "";
+
+    await withTestServer(
+      (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        res.setHeader("content-type", "application/json");
+        if (req.method === "GET" && url.pathname === "/status") {
+          res.end(JSON.stringify({ opencodeServerUrl: runtimeUrl }));
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/config/providers") {
+          res.end(JSON.stringify({ providers: [], default: {} }));
+          return;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+      },
+      async (bridgeControlUrl) => {
+        runtimeUrl = bridgeControlUrl;
+        const provider = new OpenCodeProvider({ bridgeControlUrl });
+        const methods = provider as unknown as {
+          loadOpenCodeCliModels: (path: string) => Promise<ModelInfo[]>;
+        };
+        const cliSpy = vi.spyOn(methods, "loadOpenCodeCliModels");
+
+        await expect(provider.getAvailableModels()).resolves.toEqual([
+          { id: "default", name: "Default (OpenCode config)" },
+        ]);
+        expect(cliSpy).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("remaps a stale provider-qualified model to its sole connected route", async () => {
+    await withTestServer(
+      (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        res.setHeader("content-type", "application/json");
+        if (req.method === "GET" && url.pathname === "/config/providers") {
+          res.end(
+            JSON.stringify({
+              providers: [
+                {
+                  id: "ohmyrouter",
+                  models: {
+                    "deepseek-v4-pro": {},
+                    "glm-5.2": {},
+                  },
+                },
+                {
+                  id: "anthropic",
+                  models: { "claude-sonnet-5": {} },
+                },
+              ],
+            }),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+      },
+      async (baseUrl) => {
+        const provider = new OpenCodeProvider();
+        const resolveOpenCodeRuntimeModel = (
+          provider as unknown as {
+            resolveOpenCodeRuntimeModel: (
+              baseUrl: string,
+              cwd: string,
+              model: string | null,
+            ) => Promise<string | null>;
+          }
+        ).resolveOpenCodeRuntimeModel.bind(provider);
+
+        await expect(
+          resolveOpenCodeRuntimeModel(
+            baseUrl,
+            "/repo",
+            "deepseek/deepseek-v4-pro",
+          ),
+        ).resolves.toBe("ohmyrouter/deepseek-v4-pro");
+        await expect(
+          resolveOpenCodeRuntimeModel(
+            baseUrl,
+            "/repo",
+            "ohmyrouter/deepseek-v4-pro",
+          ),
+        ).resolves.toBe("ohmyrouter/deepseek-v4-pro");
+        await expect(
+          resolveOpenCodeRuntimeModel(
+            baseUrl,
+            "/repo",
+            "anthropic/missing-model",
+          ),
+        ).resolves.toBe("anthropic/missing-model");
+      },
+    );
+  });
+
   it("parses protocol-specific reasoning variants from verbose model output", () => {
     const provider = new OpenCodeProvider();
     const parseOpenCodeVerboseModels = (
@@ -574,6 +747,19 @@ custom-openai/glm-5.2
           res.end("[]");
           return;
         }
+        if (req.method === "GET" && url.pathname === "/config/providers") {
+          res.end(
+            JSON.stringify({
+              providers: [
+                {
+                  id: "ohmyrouter",
+                  models: { "deepseek-v4-pro": {} },
+                },
+              ],
+            }),
+          );
+          return;
+        }
         if (req.method === "POST" && url.pathname === "/session") {
           createBody = (await readJsonBody(req)) as Record<string, unknown>;
           res.end(JSON.stringify({ id: "ses_shared" }));
@@ -609,7 +795,10 @@ custom-openai/glm-5.2
           bridgeControlUrl,
           opencodePath: "/definitely/not/a/real/opencode",
         });
-        const session = await provider.startSession({ cwd: "/repo" });
+        const session = await provider.startSession({
+          cwd: "/repo",
+          model: "deepseek/deepseek-v4-pro",
+        });
 
         await expect(session.iterator.next()).resolves.toMatchObject({
           done: false,
@@ -617,6 +806,7 @@ custom-openai/glm-5.2
             type: "system",
             subtype: "init",
             session_id: "ses_shared",
+            model: "ohmyrouter/deepseek-v4-pro",
           },
         });
         expect(session.pid).toBeUndefined();
@@ -642,11 +832,115 @@ custom-openai/glm-5.2
     );
     expect(methods).not.toContain("PATCH /config");
     expect(createBody).toMatchObject({
+      model: {
+        providerID: "ohmyrouter",
+        id: "deepseek-v4-pro",
+      },
       permission: expect.arrayContaining([
         { permission: "read", pattern: "*", action: "allow" },
         { permission: "bash", pattern: "*", action: "ask" },
       ]),
     });
+  });
+
+  it("routes a direct TUI session through its external plugin instead of 4521", async () => {
+    const methods: string[] = [];
+    const commands: Array<Record<string, unknown>> = [];
+    const commandHeaders: Array<string | string[] | undefined> = [];
+    await withTestServer(
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        methods.push(`${req.method} ${url.pathname}`);
+        res.setHeader("content-type", "application/json");
+        if (
+          req.method === "GET" &&
+          url.pathname === "/sessions/ses_direct/execution"
+        ) {
+          res.end(
+            JSON.stringify({ owner: "external-plugin", available: true }),
+          );
+          return;
+        }
+        if (
+          req.method === "POST" &&
+          url.pathname === "/sessions/ses_direct/external-command"
+        ) {
+          commandHeaders.push(req.headers["x-yep-anywhere"]);
+          commands.push((await readJsonBody(req)) as Record<string, unknown>);
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          url.pathname === "/sessions/ses_direct/view"
+        ) {
+          res.end(
+            JSON.stringify({
+              sessionView: {
+                active: false,
+                session: { lastTurnStatus: "completed" },
+              },
+            }),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "unexpected route" }));
+      },
+      async (bridgeControlUrl) => {
+        const provider = new OpenCodeProvider({
+          bridgeControlUrl,
+          opencodePath: "/path-that-must-not-be-spawned/opencode",
+        });
+        const session = await provider.startSession({
+          cwd: "/repo/direct",
+          resumeSessionId: "ses_direct",
+          model: "openai/gpt-test",
+          reasoningEffort: "high",
+          permissionMode: "acceptEdits",
+          initialMessage: { text: "continue", uuid: "direct-message" },
+        });
+        try {
+          await expect(session.iterator.next()).resolves.toMatchObject({
+            done: false,
+            value: { type: "system", session_id: "ses_direct" },
+          });
+          expect(session.isProcessAlive?.()).toBe(true);
+          await expect(session.iterator.next()).resolves.toMatchObject({
+            done: false,
+            value: { type: "user", uuid: "direct-message" },
+          });
+          await expect(session.iterator.next()).resolves.toMatchObject({
+            done: false,
+            value: {
+              type: "result",
+              clientUserMessageId: "direct-message",
+            },
+          });
+          expect(session.pid).toBeUndefined();
+          expect(session.isProcessAlive?.()).toBe(true);
+          expect(commands[0]).toMatchObject({
+            kind: "prompt",
+            sessionId: "ses_direct",
+            payload: {
+              parts: [{ type: "text", text: "continue" }],
+              model: { providerID: "openai", modelID: "gpt-test" },
+              variant: "high",
+            },
+            permission: expect.arrayContaining([
+              { permission: "edit", pattern: "*", action: "allow" },
+              { permission: "bash", pattern: "*", action: "ask" },
+            ]),
+          });
+          expect(commandHeaders).toEqual(["true"]);
+          expect(methods).not.toContain("GET /status");
+          expect(methods).not.toContain("POST /session");
+        } finally {
+          session.abort();
+          await session.iterator.return?.(undefined as never);
+        }
+      },
+    );
   });
 
   it("does not accept a stale OpenCode listener after its child exits", async () => {

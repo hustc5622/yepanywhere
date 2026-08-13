@@ -342,6 +342,30 @@ interface YepDecision {
   answers?: string[][];
 }
 
+interface YepExternalCommand {
+  id: string;
+  kind: "prompt" | "permission" | "abort";
+  sessionId: string;
+  payload?: {
+    parts: Array<
+      | { type: "text"; text: string }
+      | { type: "file"; mime: string; filename?: string; url: string }
+    >;
+    model?: { providerID: string; modelID: string };
+    variant?: string;
+  };
+  permission?: Array<{
+    permission: string;
+    pattern: "*";
+    action: "allow" | "ask" | "deny";
+  }>;
+}
+
+interface YepCommandAck {
+  ok: boolean;
+  error?: string;
+}
+
 interface ForwardedEvent {
   type?: string;
   properties?: unknown;
@@ -386,6 +410,13 @@ export const YepBridge = async (input: {
   const client = input.client as {
     _client?: {
       post: (options: {
+        url: string;
+        path?: Record<string, string>;
+        body?: unknown;
+        headers?: Record<string, string>;
+        throwOnError?: boolean;
+      }) => Promise<unknown>;
+      patch: (options: {
         url: string;
         path?: Record<string, string>;
         body?: unknown;
@@ -532,14 +563,69 @@ export const YepBridge = async (input: {
     );
   }
 
+  async function applyCommand(command: YepExternalCommand): Promise<void> {
+    const raw = client._client;
+    if (!raw) throw new Error("OpenCode SDK transport is unavailable");
+    if (command.kind === "abort") {
+      await raw.post({
+        url: "/session/{sessionID}/abort",
+        path: { sessionID: command.sessionId },
+        throwOnError: true,
+      });
+      return;
+    }
+    if (command.permission) {
+      await raw.patch({
+        url: "/session/{sessionID}",
+        path: { sessionID: command.sessionId },
+        body: { permission: command.permission },
+        headers: { "content-type": "application/json" },
+        throwOnError: true,
+      });
+    }
+    if (command.kind === "permission") return;
+    if (!command.payload) throw new Error("OpenCode prompt payload is missing");
+    await raw.post({
+      url: "/session/{sessionID}/prompt_async",
+      path: { sessionID: command.sessionId },
+      body: command.payload,
+      headers: { "content-type": "application/json" },
+      throwOnError: true,
+    });
+  }
+
+  async function acknowledgeCommand(
+    commandId: string,
+    ack: YepCommandAck,
+  ): Promise<boolean> {
+    return postJson(
+      `/external/instances/${encodeURIComponent(
+        instanceId,
+      )}/commands/${encodeURIComponent(commandId)}/ack`,
+      ack,
+    );
+  }
+
   const appliedDecisionIds = new Set<string>();
   const pendingDecisionAcks = new Set<string>();
+  const appliedCommandIds = new Set<string>();
+  const pendingCommandAcks = new Map<string, YepCommandAck>();
+  const observedSessionIds = new Set<string>();
 
   async function flushDecisionAcks(): Promise<boolean> {
     for (const decisionId of pendingDecisionAcks) {
       if (!(await acknowledgeDecision(decisionId))) return false;
       pendingDecisionAcks.delete(decisionId);
       appliedDecisionIds.delete(decisionId);
+    }
+    return true;
+  }
+
+  async function flushCommandAcks(): Promise<boolean> {
+    for (const [commandId, ack] of pendingCommandAcks) {
+      if (!(await acknowledgeCommand(commandId, ack))) return false;
+      pendingCommandAcks.delete(commandId);
+      appliedCommandIds.delete(commandId);
     }
     return true;
   }
@@ -556,15 +642,27 @@ export const YepBridge = async (input: {
           await delay(DECISION_RETRY_DELAY_MS);
           continue;
         }
-        const response = await fetch(
+        if (!(await flushCommandAcks())) {
+          await delay(DECISION_RETRY_DELAY_MS);
+          continue;
+        }
+        const pollUrl = new URL(
           `${BRIDGE_URL}/external/instances/${encodeURIComponent(
             instanceId,
-          )}/decisions?waitMs=${DECISION_POLL_WAIT_MS}`,
-          { signal: AbortSignal.timeout(DECISION_POLL_TIMEOUT_MS) },
+          )}/decisions`,
         );
+        pollUrl.searchParams.set("waitMs", String(DECISION_POLL_WAIT_MS));
+        pollUrl.searchParams.set("directory", directory);
+        for (const sessionId of observedSessionIds) {
+          pollUrl.searchParams.append("sessionId", sessionId);
+        }
+        const response = await fetch(pollUrl, {
+          signal: AbortSignal.timeout(DECISION_POLL_TIMEOUT_MS),
+        });
         if (response.ok) {
           const data = (await response.json()) as {
             decisions?: YepDecision[];
+            commands?: YepExternalCommand[];
           };
           let retry = false;
           for (const decision of data.decisions ?? []) {
@@ -582,6 +680,34 @@ export const YepBridge = async (input: {
               }
               pendingDecisionAcks.add(decision.id);
               if (!(await flushDecisionAcks())) {
+                retry = true;
+                break;
+              }
+            } catch {
+              retry = true;
+              break;
+            }
+          }
+          for (const command of data.commands ?? []) {
+            try {
+              if (!appliedCommandIds.has(command.id)) {
+                let ack: YepCommandAck;
+                try {
+                  await applyCommand(command);
+                  ack = { ok: true };
+                } catch (error) {
+                  ack = {
+                    ok: false,
+                    error:
+                      error instanceof Error
+                        ? error.message
+                        : "OpenCode rejected the external command",
+                  };
+                }
+                appliedCommandIds.add(command.id);
+                pendingCommandAcks.set(command.id, ack);
+              }
+              if (!(await flushCommandAcks())) {
                 retry = true;
                 break;
               }
@@ -609,6 +735,22 @@ export const YepBridge = async (input: {
       event: { type?: string; properties?: unknown };
     }) => {
       if (disposed || !event || typeof event.type !== "string") return;
+      const eventProperties = asRecord(event.properties);
+      const info = asRecord(eventProperties?.info);
+      const part = asRecord(eventProperties?.part);
+      const sessionId =
+        (typeof eventProperties?.sessionID === "string"
+          ? eventProperties.sessionID
+          : undefined) ??
+        (typeof eventProperties?.sessionId === "string"
+          ? eventProperties.sessionId
+          : undefined) ??
+        (typeof info?.sessionID === "string" ? info.sessionID : undefined) ??
+        (typeof part?.sessionID === "string" ? part.sessionID : undefined) ??
+        (event.type.startsWith("session.") && typeof info?.id === "string"
+          ? info.id
+          : undefined);
+      if (sessionId) observedSessionIds.add(sessionId);
       if (!FORWARD_EVENTS.has(event.type)) return;
       // Enqueueing is synchronous and the pump preserves event order. Do not
       // make OpenCode depend on bridge availability: some builds await plugin

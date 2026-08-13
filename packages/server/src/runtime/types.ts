@@ -272,6 +272,23 @@ export interface RuntimeController {
   getSupportedModels(processId: string): Promise<ModelInfo[] | null>;
   getSupportedCommands(processId: string): Promise<SlashCommand[] | null>;
   setModel(processId: string, model?: string): Promise<{ success: boolean }>;
+  /** Trigger a provider-native context compaction for the process' session. */
+  compact(processId: string): Promise<{ success: boolean }>;
+  /** Change the provider-native reasoning effort mid-session. */
+  setReasoningEffort(
+    processId: string,
+    effort: string,
+  ): Promise<{ success: boolean }>;
+  /** Read the provider-native session goal (null when unsupported). */
+  getGoal(
+    processId: string,
+  ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null>;
+  /** Run a provider-native goal lifecycle action (null when unsupported). */
+  goalAction(
+    processId: string,
+    action: import("@yep-anywhere/shared").ProviderGoalAction,
+    objective?: string,
+  ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null>;
   getContextUsage(sessionId: string): Promise<ContextStatusSdkPayload | null>;
   probeInitializationResult(sessionId: string): Promise<{
     models: Array<{ id: string; contextWindow?: number }>;

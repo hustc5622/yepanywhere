@@ -240,4 +240,266 @@ describe("Processes Routes", () => {
     expect(json.processes[0]?.sessionTitle).toBe("Fix the agents page titles");
     expect(json.processes[0]?.provider).toBe("codex");
   });
+
+  it("routes a compact request through the runtime controller", async () => {
+    const compact = vi.fn(async () => ({ success: true }));
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        compact,
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ success: true });
+    expect(compact).toHaveBeenCalledWith("proc-1");
+  });
+
+  it("rejects compact for a process that does not support it", async () => {
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "claude" })),
+        compact: vi.fn(async () => ({ success: false })),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(400);
+  });
+
+  it("routes a reasoning-effort switch through the runtime controller", async () => {
+    const setReasoningEffort = vi.fn(async () => ({ success: true }));
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        setReasoningEffort,
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/reasoning-effort", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ effort: "off" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      success: true,
+      effort: "off",
+    });
+    expect(setReasoningEffort).toHaveBeenCalledWith("proc-1", "off");
+  });
+
+  it("validates the reasoning-effort body", async () => {
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/reasoning-effort", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(400);
+  });
+
+  it("surfaces provider failures for unsupported effort levels", async () => {
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        setReasoningEffort: vi.fn(async () => {
+          throw new Error(
+            'Thought level "max" is not supported by the current model',
+          );
+        }),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/reasoning-effort", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ effort: "max" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining("not supported"),
+    });
+  });
+
+  it("routes a goal show through the runtime controller", async () => {
+    const getGoal = vi.fn(async () => ({
+      response: "goal status: active",
+      startedTurn: false,
+    }));
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getGoal,
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/goal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "show" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      response: "goal status: active",
+      startedTurn: false,
+    });
+    expect(getGoal).toHaveBeenCalledWith("proc-1");
+  });
+
+  it("routes a goal set with its objective", async () => {
+    const goalAction = vi.fn(async () => ({
+      response: "goal updated",
+      startedTurn: true,
+    }));
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        goalAction,
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/goal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "set", objective: "refactor the parser" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      response: "goal updated",
+      startedTurn: true,
+    });
+    expect(goalAction).toHaveBeenCalledWith(
+      "proc-1",
+      "set",
+      "refactor the parser",
+    );
+  });
+
+  it("validates the goal action and objective", async () => {
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const badAction = await routes.request("/proc-1/goal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "explode" }),
+    });
+    expect(badAction.status).toBe(400);
+
+    const missingObjective = await routes.request("/proc-1/goal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "replace" }),
+    });
+    expect(missingObjective.status).toBe(400);
+  });
+
+  it("returns 404 for an unknown process and 400 when unsupported", async () => {
+    const unknown = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => null),
+        goalAction: vi.fn(),
+        getGoal: vi.fn(),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+    const missing = await unknown.request("/nope/goal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "show" }),
+    });
+    expect(missing.status).toBe(404);
+
+    const unsupported = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "claude" })),
+        getGoal: vi.fn(async () => null),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+    const response = await unsupported.request("/proc-1/goal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "show" }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("surfaces provider goal failures as 502", async () => {
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        goalAction: vi.fn(async () => {
+          throw new Error("session unavailable");
+        }),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/goal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "clear" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "session unavailable",
+    });
+  });
 });

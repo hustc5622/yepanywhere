@@ -44,6 +44,22 @@ describe("Codex model reasoning efforts", () => {
     expect(resolveModelReasoningEffort(luna, "xhigh")).toBe("xhigh");
   });
 
+  it("resolves Kimi's exact model-specific thinking levels", () => {
+    const kimiK3: ModelInfo = {
+      id: "custom-kimi/kimi-k3",
+      name: "Kimi K3",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "low" },
+        { reasoningEffort: "high" },
+        { reasoningEffort: "max" },
+      ],
+      defaultReasoningEffort: "high",
+    };
+
+    expect(resolveModelReasoningEffort(kimiK3, "max")).toBe("max");
+    expect(resolveModelReasoningEffort(kimiK3, "xhigh")).toBe("high");
+  });
+
   it("uses the variants advertised for the selected OpenCode protocol", () => {
     const glm: ModelInfo = {
       id: "glm-5.2",

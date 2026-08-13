@@ -65,6 +65,7 @@ import {
   findSessionSummaryAcrossProviders,
 } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
+import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type {
   ImmediateStartUnavailableResponse,
   QueueFullResponse,
@@ -97,7 +98,9 @@ export interface SessionCommandServiceDeps {
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   opencodeDbPath?: string;
+  zcodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
 }
@@ -322,7 +325,9 @@ function resolveCodexModelProviderForStart(
 function supportsResumeSessionAt(
   provider: ProviderName | string | undefined,
 ): boolean {
-  return provider === "claude" || provider === "opencode";
+  return (
+    provider === "claude" || provider === "opencode" || provider === "zcode"
+  );
 }
 
 function resolveCodexResumeSource(
@@ -1006,9 +1011,13 @@ export class SessionCommandService {
       "Session resume requested",
     );
 
+    const providerRestoresReasoningEffort =
+      providerName === "codex" ||
+      providerName === "opencode" ||
+      providerName === "kimi";
     const resumeReasoningEffort =
       parsedReasoningEffort.reasoningEffort ??
-      (providerName === "codex" || providerName === "opencode"
+      (providerRestoresReasoningEffort
         ? sessionSummary?.reasoningEffort
         : undefined);
     const resumeCodexModelProvider =
@@ -1041,7 +1050,8 @@ export class SessionCommandService {
     const isSourcePreservingFork =
       (providerName === "codex" &&
         effectiveCodexForkExcludedTurns !== undefined) ||
-      (providerName === "opencode" && Boolean(body.resumeSessionAt));
+      ((providerName === "opencode" || providerName === "zcode") &&
+        Boolean(body.resumeSessionAt));
     const result = await this.deps.runtimeController.resumeSession({
       sessionId,
       projectPath: project.path,
@@ -1167,6 +1177,13 @@ export class SessionCommandService {
             resumeCodexModelProvider,
           );
         }
+      }
+      if (providerName === "zcode" && body.resumeSessionAt) {
+        // Record edit-fork lineage so list views can collapse the family.
+        await this.deps.sessionMetadataService?.setForkParentSessionId?.(
+          actualSessionId,
+          sessionId,
+        );
       }
       await this.recordSessionOrigin(actualSessionId, project, input.origin);
     }
@@ -1735,6 +1752,8 @@ export class SessionCommandService {
       opencodeReaderFactory: this.deps.opencodeReaderFactory,
       kimiSessionsDir: this.deps.kimiSessionsDir,
       kimiReaderFactory: this.deps.kimiReaderFactory,
+      zcodeDbPath: this.deps.zcodeDbPath,
+      zcodeReaderFactory: this.deps.zcodeReaderFactory,
       sessionMetadataService: this.deps.sessionMetadataService,
     };
   }

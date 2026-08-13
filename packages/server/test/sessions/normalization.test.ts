@@ -2,11 +2,15 @@ import type {
   ClaudeSessionContent,
   ClaudeSessionEntry,
   CodexSessionContent,
+  KimiSessionContent,
   UnifiedSession,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
-import { normalizeSession } from "../../src/sessions/normalization.js";
+import {
+  convertKimiMessages,
+  normalizeSession,
+} from "../../src/sessions/normalization.js";
 import type { LoadedSession } from "../../src/sessions/types.js";
 
 describe("normalizeSession", () => {
@@ -815,6 +819,181 @@ describe("normalizeSession", () => {
     });
   });
 
+  it("annotates ZCode user prompts with cross-session branch alternatives", () => {
+    const createdAtMs = Date.UTC(2026, 7, 12, 12, 0, 0);
+    const createdAtIso = new Date(createdAtMs).toISOString();
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "ses_parent",
+        projectId: "test-project" as UrlProjectId,
+        title: "ZCode branch",
+        fullTitle: "ZCode branch",
+        createdAt: createdAtIso,
+        updatedAt: createdAtIso,
+        messageCount: 2,
+        status: { state: "idle" },
+        provider: "zcode",
+      },
+      branchState: {
+        sessionId: "ses_parent",
+        provider: "zcode",
+        activeBranchId: "u2_edit",
+        selectedBranchId: "u2_edit",
+        branches: [
+          {
+            id: "u2",
+            sessionId: "ses_parent",
+            parentId: "u1",
+            prompt: "original",
+            title: "original",
+            depth: 2,
+            index: 1,
+            siblingIndex: 1,
+            siblingCount: 2,
+            isActive: false,
+            createdAt: createdAtIso,
+            provider: "zcode",
+          },
+          {
+            id: "u2_edit",
+            sessionId: "ses_child",
+            parentId: "u1",
+            prompt: "edited",
+            title: "edited",
+            depth: 2,
+            index: 2,
+            siblingIndex: 2,
+            siblingCount: 2,
+            isActive: true,
+            createdAt: new Date(createdAtMs + 400).toISOString(),
+            provider: "zcode",
+          },
+        ],
+      },
+      data: {
+        provider: "zcode",
+        session: {
+          sessionId: "ses_parent",
+          messages: [
+            {
+              id: "u2",
+              role: "user",
+              createdAt: createdAtMs,
+              parts: [
+                {
+                  id: "u2-p0",
+                  messageID: "u2",
+                  sessionID: "ses_parent",
+                  type: "text",
+                  text: "original",
+                },
+              ],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    expect(normalized.branchState).toBe(mockSession.branchState);
+    expect(normalized.messages[0]).toMatchObject({
+      uuid: "u2",
+      timestamp: createdAtIso,
+      branch: {
+        sessionId: "ses_parent",
+        branchId: "u2",
+        siblingCount: 2,
+        alternatives: [
+          expect.objectContaining({ id: "u2", sessionId: "ses_parent" }),
+          expect.objectContaining({ id: "u2_edit", sessionId: "ses_child" }),
+        ],
+      },
+    });
+  });
+
+  it("resolves a ZCode copied prompt to the canonical option by timestamp and text", () => {
+    const createdAtMs = Date.UTC(2026, 7, 12, 12, 0, 0);
+    const createdAtIso = new Date(createdAtMs).toISOString();
+    const mockSession: LoadedSession = {
+      summary: {
+        id: "ses_child",
+        projectId: "test-project" as UrlProjectId,
+        title: "ZCode branch",
+        fullTitle: "ZCode branch",
+        createdAt: createdAtIso,
+        updatedAt: createdAtIso,
+        messageCount: 1,
+        status: { state: "idle" },
+        provider: "zcode",
+      },
+      branchState: {
+        sessionId: "ses_child",
+        provider: "zcode",
+        activeBranchId: "u2_edit",
+        selectedBranchId: "u2_edit",
+        branches: [
+          {
+            id: "u2",
+            sessionId: "ses_parent",
+            parentId: "u1",
+            prompt: "original",
+            title: "original",
+            depth: 2,
+            index: 1,
+            siblingIndex: 1,
+            siblingCount: 2,
+            isActive: false,
+            createdAt: createdAtIso,
+            provider: "zcode",
+          },
+          {
+            id: "u2_edit",
+            sessionId: "ses_child",
+            parentId: "u1",
+            prompt: "edited",
+            title: "edited",
+            depth: 2,
+            index: 2,
+            siblingIndex: 2,
+            siblingCount: 2,
+            isActive: true,
+            provider: "zcode",
+          },
+        ],
+      },
+      data: {
+        provider: "zcode",
+        session: {
+          sessionId: "ses_child",
+          messages: [
+            // Copied original prompt with a fresh native id: id matching
+            // fails, the timestamp/text fallback resolves the canonical one.
+            {
+              id: "u2_copy",
+              role: "user",
+              createdAt: createdAtMs,
+              parts: [
+                {
+                  id: "u2_copy-p0",
+                  messageID: "u2_copy",
+                  sessionID: "ses_child",
+                  type: "text",
+                  text: "original",
+                },
+              ],
+            },
+          ],
+        },
+      } as UnifiedSession,
+    };
+
+    const normalized = normalizeSession(mockSession);
+    expect(normalized.messages[0]).toMatchObject({
+      uuid: "u2_copy",
+      branch: { sessionId: "ses_parent", branchId: "u2", siblingCount: 2 },
+    });
+  });
+
   it("preserves same-session Claude branch annotation", () => {
     const mockSession: LoadedSession = {
       summary: {
@@ -1334,6 +1513,72 @@ describe("normalizeSession", () => {
       "i'm talking out of turn!",
       "saying a second thing out of turn",
       "saying a third thing out of turn",
+    ]);
+  });
+});
+
+describe("convertKimiMessages", () => {
+  it("keeps persisted provider.filtered failures visible after reload", () => {
+    const session: KimiSessionContent = {
+      sessionId: "session-filtered",
+      records: [
+        {
+          type: "turn.prompt",
+          input: [{ type: "text", text: "inspect the project" }],
+          time: 1,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "content.part",
+            part: { type: "text", text: "I cannot provide that content." },
+          },
+          time: 2,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "step.end",
+            finishReason: "filtered",
+            providerFinishReason: "filtered",
+            rawFinishReason: "content_filter",
+          },
+          time: 2,
+        },
+        {
+          type: "turn.ended",
+          turnId: 0,
+          reason: "failed",
+          error: {
+            code: "provider.filtered",
+            message: "Provider safety policy blocked the response.",
+            name: "ProviderFilteredError",
+            retryable: false,
+          },
+          time: 3,
+        },
+      ],
+    };
+
+    expect(convertKimiMessages(session)).toMatchObject([
+      { type: "user" },
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "I cannot provide that content." }],
+        },
+      },
+      {
+        uuid: "session-filtered-turn-0-error",
+        type: "error",
+        error: "Provider safety policy blocked the response.",
+        content: "Provider safety policy blocked the response.",
+        errorCode: "provider.filtered",
+        retryable: false,
+        finishReason: "filtered",
+        providerFinishReason: "filtered",
+        rawFinishReason: "content_filter",
+      },
     ]);
   });
 });

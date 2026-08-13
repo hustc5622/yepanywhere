@@ -17,6 +17,9 @@ const FALLBACK_PERMISSION_MODES: Partial<
   codex: ["auto", "plan", "bypassPermissions"],
   opencode: ["default", "acceptEdits", "bypassPermissions"],
   "gemini-acp": ["default", "acceptEdits", "bypassPermissions"],
+  // ZCode's native `auto` denies every tool call, so it is not offered.
+  // The remaining four map 1:1 onto build/edit/plan/yolo.
+  zcode: ["default", "acceptEdits", "plan", "bypassPermissions"],
   // Kimi's ACP modes are default/manual, plan, auto, and yolo. The shared
   // bypassPermissions value is presented as YOLO by Kimi-specific UI.
   kimi: ["default", "plan", "auto", "bypassPermissions"],

@@ -59,6 +59,7 @@ type TitleGenerationTrigger =
   | "external-session-updated"
   | "unowned-session-updated"
   | "opencode-db-reconcile"
+  | "zcode-db-reconcile"
   | "process-idle"
   | "startup-backfill";
 
@@ -733,9 +734,11 @@ export class SessionTitleService {
           event.projectId,
           event.trigger === "opencode-db-reconcile"
             ? "opencode-db-reconcile"
-            : owner === "external"
-              ? "external-session-updated"
-              : "unowned-session-updated",
+            : event.trigger === "zcode-db-reconcile"
+              ? "zcode-db-reconcile"
+              : owner === "external"
+                ? "external-session-updated"
+                : "unowned-session-updated",
         );
       }
       return;

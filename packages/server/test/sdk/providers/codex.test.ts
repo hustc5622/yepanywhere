@@ -13,10 +13,13 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { GeneratedArtifactManifest } from "@yep-anywhere/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 import {
   InMemoryCodexEventStore,
   replayCodexSession,
@@ -310,6 +313,7 @@ function handle(message) {
         },
       );
     }
+
     if (process.env.CODEX_FAKE_SERVER_REQUEST_METHOD) {
       request(
         "synthetic-server-request",
@@ -486,6 +490,186 @@ process.stdin.on("data", (chunk) => {
       chmodSync(fakeCodexPath, 0o755);
       return fakeCodexPath;
     }
+
+    it("rejoins a bridge-owned active turn over WebSocket without spawning stdio", async () => {
+      const requests: Array<{ method: string; params?: unknown }> = [];
+      const websocketPaths: string[] = [];
+      const httpServer = createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/sessions/thread-bridge/active") {
+          res.end(JSON.stringify({ active: true, mcpProfile: "full" }));
+          return;
+        }
+        if (req.url === "/status") {
+          const address = httpServer.address() as AddressInfo;
+          res.end(
+            JSON.stringify({
+              listening: true,
+              url: `ws://127.0.0.1:${address.port}`,
+            }),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not found" }));
+      });
+      const wsServer = new WebSocketServer({ server: httpServer });
+      wsServer.on("connection", (socket, request) => {
+        websocketPaths.push(request.url ?? "");
+        socket.on("message", (raw) => {
+          const message = JSON.parse(raw.toString()) as {
+            id: number;
+            method: string;
+            params?: unknown;
+          };
+          requests.push({ method: message.method, params: message.params });
+          const send = (result: unknown) =>
+            socket.send(JSON.stringify({ id: message.id, result }));
+          if (message.method === "initialize") {
+            send({ userAgent: "fake-bridge" });
+          } else if (message.method === "config/read") {
+            send({ config: { mcp_servers: {} }, origins: {} });
+          } else if (message.method === "thread/resume") {
+            send({
+              thread: {
+                id: "thread-bridge",
+                cwd: "/repo",
+                modelProvider: "openai",
+                status: { type: "active", activeFlags: [] },
+                turns: [
+                  {
+                    id: "turn-live",
+                    status: "inProgress",
+                    items: [],
+                    error: null,
+                  },
+                ],
+                forkedFromId: null,
+              },
+              model: "gpt-5.5",
+              modelProvider: "openai",
+              serviceTier: null,
+              cwd: "/repo",
+              reasoningEffort: null,
+            });
+          } else if (message.method === "turn/steer") {
+            send({ turnId: "turn-live" });
+            socket.send(
+              JSON.stringify({
+                method: "turn/completed",
+                params: {
+                  threadId: "thread-bridge",
+                  turn: {
+                    id: "turn-live",
+                    status: "completed",
+                    items: [],
+                    error: null,
+                  },
+                },
+              }),
+            );
+          }
+        });
+      });
+      await new Promise<void>((resolve) =>
+        httpServer.listen(0, "127.0.0.1", resolve),
+      );
+      const address = httpServer.address() as AddressInfo;
+      const provider = new CodexProvider({
+        codexPath: "/path-that-must-not-be-spawned/codex",
+        bridgeExecution: {
+          mode: "external",
+          controlUrl: `http://127.0.0.1:${address.port}`,
+        },
+      });
+      const session = await provider.startSession({
+        cwd: "/repo",
+        resumeSessionId: "thread-bridge",
+        initialMessage: { text: "continue", uuid: "bridge-message" },
+      });
+      try {
+        for await (const message of session.iterator) {
+          if (
+            message.type === "result" &&
+            message.clientUserMessageId === "bridge-message"
+          ) {
+            break;
+          }
+        }
+        expect(requests.map((request) => request.method)).toContain(
+          "turn/steer",
+        );
+        expect(requests.map((request) => request.method)).not.toContain(
+          "turn/start",
+        );
+        expect(websocketPaths).toEqual(["/?mcp=full"]);
+        expect(
+          requests.find((request) => request.method === "turn/steer")?.params,
+        ).toMatchObject({
+          threadId: "thread-bridge",
+          expectedTurnId: "turn-live",
+          clientUserMessageId: "bridge-message",
+        });
+      } finally {
+        session.abort();
+        for (const client of wsServer.clients) client.terminate();
+        await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      }
+    });
+
+    it("rejects a bridge WebSocket endpoint on a different host before sending credentials", async () => {
+      const httpServer = createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/sessions/thread-bridge/active") {
+          res.end(JSON.stringify({ active: true }));
+          return;
+        }
+        if (req.url === "/status") {
+          res.end(
+            JSON.stringify({
+              listening: true,
+              url: "ws://example.invalid:4510",
+            }),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not found" }));
+      });
+      await new Promise<void>((resolve) =>
+        httpServer.listen(0, "127.0.0.1", resolve),
+      );
+      const address = httpServer.address() as AddressInfo;
+      const bridgeProvider = new CodexProvider({
+        codexPath: "/path-that-must-not-be-spawned/codex",
+        bridgeExecution: {
+          mode: "external",
+          controlUrl: `http://127.0.0.1:${address.port}`,
+          authToken: "must-not-leave-control-host",
+        },
+      });
+      const session = await bridgeProvider.startSession({
+        cwd: "/repo",
+        resumeSessionId: "thread-bridge",
+        initialMessage: { text: "continue" },
+      });
+
+      try {
+        await expect(session.iterator.next()).resolves.toMatchObject({
+          value: {
+            type: "error",
+            codexError: {
+              code: "CODEX_BRIDGE_UNAVAILABLE",
+              category: "bridge",
+            },
+          },
+        });
+      } finally {
+        session.abort();
+        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      }
+    });
 
     function readMessageCapture(capturePath: string): Array<{
       id?: string | number;

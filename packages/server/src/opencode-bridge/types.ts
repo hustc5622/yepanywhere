@@ -26,6 +26,8 @@ export interface OpenCodeBridgeSession extends BridgeSessionBase {
   /** OpenCode task/subagent parent; child sessions stay out of list views. */
   parentSessionId?: string;
   active: boolean;
+  /** Process family that can safely execute the next turn for this session. */
+  executionOwner?: "managed-server" | "external-plugin";
   /** Present while OpenCode is retrying a failed provider request. */
   retryStatus?: {
     attempt?: number;
@@ -35,6 +37,58 @@ export interface OpenCodeBridgeSession extends BridgeSessionBase {
     actionLabel?: string;
     actionLink?: string;
   };
+}
+
+export interface ExternalOpenCodeTextPart {
+  type: "text";
+  text: string;
+}
+
+export interface ExternalOpenCodeFilePart {
+  type: "file";
+  mime: string;
+  filename?: string;
+  url: string;
+}
+
+export interface ExternalOpenCodePromptCommand {
+  id: string;
+  kind: "prompt";
+  sessionId: string;
+  payload: {
+    parts: Array<ExternalOpenCodeTextPart | ExternalOpenCodeFilePart>;
+    model?: { providerID: string; modelID: string };
+    variant?: string;
+  };
+  permission?: Array<{
+    permission: string;
+    pattern: "*";
+    action: "allow" | "ask" | "deny";
+  }>;
+}
+
+export interface ExternalOpenCodePermissionCommand {
+  id: string;
+  kind: "permission";
+  sessionId: string;
+  permission: ExternalOpenCodePromptCommand["permission"];
+}
+
+export interface ExternalOpenCodeAbortCommand {
+  id: string;
+  kind: "abort";
+  sessionId: string;
+}
+
+/** Commands delivered to the SDK client embedded in a direct OpenCode TUI. */
+export type ExternalOpenCodeCommand =
+  | ExternalOpenCodePromptCommand
+  | ExternalOpenCodePermissionCommand
+  | ExternalOpenCodeAbortCommand;
+
+export interface ExternalOpenCodeCommandAck {
+  ok: boolean;
+  error?: string;
 }
 
 export type OpenCodeBridgeSessionView = BridgeSessionView;

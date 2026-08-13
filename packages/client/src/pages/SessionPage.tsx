@@ -12,6 +12,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { api, isQueuedResumeSessionResponse } from "../api/client";
+import { GoalModal } from "../components/GoalModal";
 import { MessageInput, type UploadProgress } from "../components/MessageInput";
 import { MessageInputToolbar } from "../components/MessageInputToolbar";
 import { MessageList } from "../components/MessageList";
@@ -673,6 +674,7 @@ function SessionPageContent({
 
   // Model switch modal state
   const [showModelSwitchModal, setShowModelSwitchModal] = useState(false);
+  const [showGoalModal, setShowGoalModal] = useState(false);
 
   // Track user engagement to mark session as "seen".
   // Opening a session counts as reading the current content even when an
@@ -742,9 +744,9 @@ function SessionPageContent({
     }
 
     try {
-      // Provider-specific edit semantics: Codex and OpenCode create a new
-      // native session while preserving the source; Claude resumes through
-      // the prompt parent.
+      // Provider-specific edit semantics: Codex, OpenCode and ZCode create a
+      // new native session while preserving the source; Claude resumes
+      // through the prompt parent.
       if (editRewind) {
         const model = session?.model ?? getModelSetting();
         const thinking = getThinkingSetting();
@@ -856,7 +858,7 @@ function SessionPageContent({
           historicalEditRequestStarted = true;
           if (result.sessionId === sessionId) {
             throw new Error(
-              "OpenCode edit fork did not return a new native session ID",
+              `${effectiveProvider ?? "The provider"} edit fork did not return a new native session ID`,
             );
           }
           setEditRewind(null);
@@ -1635,6 +1637,19 @@ function SessionPageContent({
     }
   };
 
+  const handleCompact = async () => {
+    if (status.owner === "self" && status.processId) {
+      try {
+        await api.compactProcess(status.processId);
+        showToast(t("sessionCompacted"), "success");
+      } catch (err) {
+        console.error("Failed to compact session:", err);
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        showToast(t("sessionCompactFailed", { message: errorMsg }), "error");
+      }
+    }
+  };
+
   const handleShare = useCallback(async () => {
     try {
       const { snapshotSession } = await import(
@@ -1867,6 +1882,20 @@ function SessionPageContent({
                       );
                     }}
                     onTerminate={handleTerminate}
+                    onCompact={
+                      session?.provider === "zcode" &&
+                      status.owner === "self" &&
+                      status.processId
+                        ? handleCompact
+                        : undefined
+                    }
+                    onGoal={
+                      session?.provider === "zcode" &&
+                      status.owner === "self" &&
+                      status.processId
+                        ? () => setShowGoalModal(true)
+                        : undefined
+                    }
                     sharingConfigured={sharingConfigured}
                     onShare={handleShare}
                     useFixedPositioning
@@ -1994,10 +2023,19 @@ function SessionPageContent({
             <ModelSwitchModal
               processId={status.processId}
               currentModel={session?.model}
+              currentReasoningEffort={session?.reasoningEffort}
               onModelChanged={handleModelChanged}
               onClose={() => setShowModelSwitchModal(false)}
             />
           )}
+
+        {/* Goal lifecycle dialog (ZCode) */}
+        {showGoalModal && status.owner === "self" && status.processId && (
+          <GoalModal
+            processId={status.processId}
+            onClose={() => setShowGoalModal(false)}
+          />
+        )}
 
         {status.owner === "external" && (
           <div className="external-session-warning">

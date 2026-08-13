@@ -56,6 +56,7 @@ import { CodexSessionScanner } from "./projects/codex-scanner.js";
 import { GeminiSessionScanner } from "./projects/gemini-scanner.js";
 import { OpenCodeSessionScanner } from "./projects/opencode-scanner.js";
 import { ProjectScanner } from "./projects/scanner.js";
+import { ZCodeSessionScanner } from "./projects/zcode-scanner.js";
 import {
   NativePushService,
   PushService,
@@ -68,7 +69,7 @@ import { HttpRuntimeController } from "./runtime/HttpRuntimeController.js";
 import type { RuntimeController } from "./runtime/types.js";
 import { detectCodexCli } from "./sdk/cli-detection.js";
 import { initMessageLogger } from "./sdk/messageLogger.js";
-import { opencodeProvider } from "./sdk/providers/index.js";
+import { codexProvider, opencodeProvider } from "./sdk/providers/index.js";
 import {
   BrowserProfileService,
   ConnectedBrowsersService,
@@ -79,10 +80,12 @@ import {
   OpenCodeSessionChangeMonitor,
   ServerSettingsService,
   SharingService,
+  ZCodeSessionChangeMonitor,
 } from "./services/index.js";
 import { ensureOpenCodeDbIndexes } from "./sessions/opencode-db-indexes.js";
 import { OPENCODE_DB_PATH } from "./sessions/opencode-db.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
+import { ZCODE_DB_PATH } from "./sessions/zcode-db.js";
 import { TerminalService } from "./terminal/TerminalService.js";
 import { UploadManager } from "./uploads/manager.js";
 import {
@@ -128,6 +131,12 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const config = loadConfig();
+codexProvider.configureBridgeExecution({
+  mode: config.codexBridgeMode,
+  controlUrl: config.codexBridgeControlUrl,
+  authToken: config.desktopAuthToken,
+  authTokenFile: config.runtimeTokenFile,
+});
 opencodeProvider.configureBridgeControlUrl(config.opencodeBridgeControlUrl);
 
 // Track services for graceful shutdown (set after createApp)
@@ -137,6 +146,8 @@ let codexBridgeForShutdown: CodexBridgeController | null = null;
 let opencodeBridgeForShutdown: OpenCodeBridgeController | null = null;
 let feishuChannelRuntimeForShutdown: FeishuChannelRuntime | null = null;
 let opencodeSessionChangeMonitorForShutdown: OpenCodeSessionChangeMonitor | null =
+  null;
+let zcodeSessionChangeMonitorForShutdown: ZCodeSessionChangeMonitor | null =
   null;
 let terminalServiceForShutdown: TerminalService | null = null;
 let sessionArchiveServiceForShutdown: SessionArchiveService | null = null;
@@ -222,6 +233,18 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
     } catch (error) {
       console.error(
         "[Shutdown] Error stopping OpenCode session change monitor:",
+        error,
+      );
+    }
+  }
+
+  if (zcodeSessionChangeMonitorForShutdown) {
+    try {
+      await zcodeSessionChangeMonitorForShutdown.stop();
+      console.log("[Shutdown] ZCode session change monitor stopped");
+    } catch (error) {
+      console.error(
+        "[Shutdown] Error stopping ZCode session change monitor:",
         error,
       );
     }
@@ -897,6 +920,29 @@ async function startServer() {
     opencodeSessionChangeMonitor.start();
     opencodeSessionChangeMonitorForShutdown = opencodeSessionChangeMonitor;
   }
+
+  const zcodeProviderEnabled =
+    config.enabledProviders.length === 0 ||
+    config.enabledProviders.includes("zcode");
+  const zcodeMonitorDisabled = ["false", "0", "off", "disabled"].includes(
+    (process.env.ZCODE_SESSION_CHANGE_MONITOR ?? "").trim().toLowerCase(),
+  );
+  if (
+    config.sessionTitleGeneration.enabled &&
+    zcodeProviderEnabled &&
+    !zcodeMonitorDisabled
+  ) {
+    const zcodeChangeScanner = new ZCodeSessionScanner();
+    const zcodeSessionChangeMonitor = new ZCodeSessionChangeMonitor({
+      dbPath: zcodeChangeScanner.databasePath,
+      scanner: zcodeChangeScanner,
+      eventBus,
+    });
+    // createApp starts SessionTitleService before returning, so no database
+    // reconciliation event can race ahead of its EventBus subscription.
+    zcodeSessionChangeMonitor.start();
+    zcodeSessionChangeMonitorForShutdown = zcodeSessionChangeMonitor;
+  }
   if (configuredRuntimeController) {
     const [activity, processes] = await Promise.all([
       runtimeController.getWorkerActivity(),
@@ -945,6 +991,7 @@ async function startServer() {
       sessionsDir: config.geminiSessionsDir,
     }),
     opencodeScanner: new OpenCodeSessionScanner(),
+    zcodeScanner: new ZCodeSessionScanner(),
   });
 
   // Set service references for graceful shutdown

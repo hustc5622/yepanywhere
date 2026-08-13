@@ -442,6 +442,37 @@ export class EmbeddedRuntimeController implements RuntimeController {
     return { success: process ? await process.setModel(model) : false };
   }
 
+  async compact(processId: string): Promise<{ success: boolean }> {
+    const process = this.supervisor.getProcess(processId);
+    return { success: process ? await process.compact() : false };
+  }
+
+  async setReasoningEffort(
+    processId: string,
+    effort: string,
+  ): Promise<{ success: boolean }> {
+    const process = this.supervisor.getProcess(processId);
+    return {
+      success: process ? await process.setReasoningEffort(effort) : false,
+    };
+  }
+
+  async getGoal(
+    processId: string,
+  ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null> {
+    const process = this.supervisor.getProcess(processId);
+    return process ? await process.getGoal() : null;
+  }
+
+  async goalAction(
+    processId: string,
+    action: import("@yep-anywhere/shared").ProviderGoalAction,
+    objective?: string,
+  ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null> {
+    const process = this.supervisor.getProcess(processId);
+    return process ? await process.goalAction(action, objective) : null;
+  }
+
   async getContextUsage(
     sessionId: string,
   ): Promise<ContextStatusSdkPayload | null> {

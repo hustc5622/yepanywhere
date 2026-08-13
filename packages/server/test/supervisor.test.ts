@@ -501,6 +501,99 @@ describe("Supervisor", () => {
       await providerSupervisor.abortProcess((forked as { id: string }).id);
     });
 
+    it("replaces a ZCode process and registers the native fork session id", async () => {
+      const starts: Array<{
+        aborted: boolean;
+        options: StartSessionOptions;
+      }> = [];
+      const startSession = vi.fn(async (options: StartSessionOptions) => {
+        const start = { aborted: false, options };
+        starts.push(start);
+        const actualSessionId = options.resumeSessionAt
+          ? "ses_zcode_forked"
+          : (options.resumeSessionId ?? "ses_created");
+
+        async function* iterator() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: actualSessionId,
+          };
+          while (!start.aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            start.aborted = true;
+          },
+        };
+      });
+      const provider: AgentProvider = {
+        name: "zcode",
+        displayName: "ZCode",
+        supportsPermissionMode: true,
+        supportsThinkingToggle: false,
+        supportsSlashCommands: false,
+        isInstalled: async () => true,
+        isAuthenticated: async () => true,
+        getAuthStatus: async () => ({
+          installed: true,
+          authenticated: true,
+          enabled: true,
+        }),
+        startSession,
+        getAvailableModels: async () => [],
+      };
+      const providerSupervisor = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+      });
+
+      const original = await providerSupervisor.resumeSession(
+        "ses_parent",
+        "/tmp/test",
+        { text: "original" },
+      );
+      const forked = await providerSupervisor.resumeSession(
+        "ses_parent",
+        "/tmp/test",
+        { text: "edited" },
+        "acceptEdits",
+        { resumeSessionAt: "msg_zcode_user" },
+      );
+
+      expect(starts[0]?.aborted).toBe(true);
+      expect((forked as { id: string }).id).not.toBe(
+        (original as { id: string }).id,
+      );
+      expect((forked as { sessionId: string }).sessionId).toBe(
+        "ses_zcode_forked",
+      );
+      expect(providerSupervisor.getProcessForSession("ses_parent")).toBe(
+        undefined,
+      );
+      expect(
+        providerSupervisor.getProcessForSession("ses_zcode_forked")?.id,
+      ).toBe((forked as { id: string }).id);
+      expect(starts[1]?.options).toEqual(
+        expect.objectContaining({
+          resumeSessionId: "ses_parent",
+          resumeSessionAt: "msg_zcode_user",
+          permissionMode: "acceptEdits",
+        }),
+      );
+
+      const forkStart = starts[1];
+      if (forkStart) {
+        forkStart.aborted = true;
+      }
+      await providerSupervisor.abortProcess((forked as { id: string }).id);
+    });
+
     it("surfaces an OpenCode fork initialization error instead of reusing the source id", async () => {
       const starts: Array<{ aborted: boolean; options: StartSessionOptions }> =
         [];

@@ -123,6 +123,14 @@ export function createAuthMiddleware(
       return;
     }
 
+    // The ZCode bridge plugin authenticates hook posts with its own shared
+    // token (validated by the route itself); cookie auth must not block them
+    // even when password auth is enabled.
+    if (path === "/api/zcode-bridge/hook") {
+      await next();
+      return;
+    }
+
     // Check if account exists (shouldn't happen if enabled via enableAuth)
     if (!authService.hasAccount()) {
       c.header("X-Setup-Required", "true");

@@ -1,8 +1,9 @@
 /**
  * Codex Provider implementation using codex app-server JSON-RPC.
  *
- * Uses `codex app-server --listen stdio://` for turn execution so we can handle
- * server-initiated permission requests (command/file approval).
+ * Uses JSON-RPC over either a resident 4510 bridge WebSocket (when resuming a
+ * bridge-owned thread) or an isolated `stdio://` app-server. Both transports
+ * handle server-initiated permission requests (command/file approval).
  */
 
 import { type ChildProcess, exec, spawn } from "node:child_process";
@@ -13,6 +14,7 @@ import type {
   ModelInfo,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import { WebSocket } from "ws";
 import {
   buildCodexInteractiveResponse,
   toCodexInteractiveRequestView,
@@ -70,6 +72,7 @@ import {
 import { getDataDir } from "../../config.js";
 import { getLogger } from "../../logging/logger.js";
 import { encodeProjectId } from "../../projects/paths.js";
+import { ensureRuntimeToken } from "../../runtime/token.js";
 import {
   GeneratedArtifactMaterializer,
   UploadManager,
@@ -96,6 +99,7 @@ import {
   DEFAULT_CODEX_MODEL_SOURCE,
   getCodexModelSourceRegistry,
 } from "./codex-model-sources.js";
+import type { ThreadReadResponse } from "./codex-protocol/generated/v2/ThreadReadResponse.js";
 import type { TurnInterruptParams } from "./codex-protocol/generated/v2/TurnInterruptParams.js";
 import type { TurnInterruptResponse } from "./codex-protocol/generated/v2/TurnInterruptResponse.js";
 import type { TurnSteerParams } from "./codex-protocol/generated/v2/TurnSteerParams.js";
@@ -487,6 +491,29 @@ export interface CodexProviderConfig {
   eventSpine?: CodexEventRolloutConfig;
   /** Managed generated-artifact storage override for tests and embedders. */
   generatedArtifactUploadManager?: UploadManager;
+  /** Optional 4510 execution route used to rejoin bridge-owned threads. */
+  bridgeExecution?: CodexBridgeExecutionConfig;
+}
+
+export interface CodexBridgeExecutionConfig {
+  mode: "embedded" | "external" | "disabled";
+  controlUrl: string;
+  /** Optional bearer accepted by a remotely exposed bridge. */
+  authToken?: string;
+  /** Runtime token shared by the main server and a local bridge sidecar. */
+  authTokenFile?: string;
+  requestTimeoutMs?: number;
+}
+
+interface CodexBridgeExecutionTarget {
+  url: string;
+  headers?: Record<string, string>;
+}
+
+interface CodexAppServerWebSocketTransport {
+  kind: "websocket";
+  url: string;
+  headers?: Record<string, string>;
 }
 
 class AsyncQueue<T> {
@@ -605,6 +632,7 @@ interface AppServerEventObserver {
 
 class CodexAppServerClient {
   private process: ChildProcess | null = null;
+  private socket: WebSocket | null = null;
   private stdoutBuffer = "";
   private stderrBuffer = "";
   private closeError: Error | null = null;
@@ -615,6 +643,7 @@ class CodexAppServerClient {
   }
 
   isAlive(): boolean {
+    if (this.socket) return this.socket.readyState === WebSocket.OPEN;
     const child = this.process;
     return Boolean(child?.pid && child.exitCode === null && !child.killed);
   }
@@ -640,6 +669,7 @@ class CodexAppServerClient {
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
     private readonly appServerArgs: string[] = [],
+    private readonly transport?: CodexAppServerWebSocketTransport,
   ) {}
 
   setServerRequestHandler(handler: AppServerRequestHandler): void {
@@ -671,8 +701,13 @@ class CodexAppServerClient {
   }
 
   async connect(): Promise<void> {
-    if (this.process) {
+    if (this.process || this.socket) {
       throw new Error("Codex app-server already connected");
+    }
+
+    if (this.transport?.kind === "websocket") {
+      await this.connectWebSocket(this.transport);
+      return;
     }
 
     const child = spawn(
@@ -733,6 +768,69 @@ class CodexAppServerClient {
       };
       child.once("spawn", onSpawn);
       child.once("error", onError);
+    });
+  }
+
+  private async connectWebSocket(
+    transport: CodexAppServerWebSocketTransport,
+  ): Promise<void> {
+    const socket = new WebSocket(transport.url, {
+      ...(transport.headers ? { headers: transport.headers } : {}),
+    });
+    this.socket = socket;
+
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        log.debug("Ignoring binary Codex app-server WebSocket frame");
+        return;
+      }
+      this.handleJsonRpcLine(data.toString());
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanupHandshake = () => {
+        socket.off("open", onOpen);
+        socket.off("error", onHandshakeError);
+        socket.off("close", onHandshakeClose);
+      };
+      const onOpen = () => {
+        if (settled) return;
+        settled = true;
+        cleanupHandshake();
+        resolve();
+      };
+      const onHandshakeError = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanupHandshake();
+        this.socket = null;
+        socket.terminate();
+        reject(error);
+      };
+      const onHandshakeClose = (code: number) => {
+        if (settled) return;
+        settled = true;
+        cleanupHandshake();
+        this.socket = null;
+        reject(
+          new Error(
+            `Codex bridge WebSocket closed during connection (code=${code})`,
+          ),
+        );
+      };
+      socket.once("open", onOpen);
+      socket.once("error", onHandshakeError);
+      socket.once("close", onHandshakeClose);
+    });
+
+    socket.on("error", (error) => this.handleProcessClose(error));
+    socket.on("close", (code, reason) => {
+      this.handleProcessClose(
+        new Error(
+          `Codex bridge WebSocket closed (code=${code}, reason=${reason.toString() || "none"})`,
+        ),
+      );
     });
   }
 
@@ -990,6 +1088,15 @@ class CodexAppServerClient {
 
     const child = this.process;
     this.process = null;
+    const socket = this.socket;
+    this.socket = null;
+    if (
+      socket &&
+      (socket.readyState === WebSocket.OPEN ||
+        socket.readyState === WebSocket.CONNECTING)
+    ) {
+      socket.close(1000, "Yep session detached");
+    }
     void terminateChildProcess(child);
   }
 
@@ -1020,14 +1127,20 @@ class CodexAppServerClient {
     });
     this.notifications.close(processError);
     this.process = null;
+    this.socket = null;
   }
 
   private sendRaw(payload: Record<string, unknown>): void {
-    if (!this.process?.stdin || this.closed) {
+    if (this.closed) {
       return;
     }
 
     try {
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        this.socket.send(JSON.stringify(payload));
+        return;
+      }
+      if (!this.process?.stdin) return;
       this.process.stdin.write(`${JSON.stringify(payload)}\n`);
     } catch (error) {
       this.handleProcessClose(
@@ -1054,6 +1167,7 @@ export class CodexProvider implements AgentProvider {
   readonly supportsSlashCommands = false;
 
   private readonly config: CodexProviderConfig;
+  private bridgeExecution?: CodexBridgeExecutionConfig;
   private readonly eventSpineConfig: CodexEventRolloutConfig;
   private readonly eventStore: CodexEventStore;
   /** Per-source model list cache (keyed by Codex model source id). */
@@ -1064,6 +1178,9 @@ export class CodexProvider implements AgentProvider {
 
   constructor(config: CodexProviderConfig = {}) {
     this.config = config;
+    this.bridgeExecution = normalizeCodexBridgeExecutionConfig(
+      config.bridgeExecution,
+    );
     this.eventSpineConfig = {
       ...codexEventRolloutConfigFromEnv(),
       ...config.eventSpine,
@@ -1087,6 +1204,114 @@ export class CodexProvider implements AgentProvider {
               : {}),
           })
         : new InMemoryCodexEventStore());
+  }
+
+  /** Configure the production singleton after environment config is loaded. */
+  configureBridgeExecution(
+    config: CodexBridgeExecutionConfig | null | undefined,
+  ): void {
+    this.bridgeExecution = normalizeCodexBridgeExecutionConfig(config);
+  }
+
+  private async resolveBridgeExecutionTarget(
+    options: StartSessionOptions,
+  ): Promise<CodexBridgeExecutionTarget | null> {
+    const config = this.bridgeExecution;
+    const sessionId = options.resumeSessionId;
+    if (!config || config.mode === "disabled" || !sessionId) return null;
+
+    const timeoutMs = config.requestTimeoutMs ?? 3_000;
+    try {
+      const authToken =
+        config.authToken?.trim() ||
+        (config.authTokenFile
+          ? await ensureRuntimeToken(config.authTokenFile)
+          : undefined);
+      const headers = {
+        accept: "application/json",
+        ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+      };
+      const activeResponse = await fetch(
+        `${config.controlUrl}/sessions/${encodeURIComponent(sessionId)}/active`,
+        {
+          headers,
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+      );
+      if (!activeResponse.ok) {
+        throw new Error(
+          `Codex bridge active probe returned ${activeResponse.status}`,
+        );
+      }
+      const activePayload = (await activeResponse.json()) as {
+        active?: unknown;
+        mcpProfile?: unknown;
+      };
+      if (activePayload.active !== true) return null;
+
+      const statusResponse = await fetch(`${config.controlUrl}/status`, {
+        headers,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!statusResponse.ok) {
+        throw new Error(
+          `Codex bridge status returned ${statusResponse.status}`,
+        );
+      }
+      const status = (await statusResponse.json()) as {
+        listening?: unknown;
+        url?: unknown;
+      };
+      if (status.listening !== true || typeof status.url !== "string") {
+        throw new Error("Codex bridge is not accepting WebSocket clients");
+      }
+      const url = new URL(status.url);
+      if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+        throw new Error(
+          `Codex bridge returned unsupported transport ${url.protocol}`,
+        );
+      }
+      const controlUrl = new URL(config.controlUrl);
+      if (isWildcardBridgeHostname(url.hostname)) {
+        // A listener may advertise its bind-all address, which is not a
+        // routable or trustworthy credential destination. Reuse the host the
+        // configured control endpoint was actually reached through.
+        url.hostname = controlUrl.hostname;
+      } else if (!isSameTrustedBridgeHost(controlUrl.hostname, url.hostname)) {
+        throw new Error(
+          "Codex bridge returned a WebSocket endpoint on a different host",
+        );
+      }
+      const mcpProfile =
+        activePayload.mcpProfile === "clear" ||
+        activePayload.mcpProfile === "light" ||
+        activePayload.mcpProfile === "full"
+          ? activePayload.mcpProfile
+          : undefined;
+      if (
+        mcpProfile === "clear" ||
+        (!mcpProfile && options.codexMcpMode === "clear")
+      ) {
+        url.searchParams.set("mcp", "clear");
+      } else if (
+        mcpProfile === "full" ||
+        (!mcpProfile && options.codexMcpMode === "full")
+      ) {
+        url.searchParams.set("mcp", "full");
+      }
+
+      return {
+        url: url.toString(),
+        ...(authToken
+          ? { headers: { authorization: `Bearer ${authToken}` } }
+          : {}),
+      };
+    } catch (error) {
+      throw new Error(
+        "Codex bridge is unavailable; refusing to start a competing app-server for an external session",
+        { cause: error },
+      );
+    }
   }
 
   /**
@@ -1477,29 +1702,44 @@ export class CodexProvider implements AgentProvider {
     reasoningEffort?: string,
     effort?: import("@yep-anywhere/shared").EffortLevel,
     thinking?: import("@yep-anywhere/shared").ThinkingConfig,
+    modelSource?: CodexModelSourceDefinition,
+    modelSlug?: string,
   ): string | undefined {
     const exactReasoningEffort = reasoningEffort?.trim();
+    let mapped: string | undefined;
     if (exactReasoningEffort) {
-      return exactReasoningEffort;
+      mapped = exactReasoningEffort;
+    } else if (thinking?.type === "disabled") {
+      mapped = "low";
+    } else if (effort) {
+      switch (effort) {
+        case "low":
+          mapped = "low";
+          break;
+        case "medium":
+          mapped = "medium";
+          break;
+        case "high":
+          mapped = "high";
+          break;
+        case "xhigh":
+          mapped = "xhigh";
+          break;
+        case "max":
+          mapped = "xhigh";
+          break;
+      }
     }
-    if (thinking?.type === "disabled") {
-      return "low";
+    // Clamp GPT-only tiers (xhigh/max/ultra) to a custom source's advertised
+    // reasoning set (e.g. low/medium/high for DeepSeek). OpenAI is untouched.
+    if (mapped && modelSource) {
+      return getCodexModelSourceRegistry().resolveReasoningEffort(
+        modelSource.id,
+        modelSlug,
+        mapped,
+      );
     }
-    if (!effort) {
-      return undefined;
-    }
-    switch (effort) {
-      case "low":
-        return "low";
-      case "medium":
-        return "medium";
-      case "high":
-        return "high";
-      case "xhigh":
-        return "xhigh";
-      case "max":
-        return "xhigh";
-    }
+    return mapped;
   }
 
   private mapPermissionModeToThreadPolicy(
@@ -1926,7 +2166,6 @@ export class CodexProvider implements AgentProvider {
     runtimeState: CodexTurnRuntimeState,
     setActiveClient: (client: CodexAppServerClient) => void,
   ): AsyncIterableIterator<SDKMessage> {
-    const codexCommand = await this.resolveCodexCommand();
     // Resolve the session's Codex model source and start the app-server with
     // its provider/catalog overrides so model discovery, catalog, auth, and the
     // thread `modelProvider` all point at the same source.
@@ -1936,6 +2175,8 @@ export class CodexProvider implements AgentProvider {
     );
     const codexEnv = this.getCodexEnv();
     let appServer: CodexAppServerClient | undefined;
+    let startupStage = "transport-selection";
+    let transportKind: "stdio" | "bridge-websocket" = "stdio";
 
     let sessionId = options.resumeSessionId ?? "";
     let eventIngress: CodexEventIngress | null = null;
@@ -1986,6 +2227,12 @@ export class CodexProvider implements AgentProvider {
     };
 
     try {
+      const bridgeTarget = await this.resolveBridgeExecutionTarget(options);
+      transportKind = bridgeTarget ? "bridge-websocket" : "stdio";
+      const codexCommand = bridgeTarget
+        ? "codex-bridge"
+        : await this.resolveCodexCommand();
+      startupStage = "transport-connect";
       appServer = new CodexAppServerClient(
         codexCommand,
         options.cwd,
@@ -1994,6 +2241,15 @@ export class CodexProvider implements AgentProvider {
           ...registry.buildAppServerArgs(modelSource),
           ...getCodexMcpAppServerArgs(options.codexMcpMode),
         ],
+        bridgeTarget
+          ? {
+              kind: "websocket",
+              url: bridgeTarget.url,
+              ...(bridgeTarget.headers
+                ? { headers: bridgeTarget.headers }
+                : {}),
+            }
+          : undefined,
       );
       setActiveClient(appServer);
       appServer.setServerRequestHandler(async (request) => {
@@ -2026,6 +2282,7 @@ export class CodexProvider implements AgentProvider {
 
       await appServer.connect();
 
+      startupStage = "initialize";
       yield* this.requestTrackedWithRetryProjection<{ userAgent: string }>({
         appServer,
         method: "initialize",
@@ -2044,6 +2301,7 @@ export class CodexProvider implements AgentProvider {
       // Read the same app-server's effective config for this cwd. This is both
       // substantially faster than spawning `codex mcp list --json` and keeps
       // project-level .codex/config.toml layers aligned with the thread.
+      startupStage = "config-read";
       const configRead = (yield* this.requestTrackedWithRetryProjection<{
         config?: unknown;
       }>({
@@ -2112,6 +2370,7 @@ export class CodexProvider implements AgentProvider {
       };
       if (options.resumeSessionId) {
         try {
+          startupStage = "thread-resume";
           const tracked =
             yield* this.requestTrackedWithRetryProjection<ThreadResumeResponse>(
               {
@@ -2148,6 +2407,7 @@ export class CodexProvider implements AgentProvider {
             },
             "Codex provisional thread had no rollout; starting replacement thread",
           );
+          startupStage = "thread-start-replacement";
           const tracked =
             yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
               appServer,
@@ -2165,6 +2425,7 @@ export class CodexProvider implements AgentProvider {
           };
         }
       } else {
+        startupStage = "thread-start";
         const tracked =
           yield* this.requestTrackedWithRetryProjection<ThreadStartResponse>({
             appServer,
@@ -2184,6 +2445,7 @@ export class CodexProvider implements AgentProvider {
 
       sessionId = threadResult.thread.id;
       runtimeState.threadId = sessionId;
+      startupStage = "thread-ready";
       if (
         forkExcludedTurnCount !== null &&
         sessionId !== options.resumeSessionId
@@ -2425,6 +2687,7 @@ export class CodexProvider implements AgentProvider {
           },
           model: requestedModel,
           codexModelProvider: effectiveModelProvider,
+          transport: transportKind,
           credentialPresent: Boolean(
             modelSource.providerConfig?.envKey
               ? process.env[modelSource.providerConfig.envKey]
@@ -2451,6 +2714,11 @@ export class CodexProvider implements AgentProvider {
 
       const messageGen = queue.generator();
       let isFirstMessage = !options.resumeSessionId || forkStartedFresh;
+      let resumedActiveTurnId =
+        transportKind === "bridge-websocket" && options.resumeSessionId
+          ? findLastInProgressCodexTurnId(threadResult.thread.turns)
+          : undefined;
+      startupStage = "turn-runtime";
 
       for await (const message of messageGen) {
         if (signal.aborted) {
@@ -2480,30 +2748,105 @@ export class CodexProvider implements AgentProvider {
             options.reasoningEffort,
             options.effort,
             options.thinking,
+            modelSource,
+            options.model,
           ),
         };
-        const turnResult =
-          (yield* this.requestTrackedWithRetryProjection<TurnStartResponse>({
-            appServer,
-            method: "turn/start",
-            params: turnStartParams,
-            metadata: message.uuid
-              ? { clientMessageId: message.uuid }
-              : undefined,
-            sessionId: () => sessionId,
-            onRetry: async (update) =>
-              await activeEventIngress.ingestClientRetry({
-                requestId: update.requestId,
-                method: update.method,
-                retryStatus: update.retryStatus,
-                threadId: sessionId,
-                ...(update.metadata?.clientMessageId
-                  ? { clientMessageId: update.metadata.clientMessageId }
-                  : {}),
-              }),
-          })).result;
+        const retryObserver = async (update: AppServerRetryUpdate) =>
+          await activeEventIngress.ingestClientRetry({
+            requestId: update.requestId,
+            method: update.method,
+            retryStatus: update.retryStatus,
+            threadId: sessionId,
+            ...(update.metadata?.clientMessageId
+              ? { clientMessageId: update.metadata.clientMessageId }
+              : {}),
+          });
+        let turnResult: TurnStartResponse | undefined;
+        let activeTurnId: string;
+        let sourceEvent: "turn/start" | "turn/steer" = "turn/start";
+        if (resumedActiveTurnId) {
+          const expectedTurnId = resumedActiveTurnId;
+          resumedActiveTurnId = undefined;
+          const steerParams: TurnSteerParams = {
+            threadId: sessionId,
+            clientUserMessageId: message.uuid,
+            input: buildCodexUserInput(message, internalPrompt),
+            expectedTurnId,
+          };
+          try {
+            const steer =
+              yield* this.requestTrackedWithRetryProjection<TurnSteerResponse>({
+                appServer,
+                method: "turn/steer",
+                params: steerParams,
+                metadata: message.uuid
+                  ? { clientMessageId: message.uuid }
+                  : undefined,
+                sessionId: () => sessionId,
+                onRetry: retryObserver,
+              });
+            if (steer.result.turnId !== expectedTurnId) {
+              throw new Error(
+                "Codex turn/steer returned an unexpected active turn ID",
+              );
+            }
+            activeTurnId = steer.result.turnId;
+            sourceEvent = "turn/steer";
+          } catch (error) {
+            if (
+              !(error instanceof CodexJsonRpcError) ||
+              error.code !== -32602
+            ) {
+              throw error;
+            }
+            const latest = await appServer.request<ThreadReadResponse>(
+              "thread/read",
+              { threadId: sessionId, includeTurns: true },
+            );
+            const stillActiveTurnId = findLastInProgressCodexTurnId(
+              latest.thread.turns,
+            );
+            if (stillActiveTurnId) {
+              throw new Error(
+                `Bridge-owned Codex active turn ${stillActiveTurnId} cannot accept direct input yet`,
+                { cause: error },
+              );
+            }
+            log.info(
+              { sessionId, expectedTurnId },
+              "Bridge-owned Codex turn completed before steer; starting a new turn",
+            );
+            turnResult =
+              (yield* this.requestTrackedWithRetryProjection<TurnStartResponse>(
+                {
+                  appServer,
+                  method: "turn/start",
+                  params: turnStartParams,
+                  metadata: message.uuid
+                    ? { clientMessageId: message.uuid }
+                    : undefined,
+                  sessionId: () => sessionId,
+                  onRetry: retryObserver,
+                },
+              )).result;
+            activeTurnId = turnResult.turn.id;
+          }
+        } else {
+          turnResult =
+            (yield* this.requestTrackedWithRetryProjection<TurnStartResponse>({
+              appServer,
+              method: "turn/start",
+              params: turnStartParams,
+              metadata: message.uuid
+                ? { clientMessageId: message.uuid }
+                : undefined,
+              sessionId: () => sessionId,
+              onRetry: retryObserver,
+            })).result;
+          activeTurnId = turnResult.turn.id;
+        }
 
-        const activeTurnId = turnResult.turn.id;
         runtimeState.activeTurnId = activeTurnId;
         // Publish the provider-accepted echo only after turn/start returns the
         // authoritative turn identity. Process separately publishes the
@@ -2526,7 +2869,7 @@ export class CodexProvider implements AgentProvider {
           eventKind: "user_message",
           turnId: activeTurnId,
           phase: "accepted",
-          sourceEvent: "turn/start",
+          sourceEvent,
         });
         yield logMessage(userMessage);
         if (historyForkPending) {
@@ -2547,11 +2890,15 @@ export class CodexProvider implements AgentProvider {
           {
             sessionId,
             turnId: activeTurnId,
-            turnStatus: turnResult.turn.status,
+            turnStatus: turnResult?.turn.status ?? "inProgress",
+            sourceEvent,
           },
-          "Started Codex app-server turn",
+          sourceEvent === "turn/steer"
+            ? "Steered bridge-owned Codex turn"
+            : "Started Codex app-server turn",
         );
-        let turnComplete = turnResult.turn.status !== "inProgress";
+        let turnComplete =
+          turnResult !== undefined && turnResult.turn.status !== "inProgress";
         let emittedTurnError = false;
 
         while (!turnComplete && !signal.aborted) {
@@ -2712,7 +3059,7 @@ export class CodexProvider implements AgentProvider {
         // If turn failed without an emitted error notification, surface start response error.
         if (
           !emittedTurnError &&
-          turnResult.turn.status === "failed" &&
+          turnResult?.turn.status === "failed" &&
           turnResult.turn.error?.message
         ) {
           const codexError = classifyCodexError(turnResult.turn.error, {
@@ -2738,12 +3085,20 @@ export class CodexProvider implements AgentProvider {
         } as SDKMessage);
       }
     } catch (error) {
-      const codexError = classifyCodexError(error);
+      const classifiedError =
+        transportKind === "bridge-websocket"
+          ? new Error("Codex bridge execution failed", { cause: error })
+          : error;
+      const codexError = classifyCodexError(classifiedError);
       log.error(
         {
           code: codexError.code,
           category: codexError.category,
           retryable: codexError.retryable,
+          startupStage,
+          transport: transportKind,
+          errorType: error instanceof Error ? error.name : typeof error,
+          rpcCode: error instanceof CodexJsonRpcError ? error.code : undefined,
         },
         "Error in codex app-server session",
       );
@@ -5140,6 +5495,59 @@ function selectCanonicalGeneratedArtifactSourceItem(
     return null;
   }
   return liveItem;
+}
+
+function normalizeCodexBridgeExecutionConfig(
+  config: CodexBridgeExecutionConfig | null | undefined,
+): CodexBridgeExecutionConfig | undefined {
+  if (!config || config.mode === "disabled") return undefined;
+  const controlUrl = config.controlUrl.trim().replace(/\/+$/, "");
+  if (!controlUrl) return undefined;
+  return {
+    ...config,
+    controlUrl,
+    ...(config.authToken?.trim()
+      ? { authToken: config.authToken.trim() }
+      : { authToken: undefined }),
+  };
+}
+
+function normalizeBridgeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, "");
+}
+
+function isWildcardBridgeHostname(hostname: string): boolean {
+  const normalized = normalizeBridgeHostname(hostname);
+  return normalized === "0.0.0.0" || normalized === "::";
+}
+
+function isLoopbackBridgeHostname(hostname: string): boolean {
+  const normalized = normalizeBridgeHostname(hostname);
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalized)
+  );
+}
+
+function isSameTrustedBridgeHost(left: string, right: string): boolean {
+  const normalizedLeft = normalizeBridgeHostname(left);
+  const normalizedRight = normalizeBridgeHostname(right);
+  return (
+    normalizedLeft === normalizedRight ||
+    (isLoopbackBridgeHostname(normalizedLeft) &&
+      isLoopbackBridgeHostname(normalizedRight))
+  );
+}
+
+function findLastInProgressCodexTurnId(
+  turns: ThreadResumeResponse["thread"]["turns"],
+): string | undefined {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn?.status === "inProgress") return turn.id;
+  }
+  return undefined;
 }
 
 /**

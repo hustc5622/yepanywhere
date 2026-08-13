@@ -142,6 +142,17 @@ describe("KimiSessionReader state v2 discovery", () => {
         join(sessionDir, "agents", "main", "wire.jsonl"),
         jsonl([
           {
+            type: "config.update",
+            modelAlias: "custom-kimi/kimi-k3",
+            thinkingEffort: "high",
+            time: createdAt,
+          },
+          {
+            type: "config.update",
+            thinkingEffort: "max",
+            time: createdAt + 1,
+          },
+          {
             type: "turn.prompt",
             input: [{ type: "text", text: "create an API test" }],
             origin: { kind: "user" },
@@ -172,6 +183,8 @@ describe("KimiSessionReader state v2 discovery", () => {
           createdAt: new Date(createdAt).toISOString(),
           updatedAt: new Date(updatedAt).toISOString(),
           messageCount: 2,
+          model: "custom-kimi/kimi-k3",
+          reasoningEffort: "max",
         }),
       ]);
     } finally {
