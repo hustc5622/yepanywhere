@@ -4,6 +4,7 @@ import {
   CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE,
   type CanonicalCodexItemState,
   type CanonicalCodexSessionState,
+  type CanonicalCodexThreadGoal,
   type CanonicalCodexThreadState,
   type CanonicalCodexTurnState,
   type CodexCanonicalItemKind,
@@ -160,6 +161,12 @@ export function applyCodexEventMutable(
       break;
     case "turn/diff/updated":
       reduceTurnDiff(state, event, payload);
+      break;
+    case "thread/goal/updated":
+      reduceThreadGoalUpdated(state, event, payload);
+      break;
+    case "thread/goal/cleared":
+      reduceThreadGoalCleared(state, event, payload);
       break;
     case "error":
       reduceError(state, event, payload);
@@ -363,7 +370,12 @@ function reduceTurnPlan(
 ): void {
   const turn = resolveTurn(state, event, payload);
   if (!turn) return;
-  if (payload?.plan !== undefined) turn.plan = structuredClone(payload.plan);
+  // Store the full notification payload (explanation + plan array) so the
+  // projection can surface both the checklist steps and the model's note.
+  if (payload !== undefined) {
+    turn.plan = structuredClone(payload);
+    turn.planSequence = event.sequence;
+  }
   turn.lastSequence = Math.max(turn.lastSequence, event.sequence);
 }
 
@@ -376,6 +388,62 @@ function reduceTurnDiff(
   if (!turn) return;
   turn.diff = readString(payload, "diff") ?? turn.diff;
   turn.lastSequence = Math.max(turn.lastSequence, event.sequence);
+}
+
+function reduceThreadGoalUpdated(
+  state: CanonicalCodexSessionState,
+  event: CodexEventEnvelope,
+  payload: SafeJsonObject | undefined,
+): void {
+  const threadId = resolveThreadId(event, payload);
+  if (!threadId) {
+    addAnomaly(state, event, "missing_identity");
+    return;
+  }
+  const goalPayload = asObject(payload?.goal);
+  if (!goalPayload) {
+    addAnomaly(state, event, "missing_identity");
+    return;
+  }
+  const objective = readString(goalPayload, "objective");
+  const status = readString(goalPayload, "status");
+  if (!objective || !status) {
+    addAnomaly(state, event, "missing_identity");
+    return;
+  }
+  const thread = ensureThread(state, threadId, event.sequence);
+  const goal: CanonicalCodexThreadGoal = {
+    objective,
+    status,
+    tokensUsed: readNumber(goalPayload, "tokensUsed") ?? 0,
+    timeUsedSeconds: readNumber(goalPayload, "timeUsedSeconds") ?? 0,
+    createdAt: readNumber(goalPayload, "createdAt") ?? 0,
+    updatedAt: readNumber(goalPayload, "updatedAt") ?? 0,
+    ...(readNumber(goalPayload, "tokenBudget") !== undefined
+      ? { tokenBudget: readNumber(goalPayload, "tokenBudget") }
+      : {}),
+  };
+  thread.goal = goal;
+  thread.goalSequence = event.sequence;
+  thread.goalUpdatedAtMs = event.appServerEmittedAtMs ?? event.receivedAtMs;
+  thread.lastSequence = Math.max(thread.lastSequence, event.sequence);
+}
+
+function reduceThreadGoalCleared(
+  state: CanonicalCodexSessionState,
+  event: CodexEventEnvelope,
+  payload: SafeJsonObject | undefined,
+): void {
+  const threadId = resolveThreadId(event, payload);
+  if (!threadId) {
+    addAnomaly(state, event, "missing_identity");
+    return;
+  }
+  const thread = ensureThread(state, threadId, event.sequence);
+  thread.goal = undefined;
+  thread.goalSequence = event.sequence;
+  thread.goalUpdatedAtMs = event.appServerEmittedAtMs ?? event.receivedAtMs;
+  thread.lastSequence = Math.max(thread.lastSequence, event.sequence);
 }
 
 function reduceError(

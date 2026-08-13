@@ -2,11 +2,13 @@ import { memo, useCallback } from "react";
 import { getMessageId } from "../lib/mergeMessages";
 import { canEditPersistedUserPrompt } from "../lib/sessionBranching";
 import type { RenderItem } from "../types/renderItems";
+import { GoalInlineBlock } from "./blocks/GoalInlineRenderer";
 import { SessionSetupBlock } from "./blocks/SessionSetupBlock";
 import { TextBlock } from "./blocks/TextBlock";
 import { ThinkingBlock } from "./blocks/ThinkingBlock";
 import { ToolCallRow } from "./blocks/ToolCallRow";
 import { UserPromptBlock } from "./blocks/UserPromptBlock";
+import { CodexNativeItemBlock } from "./blocks/codex/CodexNativeItemBlock";
 
 interface Props {
   item: RenderItem;
@@ -235,6 +237,13 @@ export const RenderItemComponent = memo(function RenderItemComponent({
         return <SessionSetupBlock title={item.title} prompts={item.prompts} />;
 
       case "system": {
+        // Kimi goal lifecycle snapshots — render the inline goal card.
+        if (item.subtype === "kimi_goal") {
+          if (item.goalSnapshot) {
+            return <GoalInlineBlock snapshot={item.goalSnapshot} />;
+          }
+          return null;
+        }
         // Different styling for compacting vs completed compaction
         const isCompacting =
           item.subtype === "status" && item.status === "compacting";
@@ -254,6 +263,9 @@ export const RenderItemComponent = memo(function RenderItemComponent({
           </div>
         );
       }
+
+      case "codex_native_item":
+        return <CodexNativeItemBlock item={item} />;
 
       default:
         return null;

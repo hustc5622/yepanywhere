@@ -160,6 +160,8 @@ export interface CanonicalCodexTurnState {
   items: Record<string, CanonicalCodexItemState>;
   itemOrder: string[];
   plan?: SafeJsonValue;
+  /** Event sequence of the latest `turn/plan/updated` snapshot. */
+  planSequence?: number;
   diff?: string;
   error?: SafeJsonValue;
   startedAtMs?: number;
@@ -176,6 +178,37 @@ export interface CanonicalCodexThreadState {
   turnOrder: string[];
   firstSequence: number;
   lastSequence: number;
+  /**
+   * Last-known thread goal snapshot. Codex emits `thread/goal/updated` with a
+   * full goal snapshot on every mutation and `thread/goal/cleared` on removal;
+   * we retain only the latest state so a REST refresh can surface the current
+   * objective, status, token budget, and elapsed time without retaining every
+   * update as a separate state object.
+   */
+  goal?: CanonicalCodexThreadGoal;
+  /** Event sequence of the last goal mutation (updated or cleared). */
+  goalSequence?: number;
+  /** Wall-clock time (epoch ms) the last goal mutation occurred. */
+  goalUpdatedAtMs?: number;
+}
+
+/**
+ * Canonical snapshot of a Codex `ThreadGoal`, mirrored from the
+ * `thread/goal/updated` notification payload. Fields use the app-server's
+ * camelCase wire naming so the projection can pass them through directly.
+ *
+ * Status values: "active" | "paused" | "blocked" | "usageLimited" |
+ * "budgetLimited" | "complete" (see `ThreadGoalStatus` in the app-server
+ * protocol, `#[serde(rename_all = "camelCase")]`).
+ */
+export interface CanonicalCodexThreadGoal {
+  objective: string;
+  status: string;
+  tokenBudget?: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface CodexEventObservation {

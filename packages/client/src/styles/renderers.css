@@ -3512,6 +3512,28 @@ details[open] .collapsible__icon {
   flex-shrink: 0;
 }
 
+/* Subagent type visual differentiation: explore (read-only, blue), coder
+   (editing, purple), and provider-specific defaults. */
+.task-agent-type-explore {
+  background: rgba(23, 131, 255, 0.15);
+  color: var(--status-info, #1783ff);
+}
+
+.task-agent-type-coder {
+  background: rgba(120, 80, 200, 0.15);
+  color: #7850c8;
+}
+
+.task-agent-type-agent {
+  background: rgba(78, 201, 176, 0.15);
+  color: var(--status-running, #4ec9b0);
+}
+
+.task-agent-type-plan {
+  background: rgba(204, 153, 51, 0.15);
+  color: var(--status-warning, #cc9333);
+}
+
 .task-model {
   flex-shrink: 0;
   background: var(--bg-tertiary);
@@ -5187,4 +5209,384 @@ pre.code-highlighter-plain code {
   color: var(--error-color, #f14c4c);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Codex native ThreadItem renderers (plan, sub-agent activity, collab) */
+.codex-native-item {
+  padding: 0.5rem 0.625rem;
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: var(--font-size-sm);
+}
+
+.codex-native-item-unknown .codex-native-item-label {
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+/* Thread goal */
+.codex-native-goal {
+  padding: 0.625rem 0.75rem;
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--status-running, #4ec9b0);
+  border-radius: 6px;
+}
+
+.codex-native-goal-complete {
+  border-left-color: var(--status-success, #89d185);
+}
+
+.codex-native-goal-paused {
+  border-left-color: var(--text-muted);
+}
+
+.codex-native-goal-limited,
+.codex-native-goal-blocked {
+  border-left-color: var(--error-color, #f14c4c);
+}
+
+.codex-native-goal-header {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-bottom: 0.375rem;
+}
+
+.codex-native-goal-icon {
+  font-size: var(--font-size-sm);
+  color: var(--status-running, #4ec9b0);
+}
+
+.codex-native-goal-label {
+  font-weight: 600;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.codex-native-goal-status {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.codex-native-goal-status.status-active {
+  color: var(--status-running, #4ec9b0);
+}
+
+.codex-native-goal-status.status-paused {
+  color: var(--text-muted);
+}
+
+.codex-native-goal-status.status-complete {
+  color: var(--status-success, #89d185);
+}
+
+.codex-native-goal-status.status-limited {
+  color: var(--error-color, #f14c4c);
+}
+
+.codex-native-goal-objective {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  margin-bottom: 0.375rem;
+}
+
+.codex-native-goal-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.codex-native-goal-usage-item {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* Proposed plan */
+.codex-native-plan {
+  padding: 0.5rem 0.625rem;
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.codex-native-plan-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.375rem;
+}
+
+.codex-native-plan-title {
+  font-weight: 600;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.codex-native-plan-badge {
+  font-size: var(--font-size-xs);
+  color: var(--status-running, #4ec9b0);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.codex-native-plan-streaming {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.codex-native-plan-streaming-cursor {
+  display: inline-block;
+  width: 0.5rem;
+  height: 1rem;
+  background: var(--status-running, #4ec9b0);
+  animation: codex-plan-cursor-blink 1s steps(2, start) infinite;
+}
+
+@keyframes codex-plan-cursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+.codex-native-plan-text {
+  margin: 0;
+  font-family: "SF Mono", Monaco, monospace;
+  font-size: var(--font-size-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+/* Sub-agent activity & collaboration */
+.codex-native-subagent {
+  padding: 0.5rem 0.625rem;
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.codex-native-subagent-title {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.codex-native-subagent-nickname {
+  color: var(--status-running, #4ec9b0);
+  font-family: "SF Mono", Monaco, monospace;
+  font-weight: 600;
+}
+
+.codex-native-subagent-role,
+.codex-native-subagent-state-role {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.codex-native-subagent-model {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.codex-native-subagent-states {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.375rem;
+}
+
+.codex-native-subagent-state {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.codex-native-subagent-state-name {
+  font-family: "SF Mono", Monaco, monospace;
+  font-size: var(--font-size-sm);
+  color: var(--status-running, #4ec9b0);
+}
+
+.codex-native-subagent-state-status {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.codex-native-subagent-state.status-running
+  .codex-native-subagent-state-status {
+  color: var(--status-running, #4ec9b0);
+}
+
+.codex-native-subagent-state.status-completed
+  .codex-native-subagent-state-status {
+  color: var(--status-success, #89d185);
+}
+
+.codex-native-subagent-state.status-errored
+  .codex-native-subagent-state-status {
+  color: var(--error-color, #f14c4c);
+}
+
+.codex-native-subagent-state-message {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+/* =============================================================================
+   Kimi goal inline card (goal lifecycle snapshots from wire.jsonl goal.*)
+   ============================================================================= */
+
+.kimi-goal-card {
+  margin: var(--spacing-sm, 8px) 0;
+  padding: var(--spacing-sm, 8px) var(--spacing-md, 12px);
+  border-radius: var(--border-radius-md, 8px);
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.05));
+  font-size: var(--font-size-sm, 13px);
+}
+
+.kimi-goal-card-created {
+  border-color: var(--status-info, #1783ff);
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+
+.kimi-goal-card-status {
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+
+.kimi-goal-card-cleared {
+  opacity: 0.7;
+}
+
+.kimi-goal-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs, 4px);
+  margin-bottom: 4px;
+}
+
+.kimi-goal-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--border-radius-sm, 4px);
+  font-size: var(--font-size-xs, 11px);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.kimi-goal-status-active {
+  background: rgba(78, 201, 176, 0.15);
+  color: var(--status-running, #4ec9b0);
+}
+
+.kimi-goal-status-paused {
+  background: rgba(128, 128, 128, 0.15);
+  color: var(--text-muted, #888);
+}
+
+.kimi-goal-status-blocked {
+  background: rgba(204, 153, 51, 0.15);
+  color: var(--status-warning, #cc9333);
+}
+
+.kimi-goal-status-complete {
+  background: rgba(78, 201, 176, 0.15);
+  color: var(--status-success, #4ec9b0);
+}
+
+.kimi-goal-status-cleared {
+  background: rgba(128, 128, 128, 0.1);
+  color: var(--text-muted, #888);
+}
+
+.kimi-goal-actor {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted, #888);
+}
+
+.kimi-goal-objective {
+  margin: 4px 0;
+  font-weight: 500;
+  color: var(--text-primary, inherit);
+}
+
+.kimi-goal-objective-muted {
+  font-weight: 400;
+  color: var(--text-muted, #888);
+}
+
+.kimi-goal-reason,
+.kimi-goal-criterion {
+  margin: 4px 0;
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted, #888);
+}
+
+.kimi-goal-metrics-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm, 8px);
+  margin-top: 6px;
+}
+
+.kimi-goal-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 60px;
+}
+
+.kimi-goal-metric-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.kimi-goal-metric-label {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted, #888);
+  text-transform: uppercase;
+}
+
+.kimi-goal-metric-value {
+  font-size: var(--font-size-xs, 11px);
+  font-weight: 600;
+  color: var(--text-primary, inherit);
+}
+
+.kimi-goal-metric-warning {
+  color: var(--status-warning, #cc9333);
+}
+
+.kimi-goal-progress-bar {
+  width: 80px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-color, rgba(128, 128, 128, 0.2));
+  overflow: hidden;
+}
+
+.kimi-goal-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--status-info, #4ec9b0);
+  transition: width 0.2s ease;
+}
+
+.kimi-goal-progress-warning {
+  background: var(--status-warning, #cc9333);
 }

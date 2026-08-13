@@ -376,6 +376,99 @@ function buildCanonicalMessageCandidates(
           },
         });
       }
+
+      // Project the turn-level plan checklist (if any) as a dedicated native
+      // item so the client can render the step list with per-step status.
+      // Codex emits `turn/plan/updated` with `{ explanation?, plan: [{ step,
+      // status }] }`; the reducer retains only the latest snapshot per turn, so
+      // we emit one candidate per turn at the plan notification's own
+      // sequence, even if later turn activity advances `turn.lastSequence`.
+      if (turn.plan !== undefined && turn.planSequence !== undefined) {
+        const planSeq = turn.planSequence;
+        if (withinWindow(planSeq)) {
+          const projectedPlan = projectTurnPlanSteps(turn.plan);
+          if (projectedPlan.steps.length > 0 || projectedPlan.explanation) {
+            const event = eventBySequence.get(planSeq);
+            const occurredAtMs = eventTime(event);
+            candidates.push({
+              kind: "item",
+              sequence: planSeq,
+              occurredAtMs,
+              originalItemId: `codex-plan-${turn.id}`,
+              nativeType: "turnPlan",
+              message: {
+                uuid: canonicalMessageId("plan", `${thread.id}:${turn.id}`),
+                type: "system",
+                subtype: "codex_native_item",
+                ...(occurredAtMs > 0
+                  ? { timestamp: new Date(occurredAtMs).toISOString() }
+                  : {}),
+                codexThreadItem: {
+                  type: "turnPlan",
+                  id: safeIdentity(turn.id, "turn"),
+                  steps: projectedPlan.steps,
+                  ...(projectedPlan.explanation
+                    ? { explanation: projectedPlan.explanation }
+                    : {}),
+                },
+                codexThreadItemLifecycle: "completed",
+                codexThreadId: safeIdentity(thread.id, "thread"),
+                codexTurnId: safeIdentity(turn.id, "turn"),
+                codexEventSequence: planSeq,
+                codexCanonicalRefresh: true,
+                _source: "jsonl",
+              },
+            });
+          }
+        }
+      }
+    }
+
+    // Project the latest thread-level goal snapshot (if any) as a dedicated
+    // native item so the client can render the current objective, status, and
+    // token usage/budget and elapsed time. Goal mutations are
+    // always-persisted events in Codex
+    // (rollout/src/policy.rs), so a durable journal always carries the latest
+    // snapshot. We emit one candidate per thread at the goal's last mutation
+    // sequence. Current thread state is not trimmed by the per-item candidate
+    // window, otherwise a still-active goal disappears after enough activity.
+    if (thread.goal && thread.goalSequence !== undefined) {
+      const goalSeq = thread.goalSequence;
+      const event = eventBySequence.get(goalSeq);
+      const occurredAtMs = thread.goalUpdatedAtMs ?? eventTime(event) ?? 0;
+      const goal = thread.goal;
+      candidates.push({
+        kind: "item",
+        sequence: goalSeq,
+        occurredAtMs,
+        nativeType: "threadGoal",
+        message: {
+          uuid: canonicalMessageId("goal", thread.id),
+          type: "system",
+          subtype: "codex_native_item",
+          ...(occurredAtMs > 0
+            ? { timestamp: new Date(occurredAtMs).toISOString() }
+            : {}),
+          codexThreadItem: {
+            type: "threadGoal",
+            id: safeIdentity(thread.id, "thread"),
+            objective: goal.objective,
+            status: goal.status,
+            ...(goal.tokenBudget !== undefined
+              ? { tokenBudget: goal.tokenBudget }
+              : {}),
+            tokensUsed: goal.tokensUsed,
+            timeUsedSeconds: goal.timeUsedSeconds,
+            createdAt: goal.createdAt,
+            updatedAt: goal.updatedAt,
+          },
+          codexThreadItemLifecycle: "completed",
+          codexThreadId: safeIdentity(thread.id, "thread"),
+          codexEventSequence: goalSeq,
+          codexCanonicalRefresh: true,
+          _source: "jsonl",
+        },
+      });
     }
   }
 
@@ -474,6 +567,9 @@ function deriveCandidateWindowStart(
     for (const turnId of thread.turnOrder) {
       const turn = thread.turns[turnId];
       if (!turn) continue;
+      if (turn.planSequence !== undefined) {
+        touchSequences.push(turn.planSequence);
+      }
       for (const itemId of turn.itemOrder) {
         const item = turn.items[itemId];
         if (item) touchSequences.push(item.lastSequence);
@@ -518,9 +614,12 @@ function deriveCandidateWindowStart(
     );
   }
 
-  if (touchSequences.length <= maxCandidateCount) return undefined;
-  touchSequences.sort((left, right) => left - right);
-  return touchSequences[touchSequences.length - maxCandidateCount];
+  // Deduplicate so a turn whose lastSequence equals its last item's
+  // lastSequence (the common case) does not inflate the window calculation.
+  const uniqueTouchSequences = [...new Set(touchSequences)];
+  if (uniqueTouchSequences.length <= maxCandidateCount) return undefined;
+  uniqueTouchSequences.sort((left, right) => left - right);
+  return uniqueTouchSequences[uniqueTouchSequences.length - maxCandidateCount];
 }
 
 function buildInteractionCandidates(
@@ -737,6 +836,44 @@ function projectSafeThreadItem(
       break;
   }
   return removeUndefined(base);
+}
+
+interface ProjectedTurnPlan {
+  steps: Array<{ step: string; status: string }>;
+  explanation?: string;
+}
+
+/**
+ * Extract a safe checklist snapshot from the `turn.plan` canonical state.
+ *
+ * The reducer stores `structuredClone(payload.plan)` from the
+ * `turn/plan/updated` notification, which carries `{ explanation?, plan:
+ * [{ step, status }] }` in camelCase wire format (`TurnPlanUpdatedNotification`
+ * in the app-server protocol). Only well-formed steps with a non-empty label
+ * are retained; unknown status strings are passed through as-is so the client
+ * can fall back gracefully.
+ */
+function projectTurnPlanSteps(plan: SafeJsonValue): ProjectedTurnPlan {
+  const planObj = asObject(plan);
+  const explanation = readString(planObj, "explanation");
+  const rawSteps = planObj?.plan ?? plan;
+  const steps: Array<{ step: string; status: string }> = [];
+
+  if (Array.isArray(rawSteps)) {
+    for (const raw of rawSteps) {
+      const stepObj = asObject(raw);
+      const step = readString(stepObj, "step");
+      const status = readString(stepObj, "status");
+      if (step && step.trim().length > 0 && status) {
+        steps.push({ step, status });
+      }
+    }
+  }
+
+  return {
+    steps,
+    ...(explanation ? { explanation } : {}),
+  };
 }
 
 function projectedStreamText(

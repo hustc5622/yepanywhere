@@ -689,6 +689,7 @@ export function useSessionMessages(
 
     api
       .getSession(projectId, sessionId, undefined, {
+        view: "canonical",
         tailCompactions: 2,
         maxMessages: INITIAL_MESSAGE_LIMIT,
         branchId,
@@ -905,7 +906,7 @@ export function useSessionMessages(
         projectId,
         sessionId,
         lastMessageIdRef.current,
-        { branchId },
+        { view: "canonical", branchId },
       );
       if (data.session.provider === "kimi") {
         // Kimi's reader cannot honor afterMessageId because its normalized
@@ -972,6 +973,7 @@ export function useSessionMessages(
           : (options.branchId ?? undefined);
       try {
         const data = await api.getSession(projectId, sessionId, undefined, {
+          view: "canonical",
           tailCompactions: 2,
           maxMessages: Math.max(
             INITIAL_MESSAGE_LIMIT,
@@ -1027,6 +1029,7 @@ export function useSessionMessages(
     setLoadingOlder(true);
     try {
       const data = await api.getSession(projectId, sessionId, undefined, {
+        view: "canonical",
         tailCompactions: 2,
         maxMessages: INITIAL_MESSAGE_LIMIT,
         beforeMessageId: pagination.truncatedBeforeMessageId,
@@ -1067,6 +1070,7 @@ export function useSessionMessages(
     setLoadingNewer(true);
     try {
       const data = await api.getSession(projectId, sessionId, undefined, {
+        view: "canonical",
         maxMessages: INITIAL_MESSAGE_LIMIT,
         afterWindowMessageId: pagination.truncatedAfterMessageId,
         branchId,
@@ -1108,6 +1112,7 @@ export function useSessionMessages(
       setLoadingTargetMessage(true);
       try {
         const data = await api.getSession(projectId, sessionId, undefined, {
+          view: "canonical",
           aroundMessageId: messageId,
           maxMessages: INITIAL_MESSAGE_LIMIT,
           branchId,

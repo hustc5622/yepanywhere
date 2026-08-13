@@ -34,6 +34,7 @@ import type {
 } from "@yep-anywhere/shared";
 import {
   getGeminiUserMessageText,
+  getKimiGoalTimeline,
   getKimiPromptImages,
   getKimiPromptText,
   getMessageContent,
@@ -650,7 +651,7 @@ function extractCodexTokenCountContextUsage(
   return result;
 }
 
-function convertCodexEntries(
+export function convertCodexEntries(
   entries: CodexSessionEntry[],
   sessionId: string,
   branchState?: SessionBranchState,
@@ -2506,7 +2507,99 @@ export function convertKimiMessages(session: KimiSessionContent): Message[] {
   }
 
   flushAssistant();
-  return messages;
+
+  // Replay the main-agent goal lifecycle (goal.create / goal.update /
+  // goal.clear / forked) and merge the snapshots into the transcript as
+  // inline `type: "kimi_goal"` messages, placed at their record timestamps.
+  // Goals are main-agent autonomous targets with budgets; surfacing them
+  // inline lets the UI show what the agent was pursuing (and how much budget
+  // it consumed) at each point in the transcript. Child-agent wires typically
+  // have no goal.* records, so this is a no-op there.
+  return mergeKimiGoalSnapshots(
+    messages,
+    getKimiGoalTimeline(session.records),
+    sid,
+  );
+}
+
+/**
+ * Merge goal snapshots into a transcript as inline `type: "kimi_goal"` messages.
+ *
+ * Each snapshot becomes a message whose `goal` payload (objective, status,
+ * budget consumption, actor, change kind) is read by the client
+ * `GoalInlineRenderer`. Snapshots are placed by their `time` field: a snapshot
+ * lands after the last existing message with a timestamp ≤ the snapshot's
+ * time. Snapshots without a time are appended in order. This keeps the goal
+ * markers interleaved with the turns that produced them, so the UI can show
+ * "goal created → assistant worked → goal blocked → …" in context.
+ */
+function mergeKimiGoalSnapshots(
+  messages: Message[],
+  snapshots: readonly import("@yep-anywhere/shared").KimiGoalSnapshot[],
+  sessionId: string,
+): Message[] {
+  if (snapshots.length === 0) return messages;
+
+  const goalMessages: Message[] = snapshots.map((snapshot, index) => {
+    const message: Message = {
+      type: "kimi_goal",
+      uuid: `${sessionId}-goal-${index}`,
+      goal: snapshot,
+      ...(snapshot.time !== undefined
+        ? { timestamp: new Date(snapshot.time).toISOString() }
+        : {}),
+    };
+    return message;
+  });
+
+  // Stable merge by timestamp: existing messages keep their order, goal
+  // messages slot in by time. Messages without timestamps go to the end.
+  const result: Message[] = [];
+  let gi = 0;
+  const messageTime = (message: Message | undefined): number => {
+    if (!message?.timestamp) return Number.POSITIVE_INFINITY;
+    const parsed = Date.parse(message.timestamp);
+    return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+  };
+  const goalTime = (message: Message): number => {
+    const snapshot = message.goal as { time?: number };
+    return snapshot.time ?? Number.POSITIVE_INFINITY;
+  };
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const msg = messages[index];
+    if (!msg) continue;
+    const msgTime = messageTime(msg);
+    while (gi < goalMessages.length) {
+      const goal = goalMessages[gi];
+      if (!goal) break;
+      if (goalTime(goal) < msgTime) {
+        result.push(goal);
+        gi += 1;
+      } else {
+        break;
+      }
+    }
+    result.push(msg);
+
+    // Equal timestamps stay stable: every existing transcript message at the
+    // timestamp is emitted before goal markers at that same timestamp.
+    if (messageTime(messages[index + 1]) !== msgTime) {
+      while (gi < goalMessages.length) {
+        const goal = goalMessages[gi];
+        if (!goal || goalTime(goal) > msgTime) break;
+        result.push(goal);
+        gi += 1;
+      }
+    }
+  }
+  // Append any remaining goal snapshots.
+  while (gi < goalMessages.length) {
+    const goal = goalMessages[gi];
+    if (goal) result.push(goal);
+    gi += 1;
+  }
+  return result;
 }
 
 // --- OpenCode Conversion Logic ---

@@ -17,8 +17,15 @@ describe("isSlashCommandSessionTitle", () => {
     "$git-commit-push review the release branch",
     "$git commit push",
     "$GIT-COMMIT-PUSH",
+    "/goal",
+    "/goal review, commit, and push the changes",
+    "/GOAL keep working until complete",
   ])("keeps %s in the regular session library", (title) => {
     expect(isSlashCommandSessionTitle(title)).toBe(false);
+  });
+
+  it("keeps the /goal exception bounded to the command name", () => {
+    expect(isSlashCommandSessionTitle("/goalkeeper check status")).toBe(true);
   });
 
   it.each([undefined, null, "", "Normal session", "Discuss $git-commit-push"])(

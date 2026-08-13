@@ -12,6 +12,8 @@ import { promisify } from "node:util";
 import type {
   CodexRetryStatus,
   ModelInfo,
+  ProviderGoalAction,
+  ProviderGoalState,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { WebSocket } from "ws";
@@ -99,6 +101,8 @@ import {
   DEFAULT_CODEX_MODEL_SOURCE,
   getCodexModelSourceRegistry,
 } from "./codex-model-sources.js";
+import type { ThreadGoal as CodexThreadGoal } from "./codex-protocol/generated/v2/ThreadGoal.js";
+import type { ThreadGoalStatus as CodexThreadGoalStatus } from "./codex-protocol/generated/v2/ThreadGoalStatus.js";
 import type { ThreadReadResponse } from "./codex-protocol/generated/v2/ThreadReadResponse.js";
 import type { TurnInterruptParams } from "./codex-protocol/generated/v2/TurnInterruptParams.js";
 import type { TurnInterruptResponse } from "./codex-protocol/generated/v2/TurnInterruptResponse.js";
@@ -387,6 +391,53 @@ interface CodexTurnRuntimeState {
 }
 
 type CodexMessagePhase = "commentary" | "final_answer";
+
+const GOAL_STATUS_LABELS: Record<CodexThreadGoalStatus, string> = {
+  active: "Active",
+  paused: "Paused",
+  blocked: "Blocked",
+  usageLimited: "Usage limited",
+  budgetLimited: "Budget limited",
+  complete: "Complete",
+};
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainder}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h ${remainingMinutes}m`;
+}
+
+function formatTokens(used: number, budget: number | null): string {
+  const fmt = (n: number): string => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return String(n);
+  };
+  return budget !== null && budget > 0
+    ? `${fmt(used)} / ${fmt(budget)}`
+    : fmt(used);
+}
+
+/**
+ * Format a Codex `ThreadGoal` as a human-readable status string, mirroring
+ * the Codex TUI `goal_display.rs` `goal_usage_summary` output.
+ */
+function formatCodexGoal(goal: CodexThreadGoal | null): string {
+  if (!goal) return "No goal set.";
+  const lines: string[] = [
+    `Objective: ${goal.objective}`,
+    `Status: ${GOAL_STATUS_LABELS[goal.status] ?? goal.status}`,
+  ];
+  if (goal.timeUsedSeconds > 0) {
+    lines.push(`Time: ${formatDuration(goal.timeUsedSeconds)}`);
+  }
+  lines.push(`Tokens: ${formatTokens(goal.tokensUsed, goal.tokenBudget)}`);
+  return lines.join("\n");
+}
 
 async function terminateChildProcess(
   child: ChildProcess | null | undefined,
@@ -1856,6 +1907,23 @@ export class CodexProvider implements AgentProvider {
             request,
           }),
       },
+      getGoal: async () => {
+        return this.codexGoalToProviderState(
+          () => activeClient,
+          runtimeState,
+          options.cwd,
+          "show",
+        );
+      },
+      goalAction: async (action, objective) => {
+        return this.codexGoalToProviderState(
+          () => activeClient,
+          runtimeState,
+          options.cwd,
+          action,
+          objective,
+        );
+      },
       steer: async (message) => {
         if (!activeClient) return false;
         if (!runtimeState.threadId || !runtimeState.activeTurnId) return false;
@@ -1900,6 +1968,108 @@ export class CodexProvider implements AgentProvider {
           return false;
         }
       },
+    };
+  }
+
+  /**
+   * Adapt the provider-neutral goal lifecycle (`ProviderGoalAction`) to Codex's
+   * native `thread/goal/*` controls and format the structured `ThreadGoal`
+   * response as a `ProviderGoalState` text summary.
+   *
+   * Action mapping:
+   * - "show" → `thread/goal/get` (read-only)
+   * - "set" → `thread/goal/set` with an active objective
+   * - "replace" → `thread/goal/clear`, then `thread/goal/set` with an active
+   *   objective so usage and budget state do not leak from the old goal
+   * - "pause" → `thread/goal/set` with `status: "paused"`
+   * - "resume" → `thread/goal/set` with `status: "active"`
+   * - "clear" → `thread/goal/clear`
+   */
+  private async codexGoalToProviderState(
+    getClient: () => CodexAppServerClient | null,
+    runtimeState: CodexTurnRuntimeState,
+    cwd: string,
+    action: ProviderGoalAction | "show",
+    objective?: string,
+  ): Promise<ProviderGoalState> {
+    const client = getClient();
+    if (!client?.isAlive() || !runtimeState.ready || !runtimeState.threadId) {
+      throw new Error("Codex goal requires an active session");
+    }
+
+    if (action === "clear") {
+      const result = await this.invokeCodexNativeControl({
+        getClient,
+        runtimeState,
+        cwd,
+        request: { control: "thread/goal/clear" },
+      });
+      if (!result.ok) {
+        throw new Error(result.error?.message ?? "Goal clear failed");
+      }
+      const cleared =
+        result.control === "thread/goal/clear" && result.data.cleared;
+      return {
+        response: cleared ? "Goal cleared." : "No goal to clear.",
+        startedTurn: false,
+      };
+    }
+
+    if (action === "show") {
+      const result = await this.invokeCodexNativeControl({
+        getClient,
+        runtimeState,
+        cwd,
+        request: { control: "thread/goal/get" },
+      });
+      if (!result.ok) {
+        throw new Error(result.error?.message ?? "Goal fetch failed");
+      }
+      const goal =
+        result.control === "thread/goal/get" ? result.data.goal : null;
+      return {
+        response: formatCodexGoal(goal),
+        startedTurn: false,
+      };
+    }
+
+    if (action === "replace") {
+      const clearResult = await this.invokeCodexNativeControl({
+        getClient,
+        runtimeState,
+        cwd,
+        request: { control: "thread/goal/clear" },
+      });
+      if (!clearResult.ok) {
+        throw new Error(clearResult.error?.message ?? "Goal clear failed");
+      }
+    }
+
+    const setStatus: CodexThreadGoalStatus | undefined =
+      action === "pause"
+        ? "paused"
+        : action === "resume" || action === "set" || action === "replace"
+          ? "active"
+          : undefined;
+    const result = await this.invokeCodexNativeControl({
+      getClient,
+      runtimeState,
+      cwd,
+      request: {
+        control: "thread/goal/set",
+        ...(objective !== undefined ? { objective } : {}),
+        ...(setStatus !== undefined ? { status: setStatus } : {}),
+      },
+    });
+    if (!result.ok) {
+      throw new Error(result.error?.message ?? "Goal set failed");
+    }
+    const goal = result.control === "thread/goal/set" ? result.data.goal : null;
+    return {
+      response: formatCodexGoal(goal),
+      // Unlike ZCode's session/goal RPC, Codex thread/goal/set only mutates
+      // durable goal state. It does not enqueue model input or start a turn.
+      startedTurn: false,
     };
   }
 

@@ -2608,4 +2608,168 @@ Details with a &gt; comparison.</result>
       }
     });
   });
+
+  describe("codex_native_item system messages", () => {
+    it("extracts plan ThreadItem as codex_native_item render item", () => {
+      const messages: Message[] = [
+        {
+          id: "plan-item",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: {
+            type: "plan",
+            id: "plan-1",
+            text: "1. Do thing A\n2. Do thing B",
+          },
+          codexThreadItemLifecycle: "completed",
+          codexThreadId: "thread-1",
+          codexTurnId: "turn-1",
+          codexCanonicalRefresh: true,
+          _source: "jsonl",
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        type: "codex_native_item",
+        id: "plan-item",
+        lifecycle: "completed",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        threadItem: {
+          type: "plan",
+          id: "plan-1",
+          text: "1. Do thing A\n2. Do thing B",
+        },
+      });
+    });
+
+    it("extracts subAgentActivity ThreadItem with started lifecycle", () => {
+      const messages: Message[] = [
+        {
+          id: "activity-1",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: {
+            type: "subAgentActivity",
+            id: "act-1",
+            kind: "started",
+            agentThreadId: "thread-child",
+            agentPath: "/root/explore",
+          },
+          codexThreadItemLifecycle: "started",
+          _source: "jsonl",
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        type: "codex_native_item",
+        lifecycle: "started",
+        threadItem: {
+          type: "subAgentActivity",
+          kind: "started",
+          agentThreadId: "thread-child",
+          agentPath: "/root/explore",
+        },
+      });
+    });
+
+    it("extracts collabAgentToolCall ThreadItem with agentsStates", () => {
+      const messages: Message[] = [
+        {
+          id: "spawn-1",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: {
+            type: "collabAgentToolCall",
+            id: "spawn-1",
+            tool: "spawnAgent",
+            model: "gpt-5",
+            reasoningEffort: "high",
+            agentsStates: {
+              "thread-child": {
+                nickname: "Einstein",
+                role: "explorer",
+                status: "running",
+              },
+            },
+          },
+          codexThreadItemLifecycle: "completed",
+          _source: "jsonl",
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+      expect(items).toHaveLength(1);
+      expect(items[0]?.type).toBe("codex_native_item");
+    });
+
+    it("skips codex_native_item without a valid threadItem payload", () => {
+      const messages: Message[] = [
+        {
+          id: "broken-1",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: null,
+          _source: "jsonl",
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+      expect(items).toHaveLength(0);
+    });
+
+    it("defaults lifecycle to started when codexThreadItemLifecycle is absent", () => {
+      const messages: Message[] = [
+        {
+          id: "no-lifecycle",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: { type: "plan", text: "draft" },
+          _source: "jsonl",
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        type: "codex_native_item",
+        lifecycle: "started",
+      });
+    });
+
+    it("still renders compact_boundary and warning system messages", () => {
+      const messages: Message[] = [
+        {
+          id: "boundary-1",
+          type: "system",
+          subtype: "compact_boundary",
+          content: "Context compacted",
+          _source: "jsonl",
+          timestamp: "2024-01-01T00:00:00Z",
+        },
+        {
+          id: "warn-1",
+          type: "system",
+          subtype: "warning",
+          content: "Heads up",
+          _source: "jsonl",
+          timestamp: "2024-01-01T00:00:01Z",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+      expect(items).toHaveLength(2);
+      expect(items[0]?.type).toBe("system");
+      expect(items[1]?.type).toBe("system");
+    });
+  });
 });

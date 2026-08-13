@@ -14,6 +14,8 @@
 import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import {
+  type AgentMapping,
+  type AgentStatus,
   type CodexEventMsgEntry,
   type CodexFunctionCallOutputPayload,
   type CodexFunctionCallPayload,
@@ -27,6 +29,8 @@ import {
   type ContextCumulativeUsage,
   SESSION_TITLE_MAX_LENGTH,
   type SessionQuestion,
+  type SubagentDescriptor,
+  type SubagentStatus,
   type UnifiedSession,
   type UrlProjectId,
   getModelContextWindow,
@@ -48,6 +52,7 @@ import {
   getCodexSessionManifest,
   invalidateCodexSessionManifest,
 } from "./codex-session-manifest.js";
+import { convertCodexEntries } from "./normalization.js";
 import {
   sanitizeCodexPublicUserPrompt,
   sanitizeCodexUserContentBlockText,
@@ -85,6 +90,91 @@ const CODEX_COMPACTION_EVENT_DEDUPE_WINDOW_MS = 5_000;
  * Codex source and stays under `codex`.
  */
 const LOCAL_CODEX_MODEL_PROVIDERS = new Set(["ollama", "lmstudio", "local"]);
+
+/**
+ * Derive a sub-agent lifecycle status from its rollout entries.
+ *
+ * Codex sub-agents are independent threads that end with either a
+ * `task_complete` event (completed), a `turn_aborted` event (interrupted), or
+ * neither while still running (`running`). We scan the event_msg entries in
+ * reverse to find the last terminal marker.
+ */
+function deriveCodexSubagentStatus(entries: CodexSessionEntry[]): {
+  status: AgentStatus;
+  descriptorStatus: SubagentStatus;
+} {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (!entry || entry.type !== "event_msg") continue;
+    const payload = entry.payload as { type?: unknown; error?: unknown };
+    if (payload.type === "task_complete") {
+      return payload.error !== undefined && payload.error !== null
+        ? { status: "failed", descriptorStatus: "failed" }
+        : { status: "completed", descriptorStatus: "completed" };
+    }
+    if (payload.type === "turn_aborted") {
+      return { status: "failed", descriptorStatus: "interrupted" };
+    }
+    if (payload.type === "error") {
+      return { status: "failed", descriptorStatus: "failed" };
+    }
+  }
+  return { status: "running", descriptorStatus: "running" };
+}
+
+function getCodexSpawnMapping(
+  entries: readonly CodexSessionEntry[],
+): Map<string, string> {
+  const callIdByChildThread = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.type !== "event_msg") continue;
+    const payload = entry.payload as Record<string, unknown>;
+    let childThreadId: unknown;
+    let callId: unknown;
+    if (payload.type === "item_completed") {
+      const item =
+        payload.item && typeof payload.item === "object"
+          ? (payload.item as Record<string, unknown>)
+          : undefined;
+      const tool = item?.tool;
+      if (
+        item?.type !== "CollabAgentToolCall" ||
+        (tool !== "spawn_agent" &&
+          tool !== "spawnAgent" &&
+          tool !== "SpawnAgent")
+      ) {
+        continue;
+      }
+      childThreadId = Array.isArray(item.receiver_thread_ids)
+        ? item.receiver_thread_ids[0]
+        : undefined;
+      callId = item.id;
+    } else if (payload.type === "collab_agent_spawn_end") {
+      // Compatibility for older rollout fixtures that persisted the legacy
+      // terminal event directly.
+      childThreadId = payload.new_thread_id;
+      callId = payload.call_id;
+    } else {
+      continue;
+    }
+    if (typeof childThreadId === "string" && typeof callId === "string") {
+      callIdByChildThread.set(childThreadId, callId);
+    }
+  }
+  return callIdByChildThread;
+}
+
+async function readCodexEntries(
+  filePath: string,
+): Promise<CodexSessionEntry[]> {
+  const lines = await readJsonlLines(filePath);
+  const entries: CodexSessionEntry[] = [];
+  for (const line of lines) {
+    const parsed = parseCodexSessionEntry(line);
+    if (parsed) entries.push(parsed);
+  }
+  return entries;
+}
 
 function timestampToMs(timestamp: string | undefined): number | null {
   if (!timestamp) return null;
@@ -395,21 +485,117 @@ export class CodexSessionReader implements ISessionReader {
   }
 
   /**
-   * Codex doesn't have subagent sessions like Claude.
-   * Returns empty array for compatibility.
+   * Return sub-agent sessions for the given parent session id.
+   *
+   * Codex sub-agents are independent threads with their own rollout files,
+   * linked to the parent via `session_meta.parent_thread_id` /
+   * `source.subagent.thread_spawn.parent_thread_id`. The manifest indexes
+   * these as `byParentThread`. The parent rollout's persisted
+   * paginated `item_completed` SpawnAgent item supplies the real spawning call
+   * id; children without that durable linkage are omitted rather than assigned
+   * a fake id. A sub-agent can itself be the parent of nested children.
    */
-  async getAgentMappings(): Promise<{ toolUseId: string; agentId: string }[]> {
-    return [];
+  async getAgentMappings(sessionId?: string): Promise<AgentMapping[]> {
+    if (!sessionId) return [];
+    const manifest = await getCodexSessionManifest(this.sessionsDir);
+    const parent = manifest.byId.get(sessionId);
+    if (!parent || !this.isManifestEntryInScope(parent)) return [];
+    const parentProjectPath = canonicalizeProjectPath(parent.cwd);
+    const children = (manifest.byParentThread.get(sessionId) ?? []).filter(
+      (child) =>
+        child.isSubagent &&
+        child.parentThreadId === sessionId &&
+        this.isManifestEntryInScope(child) &&
+        canonicalizeProjectPath(child.cwd) === parentProjectPath,
+    );
+    if (children.length === 0) return [];
+
+    try {
+      const spawnMappings = getCodexSpawnMapping(
+        await readCodexEntries(parent.filePath),
+      );
+      return children.flatMap((child) => {
+        const toolUseId = spawnMappings.get(child.id);
+        if (!toolUseId) return [];
+        return [
+          {
+            toolUseId,
+            agentId: child.id,
+            ...(child.agentRole ? { agentType: child.agentRole } : {}),
+          },
+        ];
+      });
+    } catch {
+      return [];
+    }
   }
 
   /**
-   * Codex doesn't have subagent sessions like Claude.
-   * Returns null for compatibility.
+   * Load a sub-agent session transcript by its thread id.
+   *
+   * Reads the child thread's rollout JSONL and normalizes it into the same
+   * `AgentSession` shape used by other providers, so the client can render
+   * the sub-agent transcript through the shared agent-tree UI.
    */
   async getAgentSession(
-    _agentId: string,
-  ): Promise<{ messages: Message[]; status: string } | null> {
-    return null;
+    agentId: string,
+    sessionId?: string,
+  ): Promise<{
+    messages: Message[];
+    status: AgentStatus;
+    agentType?: string;
+    descriptor?: SubagentDescriptor;
+  } | null> {
+    if (!sessionId) return null;
+    const manifest = await getCodexSessionManifest(this.sessionsDir);
+    const parent = manifest.byId.get(sessionId);
+    if (!parent || !this.isManifestEntryInScope(parent)) return null;
+    const parentProjectPath = canonicalizeProjectPath(parent.cwd);
+    const entry = manifest.byParentThread
+      .get(sessionId)
+      ?.find(
+        (candidate) =>
+          candidate.id === agentId &&
+          candidate.isSubagent &&
+          candidate.parentThreadId === sessionId &&
+          this.isManifestEntryInScope(candidate) &&
+          canonicalizeProjectPath(candidate.cwd) === parentProjectPath,
+      );
+    if (!entry) return null;
+
+    try {
+      const entries = await readCodexEntries(entry.filePath);
+      const messages = convertCodexEntries(entries, agentId);
+      const lifecycle = deriveCodexSubagentStatus(entries);
+      const parentToolUseId = (await this.getAgentMappings(sessionId)).find(
+        (mapping) => mapping.agentId === agentId,
+      )?.toolUseId;
+      const descriptor: SubagentDescriptor = {
+        agentId,
+        parentAgentId: sessionId,
+        ...(parentToolUseId ? { parentToolUseId } : {}),
+        ...(entry.agentRole ? { type: entry.agentRole } : {}),
+        ...(entry.agentPath || entry.agentNickname
+          ? { description: entry.agentPath ?? entry.agentNickname }
+          : {}),
+        status: lifecycle.descriptorStatus,
+      };
+      return {
+        messages,
+        status: lifecycle.status,
+        ...(entry.agentRole ? { agentType: entry.agentRole } : {}),
+        descriptor,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private isManifestEntryInScope(entry: CodexSessionManifestEntry): boolean {
+    return (
+      this.projectPath === undefined ||
+      canonicalizeProjectPath(entry.cwd) === this.projectPath
+    );
   }
 
   /**

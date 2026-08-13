@@ -592,11 +592,15 @@ export const CodexTaskStartedEventSchema = z.object({
 /**
  * Task complete event - emitted when an agent turn finishes.
  */
-export const CodexTaskCompleteEventSchema = z.object({
-  type: z.literal("task_complete"),
-  turn_id: z.string(),
-  last_agent_message: z.string().nullable(),
-});
+export const CodexTaskCompleteEventSchema = z
+  .object({
+    type: z.literal("task_complete"),
+    turn_id: z.string(),
+    last_agent_message: z.string().nullable(),
+    /** Present when the turn completed unsuccessfully. */
+    error: z.unknown().optional(),
+  })
+  .passthrough();
 
 /**
  * Union of event message types.

@@ -323,6 +323,14 @@ function SubagentCard({
   const metrics = liveContent?.metrics;
   const resolvedType =
     liveContent?.agentType ?? descriptor?.type ?? subagentType;
+  const normalizedType = resolvedType?.toLowerCase();
+  const typeClass =
+    normalizedType === "explore" ||
+    normalizedType === "coder" ||
+    normalizedType === "agent" ||
+    normalizedType === "plan"
+      ? normalizedType
+      : "unknown";
 
   const status = resolveSubagentStatus(
     descriptor?.status,
@@ -453,7 +461,11 @@ function SubagentCard({
         {typeof swarmIndex === "number" && (
           <span className="task-swarm-index">#{swarmIndex + 1}</span>
         )}
-        <span className="badge badge-info task-agent-type">{resolvedType}</span>
+        <span className={`badge task-agent-type task-agent-type-${typeClass}`}>
+          {normalizedType === "explore" && "🔍 "}
+          {normalizedType === "coder" && "✏️ "}
+          {resolvedType ?? "task"}
+        </span>
         <span className="task-inline-title" title={description}>
           {description}
         </span>

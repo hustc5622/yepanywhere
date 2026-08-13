@@ -1,3 +1,4 @@
+import type { KimiGoalSnapshot } from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 
 /**
@@ -13,7 +14,8 @@ export type RenderItem =
   | ToolCallItem
   | UserPromptItem
   | SessionSetupItem
-  | SystemItem;
+  | SystemItem
+  | CodexNativeItem;
 
 /** Base fields shared by all render items */
 interface RenderItemBase {
@@ -81,4 +83,32 @@ export interface SystemItem extends RenderItemBase {
   content: string;
   /** For status subtype: the current status (e.g., "compacting") */
   status?: "compacting" | null;
+  /** Structured Kimi goal lifecycle state for the inline goal renderer. */
+  goalSnapshot?: KimiGoalSnapshot;
+}
+
+/**
+ * Codex app-server native ThreadItem projected through the canonical overlay.
+ *
+ * The server emits these as system messages with `subtype: "codex_native_item"`
+ * carrying a `codexThreadItem` payload. The client splits them out from generic
+ * system messages so dedicated renderers can surface plan, sub-agent activity,
+ * and collaboration tool-call content that the generic system renderer would
+ * silently drop.
+ */
+export interface CodexNativeItem extends RenderItemBase {
+  type: "codex_native_item";
+  id: string;
+  /** The projected ThreadItem payload (type + item-specific fields). */
+  threadItem: {
+    type: string;
+    id?: string;
+    [key: string]: unknown;
+  };
+  /** Whether this item is mid-stream ("started") or finished ("completed"). */
+  lifecycle: "started" | "completed";
+  /** The Codex thread id this item belongs to, when known. */
+  threadId?: string;
+  /** The Codex turn id this item belongs to, when known. */
+  turnId?: string;
 }

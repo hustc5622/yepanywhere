@@ -379,7 +379,11 @@ function handle(message) {
       return;
     }
     if (message.method === "thread/goal/get") {
-      send(message.id, { goal: null });
+      send(message.id, {
+        goal: process.env.CODEX_FAKE_GOAL_JSON
+          ? JSON.parse(process.env.CODEX_FAKE_GOAL_JSON)
+          : null,
+      });
       return;
     }
     if (message.method === "thread/goal/set") {
@@ -398,7 +402,9 @@ function handle(message) {
       return;
     }
     if (message.method === "thread/goal/clear") {
-      send(message.id, { cleared: true });
+      send(message.id, {
+        cleared: process.env.CODEX_FAKE_GOAL_CLEAR_RESULT !== "0",
+      });
       return;
     }
     send(message.id, {});
@@ -1193,6 +1199,121 @@ process.stdin.on("data", (chunk) => {
         session?.abort();
         restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
         restoreEnv("CODEX_FAKE_CONTROL_CAPTURE", previousControlCapture);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("adapts provider goal actions and resets state before replace", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-goal-actions-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const controlCapturePath = join(tempDir, "controls.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousControlCapture = process.env.CODEX_FAKE_CONTROL_CAPTURE;
+      const previousGoal = process.env.CODEX_FAKE_GOAL_JSON;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_CONTROL_CAPTURE = controlCapturePath;
+      process.env.CODEX_FAKE_GOAL_JSON = JSON.stringify({
+        threadId: "thread-new",
+        objective: "Existing goal",
+        status: "paused",
+        tokenBudget: 20_000,
+        tokensUsed: 1_000,
+        timeUsedSeconds: 30,
+        createdAt: 1,
+        updatedAt: 2,
+      });
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        await session.iterator.next();
+        if (!session.getGoal || !session.goalAction) {
+          throw new Error("expected Codex goal controls");
+        }
+
+        await expect(session.getGoal()).resolves.toMatchObject({
+          response: expect.stringContaining("Existing goal"),
+          startedTurn: false,
+        });
+        await expect(
+          session.goalAction("replace", "Replacement goal"),
+        ).resolves.toMatchObject({
+          response: expect.stringContaining("Replacement goal"),
+          startedTurn: false,
+        });
+        await expect(session.goalAction("pause")).resolves.toMatchObject({
+          response: expect.stringContaining("Status: Paused"),
+          startedTurn: false,
+        });
+
+        const goalRequests = readFileSync(controlCapturePath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+          .filter(({ method }) => method.startsWith("thread/goal/"));
+        expect(goalRequests).toEqual([
+          {
+            method: "thread/goal/get",
+            params: { threadId: "thread-new" },
+          },
+          {
+            method: "thread/goal/clear",
+            params: { threadId: "thread-new" },
+          },
+          {
+            method: "thread/goal/set",
+            params: {
+              threadId: "thread-new",
+              objective: "Replacement goal",
+              status: "active",
+            },
+          },
+          {
+            method: "thread/goal/set",
+            params: { threadId: "thread-new", status: "paused" },
+          },
+        ]);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_CONTROL_CAPTURE", previousControlCapture);
+        restoreEnv("CODEX_FAKE_GOAL_JSON", previousGoal);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("reports when clear finds no Codex goal", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-goal-clear-empty-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousClearResult = process.env.CODEX_FAKE_GOAL_CLEAR_RESULT;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_GOAL_CLEAR_RESULT = "0";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({ cwd: tempDir });
+        await session.iterator.next();
+        if (!session.goalAction)
+          throw new Error("expected Codex goal controls");
+        await expect(session.goalAction("clear")).resolves.toEqual({
+          response: "No goal to clear.",
+          startedTurn: false,
+        });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_GOAL_CLEAR_RESULT", previousClearResult);
         rmSync(tempDir, { recursive: true, force: true });
       }
     });

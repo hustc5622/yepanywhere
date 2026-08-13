@@ -1890,7 +1890,8 @@ function SessionPageContent({
                         : undefined
                     }
                     onGoal={
-                      session?.provider === "zcode" &&
+                      (session?.provider === "zcode" ||
+                        session?.provider === "codex") &&
                       status.owner === "self" &&
                       status.processId
                         ? () => setShowGoalModal(true)

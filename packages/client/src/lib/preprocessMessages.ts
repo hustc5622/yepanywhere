@@ -1,6 +1,7 @@
-import type { MarkdownAugment } from "@yep-anywhere/shared";
+import type { KimiGoalSnapshot, MarkdownAugment } from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 import type {
+  CodexNativeItem,
   RenderItem,
   SessionSetupItem,
   SystemItem,
@@ -112,6 +113,8 @@ function getOpenCodeTaskStateText(item: RenderItem): string[] {
     case "system":
       return [item.content];
     case "thinking":
+      return [];
+    case "codex_native_item":
       return [];
   }
 }
@@ -609,6 +612,35 @@ function processMessage(
   // Handle system entries (compact_boundary, status, etc.)
   if (msg.type === "system") {
     const subtype = (msg as { subtype?: string }).subtype ?? "unknown";
+
+    // Codex canonical overlay projects native ThreadItems as system messages
+    // with a `codexThreadItem` payload. Split them out before the generic
+    // system-message filter drops them, so dedicated renderers can surface
+    // plan, sub-agent activity, and collaboration tool-call content.
+    if (subtype === "codex_native_item") {
+      const threadItem = (msg as { codexThreadItem?: unknown }).codexThreadItem;
+      if (isRecord(threadItem) && typeof threadItem.type === "string") {
+        const lifecycle = (msg as { codexThreadItemLifecycle?: unknown })
+          .codexThreadItemLifecycle;
+        const nativeItem: CodexNativeItem = {
+          type: "codex_native_item",
+          id: msgId,
+          threadItem: threadItem as CodexNativeItem["threadItem"],
+          lifecycle: lifecycle === "completed" ? "completed" : "started",
+          ...(typeof msg.codexThreadId === "string"
+            ? { threadId: msg.codexThreadId }
+            : {}),
+          ...(typeof msg.codexTurnId === "string"
+            ? { turnId: msg.codexTurnId }
+            : {}),
+          sourceMessages: [msg],
+          isSubagent: msg.isSubagent,
+        };
+        items.push(nativeItem);
+      }
+      return;
+    }
+
     // Render compact_boundary / turn_aborted / warning as visible markers
     if (
       subtype === "compact_boundary" ||
@@ -633,6 +665,26 @@ function processMessage(
     }
     // Status messages (compacting indicator) are transient - handled separately via isCompacting state
     // Skip other system entries (init, status, etc.) - they're internal
+    return;
+  }
+
+  // Kimi goal lifecycle snapshots (goal.create/update/clear replayed by the
+  // server's normalization layer). Surface as a system item with the goal
+  // snapshot payload so the GoalInlineRenderer can render the objective,
+  // status badge, and budget consumption inline in the transcript.
+  if (msg.type === "kimi_goal") {
+    const goal = (msg as { goal?: unknown }).goal;
+    if (isRecord(goal)) {
+      const systemItem: SystemItem = {
+        type: "system",
+        id: msgId || `kimi-goal-${msg.timestamp ?? Date.now()}`,
+        subtype: "kimi_goal",
+        content: "",
+        sourceMessages: [msg],
+        goalSnapshot: goal as unknown as KimiGoalSnapshot,
+      };
+      items.push(systemItem);
+    }
     return;
   }
 

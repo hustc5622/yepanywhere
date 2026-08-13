@@ -17,12 +17,24 @@ export interface CodexSessionManifestEntry {
   mtime: number;
   size: number;
   isSubagent: boolean;
+  /** Parent thread id, when this session is a sub-agent. */
+  parentThreadId?: string;
+  /** Agent path (e.g. "/root/task_name"), when available. */
+  agentPath?: string;
+  /** Randomly assigned nickname (e.g. "Einstein"), when available. */
+  agentNickname?: string;
+  /** Agent role (e.g. "explorer", "worker", "default"), when available. */
+  agentRole?: string;
+  /** Spawn depth from the root thread, when available. */
+  depth?: number;
 }
 
 export interface CodexSessionManifest {
   sessions: CodexSessionManifestEntry[];
   byId: Map<string, CodexSessionManifestEntry>;
   byProjectPath: Map<string, CodexSessionManifestEntry[]>;
+  /** Sub-agent sessions keyed by parent thread id. */
+  byParentThread: Map<string, CodexSessionManifestEntry[]>;
 }
 
 const CODEX_META_READ_MAX_BYTES = 1024 * 1024;
@@ -138,9 +150,11 @@ function createManifest(
   const sessions = [...entries].sort((a, b) => b.mtime - a.mtime);
   const byId = new Map<string, CodexSessionManifestEntry>();
   const byProjectPath = new Map<string, CodexSessionManifestEntry[]>();
+  const byParentThread = new Map<string, CodexSessionManifestEntry[]>();
 
   for (const session of sessions) {
-    if (!byId.has(session.id)) {
+    const isNewestForId = !byId.has(session.id);
+    if (isNewestForId) {
       byId.set(session.id, session);
     }
 
@@ -151,12 +165,22 @@ function createManifest(
     } else {
       byProjectPath.set(projectPath, [session]);
     }
+
+    if (isNewestForId && session.parentThreadId) {
+      const siblings = byParentThread.get(session.parentThreadId);
+      if (siblings) {
+        siblings.push(session);
+      } else {
+        byParentThread.set(session.parentThreadId, [session]);
+      }
+    }
   }
 
   return {
     sessions,
     byId,
     byProjectPath,
+    byParentThread,
   };
 }
 
@@ -215,6 +239,7 @@ async function readSessionManifestEntry(
       return null;
     }
 
+    const subagentMeta = getCodexSubagentMetadata(meta);
     return {
       id: meta.id,
       cwd: meta.cwd,
@@ -222,7 +247,22 @@ async function readSessionManifestEntry(
       timestamp: meta.timestamp,
       mtime: stats.mtimeMs,
       size: stats.size,
-      isSubagent: getCodexSubagentMetadata(meta).isSubagent,
+      isSubagent: subagentMeta.isSubagent,
+      ...(subagentMeta.parentThreadId !== undefined
+        ? { parentThreadId: subagentMeta.parentThreadId }
+        : {}),
+      ...(subagentMeta.agentPath !== undefined
+        ? { agentPath: subagentMeta.agentPath }
+        : {}),
+      ...(subagentMeta.agentNickname !== undefined
+        ? { agentNickname: subagentMeta.agentNickname }
+        : {}),
+      ...(subagentMeta.agentRole !== undefined
+        ? { agentRole: subagentMeta.agentRole }
+        : {}),
+      ...(subagentMeta.depth !== undefined
+        ? { depth: subagentMeta.depth }
+        : {}),
     };
   } catch (error) {
     getLogger().debug(
