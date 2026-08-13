@@ -28,6 +28,19 @@ export interface SkillInfo {
 }
 
 /**
+ * Safe, display-oriented summary of metadata appended by the Feishu channel.
+ * Raw manifests contain internal refs and diagnostics, so the client exposes
+ * only the small amount of provenance that is useful in the conversation UI.
+ */
+export interface FeishuPromptInfo {
+  messageCount: number;
+  attachmentCount: number;
+  contextMode?: string;
+  complete: boolean;
+  hasWarnings: boolean;
+}
+
+/**
  * Parsed user prompt with metadata extracted
  */
 export interface ParsedUserPrompt {
@@ -39,6 +52,8 @@ export interface ParsedUserPrompt {
   uploadedFiles: UploadedFileInfo[];
   /** Skill references injected into the prompt */
   skills: SkillInfo[];
+  /** Present when the prompt was dispatched through the Feishu channel */
+  feishu?: FeishuPromptInfo;
 }
 
 /**
@@ -86,6 +101,146 @@ function parseUploadedFiles(content: string): {
 }
 
 const SKILL_BLOCK_PATTERN = /<skill\b[^>]*>([\s\S]*?)<\/skill>/gi;
+const FEISHU_CONTEXT_BLOCK_PATTERN =
+  /<feishu_context_manifest>\s*([\s\S]*?)\s*<\/feishu_context_manifest>/gi;
+const FEISHU_ATTACHMENT_BLOCK_PATTERN =
+  /<feishu_attachment_manifest>\s*([\s\S]*?)\s*<\/feishu_attachment_manifest>/gi;
+
+interface FeishuContextFields {
+  messages?: number;
+  attachments?: number;
+  effectiveMode?: string;
+  complete?: boolean;
+  warnings: string[];
+}
+
+function parseNonNegativeInteger(
+  value: string | undefined,
+): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function parseFeishuContextFields(block: string): FeishuContextFields {
+  const fields = new Map<string, string>();
+  for (const line of block.split("\n")) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) continue;
+    fields.set(
+      line.slice(0, separator).trim().toLowerCase(),
+      line.slice(separator + 1).trim(),
+    );
+  }
+
+  const warningValue = fields.get("warnings");
+  return {
+    messages: parseNonNegativeInteger(fields.get("messages")),
+    attachments: parseNonNegativeInteger(fields.get("attachments")),
+    effectiveMode:
+      fields.get("effective_mode") || fields.get("mode") || undefined,
+    complete:
+      fields.get("complete") === "true"
+        ? true
+        : fields.get("complete") === "false"
+          ? false
+          : undefined,
+    warnings:
+      !warningValue || warningValue.toLowerCase() === "none"
+        ? []
+        : warningValue
+            .split(",")
+            .map((warning) => warning.trim())
+            .filter(Boolean),
+  };
+}
+
+function cleanFeishuDisplayText(content: string): string {
+  return (
+    content
+      // Batch headings are transport framing. The compact source row carries
+      // the useful message count without making users read prompt syntax.
+      .replace(/^\s*##\s+飞书消息\s+\d+\/\d+\s*$/gim, "\n")
+      // Feishu's normalizer emits Markdown, while user prompts intentionally use
+      // a plain/safe renderer. Remove presentation-only markers that would
+      // otherwise leak through as literal punctuation.
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+      .replace(/^\s*>\s?/gm, "")
+      // Resource keys are not usable links. The downloaded image is rendered
+      // from the managed attachment; on download failure the typed failure copy
+      // remains visible without leaking the opaque key.
+      .replace(
+        /^\s*!\[(?:image|图片)?\]\((?!https?:\/\/|data:)[^)\n]+\)\s*$/gim,
+        "\n",
+      )
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
+}
+
+function parseFeishuMetadata(content: string): {
+  textWithoutFeishuMetadata: string;
+  feishu?: FeishuPromptInfo;
+} {
+  const contexts: FeishuContextFields[] = [];
+  const attachmentKinds: string[] = [];
+  let foundContextBlock = false;
+  let foundAttachmentBlock = false;
+
+  let textWithoutFeishuMetadata = content.replace(
+    FEISHU_CONTEXT_BLOCK_PATTERN,
+    (_raw, block: string) => {
+      foundContextBlock = true;
+      contexts.push(parseFeishuContextFields(block));
+      return "\n";
+    },
+  );
+  textWithoutFeishuMetadata = textWithoutFeishuMetadata.replace(
+    FEISHU_ATTACHMENT_BLOCK_PATTERN,
+    (_raw, block: string) => {
+      foundAttachmentBlock = true;
+      for (const line of block.split("\n")) {
+        const kind = /(?:^|\|)\s*kind=([a-z0-9_-]+)/i.exec(line)?.[1];
+        if (kind) attachmentKinds.push(kind.toLowerCase());
+      }
+      return "\n";
+    },
+  );
+
+  if (!foundContextBlock && !foundAttachmentBlock) {
+    return { textWithoutFeishuMetadata: content };
+  }
+
+  const modes = [
+    ...new Set(
+      contexts.flatMap((context) =>
+        context.effectiveMode ? [context.effectiveMode] : [],
+      ),
+    ),
+  ];
+  const contextAttachmentCount = contexts.reduce(
+    (sum, context) => sum + (context.attachments ?? 0),
+    0,
+  );
+  const feishu: FeishuPromptInfo = {
+    messageCount: Math.max(
+      1,
+      contexts.reduce((sum, context) => sum + (context.messages ?? 0), 0),
+    ),
+    attachmentCount: Math.max(contextAttachmentCount, attachmentKinds.length),
+    contextMode: modes.length === 1 ? modes[0] : undefined,
+    complete: contexts.every((context) => context.complete !== false),
+    hasWarnings: contexts.some((context) => context.warnings.length > 0),
+  };
+
+  return {
+    textWithoutFeishuMetadata: cleanFeishuDisplayText(
+      textWithoutFeishuMetadata,
+    ),
+    feishu,
+  };
+}
 
 function extractTagValue(content: string, tagName: string): string {
   const pattern = new RegExp(
@@ -143,16 +298,23 @@ function parseSkillReferences(content: string): {
  * Also handles <ide_selection> tags by stripping them from the text.
  */
 export function parseUserPrompt(content: string): ParsedUserPrompt {
-  // First extract uploaded files section
-  const { textWithoutUploads, uploadedFiles } = parseUploadedFiles(content);
-  const { textWithoutSkills, skills } =
-    parseSkillReferences(textWithoutUploads);
+  // Extract skills before cleaning channel-generated Markdown so a Feishu
+  // prompt cannot accidentally rewrite headings inside an injected skill.
+  const { textWithoutSkills, skills } = parseSkillReferences(content);
+  // Channel metadata is removed before the generic upload section so old and
+  // new persisted sessions get the same clean, retroactive presentation.
+  const { textWithoutFeishuMetadata, feishu } =
+    parseFeishuMetadata(textWithoutSkills);
+  const { textWithoutUploads, uploadedFiles } = parseUploadedFiles(
+    textWithoutFeishuMetadata,
+  );
 
   // Then process IDE metadata on the remaining text
   return {
-    text: stripIdeMetadata(textWithoutSkills),
-    openedFiles: parseOpenedFiles(textWithoutSkills),
+    text: stripIdeMetadata(textWithoutUploads),
+    openedFiles: parseOpenedFiles(textWithoutUploads),
     uploadedFiles,
     skills,
+    ...(feishu ? { feishu } : {}),
   };
 }

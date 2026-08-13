@@ -1,7 +1,10 @@
 import { isManagedUploadDownloadUrl } from "@yep-anywhere/shared";
-import { memo, useState } from "react";
+import { type ReactNode, memo, useState } from "react";
 import { useFetchedImage } from "../../hooks/useRemoteImage";
+import { useOptionalI18n } from "../../i18n";
+import { apiPath as resolveApiPath } from "../../lib/apiPath";
 import {
+  type FeishuPromptInfo,
   type SkillInfo,
   type UploadedFileInfo,
   getFilename,
@@ -91,6 +94,104 @@ function OpenedFilesMetadata({ files }: { files: string[] }) {
  */
 function isImageMimeType(mimeType: string): boolean {
   return mimeType.startsWith("image/");
+}
+
+function isGenericFeishuAttachmentName(name: string): boolean {
+  return /^(?:[0-9a-f-]{36}_)?feishu-\d+\.[a-z0-9_-]+$/i.test(name);
+}
+
+function managedUploadHref(path: string): string {
+  const endpoint = path.startsWith("/api") ? path.slice(4) : path;
+  return resolveApiPath(endpoint);
+}
+
+function renderPromptTextWithLinks(text: string): ReactNode[] {
+  const pattern =
+    /\[([^\]\n]{1,300})\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/gi;
+  const rendered: ReactNode[] = [];
+  let cursor = 0;
+
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) rendered.push(text.slice(cursor, index));
+
+    const markdownLabel = match[1];
+    const markdownUrl = match[2];
+    let url = markdownUrl ?? match[3] ?? "";
+    let trailing = "";
+    if (!markdownUrl) {
+      const trailingMatch = /^(.*?)([.,;:!?，。；：！？]+)$/.exec(url);
+      if (trailingMatch) {
+        url = trailingMatch[1] ?? url;
+        trailing = trailingMatch[2] ?? "";
+      }
+    }
+
+    rendered.push(
+      <a
+        key={`${index}-${url}`}
+        className="user-prompt-link"
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        {markdownLabel ?? url}
+      </a>,
+    );
+    if (trailing) rendered.push(trailing);
+    cursor = index + match[0].length;
+  }
+
+  if (cursor < text.length) rendered.push(text.slice(cursor));
+  return rendered;
+}
+
+function FeishuPromptSource({ info }: { info?: FeishuPromptInfo }) {
+  const i18n = useOptionalI18n();
+  if (!info) return null;
+
+  const contextLabels: string[] = [];
+  if (info.messageCount > 1) {
+    contextLabels.push(
+      i18n?.t("userPromptFeishuMessageCount", {
+        count: info.messageCount,
+      }) ?? `${info.messageCount} messages`,
+    );
+  }
+  if (info.contextMode === "current+quoted") {
+    contextLabels.push(i18n?.t("userPromptFeishuQuoted") ?? "Includes quote");
+  } else if (info.contextMode === "topic") {
+    contextLabels.push(i18n?.t("userPromptFeishuTopic") ?? "Topic context");
+  } else if (info.contextMode === "merge-forward") {
+    contextLabels.push(
+      i18n?.t("userPromptFeishuForwarded") ?? "Forwarded thread",
+    );
+  }
+  const hasImportWarning = !info.complete || info.hasWarnings;
+
+  return (
+    <div className="feishu-prompt-source">
+      <span className="feishu-prompt-source-badge">
+        {i18n?.t("userPromptSourceFeishu") ?? "From Feishu"}
+      </span>
+      {contextLabels.length > 0 && (
+        <span className="feishu-prompt-context">
+          {contextLabels.join(" · ")}
+        </span>
+      )}
+      {hasImportWarning && (
+        <span
+          className="feishu-prompt-warning"
+          title={
+            i18n?.t("userPromptFeishuImportWarning") ??
+            "Some Feishu context could not be imported"
+          }
+        >
+          ⚠
+        </span>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -348,10 +449,17 @@ function FetchedUploadedImage({
 /**
  * Single uploaded file attachment - clickable for images
  */
-function UploadedFileItem({ file }: { file: UploadedFileInfo }) {
+function UploadedFileItem({
+  file,
+  displayName,
+}: {
+  file: UploadedFileInfo;
+  displayName: string;
+}) {
+  const i18n = useOptionalI18n();
   const [showModal, setShowModal] = useState(false);
   const isImage = isImageMimeType(file.mimeType);
-  const apiPath = isImage ? getUploadUrl(file.path) : null;
+  const apiPath = getUploadUrl(file.path);
   const directPreviewUrl = isImage ? (file.previewUrl ?? null) : null;
 
   if (isImage && (apiPath || directPreviewUrl)) {
@@ -361,20 +469,22 @@ function UploadedFileItem({ file }: { file: UploadedFileInfo }) {
           type="button"
           className="uploaded-file uploaded-file-clickable"
           title={`${file.mimeType}, ${file.size}`}
+          aria-label={
+            i18n?.t("userPromptOpenAttachment", { name: displayName }) ??
+            `Open ${displayName}`
+          }
           onClick={() => setShowModal(true)}
         >
-          📎 {file.originalName}
+          <span aria-hidden="true">🖼️</span>
+          <span>{displayName}</span>
         </button>
         {showModal && (
-          <Modal title={file.originalName} onClose={() => setShowModal(false)}>
+          <Modal title={displayName} onClose={() => setShowModal(false)}>
             <div className="uploaded-image-modal">
               {directPreviewUrl ? (
-                <img src={directPreviewUrl} alt={file.originalName} />
+                <img src={directPreviewUrl} alt={displayName} />
               ) : apiPath ? (
-                <FetchedUploadedImage
-                  apiPath={apiPath}
-                  alt={file.originalName}
-                />
+                <FetchedUploadedImage apiPath={apiPath} alt={displayName} />
               ) : null}
             </div>
           </Modal>
@@ -383,9 +493,29 @@ function UploadedFileItem({ file }: { file: UploadedFileInfo }) {
     );
   }
 
+  if (apiPath) {
+    return (
+      <a
+        className="uploaded-file uploaded-file-clickable"
+        href={managedUploadHref(apiPath)}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`${file.mimeType}, ${file.size}`}
+        aria-label={
+          i18n?.t("userPromptOpenAttachment", { name: displayName }) ??
+          `Open ${displayName}`
+        }
+      >
+        <span aria-hidden="true">📄</span>
+        <span>{displayName}</span>
+      </a>
+    );
+  }
+
   return (
     <span className="uploaded-file" title={`${file.mimeType}, ${file.size}`}>
-      📎 {file.originalName}
+      <span aria-hidden="true">📎</span>
+      <span>{displayName}</span>
     </span>
   );
 }
@@ -393,14 +523,35 @@ function UploadedFileItem({ file }: { file: UploadedFileInfo }) {
 /**
  * Renders uploaded file attachments below the user prompt
  */
-function UploadedFilesMetadata({ files }: { files: UploadedFileInfo[] }) {
+function UploadedFilesMetadata({
+  files,
+  feishu,
+}: {
+  files: UploadedFileInfo[];
+  feishu?: FeishuPromptInfo;
+}) {
+  const i18n = useOptionalI18n();
   if (files.length === 0) return null;
 
   return (
     <div className="user-prompt-metadata">
-      {files.map((file) => (
-        <UploadedFileItem key={file.path} file={file} />
-      ))}
+      {files.map((file, index) => {
+        const displayName =
+          feishu && isGenericFeishuAttachmentName(file.originalName)
+            ? isImageMimeType(file.mimeType)
+              ? (i18n?.t("userPromptImageAttachment", { index: index + 1 }) ??
+                `Image ${index + 1}`)
+              : (i18n?.t("userPromptFileAttachment", { index: index + 1 }) ??
+                `File ${index + 1}`)
+            : file.originalName;
+        return (
+          <UploadedFileItem
+            key={file.path}
+            file={file}
+            displayName={displayName}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -518,6 +669,7 @@ function BranchControls({
  * Renders text content with optional truncation and "Show more" button
  */
 function CollapsibleText({ text }: { text: string }) {
+  const i18n = useOptionalI18n();
   const [isExpanded, setIsExpanded] = useState(false);
   const lines = text.split("\n");
   const exceedsLines = lines.length > MAX_LINES;
@@ -527,14 +679,14 @@ function CollapsibleText({ text }: { text: string }) {
   if (!needsTruncation || isExpanded) {
     return (
       <div className="text-block">
-        {text}
+        {renderPromptTextWithLinks(text)}
         {isExpanded && needsTruncation && (
           <button
             type="button"
             className="show-more-btn"
             onClick={() => setIsExpanded(false)}
           >
-            Show less
+            {i18n?.t("userPromptShowLess") ?? "Show less"}
           </button>
         )}
       </div>
@@ -552,7 +704,7 @@ function CollapsibleText({ text }: { text: string }) {
   return (
     <div className="text-block collapsible-text">
       <div className="truncated-content">
-        {truncatedText}
+        {renderPromptTextWithLinks(truncatedText)}
         <div className="fade-overlay" />
       </div>
       <button
@@ -560,7 +712,7 @@ function CollapsibleText({ text }: { text: string }) {
         className="show-more-btn"
         onClick={() => setIsExpanded(true)}
       >
-        Show more
+        {i18n?.t("userPromptShowMore") ?? "Show more"}
       </button>
     </div>
   );
@@ -580,15 +732,28 @@ export const UserPromptBlock = memo(function UserPromptBlock({
   const handleSelectBranch = onSelectBranch ?? onSelectCodexBranch;
 
   if (typeof content === "string") {
-    const { text, openedFiles, uploadedFiles, skills } =
+    const { text, openedFiles, uploadedFiles, skills, feishu } =
       parseUserPrompt(content);
 
     // Don't render if there's no actual text content
     if (!text && skills.length === 0) {
       const hasMetadata = openedFiles.length > 0 || uploadedFiles.length > 0;
+      if (feishu && hasMetadata) {
+        return (
+          <div className="user-prompt-container">
+            <div className="message message-user-prompt">
+              <div className="message-content">
+                <FeishuPromptSource info={feishu} />
+                <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
+              </div>
+            </div>
+            <OpenedFilesMetadata files={openedFiles} />
+          </div>
+        );
+      }
       return hasMetadata ? (
         <>
-          <UploadedFilesMetadata files={uploadedFiles} />
+          <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
           <OpenedFilesMetadata files={openedFiles} />
         </>
       ) : null;
@@ -606,9 +771,10 @@ export const UserPromptBlock = memo(function UserPromptBlock({
         />
         <div className="message message-user-prompt">
           <div className="message-content">
+            <FeishuPromptSource info={feishu} />
             {text && <CollapsibleText text={text} />}
             <SkillReferences skills={skills} />
-            <UploadedFilesMetadata files={uploadedFiles} />
+            <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
           </div>
         </div>
         {branchMetadata && (
@@ -634,15 +800,28 @@ export const UserPromptBlock = memo(function UserPromptBlock({
       : textContent;
 
   // Parse the combined text content for metadata
-  const { text, openedFiles, uploadedFiles, skills } =
+  const { text, openedFiles, uploadedFiles, skills, feishu } =
     parseUserPrompt(textForParsing);
   const allUploadedFiles = mergeUploadedFiles(uploadedFiles, codexImageFiles);
 
   if (!text && skills.length === 0) {
     const hasMetadata = openedFiles.length > 0 || allUploadedFiles.length > 0;
+    if (feishu && hasMetadata) {
+      return (
+        <div className="user-prompt-container">
+          <div className="message message-user-prompt">
+            <div className="message-content">
+              <FeishuPromptSource info={feishu} />
+              <UploadedFilesMetadata files={allUploadedFiles} feishu={feishu} />
+            </div>
+          </div>
+          <OpenedFilesMetadata files={openedFiles} />
+        </div>
+      );
+    }
     return hasMetadata ? (
       <>
-        <UploadedFilesMetadata files={allUploadedFiles} />
+        <UploadedFilesMetadata files={allUploadedFiles} feishu={feishu} />
         <OpenedFilesMetadata files={openedFiles} />
       </>
     ) : (
@@ -666,9 +845,10 @@ export const UserPromptBlock = memo(function UserPromptBlock({
       />
       <div className="message message-user-prompt">
         <div className="message-content">
+          <FeishuPromptSource info={feishu} />
           {text && <CollapsibleText text={text} />}
           <SkillReferences skills={skills} />
-          <UploadedFilesMetadata files={allUploadedFiles} />
+          <UploadedFilesMetadata files={allUploadedFiles} feishu={feishu} />
         </div>
       </div>
       {branchMetadata && (
