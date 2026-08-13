@@ -446,20 +446,17 @@ describe("SessionIndexService", () => {
       );
       expect(stale[0]?.title).toBe("Original content");
 
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        const refreshed = await fastService.getSessionsWithCache(
-          sessionDir,
-          projectId,
-          reader,
-          { allowStale: true },
-        );
-        if (refreshed[0]?.title === "Updated content with a different length") {
-          return;
-        }
-      }
-
-      throw new Error("Background validation did not refresh the stale index");
+      // A normal read joins the background validation started above. Polling
+      // with allowStale would start another refresh after the first completes,
+      // leaving an index write racing with test cleanup.
+      const refreshed = await fastService.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+      expect(refreshed[0]?.title).toBe(
+        "Updated content with a different length",
+      );
     });
   });
 
