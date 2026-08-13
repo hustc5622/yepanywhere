@@ -42,6 +42,95 @@ describe("UserPromptBlock", () => {
     expect(screen.queryByText(/data:image\/png;base64/i)).toBeNull();
   });
 
+  it("renders Feishu prompts without raw manifests and keeps image preview", () => {
+    const downloadUrl =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_feishu-1.image";
+    const content: ContentBlock[] = [
+      {
+        type: "text",
+        text: `![image](img_v3_fixture)
+怎么回复
+
+<feishu_context_manifest>
+mode: current
+effective_mode: current
+messages: 1
+attachments: 1
+operator: ou_private
+complete: true
+warnings: none
+</feishu_context_manifest>
+
+<feishu_attachment_manifest>
+- private_feishu-1.image | kind=image | mime=image/png | bytes=4 | sha256=private | ref=upload:private | status=downloaded
+</feishu_attachment_manifest>
+
+User uploaded files:
+- feishu-1.image (4 B, image/png): ${downloadUrl}`,
+      },
+      {
+        type: "input_image",
+        image_url: "data:image/png;base64,AAAA",
+        mime_type: "image/png",
+      },
+    ];
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByText("From Feishu")).toBeDefined();
+    expect(screen.getByText("怎么回复")).toBeDefined();
+    expect(screen.queryByText(/feishu_context_manifest/)).toBeNull();
+    expect(screen.queryByText(/ou_private/)).toBeNull();
+    expect(screen.queryByText(/img_v3_fixture/)).toBeNull();
+
+    const imageButton = screen.getByRole("button", { name: "Open Image 1" });
+    fireEvent.click(imageButton);
+    expect(screen.getByRole("img", { name: "Image 1" })).toBeDefined();
+  });
+
+  it("opens Feishu document links and downloaded files", () => {
+    const downloadUrl =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_report.pdf";
+    const content = `请查看 [项目文档](https://example.test/doc)
+
+<feishu_context_manifest>
+mode: current
+effective_mode: current
+messages: 1
+attachments: 1
+complete: true
+warnings: none
+</feishu_context_manifest>
+
+<feishu_attachment_manifest>
+- report.pdf | kind=pdf | mime=application/pdf | bytes=1024 | sha256=private | ref=upload:private | status=downloaded
+</feishu_attachment_manifest>
+
+User uploaded files:
+- report.pdf (1 KB, application/pdf): ${downloadUrl}`;
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    const documentLink = screen.getByRole("link", { name: "项目文档" });
+    expect(documentLink.getAttribute("href")).toBe("https://example.test/doc");
+    expect(documentLink.getAttribute("target")).toBe("_blank");
+
+    const attachmentLink = screen.getByRole("link", {
+      name: "Open report.pdf",
+    });
+    expect(attachmentLink.getAttribute("href")).toContain(
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_report.pdf",
+    );
+  });
+
   it("opens preview modal for Codex inline input_image attachments", () => {
     const content: ContentBlock[] = [
       {

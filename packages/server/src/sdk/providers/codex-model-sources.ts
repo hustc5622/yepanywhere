@@ -77,6 +77,12 @@ export interface CodexModelSourceDefinition {
     baseUrl: string;
     wireApi: "responses";
     envKey: string;
+    /** Retry failed HTTP requests before Codex reports a terminal provider error. */
+    requestMaxRetries?: number;
+    /** Retry a dropped Responses SSE stream before failing the turn. */
+    streamMaxRetries?: number;
+    /** Maximum quiet period for a Responses SSE stream. */
+    streamIdleTimeoutMs?: number;
   };
   /** Versioned Codex model catalog for custom sources. */
   catalog?: CodexModelSourceCatalog;
@@ -105,6 +111,13 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
       baseUrl: "https://api.deepseek.com/",
       wireApi: "responses",
       envKey: "DEEPSEEK_API_KEY",
+      // DeepSeek documents transient 5xx/503 overloads and queues some
+      // requests for an extended period. Codex's defaults (4 request retries,
+      // 5 stream retries, 5 minute idle timeout) are too short for that
+      // operating envelope, especially immediately after a model release.
+      requestMaxRetries: 8,
+      streamMaxRetries: 8,
+      streamIdleTimeoutMs: 600_000,
     },
     requiredEnv: "DEEPSEEK_API_KEY",
     catalog: {
@@ -360,7 +373,14 @@ export class CodexModelSourceRegistry {
     const args: string[] = ["-c", `model_provider="${definition.id}"`];
 
     if (definition.providerConfig) {
-      const { baseUrl, wireApi, envKey } = definition.providerConfig;
+      const {
+        baseUrl,
+        wireApi,
+        envKey,
+        requestMaxRetries,
+        streamMaxRetries,
+        streamIdleTimeoutMs,
+      } = definition.providerConfig;
       const prefix = `model_providers.${definition.id}`;
       args.push(
         "-c",
@@ -371,7 +391,26 @@ export class CodexModelSourceRegistry {
         `${prefix}.wire_api="${wireApi}"`,
         "-c",
         `${prefix}.env_key="${envKey}"`,
+        // Custom OpenAI-compatible providers use HTTP Responses, never the
+        // ChatGPT-authenticated WebSocket transport. Pin both flags so a
+        // same-named entry in the user's global config cannot leak through.
+        "-c",
+        `${prefix}.requires_openai_auth=false`,
+        "-c",
+        `${prefix}.supports_websockets=false`,
       );
+      if (requestMaxRetries !== undefined) {
+        args.push("-c", `${prefix}.request_max_retries=${requestMaxRetries}`);
+      }
+      if (streamMaxRetries !== undefined) {
+        args.push("-c", `${prefix}.stream_max_retries=${streamMaxRetries}`);
+      }
+      if (streamIdleTimeoutMs !== undefined) {
+        args.push(
+          "-c",
+          `${prefix}.stream_idle_timeout_ms=${streamIdleTimeoutMs}`,
+        );
+      }
       // The user's global config may set an OpenAI-only `service_tier` (e.g.
       // "priority"/"flex"). Custom sources don't advertise those tiers, so
       // Codex would warn and drop it per request. Pin the neutral "default"

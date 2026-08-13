@@ -71,6 +71,15 @@ describe("sessions route canonical Codex refresh overlay", () => {
     });
     expect(JSON.stringify(body)).not.toContain("bridge answer");
     expect(bridgeReplay).not.toHaveBeenCalled();
+
+    const lightweightResponse = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}`,
+    );
+    expect(lightweightResponse.status).toBe(200);
+    expect(JSON.stringify(await lightweightResponse.json())).not.toContain(
+      "bridge answer",
+    );
+    expect(bridgeReplay).not.toHaveBeenCalled();
   });
 
   it("preserves canonical output across warm reads and applies appended events", async () => {
@@ -166,6 +175,73 @@ describe("sessions route canonical Codex refresh overlay", () => {
     expect(body.messages[0].codexThreadItem).toBeUndefined();
     expect(body.messages[0].codexCanonicalRefresh).toBeUndefined();
     expect(body.messages[0].codexThreadId).toBeUndefined();
+  });
+
+  it("surfaces persisted provider failures in the default lightweight view", async () => {
+    const providerStore = new InMemoryCodexEventStore({ now: () => 2_000 });
+    await providerStore.append(
+      testDraft(
+        "error",
+        {
+          threadId: "thread-provider",
+          turnId: "turn-provider",
+          willRetry: true,
+          error: {
+            message: "server overloaded",
+            codexErrorInfo: "serverOverloaded",
+          },
+        },
+        {
+          sessionId,
+          eventId: "retry-event",
+          receivedAtMs: Date.parse("2026-08-08T00:00:02.000Z"),
+        },
+      ),
+    );
+    await providerStore.append(
+      testDraft(
+        "error",
+        {
+          threadId: "thread-provider",
+          turnId: "turn-provider",
+          willRetry: false,
+          error: { message: "unknown Codex error" },
+        },
+        {
+          sessionId,
+          eventId: "terminal-event",
+          receivedAtMs: Date.parse("2026-08-08T00:00:03.000Z"),
+        },
+      ),
+    );
+    const routes = createTestRoutes("legacy answer", [
+      fixedSource("provider", providerStore),
+    ]);
+
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}`,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.messages).toHaveLength(3);
+    expect(body.messages[0]).toMatchObject({ type: "assistant" });
+    expect(body.messages[1]).toMatchObject({
+      type: "system",
+      warningKind: "codex_provider_retry",
+      willRetry: true,
+    });
+    expect(body.messages[2]).toMatchObject({
+      type: "error",
+      error: "Codex is busy and cannot process the request right now.",
+      codexRetryExhausted: true,
+      codexCanonicalRefresh: true,
+    });
+    expect(body.session).toMatchObject({
+      lastTurnStatus: "failed",
+      lastErrorMessage:
+        "Codex is busy and cannot process the request right now.",
+    });
   });
 
   it("falls back to normalized rollout when the canonical journal is unreadable", async () => {

@@ -528,6 +528,115 @@ describe("canonical Codex persisted session projection", () => {
     expect(serialized).not.toContain("/Users/example/private");
   });
 
+  it("rebuilds provider retries and keeps their cause after retries are exhausted", () => {
+    const retry = testEvent(
+      1,
+      "error",
+      {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        willRetry: true,
+        error: {
+          code: "CODEX_OVERLOADED",
+          category: "overloaded",
+          retryable: true,
+          message: "server overloaded",
+          publicMessage:
+            "Codex is busy and cannot process the request right now.",
+          nextAction: "Try again shortly.",
+        },
+      },
+      { receivedAtMs: 1_000 },
+    );
+    const exhausted = testEvent(
+      2,
+      "error",
+      {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        willRetry: false,
+        error: {
+          code: "CODEX_UNKNOWN",
+          category: "unknown",
+          retryable: false,
+          message: "unknown Codex error",
+          publicMessage:
+            "Codex encountered an unclassified error before the task completed.",
+          nextAction:
+            "Try again; if the problem persists, inspect diagnostics in Yep.",
+        },
+      },
+      { receivedAtMs: 2_000 },
+    );
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      [retry, exhausted],
+    );
+
+    expect(result.messages).toEqual([
+      expect.objectContaining({
+        type: "system",
+        subtype: "warning",
+        content:
+          "Codex is busy and cannot process the request right now. Codex is retrying automatically; keep this turn running.",
+        warningKind: "codex_provider_retry",
+        willRetry: true,
+        codexEventSequence: 1,
+        codexError: expect.objectContaining({
+          code: "CODEX_OVERLOADED",
+          category: "overloaded",
+        }),
+      }),
+      expect.objectContaining({
+        type: "error",
+        error: "Codex is busy and cannot process the request right now.",
+        willRetry: false,
+        codexRetryExhausted: true,
+        codexEventSequence: 2,
+        codexError: expect.objectContaining({
+          code: "CODEX_OVERLOADED",
+          category: "overloaded",
+        }),
+      }),
+    ]);
+  });
+
+  it("does not leave stale failed turn health after a later successful turn", () => {
+    const failed = testEvent(1, "error", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      willRetry: false,
+      error: {
+        message: "server overloaded",
+        codexErrorInfo: "serverOverloaded",
+      },
+    });
+    const failedCompletion = testEvent(2, "turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "failed", error: null, items: [] },
+    });
+    const successfulCompletion = testEvent(3, "turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-2", status: "completed", error: null, items: [] },
+    });
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      [failed, failedCompletion, successfulCompletion],
+    );
+
+    expect(result.turnHealth).toEqual({ lastTurnStatus: "completed" });
+    expect(result.messages).toEqual([
+      expect.objectContaining({
+        type: "error",
+        codexError: expect.objectContaining({ code: "CODEX_OVERLOADED" }),
+      }),
+    ]);
+  });
+
   it("selects one provider-first journal and never merges bridge sequences", async () => {
     const providerEvents = [testEvent(1, "warning", { message: "provider" })];
     const bridgeEvents = [testEvent(1, "warning", { message: "bridge" })];

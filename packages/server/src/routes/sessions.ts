@@ -37,7 +37,9 @@ import {
   CodexProjectionCache,
   normalizeCodexEventStoreSources,
   overlayCanonicalCodexSessionMessages,
+  overlayCodexProviderErrorMessages,
   selectCodexEventSourceWithCache,
+  selectCodexProviderErrorEventSource,
 } from "../codex-events/index.js";
 import {
   type SessionInputResponseBody,
@@ -1392,7 +1394,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
                 : { maxCandidateCount: boundedMaxMessages }),
             },
           );
-          session = { ...session, messages: overlay.messages };
+          session = {
+            ...session,
+            messages: overlay.messages,
+            ...(overlay.turnHealth ?? {}),
+          };
           getLogger().debug(
             {
               sessionId,
@@ -1425,6 +1431,54 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             totalMs: Date.now() - canonicalStartedMs,
           },
           "Canonical Codex session overlay unavailable; using legacy normalization",
+        );
+      }
+    }
+
+    if (
+      session &&
+      !canonicalViewRequested &&
+      afterMessageId === undefined &&
+      isCodexProviderName(session.provider) &&
+      codexEventStoreSources.length > 0
+    ) {
+      const errorOverlayStartedMs = Date.now();
+      try {
+        const selected = await selectCodexProviderErrorEventSource(
+          codexEventStoreSources,
+          sessionId,
+        );
+        if (selected) {
+          const overlay = overlayCodexProviderErrorMessages(
+            sessionId,
+            session.messages,
+            selected.events,
+          );
+          session = {
+            ...session,
+            messages: overlay.messages,
+            ...(overlay.turnHealth ?? {}),
+          };
+          getLogger().debug(
+            {
+              sessionId,
+              sourceId: selected.sourceId,
+              eventCount: overlay.eventCount,
+              projectedMessageCount: overlay.projectedMessageCount,
+              totalMs: Date.now() - errorOverlayStartedMs,
+            },
+            "Codex provider error overlay completed",
+          );
+        }
+      } catch {
+        // The rollout remains the compatibility baseline. A journal read or
+        // validation failure must not make the normal session endpoint fail.
+        getLogger().warn(
+          {
+            sessionId,
+            totalMs: Date.now() - errorOverlayStartedMs,
+          },
+          "Codex provider error overlay unavailable; using legacy normalization",
         );
       }
     }

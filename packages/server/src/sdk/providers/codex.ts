@@ -39,7 +39,11 @@ import {
   logCodexCorrelationDebug,
   summarizeCodexNormalizedMessage,
 } from "../../codex/correlationDebugLogger.js";
-import { classifyCodexError } from "../../codex/error-taxonomy.js";
+import {
+  type CanonicalCodexError,
+  classifyCodexError,
+  formatCodexRetryWarning,
+} from "../../codex/error-taxonomy.js";
 import {
   type CodexFileChangeStatus,
   type NormalizedCodexFileChange,
@@ -2363,6 +2367,14 @@ export class CodexProvider implements AgentProvider {
     // UI can stream command output like the Codex TUI does.
     const commandOutputBuffers = new Map<string, string>();
     const shadowCommandOutputBuffers = new Map<string, string>();
+    const canonicalRetryableErrorsByTurnId = new Map<
+      string,
+      CanonicalCodexError
+    >();
+    const legacyRetryableErrorsByTurnId = new Map<
+      string,
+      CanonicalCodexError
+    >();
     let generatedArtifactRuntime:
       | {
           uploadManager: UploadManager;
@@ -3094,6 +3106,9 @@ export class CodexProvider implements AgentProvider {
               usageByTurnId,
               customToolContexts,
               commandOutputBuffers,
+              true,
+              false,
+              legacyRetryableErrorsByTurnId,
             );
           } else {
             const canonicalMessages = this.convertNotificationToSDKMessages(
@@ -3108,6 +3123,7 @@ export class CodexProvider implements AgentProvider {
                 : shadowCommandOutputBuffers,
               projectionMode === "primary",
               true,
+              canonicalRetryableErrorsByTurnId,
             );
             const legacyMessages = this.convertNotificationToSDKMessages(
               rawNotification,
@@ -3121,6 +3137,7 @@ export class CodexProvider implements AgentProvider {
                 : shadowCommandOutputBuffers,
               projectionMode === "shadow",
               false,
+              legacyRetryableErrorsByTurnId,
             );
             const parity = activeEventIngress.recordProjectionParity(
               canonicalEvent,
@@ -3958,6 +3975,7 @@ export class CodexProvider implements AgentProvider {
     commandOutputBuffers: Map<string, string> = new Map(),
     emitProjectionDiagnostics = true,
     emitUnknownCompatibilityMessage = false,
+    retryableErrorsByTurnId: Map<string, CanonicalCodexError> = new Map(),
   ): SDKMessage[] {
     switch (notification.method) {
       case "turn/completed": {
@@ -3993,21 +4011,30 @@ export class CodexProvider implements AgentProvider {
           sourceEvent: notification.method,
         });
         if (turnStatus === "failed") {
-          const codexError = classifyCodexError(
+          const classifiedError = classifyCodexError(
             params?.turn.error ?? notification.params,
             turnId ? { correlationId: turnId } : {},
           );
+          const retryCause = turnId
+            ? retryableErrorsByTurnId.get(turnId)
+            : undefined;
+          const retryExhausted =
+            classifiedError.category === "unknown" && retryCause !== undefined;
+          const codexError = retryExhausted ? retryCause : classifiedError;
+          if (turnId) retryableErrorsByTurnId.delete(turnId);
           return [
             {
               type: "error",
               session_id: sessionId,
               error: codexError.publicMessage,
               codexError,
+              ...(retryExhausted ? { codexRetryExhausted: true } : {}),
               ...(turnId ? { turnId } : {}),
             } as SDKMessage,
             message,
           ];
         }
+        if (turnId) retryableErrorsByTurnId.delete(turnId);
         return [message];
       }
 
@@ -4019,12 +4046,17 @@ export class CodexProvider implements AgentProvider {
         );
 
         if (params?.willRetry) {
+          if (params.turnId) {
+            retryableErrorsByTurnId.set(params.turnId, codexError);
+          }
+          const warning = formatCodexRetryWarning(codexError);
           return [
             {
               type: "system",
               subtype: "warning",
               session_id: sessionId,
-              warning: codexError.publicMessage,
+              content: warning,
+              warning,
               codexError,
               willRetry: true,
               threadId: params.threadId,
@@ -4033,11 +4065,20 @@ export class CodexProvider implements AgentProvider {
           ];
         }
 
+        const retryCause = params?.turnId
+          ? retryableErrorsByTurnId.get(params.turnId)
+          : undefined;
+        const retryExhausted =
+          codexError.category === "unknown" && retryCause !== undefined;
+        const effectiveError = retryExhausted ? retryCause : codexError;
+        if (params?.turnId) retryableErrorsByTurnId.delete(params.turnId);
+
         const errorEvent = {
           type: "error",
           session_id: sessionId,
-          error: codexError.publicMessage,
-          codexError,
+          error: effectiveError.publicMessage,
+          codexError: effectiveError,
+          ...(retryExhausted ? { codexRetryExhausted: true } : {}),
           willRetry: false,
           threadId: params?.threadId,
           turnId: params?.turnId,

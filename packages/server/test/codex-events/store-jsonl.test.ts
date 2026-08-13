@@ -129,7 +129,7 @@ describe("JsonlCodexEventStore rotation", () => {
     for (let index = 1; index <= 6; index += 1) {
       await store.append(
         testDraft(
-          "warning",
+          index % 2 === 0 ? "turn/completed" : "error",
           { message: `event-${index} ${"x".repeat(200)}` },
           { eventId: `event-${index}` },
         ),
@@ -150,6 +150,11 @@ describe("JsonlCodexEventStore rotation", () => {
     expect(inProcess.map((event) => event.sequence)).toEqual([
       1, 2, 3, 4, 5, 6,
     ]);
+    expect(
+      (await store.replay({ sessionId: "session-1", methods: ["error"] })).map(
+        (event) => event.eventId,
+      ),
+    ).toEqual(["event-1", "event-3", "event-5"]);
 
     // A fresh instance cold-loads across segment files with the same result.
     const reopened = new JsonlCodexEventStore({ filePath });
@@ -157,6 +162,14 @@ describe("JsonlCodexEventStore rotation", () => {
     expect(replayed.map((event) => event.eventId)).toEqual(
       inProcess.map((event) => event.eventId),
     );
+    expect(
+      (
+        await reopened.replay({
+          sessionId: "session-1",
+          methods: ["turn/completed"],
+        })
+      ).map((event) => event.eventId),
+    ).toEqual(["event-2", "event-4", "event-6"]);
   });
 
   it("prunes closed segments beyond keepSegments", async () => {

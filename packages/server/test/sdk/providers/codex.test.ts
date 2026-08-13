@@ -3382,11 +3382,83 @@ describe("CodexProvider Event Normalization", () => {
       expect.objectContaining({
         type: "system",
         subtype: "warning",
+        warning:
+          "Codex is busy and cannot process the request right now. Codex is retrying automatically; keep this turn running.",
         willRetry: true,
         codexError: expect.objectContaining({ category: "overloaded" }),
       }),
     ]);
     expect(JSON.stringify(messages)).not.toContain("/private/secret");
+  });
+
+  it("preserves the retry cause when Codex reports an unknown terminal error", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+        customToolContexts?: Map<string, unknown>,
+        commandOutputBuffers?: Map<string, string>,
+        emitProjectionDiagnostics?: boolean,
+        emitUnknownCompatibilityMessage?: boolean,
+        retryableErrorsByTurnId?: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const retryableErrorsByTurnId = new Map<string, unknown>();
+
+    provider.convertNotificationToSDKMessages(
+      {
+        method: "error",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          willRetry: true,
+          error: {
+            message: "server overloaded",
+            codexErrorInfo: "serverOverloaded",
+          },
+        },
+      },
+      "session-1",
+      new Map(),
+      new Map(),
+      new Map(),
+      true,
+      false,
+      retryableErrorsByTurnId,
+    );
+    const terminal = provider.convertNotificationToSDKMessages(
+      {
+        method: "error",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          willRetry: false,
+          error: { message: "unknown Codex error" },
+        },
+      },
+      "session-1",
+      new Map(),
+      new Map(),
+      new Map(),
+      true,
+      false,
+      retryableErrorsByTurnId,
+    );
+
+    expect(terminal).toEqual([
+      expect.objectContaining({
+        type: "error",
+        error: "Codex is busy and cannot process the request right now.",
+        willRetry: false,
+        codexRetryExhausted: true,
+        codexError: expect.objectContaining({
+          code: "CODEX_OVERLOADED",
+          category: "overloaded",
+        }),
+      }),
+    ]);
+    expect(retryableErrorsByTurnId.has("turn-1")).toBe(false);
   });
 
   it("streams raw code-mode exec calls and their results", () => {

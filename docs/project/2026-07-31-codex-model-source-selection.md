@@ -1,8 +1,10 @@
 # Codex 多模型源选择能力开发设计
 
-状态：Draft
+状态：Implemented
 
 调研日期：2026-07-31
+
+最近更新：2026-08-13
 
 适用范围：Yep Anywhere 的 `codex` provider、新会话模型选择、Codex app-server 启动与恢复、Codex session 元数据读取
 
@@ -38,7 +40,7 @@ Codex CLI 和 Codex app-server 已经具备自定义模型提供方能力，但 
 | provider 配置 | 由服务端受控注册表生成 app-server `-c` 覆盖 | 不允许浏览器传入任意 URL、密钥或 catalog 路径 |
 | 模型目录 | 每个模型源使用自己的 app-server 启动配置与缓存 | Codex `model/list` 没有 provider 过滤参数，模型管理器在进程启动时绑定 provider/catalog |
 | 会话恢复 | 始终恢复到会话原有模型源 | 不允许普通 resume/edit 请求把既有 Codex thread 静默迁移到另一个 provider |
-| DeepSeek 开放模型 | 展示 `deepseek-v4-flash` + `deepseek-v4-pro` | 2026-08-13 起两者都通过 Codex Responses API 开放；原生思考档位为 `low/high/max` |
+| DeepSeek 开放模型 | 展示 `deepseek-v4-flash` 与 `deepseek-v4-pro` | 2026-08-13 起两者都通过 Codex Responses API 开放，共用同一 Base URL 与 Key，原生思考档位为 `low/high/max` |
 
 这不是单纯的 UI 下拉框改动。要形成可靠能力，需要同时扩展模型发现、共享类型、API、Supervisor、Codex app-server 启动、session metadata、恢复逻辑和 Codex reader。
 
@@ -107,6 +109,11 @@ name = "DeepSeek"
 base_url = "https://api.deepseek.com/"
 wire_api = "responses"
 env_key = "DEEPSEEK_API_KEY"
+request_max_retries = 8
+stream_max_retries = 8
+stream_idle_timeout_ms = 600000
+requires_openai_auth = false
+supports_websockets = false
 ```
 
 相关关键字段：
@@ -117,6 +124,11 @@ env_key = "DEEPSEEK_API_KEY"
 | `model_providers.<id>.base_url` | 上游 API 地址 |
 | `model_providers.<id>.wire_api` | 当前 DeepSeek 集成使用 `responses` |
 | `model_providers.<id>.env_key` | 从环境变量读取 API Key |
+| `model_providers.<id>.request_max_retries` | DeepSeek 5xx/503 的 HTTP 请求重试上限；Yep 固定为 8 |
+| `model_providers.<id>.stream_max_retries` | Responses SSE 中断后的恢复上限；Yep 固定为 8 |
+| `model_providers.<id>.stream_idle_timeout_ms` | SSE 静默等待上限；Yep 按 DeepSeek 最长排队窗口固定为 600000 ms |
+| `model_providers.<id>.requires_openai_auth` | 自定义 DeepSeek provider 固定为 `false`，避免继承 ChatGPT 认证 |
+| `model_providers.<id>.supports_websockets` | DeepSeek 使用 HTTP Responses/SSE，固定为 `false` |
 | `model_providers.<id>.experimental_bearer_token` | 直接写 token；官方参考中不推荐，Yep 不采用 |
 | `model_catalog_json` | 指定模型元数据目录，启动时加载 |
 
@@ -172,14 +184,15 @@ codex app-server ... -c key=value
 
 ### 3.5 DeepSeek 当前接入要求
 
-DeepSeek 官方 Codex 集成说明当前包含：
+DeepSeek 官方资料与当前实测包含：
 
 - 通过 Responses API 与 Codex 通信。
 - provider ID 为 `deepseek`。
 - Base URL 为 `https://api.deepseek.com/`。
 - 需要独立的 `models.json` 向 Codex 声明模型能力。
-- 2026-07-31 页面提示只有 `deepseek-v4-flash` 已支持 Codex；2026-08-13 起 `deepseek-v4-pro` 一并开放。
+- 2026-07-31 页面提示只有 `deepseek-v4-flash` 已支持 Codex；2026-08-13 模型表加入 `deepseek-v4-pro`，并确认两个稳定别名共用 Base URL 与 Key、具备 1M 上下文和最大 384K 输出。
 - 官方 catalog 中模型的 `minimal_client_version` 为 `0.144.0`。
+- 503 表示上游暂时过载，应短暂等待并重试；Yep 因此为该受管 provider 使用独立于 OpenAI 默认值的重试窗口。
 
 本机调研时安装的版本是 `codex-cli 0.144.5`，满足该最低版本。产品实现仍需要显式做版本/能力错误提示，不能假设所有部署机器版本相同。
 
@@ -958,9 +971,23 @@ deepseek-v4-flash
 deepseek-v4-pro
 ```
 
-两个模型都对外声明官方 Responses API 支持的 `low/high/max` 思考档位，默认 `high`。Codex 会话的 reasoning effort 在发送给 app-server 前按模型源解析：兼容请求 `medium` / `xhigh` 依照 DeepSeek 官方映射收敛到 `high`，`minimal` 收敛到 `low`，未知的更高档位收敛到 `max`，其他未知值回退到模型默认 `high`。见 `CodexModelSourceRegistry.resolveReasoningEffort`。
-
 > 首期（2026-07-31）只开放 `deepseek-v4-flash`；`deepseek-v4-pro` 在 DeepSeek 官方确认 Codex 支持并完成 tool-call / reasoning / resume 回归后于 2026-08-13 放开。
+
+2026-08-13 更新：DeepSeek 官方模型表已确认 `deepseek-v4-pro` 的稳定版本为
+`DeepSeek-V4-Pro-0813`，支持 Responses API、1M 上下文和最大 384K 输出；
+`deepseek-v4-flash` 当前对应 `DeepSeek-V4-Flash-0731`。
+
+两者继续归属同一个 `deepseek` model source，并复用 `DEEPSEEK_API_KEY`；不新增
+单独的 Pro provider 或密钥配置。两个模型都对外声明官方 Responses API 支持的
+`low/high/max` 思考档位，默认 `high`。Codex 会话的 reasoning effort 在发送给
+app-server 前按模型源解析：兼容请求 `medium` / `xhigh` 依照 DeepSeek 官方映射收敛到
+`high`，`minimal` 收敛到 `low`，未知的更高档位收敛到 `max`，其他未知值回退到模型
+默认 `high`。见 `CodexModelSourceRegistry.resolveReasoningEffort`。
+
+DeepSeek 的 503 是可恢复的瞬时过载，不应触发模型静默降级。受管 provider 将
+`request_max_retries` 与 `stream_max_retries` 都固定为 8，并把
+`stream_idle_timeout_ms` 固定为 600000；重试中的会话明确显示“正在自动重试，请保持
+当前 turn 运行”。用户仍可主动 Stop，Stop 会按 Codex 协议立即结束后续重试。
 
 ### 10.4 Codex 版本
 
@@ -1171,7 +1198,7 @@ pnpm test
 在不影响现有服务的独立端口/profile 上验证：
 
 1. 不配置 DeepSeek Key：OpenAI 正常，DeepSeek 显示未配置。
-2. 配置 Key：新会话列表出现 DeepSeek V4 Flash。
+2. 配置 Key：新会话列表出现 DeepSeek V4 Flash 和 V4 Pro。
 3. 创建 DeepSeek 会话并执行文本、读文件、shell 审批、工具结果。
 4. 刷新页面后继续对话。
 5. 重启测试实例后 resume。
@@ -1231,7 +1258,7 @@ pnpm test
 
 - 默认仍选择 OpenAI。
 - 只在 Key 和版本满足要求时开放 DeepSeek。
-- 先只开放 V4 Flash。
+- 首期只开放 V4 Flash；2026-08-13 起同步开放正式版 V4 Pro。
 - 观察 401、model-not-found、catalog parse、tool-call 和 resume 错误。
 
 ---
@@ -1242,7 +1269,7 @@ pnpm test
 
 - [ ] Codex 新会话模型列表按 OpenAI / DeepSeek 分组。
 - [ ] 选择 OpenAI 时继续使用现有官方登录。
-- [ ] 选择 DeepSeek 时使用 `modelProvider=deepseek` 和 `deepseek-v4-flash`。
+- [ ] 选择 DeepSeek 时使用 `modelProvider=deepseek`，并可选择 `deepseek-v4-flash` 或 `deepseek-v4-pro`。
 - [ ] DeepSeek catalog 不替换 OpenAI 模型目录。
 - [ ] DeepSeek Key 缺失不会影响 OpenAI。
 - [ ] 页面刷新、服务重启和 resume 后仍使用原 source。
