@@ -8,7 +8,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZCodeBridgeService } from "../../src/zcode-bridge/ZCodeBridgeService.js";
 
 describe("ZCodeBridgeService", () => {
@@ -99,14 +99,21 @@ describe("ZCodeBridgeService", () => {
     });
 
     it("expires sessions after the configured quiet period", async () => {
-      const service = makeService(5_000, 1);
-      await service.handleHook({
-        hook_event_name: "SessionStart",
-        session_id: "ses-stale",
-      });
-      expect(service.listSessions()).toHaveLength(1);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(service.listSessions()).toHaveLength(0);
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
+        const service = makeService(5_000, 1);
+        await service.handleHook({
+          hook_event_name: "SessionStart",
+          session_id: "ses-stale",
+        });
+        expect(service.listSessions()).toHaveLength(1);
+
+        vi.advanceTimersByTime(1);
+        expect(service.listSessions()).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
