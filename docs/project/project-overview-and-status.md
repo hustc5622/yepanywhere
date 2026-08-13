@@ -3,6 +3,8 @@
 Yep Anywhere 是用于管理 Claude 和 Codex 智能体的 Web 界面，在手机和桌面端都能良好使用。
 
 > 原始愿景文档和更详细的设计背景见 `docs/archive/`。
+>
+> 当前分支的二次开发内容见 [本分支新增与修复说明](../本分支新增与修复.md)。
 
 ## 它是什么
 
@@ -32,6 +34,8 @@ Yep Anywhere 是用于管理 Claude 和 Codex 智能体的 Web 界面，在手�
 - 进程重启后可继续会话
 - 检测外部会话（CLI、VS Code）并以只读方式展示
 - 支持自定义会话标题和归档状态
+- 会话检查器可浏览仓库文件，并在文件变动时刷新目录树
+- 会话内支持文件多标签页预览和文本编辑
 
 **移动端体验**
 
@@ -43,7 +47,8 @@ Yep Anywhere 是用于管理 Claude 和 Codex 智能体的 Web 界面，在手�
 **智能体功能**
 
 - 跟踪 subagent（Task 工具）并展示状态
-- 支持模型选择和 extended thinking
+- 支持模型选择和提供商原生思考程度档位
+- 支持 Markdown、PDF、DOCX、CSV/TSV 与 XLS/XLSX 文件预览
 - 通过 WebSocket 上传文件
 - Plan mode 支持审批工作流
 - 通过浏览器语音 API 输入语音
@@ -55,6 +60,12 @@ Yep Anywhere 是用于管理 Claude 和 Codex 智能体的 Web 界面，在手�
 - Codex：功能可用，但透明度有限，编辑过程较黑盒，没有细粒度工具事件
 - Codex-OSS：通过 shell 命令使用本地模型，比云端 Codex 更透明
 - Gemini：只读模式，没有编辑工具，适合探索和规划
+
+**本分支运维能力**
+
+- 设置页可检查更新、重构建本地最新代码，或拉取 GitHub 最新代码后重构建
+- `pnpm yep` 可交互管理 Windows 和 macOS 的开发、生产和登录自启动服务
+- 管理员密码可在服务器本机管理普通登录密码，且跨当前系统用户的 Profile 生效
 
 ### 架构
 

@@ -2,42 +2,11 @@
 
 Yep Anywhere 运行在你的开发机上。如果想从手机或局域网外的其他设备访问它，需要配置远程访问。
 
-## 安全 Relay
+本分支的远程访问依赖你自己的局域网、组网工具、反向代理或隧道；当前没有 README 中旧 Relay 配置对应的用户入口。
 
-这是远程访问 Yep Anywhere 最简单的方式。无需端口转发，也不需要额外网络配置。
+## 可选方案
 
-**通过设置界面配置：**
-
-1. 打开 Settings -> Remote Access
-2. 输入 username 和 password
-3. 从任意地点访问 `yepanywhere.com/remote`
-
-**通过 CLI 配置（适合无头或自动化部署）：**
-
-```bash
-yepanywhere --setup-remote-access --username myserver --password "secretpass123"
-```
-
-**工作方式：**
-
-- 你的 yepanywhere server 会连接到公共 relay
-- 手机连接到同一个 relay，并使用 SRP-6a 做认证（零知识密码证明）
-- 所有流量都用 TweetNaCl 做端到端加密；relay 只能看到不透明的加密数据块
-- 如果愿意，也可以[运行自己的 relay](relay-design.md)
-
-**安全性：**
-
-- Relay 永远看不到你的密码或会话密钥
-- 流量使用 XSalsa20-Poly1305 加密（Signal、Keybase 等也使用同类方案）
-- 不需要账号或注册流程，只需要你自己控制的一组 username/password
-
-技术细节见 [relay-design.md](relay-design.md)。
-
----
-
-## 其他方案
-
-如果不想使用 relay，也可以选择下面这些方案。它们都需要你信任某个外部方来帮你路由流量。
+以下方案都应将流量转发到服务端本机端口，开发模式默认是 3400，生产模式默认是 8022。
 
 ## 方案 1：Tailscale（推荐）
 
@@ -47,7 +16,7 @@ yepanywhere --setup-remote-access --username myserver --password "secretpass123"
 
 1. 在开发机和手机上安装 Tailscale
 2. 两台设备登录同一个账号
-3. 通过 `http://<tailscale-ip>:3400` 访问 Yep Anywhere
+3. 通过 `http://<tailscale-ip>:8022` 访问生产服务，或在开发时使用 3400 端口
 
 **优点：** 非常简单、加密、可穿透 NAT，个人使用免费
 
@@ -78,7 +47,7 @@ yepanywhere --setup-remote-access --username myserver --password "secretpass123"
 
    ```bash
    # 快速测试（随机 URL，不需要账号）
-   cloudflared tunnel --url http://localhost:3400
+   cloudflared tunnel --url http://localhost:8022
 
    # 持久配置（需要 Cloudflare 账号 + 域名）
    cloudflared tunnel create yep-anywhere
@@ -102,7 +71,7 @@ yepanywhere --setup-remote-access --username myserver --password "secretpass123"
 
    ```text
    claude.yourdomain.com {
-       reverse_proxy 127.0.0.1:3400
+       reverse_proxy 127.0.0.1:8022
        basicauth /* {
            youruser $2a$14$hashedpassword
        }
@@ -119,11 +88,11 @@ yepanywhere --setup-remote-access --username myserver --password "secretpass123"
 
 ```bash
 # 一次性运行
-ssh -N -R 3400:localhost:3400 yourserver
+ssh -N -R 8022:localhost:8022 yourserver
 
 # 持久运行（需要安装 autossh）
 autossh -M 0 -N -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" \
-    -R 3400:localhost:3400 yourserver
+    -R 8022:localhost:8022 yourserver
 ```
 
 如果使用 systemd service，创建 `~/.config/systemd/user/claude-tunnel.service`：
@@ -134,7 +103,7 @@ Description=SSH tunnel for Yep Anywhere
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/autossh -M 0 -N -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" -R 3400:localhost:3400 yourserver
+ExecStart=/usr/bin/autossh -M 0 -N -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" -R 8022:localhost:8022 yourserver
 Restart=always
 RestartSec=10
 
@@ -156,7 +125,7 @@ systemctl --user start claude-tunnel
 ## 安全注意事项
 
 - Yep Anywhere 可以访问你的代码库。只使用你信任的远程访问方式。
-- 远程访问始终使用 HTTPS；上面的方案都能提供 HTTPS。
+- Tailscale 的组网链路已加密，但示例使用 HTTP；Cloudflare Tunnel 和 Caddy 可提供 HTTPS。
 - 建议额外添加认证层，例如 basic auth、Cloudflare Access 等。
 - 服务器默认只监听 localhost。远程访问方案应 tunnel 到 localhost，而不是直接监听所有网卡。
 
