@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeProjectId } from "../../src/projects/paths.js";
 import { CodexSessionReader } from "../../src/sessions/codex-reader.js";
 import { invalidateCodexSessionManifest } from "../../src/sessions/codex-session-manifest.js";
+import { normalizeSession } from "../../src/sessions/normalization.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -126,6 +127,113 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(second).toHaveLength(1);
     expect(first[0]?.sessionId).toBe(sessionId);
     expect(second[0]?.sessionId).toBe(sessionId);
+  });
+
+  it("hides recommended plugin context from the title and conversation", async () => {
+    const sessionId = randomUUID();
+    const timestamp = new Date().toISOString();
+    const recommendedPlugins =
+      "<recommended_plugins>\nHere is a list of plugins that are available but not installed.\n- Airtable\n</recommended_plugins>";
+    const responseMessage = (role: "user" | "assistant", text: string) => ({
+      type: "response_item",
+      timestamp,
+      payload: {
+        type: "message",
+        role,
+        content: [
+          {
+            type: role === "user" ? "input_text" : "output_text",
+            text,
+          },
+        ],
+      },
+    });
+    const entries = [
+      {
+        type: "session_meta",
+        timestamp,
+        payload: {
+          id: sessionId,
+          cwd: "/test/project",
+          timestamp,
+          model_provider: "openai",
+        },
+      },
+      responseMessage("user", recommendedPlugins),
+      responseMessage("user", "Actual user prompt"),
+      responseMessage("assistant", "Actual response"),
+    ];
+    await writeFile(
+      join(testDir, `${sessionId}.jsonl`),
+      `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    );
+
+    const projectId = "test-project" as UrlProjectId;
+    const summary = await reader.getSessionSummary(sessionId, projectId);
+    const loaded = await reader.getSession(sessionId, projectId);
+
+    expect(summary?.title).toBe("Actual user prompt");
+    expect(summary?.fullTitle).toBe("Actual user prompt");
+    expect(summary?.userQuestions.map((question) => question.text)).toEqual([
+      "Actual user prompt",
+    ]);
+    expect(loaded).not.toBeNull();
+    if (!loaded) throw new Error("Expected Codex session to load");
+    const normalized = normalizeSession(loaded);
+    expect(JSON.stringify(normalized.messages)).not.toContain(
+      "recommended_plugins",
+    );
+    expect(JSON.stringify(normalized.messages)).toContain("Actual user prompt");
+  });
+
+  it("uses the visible request from Codex Desktop prompt wrappers", async () => {
+    const sessionId = randomUUID();
+    const timestamp = new Date().toISOString();
+    const wrappedPrompt = `# Files mentioned by the user:
+
+## E1089999.BIN: F:/DCOLYMP/E1089999.BIN
+
+<in-app-browser-context source="ambient-ui-state">
+hidden browser state
+</in-app-browser-context>
+
+## My request:
+插到相机里没反应`;
+    await writeFile(
+      join(testDir, `${sessionId}.jsonl`),
+      `${[
+        JSON.stringify({
+          type: "session_meta",
+          timestamp,
+          payload: {
+            id: sessionId,
+            cwd: "/test/project",
+            timestamp,
+            model_provider: "openai",
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          timestamp,
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: wrappedPrompt }],
+          },
+        }),
+      ].join("\n")}\n`,
+    );
+
+    const summary = await reader.getSessionSummary(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+
+    expect(summary?.title).toBe("插到相机里没反应");
+    expect(summary?.fullTitle).toBe("插到相机里没反应");
+    expect(summary?.userQuestions.map((question) => question.text)).toEqual([
+      "插到相机里没反应",
+    ]);
   });
 
   it("filters manifest session files by project path", async () => {
@@ -780,6 +888,43 @@ describe("CodexSessionReader - OSS Support", () => {
     ]);
 
     const files = await reader.listSessionFiles(testDir);
+    expect(files.map((file) => file.sessionId)).toEqual(["top-level"]);
+  });
+
+  it("filters guardian subagent sessions from top-level listings", async () => {
+    const now = new Date().toISOString();
+    await Promise.all([
+      writeFile(
+        join(testDir, "top-level.jsonl"),
+        `${JSON.stringify({
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            id: "top-level",
+            cwd: "/test/project",
+            timestamp: now,
+            model_provider: "openai",
+          },
+        })}\n`,
+      ),
+      writeFile(
+        join(testDir, "guardian.jsonl"),
+        `${JSON.stringify({
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            id: "guardian",
+            cwd: "/test/project",
+            timestamp: now,
+            model_provider: "openai",
+            source: { subagent: { other: "guardian" } },
+          },
+        })}\n`,
+      ),
+    ]);
+
+    const files = await reader.listSessionFiles(testDir);
+
     expect(files.map((file) => file.sessionId)).toEqual(["top-level"]);
   });
 });

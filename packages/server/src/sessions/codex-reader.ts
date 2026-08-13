@@ -28,6 +28,7 @@ import {
   type UrlProjectId,
   getModelContextWindow,
   parseCodexSessionEntry,
+  parseUserPromptMetadata,
 } from "@yep-anywhere/shared";
 
 import { canonicalizeProjectPath } from "../projects/paths.js";
@@ -408,7 +409,7 @@ export class CodexSessionReader implements ISessionReader {
 
     const manifest = await getCodexSessionManifest(this.sessionsDir);
     const session = manifest.byId.get(sessionId);
-    if (!session || session.isSubagent) return null;
+    if (!session) return null;
 
     if (
       this.projectPath &&
@@ -447,7 +448,10 @@ export class CodexSessionReader implements ISessionReader {
         entry.type === "event_msg" &&
         entry.payload.type === "user_message"
       ) {
-        const fullTitle = entry.payload.message.trim();
+        const fullTitle = this.extractVisibleUserPrompt(entry.payload.message);
+        if (!fullTitle) {
+          continue;
+        }
         if (skipLeadingSystemPrompts && isSyntheticUserPromptText(fullTitle)) {
           continue;
         }
@@ -461,10 +465,11 @@ export class CodexSessionReader implements ISessionReader {
       if (entry.type === "response_item") {
         const payload = entry.payload;
         if (payload.type === "message" && payload.role === "user") {
-          const text = payload.content
+          const rawText = payload.content
             .map((c) => ("text" in c ? c.text : ""))
             .join("\n")
             .trim();
+          const text = this.extractVisibleUserPrompt(rawText);
           if (
             text &&
             !(skipLeadingSystemPrompts && isSyntheticUserPromptText(text))
@@ -561,7 +566,7 @@ export class CodexSessionReader implements ISessionReader {
   private extractCodexUserMessageText(
     content: CodexMessagePayload["content"],
   ): string {
-    return content
+    const rawText = content
       .map((block) => {
         if (block.type === "input_text") {
           return block.text;
@@ -573,6 +578,14 @@ export class CodexSessionReader implements ISessionReader {
       })
       .filter(Boolean)
       .join("\n");
+    return this.extractVisibleUserPrompt(rawText);
+  }
+
+  private extractVisibleUserPrompt(text: string): string {
+    const parsed = parseUserPromptMetadata(text);
+    return (
+      parsed.text || parsed.mentionedFiles.map((file) => file.name).join(", ")
+    ).trim();
   }
 
   /**

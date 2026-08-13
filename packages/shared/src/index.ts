@@ -2,9 +2,14 @@ export {
   isIdeMetadata,
   stripIdeMetadata,
   stripBridgeMetadata,
+  parseUserPromptMetadata,
   extractOpenedFilePath,
   parseOpenedFiles,
   getFilename,
+} from "./ideMetadata.js";
+export type {
+  MentionedFile,
+  ParsedUserPromptMetadata,
 } from "./ideMetadata.js";
 
 // File path detection (shared between server and client)
@@ -131,6 +136,7 @@ export {
   getLogicalParentUuid,
   isConversationEntry,
   getMessageContent,
+  isClaudeInternalUserPromptEntry,
 } from "./claude-sdk-schema/guards.js";
 
 // App-specific types (extend SDK types with runtime fields)

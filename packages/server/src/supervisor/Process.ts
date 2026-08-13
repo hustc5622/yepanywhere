@@ -32,6 +32,8 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from "./types.js";
 
 type Listener = (event: ProcessEvent) => void;
 
+const DEFAULT_PROVIDER_INITIALIZATION_TIMEOUT_MS = 15_000;
+
 /**
  * IMPORTANT: Never filter out messages by type before emitting to SSE!
  *
@@ -775,7 +777,9 @@ export class Process {
   }
 
   /** 等待 provider 发出 init；若启动阶段退出则立即失败。 */
-  waitForInitialization(timeoutMs = 5000): Promise<void> {
+  waitForInitialization(
+    timeoutMs = DEFAULT_PROVIDER_INITIALIZATION_TIMEOUT_MS,
+  ): Promise<void> {
     if (this.initializationResolved) return Promise.resolve();
     if (this.initializationError)
       return Promise.reject(this.initializationError);

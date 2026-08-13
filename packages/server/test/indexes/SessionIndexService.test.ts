@@ -377,6 +377,105 @@ describe("SessionIndexService", () => {
       );
       expect(sessions).toHaveLength(1);
     });
+
+    it("rebuilds version 8 indexes after session title parsing changes", async () => {
+      await createSession("session-1", "Actual user prompt");
+      const sessionStats = await stat(join(sessionDir, "session-1.jsonl"));
+      const indexPath = service.getIndexPath(sessionDir, reader);
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          version: 8,
+          projectId,
+          sessions: {
+            "session-1": {
+              title: "<recommended_plugins> stale title",
+              fullTitle: "<recommended_plugins> stale title",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              messageCount: 1,
+              indexedBytes: sessionStats.size,
+              fileMtime: sessionStats.mtimeMs,
+              provider: "claude",
+            },
+          },
+        }),
+      );
+
+      const sessions = await service.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+
+      expect(sessions[0]?.title).toBe("Actual user prompt");
+    });
+
+    it("rebuilds version 9 indexes after prompt metadata parsing changes", async () => {
+      await createSession("session-1", "Actual user prompt");
+      const sessionStats = await stat(join(sessionDir, "session-1.jsonl"));
+      const indexPath = service.getIndexPath(sessionDir, reader);
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          version: 9,
+          projectId,
+          sessions: {
+            "session-1": {
+              title: "# Files mentioned by the user: stale title",
+              fullTitle: "# Files mentioned by the user: stale title",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              messageCount: 1,
+              indexedBytes: sessionStats.size,
+              fileMtime: sessionStats.mtimeMs,
+              provider: "claude",
+            },
+          },
+        }),
+      );
+
+      const sessions = await service.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+
+      expect(sessions[0]?.title).toBe("Actual user prompt");
+    });
+
+    it("rebuilds version 10 indexes after Claude internal-message filtering changes", async () => {
+      await createSession("session-1", "Actual user prompt");
+      const sessionStats = await stat(join(sessionDir, "session-1.jsonl"));
+      const indexPath = service.getIndexPath(sessionDir, reader);
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          version: 10,
+          projectId,
+          sessions: {
+            "session-1": {
+              title: "Internal Claude context",
+              fullTitle: "Internal Claude context",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              messageCount: 1,
+              indexedBytes: sessionStats.size,
+              fileMtime: sessionStats.mtimeMs,
+              provider: "claude",
+            },
+          },
+        }),
+      );
+
+      const sessions = await service.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+
+      expect(sessions[0]?.title).toBe("Actual user prompt");
+    });
   });
 
   describe("index file location", () => {

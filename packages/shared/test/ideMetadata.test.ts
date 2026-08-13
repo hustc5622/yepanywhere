@@ -4,6 +4,7 @@ import {
   getFilename,
   isIdeMetadata,
   parseOpenedFiles,
+  parseUserPromptMetadata,
   stripIdeMetadata,
 } from "../src/ideMetadata.js";
 
@@ -168,6 +169,80 @@ function foo() {
 
     it("handles Windows-style paths with forward slashes", () => {
       expect(getFilename("C:/Users/test/file.ts")).toBe("file.ts");
+    });
+  });
+
+  describe("parseUserPromptMetadata", () => {
+    it("extracts the request and mentioned files from Codex Desktop wrappers", () => {
+      const input = `
+# Files mentioned by the user:
+
+## E1089999.BIN: F:/DCOLYMP/E1089999.BIN
+
+<in-app-browser-context source="ambient-ui-state">
+This block is automatically supplied ambient UI state.
+- Current URL: https://example.test/private-token
+</in-app-browser-context>
+
+## My request:
+插到相机里没反应
+`;
+
+      expect(parseUserPromptMetadata(input)).toEqual({
+        text: "插到相机里没反应",
+        mentionedFiles: [
+          { name: "E1089999.BIN", path: "F:/DCOLYMP/E1089999.BIN" },
+        ],
+      });
+    });
+
+    it("keeps file metadata when the wrapped request is empty", () => {
+      const input = `# Files mentioned by the user:
+
+## screenshot.png: C:/Temp/screenshot.png
+
+## My request:
+`;
+
+      expect(parseUserPromptMetadata(input)).toEqual({
+        text: "",
+        mentionedFiles: [
+          { name: "screenshot.png", path: "C:/Temp/screenshot.png" },
+        ],
+      });
+    });
+
+    it("removes ambient browser context without requiring a request wrapper", () => {
+      const input = `<in-app-browser-context source="ambient-ui-state">
+hidden
+</in-app-browser-context>
+
+Keep this text`;
+
+      expect(parseUserPromptMetadata(input)).toEqual({
+        text: "Keep this text",
+        mentionedFiles: [],
+      });
+    });
+
+    it("preserves ordinary XML user content", () => {
+      const input =
+        '<?xml version="1.0"?><firmware_result>ok</firmware_result>';
+
+      expect(parseUserPromptMetadata(input)).toEqual({
+        text: input,
+        mentionedFiles: [],
+      });
+    });
+
+    it("preserves an ordinary Markdown My request heading", () => {
+      const input =
+        "Context I wrote myself\n\n## My request:\nKeep all of this";
+
+      expect(parseUserPromptMetadata(input)).toEqual({
+        text: input,
+        mentionedFiles: [],
+      });
     });
   });
 });

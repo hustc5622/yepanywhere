@@ -900,6 +900,7 @@
   "folderBrowseTitle": "Seleccionar carpeta del proyecto",
   "folderBrowseClose": "Cerrar",
   "folderBrowseCurrent": "Ruta actual (dispositivo del servidor)",
+  "folderBrowseDrives": "Unidades",
   "folderBrowseUp": "Subir",
   "folderBrowseSelectHere": "Seleccionar esta carpeta",
   "folderBrowseLoading": "Cargando…",

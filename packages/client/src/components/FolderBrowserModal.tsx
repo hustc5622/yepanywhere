@@ -85,7 +85,7 @@ export function FolderBrowserModal({
   };
 
   const goUp = () => {
-    if (parent) void load(parent);
+    if (parent !== null) void load(parent);
   };
 
   return (
@@ -100,7 +100,9 @@ export function FolderBrowserModal({
             {t("folderBrowseCurrent")}
           </span>
           <code className="folder-browser-path-value">
-            {currentPath ?? "…"}
+            {currentPath === ""
+              ? t("folderBrowseDrives")
+              : (currentPath ?? "…")}
           </code>
         </div>
 

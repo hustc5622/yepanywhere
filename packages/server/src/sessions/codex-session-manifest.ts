@@ -234,20 +234,7 @@ async function readSessionManifestEntry(
 function isSubagentSessionMeta(
   meta: CodexSessionMetaEntry["payload"],
 ): boolean {
-  if (!("forked_from_id" in meta) || typeof meta.forked_from_id !== "string") {
-    return false;
-  }
-
   const source = meta.source;
   if (!source || typeof source !== "object") return false;
-
-  const subagentSource = source as {
-    subagent?: { thread_spawn?: { parent_thread_id?: string } };
-    subAgent?: { thread_spawn?: { parent_thread_id?: string } };
-  };
-
-  return (
-    typeof (subagentSource.subagent ?? subagentSource.subAgent)?.thread_spawn
-      ?.parent_thread_id === "string"
-  );
+  return "subagent" in source || "subAgent" in source;
 }

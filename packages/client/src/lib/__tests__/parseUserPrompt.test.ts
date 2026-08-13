@@ -65,4 +65,29 @@ Commit and push current changes.
     expect(parsed.text).toContain("<name>git-commit-push</name>");
     expect(parsed.skills).toHaveLength(0);
   });
+
+  it("maps Codex Desktop prompt wrappers into visible text and existing uploads", () => {
+    const content = `# Files mentioned by the user:
+
+## report.txt: C:/Temp/report.txt
+
+<in-app-browser-context source="ambient-ui-state">
+hidden browser state
+</in-app-browser-context>
+
+## My request:
+Summarize the report`;
+
+    const parsed = parseUserPrompt(content);
+
+    expect(parsed.text).toBe("Summarize the report");
+    expect(parsed.uploadedFiles).toEqual([
+      {
+        originalName: "report.txt",
+        size: "unknown size",
+        mimeType: "application/octet-stream",
+        path: "C:/Temp/report.txt",
+      },
+    ]);
+  });
 });

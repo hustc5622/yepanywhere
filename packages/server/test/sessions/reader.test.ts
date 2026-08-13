@@ -46,6 +46,57 @@ describe("SessionReader", () => {
   });
 
   describe("title extraction", () => {
+    it.each(["isSynthetic", "isMeta", "isCompactSummary"])(
+      "skips Claude user entries marked %s when choosing the title and questions",
+      async (metadataFlag) => {
+        const sessionId = `test-session-${metadataFlag}`;
+        const internalUuid = randomUUID();
+        const userUuid = randomUUID();
+        const assistantUuid = randomUUID();
+        const jsonl = [
+          {
+            type: "user",
+            uuid: internalUuid,
+            parentUuid: null,
+            message: { content: "Internal Claude context" },
+            [metadataFlag]: true,
+          },
+          {
+            type: "user",
+            uuid: userUuid,
+            parentUuid: internalUuid,
+            message: { content: "Actual user request" },
+          },
+          {
+            type: "assistant",
+            uuid: assistantUuid,
+            parentUuid: userUuid,
+            message: { content: "Actual assistant response" },
+          },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n");
+        await writeFile(join(testDir, `${sessionId}.jsonl`), `${jsonl}\n`);
+
+        const summary = await reader.getSessionSummary(
+          sessionId,
+          "test-project" as UrlProjectId,
+        );
+        const session = await reader.getSession(
+          sessionId,
+          "test-project" as UrlProjectId,
+        );
+
+        expect(summary?.title).toBe("Actual user request");
+        expect(
+          summary?.userQuestions?.map((question) => question.text),
+        ).toEqual(["Actual user request"]);
+        expect(
+          session?.branchState?.branches.map((branch) => branch.prompt),
+        ).toEqual(["Actual user request"]);
+      },
+    );
+
     it("only lists sessions whose jsonl cwd matches the requested project", async () => {
       const projectOne = "/Users/test/code/project-one";
       const projectTwo = "/Users/test/code/project-two";

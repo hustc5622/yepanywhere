@@ -126,4 +126,28 @@ Commit and push current changes.
     ).toBeDefined();
     expect(screen.getByText(/# Git Commit Push/)).toBeDefined();
   });
+
+  it("renders a file-only Codex Desktop prompt without provider wrapper text", () => {
+    const content = `# Files mentioned by the user:
+
+## E1089999.BIN: F:/DCOLYMP/E1089999.BIN
+
+<in-app-browser-context source="ambient-ui-state">
+hidden browser state
+</in-app-browser-context>
+
+## My request:
+`;
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByText(/E1089999\.BIN/)).toBeDefined();
+    expect(screen.queryByText(/Files mentioned by the user/)).toBeNull();
+    expect(screen.queryByText(/in-app-browser-context/)).toBeNull();
+    expect(screen.queryByText(/My request/)).toBeNull();
+  });
 });

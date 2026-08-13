@@ -17,6 +17,42 @@ function createMockIterator(messages: SDKMessage[]): AsyncIterator<SDKMessage> {
 }
 
 describe("Process", () => {
+  describe("provider initialization", () => {
+    it("allows up to 15 seconds for a cold provider startup", async () => {
+      vi.useFakeTimers();
+      try {
+        const iterator: AsyncIterator<SDKMessage> = {
+          next: () => new Promise(() => {}),
+        };
+        const process = new Process(iterator, {
+          projectPath: "/test",
+          projectId: "proj-1",
+          sessionId: "sess-1",
+          idleTimeoutMs: 100,
+        });
+        let settled = false;
+        const initialization = process.waitForInitialization().then(
+          () => "resolved",
+          (error: Error) => error.message,
+        );
+        void initialization.finally(() => {
+          settled = true;
+        });
+
+        await vi.advanceTimersByTimeAsync(5_001);
+        expect(settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(9_999);
+        await expect(initialization).resolves.toBe(
+          "Provider session startup timed out before initialization",
+        );
+        process.terminate("test cleanup");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe("event subscription", () => {
     it("emits message events", async () => {
       const messages: SDKMessage[] = [

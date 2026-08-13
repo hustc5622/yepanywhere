@@ -554,9 +554,19 @@ export const UserPromptBlock = memo(function UserPromptBlock({
       : textContent;
 
   // Parse the combined text content for metadata
-  const { text, openedFiles, uploadedFiles, skills } =
+  const { text, openedFiles, uploadedFiles, mentionedFiles, skills } =
     parseUserPrompt(textForParsing);
-  const allUploadedFiles = mergeUploadedFiles(uploadedFiles, codexImageFiles);
+  const visibleUploadedFiles =
+    codexImageFiles.length > 0
+      ? uploadedFiles.filter(
+          (file) =>
+            !mentionedFiles.some((mentioned) => mentioned.path === file.path),
+        )
+      : uploadedFiles;
+  const allUploadedFiles = mergeUploadedFiles(
+    visibleUploadedFiles,
+    codexImageFiles,
+  );
 
   if (!text && skills.length === 0) {
     const hasMetadata = openedFiles.length > 0 || allUploadedFiles.length > 0;

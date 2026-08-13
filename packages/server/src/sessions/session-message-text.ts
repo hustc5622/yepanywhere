@@ -1,5 +1,6 @@
 import {
   isIdeMetadata,
+  parseUserPromptMetadata,
   stripBridgeMetadata,
   stripIdeMetadata,
 } from "@yep-anywhere/shared";
@@ -102,5 +103,8 @@ function extractContentText(content: unknown): string {
 }
 
 function cleanMessageText(text: string): string {
-  return stripBridgeMetadata(stripIdeMetadata(text));
+  const parsed = parseUserPromptMetadata(text);
+  const visibleText =
+    parsed.text || parsed.mentionedFiles.map((file) => file.name).join(", ");
+  return stripBridgeMetadata(stripIdeMetadata(visibleText));
 }

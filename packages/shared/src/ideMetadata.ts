@@ -16,6 +16,13 @@ const SYSTEM_CONTEXT_PATTERN =
 const BRIDGE_TIMESTAMP_PREFIX_PATTERN =
   /^\s*\[\d{4}[/-]\d{1,2}[/-]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?\]\s*/;
 
+const CODEX_BROWSER_CONTEXT_PATTERN =
+  /<in-app-browser-context\b[^>]*>[\s\S]*?<\/in-app-browser-context>/gi;
+const CODEX_FILES_SECTION_PATTERN =
+  /(?:^|\n)\s*# Files mentioned by the user:\s*\n([\s\S]*?)(?=\n\s*(?:<in-app-browser-context\b|## My request:)|$)/i;
+const CODEX_REQUEST_MARKER_PATTERN = /(?:^|\n)\s*## My request:\s*(?:\n|$)/i;
+const CODEX_MENTIONED_FILE_PATTERN = /^\s*##\s+(.+?):\s+(.+?)\s*$/gm;
+
 /** Pattern specifically for ide_opened_file tags */
 const OPENED_FILE_TAG_PATTERN =
   /<ide_opened_file>([\s\S]*?)<\/ide_opened_file>/g;
@@ -52,6 +59,54 @@ export function stripBridgeMetadata(text: string): string {
     .replace(SYSTEM_CONTEXT_PATTERN, "")
     .replace(BRIDGE_TIMESTAMP_PREFIX_PATTERN, "")
     .trim();
+}
+
+export interface MentionedFile {
+  name: string;
+  path: string;
+}
+
+export interface ParsedUserPromptMetadata {
+  text: string;
+  mentionedFiles: MentionedFile[];
+}
+
+/**
+ * Extract the user-visible parts of provider-wrapped prompt text.
+ * The original text remains unchanged in provider session storage.
+ */
+export function parseUserPromptMetadata(
+  content: string,
+): ParsedUserPromptMetadata {
+  const filesSection = CODEX_FILES_SECTION_PATTERN.exec(content);
+  const mentionedFiles: MentionedFile[] = [];
+
+  if (filesSection?.[1]) {
+    for (const match of filesSection[1].matchAll(
+      CODEX_MENTIONED_FILE_PATTERN,
+    )) {
+      const name = match[1]?.trim();
+      const path = match[2]?.trim();
+      if (name && path) {
+        mentionedFiles.push({ name, path });
+      }
+    }
+  }
+
+  const requestMarker = CODEX_REQUEST_MARKER_PATTERN.exec(content);
+  const hasCodexWrapper = Boolean(
+    filesSection || CODEX_BROWSER_CONTEXT_PATTERN.test(content),
+  );
+  CODEX_BROWSER_CONTEXT_PATTERN.lastIndex = 0;
+  const visibleContent =
+    hasCodexWrapper && requestMarker
+      ? content.slice(requestMarker.index + requestMarker[0].length)
+      : content.replace(CODEX_FILES_SECTION_PATTERN, "\n");
+
+  return {
+    text: visibleContent.replace(CODEX_BROWSER_CONTEXT_PATTERN, "\n").trim(),
+    mentionedFiles,
+  };
 }
 
 /**

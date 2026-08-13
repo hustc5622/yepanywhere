@@ -1,4 +1,7 @@
-import type { MarkdownAugment } from "@yep-anywhere/shared";
+import {
+  type MarkdownAugment,
+  isClaudeInternalUserPromptEntry,
+} from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 import type {
   RenderItem,
@@ -481,6 +484,10 @@ function processMessage(
     (msg.message as { role?: "user" | "assistant" } | undefined)?.role ??
     msg.role;
   const isUserMessage = msg.type === "user" || role === "user";
+
+  if (isClaudeInternalUserPromptEntry(msg)) {
+    return;
+  }
 
   // String content = user prompt (only if type is user)
   if (typeof content === "string") {

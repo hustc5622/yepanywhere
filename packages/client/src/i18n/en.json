@@ -1017,6 +1017,7 @@
   "folderBrowseTitle": "Select project folder",
   "folderBrowseClose": "Close",
   "folderBrowseCurrent": "Current path (server device)",
+  "folderBrowseDrives": "Drives",
   "folderBrowseUp": "Up",
   "folderBrowseSelectHere": "Select this folder",
   "folderBrowseLoading": "Loading…",

@@ -3,6 +3,7 @@ import {
   type SessionBranchOption,
   type SessionBranchState,
   getLogicalParentUuid,
+  isClaudeInternalUserPromptEntry,
 } from "@yep-anywhere/shared";
 import {
   type DagNode,
@@ -30,7 +31,7 @@ interface NormalizeClaudeEntriesOptions {
 }
 
 function getClaudeUserPromptText(raw: ClaudeSessionEntry): string | null {
-  if (raw.type !== "user") return null;
+  if (raw.type !== "user" || isClaudeInternalUserPromptEntry(raw)) return null;
 
   const content = raw.message?.content;
   if (typeof content === "string") {
@@ -426,6 +427,7 @@ function collectVisibleEntriesForBranch(
   const includedUuids = new Set<string>();
   const includedNonUuidLineIndices = new Set<number>();
   const pushUnique = (raw: ClaudeSessionEntry, lineIndex: number) => {
+    if (isClaudeInternalUserPromptEntry(raw)) return;
     const uuid = "uuid" in raw ? raw.uuid : undefined;
     if (uuid) {
       if (includedUuids.has(uuid)) return;

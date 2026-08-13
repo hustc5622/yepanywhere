@@ -7,6 +7,7 @@ const SESSION_SETUP_PREFIXES = [
 
 const SYNTHETIC_USER_PROMPT_PREFIXES = [
   "<permissions instructions>",
+  "<recommended_plugins>",
   "<skill>",
   "<skills_instructions>",
 ];

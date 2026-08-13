@@ -30,6 +30,75 @@ describe("createFsBrowseRoutes", () => {
     expect(body.entries.every((e) => e.isDirectory)).toBe(true);
   });
 
+  it("lists accessible Windows drive roots when no path is given", async () => {
+    const app = createFsBrowseRoutes({
+      platform: "win32",
+      pathExists: async (path) => path === "C:\\" || path === "D:\\",
+    });
+
+    const res = await app.request("/browse");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      path: "",
+      parent: null,
+      entries: [
+        { name: "C:\\", path: "C:\\", isDirectory: true },
+        { name: "D:\\", path: "D:\\", isDirectory: true },
+      ],
+    });
+  });
+
+  it("returns to the Windows drive list from a drive root", async () => {
+    const app = createFsBrowseRoutes({
+      platform: "win32",
+      pathExists: async () => true,
+    });
+
+    const res = await app.request("/browse?path=C%3A%5C");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { parent: string | null };
+    expect(body.parent).toBe("");
+  });
+
+  it("lists the macOS system volume and mounted volumes when no path is given", async () => {
+    const app = createFsBrowseRoutes({
+      platform: "darwin",
+      readDirectoryNames: async (path) =>
+        path === "/Volumes" ? ["External", "Network"] : [],
+      pathExists: async () => true,
+    });
+
+    const res = await app.request("/browse");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      path: "",
+      parent: null,
+      entries: [
+        { name: "/", path: "/", isDirectory: true },
+        {
+          name: "External",
+          path: "/Volumes/External",
+          isDirectory: true,
+        },
+        { name: "Network", path: "/Volumes/Network", isDirectory: true },
+      ],
+    });
+  });
+
+  it("returns to the macOS volume list from the system and mounted volume roots", async () => {
+    const app = createFsBrowseRoutes({ platform: "darwin" });
+
+    for (const path of ["/", "/Volumes/External"]) {
+      const res = await app.request(`/browse?path=${encodeURIComponent(path)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { parent: string | null };
+      expect(body.parent).toBe("");
+    }
+  });
+
   it("lists only directories (not files) in the target dir", async () => {
     const app = createFsBrowseRoutes();
     const res = await app.request(`/browse?path=${encodeURIComponent(tmp)}`);

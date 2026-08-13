@@ -1017,6 +1017,7 @@
   "folderBrowseTitle": "选择项目文件夹",
   "folderBrowseClose": "关闭",
   "folderBrowseCurrent": "当前路径（服务端设备）",
+  "folderBrowseDrives": "磁盘",
   "folderBrowseUp": "上级目录",
   "folderBrowseSelectHere": "选择此目录",
   "folderBrowseLoading": "加载中…",

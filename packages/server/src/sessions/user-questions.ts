@@ -1,6 +1,7 @@
 import {
   type SessionQuestion,
   isIdeMetadata,
+  parseUserPromptMetadata,
   stripBridgeMetadata,
   stripIdeMetadata,
 } from "@yep-anywhere/shared";
@@ -15,7 +16,10 @@ export function compactQuestionText(
   text: string,
   maxLength = SESSION_QUESTION_MAX_LENGTH,
 ): string {
-  const normalized = stripBridgeMetadata(stripIdeMetadata(text))
+  const parsed = parseUserPromptMetadata(text);
+  const visibleText =
+    parsed.text || parsed.mentionedFiles.map((file) => file.name).join(", ");
+  const normalized = stripBridgeMetadata(stripIdeMetadata(visibleText))
     .replace(/\s+/g, " ")
     .trim();
   if (normalized.length <= maxLength) return normalized;

@@ -3,6 +3,77 @@ import type { Message } from "../../types";
 import { preprocessMessages } from "../preprocessMessages";
 
 describe("preprocessMessages", () => {
+  it.each(["isSynthetic", "isMeta", "isCompactSummary"])(
+    "does not render Claude user entries marked %s as user prompts",
+    (metadataFlag) => {
+      const messages: Message[] = [
+        {
+          id: "internal-message",
+          type: "user",
+          message: { role: "user", content: "Internal Claude context" },
+          [metadataFlag]: true,
+        },
+        {
+          id: "actual-message",
+          type: "user",
+          message: { role: "user", content: "Actual user request" },
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        type: "user_prompt",
+        content: "Actual user request",
+      });
+    },
+  );
+
+  it("still pairs synthetic Claude tool-result messages with their tool calls", () => {
+    const messages: Message[] = [
+      {
+        id: "assistant-message",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-1",
+              name: "Read",
+              input: { file_path: "test.ts" },
+            },
+          ],
+        },
+      },
+      {
+        id: "tool-result-message",
+        type: "user",
+        isSynthetic: true,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-1",
+              content: "file contents",
+            },
+          ],
+        },
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "tool-1",
+      status: "complete",
+    });
+  });
+
   it("pairs tool_use with tool_result", () => {
     const messages: Message[] = [
       {

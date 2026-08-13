@@ -1,5 +1,6 @@
 import {
   parseOpenedFiles,
+  parseUserPromptMetadata,
   getFilename as sharedGetFilename,
   stripIdeMetadata,
 } from "@yep-anywhere/shared";
@@ -37,6 +38,8 @@ export interface ParsedUserPrompt {
   openedFiles: string[];
   /** Uploaded file attachments */
   uploadedFiles: UploadedFileInfo[];
+  /** Files described by Codex Desktop's prompt wrapper. */
+  mentionedFiles: UploadedFileInfo[];
   /** Skill references injected into the prompt */
   skills: SkillInfo[];
 }
@@ -147,12 +150,21 @@ export function parseUserPrompt(content: string): ParsedUserPrompt {
   const { textWithoutUploads, uploadedFiles } = parseUploadedFiles(content);
   const { textWithoutSkills, skills } =
     parseSkillReferences(textWithoutUploads);
+  const { text, mentionedFiles: mentionedFileMetadata } =
+    parseUserPromptMetadata(textWithoutSkills);
+  const mentionedFiles = mentionedFileMetadata.map((file) => ({
+    originalName: file.name,
+    size: "unknown size",
+    mimeType: "application/octet-stream",
+    path: file.path,
+  }));
 
   // Then process IDE metadata on the remaining text
   return {
-    text: stripIdeMetadata(textWithoutSkills),
+    text: stripIdeMetadata(text),
     openedFiles: parseOpenedFiles(textWithoutSkills),
-    uploadedFiles,
+    uploadedFiles: [...uploadedFiles, ...mentionedFiles],
+    mentionedFiles,
     skills,
   };
 }

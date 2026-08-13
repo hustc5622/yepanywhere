@@ -39,3 +39,30 @@ export function getMessageContent(entry: ClaudeSessionEntry) {
   }
   return undefined;
 }
+
+/** Check whether a Claude user-role entry is internal context, not a prompt. */
+export function isClaudeInternalUserPromptEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false;
+
+  const record = entry as Record<string, unknown>;
+  if (record.type !== "user") return false;
+  if (
+    record.isSynthetic !== true &&
+    record.isMeta !== true &&
+    record.isCompactSummary !== true
+  ) {
+    return false;
+  }
+
+  const message = record.message;
+  if (!message || typeof message !== "object") return true;
+  const content = (message as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return true;
+
+  return !content.some(
+    (block) =>
+      block !== null &&
+      typeof block === "object" &&
+      (block as Record<string, unknown>).type === "tool_result",
+  );
+}

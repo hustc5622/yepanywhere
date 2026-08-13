@@ -9,6 +9,7 @@ import {
   type UrlProjectId,
   escalateContextWindow,
   getModelContextWindow,
+  isClaudeInternalUserPromptEntry,
   isIdeMetadata,
   stripBridgeMetadata,
   stripIdeMetadata,
@@ -310,7 +311,9 @@ export class ClaudeSessionReader implements ISessionReader {
       // Filter active branch to user/assistant messages only
       const conversationMessages = activeBranch
         .filter(
-          (node) => node.raw.type === "user" || node.raw.type === "assistant",
+          (node) =>
+            (node.raw.type === "user" || node.raw.type === "assistant") &&
+            !isClaudeInternalUserPromptEntry(node.raw),
         )
         .map((node) => node.raw);
 
@@ -702,7 +705,7 @@ export class ClaudeSessionReader implements ISessionReader {
 
   private findFirstUserMessage(messages: ClaudeSessionEntry[]): string | null {
     for (const msg of messages) {
-      if (msg.type === "user") {
+      if (msg.type === "user" && !isClaudeInternalUserPromptEntry(msg)) {
         const content = msg.message.content;
         if (content) {
           // Content can be string or array of content blocks
@@ -727,7 +730,9 @@ export class ClaudeSessionReader implements ISessionReader {
 
     for (let index = 0; index < messages.length; index++) {
       const msg = messages[index];
-      if (!msg || msg.type !== "user") continue;
+      if (!msg || msg.type !== "user" || isClaudeInternalUserPromptEntry(msg)) {
+        continue;
+      }
 
       const content = msg.message.content;
       if (!content) continue;

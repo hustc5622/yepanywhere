@@ -15,6 +15,7 @@ export const BaseEntrySchema = z.object({
 
   // optional
   isMeta: z.boolean().optional(),
+  isSynthetic: z.boolean().optional(),
   toolUseResult: z.unknown().optional(),
   gitBranch: z.string().optional(),
   isCompactSummary: z.boolean().optional(),
