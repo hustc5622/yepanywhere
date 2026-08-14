@@ -1246,9 +1246,10 @@ export const api = {
     ),
 
   /**
-   * Goal lifecycle actions (ZCode session/goal). `show` returns the
-   * provider-rendered status text; set/replace require an objective and may
-   * start a turn immediately (startedTurn).
+   * Provider-native Goal lifecycle actions (for example ZCode `session/goal`
+   * or Codex `thread/goal/*`). `show` returns provider-rendered status text;
+   * set/replace require an objective. A provider may report `startedTurn`,
+   * but Codex automatic continuations are observed through turn notifications.
    */
   processGoal: (
     processId: string,

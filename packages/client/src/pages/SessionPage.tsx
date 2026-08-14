@@ -2030,7 +2030,7 @@ function SessionPageContent({
             />
           )}
 
-        {/* Goal lifecycle dialog (ZCode) */}
+        {/* Provider-native Goal lifecycle dialog (ZCode or Codex). */}
         {showGoalModal && status.owner === "self" && status.processId && (
           <GoalModal
             processId={status.processId}

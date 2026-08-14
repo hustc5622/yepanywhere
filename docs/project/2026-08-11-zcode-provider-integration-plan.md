@@ -57,7 +57,7 @@ Yep Anywhere **可以支持 ZCode**。推荐新增独立顶层 provider `zcode`�
 | ZCode model provider | ZCode 内部的模型上游，例如 Z.AI、BigModel 或 OpenAI-compatible 自定义源 |
 | ZCode Desktop | `/Applications/ZCode.app`，负责 UI、配置和内置 CLI 分发 |
 | ZCode Protocol | 本机 CLI `app-server` 暴露的 stdio 双向协议；当前未见公开稳定规范 |
-| Codex Goal mode | 用于执行本文开发计划的新 Codex session 的持久目标模式，与 ZCode 原生 `/goal` 是两个实现 |
+| Codex Goal mode | Codex thread 级持久目标，与 permission mode 和 ZCode 原生 `/goal` 都是不同实现；Yep 当前只有 RPC 控制和刷新展示，还没有新会话 Goal-first 与自动 continuation 的完整监督，见 [Codex Goal 适配计划](./2026-08-14-codex-goal-support-plan.md) |
 
 ### 1.2 核心目标
 
@@ -1294,11 +1294,13 @@ P1 继续只编辑 ZCode 相关文件。会话期间 Kimi 相关 dirty 改动仍
 - P2（历史 reader/scanner/normalization）不需要用户授权，可继续推进。
 - 真实模型 smoke 是 P4 的门禁，需要用户明确授权后才能运行。
 
-## 14. 新 Codex session 的 Goal Prompt
+## 14. 历史：新 Codex session 的 Goal Prompt
 
-OpenAI 官方 Codex 手册建议：长任务用 `/goal` 创建持久目标，目标中写清 outcome、constraints 和 verification；复杂细节放在文件中并让 goal 引用该文件。参见 [Long-running work](https://learn.chatgpt.com/docs/long-running-work)。下面的 prompt 因此只定义完成边界，把详细阶段门禁留在本文。
+> 2026-08-14 更正：本节保留的是当时的执行 prompt，不是当前 Yep New Session 的原生 Goal-first 使用说明。Yep 目前不会在新会话入口拦截 `/goal`；把下面文本作为第一条消息发送会走普通 `turn/start`，最多由模型决定是否调用 goal tool，不能作为原生 Goal 已建立的验收证据。完整现状和修复顺序见 [Codex Goal 模式适配现状与完整开发计划](./2026-08-14-codex-goal-support-plan.md)。
 
-在一个以本仓库为 workspace 的新 Codex session 中，把下面整段作为第一条消息发送：
+OpenAI 官方 Codex 指南建议：长任务用 `/goal` 创建持久目标，目标中写清 outcome、constraints 和 verification；复杂细节放在文件中并让 goal 引用该文件。参见 [OpenAI 官方 Goal 指南](https://learn.chatgpt.com/use-cases/follow-goals)。下面的 prompt 因此只定义完成边界，把详细阶段门禁留在本文。
+
+下面内容只应在原生 Codex CLI 的 `/goal` 分派路径中使用；等 Yep 完成上述适配计划的 Goal-first checkpoint 后，也可以由专用 Goal 入口提交。不要在当前 Yep New Session 中把它作为普通第一条消息粘贴：
 
 ```text
 /goal 在 Yep Anywhere 仓库中完成生产可用的 ZCode provider 核心接入，严格以 docs/project/2026-08-11-zcode-provider-integration-plan.md 的 P0–P4、共同门禁和 Definition of Done 为唯一实施与验收基线。
@@ -1312,7 +1314,7 @@ OpenAI 官方 Codex 手册建议：长任务用 `/goal` 创建持久目标，目
 持续工作直到 P0–P4 全部通过：聚焦测试、pnpm lint、pnpm typecheck、pnpm test、git diff --check 均有记录；真实 smoke 在获授权后通过；其他 provider 无回归；文档、兼容矩阵、已知限制和执行记录已更新。只有这些条件全部满足且没有必需工作或未解释失败时才把 goal 标记 complete；不要因为上下文、预算或单个阶段结束而提前完成。P5 不属于本 goal，完成核心后只总结后续建议，不直接实现。
 ```
 
-如果新 session 已经有普通对话上下文，先新建空 session 再粘贴；不要在一个已经承担其他代码修改的 session 上追加此 goal，以免 dirty ownership 和完成标准混在一起。
+历史使用约束是：如果 session 已经有普通对话上下文，应新建空 session；不要在一个已经承担其他代码修改的 session 上追加此 goal，以免 dirty ownership 和完成标准混在一起。当前 Yep 在 Goal-first 完成前不提供上述原生启动保证。
 
 ## 15. 最终交付清单
 

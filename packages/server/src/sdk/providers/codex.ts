@@ -2071,8 +2071,10 @@ export class CodexProvider implements AgentProvider {
     const goal = result.control === "thread/goal/set" ? result.data.goal : null;
     return {
       response: formatCodexGoal(goal),
-      // Unlike ZCode's session/goal RPC, Codex thread/goal/set only mutates
-      // durable goal state. It does not enqueue model input or start a turn.
+      // `thread/goal/set` returns before its runtime effects are authoritative:
+      // an active goal may subsequently start an automatic continuation. The
+      // current neutral response cannot observe that notification, so this
+      // compatibility field must not be used as Codex turn-lifecycle truth.
       startedTurn: false,
     };
   }

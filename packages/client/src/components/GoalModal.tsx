@@ -22,8 +22,9 @@ const PROMPT_ACTIONS = [
 /**
  * Provider-neutral goal lifecycle dialog. Loads the current goal status via
  * `action: "show"` on open and offers set/replace (with objective text) and
- * pause/resume/clear actions. Some providers may start a model turn for an
- * explicit set/replace action; Codex only mutates its durable thread goal.
+ * pause/resume/clear actions. An active Codex goal mutation may make the
+ * app-server start an automatic continuation asynchronously; whether that
+ * happened is determined by turn notifications, not the action response.
  *
  * Supported providers: ZCode (`session/goal` RPC) and Codex
  * (`thread/goal/*` native controls, formatted into the same `ProviderGoalState`

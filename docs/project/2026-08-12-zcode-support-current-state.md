@@ -450,16 +450,18 @@ docs/project/2026-08-11-zcode-provider-integration-plan.md
 - 保留 dirty worktree 中与本任务无关的用户改动，不回滚、不覆盖。
 - 每个 checkpoint 完成后先记录证据，再进入下一阶段；遇到真实协议不确定项时回到 CLI reference 验证，不凭印象补字段。
 
-## 13. 可直接使用的 Goal prompt
+## 13. 历史 Goal prompt（非当前 Yep 启动说明）
 
-Codex Goal mode 的官方说明见 [OpenAI 官方 Goal 指南](https://learn.chatgpt.com/use-cases/follow-goals)。如果 `/goal` 不可用，可先执行 `codex features enable goals`，或在 `config.toml` 中启用：
+> 2026-08-14 更正：下面内容是完成本轮 ZCode 修复时保留的执行 prompt。当前 Yep New Session 不会把第一条 `/goal` 确定性转换成原生 `thread/goal/set`，而是把它作为普通 `turn/start` 输入；因此不要再用本节作为 Yep 已支持 Goal-first 的证据。Yep 的现状、自动 continuation 风险和开发计划见 [Codex Goal 模式适配现状与完整开发计划](./2026-08-14-codex-goal-support-plan.md)。
+
+Codex Goal mode 的官方说明见 [OpenAI 官方 Goal 指南](https://learn.chatgpt.com/use-cases/follow-goals)。当前仓库的 Codex reference 已把 goals 标为 stable/default enabled；对于 `/goal` 仍不可用的旧安装，可按官方说明执行 `codex features enable goals`，或在 `config.toml` 中启用：
 
 ```toml
 [features]
 goals = true
 ```
 
-在本仓库开启一个新 Codex 会话后，粘贴以下 prompt：
+以下 prompt 仅作为历史执行记录保留。它可以通过原生 Codex CLI 的 `/goal` 命令提交；在 Yep 完成 Goal-first 适配前，不应作为普通新会话消息粘贴：
 
 ```text
 /goal 在 /Users/yueyuan/Desktop/work/before_work/yepanywhere 中完成 ZCode 新会话实时链路的真实协议修复：以本机 ZCode CLI 0.16.1 的实际契约为基线，在不破坏现有历史 session 读取能力和 secret 边界的前提下，使有效配置的 ZCode 能被 /api/providers 正确判定为可用、能在新会话表单正常选择，并完成 create/send/stream/result/persistence 闭环；持续推进，直到 docs/project/2026-08-12-zcode-support-current-state.md 第 11 节的总体验收条件全部满足。
