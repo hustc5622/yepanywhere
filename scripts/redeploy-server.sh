@@ -59,6 +59,8 @@ source "$SCRIPT_DIR/lib/node.sh"
 source "$SCRIPT_DIR/lib/pnpm.sh"
 # shellcheck source=scripts/lib/deploy-lock.sh
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
+# shellcheck source=scripts/lib/deploy-npm.sh
+source "$SCRIPT_DIR/lib/deploy-npm.sh"
 
 # ----- args -----
 DO_BUILD=true
@@ -615,10 +617,14 @@ runtime_dependencies_installed() {
 }
 
 install_runtime_dependencies() {
+  local npm_registry
+  npm_registry="$(deploy_npm_registry)"
   log "Installing runtime dependencies in dist/npm-package ..."
+  dim "npm registry: ${npm_registry}"
+  dim "npm network: direct (inherited proxy settings disabled)"
   (
     cd "$REPO_ROOT/dist/npm-package"
-    npm install --omit=dev --no-audit --no-fund --silent
+    run_deploy_npm_direct install --omit=dev --no-audit --no-fund --prefer-offline
   )
   chmod +x "$REPO_ROOT"/dist/npm-package/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
 }

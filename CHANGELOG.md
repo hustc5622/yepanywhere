@@ -32,6 +32,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Reducer parity tests covering empty events, out-of-order sequence, session mismatch, multi-thread/turn, client retry, and single-event vs batch-path equivalence
 
 ### Changed
+- Install deployment bundle runtime dependencies directly from `https://registry.npmmirror.com/` by default, ignoring inherited proxy settings and preferring the local npm cache; `YEP_DEPLOY_NPM_REGISTRY` can override the registry when needed, and deployment logs now show the selected network path
 - Render Feishu-origin user prompts as compact channel messages instead of exposing raw context/attachment manifests: internal refs, hashes and operator IDs are hidden, generated image placeholders collapse into named preview chips, downloaded files become actionable links, and safe HTTP(S) document links in the message body open directly
 - Harden the managed DeepSeek Codex provider for transient upstream overloads with eight HTTP/SSE retries, a ten-minute stream idle window, explicitly disabled OpenAI authentication/WebSocket inheritance, and a visible automatic-retry notice
 - Skip canonical Codex overlay by default on normal Session GET; the web client does not consume canonical native-item fields, so a `view=canonical` query opt-in now gates the 11k-event projection that previously caused 48–52s TTFB and ~1 GB RSS on long sessions
