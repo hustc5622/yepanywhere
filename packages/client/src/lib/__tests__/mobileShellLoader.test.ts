@@ -69,6 +69,16 @@ function postAppReady(dom: JSDOM, frame: HTMLIFrameElement, origin: string) {
   );
 }
 
+function clickSavedNode(dom: JSDOM, origin: string) {
+  const button = Array.from(
+    dom.window.document.querySelectorAll<HTMLButtonElement>(
+      "[data-node-origin]",
+    ),
+  ).find((candidate) => candidate.dataset.nodeOrigin === origin);
+  if (!button) throw new Error(`saved node button not found: ${origin}`);
+  button.click();
+}
+
 afterEach(() => {
   for (const dom of openDoms.splice(0)) dom.window.close();
 });
@@ -155,7 +165,9 @@ describe("APK mobile shell recovery", () => {
       new dom.window.Event("submit", { bubbles: true, cancelable: true }),
     );
 
-    expect(frame.src).toBe("http://10.0.0.2:9000/yep/?yep-mobile-shell=1");
+    expect(frame.src).toBe(
+      "http://10.0.0.2:9000/yep/projects?yep-mobile-shell=1",
+    );
     expect(
       dom.window.localStorage.getItem("yep-anywhere-mobile-active-node"),
     ).toBe("http://10.0.0.2:9000");
@@ -165,6 +177,52 @@ describe("APK mobile shell recovery", () => {
     ).toContain("正在连接");
     expect(dom.window.document.body.classList.contains("is-panel-open")).toBe(
       true,
+    );
+  });
+
+  it("opens the new endpoint at its project list instead of reusing an old session route", () => {
+    const { dom, frame } = mountShell();
+    frame.src =
+      "http://43.226.60.75:46789/yep/projects/old-project/sessions/old-session?branch=old-branch";
+
+    clickSavedNode(dom, "http://39.106.200.1:18022");
+
+    expect(frame.src).toBe(
+      "http://39.106.200.1:18022/yep/projects?yep-mobile-shell=1",
+    );
+  });
+
+  it("drops a project path sent by the embedded client when it changes endpoints", () => {
+    const { dom, frame } = mountShell();
+
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        data: {
+          type: "yep-anywhere:mobile-shell-set-channel",
+          channel: "tcp",
+          node: "http://39.106.200.1:18022",
+          path: "/yep/new-session?projectId=old-project",
+        },
+        source: frame.contentWindow,
+      }),
+    );
+
+    expect(frame.src).toBe(
+      "http://39.106.200.1:18022/yep/projects?yep-mobile-shell=1",
+    );
+  });
+
+  it("preserves the current route when retrying the same endpoint", () => {
+    const { dom, frame } = mountShell();
+    frame.src =
+      "http://43.226.60.75:46789/yep/projects/current-project/sessions/current-session?branch=current-branch";
+
+    dom.window.document
+      .querySelector<HTMLButtonElement>("[data-retry-connection]")
+      ?.click();
+
+    expect(frame.src).toBe(
+      "http://43.226.60.75:46789/yep/projects/current-project/sessions/current-session?branch=current-branch&yep-mobile-shell=1",
     );
   });
 });

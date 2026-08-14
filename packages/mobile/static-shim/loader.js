@@ -38,6 +38,7 @@
     "http://43.226.60.75:61874"
   ];
   var NODE_HISTORY_LIMIT = 8;
+  var TARGET_CHANGE_PATH = "/yep/projects";
   var APP_READY_TIMEOUT_MS = 12000;
   var SLOW_STATUS_MS = 8000;
   // The longest iframe-side native request timeout is 60 seconds (log upload).
@@ -811,6 +812,15 @@
 
   function loadTarget(target, options) {
     if (!target) target = targetFromChannel(DEFAULT_CHANNEL);
+    var previousTarget = activeTarget;
+    var path = options && options.path;
+    // Project and session ids belong to one server installation. Carrying a
+    // route from another origin can make the new server return
+    // "Project not found", so a real endpoint change starts from its project
+    // list. Same-origin retries still keep the current route.
+    if (previousTarget && previousTarget.origin !== target.origin) {
+      path = TARGET_CHANGE_PATH;
+    }
     activeTarget = target;
     activeChannel = target.channel;
 
@@ -835,7 +845,7 @@
       if (!loaded) updateStatus(t("waitingForApp"));
       renderConnectionControls();
     };
-    frame.src = getFrameUrl(target, options && options.path);
+    frame.src = getFrameUrl(target, path);
     updateSlowStatus();
     startAppReadyTimeout();
     renderConnectionControls();

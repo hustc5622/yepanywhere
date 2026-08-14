@@ -54,6 +54,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Update the built-in mobile shell `mini` node to its current connection endpoint
 
 ### Fixed
+- Reset the APK mobile shell to the destination server's project list when switching endpoints instead of carrying over the previous server's project/session route and surfacing `Project not found`; same-endpoint retries still preserve the current page
 - Keep long-running `/goal` workflow sessions in the regular session list and sidebar instead of classifying them as one-off slash-command sessions
 - Keep ZCode's shared SQLite store intact when archiving one session by toggling only that project-scoped row's `time_archived`, and require the configured project directory for every ZCode summary/content/stats lookup so a guessed session ID cannot cross project boundaries. Compatibility credentials are now carried into the in-memory provider registry, malformed non-string runtime headers fail closed, MCP status errors are credential-redacted, and the hook installer explicitly enforces `0600` on both bridge and CLI config files
 - Refuse Codex bridge status endpoints on unrelated hosts before attaching the desktop bearer token; wildcard bridge listeners are rewritten to the configured control host, while loopback aliases remain interoperable
