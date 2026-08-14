@@ -157,6 +157,8 @@ export interface AppMessageExtensions {
   codexThreadItemLifecycle?: "started" | "completed";
   codexThreadId?: string;
   codexTurnId?: string;
+  /** Stable native identity shared by Codex live items and rollout records. */
+  codexCorrelationKey?: string;
   codexEventSequence?: number;
   codexRawReasoningAllowed?: boolean;
   /** Policy-checked, Yep-managed artifacts. Never contains a local path. */

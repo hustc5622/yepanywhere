@@ -111,11 +111,22 @@ export const CodexMessagePhaseSchema = z
 
 export type CodexMessagePhase = z.infer<typeof CodexMessagePhaseSchema>;
 
+const CodexResponseItemIdentityFields = {
+  id: z.string().optional(),
+  internal_chat_message_metadata_passthrough: z
+    .object({
+      turn_id: z.string().optional(),
+    })
+    .passthrough()
+    .optional(),
+};
+
 /**
  * User or assistant message payload.
  */
 export const CodexMessagePayloadSchema = z.object({
   type: z.literal("message"),
+  ...CodexResponseItemIdentityFields,
   role: z.enum(["user", "assistant", "developer"]),
   phase: CodexMessagePhaseSchema,
   content: z.array(
@@ -143,6 +154,7 @@ export const CodexSummaryTextSchema = z.object({
  */
 export const CodexReasoningPayloadSchema = z.object({
   type: z.literal("reasoning"),
+  ...CodexResponseItemIdentityFields,
   summary: z.array(CodexSummaryTextSchema).optional(),
   content: z.unknown().nullable().optional(), // Raw content if available
   encrypted_content: z.string().optional(), // Encrypted reasoning

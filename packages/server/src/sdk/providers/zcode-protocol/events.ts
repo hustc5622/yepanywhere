@@ -56,6 +56,12 @@ export interface ZCodeEventConverterState {
   readonly toolInputBuffers: Map<string, string>;
   /** Already-projected message IDs (from upsert or stream end). */
   readonly projectedMessageIds: Set<string>;
+  /** Highest unified event sequence already handled. */
+  lastEventSeq: number | null;
+  /** Recently handled event IDs for exact replay suppression. */
+  readonly seenEventIds: Set<string>;
+  /** Completed streamed text awaiting its full message.upserted snapshot. */
+  lastCompletedText: string | null;
   /** Count of unknown events for diagnostics. */
   unknownEventCount: number;
 }
@@ -66,6 +72,9 @@ export function createZCodeEventConverterState(): ZCodeEventConverterState {
     reasoningBuffers: new Map(),
     toolInputBuffers: new Map(),
     projectedMessageIds: new Set(),
+    lastEventSeq: null,
+    seenEventIds: new Set(),
+    lastCompletedText: null,
     unknownEventCount: 0,
   };
 }
@@ -96,6 +105,9 @@ interface ZCodeEventParams {
   event?: string;
   messageId?: string;
   message?: unknown;
+  content?: unknown;
+  attachments?: unknown[];
+  toolCalls?: unknown[];
   model?: string;
   text?: string;
   reasoning?: string;
@@ -159,6 +171,52 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+const MAX_SEEN_ZCODE_EVENT_IDS = 2_048;
+
+function isDuplicateUnifiedEvent(
+  notification: ZCodeJsonRpcNotification,
+  state: ZCodeEventConverterState,
+): boolean {
+  if (
+    notification.method !== "session/event" &&
+    notification.method !== "event"
+  ) {
+    return false;
+  }
+
+  const rawParams =
+    (notification.params as Record<string, unknown> | undefined) ?? {};
+  const eventId = asString(rawParams.eventId);
+  const seq =
+    typeof rawParams.seq === "number" &&
+    Number.isInteger(rawParams.seq) &&
+    rawParams.seq >= 0
+      ? rawParams.seq
+      : undefined;
+
+  if (eventId && state.seenEventIds.has(eventId)) {
+    return true;
+  }
+  if (
+    seq !== undefined &&
+    state.lastEventSeq !== null &&
+    seq <= state.lastEventSeq
+  ) {
+    return true;
+  }
+
+  if (seq !== undefined) {
+    state.lastEventSeq = seq;
+  }
+  if (eventId) {
+    if (state.seenEventIds.size >= MAX_SEEN_ZCODE_EVENT_IDS) {
+      state.seenEventIds.clear();
+    }
+    state.seenEventIds.add(eventId);
+  }
+  return false;
 }
 
 // =============================================================================
@@ -283,6 +341,10 @@ export function convertZCodeNotificationToSDKMessages(
   sessionId: string,
 ): SDKMessage[] {
   const method = notification.method;
+
+  if (isDuplicateUnifiedEvent(notification, state)) {
+    return [];
+  }
 
   // The unified event stream arrives as "session/event" with the actual event
   // name in params.type (real CLI 0.16.1).
@@ -442,7 +504,11 @@ function convertMessageUpserted(
   sessionId: string,
 ): SDKMessage[] {
   const params = extractParams(notification);
-  const messageId = asString(params.messageId);
+  const legacyMessage = asObject(params.message);
+  const legacyMessageId = asString(params.messageId);
+  const eventId = asString(params.eventId);
+  const messageId =
+    legacyMessageId ?? (eventId ? `zcode-event:${eventId}` : undefined);
   if (!messageId) return [];
 
   // Skip if already projected via streaming.
@@ -450,11 +516,15 @@ function convertMessageUpserted(
     return [];
   }
 
-  const messageObj = asObject(params.message);
-  if (!messageObj) return [];
-
-  const role = asString(messageObj.role) ?? "assistant";
-  const content = messageObj.content;
+  const rawRole = asString(legacyMessage?.role) ?? asString(params.type);
+  const normalizedRole = rawRole?.toLowerCase().replaceAll("-", "_");
+  const role =
+    normalizedRole === "user" || normalizedRole === "user_message"
+      ? "user"
+      : normalizedRole === "system" || normalizedRole === "system_message"
+        ? "system"
+        : "assistant";
+  const content = legacyMessage?.content ?? params.content;
 
   // Extract text from content (could be string or array of parts).
   let text: string | undefined;
@@ -471,16 +541,26 @@ function convertMessageUpserted(
     text = textParts.length > 0 ? textParts.join("\n") : undefined;
   }
 
+  // The provider already yields the submitted user message before session/send,
+  // and system snapshots are metadata. Project only assistant upserts here.
+  if (role !== "assistant" || !text) return [];
+
+  if (!legacyMessageId && state.lastCompletedText === text) {
+    state.lastCompletedText = null;
+    state.projectedMessageIds.add(messageId);
+    return [];
+  }
+
   state.projectedMessageIds.add(messageId);
 
   return [
     {
-      type: role === "user" ? "user" : "assistant",
+      type: "assistant",
       uuid: messageId,
       session_id: sessionId,
       message: {
-        role,
-        content: text ?? "",
+        role: "assistant",
+        content: text,
       },
     },
   ];
@@ -509,6 +589,7 @@ function convertModelStreaming(
     // Text streaming
     case "text_start": {
       state.textBuffers.set(messageId, "");
+      state.lastCompletedText = null;
       return [];
     }
     case "text_delta": {
@@ -533,6 +614,7 @@ function convertModelStreaming(
       const text = state.textBuffers.get(messageId) ?? "";
       state.textBuffers.delete(messageId);
       state.projectedMessageIds.add(messageId);
+      state.lastCompletedText = text || null;
       return [
         {
           type: "assistant",
@@ -576,6 +658,7 @@ function convertModelStreaming(
       return [
         {
           type: "assistant",
+          uuid: `${messageId}:reasoning`,
           session_id: sessionId,
           message: {
             role: "assistant",
@@ -680,6 +763,7 @@ function convertToolCallEvent(
   return [
     {
       type: "assistant",
+      uuid: `${toolCallId ?? "unknown"}:tool-use`,
       session_id: sessionId,
       message: {
         role: "assistant",
@@ -715,6 +799,7 @@ function convertToolUpdated(
 
     messages.push({
       type: "user",
+      uuid: `${toolCallId}:tool-result`,
       session_id: sessionId,
       tool_use_id: toolCallId,
       message: {

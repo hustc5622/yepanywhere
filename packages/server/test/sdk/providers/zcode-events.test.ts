@@ -20,6 +20,7 @@ import {
 } from "../../../src/sdk/providers/zcode-protocol/events.js";
 
 const SESSION_ID = "test-session-1";
+let nextEventSeq = 0;
 
 function makeNotification(
   method: string,
@@ -34,14 +35,15 @@ function makeEventNotification(
 ): ZCodeJsonRpcNotification {
   // Real ZCode CLI 0.16.1 event envelope:
   // {method: "session/event", params: {type, payload, seq, sessionId, eventId, timestamp}}
+  const seq = nextEventSeq++;
   return {
     method: "session/event",
     params: {
       type: eventName,
       payload: params,
-      seq: 0,
+      seq,
       sessionId: SESSION_ID,
-      eventId: "test-evt",
+      eventId: `test-evt-${seq}`,
       timestamp: 0,
     },
   };
@@ -278,6 +280,7 @@ describe("ZCode event converter", () => {
       );
       expect(endMessages).toHaveLength(1);
       expect(endMessages[0]?.type).toBe("assistant");
+      expect(endMessages[0]?.uuid).toBe(`${msgId}:reasoning`);
       const content = endMessages[0]?.message?.content as Array<{
         thinking: string;
       }>;
@@ -331,6 +334,7 @@ describe("ZCode event converter", () => {
       );
       expect(callMessages).toHaveLength(1);
       expect(callMessages[0]?.type).toBe("assistant");
+      expect(callMessages[0]?.uuid).toBe(`${toolCallId}:tool-use`);
       const content = callMessages[0]?.message?.content as Array<
         Record<string, unknown>
       >;
@@ -519,6 +523,7 @@ describe("ZCode event converter", () => {
       );
       expect(messages).toHaveLength(1);
       expect(messages[0]?.type).toBe("user");
+      expect(messages[0]?.uuid).toBe("tool-1:tool-result");
       expect(messages[0]?.tool_use_id).toBe("tool-1");
       const content = messages[0]?.message?.content as Array<
         Record<string, unknown>
@@ -548,6 +553,92 @@ describe("ZCode event converter", () => {
   });
 
   describe("message.upserted dedup", () => {
+    it("projects the real strict CLI payload using the stable event id", () => {
+      const state = createZCodeEventConverterState();
+      const notification = makeEventNotification("message.upserted", {
+        type: "assistant_message",
+        content: "Hello from the real payload",
+        attachments: [],
+        toolCalls: [],
+      });
+      const eventId = (notification.params as { eventId: string }).eventId;
+
+      const messages = convertZCodeNotificationToSDKMessages(
+        notification,
+        state,
+        SESSION_ID,
+      );
+
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "assistant",
+          uuid: `zcode-event:${eventId}`,
+          message: {
+            role: "assistant",
+            content: "Hello from the real payload",
+          },
+        }),
+      ]);
+    });
+
+    it("drops an exact event replay before projecting it twice", () => {
+      const state = createZCodeEventConverterState();
+      const notification = makeEventNotification("message.upserted", {
+        type: "assistant_message",
+        content: "Only once",
+      });
+
+      expect(
+        convertZCodeNotificationToSDKMessages(notification, state, SESSION_ID),
+      ).toHaveLength(1);
+      expect(
+        convertZCodeNotificationToSDKMessages(notification, state, SESSION_ID),
+      ).toEqual([]);
+    });
+
+    it("does not re-project a full upsert after the same streamed text", () => {
+      const state = createZCodeEventConverterState();
+      const msgId = "msg-stream-upsert";
+      convertZCodeNotificationToSDKMessages(
+        makeEventNotification("model.streaming", {
+          kind: "text_start",
+          assistantMessageId: msgId,
+        }),
+        state,
+        SESSION_ID,
+      );
+      convertZCodeNotificationToSDKMessages(
+        makeEventNotification("model.streaming", {
+          kind: "text_delta",
+          assistantMessageId: msgId,
+          delta: "Same text",
+        }),
+        state,
+        SESSION_ID,
+      );
+      expect(
+        convertZCodeNotificationToSDKMessages(
+          makeEventNotification("model.streaming", {
+            kind: "text_end",
+            assistantMessageId: msgId,
+          }),
+          state,
+          SESSION_ID,
+        ),
+      ).toHaveLength(1);
+
+      expect(
+        convertZCodeNotificationToSDKMessages(
+          makeEventNotification("message.upserted", {
+            type: "assistant_message",
+            content: "Same text",
+          }),
+          state,
+          SESSION_ID,
+        ),
+      ).toEqual([]);
+    });
+
     it("projects a message on first upsert and skips duplicates", () => {
       const state = createZCodeEventConverterState();
       const msgId = "msg-upsert-1";

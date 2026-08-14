@@ -693,7 +693,15 @@ export function convertCodexEntries(
         : converted
           ? [converted]
           : [];
+      const correlationKey = getCodexResponseCorrelationKey(entry.payload);
+      const responseTurnId = getCodexResponsePayloadTurnId(entry.payload);
       for (const msg of convertedMessages) {
+        if (correlationKey) {
+          msg.codexCorrelationKey = correlationKey;
+        }
+        if (responseTurnId) {
+          msg.codexTurnId = responseTurnId;
+        }
         if (isCodexCorrelationDebugEnabled()) {
           logCodexCorrelationDebug({
             sessionId,
@@ -969,6 +977,9 @@ function getCodexResponsePayloadItemId(
   payload: CodexResponseItemEntry["payload"],
 ): string | undefined {
   switch (payload.type) {
+    case "message":
+    case "reasoning":
+      return payload.id;
     case "function_call":
     case "function_call_output":
       return payload.call_id;
@@ -983,6 +994,31 @@ function getCodexResponsePayloadItemId(
     default:
       return undefined;
   }
+}
+
+function getCodexResponsePayloadTurnId(
+  payload: CodexResponseItemEntry["payload"],
+): string | undefined {
+  if (payload.type !== "message" && payload.type !== "reasoning") {
+    return undefined;
+  }
+  return payload.internal_chat_message_metadata_passthrough?.turn_id;
+}
+
+function getCodexResponseCorrelationKey(
+  payload: CodexResponseItemEntry["payload"],
+): string | undefined {
+  const itemId = getCodexResponsePayloadItemId(payload);
+  const turnId = getCodexResponsePayloadTurnId(payload);
+  if (!itemId || !turnId) return undefined;
+
+  if (payload.type === "message" && payload.role === "assistant") {
+    return `codex:${turnId}:agent-message:${itemId}`;
+  }
+  if (payload.type === "reasoning") {
+    return `codex:${turnId}:reasoning:${itemId}`;
+  }
+  return undefined;
 }
 
 function getCodexEventPayloadTurnId(

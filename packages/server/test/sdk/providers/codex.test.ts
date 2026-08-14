@@ -2662,6 +2662,44 @@ describe("CodexProvider Event Normalization", () => {
     expect(typeof provider.startSession).toBe("function");
   });
 
+  it("uses one stable correlation key for agent-message lifecycle updates", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const params = {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "msg-native-1",
+        type: "agentMessage",
+        text: "Checking the repository.",
+        phase: "commentary",
+      },
+    };
+
+    const started = provider.convertNotificationToSDKMessages(
+      { method: "item/started", params },
+      "thread-1",
+      new Map(),
+    );
+    const completed = provider.convertNotificationToSDKMessages(
+      { method: "item/completed", params },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(started[0]?.codexCorrelationKey).toBe(
+      "codex:turn-1:agent-message:msg-native-1",
+    );
+    expect(completed[0]?.codexCorrelationKey).toBe(
+      started[0]?.codexCorrelationKey,
+    );
+  });
+
   it("normalizes command execution tool_use and tool_result to Read shape", () => {
     const provider = createTestProvider() as unknown as {
       convertItemToSDKMessages: (

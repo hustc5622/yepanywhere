@@ -4846,6 +4846,7 @@ export class CodexProvider implements AgentProvider {
             type: "assistant",
             session_id: sessionId,
             uuid,
+            codexCorrelationKey: `codex:${turnId}:reasoning:${item.id}`,
             message: {
               role: "assistant",
               content: [
@@ -4874,6 +4875,7 @@ export class CodexProvider implements AgentProvider {
             type: "assistant",
             session_id: sessionId,
             uuid,
+            codexCorrelationKey: `codex:${turnId}:agent-message:${item.id}`,
             ...(item.phase ? { codexMessagePhase: item.phase } : {}),
             message: {
               role: "assistant",

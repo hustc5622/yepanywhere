@@ -102,6 +102,13 @@ function isReplayMessage(message: Message): boolean {
   return message.isReplay === true;
 }
 
+function getCodexCorrelationKey(message: Message): string | null {
+  return typeof message.codexCorrelationKey === "string" &&
+    message.codexCorrelationKey.length > 0
+    ? message.codexCorrelationKey
+    : null;
+}
+
 function getAllowedTimestampDeltaMs(a: Message, b: Message): number {
   return isReplayMessage(a) || isReplayMessage(b)
     ? REPLAY_TIMESTAMP_WINDOW_MS
@@ -151,9 +158,13 @@ export function hasEquivalentJsonlMessage(
   incoming: Message,
   options?: { windowMs?: number; replayWindowMs?: number },
 ): boolean {
+  const incomingCorrelationKey = getCodexCorrelationKey(incoming);
   const incomingFingerprint = getSemanticFingerprint(incoming);
   const incomingTimestampMs = getMessageTimestampMs(incoming);
-  if (!incomingFingerprint || incomingTimestampMs === null) {
+  if (
+    !incomingCorrelationKey &&
+    (!incomingFingerprint || incomingTimestampMs === null)
+  ) {
     return false;
   }
 
@@ -165,6 +176,23 @@ export function hasEquivalentJsonlMessage(
   for (let i = existing.length - 1; i >= startIndex; i -= 1) {
     const candidate = existing[i];
     if (!candidate || candidate._source !== "jsonl") {
+      continue;
+    }
+    const candidateCorrelationKey = getCodexCorrelationKey(candidate);
+    if (
+      incomingCorrelationKey &&
+      candidateCorrelationKey === incomingCorrelationKey
+    ) {
+      return true;
+    }
+    if (
+      incomingCorrelationKey &&
+      candidateCorrelationKey &&
+      candidateCorrelationKey !== incomingCorrelationKey
+    ) {
+      continue;
+    }
+    if (!incomingFingerprint || incomingTimestampMs === null) {
       continue;
     }
     if (getSemanticFingerprint(candidate) !== incomingFingerprint) {
@@ -192,6 +220,7 @@ interface IndexedMessage {
   originalIndex: number;
   timestampMs: number | null;
   fingerprint: string | null;
+  correlationKey: string | null;
 }
 
 export function reconcileCodexLinearMessages(
@@ -209,6 +238,7 @@ export function reconcileCodexLinearMessages(
         originalIndex,
         timestampMs: getMessageTimestampMs(message),
         fingerprint: getSemanticFingerprint(message),
+        correlationKey: getCodexCorrelationKey(message),
       }),
     )
     .sort((a, b) => {
@@ -224,11 +254,29 @@ export function reconcileCodexLinearMessages(
     });
 
   const kept: IndexedMessage[] = [];
+  const correlatedMessages = new Map<string, IndexedMessage>();
 
   for (const entry of sorted) {
     let merged = false;
 
-    if (entry.fingerprint && entry.timestampMs !== null) {
+    if (entry.correlationKey) {
+      const candidate = correlatedMessages.get(entry.correlationKey);
+      if (candidate) {
+        const incomingSource =
+          entry.message._source ?? candidate.message._source ?? "sdk";
+        candidate.message = mergeMessage(
+          candidate.message,
+          entry.message,
+          incomingSource,
+        );
+        candidate.timestampMs =
+          getMessageTimestampMs(candidate.message) ?? candidate.timestampMs;
+        candidate.fingerprint = getSemanticFingerprint(candidate.message);
+        merged = true;
+      }
+    }
+
+    if (!merged && entry.fingerprint && entry.timestampMs !== null) {
       for (let i = kept.length - 1; i >= 0; i -= 1) {
         const candidate = kept[i];
         if (!candidate) {
@@ -241,6 +289,13 @@ export function reconcileCodexLinearMessages(
           break;
         }
         if (candidate.fingerprint !== entry.fingerprint) {
+          continue;
+        }
+        if (
+          candidate.correlationKey &&
+          entry.correlationKey &&
+          candidate.correlationKey !== entry.correlationKey
+        ) {
           continue;
         }
         if (
@@ -265,6 +320,10 @@ export function reconcileCodexLinearMessages(
         candidate.timestampMs =
           getMessageTimestampMs(candidate.message) ?? candidate.timestampMs;
         candidate.fingerprint = getSemanticFingerprint(candidate.message);
+        candidate.correlationKey ??= entry.correlationKey;
+        if (candidate.correlationKey) {
+          correlatedMessages.set(candidate.correlationKey, candidate);
+        }
         merged = true;
         break;
       }
@@ -272,6 +331,9 @@ export function reconcileCodexLinearMessages(
 
     if (!merged) {
       kept.push(entry);
+      if (entry.correlationKey) {
+        correlatedMessages.set(entry.correlationKey, entry);
+      }
     }
   }
 

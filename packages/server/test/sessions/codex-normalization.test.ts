@@ -363,6 +363,34 @@ describe("Codex Normalization", () => {
     });
   });
 
+  it("preserves the native Codex item identity for live/disk reconciliation", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2024-01-01T00:00:01Z",
+        payload: {
+          type: "message",
+          id: "msg-native-1",
+          role: "assistant",
+          phase: "commentary",
+          content: [{ type: "output_text", text: "Checking the repository." }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: "turn-native-1",
+          },
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+
+    expect(result.messages).toEqual([
+      expect.objectContaining({
+        codexTurnId: "turn-native-1",
+        codexCorrelationKey: "codex:turn-native-1:agent-message:msg-native-1",
+      }),
+    ]);
+  });
+
   it("applies Codex thread_rolled_back markers before normalizing", () => {
     const entries: CodexSessionEntry[] = [
       codexUserMessage("q1", 1),

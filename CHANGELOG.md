@@ -56,6 +56,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Update the built-in mobile shell `mini` node to its current connection endpoint
 
 ### Fixed
+- Prevent provider transcript rows from multiplying across reconnects: Codex live lifecycle items and persisted rollout messages now reconcile by their native turn/item identity instead of text-and-time heuristics alone, while ZCode suppresses replayed event sequences, consumes the real strict `message.upserted` payload, and assigns stable identities to reasoning and tool rows
 - Preserve Kimi's active permission mode when approving an `ExitPlanMode` review, so a YOLO session no longer falls back to manual approval before implementation or passes that downgraded mode to subagents
 - Prevent Kimi ACP sessions from silently dropping later items in a batched `AskUserQuestion`: the host now tells Kimi to ask one question per call, retry any omitted question separately, and never infer a Recommended default; persisted and live Kimi JSON answer results are also normalized so transcripts show the real answered count and selected option instead of `0 answered`
 - Deduplicate Codex code-mode plan progress between the transcript and Session Inspector, keep native-only turn-plan snapshots available in the inspector, and suppress canonical reasoning/command/message placeholders that only repeated normalized transcript activity as empty label cards

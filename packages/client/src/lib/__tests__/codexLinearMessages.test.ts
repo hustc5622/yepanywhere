@@ -71,6 +71,73 @@ describe("hasEquivalentJsonlMessage", () => {
 });
 
 describe("reconcileCodexLinearMessages", () => {
+  it("converges lifecycle, persisted refresh, and replay by native correlation key", () => {
+    const correlationKey = "codex:turn-1:agent-message:msg-native-1";
+    const started: Message = {
+      uuid: "msg-native-1-turn-1",
+      type: "assistant",
+      timestamp: "2026-03-09T10:00:00.000Z",
+      _source: "sdk",
+      codexCorrelationKey: correlationKey,
+      message: { role: "assistant", content: "" },
+    };
+    const completed: Message = {
+      ...started,
+      timestamp: "2026-03-09T10:00:00.500Z",
+      message: { role: "assistant", content: "Checking the repository." },
+    };
+    const persisted: Message = {
+      uuid: "codex-12-persisted",
+      type: "assistant",
+      timestamp: "2026-03-09T10:00:01.000Z",
+      _source: "jsonl",
+      codexCorrelationKey: correlationKey,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Checking the repository." }],
+      },
+    };
+    const replay: Message = {
+      ...completed,
+      timestamp: "2026-03-09T10:05:00.000Z",
+      isReplay: true,
+    };
+
+    const result = reconcileCodexLinearMessages([
+      started,
+      completed,
+      persisted,
+      replay,
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?._source).toBe("jsonl");
+    expect(result[0]?.uuid).toBe("codex-12-persisted");
+  });
+
+  it("keeps intentional same-text messages with different native identities", () => {
+    const messages: Message[] = [
+      {
+        uuid: "sdk-1",
+        type: "assistant",
+        timestamp: "2026-03-09T10:00:00.000Z",
+        _source: "sdk",
+        codexCorrelationKey: "codex:turn-1:agent-message:msg-1",
+        message: { role: "assistant", content: "Still working." },
+      },
+      {
+        uuid: "jsonl-2",
+        type: "assistant",
+        timestamp: "2026-03-09T10:00:00.500Z",
+        _source: "jsonl",
+        codexCorrelationKey: "codex:turn-2:agent-message:msg-2",
+        message: { role: "assistant", content: "Still working." },
+      },
+    ];
+
+    expect(reconcileCodexLinearMessages(messages)).toHaveLength(2);
+  });
+
   it("merges sdk/jsonl duplicates and prefers jsonl", () => {
     const messages: Message[] = [
       {
