@@ -1,3 +1,4 @@
+import type { ContextUsage } from "@yep-anywhere/shared";
 import {
   BridgeHttpClient,
   type BridgeHttpClientOptions,
@@ -23,6 +24,7 @@ interface CodexSessionPollState extends BridgePollState {
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
+  contextUsage?: ContextUsage;
 }
 
 export class CodexBridgeHttpClient
@@ -136,6 +138,7 @@ export class CodexBridgeHttpClient
           model: session.model,
           reasoningEffort: session.reasoningEffort,
           serviceTier: session.serviceTier,
+          contextUsage: session.contextUsage,
           activity: session.activity,
           pendingInputType: session.pendingInputType,
           pendingInputRequestId: view.pendingInputRequestId,
@@ -162,7 +165,10 @@ export class CodexBridgeHttpClient
       previous.messageCount !== state.messageCount ||
       previous.model !== state.model ||
       previous.reasoningEffort !== state.reasoningEffort ||
-      previous.serviceTier !== state.serviceTier
+      previous.serviceTier !== state.serviceTier ||
+      previous.contextUsage?.inputTokens !== state.contextUsage?.inputTokens ||
+      previous.contextUsage?.percentage !== state.contextUsage?.percentage ||
+      previous.contextUsage?.contextWindow !== state.contextUsage?.contextWindow
     ) {
       this.eventBus.emit({
         type: "session-updated",
@@ -174,6 +180,7 @@ export class CodexBridgeHttpClient
         model: state.model,
         reasoningEffort: state.reasoningEffort,
         serviceTier: state.serviceTier,
+        ...(state.contextUsage ? { contextUsage: state.contextUsage } : {}),
         timestamp,
       });
     }

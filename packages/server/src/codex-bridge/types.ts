@@ -1,4 +1,4 @@
-import type { InputRequest } from "@yep-anywhere/shared";
+import type { ContextUsage, InputRequest } from "@yep-anywhere/shared";
 import type {
   BridgeController,
   BridgeInputResponse,
@@ -99,6 +99,8 @@ export interface CodexUsageRequestOptions {
 export interface CodexBridgeSession extends BridgeSessionBase {
   provider: "codex";
   serviceTier?: string;
+  /** Context window fill reported by the app-server, when observed. */
+  contextUsage?: ContextUsage;
   connectionIds: number[];
 }
 

@@ -980,6 +980,96 @@ describe("CodexBridgeService", () => {
     }
   });
 
+  it("tracks fresh and post-compaction context usage", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      client.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "thread/read",
+          params: { threadId: "thread-usage" },
+        }),
+      );
+      await waitFor(() => upstreamMessages.length === 1);
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            cwd: "/tmp/project-usage",
+            thread: {
+              id: "thread-usage",
+              preview: "Usage test",
+              createdAt: 1_780_000_000,
+              updatedAt: 1_780_000_001,
+              cwd: "/tmp/project-usage",
+              status: { type: "working" },
+              turns: [],
+            },
+          },
+        }),
+      );
+      await waitFor(() => bridge.listSessions().length === 1);
+
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId: "thread-usage",
+            turnId: "turn-usage",
+            tokenUsage: {
+              total: { totalTokens: 5000 },
+              last: { inputTokens: 4000, totalTokens: 4500 },
+              modelContextWindow: 20_000,
+            },
+          },
+        }),
+      );
+      await waitFor(
+        () => bridge.listSessions()[0]?.contextUsage?.inputTokens === 4000,
+      );
+      expect(bridge.listSessions()[0]?.contextUsage).toEqual({
+        inputTokens: 4000,
+        percentage: 20,
+        contextWindow: 20_000,
+      });
+
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId: "thread-usage",
+            turnId: "turn-usage",
+            tokenUsage: {
+              total: { totalTokens: 5000 },
+              last: { inputTokens: 0, totalTokens: 1200 },
+              modelContextWindow: 20_000,
+            },
+          },
+        }),
+      );
+      await waitFor(
+        () => bridge.listSessions()[0]?.contextUsage?.inputTokens === 1200,
+      );
+      expect(emittedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "session-updated",
+          sessionId: "thread-usage",
+          contextUsage: {
+            inputTokens: 1200,
+            percentage: 6,
+            contextWindow: 20_000,
+          },
+        }),
+      );
+    } finally {
+      client.close();
+    }
+  });
+
   it("records and transparently forwards MCP startup notifications", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {
@@ -2736,10 +2826,26 @@ describe("CodexBridgeService", () => {
         }),
       );
       await completed;
+      const tokenUsage = waitForJson(client);
+      latestUpstream?.send(
+        JSON.stringify({
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId: "thread-persist",
+            turnId: "turn-1",
+            tokenUsage: {
+              total: { totalTokens: 5000 },
+              last: { inputTokens: 3200, totalTokens: 3400 },
+              modelContextWindow: 16_000,
+            },
+          },
+        }),
+      );
+      await tokenUsage;
       await waitFor(
         () =>
           first.listSessions().find((s) => s.id === "thread-persist")
-            ?.messageCount === 1,
+            ?.contextUsage?.inputTokens === 3200,
       );
     } finally {
       client.close();
@@ -2765,6 +2871,11 @@ describe("CodexBridgeService", () => {
         title: "Persisted session",
         messageCount: 1,
         activity: "idle",
+        contextUsage: {
+          inputTokens: 3200,
+          percentage: 20,
+          contextWindow: 16_000,
+        },
       });
     } finally {
       await second.shutdown();

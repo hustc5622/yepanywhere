@@ -159,6 +159,13 @@ function isCodexProvider(provider?: string): boolean {
  * messages load on demand via the top-of-list infinite scroll.
  */
 const INITIAL_MESSAGE_LIMIT = 100;
+/**
+ * One-shot delayed metadata retry when the initial GET returns no
+ * contextUsage (bridge session not yet readable from disk, or the first
+ * turn has not finished). No later event is guaranteed to fill the gap,
+ * so the indicator would otherwise stay hidden until the next navigation.
+ */
+const CONTEXT_USAGE_RETRY_MS = 3_000;
 const ACTIVE_WINDOW_TARGET_MESSAGES = INITIAL_MESSAGE_LIMIT;
 const ACTIVE_WINDOW_TRIGGER_MESSAGES = INITIAL_MESSAGE_LIMIT + 50;
 const ACTIVE_WINDOW_TURN_BOUNDARY_LOOKBACK = 25;
@@ -470,6 +477,9 @@ export function useSessionMessages(
   // invalidated by navigation/edit). A failed newer request must not prevent an
   // older successful request from filling a gap.
   const refreshAppliedGenerationRef = useRef(0);
+  // Pending one-shot contextUsage retry timer (cleared on session change).
+  const contextUsageRetryTimerRef =
+    useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -662,6 +672,21 @@ export function useSessionMessages(
     [updatePersistedTimestampWatermark],
   );
 
+  // Fetch session metadata only
+  const fetchSessionMetadata = useCallback(async () => {
+    try {
+      const data = await api.getSessionMetadata(projectId, sessionId);
+      // For new sessions, prev may be null if JSONL didn't exist on initial load
+      setSession((prev) =>
+        prev
+          ? { ...prev, ...data.session, messages: prev.messages }
+          : { ...data.session, messages: [] },
+      );
+    } catch {
+      // Silent fail for metadata updates
+    }
+  }, [projectId, sessionId]);
+
   // Initial load. Branch switches reload message content for the same
   // session without returning the page to its full-screen loading state.
   useEffect(() => {
@@ -709,6 +734,17 @@ export function useSessionMessages(
         loadedSessionKeyRef.current = sessionLoadKey;
         setLoading(false);
 
+        // The initial GET can legitimately miss contextUsage (bridge session
+        // not yet readable from disk, first turn unfinished), and no later
+        // event is guaranteed to fill the gap. Retry metadata once so the
+        // context indicator appears without requiring a navigation.
+        if (!data.session.contextUsage) {
+          contextUsageRetryTimerRef.current = setTimeout(() => {
+            contextUsageRetryTimerRef.current = undefined;
+            if (isCurrent) void fetchSessionMetadata();
+          }, CONTEXT_USAGE_RETRY_MS);
+        }
+
         if (!supersededByCommittedRefresh) {
           // Notify parent only for the snapshot that was actually applied.
           onLoadComplete?.({
@@ -731,6 +767,8 @@ export function useSessionMessages(
 
     return () => {
       isCurrent = false;
+      clearTimeout(contextUsageRetryTimerRef.current);
+      contextUsageRetryTimerRef.current = undefined;
     };
   }, [
     projectId,
@@ -740,6 +778,7 @@ export function useSessionMessages(
     onLoadError,
     flushBuffer,
     applySessionSnapshot,
+    fetchSessionMetadata,
   ]);
 
   const updateActiveWindowFollowingBottom = useCallback(
@@ -1142,21 +1181,6 @@ export function useSessionMessages(
     },
     [projectId, sessionId, branchId, applySessionSnapshot, onLoadComplete],
   );
-
-  // Fetch session metadata only
-  const fetchSessionMetadata = useCallback(async () => {
-    try {
-      const data = await api.getSessionMetadata(projectId, sessionId);
-      // For new sessions, prev may be null if JSONL didn't exist on initial load
-      setSession((prev) =>
-        prev
-          ? { ...prev, ...data.session, messages: prev.messages }
-          : { ...data.session, messages: [] },
-      );
-    } catch {
-      // Silent fail for metadata updates
-    }
-  }, [projectId, sessionId]);
 
   /**
    * Rewind/edit: drop the message with `uuid` and everything after it (keeping

@@ -4,7 +4,12 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
 import { basename, dirname } from "node:path";
-import type { UrlProjectId, UserQuestionAnswers } from "@yep-anywhere/shared";
+import {
+  type ContextUsage,
+  type UrlProjectId,
+  type UserQuestionAnswers,
+  getModelContextWindow,
+} from "@yep-anywhere/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
 import { BridgeEventNotifier } from "../bridge-common/BridgeEventNotifier.js";
 import type {
@@ -187,6 +192,8 @@ interface SessionRecord {
   /** Message of the most recent turn error/`error` notification. */
   lastErrorMessage?: string;
   pendingInputType?: "tool-approval" | "user-question";
+  /** Context window fill from the latest thread/tokenUsage/updated. */
+  contextUsage?: ContextUsage;
   connectionIds: Set<number>;
   completedTurnIds: Set<string>;
 }
@@ -207,6 +214,7 @@ interface PersistedSessionRecord {
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
+  contextUsage?: ContextUsage;
   lastTurnStatus?: "completed" | "interrupted" | "failed";
   lastErrorMessage?: string;
   completedTurnIds: string[];
@@ -1657,6 +1665,43 @@ export class CodexBridgeService implements CodexBridgeController {
         this.emitSessionUpdated(record, "codex-plan-updated");
         break;
       }
+      case "thread/tokenUsage/updated": {
+        const threadId = getString(p?.threadId);
+        if (!threadId) break;
+        const record = this.sessions.get(threadId);
+        if (!record) break;
+        const tokenUsage = asRecord(p?.tokenUsage);
+        const last = asRecord(tokenUsage?.last);
+        // Mirror codex-reader semantics: normally the context meter tracks the
+        // latest turn's fresh input tokens. Immediately after compaction Codex
+        // reports inputTokens=0 and puts the compacted summary size in
+        // last.totalTokens, which is the new current context fill.
+        const freshInputTokens =
+          typeof last?.inputTokens === "number" ? last.inputTokens : 0;
+        const compactedContextTokens =
+          typeof last?.totalTokens === "number" ? last.totalTokens : 0;
+        const inputTokens =
+          freshInputTokens > 0 ? freshInputTokens : compactedContextTokens;
+        if (inputTokens <= 0) break;
+        const reportedWindow =
+          typeof tokenUsage?.modelContextWindow === "number" &&
+          tokenUsage.modelContextWindow > 0
+            ? tokenUsage.modelContextWindow
+            : undefined;
+        const contextWindow =
+          reportedWindow ?? getModelContextWindow(record.model, "codex");
+        record.contextUsage = {
+          inputTokens,
+          percentage: Math.min(
+            100,
+            Math.round((inputTokens / contextWindow) * 100),
+          ),
+          contextWindow,
+        };
+        this.emitSessionUpdated(record);
+        this.schedulePersist();
+        break;
+      }
       case "turn/completed": {
         const threadId = getString(p?.threadId);
         if (!threadId) break;
@@ -2326,6 +2371,7 @@ export class CodexBridgeService implements CodexBridgeController {
         model: record.model,
         reasoningEffort: record.reasoningEffort,
         serviceTier: record.serviceTier,
+        contextUsage: record.contextUsage,
         lastTurnStatus: record.lastTurnStatus,
         lastErrorMessage: record.lastErrorMessage,
         completedTurnIds: Array.from(record.completedTurnIds),
@@ -2395,6 +2441,7 @@ export class CodexBridgeService implements CodexBridgeController {
         model: stored.model,
         reasoningEffort: stored.reasoningEffort,
         serviceTier: stored.serviceTier,
+        contextUsage: stored.contextUsage,
         // Restored sessions have no live connection; they are idle until a
         // TUI reconnects and reports fresh status.
         activity: "idle",
@@ -2516,6 +2563,7 @@ export class CodexBridgeService implements CodexBridgeController {
       model: record.model,
       reasoningEffort: record.reasoningEffort,
       serviceTier: record.serviceTier,
+      ...(record.contextUsage ? { contextUsage: record.contextUsage } : {}),
       timestamp: new Date().toISOString(),
     });
   }
@@ -2539,6 +2587,7 @@ export class CodexBridgeService implements CodexBridgeController {
       pendingInputType: record.pendingInputType,
       lastTurnStatus: record.lastTurnStatus,
       lastErrorMessage: record.lastErrorMessage,
+      contextUsage: record.contextUsage,
       connectionIds: Array.from(record.connectionIds),
     };
   }
@@ -2560,6 +2609,7 @@ export class CodexBridgeService implements CodexBridgeController {
       serviceTier: session.serviceTier,
       lastTurnStatus: session.lastTurnStatus,
       lastErrorMessage: session.lastErrorMessage,
+      contextUsage: session.contextUsage,
       originator: "Yep Codex Bridge",
       createdBy: "external",
       source: "codex-bridge",
