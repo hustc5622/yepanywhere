@@ -271,6 +271,14 @@ export class KimiSessionReader implements ISessionReader {
    *
    * Kimi agent ids (`agent-0`, `agent-1`, ...) are only unique within a
    * session, so this must be scoped by sessionId — the route forwards it.
+   *
+   * Calls whose tool.result has not landed yet (still-running foreground
+   * children) get a provisional mapping instead: Kimi allocates agent ids
+   * deterministically in spawn order and creates `agents/<agentId>/` at spawn
+   * time, so the unclaimed directories on disk are assigned to pending calls
+   * in call order. Once a result lands, its parsed ids are authoritative and
+   * claim their directories back (callers replace provisional entries with
+   * the fresh response).
    */
   async getAgentMappings(sessionId?: string): Promise<AgentMapping[]> {
     if (!sessionId) return [];
@@ -284,28 +292,51 @@ export class KimiSessionReader implements ISessionReader {
       return [];
     }
 
-    // Requested subagent type per spawning tool call (from the call args).
-    const requestedTypeByCallId = new Map<string, string | undefined>();
+    const callMetadataByCallId = new Map<
+      string,
+      {
+        requestedType?: string;
+        resumeAgentIds: string[];
+        newAgentCount: number;
+      }
+    >();
     // Raw tool.result output text per spawning tool call.
     const resultOutputByCallId = new Map<string, string>();
     // Preserve tool.call order so swarmIndex fallback (per-call ordinal) is
     // deterministic; the child's own `swarmIndex` from the result wins.
     const spawnCallIds: string[] = [];
-
     for (const record of records) {
       if (!isKimiLoopEventRecord(record)) continue;
       const event = record.event;
       if (event.type === "tool.call") {
         const call = event as KimiToolCallEvent;
         if (call.name === "Agent" || call.name === "AgentSwarm") {
-          if (!requestedTypeByCallId.has(call.toolCallId)) {
+          if (!callMetadataByCallId.has(call.toolCallId)) {
             spawnCallIds.push(call.toolCallId);
           }
+          const args = call.args ?? {};
           const argType = call.args?.subagent_type;
-          requestedTypeByCallId.set(
-            call.toolCallId,
-            typeof argType === "string" ? argType : undefined,
-          );
+          const requestedType =
+            typeof argType === "string" ? argType : undefined;
+          const resumeAgentIds =
+            call.name === "Agent"
+              ? [normalizeKimiAgentId(args.resume)].filter(
+                  (agentId): agentId is string => Boolean(agentId),
+                )
+              : normalizeKimiResumeAgentIds(args.resume_agent_ids);
+          const newAgentCount =
+            call.name === "Agent"
+              ? resumeAgentIds.length > 0
+                ? 0
+                : 1
+              : Array.isArray(args.items)
+                ? args.items.length
+                : 0;
+          callMetadataByCallId.set(call.toolCallId, {
+            ...(requestedType ? { requestedType } : {}),
+            resumeAgentIds,
+            newAgentCount,
+          });
         }
       } else if (event.type === "tool.result") {
         const res = event as KimiToolResultEvent;
@@ -317,12 +348,16 @@ export class KimiSessionReader implements ISessionReader {
     }
 
     const mappings: AgentMapping[] = [];
+    // Directories already claimed by parsed tool.results, so the provisional
+    // pass below never re-assigns a finished child.
+    const claimedAgentIds = new Set<string>();
     for (const toolUseId of spawnCallIds) {
       const output = resultOutputByCallId.get(toolUseId);
-      if (!output) continue; // No result yet → no authoritative identity.
+      if (!output) continue; // No result yet → provisional identity pass below.
       const children = parseKimiSubagentResults(output);
-      const requestedType = requestedTypeByCallId.get(toolUseId);
+      const requestedType = callMetadataByCallId.get(toolUseId)?.requestedType;
       children.forEach((child, index) => {
+        claimedAgentIds.add(child.agentId);
         mappings.push({
           toolUseId,
           agentId: child.agentId,
@@ -333,6 +368,59 @@ export class KimiSessionReader implements ISessionReader {
           ...(child.status ? { status: child.status } : {}),
         });
       });
+    }
+
+    // Provisional identity for still-pending calls (foreground children whose
+    // result lands only when they finish). Explicit Agent/AgentSwarm resume ids
+    // are authoritative and may legitimately reuse a directory claimed by an
+    // earlier call. Newly spawned children are assigned from the remaining
+    // directories in call order, bounded by the call's declared item count.
+    const pendingCallIds = spawnCallIds.filter(
+      (toolUseId) => !resultOutputByCallId.has(toolUseId),
+    );
+    if (pendingCallIds.length > 0) {
+      let allAgentIds: string[] = [];
+      try {
+        allAgentIds = (await readdir(join(entry.sessionDir, "agents")))
+          .filter((name) => /^agent-\d+$/.test(name))
+          .sort(
+            (a, b) =>
+              Number(a.slice("agent-".length)) -
+              Number(b.slice("agent-".length)),
+          );
+      } catch {
+        // No agents directory — nothing to provisionally map.
+      }
+      const availableAgentIds = new Set(allAgentIds);
+      for (const toolUseId of pendingCallIds) {
+        const metadata = callMetadataByCallId.get(toolUseId);
+        for (const agentId of metadata?.resumeAgentIds ?? []) {
+          if (availableAgentIds.has(agentId)) claimedAgentIds.add(agentId);
+        }
+      }
+      const remainingDirs = allAgentIds.filter(
+        (agentId) => !claimedAgentIds.has(agentId),
+      );
+      for (const toolUseId of pendingCallIds) {
+        const metadata = callMetadataByCallId.get(toolUseId);
+        if (!metadata) continue;
+        metadata.resumeAgentIds.forEach((agentId, swarmIndex) => {
+          if (!availableAgentIds.has(agentId)) return;
+          mappings.push({ toolUseId, agentId, swarmIndex });
+        });
+        for (let newIndex = 0; newIndex < metadata.newAgentCount; newIndex++) {
+          const agentId = remainingDirs.shift();
+          if (!agentId) break; // A later child has not created its directory yet.
+          mappings.push({
+            toolUseId,
+            agentId,
+            ...(metadata.requestedType
+              ? { agentType: metadata.requestedType }
+              : {}),
+            swarmIndex: metadata.resumeAgentIds.length + newIndex,
+          });
+        }
+      }
     }
     return mappings;
   }
@@ -856,6 +944,20 @@ export class KimiSessionReader implements ISessionReader {
     }
     return questions;
   }
+}
+
+function normalizeKimiAgentId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return /^agent-\d+$/.test(trimmed) ? trimmed : undefined;
+}
+
+function normalizeKimiResumeAgentIds(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.keys(value).flatMap((agentId) => {
+    const normalized = normalizeKimiAgentId(agentId);
+    return normalized ? [normalized] : [];
+  });
 }
 
 /**

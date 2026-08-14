@@ -6,6 +6,8 @@ import type { Message, Session } from "../../types";
 import {
   type PendingMessage,
   buildAgentMappingLoadPlan,
+  extractKimiAgentIdFromFileEvent,
+  hasUnresolvedKimiAgentMappings,
   isCodexHistoryRewriteSnapshotReady,
   isKimiAuthoritativeSnapshotReady,
   isToolUseOnlyAssistantMessage,
@@ -14,6 +16,7 @@ import {
   reconcilePendingMessagesWithConfirmedMessages,
   sessionTurnHealthFromSession,
   shouldDeferKimiPersistedSync,
+  shouldFetchSessionMetadataForUpdate,
   shouldRefreshFullPersistedSession,
   shouldRefreshSettledAuthoritativeSnapshot,
 } from "../useSession";
@@ -316,6 +319,8 @@ describe("buildAgentMappingLoadPlan", () => {
           input: {
             description: "inspect in parallel",
             subagent_type: "explore",
+            items: ["frontend", "backend"],
+            prompt_template: "inspect {{item}}",
           },
         },
       ],
@@ -337,10 +342,21 @@ describe("buildAgentMappingLoadPlan", () => {
     },
   };
 
-  it("waits for Kimi's authoritative result, then keeps the completed swarm eligible", () => {
-    expect(
-      buildAgentMappingLoadPlan([swarmToolUse], "kimi", "session-1"),
-    ).toBeNull();
+  it("makes pending Kimi calls eligible (provisional ids) and keeps completed ones", () => {
+    // Pending calls are eligible: the server assigns provisional child ids
+    // from the on-disk agents/ directory so live activity can be shown.
+    const pendingPlan = buildAgentMappingLoadPlan(
+      [swarmToolUse],
+      "kimi",
+      "session-1",
+    );
+    expect(pendingPlan?.tasks).toEqual([
+      expect.objectContaining({
+        toolUseId: "AgentSwarm_0",
+        resultCount: 0,
+        expectedAgentCount: 2,
+      }),
+    ]);
 
     const completedPlan = buildAgentMappingLoadPlan(
       [swarmToolUse, swarmResult],
@@ -389,6 +405,40 @@ describe("buildAgentMappingLoadPlan", () => {
         "session-1",
       ),
     ).toBeNull();
+  });
+});
+
+describe("hasUnresolvedKimiAgentMappings", () => {
+  const swarmTask = {
+    toolUseId: "AgentSwarm_0",
+    description: "inspect",
+    subagentType: "explore",
+    resultCount: 0,
+    expectedAgentCount: 2,
+  };
+
+  it("keeps a pending swarm unresolved until every declared child is mapped", () => {
+    expect(
+      hasUnresolvedKimiAgentMappings(
+        [swarmTask],
+        new Map([["AgentSwarm_0", ["agent-0"]]]),
+      ),
+    ).toBe(true);
+    expect(
+      hasUnresolvedKimiAgentMappings(
+        [swarmTask],
+        new Map([["AgentSwarm_0", ["agent-0", "agent-1"]]]),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not retry completed calls", () => {
+    expect(
+      hasUnresolvedKimiAgentMappings(
+        [{ ...swarmTask, resultCount: 1 }],
+        new Map(),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -453,6 +503,39 @@ describe("extractSessionIdFromFileEvent", () => {
           "wd_example/session_186997d7-2289-4e62-993c-c97c703ded86/agents/main/wire.jsonl",
       }),
     ).toBe("session_186997d7-2289-4e62-993c-c97c703ded86");
+  });
+});
+
+describe("extractKimiAgentIdFromFileEvent", () => {
+  it("extracts child ids from Kimi agent wire paths", () => {
+    expect(
+      extractKimiAgentIdFromFileEvent({
+        provider: "kimi",
+        relativePath: "wd_example/session_123/agents/agent-6/wire.jsonl",
+      }),
+    ).toBe("agent-6");
+  });
+
+  it("ignores the main Kimi wire and other providers", () => {
+    expect(
+      extractKimiAgentIdFromFileEvent({
+        provider: "kimi",
+        relativePath: "wd_example/session_123/agents/main/wire.jsonl",
+      }),
+    ).toBeNull();
+    expect(
+      extractKimiAgentIdFromFileEvent({
+        provider: "claude",
+        relativePath: "projects/example/agent-6.jsonl",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("shouldFetchSessionMetadataForUpdate", () => {
+  it("fetches only while the initial session snapshot is absent", () => {
+    expect(shouldFetchSessionMetadataForUpdate(null)).toBe(true);
+    expect(shouldFetchSessionMetadataForUpdate(session())).toBe(false);
   });
 });
 

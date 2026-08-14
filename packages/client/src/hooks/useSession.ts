@@ -62,9 +62,12 @@ export interface AgentMappingLoadPlan {
 /**
  * Select the tool calls whose agent mappings can be restored from disk.
  *
- * Most providers expose mappings while a Task is still pending. Kimi is the
- * inverse: its authoritative child ids live in tool.result, so completed calls
- * must remain eligible and the key must advance whenever another result lands.
+ * Most providers expose mappings while a Task is still pending, so completed
+ * calls drop out and pending calls drive the key. Kimi's authoritative child
+ * ids live in tool.result (completed calls must stay eligible and the key
+ * must advance when another result lands), but the reader also assigns
+ * provisional ids from on-disk agent directories, so pending Kimi calls are
+ * eligible too.
  */
 export function buildAgentMappingLoadPlan(
   messages: Message[],
@@ -72,7 +75,7 @@ export function buildAgentMappingLoadPlan(
   sessionId: string,
 ): AgentMappingLoadPlan | null {
   const tasks = findAgentTasks(messages).filter((task) =>
-    provider === "kimi" ? task.resultCount > 0 : task.resultCount === 0,
+    provider === "kimi" ? true : task.resultCount === 0,
   );
   if (tasks.length === 0) return null;
 
@@ -80,10 +83,45 @@ export function buildAgentMappingLoadPlan(
     loadKey: [
       sessionId,
       provider ?? "unknown",
-      ...tasks.map((task) => `${task.toolUseId}:${task.resultCount}`),
+      ...tasks.map(
+        (task) =>
+          `${task.toolUseId}:${task.resultCount}:${task.expectedAgentCount ?? "?"}`,
+      ),
     ].join("\u0000"),
     tasks,
   };
+}
+
+/** Whether a pending Kimi spawn still has child directories left to discover. */
+export function hasUnresolvedKimiAgentMappings(
+  tasks: AgentTask[],
+  idsByToolUse: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  return tasks.some((task) => {
+    if (task.resultCount > 0) return false;
+    const mappedCount = idsByToolUse.get(task.toolUseId)?.length ?? 0;
+    return task.expectedAgentCount === undefined
+      ? mappedCount === 0
+      : mappedCount < task.expectedAgentCount;
+  });
+}
+
+/** Extract a Kimi child id from an agents/<id>/wire.jsonl activity event. */
+export function extractKimiAgentIdFromFileEvent(
+  event: Pick<FileChangeEvent, "provider" | "relativePath">,
+): string | null {
+  if (event.provider !== "kimi") return null;
+  const parts = event.relativePath.split(/[\\/]/);
+  const agentsIndex = parts.lastIndexOf("agents");
+  const agentId = agentsIndex >= 0 ? parts[agentsIndex + 1] : undefined;
+  return agentId && /^agent-\d+$/.test(agentId) ? agentId : null;
+}
+
+/** Initial stream updates need a REST fallback until the session GET lands. */
+export function shouldFetchSessionMetadataForUpdate(
+  session: Session | null,
+): boolean {
+  return session === null;
 }
 
 export function sessionTurnHealthFromSession(
@@ -883,13 +921,22 @@ export function useSession(
   }>({ timer: null, pending: false });
 
   // Track the exact set of Task results used for the most recent mapping load.
-  // Kimi's key advances from pending (ineligible) to result-backed, and again
-  // if another result for the same tool call lands.
+  // Kimi's key advances when a new call appears, when a result lands, and
+  // again if another result for the same tool call lands.
   const agentMappingsLoadKeyRef = useRef<string | null>(null);
+  const knownKimiAgentIdsRef = useRef<Set<string>>(new Set());
+  const [agentMappingsRevision, setAgentMappingsRevision] = useState(0);
+
+  useEffect(() => {
+    knownKimiAgentIdsRef.current = new Set(
+      Array.from(toolUseToAgentIds.values()).flat(),
+    );
+  }, [toolUseToAgentIds]);
 
   // Restore agent mappings and content from persisted provider transcripts.
-  // Other providers load pending Tasks; Kimi loads result-backed Tasks because
-  // the parent tool.result is its authoritative child identity source.
+  // Other providers load pending Tasks from their streaming transcripts; Kimi's
+  // ids come from the disk reader (authoritative tool.result ids, plus
+  // provisional ids for still-running children from the agents/ directory).
   useEffect(() => {
     if (loading || messages.length === 0) return;
 
@@ -898,19 +945,26 @@ export function useSession(
       session?.provider,
       sessionId,
     );
-    if (!loadPlan || agentMappingsLoadKeyRef.current === loadPlan.loadKey) {
+    const loadKey = loadPlan
+      ? `${loadPlan.loadKey}\u0000${agentMappingsRevision}`
+      : null;
+    if (!loadPlan || agentMappingsLoadKeyRef.current === loadKey) {
       return;
     }
 
     // Claim this plan before starting the request so unrelated rerenders do not
     // launch duplicate mapping/content reads.
-    agentMappingsLoadKeyRef.current = loadPlan.loadKey;
+    agentMappingsLoadKeyRef.current = loadKey;
 
-    const loadMappedAgents = async () => {
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const loadMappedAgents = async (attempt: number): Promise<void> => {
       try {
         // Get agent mappings (toolUseId → agentId). An AgentSwarm call fans
         // out to N children sharing one toolUseId, so group them.
         const { mappings } = await api.getAgentMappings(projectId, sessionId);
+        if (cancelled) return;
         const firstAgentByToolUse = new Map<string, string>();
         const idsByToolUse = new Map<string, string[]>();
         for (const m of mappings) {
@@ -924,13 +978,25 @@ export function useSession(
             idsByToolUse.set(m.toolUseId, [m.agentId]);
           }
         }
+        if (session?.provider === "kimi") {
+          for (const ids of idsByToolUse.values()) {
+            for (const agentId of ids) {
+              knownKimiAgentIdsRef.current.add(agentId);
+            }
+          }
+        }
 
         // Update the toolUseToAgent state with loaded mappings
         // This allows TaskRenderer to access agentContent even after page reload
         setToolUseToAgent((prev) => {
           const next = new Map(prev);
           for (const [toolUseId, agentId] of firstAgentByToolUse) {
-            if (!next.has(toolUseId)) {
+            // Kimi mappings are authoritative: let a later result-backed id
+            // replace an earlier provisional (directory-scan) one.
+            if (
+              !next.has(toolUseId) ||
+              (session?.provider === "kimi" && next.get(toolUseId) !== agentId)
+            ) {
               next.set(toolUseId, agentId);
             }
           }
@@ -939,12 +1005,23 @@ export function useSession(
         setToolUseToAgentIds((prev) => {
           const next = new Map(prev);
           for (const [toolUseId, ids] of idsByToolUse) {
-            const existing = next.get(toolUseId) ?? [];
-            const merged = [...existing];
-            for (const id of ids) {
-              if (!merged.includes(id)) merged.push(id);
+            if (session?.provider === "kimi") {
+              // The reader returns the session's full mapping set, so a fresh
+              // response replaces (rather than merges with) stale provisional
+              // fan-outs.
+              const existing = next.get(toolUseId) ?? [];
+              const unchanged =
+                existing.length === ids.length &&
+                existing.every((id) => ids.includes(id));
+              if (!unchanged) next.set(toolUseId, [...ids]);
+            } else {
+              const existing = next.get(toolUseId) ?? [];
+              const merged = [...existing];
+              for (const id of ids) {
+                if (!merged.includes(id)) merged.push(id);
+              }
+              next.set(toolUseId, merged);
             }
-            next.set(toolUseId, merged);
           }
           return next;
         });
@@ -959,6 +1036,7 @@ export function useSession(
           }
         }
         for (const agentId of mappedAgentIds) {
+          if (cancelled) return;
           try {
             const agentData = await api.getAgentSession(
               projectId,
@@ -966,6 +1044,7 @@ export function useSession(
               agentId,
             );
 
+            if (cancelled) return;
             // Merge into agentContent state, deduping by message ID
             // Use getMessageId to prefer uuid over id
             setAgentContent((prev) => {
@@ -993,13 +1072,34 @@ export function useSession(
             // Skip agents that can't be loaded
           }
         }
+
+        // A pending Kimi call resolves only after the reader spots its
+        // agents/<id> directory, which can appear a moment after the tool
+        // call surfaces. Retry a few times so late directory creation is
+        // picked up without waiting for the tool result.
+        if (cancelled || session?.provider !== "kimi") return;
+        const hasUnresolvedPending = hasUnresolvedKimiAgentMappings(
+          loadPlan.tasks,
+          idsByToolUse,
+        );
+        if (hasUnresolvedPending && attempt < 5) {
+          retryTimer = setTimeout(
+            () => void loadMappedAgents(attempt + 1),
+            3000,
+          );
+        }
       } catch {
         // Silent fail for agent mappings - not critical
       }
     };
 
-    void loadMappedAgents();
+    void loadMappedAgents(0);
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, [
+    agentMappingsRevision,
     loading,
     messages,
     projectId,
@@ -1088,6 +1188,16 @@ export function useSession(
         return;
       }
 
+      // Kimi swarm members can create their directories seconds apart. A new
+      // child file is a durable signal to re-read the mapping even after the
+      // bounded timer retries have ended.
+      const kimiAgentId = extractKimiAgentIdFromFileEvent(event);
+      if (kimiAgentId && !knownKimiAgentIdsRef.current.has(kimiAgentId)) {
+        knownKimiAgentIdsRef.current.add(kimiAgentId);
+        agentMappingsLoadKeyRef.current = null;
+        setAgentMappingsRevision((revision) => revision + 1);
+      }
+
       // Owned sessions normally stay on their stream. Kimi is the exception:
       // turn.ended does not await its wire persistence queue, so a main-agent
       // wire.jsonl event observed after idle is an additional convergence signal.
@@ -1146,6 +1256,13 @@ export function useSession(
         };
       });
 
+      // The initial GET can still be in flight when a stream event arrives
+      // (e.g. the +1s/+3s reconcile events for a new session). Fetch metadata
+      // instead of dropping the event so title/contextUsage land promptly.
+      if (shouldFetchSessionMetadataForUpdate(session)) {
+        void fetchSessionMetadata();
+      }
+
       if (
         historyRewriteRequest &&
         (session?.provider === "codex" || session?.provider === "codex-oss")
@@ -1174,8 +1291,10 @@ export function useSession(
     },
     [
       processState,
+      fetchSessionMetadata,
       historyRewriteRequest,
       scheduleAuthoritativeSnapshotRefresh,
+      session,
       session?.provider,
       sessionId,
       setSession,

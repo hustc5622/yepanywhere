@@ -685,9 +685,340 @@ describe("KimiSessionReader robustness", () => {
     expect(session?.descriptor?.status).toBe("running");
   });
 
-  it("returns [] mappings while the child result has not landed yet", async () => {
-    // No tool.result in the main wire → no authoritative identity yet.
+  it("returns a provisional mapping from the on-disk agent dir before the result lands", async () => {
+    // No tool.result in the main wire, but agents/agent-0 exists → the reader
+    // provisionally links the pending call so live activity can be shown.
     const mappings = await reader.getAgentMappings(S);
-    expect(mappings).toEqual([]);
+    expect(mappings).toEqual([
+      {
+        toolUseId: "Agent_0",
+        agentId: "agent-0",
+        agentType: "explore",
+        swarmIndex: 0,
+      },
+    ]);
+  });
+});
+
+// ── Provisional mappings: pending calls ↔ unclaimed agents/ dirs ─────────
+describe("KimiSessionReader provisional agent mappings", () => {
+  let sessionsDir: string;
+  let reader: KimiSessionReader;
+  const S = "session_provisional";
+  let dir: string;
+
+  const PENDING_MAIN = jsonl([
+    { type: "metadata", created_at: 1 },
+    {
+      type: "turn.prompt",
+      input: [{ type: "text", text: "work on several fronts" }],
+      time: 1,
+    },
+    {
+      type: "context.append_loop_event",
+      event: {
+        type: "tool.call",
+        toolCallId: "Agent_0",
+        name: "Agent",
+        args: { subagent_type: "explore", description: "finished frontend" },
+      },
+      time: 2,
+    },
+    {
+      type: "context.append_loop_event",
+      event: {
+        type: "tool.result",
+        toolCallId: "Agent_0",
+        result: {
+          output:
+            "agent_id: agent-0\nactual_subagent_type: explore\nstatus: completed\n\nfrontend done",
+        },
+      },
+      time: 3,
+    },
+    {
+      type: "context.append_loop_event",
+      event: {
+        type: "tool.call",
+        toolCallId: "Agent_1",
+        name: "Agent",
+        args: { subagent_type: "coder", description: "running backend" },
+      },
+      time: 4,
+    },
+    {
+      type: "context.append_loop_event",
+      event: {
+        type: "tool.call",
+        toolCallId: "AgentSwarm_2",
+        name: "AgentSwarm",
+        args: {
+          subagent_type: "explore",
+          description: "running docs sweep",
+          items: ["docs", "tests"],
+          prompt_template: "inspect {{item}}",
+        },
+      },
+      time: 5,
+    },
+  ]);
+
+  beforeEach(async () => {
+    sessionsDir = join(
+      tmpdir(),
+      `kimi-prov-${Math.random().toString(36).slice(2)}`,
+    );
+    dir = join(sessionsDir, "wd_test", S);
+    await mkdir(join(dir, "agents", "main"), { recursive: true });
+    for (const agentId of ["agent-0", "agent-1", "agent-2", "agent-3"]) {
+      await mkdir(join(dir, "agents", agentId), { recursive: true });
+    }
+    await writeFile(
+      join(dir, "state.json"),
+      JSON.stringify({ workDir: WORK_DIR, title: "provisional" }),
+    );
+    await writeFile(join(dir, "agents", "main", "wire.jsonl"), PENDING_MAIN);
+    reader = new KimiSessionReader({ sessionsDir });
+  });
+
+  afterEach(async () => {
+    await rm(sessionsDir, { recursive: true, force: true });
+  });
+
+  it("skips claimed directories and assigns pending calls in call order", async () => {
+    // agent-0 is claimed by the completed Agent_0 result; the pending Agent_1
+    // takes the next unclaimed directory (agent-1), and the trailing
+    // AgentSwarm_2 fans out over the rest.
+    const mappings = await reader.getAgentMappings(S);
+    expect(mappings).toEqual([
+      expect.objectContaining({ toolUseId: "Agent_0", agentId: "agent-0" }),
+      {
+        toolUseId: "Agent_1",
+        agentId: "agent-1",
+        agentType: "coder",
+        swarmIndex: 0,
+      },
+      {
+        toolUseId: "AgentSwarm_2",
+        agentId: "agent-2",
+        agentType: "explore",
+        swarmIndex: 0,
+      },
+      {
+        toolUseId: "AgentSwarm_2",
+        agentId: "agent-3",
+        agentType: "explore",
+        swarmIndex: 1,
+      },
+    ]);
+  });
+
+  it("assigns nothing when no unclaimed directories exist", async () => {
+    for (const agentId of ["agent-1", "agent-2", "agent-3"]) {
+      await rm(join(dir, "agents", agentId), { recursive: true, force: true });
+    }
+    const mappings = await reader.getAgentMappings(S);
+    expect(mappings).toHaveLength(1); // Only the completed Agent_0 mapping.
+  });
+
+  it("ignores non-agent directories when scanning", async () => {
+    await mkdir(join(dir, "agents", "scratch"), { recursive: true });
+    const mappings = await reader.getAgentMappings(S);
+    expect(mappings.map((m) => m.agentId)).not.toContain("scratch");
+  });
+
+  it("maps a pending Agent resume to its existing child directory", async () => {
+    await writeFile(
+      join(dir, "agents", "main", "wire.jsonl"),
+      jsonl([
+        { type: "metadata", created_at: 1 },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "Agent_0",
+            name: "Agent",
+            args: { subagent_type: "explore" },
+          },
+          time: 2,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.result",
+            toolCallId: "Agent_0",
+            result: {
+              output:
+                "agent_id: agent-0\nactual_subagent_type: explore\nstatus: completed",
+            },
+          },
+          time: 3,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "Agent_1",
+            name: "Agent",
+            args: { resume: "agent-0", description: "continue the work" },
+          },
+          time: 4,
+        },
+      ]),
+    );
+
+    expect(await reader.getAgentMappings(S)).toEqual([
+      expect.objectContaining({ toolUseId: "Agent_0", agentId: "agent-0" }),
+      {
+        toolUseId: "Agent_1",
+        agentId: "agent-0",
+        swarmIndex: 0,
+      },
+    ]);
+  });
+
+  it("maps resumed and newly spawned AgentSwarm members without consuming unrelated dirs", async () => {
+    await writeFile(
+      join(dir, "agents", "main", "wire.jsonl"),
+      jsonl([
+        { type: "metadata", created_at: 1 },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "Agent_0",
+            name: "Agent",
+            args: { subagent_type: "explore" },
+          },
+          time: 2,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.result",
+            toolCallId: "Agent_0",
+            result: { output: "agent_id: agent-0\nstatus: completed" },
+          },
+          time: 3,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "AgentSwarm_1",
+            name: "AgentSwarm",
+            args: {
+              resume_agent_ids: { "agent-0": "continue" },
+              items: ["new work"],
+              prompt_template: "inspect {{item}}",
+            },
+          },
+          time: 4,
+        },
+      ]),
+    );
+
+    expect(await reader.getAgentMappings(S)).toEqual([
+      expect.objectContaining({ toolUseId: "Agent_0", agentId: "agent-0" }),
+      {
+        toolUseId: "AgentSwarm_1",
+        agentId: "agent-0",
+        swarmIndex: 0,
+      },
+      {
+        toolUseId: "AgentSwarm_1",
+        agentId: "agent-1",
+        swarmIndex: 1,
+      },
+    ]);
+  });
+
+  it("adds staggered AgentSwarm directories as they appear", async () => {
+    await writeFile(
+      join(dir, "agents", "main", "wire.jsonl"),
+      jsonl([
+        { type: "metadata", created_at: 1 },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "AgentSwarm_0",
+            name: "AgentSwarm",
+            args: {
+              items: ["one", "two", "three"],
+              prompt_template: "inspect {{item}}",
+            },
+          },
+          time: 2,
+        },
+      ]),
+    );
+    await rm(join(dir, "agents", "agent-2"), { recursive: true, force: true });
+    await rm(join(dir, "agents", "agent-3"), { recursive: true, force: true });
+
+    expect(await reader.getAgentMappings(S)).toEqual([
+      expect.objectContaining({
+        toolUseId: "AgentSwarm_0",
+        agentId: "agent-0",
+      }),
+      expect.objectContaining({
+        toolUseId: "AgentSwarm_0",
+        agentId: "agent-1",
+      }),
+    ]);
+
+    await mkdir(join(dir, "agents", "agent-2"), { recursive: true });
+    expect(await reader.getAgentMappings(S)).toEqual([
+      expect.objectContaining({
+        toolUseId: "AgentSwarm_0",
+        agentId: "agent-0",
+      }),
+      expect.objectContaining({
+        toolUseId: "AgentSwarm_0",
+        agentId: "agent-1",
+      }),
+      expect.objectContaining({
+        toolUseId: "AgentSwarm_0",
+        agentId: "agent-2",
+      }),
+    ]);
+  });
+
+  it("sorts agent directories numerically, not lexically", async () => {
+    // Additional pending call plus agent-10/agent-2: numeric order must win.
+    await writeFile(
+      join(dir, "agents", "main", "wire.jsonl"),
+      jsonl([
+        { type: "metadata", created_at: 1 },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "Agent_0",
+            name: "Agent",
+            args: { subagent_type: "explore" },
+          },
+          time: 2,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "Agent_1",
+            name: "Agent",
+            args: { subagent_type: "coder" },
+          },
+          time: 3,
+        },
+      ]),
+    );
+    await mkdir(join(dir, "agents", "agent-10"), { recursive: true });
+    const mappings = await reader.getAgentMappings(S);
+    // agent-0..3 exist; two pending calls take agent-0 and agent-1 (numeric
+    // order), never agent-10 just because "agent-1" < "agent-10" lexically.
+    expect(mappings.map((m) => [m.toolUseId, m.agentId])).toEqual([
+      ["Agent_0", "agent-0"],
+      ["Agent_1", "agent-1"],
+    ]);
   });
 });

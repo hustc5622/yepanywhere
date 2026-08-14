@@ -19,13 +19,19 @@ export interface PendingTask {
  */
 export interface AgentTask extends PendingTask {
   resultCount: number;
+  /** Number of child sessions declared by the spawning call, when knowable. */
+  expectedAgentCount?: number;
 }
 
 /** Find every Task/Agent tool call and count its matching tool results. */
 export function findAgentTasks(messages: Message[]): AgentTask[] {
   const taskToolUses = new Map<
     string,
-    { description: string; subagentType: string }
+    {
+      description: string;
+      subagentType: string;
+      expectedAgentCount?: number;
+    }
   >();
   const resultCounts = new Map<string, number>();
 
@@ -51,11 +57,29 @@ export function findAgentTasks(messages: Message[]): AgentTask[] {
           | {
               description?: string;
               subagent_type?: string;
+              items?: unknown[];
+              resume_agent_ids?: Record<string, unknown>;
             }
           | undefined;
+        const swarmAgentCount =
+          block.name === "AgentSwarm"
+            ? (Array.isArray(input?.items) ? input.items.length : 0) +
+              (input?.resume_agent_ids &&
+              typeof input.resume_agent_ids === "object" &&
+              !Array.isArray(input.resume_agent_ids)
+                ? Object.keys(input.resume_agent_ids).filter((agentId) =>
+                    /^agent-\d+$/.test(agentId),
+                  ).length
+                : 0)
+            : undefined;
         taskToolUses.set(block.id, {
           description: input?.description ?? "Unknown task",
           subagentType: input?.subagent_type ?? "unknown",
+          ...(block.name === "AgentSwarm"
+            ? swarmAgentCount && swarmAgentCount > 0
+              ? { expectedAgentCount: swarmAgentCount }
+              : {}
+            : { expectedAgentCount: 1 }),
         });
       }
 
@@ -73,11 +97,12 @@ export function findAgentTasks(messages: Message[]): AgentTask[] {
   }
 
   return [...taskToolUses.entries()].map(
-    ([toolUseId, { description, subagentType }]) => ({
+    ([toolUseId, { description, subagentType, expectedAgentCount }]) => ({
       toolUseId,
       description,
       subagentType,
       resultCount: resultCounts.get(toolUseId) ?? 0,
+      ...(expectedAgentCount !== undefined ? { expectedAgentCount } : {}),
     }),
   );
 }
