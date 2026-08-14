@@ -309,6 +309,41 @@ describe("Codex transcript export", () => {
   });
 });
 
+describe("session detail view", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
+  });
+
+  it("opts the web transcript into the canonical Codex overlay", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        session: { id: "session-1", provider: "codex", messages: [] },
+        messages: [],
+        ownership: { owner: "none" },
+      }),
+    } as Response);
+
+    await api.getSession("project-1", "session-1", undefined, {
+      view: "canonical",
+      maxMessages: 100,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project-1/sessions/session-1?view=canonical&maxMessages=100",
+      expect.any(Object),
+    );
+  });
+});
+
 describe("Codex native controls", () => {
   const fetchMock = vi.fn<typeof fetch>();
 

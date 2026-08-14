@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import {
   type AgentMapping,
   type AgentStatus,
+  type ContextCompactEvent,
   type ContextCumulativeUsage,
   type KimiStepEndEvent,
   type KimiSubagentStatus,
@@ -33,7 +34,10 @@ import {
   getKimiSubagentType,
   getModelContextWindow,
   inferKimiSubagentStatus,
+  isKimiContextApplyCompactionRecord,
+  isKimiFullCompactionBeginRecord,
   isKimiLoopEventRecord,
+  isKimiTurnEndedRecord,
   isKimiTurnPromptRecord,
   parseKimiSessionState,
   parseKimiWireJsonl,
@@ -83,6 +87,11 @@ interface KimiWireDerived {
   contextUsage: ContextUsage | undefined;
   cumulativeUsage: ContextCumulativeUsage | undefined;
   firstPromptText: string | undefined;
+  /** Context compaction events (full_compaction.* + context.apply_compaction). */
+  compactCount: number;
+  compactEvents: ContextCompactEvent[] | undefined;
+  /** Terminal outcome of the last turn (from the last turn.ended.reason). */
+  lastTurnReason: string | undefined;
 }
 
 export class KimiSessionReader implements ISessionReader {
@@ -164,6 +173,19 @@ export class KimiSessionReader implements ISessionReader {
         provider: "kimi",
         model: derived.model,
         reasoningEffort: derived.reasoningEffort,
+        compactCount: derived.compactCount,
+        compactEvents: derived.compactEvents,
+        // When the Kimi process has exited (no live runtime driving an
+        // activity), the last `turn.ended.reason` is the authoritative
+        // terminal outcome. Map it so an offline session can still show
+        // "completed / cancelled / failed" instead of a blank status.
+        ...(derived.lastTurnReason
+          ? {
+              lastTurnStatus: mapKimiTurnReasonToLastTurnStatus(
+                derived.lastTurnReason,
+              ),
+            }
+          : {}),
       };
     } catch {
       return null;
@@ -646,6 +668,11 @@ export class KimiSessionReader implements ISessionReader {
     let firstPromptText: string | undefined;
     let messageCount = 0;
     let turnCount = 0;
+    let lastTurnReason: string | undefined;
+
+    // Compaction tracking (full_compaction.begin + context.apply_compaction).
+    const compactEvents: ContextCompactEvent[] = [];
+    let compactionTrigger: string | undefined;
 
     // Assistant-segment tracking (mirrors convertKimiMessages flush points).
     let pendingAssistantBlocks = 0;
@@ -687,6 +714,53 @@ export class KimiSessionReader implements ISessionReader {
         if (firstPromptText === undefined) {
           firstPromptText = getKimiPromptText(record.input);
         }
+        continue;
+      }
+      if (isKimiTurnEndedRecord(record)) {
+        lastTurnReason = record.reason ?? lastTurnReason;
+        continue;
+      }
+      // Compaction lifecycle: `full_compaction.begin` opens a phase (trigger
+      // rides the begin payload as `source` upstream; we read it loosely);
+      // `context.apply_compaction` carries the before/after token numbers.
+      if (isKimiFullCompactionBeginRecord(record)) {
+        const { source, trigger } = record as {
+          source?: unknown;
+          trigger?: unknown;
+        };
+        compactionTrigger =
+          typeof source === "string"
+            ? source
+            : typeof trigger === "string"
+              ? trigger
+              : undefined;
+        continue;
+      }
+      if (
+        record.type === "full_compaction.cancel" ||
+        record.type === "full_compaction.complete"
+      ) {
+        // A cancelled/finished phase must not lend its source to a later,
+        // unrelated context.apply_compaction record.
+        compactionTrigger = undefined;
+        continue;
+      }
+      if (isKimiContextApplyCompactionRecord(record)) {
+        const before = record.tokensBefore;
+        const after = record.tokensAfter;
+        const event: ContextCompactEvent = {
+          ...(record.time !== undefined
+            ? { timestamp: new Date(record.time).toISOString() }
+            : {}),
+          ...(typeof before === "number" ? { beforeTokens: before } : {}),
+          ...(typeof after === "number" ? { afterTokens: after } : {}),
+          ...(typeof before === "number" && typeof after === "number"
+            ? { reclaimedTokens: Math.max(0, before - after) }
+            : {}),
+          ...(compactionTrigger ? { trigger: compactionTrigger } : {}),
+        };
+        compactEvents.push(event);
+        compactionTrigger = undefined;
         continue;
       }
       if (!isKimiLoopEventRecord(record)) continue;
@@ -755,6 +829,9 @@ export class KimiSessionReader implements ISessionReader {
       contextUsage,
       cumulativeUsage,
       firstPromptText,
+      compactCount: compactEvents.length,
+      compactEvents: compactEvents.length > 0 ? compactEvents : undefined,
+      lastTurnReason,
     };
   }
 
@@ -944,5 +1021,29 @@ function subagentToAgentStatus(status: KimiSubagentStatus): AgentStatus {
       return "running";
     default:
       return "pending";
+  }
+}
+
+/**
+ * Map a Kimi `turn.ended.reason` to the session-level last-turn status.
+ *
+ * The upstream `TurnEndReason` is `completed | cancelled | failed | blocked`;
+ * `blocked` (a hook-blocked turn) collapses to `failed` at the session level,
+ * mirroring the upstream `SessionTurnOutcome` mapping. This lets an offline
+ * session whose process has exited still surface a terminal status.
+ */
+function mapKimiTurnReasonToLastTurnStatus(
+  reason: string,
+): import("@yep-anywhere/shared").SessionLastTurnStatus | undefined {
+  switch (reason) {
+    case "completed":
+      return "completed";
+    case "cancelled":
+      return "interrupted";
+    case "failed":
+    case "blocked":
+      return "failed";
+    default:
+      return undefined;
   }
 }

@@ -639,6 +639,8 @@ function inferKimiAcpToolName(
   const trimmedTitle = title?.trim();
   const lowerTitle = trimmedTitle?.toLowerCase() ?? "";
   const exactNames: Record<string, string> = {
+    agent: "Agent",
+    agentswarm: "AgentSwarm",
     bash: "Bash",
     edit: "Edit",
     glob: "Glob",
@@ -650,6 +652,18 @@ function inferKimiAcpToolName(
   };
   const exactName = exactNames[lowerTitle];
   if (exactName) return exactName;
+
+  // Subagent dispatch: AgentSwarm also accepts `subagent_type`, so its
+  // distinctive batch fields must be checked before the single-Agent shape.
+  // Match both before generic arg checks so the inline Task renderer gets the
+  // precise tool name.
+  if ("items" in input && "prompt_template" in input) return "AgentSwarm";
+  if (
+    "subagent_type" in input ||
+    ("prompt" in input && "description" in input)
+  ) {
+    return "Agent";
+  }
 
   if ("old_string" in input || "new_string" in input) return "Edit";
   if (typeof input.path === "string" && typeof input.content === "string") {

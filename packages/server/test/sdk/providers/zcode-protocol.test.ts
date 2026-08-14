@@ -114,6 +114,12 @@ function handle(line) {
     return;
   }
 
+  // Client responses to server-initiated requests only carry {id, result}
+  // or {id, error}. They must not trigger another notification/request, or
+  // the fixture recursively echoes its own reverse request back to the client.
+  const method = message.method;
+  if (!method) return;
+
   // Send a notification before responding (if requested).
   if (process.env.ZCODE_FAKE_NOTIFY) {
     notify(process.env.ZCODE_FAKE_NOTIFY, { data: "before-response" });
@@ -130,9 +136,6 @@ function handle(line) {
   if (process.env.ZCODE_FAKE_HANG === "1") {
     return; // never respond
   }
-
-  const method = message.method;
-  if (!method) return;
 
   if (method === "workspace/readState") {
     if (process.env.ZCODE_FAKE_HALF_LINE === "1") {

@@ -82,3 +82,21 @@ describe("Codex local media session schema", () => {
     expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
   });
 });
+
+describe("Codex terminal turn session schema", () => {
+  it("preserves task_complete error details for status derivation", () => {
+    const raw = {
+      timestamp: "2026-08-13T01:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "turn-failed",
+        last_agent_message: null,
+        error: { message: "provider failed", codexErrorInfo: "rateLimit" },
+      },
+    } as const;
+
+    expect(CodexSessionEntrySchema.parse(raw)).toEqual(raw);
+    expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+  });
+});

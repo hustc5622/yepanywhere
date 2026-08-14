@@ -193,9 +193,33 @@ describe("CodexSessionReader - OSS Support", () => {
   it("keeps Codex collaboration children out of top-level session files", async () => {
     const parentId = randomUUID();
     const childId = randomUUID();
+    const grandchildId = randomUUID();
     await createSessionFile(parentId, "openai", "gpt-5");
 
     const now = new Date().toISOString();
+    const parentPath = join(testDir, `${parentId}.jsonl`);
+    const parentRollout = await readFile(parentPath, "utf8");
+    await writeFile(
+      parentPath,
+      `${parentRollout}${JSON.stringify({
+        type: "event_msg",
+        timestamp: now,
+        payload: {
+          type: "item_completed",
+          thread_id: parentId,
+          turn_id: "turn-parent",
+          item: {
+            type: "CollabAgentToolCall",
+            id: "spawn-call-1",
+            tool: "spawn_agent",
+            status: "completed",
+            sender_thread_id: parentId,
+            receiver_thread_ids: [childId],
+            agents_states: {},
+          },
+        },
+      })}\n`,
+    );
     await writeFile(
       join(testDir, `${childId}.jsonl`),
       `${[
@@ -216,6 +240,8 @@ describe("CodexSessionReader - OSS Support", () => {
                   parent_thread_id: parentId,
                   depth: 1,
                   agent_path: "/root/review",
+                  agent_nickname: "Noether",
+                  agent_role: "reviewer",
                 },
               },
             },
@@ -229,6 +255,70 @@ describe("CodexSessionReader - OSS Support", () => {
             message: "Review the parent changes",
           },
         }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: now,
+          payload: {
+            type: "item_completed",
+            thread_id: childId,
+            turn_id: "turn-child",
+            item: {
+              type: "CollabAgentToolCall",
+              id: "spawn-call-nested",
+              tool: "spawn_agent",
+              status: "completed",
+              sender_thread_id: childId,
+              receiver_thread_ids: [grandchildId],
+              agents_states: {},
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: now,
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-child",
+            last_agent_message: "Review complete",
+          },
+        }),
+      ].join("\n")}\n`,
+    );
+    await writeFile(
+      join(testDir, `${grandchildId}.jsonl`),
+      `${[
+        JSON.stringify({
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            session_id: childId,
+            id: grandchildId,
+            parent_thread_id: childId,
+            cwd: "/test/project",
+            timestamp: now,
+            thread_source: "subagent",
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: childId,
+                  depth: 2,
+                  agent_path: "/root/review/nested",
+                  agent_role: "explorer",
+                },
+              },
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: now,
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-grandchild",
+            last_agent_message: null,
+            error: { message: "Nested review failed" },
+          },
+        }),
       ].join("\n")}\n`,
     );
 
@@ -237,6 +327,63 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(
       await reader.getSessionSummary(childId, "test-project" as UrlProjectId),
     ).toBeNull();
+    await expect(reader.getAgentMappings(parentId)).resolves.toEqual([
+      {
+        toolUseId: "spawn-call-1",
+        agentId: childId,
+        agentType: "reviewer",
+      },
+    ]);
+    await expect(
+      reader.getAgentSession(childId, parentId),
+    ).resolves.toMatchObject({
+      status: "completed",
+      agentType: "reviewer",
+      descriptor: {
+        agentId: childId,
+        parentAgentId: parentId,
+        parentToolUseId: "spawn-call-1",
+        type: "reviewer",
+        description: "/root/review",
+        status: "completed",
+      },
+    });
+    await expect(
+      reader.getAgentSession(childId, "different-parent"),
+    ).resolves.toBeNull();
+    await expect(reader.getAgentSession(childId)).resolves.toBeNull();
+    await expect(reader.getAgentMappings(childId)).resolves.toEqual([
+      {
+        toolUseId: "spawn-call-nested",
+        agentId: grandchildId,
+        agentType: "explorer",
+      },
+    ]);
+    await expect(
+      reader.getAgentSession(grandchildId, childId),
+    ).resolves.toMatchObject({
+      status: "failed",
+      agentType: "explorer",
+      descriptor: {
+        agentId: grandchildId,
+        parentAgentId: childId,
+        parentToolUseId: "spawn-call-nested",
+        type: "explorer",
+        description: "/root/review/nested",
+        status: "failed",
+      },
+    });
+
+    const otherProjectReader = new CodexSessionReader({
+      sessionsDir: testDir,
+      projectPath: "/test/other-project",
+    });
+    await expect(
+      otherProjectReader.getAgentMappings(parentId),
+    ).resolves.toEqual([]);
+    await expect(
+      otherProjectReader.getAgentSession(childId, parentId),
+    ).resolves.toBeNull();
   });
 
   const createRollbackSessionFile = async (sessionId: string) => {

@@ -22,6 +22,7 @@ packages/mobile/src-tauri/gen/android/app/google-services.json
 .idea/
 .vscode/
 .claude/
+.zcode/
 *.swp
 *.swo
 *~

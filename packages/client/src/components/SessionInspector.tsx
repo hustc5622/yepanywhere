@@ -911,54 +911,153 @@ function getMessageIdLike(message: Message): string {
 }
 
 /**
- * Collect OpenCode subagent sessions launched from this session's `task` tool
- * calls. Each carries the child session id in its lifted `opencodeMetadata`, so
- * we can link to the subagent's own session page.
+ * Collect subagent sessions from the render items.
+ *
+ * Two sources:
+ * - Claude/OpenCode `task` tool calls (sessionId in the tool input)
+ * - Codex native `subAgentActivity` and `collabAgentToolCall` ThreadItems
+ *   (agentThreadId / receiverThreadIds), projected as `codex_native_item`
+ *   render items by the canonical overlay.
  */
 function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
   const result: SubagentItem[] = [];
   const resultIndexBySessionId = new Map<string, number>();
 
   for (const item of items) {
-    if (item.type !== "tool_call") continue;
-    if (item.toolName.toLowerCase() !== "task") continue;
-    if (!isRecord(item.toolInput)) continue;
+    if (item.type === "tool_call") {
+      if (item.toolName.toLowerCase() !== "task") continue;
+      if (!isRecord(item.toolInput)) continue;
 
-    const sessionId = getOpenCodeSubagentSessionId(item.toolInput);
-    if (!sessionId) continue;
+      const sessionId = getOpenCodeSubagentSessionId(item.toolInput);
+      if (!sessionId) continue;
 
-    const description =
-      (typeof item.toolInput.description === "string" &&
-        item.toolInput.description.trim()) ||
-      (typeof item.toolInput.opencodeTitle === "string" &&
-        item.toolInput.opencodeTitle.trim()) ||
-      "";
-    const agent =
-      typeof item.toolInput.subagent_type === "string"
-        ? item.toolInput.subagent_type.trim()
-        : undefined;
+      const description =
+        (typeof item.toolInput.description === "string" &&
+          item.toolInput.description.trim()) ||
+        (typeof item.toolInput.opencodeTitle === "string" &&
+          item.toolInput.opencodeTitle.trim()) ||
+        "";
+      const agent =
+        typeof item.toolInput.subagent_type === "string"
+          ? item.toolInput.subagent_type.trim()
+          : undefined;
 
-    const next = { sessionId, description, agent, status: item.status };
-    const existingIndex = resultIndexBySessionId.get(sessionId);
-    if (existingIndex === undefined) {
-      resultIndexBySessionId.set(sessionId, result.length);
-      result.push(next);
+      const next = { sessionId, description, agent, status: item.status };
+      const existingIndex = resultIndexBySessionId.get(sessionId);
+      if (existingIndex === undefined) {
+        resultIndexBySessionId.set(sessionId, result.length);
+        result.push(next);
+        continue;
+      }
+
+      const existing = result[existingIndex];
+      if (existing) {
+        result[existingIndex] = {
+          ...next,
+          description: description || existing.description,
+          agent: agent || existing.agent,
+        };
+      }
       continue;
     }
 
-    const existing = result[existingIndex];
-    if (existing) {
-      // `task_id` can resume the same child. Keep its original list position
-      // while reflecting the latest description, agent, and lifecycle state.
-      result[existingIndex] = {
-        ...next,
-        description: description || existing.description,
-        agent: agent || existing.agent,
-      };
+    // Codex native sub-agent ThreadItems.
+    if (item.type !== "codex_native_item") continue;
+    const threadItem = item.threadItem;
+
+    if (threadItem.type === "subAgentActivity") {
+      const sessionId =
+        typeof threadItem.agentThreadId === "string"
+          ? threadItem.agentThreadId
+          : undefined;
+      if (!sessionId) continue;
+      const agentPath =
+        typeof threadItem.agentPath === "string"
+          ? threadItem.agentPath
+          : undefined;
+      const kind =
+        typeof threadItem.kind === "string" ? threadItem.kind : undefined;
+      const description = agentPath ?? sessionId;
+      const status: ToolCallItem["status"] =
+        kind?.toLowerCase() === "interrupted" ? "aborted" : "pending";
+      const existingIndex = resultIndexBySessionId.get(sessionId);
+      if (existingIndex === undefined) {
+        resultIndexBySessionId.set(sessionId, result.length);
+        result.push({ sessionId, description, status });
+      } else {
+        const existing = result[existingIndex];
+        if (existing) {
+          result[existingIndex] = {
+            ...existing,
+            description,
+            status,
+          };
+        }
+      }
+      continue;
+    }
+
+    if (threadItem.type === "collabAgentToolCall") {
+      const agentsStates = threadItem.agentsStates;
+      if (!isRecord(agentsStates)) continue;
+      for (const [threadId, stateRaw] of Object.entries(agentsStates)) {
+        if (!isRecord(stateRaw)) continue;
+        const nickname =
+          typeof stateRaw.nickname === "string" ? stateRaw.nickname : undefined;
+        const role =
+          typeof stateRaw.role === "string"
+            ? stateRaw.role
+            : typeof stateRaw.agent_type === "string"
+              ? stateRaw.agent_type
+              : undefined;
+        const agentStatus =
+          typeof stateRaw.status === "string" ? stateRaw.status : "unknown";
+        const existingIndex = resultIndexBySessionId.get(threadId);
+        const next: SubagentItem = {
+          sessionId: threadId,
+          description: nickname ?? threadId,
+          ...(role && role !== "default" ? { agent: role } : {}),
+          status: collabAgentStatusToItemStatus(agentStatus),
+        };
+        if (existingIndex === undefined) {
+          resultIndexBySessionId.set(threadId, result.length);
+          result.push(next);
+        } else {
+          const existing = result[existingIndex];
+          if (existing) {
+            result[existingIndex] = {
+              ...existing,
+              ...next,
+              description: nickname ?? existing.description,
+              agent: role && role !== "default" ? role : existing.agent,
+            };
+          }
+        }
+      }
     }
   }
 
   return result;
+}
+
+function collabAgentStatusToItemStatus(status: string): ToolCallItem["status"] {
+  switch (status) {
+    case "running":
+    case "in_progress":
+    case "inProgress":
+      return "pending";
+    case "completed":
+    case "complete":
+      return "complete";
+    case "errored":
+    case "error":
+    case "failed":
+      return "error";
+    case "interrupted":
+      return "aborted";
+    default:
+      return "pending";
+  }
 }
 
 function getSubagentStatusLabel(

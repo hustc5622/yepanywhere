@@ -319,9 +319,10 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
     }
   });
 
-  // POST /api/processes/:processId/goal - Goal lifecycle actions (currently
-  // ZCode session/goal). Body: { action: "show"|"set"|"replace"|"pause"|
-  // "resume"|"clear", objective?: string }. set/replace require objective.
+  // POST /api/processes/:processId/goal - Goal lifecycle actions (ZCode
+  // session/goal and Codex thread/goal native controls). Body: { action:
+  // "show"|"set"|"replace"|"pause"|"resume"|"clear", objective?: string }.
+  // set/replace require objective.
   routes.post("/:processId/goal", async (c) => {
     const processId = c.req.param("processId");
 

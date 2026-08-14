@@ -1581,4 +1581,125 @@ describe("convertKimiMessages", () => {
       },
     ]);
   });
+
+  it("merges goal lifecycle snapshots as inline kimi_goal messages", () => {
+    const session: KimiSessionContent = {
+      sessionId: "session-goal",
+      records: [
+        {
+          type: "goal.create",
+          goalId: "g1",
+          objective: "build feature X",
+          time: 1,
+        },
+        {
+          type: "turn.prompt",
+          input: [{ type: "text", text: "go" }],
+          time: 2,
+        },
+        {
+          type: "goal.update",
+          status: "blocked",
+          reason: "rate limit",
+          turnsUsed: 3,
+          budgetLimits: { turnBudget: 10 },
+          time: 3,
+        },
+        {
+          type: "goal.clear",
+          time: 4,
+        },
+      ],
+    };
+
+    const messages = convertKimiMessages(session);
+    const goalMessages = messages.filter((m) => m.type === "kimi_goal");
+    expect(goalMessages).toHaveLength(3);
+
+    // created snapshot
+    expect(goalMessages[0]?.goal).toMatchObject({
+      goalId: "g1",
+      objective: "build feature X",
+      status: "active",
+      turnsUsed: 0,
+      budgetLimits: {},
+      change: "created",
+    });
+
+    // status change → blocked
+    expect(goalMessages[1]?.goal).toMatchObject({
+      status: "blocked",
+      reason: "rate limit",
+      turnsUsed: 3,
+      budgetLimits: { turnBudget: 10 },
+      change: "status",
+    });
+
+    // cleared
+    expect(goalMessages[2]?.goal).toMatchObject({
+      status: "cleared",
+      change: "cleared",
+    });
+
+    // The goal messages should interleave with the user turn by timestamp.
+    const userTurnIdx = messages.findIndex((m) => m.type === "user");
+    const createdIdx = messages.findIndex(
+      (m) =>
+        m.type === "kimi_goal" &&
+        (m.goal as { change?: string }).change === "created",
+    );
+    // created (time 1) comes before the user turn (time 2).
+    expect(createdIdx).toBeLessThan(userTurnIdx);
+  });
+
+  it("does not emit goal messages for a child wire without goal records", () => {
+    const session: KimiSessionContent = {
+      sessionId: "session-child",
+      records: [
+        {
+          type: "turn.prompt",
+          input: [{ type: "text", text: "do work" }],
+          time: 1,
+        },
+        {
+          type: "context.append_loop_event",
+          event: { type: "content.part", part: { type: "text", text: "done" } },
+          time: 2,
+        },
+      ],
+    };
+
+    const messages = convertKimiMessages(session);
+    expect(messages.filter((m) => m.type === "kimi_goal")).toHaveLength(0);
+  });
+
+  it("places a goal marker after transcript messages with the same timestamp", () => {
+    const messages = convertKimiMessages({
+      sessionId: "session-goal-tie",
+      records: [
+        {
+          type: "turn.prompt",
+          input: [{ type: "text", text: "start" }],
+          time: 10,
+        },
+        {
+          type: "context.append_loop_event",
+          event: { type: "content.part", part: { type: "text", text: "work" } },
+          time: 10,
+        },
+        {
+          type: "goal.create",
+          goalId: "g-tie",
+          objective: "finish",
+          time: 10,
+        },
+      ],
+    });
+
+    expect(messages.map((message) => message.type)).toEqual([
+      "user",
+      "assistant",
+      "kimi_goal",
+    ]);
+  });
 });

@@ -166,6 +166,32 @@ describe("KimiSessionReader state v2 discovery", () => {
             },
             time: updatedAt,
           },
+          {
+            type: "full_compaction.begin",
+            source: "manual",
+            time: updatedAt + 1,
+          },
+          {
+            type: "full_compaction.cancel",
+            time: updatedAt + 2,
+          },
+          {
+            type: "context.apply_compaction",
+            tokensBefore: 50_000,
+            tokensAfter: 8_000,
+            time: updatedAt + 3,
+          },
+          {
+            type: "full_compaction.begin",
+            source: "auto",
+            time: updatedAt + 4,
+          },
+          {
+            type: "context.apply_compaction",
+            tokensBefore: 8_000,
+            tokensAfter: 4_000,
+            time: updatedAt + 5,
+          },
         ]),
       );
 
@@ -185,8 +211,24 @@ describe("KimiSessionReader state v2 discovery", () => {
           messageCount: 2,
           model: "custom-kimi/kimi-k3",
           reasoningEffort: "max",
+          compactCount: 2,
+          compactEvents: [
+            expect.objectContaining({
+              beforeTokens: 50_000,
+              afterTokens: 8_000,
+              reclaimedTokens: 42_000,
+            }),
+            {
+              timestamp: new Date(updatedAt + 5).toISOString(),
+              beforeTokens: 8_000,
+              afterTokens: 4_000,
+              reclaimedTokens: 4_000,
+              trigger: "auto",
+            },
+          ],
         }),
       ]);
+      expect(sessions[0]?.compactEvents?.[0]).not.toHaveProperty("trigger");
     } finally {
       await rm(sessionsDir, { recursive: true, force: true });
     }

@@ -186,6 +186,92 @@ describe("SessionInspector", () => {
     expect(link.textContent).not.toContain("running");
   });
 
+  it("uses lowercase Codex activity kinds and the latest subagent state", () => {
+    renderInspector("codex", [
+      {
+        uuid: "activity-started",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem: {
+          type: "subAgentActivity",
+          id: "activity-1",
+          kind: "started",
+          agentThreadId: "child-thread",
+          agentPath: "/root/worker",
+        },
+      },
+      {
+        uuid: "activity-interrupted",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem: {
+          type: "subAgentActivity",
+          id: "activity-2",
+          kind: "interrupted",
+          agentThreadId: "child-thread",
+          agentPath: "/root/worker",
+        },
+      },
+    ]);
+
+    const link = screen.getByRole("link", { name: /\/root\/worker/i });
+    expect(link.getAttribute("href")).toBe(
+      "/projects/project-1/sessions/child-thread",
+    );
+    expect(link.textContent).toContain("interrupted");
+    expect(
+      screen.getAllByRole("link", { name: /\/root\/worker/i }),
+    ).toHaveLength(1);
+  });
+
+  it("lists Codex collab states that only contain status and message", () => {
+    renderInspector("codex", [
+      {
+        uuid: "collab-spawn",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem: {
+          type: "collabAgentToolCall",
+          id: "collab-1",
+          tool: "spawnAgent",
+          agentsStates: {
+            "child-status-only": {
+              status: "completed",
+              message: "Finished review",
+            },
+          },
+        },
+      },
+      {
+        uuid: "collab-wait",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem: {
+          type: "collabAgentToolCall",
+          id: "collab-2",
+          tool: "wait",
+          agentsStates: {
+            "child-status-only": {
+              status: "failed",
+              message: "Review failed",
+            },
+          },
+        },
+      },
+    ]);
+
+    const link = screen.getByRole("link", { name: /child-status-only/i });
+    expect(link.getAttribute("href")).toBe(
+      "/projects/project-1/sessions/child-status-only",
+    );
+    expect(link.textContent).toContain("failed");
+    expect(link.textContent).not.toContain("completed");
+  });
+
   it("does not show Codex channel metadata for Claude sessions", () => {
     renderInspector("claude", [
       {

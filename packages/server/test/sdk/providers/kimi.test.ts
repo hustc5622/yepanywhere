@@ -626,6 +626,58 @@ describe("KimiProvider ACP updates", () => {
     });
   });
 
+  it("distinguishes AgentSwarm from Agent when both carry subagent_type", () => {
+    const provider = new KimiProvider();
+
+    expect(
+      convertKimiUpdate(provider, {
+        sessionUpdate: "tool_call",
+        toolCallId: "swarm-1",
+        title: "Dispatching subagents",
+        status: "in_progress",
+        rawInput: {
+          subagent_type: "coder",
+          items: [{ task: "one" }, { task: "two" }],
+          prompt_template: "Handle {item}",
+        },
+      }),
+    ).toMatchObject({
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "swarm-1",
+            name: "AgentSwarm",
+          },
+        ],
+      },
+    });
+
+    expect(
+      convertKimiUpdate(provider, {
+        sessionUpdate: "tool_call",
+        toolCallId: "agent-1",
+        title: "Dispatching subagent",
+        status: "in_progress",
+        rawInput: {
+          subagent_type: "explore",
+          prompt: "Investigate",
+          description: "Read-only research",
+        },
+      }),
+    ).toMatchObject({
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "agent-1",
+            name: "Agent",
+          },
+        ],
+      },
+    });
+  });
+
   it("distinguishes Glob from Grep when both include a path", () => {
     const provider = new KimiProvider();
 

@@ -970,6 +970,7 @@ export const api = {
     sessionId: string,
     afterMessageId?: string,
     options?: {
+      view?: "canonical";
       tailCompactions?: number;
       beforeMessageId?: string;
       aroundMessageId?: string;
@@ -980,6 +981,7 @@ export const api = {
   ) => {
     const params = new URLSearchParams();
     if (afterMessageId) params.set("afterMessageId", afterMessageId);
+    if (options?.view) params.set("view", options.view);
     if (options?.tailCompactions !== undefined)
       params.set("tailCompactions", String(options.tailCompactions));
     if (options?.beforeMessageId)

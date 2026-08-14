@@ -157,6 +157,52 @@ describe("canonical Codex persisted session projection", () => {
     ).toEqual([4, 5]);
   });
 
+  it("keeps current thread goal state outside the recent item window", () => {
+    const events = [
+      testEvent(1, "thread/goal/updated", {
+        threadId: "thread-1",
+        goal: {
+          threadId: "thread-1",
+          objective: "Ship safely",
+          status: "active",
+          tokenBudget: 10_000,
+          tokensUsed: 100,
+          timeUsedSeconds: 2,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      }),
+      testEvent(2, "item/completed", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "older", type: "agentMessage", text: "older" },
+      }),
+      testEvent(3, "item/completed", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "latest", type: "agentMessage", text: "latest" },
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+      { maxCandidateCount: 1 },
+    );
+
+    expect(
+      result.messages.some(
+        (message) => message.codexThreadItem?.type === "threadGoal",
+      ),
+    ).toBe(true);
+    expect(
+      result.messages.some(
+        (message) => message.codexThreadItem?.id === "latest",
+      ),
+    ).toBe(true);
+  });
+
   it("keeps an old item whose lifecycle was touched inside the recent window", () => {
     const events = [
       testEvent(1, "item/started", {
@@ -749,6 +795,187 @@ describe("canonical Codex persisted session projection", () => {
         ],
       ),
     ).toThrow("cannot mix session journals");
+  });
+
+  it("projects thread/goal/updated as a threadGoal native item", () => {
+    const events = [
+      testEvent(1, "thread/goal/updated", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        goal: {
+          threadId: "thread-1",
+          objective: "Ship the feature",
+          status: "active",
+          tokenBudget: 100000,
+          tokensUsed: 500,
+          timeUsedSeconds: 30,
+          createdAt: 1000,
+          updatedAt: 2000,
+        },
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+    );
+
+    const goalMessage = result.messages.find(
+      (m) =>
+        (m as { codexThreadItem?: { type?: string } }).codexThreadItem?.type ===
+        "threadGoal",
+    );
+    expect(goalMessage).toBeDefined();
+    expect(goalMessage?.codexThreadItem).toMatchObject({
+      type: "threadGoal",
+      objective: "Ship the feature",
+      status: "active",
+      tokensUsed: 500,
+      timeUsedSeconds: 30,
+    });
+  });
+
+  it("does not project goal after thread/goal/cleared", () => {
+    const events = [
+      testEvent(1, "thread/goal/updated", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        goal: {
+          threadId: "thread-1",
+          objective: "Ship the feature",
+          status: "active",
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1000,
+          updatedAt: 2000,
+        },
+      }),
+      testEvent(2, "thread/goal/cleared", {
+        threadId: "thread-1",
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+    );
+
+    const goalMessage = result.messages.find(
+      (m) =>
+        (m as { codexThreadItem?: { type?: string } }).codexThreadItem?.type ===
+        "threadGoal",
+    );
+    expect(goalMessage).toBeUndefined();
+  });
+
+  it("projects turn/plan/updated as a turnPlan checklist native item", () => {
+    const events = [
+      testEvent(1, "turn/plan/updated", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        explanation: "Breaking down the work",
+        plan: [
+          { step: "Read the file", status: "completed" },
+          { step: "Write tests", status: "inProgress" },
+          { step: "Run tests", status: "pending" },
+        ],
+      }),
+      testEvent(2, "turn/diff/updated", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        diff: "later activity",
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+    );
+
+    const planMessage = result.messages.find(
+      (m) =>
+        (m as { codexThreadItem?: { type?: string } }).codexThreadItem?.type ===
+        "turnPlan",
+    );
+    expect(planMessage).toBeDefined();
+    expect(planMessage?.codexEventSequence).toBe(1);
+    expect(planMessage?.codexThreadItem).toMatchObject({
+      type: "turnPlan",
+      explanation: "Breaking down the work",
+      steps: [
+        { step: "Read the file", status: "completed" },
+        { step: "Write tests", status: "inProgress" },
+        { step: "Run tests", status: "pending" },
+      ],
+    });
+  });
+
+  it("attaches turnPlan state to the existing live UpdatePlan row", () => {
+    const legacy: Message[] = [
+      {
+        uuid: "codex-plan-turn-1",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "codex-plan-turn-1",
+              name: "UpdatePlan",
+              input: {
+                plan: [{ step: "Read", status: "completed" }],
+              },
+            },
+          ],
+        },
+      },
+    ];
+    const events = [
+      testEvent(1, "turn/plan/updated", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        plan: [{ step: "Read", status: "completed" }],
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      legacy,
+      events,
+    );
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      uuid: "codex-plan-turn-1",
+      codexThreadItem: { type: "turnPlan" },
+      codexEventSequence: 1,
+    });
+  });
+
+  it("does not project turnPlan when plan steps are empty", () => {
+    const events = [
+      testEvent(1, "turn/plan/updated", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        plan: [],
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+    );
+
+    const planMessage = result.messages.find(
+      (m) =>
+        (m as { codexThreadItem?: { type?: string } }).codexThreadItem?.type ===
+        "turnPlan",
+    );
+    expect(planMessage).toBeUndefined();
   });
 });
 

@@ -20,10 +20,14 @@ const PROMPT_ACTIONS = [
 ] as const;
 
 /**
- * Minimal ZCode goal lifecycle dialog. Loads the current goal status via
+ * Provider-neutral goal lifecycle dialog. Loads the current goal status via
  * `action: "show"` on open and offers set/replace (with objective text) and
- * pause/resume/clear actions. set/replace may start a model turn immediately
- * — that is the intended behavior of the user's explicit click.
+ * pause/resume/clear actions. Some providers may start a model turn for an
+ * explicit set/replace action; Codex only mutates its durable thread goal.
+ *
+ * Supported providers: ZCode (`session/goal` RPC) and Codex
+ * (`thread/goal/*` native controls, formatted into the same `ProviderGoalState`
+ * text summary).
  */
 export function GoalModal({ processId, onClose }: GoalModalProps) {
   const { t } = useI18n();

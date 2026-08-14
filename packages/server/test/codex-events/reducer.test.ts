@@ -433,4 +433,158 @@ describe("canonical Codex event reducer", () => {
       JSON.stringify(batchState.threads),
     );
   });
+
+  describe("thread/goal/updated", () => {
+    it("stores the latest goal snapshot on the thread", () => {
+      const events = [
+        testEvent(1, "thread/goal/updated", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          goal: {
+            threadId: "thread-1",
+            objective: "Ship the feature",
+            status: "active",
+            tokenBudget: 100000,
+            tokensUsed: 500,
+            timeUsedSeconds: 30,
+            createdAt: 1000,
+            updatedAt: 2000,
+          },
+        }),
+        testEvent(2, "thread/goal/updated", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          goal: {
+            threadId: "thread-1",
+            objective: "Ship the feature",
+            status: "complete",
+            tokenBudget: 100000,
+            tokensUsed: 5000,
+            timeUsedSeconds: 120,
+            createdAt: 1000,
+            updatedAt: 3000,
+          },
+        }),
+      ];
+
+      const state = reduceCodexEvents(
+        createCanonicalCodexSessionState("session-1"),
+        events,
+      );
+      const thread = state.threads["thread-1"];
+      expect(thread?.goal).toMatchObject({
+        objective: "Ship the feature",
+        status: "complete",
+        tokensUsed: 5000,
+        timeUsedSeconds: 120,
+      });
+      expect(thread?.goalSequence).toBe(2);
+      expect(thread?.goalUpdatedAtMs).toBeDefined();
+    });
+
+    it("records a missing_identity anomaly when goal payload is absent", () => {
+      const events = [
+        testEvent(1, "thread/goal/updated", {
+          threadId: "thread-1",
+        }),
+      ];
+
+      const state = reduceCodexEvents(
+        createCanonicalCodexSessionState("session-1"),
+        events,
+      );
+      expect(state.threads["thread-1"]?.goal).toBeUndefined();
+      expect(state.anomalies).toHaveLength(1);
+      expect(state.anomalies[0]?.kind).toBe("missing_identity");
+    });
+  });
+
+  describe("thread/goal/cleared", () => {
+    it("removes the goal from the thread", () => {
+      const events = [
+        testEvent(1, "thread/goal/updated", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          goal: {
+            threadId: "thread-1",
+            objective: "Ship the feature",
+            status: "active",
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            createdAt: 1000,
+            updatedAt: 2000,
+          },
+        }),
+        testEvent(2, "thread/goal/cleared", {
+          threadId: "thread-1",
+        }),
+      ];
+
+      const state = reduceCodexEvents(
+        createCanonicalCodexSessionState("session-1"),
+        events,
+      );
+      expect(state.threads["thread-1"]?.goal).toBeUndefined();
+      expect(state.threads["thread-1"]?.goalSequence).toBe(2);
+    });
+  });
+
+  describe("turn/plan/updated", () => {
+    it("stores the full plan payload including explanation", () => {
+      const events = [
+        testEvent(1, "turn/plan/updated", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          explanation: "Breaking down the work",
+          plan: [
+            { step: "Read the file", status: "completed" },
+            { step: "Write tests", status: "inProgress" },
+            { step: "Run tests", status: "pending" },
+          ],
+        }),
+      ];
+
+      const state = reduceCodexEvents(
+        createCanonicalCodexSessionState("session-1"),
+        events,
+      );
+      const turn = state.threads["thread-1"]?.turns["turn-1"];
+      expect(turn?.plan).toMatchObject({
+        explanation: "Breaking down the work",
+        plan: [
+          { step: "Read the file", status: "completed" },
+          { step: "Write tests", status: "inProgress" },
+          { step: "Run tests", status: "pending" },
+        ],
+      });
+      expect(turn?.planSequence).toBe(1);
+    });
+
+    it("overwrites the plan on subsequent updates", () => {
+      const events = [
+        testEvent(1, "turn/plan/updated", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          plan: [{ step: "Step A", status: "pending" }],
+        }),
+        testEvent(2, "turn/plan/updated", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          plan: [{ step: "Step A", status: "completed" }],
+        }),
+      ];
+
+      const state = reduceCodexEvents(
+        createCanonicalCodexSessionState("session-1"),
+        events,
+      );
+      const plan = state.threads["thread-1"]?.turns["turn-1"]?.plan;
+      expect(state.threads["thread-1"]?.turns["turn-1"]?.planSequence).toBe(2);
+      const planArray = (plan as { plan?: unknown[] } | undefined)?.plan;
+      expect(planArray?.[0]).toMatchObject({
+        step: "Step A",
+        status: "completed",
+      });
+    });
+  });
 });

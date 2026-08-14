@@ -149,26 +149,49 @@ export const KimiMetadataRecordSchema = z.object({
   created_at: z.number().optional(),
 });
 
-/** `config.update` carrying the resolved model alias + thinking effort. */
-export const KimiModelConfigRecordSchema = z.object({
-  type: z.literal("config.update"),
-  modelAlias: z.string(),
-  thinkingEffort: z.string().optional(),
-  time: z.number().optional(),
-});
+/**
+ * Upstream defines `config.update` as one partial-update payload. A record can
+ * update model, profile, thinking effort, or any combination of them.
+ */
+export const KimiConfigUpdateRecordSchema = z
+  .object({
+    type: z.literal("config.update"),
+    modelAlias: z.string().optional(),
+    profileName: z.string().optional(),
+    thinkingEffort: z.string().optional(),
+    thinkingLevel: z.string().optional(),
+    systemPrompt: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+/** `config.update` carrying at least a resolved model alias. */
+export const KimiModelConfigRecordSchema = z
+  .object({
+    type: z.literal("config.update"),
+    modelAlias: z.string(),
+    profileName: z.string().optional(),
+    thinkingEffort: z.string().optional(),
+    thinkingLevel: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
 
 /**
- * `config.update` carrying the resolved subagent profile. Kimi writes a second
- * `config.update` into each child's wire log with `profileName` set to the
- * subagent type (`explore`, `coder`, …). This is the authoritative,
- * per-agent source of the subagent type — independent of the parent tool
- * call's requested `subagent_type`.
+ * `config.update` carrying at least the resolved subagent profile. Upstream
+ * defines one partial-update payload, so a record may contain both
+ * `profileName` and `modelAlias`; both fields must survive parsing.
  */
-export const KimiProfileConfigRecordSchema = z.object({
-  type: z.literal("config.update"),
-  profileName: z.string(),
-  time: z.number().optional(),
-});
+export const KimiProfileConfigRecordSchema = z
+  .object({
+    type: z.literal("config.update"),
+    profileName: z.string(),
+    modelAlias: z.string().optional(),
+    thinkingEffort: z.string().optional(),
+    thinkingLevel: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
 
 export const KimiTurnPromptRecordSchema = z.object({
   type: z.literal("turn.prompt"),
@@ -182,10 +205,15 @@ export const KimiLoopEventRecordSchema = z.object({
   time: z.number().optional(),
 });
 
-export const KimiUsageRecordSchema = z.object({
-  type: z.literal("usage.record"),
-  time: z.number().optional(),
-});
+export const KimiUsageRecordSchema = z
+  .object({
+    type: z.literal("usage.record"),
+    model: z.string().optional(),
+    usageScope: z.string().optional(),
+    usage: z.unknown().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
 
 export const KimiTurnEndedErrorSchema = z
   .object({
@@ -208,14 +236,466 @@ export const KimiTurnEndedRecordSchema = z.object({
 });
 export type KimiTurnEndedRecord = z.infer<typeof KimiTurnEndedRecordSchema>;
 
+// -----------------------------------------------------------------------------
+// Goal lifecycle (main-agent autonomous goal: create / update / clear / fork).
+// Mirrors references/kimi-code packages/agent-core-v2/src/agent/goal/goalOps.ts.
+// A goal is a structured, multi-turn autonomous target with budgets; only the
+// main agent holds one. `complete` is transient (cleared immediately after).
+// -----------------------------------------------------------------------------
+
+export const KimiGoalBudgetLimitsSchema = z
+  .object({
+    tokenBudget: z.number().finite().nonnegative().optional(),
+    turnBudget: z.number().finite().nonnegative().optional(),
+    wallClockBudgetMs: z.number().finite().nonnegative().optional(),
+  })
+  .passthrough();
+
+export const KimiGoalStatusSchema = z.enum([
+  "active",
+  "paused",
+  "blocked",
+  "complete",
+]);
+export const KimiGoalActorSchema = z.enum([
+  "user",
+  "model",
+  "runtime",
+  "system",
+]);
+
+export const KimiGoalCreateRecordSchema = z
+  .object({
+    type: z.literal("goal.create"),
+    goalId: z.string(),
+    objective: z.string(),
+    completionCriterion: z.string().nullish(),
+    wallClockResumedAt: z.number().finite().nonnegative().nullish(),
+    status: KimiGoalStatusSchema.nullish(),
+    actor: KimiGoalActorSchema.nullish(),
+    budgetLimits: KimiGoalBudgetLimitsSchema.nullish(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiGoalUpdateRecordSchema = z
+  .object({
+    type: z.literal("goal.update"),
+    goalId: z.string().optional(),
+    status: KimiGoalStatusSchema.optional(),
+    reason: z.string().optional(),
+    turnsUsed: z.number().finite().nonnegative().optional(),
+    tokensUsed: z.number().finite().nonnegative().optional(),
+    wallClockMs: z.number().finite().nonnegative().optional(),
+    wallClockResumedAt: z.number().finite().nonnegative().optional(),
+    budgetLimits: KimiGoalBudgetLimitsSchema.optional(),
+    actor: KimiGoalActorSchema.optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiGoalClearRecordSchema = z
+  .object({
+    type: z.literal("goal.clear"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiForkedRecordSchema = z
+  .object({
+    type: z.literal("forked"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Profile binding. `profile.bind` carries the resolved profile, including the
+// authoritative `profileName` ("agent" for main, "coder"/"explore"/… for a
+// child). `tools.set_active_tools` / `tools.reset_active_tools` mutate the
+// active tool roster mid-session.
+// -----------------------------------------------------------------------------
+
+export const KimiProfileBindRecordSchema = z
+  .object({
+    type: z.literal("profile.bind"),
+    modelAlias: z.string().optional(),
+    profileName: z.string().optional(),
+    thinkingEffort: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiSetActiveToolsRecordSchema = z
+  .object({
+    type: z.literal("tools.set_active_tools"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiResetActiveToolsRecordSchema = z
+  .object({
+    type: z.literal("tools.reset_active_tools"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Context memory ops. `context.append_message` is the post-compaction
+// projection (intentionally ignored for transcript reconstruction); the others
+// track clear / apply_compaction / undo lifecycle.
+// -----------------------------------------------------------------------------
+
+export const KimiContextAppendMessageRecordSchema = z
+  .object({
+    type: z.literal("context.append_message"),
+    message: z.unknown(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiContextClearRecordSchema = z
+  .object({
+    type: z.literal("context.clear"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiContextApplyCompactionRecordSchema = z
+  .object({
+    type: z.literal("context.apply_compaction"),
+    tokensBefore: z.number().optional(),
+    tokensAfter: z.number().optional(),
+    summaryOutputTokens: z.number().optional(),
+    keptUserMessageCount: z.number().optional(),
+    keptHeadUserMessageCount: z.number().optional(),
+    droppedCount: z.number().optional(),
+    legacyTail: z.boolean().optional(),
+    compactedCount: z.number().optional(),
+    count: z.number().optional(),
+    summary: z.unknown().optional(),
+    contextSummary: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiContextUndoRecordSchema = z
+  .object({
+    type: z.literal("context.undo"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Turn lifecycle. `turn.steer` injects a mid-turn steer; `turn.cancel`
+// records an abort intent (consumed by inferKimiSubagentStatus → interrupted).
+// -----------------------------------------------------------------------------
+
+export const KimiTurnSteerRecordSchema = z
+  .object({
+    type: z.literal("turn.steer"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiTurnCancelRecordSchema = z
+  .object({
+    type: z.literal("turn.cancel"),
+    turnId: z.number().optional(),
+    target: z.enum(["active", "queued"]).optional(),
+    reason: z.enum(["user_cancelled", "aborted"]).optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Swarm mode. `swarm_mode.enter`/`exit` bracket an AgentSwarm fan-out.
+// -----------------------------------------------------------------------------
+
+export const KimiSwarmEnterRecordSchema = z
+  .object({
+    type: z.literal("swarm_mode.enter"),
+    trigger: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiSwarmExitRecordSchema = z
+  .object({
+    type: z.literal("swarm_mode.exit"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Plan mode (read-only planning lifecycle). Fields are passthrough — these
+// records are low-frequency and the upstream payload is feature-scoped.
+// -----------------------------------------------------------------------------
+
+export const KimiPlanModeEnterRecordSchema = z
+  .object({ type: z.literal("plan_mode.enter"), time: z.number().optional() })
+  .passthrough();
+export const KimiPlanModeCancelRecordSchema = z
+  .object({ type: z.literal("plan_mode.cancel"), time: z.number().optional() })
+  .passthrough();
+export const KimiPlanModeExitRecordSchema = z
+  .object({ type: z.literal("plan_mode.exit"), time: z.number().optional() })
+  .passthrough();
+export const KimiPlanRevisionRecordSchema = z
+  .object({ type: z.literal("plan.revision"), time: z.number().optional() })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Background task lifecycle. `info` carries the task descriptor (incl. agentId,
+// subagentType, model); `task.terminated.outputTail` carries the bounded output
+// summary beside `info`.
+// -----------------------------------------------------------------------------
+
+const KimiTaskInfoSchema = z
+  .object({
+    taskId: z.string().optional(),
+    description: z.string().optional(),
+    status: z.string().optional(),
+    detached: z.boolean().optional(),
+    startedAt: z.number().optional(),
+    endedAt: z.number().optional(),
+    timeoutMs: z.number().optional(),
+    kind: z.string().optional(),
+    agentId: z.string().optional(),
+    subagentType: z.string().optional(),
+    model: z.string().optional(),
+    thinkingEffort: z.string().optional(),
+  })
+  .passthrough();
+
+export const KimiTaskStartedRecordSchema = z
+  .object({
+    type: z.literal("task.started"),
+    info: KimiTaskInfoSchema,
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiTaskTerminatedRecordSchema = z
+  .object({
+    type: z.literal("task.terminated"),
+    info: KimiTaskInfoSchema,
+    outputTail: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// LLM request / tools snapshot.
+// -----------------------------------------------------------------------------
+
+export const KimiLlmToolsSnapshotRecordSchema = z
+  .object({
+    type: z.literal("llm.tools_snapshot"),
+    hash: z.string().optional(),
+    tools: z.unknown().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiLlmRequestRecordSchema = z
+  .object({
+    type: z.literal("llm.request"),
+    kind: z.string().optional(),
+    maxTokens: z.number().optional(),
+    messageCount: z.number().optional(),
+    model: z.string().optional(),
+    modelAlias: z.string().optional(),
+    provider: z.string().optional(),
+    systemPromptHash: z.string().optional(),
+    thinkingEffort: z.string().optional(),
+    thinkingKeep: z.boolean().optional(),
+    toolSelect: z.unknown().optional(),
+    toolsHash: z.string().optional(),
+    turnStep: z.unknown().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Permission / todo store / user tool / mcp discovery.
+// -----------------------------------------------------------------------------
+
+export const KimiPermissionSetModeRecordSchema = z
+  .object({
+    type: z.literal("permission.set_mode"),
+    mode: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiPermissionRulesAddRecordSchema = z
+  .object({
+    type: z.literal("permission.rules.add"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiPermissionApprovalResultRecordSchema = z
+  .object({
+    type: z.literal("permission.record_approval_result"),
+    turnId: z.number().int().nonnegative(),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    action: z.string(),
+    sessionApprovalRule: z.string().optional(),
+    result: z.unknown(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiPluginSessionStartRecordSchema = z
+  .object({
+    type: z.literal("plugin.session_start"),
+    content: z.string().nullable(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiInterruptionReminderRecordedRecordSchema = z
+  .object({
+    type: z.literal("interruptionReminder.recorded"),
+    turnId: z.number().int().nonnegative(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiToolsUpdateStoreRecordSchema = z
+  .object({
+    type: z.literal("tools.update_store"),
+    key: z.string().optional(),
+    value: z.unknown().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiRegisterUserToolRecordSchema = z
+  .object({
+    type: z.literal("tools.register_user_tool"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiUnregisterUserToolRecordSchema = z
+  .object({
+    type: z.literal("tools.unregister_user_tool"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiMcpToolsDiscoveredRecordSchema = z
+  .object({
+    type: z.literal("mcp.tools_discovered"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Full compaction lifecycle. The begin record carries source/instruction;
+// compaction metrics are persisted by `context.apply_compaction`.
+// -----------------------------------------------------------------------------
+
+export const KimiFullCompactionBeginRecordSchema = z
+  .object({
+    type: z.literal("full_compaction.begin"),
+    source: z.enum(["manual", "auto"]).optional(),
+    instruction: z.string().optional(),
+    /** Compatibility with early fixtures that used `trigger`. */
+    trigger: z.string().optional(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiFullCompactionCancelRecordSchema = z
+  .object({
+    type: z.literal("full_compaction.cancel"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiFullCompactionCompleteRecordSchema = z
+  .object({
+    type: z.literal("full_compaction.complete"),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+// -----------------------------------------------------------------------------
+// Interaction (human-in-the-loop). `interaction.request` opens an
+// approval/question/user_tool entry; `interaction.resolved` folds the
+// response. A request left unresolved means the process died with it pending.
+// -----------------------------------------------------------------------------
+
+export const KimiInteractionRequestRecordSchema = z
+  .object({
+    type: z.literal("interaction.request"),
+    id: z.string(),
+    kind: z.enum(["approval", "question", "user_tool"]),
+    toolCallId: z.string().optional(),
+    agentId: z.string().optional(),
+    request: z.unknown(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
+export const KimiInteractionResolvedRecordSchema = z
+  .object({
+    type: z.literal("interaction.resolved"),
+    id: z.string(),
+    response: z.unknown(),
+    time: z.number().optional(),
+  })
+  .passthrough();
+
 /** Discriminated where possible; unknown record types pass through. */
 export type KimiWireRecord =
   | z.infer<typeof KimiMetadataRecordSchema>
-  | z.infer<typeof KimiModelConfigRecordSchema>
+  | z.infer<typeof KimiConfigUpdateRecordSchema>
+  | z.infer<typeof KimiProfileBindRecordSchema>
+  | z.infer<typeof KimiSetActiveToolsRecordSchema>
+  | z.infer<typeof KimiResetActiveToolsRecordSchema>
   | z.infer<typeof KimiTurnPromptRecordSchema>
+  | z.infer<typeof KimiTurnSteerRecordSchema>
+  | z.infer<typeof KimiTurnCancelRecordSchema>
+  | z.infer<typeof KimiTurnEndedRecordSchema>
   | z.infer<typeof KimiLoopEventRecordSchema>
+  | z.infer<typeof KimiContextAppendMessageRecordSchema>
+  | z.infer<typeof KimiContextClearRecordSchema>
+  | z.infer<typeof KimiContextApplyCompactionRecordSchema>
+  | z.infer<typeof KimiContextUndoRecordSchema>
   | z.infer<typeof KimiUsageRecordSchema>
-  | KimiTurnEndedRecord
+  | z.infer<typeof KimiGoalCreateRecordSchema>
+  | z.infer<typeof KimiGoalUpdateRecordSchema>
+  | z.infer<typeof KimiGoalClearRecordSchema>
+  | z.infer<typeof KimiForkedRecordSchema>
+  | z.infer<typeof KimiSwarmEnterRecordSchema>
+  | z.infer<typeof KimiSwarmExitRecordSchema>
+  | z.infer<typeof KimiPlanModeEnterRecordSchema>
+  | z.infer<typeof KimiPlanModeCancelRecordSchema>
+  | z.infer<typeof KimiPlanModeExitRecordSchema>
+  | z.infer<typeof KimiPlanRevisionRecordSchema>
+  | z.infer<typeof KimiTaskStartedRecordSchema>
+  | z.infer<typeof KimiTaskTerminatedRecordSchema>
+  | z.infer<typeof KimiLlmToolsSnapshotRecordSchema>
+  | z.infer<typeof KimiLlmRequestRecordSchema>
+  | z.infer<typeof KimiPermissionSetModeRecordSchema>
+  | z.infer<typeof KimiPermissionRulesAddRecordSchema>
+  | z.infer<typeof KimiPermissionApprovalResultRecordSchema>
+  | z.infer<typeof KimiPluginSessionStartRecordSchema>
+  | z.infer<typeof KimiInterruptionReminderRecordedRecordSchema>
+  | z.infer<typeof KimiToolsUpdateStoreRecordSchema>
+  | z.infer<typeof KimiRegisterUserToolRecordSchema>
+  | z.infer<typeof KimiUnregisterUserToolRecordSchema>
+  | z.infer<typeof KimiMcpToolsDiscoveredRecordSchema>
+  | z.infer<typeof KimiFullCompactionBeginRecordSchema>
+  | z.infer<typeof KimiFullCompactionCancelRecordSchema>
+  | z.infer<typeof KimiFullCompactionCompleteRecordSchema>
+  | z.infer<typeof KimiInteractionRequestRecordSchema>
+  | z.infer<typeof KimiInteractionResolvedRecordSchema>
   | ({ type: string } & Record<string, unknown>);
 
 /**
@@ -313,23 +793,171 @@ function coerceKimiRecord(raw: { type: string }): KimiWireRecord {
       return r.success ? r.data : raw;
     }
     case "config.update": {
-      const r = KimiModelConfigRecordSchema.safeParse(raw);
+      const r = KimiConfigUpdateRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "profile.bind": {
+      const r = KimiProfileBindRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "tools.set_active_tools": {
+      const r = KimiSetActiveToolsRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "tools.reset_active_tools": {
+      const r = KimiResetActiveToolsRecordSchema.safeParse(raw);
       return r.success ? r.data : raw;
     }
     case "turn.prompt": {
       const r = KimiTurnPromptRecordSchema.safeParse(raw);
       return r.success ? r.data : raw;
     }
+    case "turn.steer": {
+      const r = KimiTurnSteerRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "turn.cancel": {
+      const r = KimiTurnCancelRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "turn.ended": {
+      const r = KimiTurnEndedRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
     case "context.append_loop_event": {
       const r = KimiLoopEventRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "context.append_message": {
+      const r = KimiContextAppendMessageRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "context.clear": {
+      const r = KimiContextClearRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "context.apply_compaction": {
+      const r = KimiContextApplyCompactionRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "context.undo": {
+      const r = KimiContextUndoRecordSchema.safeParse(raw);
       return r.success ? r.data : raw;
     }
     case "usage.record": {
       const r = KimiUsageRecordSchema.safeParse(raw);
       return r.success ? r.data : raw;
     }
-    case "turn.ended": {
-      const r = KimiTurnEndedRecordSchema.safeParse(raw);
+    case "goal.create": {
+      const r = KimiGoalCreateRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "goal.update": {
+      const r = KimiGoalUpdateRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "goal.clear": {
+      const r = KimiGoalClearRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "forked": {
+      const r = KimiForkedRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "swarm_mode.enter": {
+      const r = KimiSwarmEnterRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "swarm_mode.exit": {
+      const r = KimiSwarmExitRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "plan_mode.enter": {
+      const r = KimiPlanModeEnterRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "plan_mode.cancel": {
+      const r = KimiPlanModeCancelRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "plan_mode.exit": {
+      const r = KimiPlanModeExitRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "plan.revision": {
+      const r = KimiPlanRevisionRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "task.started": {
+      const r = KimiTaskStartedRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "task.terminated": {
+      const r = KimiTaskTerminatedRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "llm.tools_snapshot": {
+      const r = KimiLlmToolsSnapshotRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "llm.request": {
+      const r = KimiLlmRequestRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "permission.set_mode": {
+      const r = KimiPermissionSetModeRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "permission.rules.add": {
+      const r = KimiPermissionRulesAddRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "permission.record_approval_result": {
+      const r = KimiPermissionApprovalResultRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "plugin.session_start": {
+      const r = KimiPluginSessionStartRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "interruptionReminder.recorded": {
+      const r = KimiInterruptionReminderRecordedRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "tools.update_store": {
+      const r = KimiToolsUpdateStoreRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "tools.register_user_tool": {
+      const r = KimiRegisterUserToolRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "tools.unregister_user_tool": {
+      const r = KimiUnregisterUserToolRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "mcp.tools_discovered": {
+      const r = KimiMcpToolsDiscoveredRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "full_compaction.begin": {
+      const r = KimiFullCompactionBeginRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "full_compaction.cancel": {
+      const r = KimiFullCompactionCancelRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "full_compaction.complete": {
+      const r = KimiFullCompactionCompleteRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "interaction.request": {
+      const r = KimiInteractionRequestRecordSchema.safeParse(raw);
+      return r.success ? r.data : raw;
+    }
+    case "interaction.resolved": {
+      const r = KimiInteractionResolvedRecordSchema.safeParse(raw);
       return r.success ? r.data : raw;
     }
     default:
@@ -466,6 +1094,361 @@ export function isKimiModelConfigRecord(
   return record.type === "config.update" && "modelAlias" in record;
 }
 
+/** Type guard for the profile-config variant of `config.update`. */
+export function isKimiProfileConfigRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiProfileConfigRecordSchema> {
+  return record.type === "config.update" && "profileName" in record;
+}
+
+/** Type guard for `profile.bind` (authoritative profile source). */
+export function isKimiProfileBindRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiProfileBindRecordSchema> {
+  return record.type === "profile.bind";
+}
+
+/** Type guard for `goal.create`. */
+export function isKimiGoalCreateRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiGoalCreateRecordSchema> {
+  return (
+    record.type === "goal.create" &&
+    KimiGoalCreateRecordSchema.safeParse(record).success
+  );
+}
+
+/** Type guard for `goal.update`. */
+export function isKimiGoalUpdateRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiGoalUpdateRecordSchema> {
+  return (
+    record.type === "goal.update" &&
+    KimiGoalUpdateRecordSchema.safeParse(record).success
+  );
+}
+
+/** Type guard for `goal.clear`. */
+export function isKimiGoalClearRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiGoalClearRecordSchema> {
+  return (
+    record.type === "goal.clear" &&
+    KimiGoalClearRecordSchema.safeParse(record).success
+  );
+}
+
+/** Type guard for `forked` (goal boundary clear). */
+export function isKimiForkedRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiForkedRecordSchema> {
+  return (
+    record.type === "forked" && KimiForkedRecordSchema.safeParse(record).success
+  );
+}
+
+/** Type guard for `swarm_mode.enter`. */
+export function isKimiSwarmEnterRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiSwarmEnterRecordSchema> {
+  return record.type === "swarm_mode.enter";
+}
+
+/** Type guard for `swarm_mode.exit`. */
+export function isKimiSwarmExitRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiSwarmExitRecordSchema> {
+  return record.type === "swarm_mode.exit";
+}
+
+/** Type guard for `task.started`. */
+export function isKimiTaskStartedRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiTaskStartedRecordSchema> {
+  return record.type === "task.started";
+}
+
+/** Type guard for `task.terminated`. */
+export function isKimiTaskTerminatedRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiTaskTerminatedRecordSchema> {
+  return record.type === "task.terminated";
+}
+
+/** Type guard for `interaction.request`. */
+export function isKimiInteractionRequestRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiInteractionRequestRecordSchema> {
+  return record.type === "interaction.request";
+}
+
+/** Type guard for `interaction.resolved`. */
+export function isKimiInteractionResolvedRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiInteractionResolvedRecordSchema> {
+  return record.type === "interaction.resolved";
+}
+
+/** Type guard for `turn.cancel`. */
+export function isKimiTurnCancelRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiTurnCancelRecordSchema> {
+  return record.type === "turn.cancel";
+}
+
+/** Type guard for `full_compaction.begin`. */
+export function isKimiFullCompactionBeginRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiFullCompactionBeginRecordSchema> {
+  return (
+    record.type === "full_compaction.begin" &&
+    KimiFullCompactionBeginRecordSchema.safeParse(record).success
+  );
+}
+
+/** Type guard for `context.apply_compaction`. */
+export function isKimiContextApplyCompactionRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiContextApplyCompactionRecordSchema> {
+  return (
+    record.type === "context.apply_compaction" &&
+    KimiContextApplyCompactionRecordSchema.safeParse(record).success
+  );
+}
+
+/** Type guard for `tools.update_store`. */
+export function isKimiToolsUpdateStoreRecord(
+  record: KimiWireRecord,
+): record is z.infer<typeof KimiToolsUpdateStoreRecordSchema> {
+  return record.type === "tools.update_store";
+}
+
+// =============================================================================
+// Goal timeline replay (pure, from a main-agent wire.jsonl)
+// =============================================================================
+
+/**
+ * A goal budget limit. Mirrors the upstream `GoalBudgetLimits`:
+ * `tokenBudget` / `turnBudget` / `wallClockBudgetMs`.
+ */
+export interface KimiGoalBudgetLimits {
+  tokenBudget?: number;
+  turnBudget?: number;
+  wallClockBudgetMs?: number;
+}
+
+/**
+ * A single goal snapshot — the goal's state at one point in the wire timeline.
+ * Emitted by `getKimiGoalTimeline` for `goal.create` and each meaningful
+ * `goal.update` (status/budget/counter change), plus a terminal snapshot at
+ * `goal.clear` / `forked`. The `change` field classifies what this snapshot
+ * records, so the renderer can choose how prominently to surface it.
+ */
+export interface KimiGoalSnapshot {
+  /** The goal id (from goal.create; undefined after clear). */
+  goalId?: string;
+  /** The objective text (from goal.create; carried forward). */
+  objective?: string;
+  /** Optional completion criterion the model must satisfy. */
+  completionCriterion?: string;
+  /** Current status, including the synthetic `cleared` timeline marker. */
+  status: "active" | "paused" | "blocked" | "complete" | "cleared";
+  /** Terminal reason (set on blocked/complete via goal.update.reason). */
+  reason?: string;
+  /** Turns consumed so far. */
+  turnsUsed?: number;
+  /** Tokens consumed so far. */
+  tokensUsed?: number;
+  /** Wall-clock milliseconds consumed so far. */
+  wallClockMs?: number;
+  /** Epoch-ms anchor for the currently active wall-clock interval. */
+  wallClockResumedAt?: number;
+  /** Active budget limits. */
+  budgetLimits?: KimiGoalBudgetLimits;
+  /** Who drove this change. */
+  actor?: "user" | "model" | "runtime" | "system";
+  /** Record timestamp (epoch ms). */
+  time?: number;
+  /** What this snapshot records. */
+  change: "created" | "status" | "budget" | "progress" | "cleared";
+}
+
+/**
+ * Replay `goal.*` / `forked` records into a timeline of goal snapshots.
+ *
+ * Mirrors the upstream `GoalModel` apply semantics (references/kimi-code
+ * packages/agent-core-v2/src/agent/goal/goalOps.ts):
+ *  - `goal.create` → a `created` snapshot (status forced to `active`,
+ *    counters zeroed, budget limits initialized empty).
+ *  - `goal.update` → a snapshot whose `change` reflects what changed: a
+ *    `status` change (active/paused/blocked/complete), a `budget` change
+ *    (budgetLimits), or a `progress` change (turnsUsed/tokensUsed/wallClockMs
+ *    only). Exact no-op updates do not create timeline noise.
+ *  - `goal.clear` / `forked` → a `cleared` snapshot (status `cleared`).
+ *
+ * On resume, the upstream normalizes an `active` goal down to `paused`
+ * ("Paused after agent resume"); a replayed `active` status is preserved as-is
+ * here (the wire already records what was dispatched), so callers that need
+ * the post-resume view should apply `paused` themselves.
+ *
+ * Only the main agent holds a goal; child wires typically have no goal.*
+ * records, in which case this returns an empty array.
+ */
+export function getKimiGoalTimeline(
+  records: readonly KimiWireRecord[],
+): KimiGoalSnapshot[] {
+  const snapshots: KimiGoalSnapshot[] = [];
+  let goal: {
+    goalId: string;
+    objective: string;
+    completionCriterion?: string;
+    status: "active" | "paused" | "blocked" | "complete";
+    reason?: string;
+    turnsUsed: number;
+    tokensUsed: number;
+    wallClockMs: number;
+    wallClockResumedAt?: number;
+    budgetLimits?: KimiGoalBudgetLimits;
+  } | null = null;
+
+  const emitProgress = (
+    time: number | undefined,
+    change: KimiGoalSnapshot["change"] = "progress",
+    actor?: KimiGoalSnapshot["actor"],
+  ) => {
+    if (!goal) return;
+    snapshots.push({
+      goalId: goal.goalId,
+      objective: goal.objective,
+      ...(goal.completionCriterion
+        ? { completionCriterion: goal.completionCriterion }
+        : {}),
+      status: goal.status,
+      ...(goal.reason ? { reason: goal.reason } : {}),
+      ...(goal.turnsUsed ? { turnsUsed: goal.turnsUsed } : {}),
+      ...(goal.tokensUsed ? { tokensUsed: goal.tokensUsed } : {}),
+      ...(goal.wallClockMs ? { wallClockMs: goal.wallClockMs } : {}),
+      ...(goal.wallClockResumedAt !== undefined
+        ? { wallClockResumedAt: goal.wallClockResumedAt }
+        : {}),
+      ...(goal.budgetLimits ? { budgetLimits: goal.budgetLimits } : {}),
+      ...(actor ? { actor } : {}),
+      ...(time !== undefined ? { time } : {}),
+      change,
+    });
+  };
+
+  for (const record of records) {
+    if (isKimiGoalCreateRecord(record)) {
+      goal = {
+        goalId: record.goalId,
+        objective: record.objective,
+        ...(record.completionCriterion
+          ? { completionCriterion: record.completionCriterion }
+          : {}),
+        status: "active",
+        turnsUsed: 0,
+        tokensUsed: 0,
+        wallClockMs: 0,
+        ...(record.wallClockResumedAt != null
+          ? { wallClockResumedAt: record.wallClockResumedAt }
+          : {}),
+        budgetLimits: {},
+      };
+      snapshots.push({
+        goalId: goal.goalId,
+        objective: goal.objective,
+        ...(goal.completionCriterion
+          ? { completionCriterion: goal.completionCriterion }
+          : {}),
+        status: "active",
+        turnsUsed: 0,
+        tokensUsed: 0,
+        wallClockMs: 0,
+        budgetLimits: {},
+        ...(goal.wallClockResumedAt !== undefined
+          ? { wallClockResumedAt: goal.wallClockResumedAt }
+          : {}),
+        ...(record.actor ? { actor: record.actor } : {}),
+        ...(record.time !== undefined ? { time: record.time } : {}),
+        change: "created",
+      });
+      continue;
+    }
+    if (isKimiGoalUpdateRecord(record) && goal) {
+      let change: KimiGoalSnapshot["change"] = "progress";
+      let changed = false;
+      if (record.status !== undefined && record.status !== goal.status) {
+        goal.status = record.status;
+        if (record.status === "active") {
+          goal.reason = undefined;
+          goal.wallClockResumedAt = record.wallClockResumedAt;
+        } else {
+          goal.reason = record.reason;
+          goal.wallClockResumedAt = undefined;
+        }
+        change = "status";
+        changed = true;
+      } else if (
+        record.wallClockResumedAt !== undefined &&
+        goal.status === "active" &&
+        record.wallClockResumedAt !== goal.wallClockResumedAt
+      ) {
+        goal.wallClockResumedAt = record.wallClockResumedAt;
+        changed = true;
+      }
+      if (record.budgetLimits !== undefined) {
+        goal.budgetLimits = record.budgetLimits;
+        if (change === "progress") change = "budget";
+        changed = true;
+      }
+      if (
+        record.turnsUsed !== undefined &&
+        record.turnsUsed !== goal.turnsUsed
+      ) {
+        goal.turnsUsed = record.turnsUsed;
+        changed = true;
+      }
+      if (
+        record.tokensUsed !== undefined &&
+        record.tokensUsed !== goal.tokensUsed
+      ) {
+        goal.tokensUsed = record.tokensUsed;
+        changed = true;
+      }
+      if (
+        record.wallClockMs !== undefined &&
+        record.wallClockMs !== goal.wallClockMs
+      ) {
+        goal.wallClockMs = record.wallClockMs;
+        changed = true;
+      }
+      if (changed) emitProgress(record.time, change, record.actor);
+      continue;
+    }
+    if ((isKimiGoalClearRecord(record) || isKimiForkedRecord(record)) && goal) {
+      snapshots.push({
+        goalId: goal.goalId,
+        objective: goal.objective,
+        ...(goal.completionCriterion
+          ? { completionCriterion: goal.completionCriterion }
+          : {}),
+        status: "cleared",
+        ...(goal.reason ? { reason: goal.reason } : {}),
+        ...(goal.turnsUsed ? { turnsUsed: goal.turnsUsed } : {}),
+        ...(goal.tokensUsed ? { tokensUsed: goal.tokensUsed } : {}),
+        ...(goal.wallClockMs ? { wallClockMs: goal.wallClockMs } : {}),
+        ...(goal.budgetLimits ? { budgetLimits: goal.budgetLimits } : {}),
+        ...(record.time !== undefined ? { time: record.time } : {}),
+        change: "cleared",
+      });
+      goal = null;
+    }
+  }
+
+  return snapshots;
+}
+
 // =============================================================================
 // Subagent metrics + lifecycle derivation (pure, from a child wire.jsonl)
 // =============================================================================
@@ -501,10 +1484,22 @@ export interface KimiSubagentMetrics {
   durationMs?: number;
 }
 
-/** Resolve the subagent profile/type from a child's `config.update` record. */
+/**
+ * Resolve the subagent profile/type. Prefers `profile.bind.profileName` (the
+ * authoritative source in Kimi Code 0.34+); falls back to the profile-config
+ * variant of `config.update` (older sessions / a second record Kimi writes into
+ * each child wire). The two carry the same `profileName` for a given agent.
+ */
 export function getKimiSubagentType(
   records: readonly KimiWireRecord[],
 ): string | undefined {
+  for (const record of records) {
+    if (record.type !== "profile.bind") continue;
+    const profileName = (record as { profileName?: unknown }).profileName;
+    if (typeof profileName === "string" && profileName.length > 0) {
+      return profileName;
+    }
+  }
   for (const record of records) {
     if (record.type !== "config.update") continue;
     const profileName = (record as { profileName?: unknown }).profileName;
