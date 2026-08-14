@@ -2790,6 +2790,109 @@ describe("CodexProvider Event Normalization", () => {
     ]);
   });
 
+  it("projects token usage while the Codex turn is still running", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-running",
+          tokenUsage: {
+            total: {
+              totalTokens: 168_796,
+              inputTokens: 167_772,
+              cachedInputTokens: 150_000,
+              cacheWriteInputTokens: 0,
+              outputTokens: 1_024,
+              reasoningOutputTokens: 0,
+            },
+            last: {
+              totalTokens: 168_796,
+              inputTokens: 167_772,
+              cachedInputTokens: 150_000,
+              cacheWriteInputTokens: 0,
+              outputTokens: 1_024,
+              reasoningOutputTokens: 0,
+            },
+            modelContextWindow: 258_400,
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "system",
+        subtype: "turn_usage",
+        session_id: "thread-1",
+        turnId: "turn-running",
+        codexTurnId: "turn-running",
+        usage: {
+          input_tokens: 167_772,
+          output_tokens: 1_024,
+          cached_input_tokens: 150_000,
+          model_context_window: 258_400,
+        },
+      }),
+    ]);
+  });
+
+  it("uses the compacted total for live usage when fresh input is zero", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-compacted",
+          tokenUsage: {
+            total: {
+              totalTokens: 90_000,
+              inputTokens: 0,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 0,
+              reasoningOutputTokens: 0,
+            },
+            last: {
+              totalTokens: 90_000,
+              inputTokens: 0,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 0,
+              reasoningOutputTokens: 0,
+            },
+            modelContextWindow: 258_400,
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages[0]?.usage).toMatchObject({
+      input_tokens: 90_000,
+      model_context_window: 258_400,
+    });
+  });
+
   it("correlates item lifecycle messages and publishes terminal tool status", () => {
     const provider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (

@@ -2152,7 +2152,11 @@ export class Process {
           this.emit({ type: "message", message });
         }
 
-        if (message.type === "system" && message.subtype === "turn_complete") {
+        if (
+          message.type === "system" &&
+          (message.subtype === "turn_usage" ||
+            message.subtype === "turn_complete")
+        ) {
           const usage = message.usage as
             | { model_context_window?: unknown }
             | undefined;

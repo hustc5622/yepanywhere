@@ -210,6 +210,47 @@ describe("useSessionMessages Codex snapshot refresh", () => {
     cleanup();
   });
 
+  it("applies live Codex usage without rendering a control message", async () => {
+    const prompt = message("persisted-prompt", {
+      timestamp: "2026-08-14T15:50:09.000Z",
+    });
+    mockGetSession.mockResolvedValueOnce(
+      sessionResponse("2026-08-14T15:50:09.000Z", [prompt]),
+    );
+
+    const { result } = renderHook(() =>
+      useSessionMessages({ projectId: "project-1", sessionId: "session-1" }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.handleStreamMessageEvent({
+        type: "system",
+        subtype: "turn_usage",
+        usage: {
+          input_tokens: 167_772,
+          output_tokens: 1_024,
+          cached_input_tokens: 150_000,
+          model_context_window: 258_400,
+        },
+      } as Message);
+    });
+
+    expect(result.current.messages).toHaveLength(1);
+    expect(result.current.messages[0]?.contextBefore).toMatchObject({
+      inputTokens: 167_772,
+      percentage: 65,
+      contextWindow: 258_400,
+    });
+    expect(result.current.session?.contextUsage).toMatchObject({
+      inputTokens: 167_772,
+      outputTokens: 1_024,
+      cacheReadTokens: 150_000,
+      percentage: 65,
+      contextWindow: 258_400,
+    });
+  });
+
   it("does not let a late initial load overwrite a newer committed refresh", async () => {
     const initialMessage = message("persisted-1", {
       timestamp: "2026-07-31T00:00:01.000Z",

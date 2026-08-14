@@ -68,7 +68,10 @@ export function extractCodexTurnContextUsage(
   if (!isCodexProvider(provider)) {
     return undefined;
   }
-  if (message.type !== "system" || message.subtype !== "turn_complete") {
+  if (
+    message.type !== "system" ||
+    (message.subtype !== "turn_usage" && message.subtype !== "turn_complete")
+  ) {
     return undefined;
   }
 

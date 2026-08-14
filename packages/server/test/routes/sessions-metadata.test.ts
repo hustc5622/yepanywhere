@@ -11,6 +11,7 @@ import {
   type SessionsDeps,
   createSessionsRoutes,
 } from "../../src/routes/sessions.js";
+import type { RuntimeProcessSnapshot } from "../../src/runtime/types.js";
 import type { CodexSessionReader } from "../../src/sessions/codex-reader.js";
 import { OpenCodeSessionReader } from "../../src/sessions/opencode-reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
@@ -199,6 +200,92 @@ function createSummary(): SessionSummary {
 }
 
 describe("Sessions metadata route", () => {
+  it("returns the latest live Codex usage before the session file exists", async () => {
+    const project = createProject();
+    const process = {
+      id: "proc-codex-live",
+      sessionId: "sess-codex-live",
+      projectId: project.id,
+      projectPath: project.path,
+      projectName: project.name,
+      sessionTitle: null,
+      state: "in-turn",
+      startedAt: "2026-08-14T15:50:09.000Z",
+      queueDepth: 0,
+      provider: "codex",
+      model: "gpt-5.3-codex",
+      permissionMode: "default",
+      modeVersion: 0,
+      pendingInputRequest: null,
+      supportsDynamicModels: false,
+      supportsDynamicCommands: false,
+      supportsSetModel: false,
+      contextWindow: 258_400,
+      messageHistory: [
+        {
+          type: "user",
+          uuid: "prompt-1",
+          timestamp: "2026-08-14T15:50:09.000Z",
+          message: { role: "user", content: "inspect the repository" },
+        },
+        {
+          type: "system",
+          subtype: "turn_usage",
+          usage: {
+            input_tokens: 15_112,
+            model_context_window: 258_400,
+          },
+        },
+        {
+          type: "system",
+          subtype: "turn_usage",
+          usage: {
+            input_tokens: 167_772,
+            output_tokens: 1_024,
+            cached_input_tokens: 150_000,
+            model_context_window: 258_400,
+          },
+        },
+      ],
+    } satisfies RuntimeProcessSnapshot;
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => process),
+        wasEverOwned: vi.fn(async () => true),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () =>
+          ({
+            getSession: vi.fn(async () => null),
+          }) as unknown as ISessionReader,
+      ),
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${process.sessionId}`,
+    );
+
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.session.contextUsage).toMatchObject({
+      inputTokens: 167_772,
+      outputTokens: 1_024,
+      cacheReadTokens: 150_000,
+      percentage: 65,
+      contextWindow: 258_400,
+    });
+    expect(json.messages).toHaveLength(1);
+    expect(json.messages[0].contextBefore).toMatchObject({
+      inputTokens: 167_772,
+      percentage: 65,
+      contextWindow: 258_400,
+    });
+  });
+
   it("persists live and idle permission-mode changes", async () => {
     const testDir = join(tmpdir(), `session-mode-route-${randomUUID()}`);
     const metadata = new SessionMetadataService({ dataDir: testDir });

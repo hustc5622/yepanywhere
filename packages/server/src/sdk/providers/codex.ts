@@ -3335,10 +3335,20 @@ export class CodexProvider implements AgentProvider {
     const notification = this.asThreadTokenUsageUpdatedNotification(params);
     if (!notification) return null;
 
+    const freshInputTokens = notification.tokenUsage.last.inputTokens;
+    const compactedContextTokens =
+      typeof notification.tokenUsage.last.totalTokens === "number"
+        ? notification.tokenUsage.last.totalTokens
+        : 0;
+
     return {
       turnId: notification.turnId,
       snapshot: {
-        inputTokens: notification.tokenUsage.last.inputTokens,
+        // Immediately after compaction Codex reports inputTokens=0 and puts
+        // the compacted summary size in last.totalTokens. Keep this aligned
+        // with the persisted reader and bridge-owned session path.
+        inputTokens:
+          freshInputTokens > 0 ? freshInputTokens : compactedContextTokens,
         outputTokens: notification.tokenUsage.last.outputTokens,
         cachedInputTokens: notification.tokenUsage.last.cachedInputTokens,
         modelContextWindow: notification.tokenUsage.modelContextWindow,
@@ -3980,6 +3990,26 @@ export class CodexProvider implements AgentProvider {
     retryableErrorsByTurnId: Map<string, CanonicalCodexError> = new Map(),
   ): SDKMessage[] {
     switch (notification.method) {
+      case "thread/tokenUsage/updated": {
+        const usage = this.extractTurnUsage(notification.params);
+        if (!usage) return [];
+        return [
+          withCodexTimestamp({
+            type: "system",
+            subtype: "turn_usage",
+            session_id: sessionId,
+            turnId: usage.turnId,
+            codexTurnId: usage.turnId,
+            usage: {
+              input_tokens: usage.snapshot.inputTokens,
+              output_tokens: usage.snapshot.outputTokens,
+              cached_input_tokens: usage.snapshot.cachedInputTokens,
+              model_context_window: usage.snapshot.modelContextWindow,
+            },
+          } as SDKMessage),
+        ];
+      }
+
       case "turn/completed": {
         const params = this.asTurnCompletedNotification(notification.params);
         const turnId = params?.turn.id ?? null;

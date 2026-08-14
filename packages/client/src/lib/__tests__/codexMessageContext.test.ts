@@ -31,6 +31,31 @@ describe("codexMessageContext", () => {
     });
   });
 
+  it("extracts context usage before a Codex turn completes", () => {
+    const session = {
+      provider: "codex",
+      model: "gpt-5.3-codex",
+    } as Session;
+    const message = {
+      type: "system",
+      subtype: "turn_usage",
+      usage: {
+        input_tokens: 167_772,
+        output_tokens: 1_024,
+        cached_input_tokens: 150_000,
+        model_context_window: 258_400,
+      },
+    } as Message;
+
+    expect(extractCodexTurnContextUsage(message, session)).toMatchObject({
+      inputTokens: 167_772,
+      outputTokens: 1_024,
+      cacheReadTokens: 150_000,
+      percentage: 65,
+      contextWindow: 258_400,
+    });
+  });
+
   it("applies context usage to the latest real user prompt", () => {
     const messages: Message[] = [
       {

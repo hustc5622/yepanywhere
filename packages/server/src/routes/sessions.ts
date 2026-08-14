@@ -275,23 +275,25 @@ function sdkMessagesToClientMessages(
       continue;
     }
 
-    const contextUsage = extractCodexTurnCompleteContextUsage(msg, options);
+    const contextUsage = extractCodexTurnContextUsage(msg, options);
     if (contextUsage && pendingUserMessage) {
       pendingUserMessage.contextBefore = contextUsage;
-      pendingUserMessage = null;
+      if (msg.subtype === "turn_complete") {
+        pendingUserMessage = null;
+      }
     }
   }
   return messages;
 }
 
-function extractCodexTurnCompleteContextUsage(
+function extractCodexTurnContextUsage(
   msg: SDKMessage,
   options: { model?: string; provider?: ProviderName },
 ): ContextUsage | undefined {
   if (
     (options.provider !== "codex" && options.provider !== "codex-oss") ||
     msg.type !== "system" ||
-    msg.subtype !== "turn_complete"
+    (msg.subtype !== "turn_usage" && msg.subtype !== "turn_complete")
   ) {
     return undefined;
   }
@@ -385,7 +387,8 @@ function computeSDKCompactionOverhead(sdkMessages: SDKMessage[]): number {
 /**
  * Extract context usage from SDK messages.
  * Finds the last assistant message with usage data; for Codex providers the
- * usage lives on `system/turn_complete` messages instead.
+ * usage lives on live `system/turn_usage` and final `system/turn_complete`
+ * messages instead.
  *
  * @param sdkMessages - SDK messages to search
  * @param model - Model ID for determining context window size
@@ -415,12 +418,13 @@ function extractContextUsageFromSDKMessages(
   for (let i = sdkMessages.length - 1; i >= 0; i--) {
     const msg = sdkMessages[i];
     if (!msg) continue;
-    // Codex attaches usage to system/turn_complete, not assistant messages.
+    // Codex attaches usage to system lifecycle messages, not assistant messages.
     const carriesUsage =
       msg.type === "assistant" ||
       (isCodexProvider &&
         msg.type === "system" &&
-        (msg as { subtype?: string }).subtype === "turn_complete");
+        ((msg as { subtype?: string }).subtype === "turn_usage" ||
+          (msg as { subtype?: string }).subtype === "turn_complete"));
     if (carriesUsage && msg.usage) {
       const usage = msg.usage as {
         input_tokens?: number;
@@ -447,8 +451,8 @@ function extractContextUsageFromSDKMessages(
       // Apply compaction overhead correction
       const inputTokens = rawInputTokens + overhead;
 
-      // Codex turn_complete usage carries the SDK-reported context window;
-      // prefer it over the model-table fallback.
+      // Codex lifecycle usage carries the SDK-reported context window; prefer
+      // it over the model-table fallback.
       const effectiveContextWindow =
         usage.model_context_window && usage.model_context_window > 0
           ? usage.model_context_window
