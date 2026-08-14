@@ -11,6 +11,7 @@ import type {
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
 import { zSessionNotification } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js";
+import { KIMI_ACP_SINGLE_QUESTION_REMINDER } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACPClient } from "../../../src/sdk/providers/acp/client.js";
 import {
@@ -320,6 +321,52 @@ describe("KimiProvider prompt completion", () => {
     vi.spyOn(ACPClient.prototype, "setSessionMode").mockResolvedValue();
     vi.spyOn(ACPClient.prototype, "close").mockImplementation(() => {});
   }
+
+  it("tells Kimi to ask ACP questions one at a time without changing the public prompt", async () => {
+    mockKimiSessionStart();
+    const prompt = vi.spyOn(ACPClient.prototype, "prompt").mockResolvedValue({
+      stopReason: "end_turn",
+    });
+
+    const session = await new KimiProvider({
+      kimiPath: process.execPath,
+    }).startSession({
+      cwd: process.cwd(),
+      initialMessage: { text: "inspect the project" },
+    });
+
+    await session.iterator.next();
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "user",
+        message: { content: "inspect the project" },
+      },
+    });
+    await session.iterator.next();
+
+    expect(prompt).toHaveBeenCalledWith("session-1", [
+      {
+        type: "text",
+        text: `${KIMI_ACP_SINGLE_QUESTION_REMINDER}\n\ninspect the project`,
+      },
+    ]);
+
+    session.queue.push({ text: "follow up" });
+    await expect(session.iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "user",
+        message: { content: "follow up" },
+      },
+    });
+    await session.iterator.next();
+    expect(prompt).toHaveBeenNthCalledWith(2, "session-1", [
+      {
+        type: "text",
+        text: `${KIMI_ACP_SINGLE_QUESTION_REMINDER}\n\nfollow up`,
+      },
+    ]);
+    session.abort();
+  });
 
   it("surfaces an ACP refusal as an error before completing the turn", async () => {
     mockKimiSessionStart();

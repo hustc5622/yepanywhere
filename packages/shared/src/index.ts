@@ -505,6 +505,7 @@ export type {
   KimiGoalSnapshot,
 } from "./kimi-schema/types.js";
 export {
+  KIMI_ACP_SINGLE_QUESTION_REMINDER,
   parseKimiWireJsonl,
   parseKimiSessionState,
   getKimiPromptText,

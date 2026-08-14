@@ -993,6 +993,20 @@ export function parseKimiSessionState(
 const KIMI_SYSTEM_PART_RE =
   /^<system>Image compressed to fit model limits:[\s\S]*<\/system>$/;
 
+/**
+ * Kimi's ACP adapter currently degrades a batched AskUserQuestion call to its
+ * first question because ACP has no multi-answer response shape. Yep injects
+ * this exact provider-only reminder into provider prompts so the model asks
+ * one question per call and never invents an answer for a dropped question.
+ *
+ * Exporting the exact text also lets persisted Kimi prompt replay remove only
+ * Yep's own compatibility block without hiding similar user-authored prose.
+ */
+export const KIMI_ACP_SINGLE_QUESTION_REMINDER = `<system-reminder>
+[yep-anywhere:kimi-acp-single-question]
+This ACP host can transport exactly one AskUserQuestion item per tool call. Put exactly one question in every AskUserQuestion call and wait for its answer before asking the next. If a result omits any question, ask each missing question in a new one-question call. Never infer an omitted answer or treat a Recommended option as selected.
+</system-reminder>`;
+
 function isKimiInjectedSystemText(text: string): boolean {
   return KIMI_SYSTEM_PART_RE.test(text.trim());
 }
@@ -1001,7 +1015,9 @@ function isKimiInjectedSystemText(text: string): boolean {
 export function getKimiPromptText(input: readonly unknown[]): string {
   return input
     .map((part) => {
-      if (typeof part === "string") return part;
+      if (typeof part === "string") {
+        return stripKimiAcpCompatibilityReminder(part);
+      }
       if (
         typeof part === "object" &&
         part !== null &&
@@ -1009,12 +1025,20 @@ export function getKimiPromptText(input: readonly unknown[]): string {
         typeof (part as { text?: unknown }).text === "string"
       ) {
         const text = (part as { text: string }).text;
-        return isKimiInjectedSystemText(text) ? "" : text;
+        return isKimiInjectedSystemText(text)
+          ? ""
+          : stripKimiAcpCompatibilityReminder(text);
       }
       return "";
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function stripKimiAcpCompatibilityReminder(text: string): string {
+  if (text === KIMI_ACP_SINGLE_QUESTION_REMINDER) return "";
+  const prefix = `${KIMI_ACP_SINGLE_QUESTION_REMINDER}\n\n`;
+  return text.startsWith(prefix) ? text.slice(prefix.length) : text;
 }
 
 /** A `blobref:<mimeType>;<sha256>` reference resolved to its parts. */

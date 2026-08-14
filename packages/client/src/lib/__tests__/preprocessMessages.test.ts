@@ -641,6 +641,70 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("normalizes Kimi JSON question answers without inventing a missing answer", () => {
+    const questions = [
+      {
+        header: "Interaction",
+        question: "Which interaction do you prefer?",
+        options: [
+          { label: "Wizard", description: "Step by step" },
+          { label: "Single page", description: "Progressive disclosure" },
+        ],
+      },
+      {
+        header: "Scope",
+        question: "Should the retry dialog be included?",
+        options: [
+          { label: "Launch only", description: "Smaller scope" },
+          { label: "Share components", description: "Broader scope" },
+        ],
+      },
+    ];
+    const messages: Message[] = [
+      {
+        id: "msg-kimi-question-use",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "AskUserQuestion:5",
+            name: "AskUserQuestion",
+            input: { questions },
+          },
+        ],
+      },
+      {
+        id: "msg-kimi-question-result",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "AskUserQuestion:5",
+            content: JSON.stringify({
+              answers: { "Which interaction do you prefer?": "Wizard" },
+            }),
+          },
+        ],
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+    const item = items[0];
+    if (!item || item.type !== "tool_call") {
+      throw new Error("expected a tool_call item");
+    }
+    expect(item.toolResult?.structured).toEqual({
+      questions,
+      answers: { "Which interaction do you prefer?": "Wizard" },
+    });
+    expect(
+      Object.keys(
+        (item.toolResult?.structured as { answers: Record<string, string> })
+          .answers,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("reads question answers from the live tool_result metadata, not the tool_use", () => {
     // Live-stream shape: the tool_use is emitted first without the final
     // answers; the completed tool_result carries `opencodeMetadata.answers`.

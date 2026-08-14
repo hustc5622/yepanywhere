@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  KIMI_ACP_SINGLE_QUESTION_REMINDER,
   KimiConfigUpdateRecordSchema,
   KimiGoalBudgetLimitsSchema,
   KimiGoalCreateRecordSchema,
@@ -161,6 +162,25 @@ describe("getKimiPromptText", () => {
         },
       ]),
     ).toBe("describe this");
+  });
+
+  it("hides Yep's exact ACP question compatibility reminder", () => {
+    expect(
+      getKimiPromptText([
+        {
+          type: "text",
+          text: `${KIMI_ACP_SINGLE_QUESTION_REMINDER}\n\ninspect the project`,
+        },
+      ]),
+    ).toBe("inspect the project");
+    expect(
+      getKimiPromptText([
+        {
+          type: "text",
+          text: "[yep-anywhere:kimi-acp-single-question] is user prose",
+        },
+      ]),
+    ).toBe("[yep-anywhere:kimi-acp-single-question] is user prose");
   });
 
   it("keeps user text that merely mentions a system tag", () => {

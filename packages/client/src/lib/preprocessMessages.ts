@@ -1678,7 +1678,48 @@ function normalizeOpenCodeToolResult(
     return normalizeOpenCodeQuestionResult(input, resultMetadata);
   }
 
+  if (normalized === "askuserquestion") {
+    return normalizeAskUserQuestionResult(input, content);
+  }
+
   return undefined;
+}
+
+/**
+ * Kimi persists AskUserQuestion results as JSON text instead of a structured
+ * tool result. Pair the answer object with the original prompts so the shared
+ * renderer can count and highlight only the questions actually answered.
+ */
+function normalizeAskUserQuestionResult(
+  input: unknown,
+  content: string,
+): unknown {
+  if (!isRecord(input) || !Array.isArray(input.questions)) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.answers)) return undefined;
+
+  const answers: Record<string, string | string[]> = {};
+  for (const [question, rawAnswer] of Object.entries(parsed.answers)) {
+    if (typeof rawAnswer === "string" && rawAnswer.length > 0) {
+      answers[question] = rawAnswer;
+      continue;
+    }
+    if (Array.isArray(rawAnswer)) {
+      const values = rawAnswer.filter(
+        (value): value is string =>
+          typeof value === "string" && value.length > 0,
+      );
+      if (values.length > 0) answers[question] = values;
+    }
+  }
+
+  return { questions: input.questions, answers };
 }
 
 /**

@@ -34,7 +34,10 @@ import type {
   SessionUpdate,
   ToolKind,
 } from "@agentclientprotocol/sdk";
-import type { ModelInfo } from "@yep-anywhere/shared";
+import {
+  KIMI_ACP_SINGLE_QUESTION_REMINDER,
+  type ModelInfo,
+} from "@yep-anywhere/shared";
 import { normalizeKimiToolInput } from "../../kimi/tool-input.js";
 import { getLogger } from "../../logging/logger.js";
 import { whichCommand } from "../cli-detection.js";
@@ -1095,6 +1098,12 @@ export class KimiProvider implements AgentProvider {
           internalPrompt = `${prefix}${internalPrompt}`;
           publicPrompt = `${prefix}${publicPrompt}`;
         }
+        // Kimi's current ACP bridge reduces AskUserQuestion batches to the
+        // first item and can only round-trip one optionId. Repeat this hidden
+        // host constraint on every turn so compaction cannot discard it, and
+        // explicitly forbid accepting a recommended default for a missing
+        // answer.
+        internalPrompt = `${KIMI_ACP_SINGLE_QUESTION_REMINDER}\n\n${internalPrompt}`;
         isFirstNewMessage = false;
 
         const userUuid = (message as { uuid?: string }).uuid ?? randomUUID();
