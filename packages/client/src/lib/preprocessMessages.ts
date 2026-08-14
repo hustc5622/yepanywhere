@@ -1,4 +1,8 @@
-import type { KimiGoalSnapshot, MarkdownAugment } from "@yep-anywhere/shared";
+import {
+  CODEX_THREAD_ITEM_TYPES,
+  type KimiGoalSnapshot,
+  type MarkdownAugment,
+} from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 import type {
   CodexNativeItem,
@@ -19,6 +23,22 @@ import {
 } from "./openCodeSubagents";
 
 const CODEX_TURN_ABORTED_DISPLAY_TEXT = "Conversation stopped by user";
+
+const CODEX_KNOWN_THREAD_ITEM_TYPES = new Set<string>(CODEX_THREAD_ITEM_TYPES);
+const CODEX_NATIVE_ITEM_TYPES_WITH_DEDICATED_RENDERERS = new Set([
+  "threadGoal",
+  "plan",
+  "turnPlan",
+  "subAgentActivity",
+  "collabAgentToolCall",
+]);
+
+function shouldKeepCodexNativeItemType(type: string): boolean {
+  return (
+    CODEX_NATIVE_ITEM_TYPES_WITH_DEDICATED_RENDERERS.has(type) ||
+    !CODEX_KNOWN_THREAD_ITEM_TYPES.has(type)
+  );
+}
 
 interface TaskNotification {
   taskId: string;
@@ -359,11 +379,37 @@ function collapseSessionSetupRuns(items: RenderItem[]): RenderItem[] {
 
 function isPlanProgressToolName(toolName: string): boolean {
   const normalized = toolName.trim().toLowerCase().replace(/[_-]/g, "");
-  return normalized === "updateplan" || normalized === "todowrite";
+  return (
+    normalized === "updateplan" ||
+    normalized === "todowrite" ||
+    normalized === "todolist"
+  );
 }
 
 export function isPlanProgressItem(item: RenderItem): item is ToolCallItem {
-  return item.type === "tool_call" && isPlanProgressToolName(item.toolName);
+  if (item.type !== "tool_call" || !isPlanProgressToolName(item.toolName)) {
+    return false;
+  }
+
+  const normalized = item.toolName.trim().toLowerCase().replace(/[_-]/g, "");
+  if (normalized === "todolist") {
+    // Kimi uses the same tool for reads and writes. Only writes replace the
+    // plan snapshot; a query without `todos` remains a normal tool row.
+    return isRecord(item.toolInput) && Array.isArray(item.toolInput.todos);
+  }
+  return true;
+}
+
+export function isNativePlanProgressItem(
+  item: RenderItem,
+): item is CodexNativeItem {
+  return (
+    item.type === "codex_native_item" && item.threadItem.type === "turnPlan"
+  );
+}
+
+export function isPlanTimelineItem(item: RenderItem): boolean {
+  return isPlanProgressItem(item) || isNativePlanProgressItem(item);
 }
 
 function uniqueSourceMessages(messages: Message[]): Message[] {
@@ -620,6 +666,14 @@ function processMessage(
     if (subtype === "codex_native_item") {
       const threadItem = (msg as { codexThreadItem?: unknown }).codexThreadItem;
       if (isRecord(threadItem) && typeof threadItem.type === "string") {
+        // Known ThreadItems such as reasoning, commandExecution, and
+        // agentMessage already flow through the normalized transcript. Their
+        // canonical copies do not carry additional displayable content and
+        // otherwise become duplicate label-only cards. Keep the native types
+        // that have dedicated UI plus unknown future variants for diagnostics.
+        if (!shouldKeepCodexNativeItemType(threadItem.type)) {
+          return;
+        }
         const lifecycle = (msg as { codexThreadItemLifecycle?: unknown })
           .codexThreadItemLifecycle;
         const nativeItem: CodexNativeItem = {

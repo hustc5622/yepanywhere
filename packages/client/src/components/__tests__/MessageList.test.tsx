@@ -75,7 +75,7 @@ function assistantToolItem(
   id: string,
   toolName: string,
   answered = false,
-): RenderItem {
+): Extract<RenderItem, { type: "tool_call" }> {
   return {
     id,
     type: "tool_call",
@@ -99,6 +99,36 @@ function assistantToolItem(
         message: { role: "assistant", content: [] },
       } satisfies Message,
     ],
+  };
+}
+
+function codexNativeTurnPlanItem(id: string): RenderItem {
+  return {
+    id,
+    type: "codex_native_item",
+    threadItem: {
+      type: "turnPlan",
+      steps: [{ step: "Fix duplicate plan", status: "completed" }],
+    },
+    lifecycle: "completed",
+    sourceMessages: [
+      {
+        id,
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItem: { type: "turnPlan" },
+      } satisfies Message,
+    ],
+  };
+}
+
+function kimiTodoListItem(
+  id: string,
+  todos?: Array<{ title: string; status: string }>,
+): RenderItem {
+  return {
+    ...assistantToolItem(id, "TodoList"),
+    toolInput: todos ? { todos } : {},
   };
 }
 
@@ -227,6 +257,63 @@ describe("MessageList target loading", () => {
 
     await waitFor(() => expect(onBranchFocused).toHaveBeenCalledTimes(1));
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+});
+
+describe("MessageList plan progress", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the exec trace but hides both plan snapshots from the transcript", () => {
+    render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantToolItem("exec-plan", "CodexExec"),
+          assistantToolItem("update-plan", "UpdatePlan"),
+          codexNativeTurnPlanItem("native-turn-plan"),
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("render-item-exec-plan")).not.toBeNull();
+    expect(screen.queryByTestId("render-item-update-plan")).toBeNull();
+    expect(screen.queryByTestId("render-item-native-turn-plan")).toBeNull();
+  });
+
+  it("hides Kimi TodoList writes but keeps TodoList reads visible", () => {
+    render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          kimiTodoListItem("kimi-todo-write", [
+            { title: "Fix the renderer", status: "in_progress" },
+          ]),
+          kimiTodoListItem("kimi-todo-read"),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByTestId("render-item-kimi-todo-write")).toBeNull();
+    expect(screen.getByTestId("render-item-kimi-todo-read")).not.toBeNull();
   });
 });
 

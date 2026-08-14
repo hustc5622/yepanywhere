@@ -1518,6 +1518,70 @@ describe("normalizeSession", () => {
 });
 
 describe("convertKimiMessages", () => {
+  it("replays TodoList from the durable tool call without duplicating its store update", () => {
+    const messages = convertKimiMessages({
+      sessionId: "session-todo",
+      records: [
+        {
+          type: "turn.prompt",
+          input: [{ type: "text", text: "fix the renderer" }],
+          time: 1,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "TodoList_1",
+            name: "TodoList",
+            args: {
+              todos: [
+                { title: "Inspect code", status: "done" },
+                { title: "Patch renderer", status: "in_progress" },
+              ],
+            },
+          },
+          time: 2,
+        },
+        {
+          type: "tools.update_store",
+          key: "todo",
+          value: [
+            { title: "Inspect code", status: "done" },
+            { title: "Patch renderer", status: "in_progress" },
+          ],
+          time: 3,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.result",
+            toolCallId: "TodoList_1",
+            result: { output: "Todo list updated." },
+          },
+          time: 4,
+        },
+      ],
+    });
+
+    const blocks = messages.flatMap((message) => {
+      const content = message.message?.content;
+      return Array.isArray(content) ? content : [];
+    });
+    expect(blocks.filter((block) => block.type === "tool_use")).toEqual([
+      expect.objectContaining({
+        id: "TodoList_1",
+        name: "TodoList",
+        input: {
+          todos: [
+            { title: "Inspect code", status: "done" },
+            { title: "Patch renderer", status: "in_progress" },
+          ],
+        },
+      }),
+    ]);
+    expect(blocks.filter((block) => block.type === "thinking")).toHaveLength(0);
+  });
+
   it("keeps persisted provider.filtered failures visible after reload", () => {
     const session: KimiSessionContent = {
       sessionId: "session-filtered",

@@ -8,6 +8,7 @@ import { formatSmartTime } from "../lib/datetime";
 import { getOpenCodeSubagentSessionId } from "../lib/openCodeSubagents";
 import {
   type ActiveToolApproval,
+  isNativePlanProgressItem,
   isPlanProgressItem,
   preprocessMessages,
 } from "../lib/preprocessMessages";
@@ -17,7 +18,11 @@ import type {
   ProviderName,
   SessionStatus,
 } from "../types";
-import type { RenderItem, ToolCallItem } from "../types/renderItems";
+import type {
+  CodexNativeItem,
+  RenderItem,
+  ToolCallItem,
+} from "../types/renderItems";
 import { ProviderBadge } from "./ProviderBadge";
 import {
   type ChecklistItem,
@@ -657,13 +662,17 @@ function buildPlanProgress(
   items: RenderItem[],
   t: TFunction,
 ): PlanProgress | null {
-  const planItems = items.filter(isPlanProgressItem);
+  const planItems = items.filter(
+    (item) => isPlanProgressItem(item) || isNativePlanProgressItem(item),
+  );
   const latest = planItems[planItems.length - 1];
   if (!latest) {
     return null;
   }
 
-  const extracted = extractPlanProgress(latest);
+  const extracted = isNativePlanProgressItem(latest)
+    ? extractNativeTurnPlanProgress(latest)
+    : extractPlanProgress(latest);
   if (!extracted || extracted.items.length === 0) {
     return null;
   }
@@ -681,6 +690,33 @@ function buildPlanProgress(
   };
 }
 
+function extractNativeTurnPlanProgress(item: CodexNativeItem): {
+  items: ChecklistItem[];
+  note?: string;
+} {
+  const steps = Array.isArray(item.threadItem.steps)
+    ? item.threadItem.steps
+    : [];
+  const items = steps
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        isRecord(entry) &&
+        typeof entry.step === "string" &&
+        entry.step.trim() !== "",
+    )
+    .map((entry) => ({
+      label: (entry.step as string).trim(),
+      status: normalizeChecklistStatus(entry.status),
+    }));
+  const explanation = item.threadItem.explanation;
+  const note =
+    typeof explanation === "string" && explanation.trim()
+      ? explanation.trim()
+      : undefined;
+
+  return { items, note };
+}
+
 function extractPlanProgress(
   item: ToolCallItem,
 ): { items: ChecklistItem[]; note?: string } | null {
@@ -693,8 +729,8 @@ function extractPlanProgress(
     return extractUpdatePlanProgress(item.toolInput);
   }
 
-  if (normalizedToolName === "todowrite") {
-    return extractTodoWriteProgress(item);
+  if (normalizedToolName === "todowrite" || normalizedToolName === "todolist") {
+    return extractTodoProgress(item);
   }
 
   return null;
@@ -725,7 +761,7 @@ function extractUpdatePlanProgress(
   return { items, note };
 }
 
-function extractTodoWriteProgress(
+function extractTodoProgress(
   item: ToolCallItem,
 ): { items: ChecklistItem[] } | null {
   const structured = item.toolResult?.structured;
@@ -744,11 +780,14 @@ function extractTodoWriteProgress(
     .filter(
       (entry): entry is Record<string, unknown> =>
         isRecord(entry) &&
-        typeof entry.content === "string" &&
-        entry.content !== "",
+        ((typeof entry.content === "string" && entry.content !== "") ||
+          (typeof entry.title === "string" && entry.title !== "")),
     )
     .map((entry) => ({
-      label: entry.content as string,
+      label:
+        typeof entry.content === "string"
+          ? entry.content
+          : (entry.title as string),
       status: normalizeChecklistStatus(entry.status),
     }));
 

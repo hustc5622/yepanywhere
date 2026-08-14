@@ -101,6 +101,63 @@ describe("SessionInspector", () => {
     expect(screen.queryByText("Done.")).toBeNull();
   });
 
+  it("uses a native Codex turn plan in the inspector", () => {
+    renderInspector("codex", [
+      {
+        id: "native-turn-plan",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem: {
+          type: "turnPlan",
+          steps: [
+            { step: "Inspect duplicate rows", status: "completed" },
+            { step: "Fix plan rendering", status: "in_progress" },
+          ],
+          explanation: "Keep the checklist in the session outline.",
+        },
+      },
+    ]);
+
+    expect(screen.getByText("Plan")).not.toBeNull();
+    expect(screen.getByText("1/2 complete")).not.toBeNull();
+    expect(screen.getByText("Inspect duplicate rows")).not.toBeNull();
+    expect(screen.getByText("Fix plan rendering")).not.toBeNull();
+    expect(
+      screen.getByText("Keep the checklist in the session outline."),
+    ).not.toBeNull();
+  });
+
+  it("uses a persisted Kimi TodoList write in the inspector", () => {
+    renderInspector("kimi", [
+      {
+        id: "kimi-todo-message",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "kimi-todo-1",
+              name: "TodoList",
+              input: {
+                todos: [
+                  { title: "Inspect duplicate rows", status: "done" },
+                  { title: "Fix Kimi plan rendering", status: "in_progress" },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(screen.getByText("Plan")).not.toBeNull();
+    expect(screen.getByText("1/2 complete")).not.toBeNull();
+    expect(screen.getByText("Inspect duplicate rows")).not.toBeNull();
+    expect(screen.getByText("Fix Kimi plan rendering")).not.toBeNull();
+  });
+
   it("lists OpenCode subagents with links to their child sessions", () => {
     renderInspector("opencode", [
       {

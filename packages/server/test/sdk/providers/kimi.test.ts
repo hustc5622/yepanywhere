@@ -678,6 +678,68 @@ describe("KimiProvider ACP updates", () => {
     });
   });
 
+  it("identifies a structured TodoList update from its descriptive ACP title", () => {
+    const provider = new KimiProvider();
+
+    expect(
+      convertKimiUpdate(provider, {
+        sessionUpdate: "tool_call",
+        toolCallId: "todo-1",
+        title: "Updating todo list",
+        status: "in_progress",
+        rawInput: {
+          todos: [
+            { title: "Inspect the session", status: "done" },
+            { title: "Fix the renderer", status: "in_progress" },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "todo-1",
+            name: "TodoList",
+            input: {
+              todos: [
+                { title: "Inspect the session", status: "done" },
+                { title: "Fix the renderer", status: "in_progress" },
+              ],
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("identifies a read-only TodoList call with no todos input", () => {
+    const provider = new KimiProvider();
+
+    expect(
+      convertKimiUpdate(provider, {
+        sessionUpdate: "tool_call",
+        toolCallId: "todo-read-1",
+        title: "Reading todo list",
+        status: "in_progress",
+        rawInput: {},
+      }),
+    ).toMatchObject({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "todo-read-1",
+            name: "TodoList",
+            input: {},
+          },
+        ],
+      },
+    });
+  });
+
   it("distinguishes Glob from Grep when both include a path", () => {
     const provider = new KimiProvider();
 
@@ -794,7 +856,7 @@ describe("KimiProvider ACP updates", () => {
     });
   });
 
-  it("maps Kimi thought and plan updates instead of dropping them", () => {
+  it("keeps Kimi thoughts but drops the duplicate ACP TodoList plan", () => {
     const provider = new KimiProvider();
 
     expect(
@@ -827,17 +889,7 @@ describe("KimiProvider ACP updates", () => {
           },
         ],
       }),
-    ).toMatchObject({
-      type: "assistant",
-      message: {
-        content: [
-          {
-            type: "thinking",
-            thinking: "- [x] Inspect session data\n- [>] Fix normalization",
-          },
-        ],
-      },
-    });
+    ).toBeNull();
   });
 });
 

@@ -1109,6 +1109,65 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("collapses repeated Kimi TodoList writes using the latest title snapshot", () => {
+    const messages: Message[] = [
+      {
+        id: "msg-user",
+        role: "user",
+        content: "Implement the feature",
+      },
+      {
+        id: "msg-kimi-todo-1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "kimi-todo-1",
+            name: "TodoList",
+            input: {
+              todos: [
+                { title: "Inspect code", status: "in_progress" },
+                { title: "Patch renderer", status: "pending" },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        id: "msg-kimi-todo-2",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "kimi-todo-2",
+            name: "TodoList",
+            input: {
+              todos: [
+                { title: "Inspect code", status: "done" },
+                { title: "Patch renderer", status: "in_progress" },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+
+    const todoItems = preprocessMessages(messages).filter(
+      (item) => item.type === "tool_call" && item.toolName === "TodoList",
+    );
+
+    expect(todoItems).toHaveLength(1);
+    expect(todoItems[0]).toMatchObject({
+      id: "kimi-todo-1",
+      toolInput: {
+        todos: [
+          { title: "Inspect code", status: "done" },
+          { title: "Patch renderer", status: "in_progress" },
+        ],
+      },
+    });
+  });
+
   it("preserves Agent tool summaries for rendering completed tasks", () => {
     const messages: Message[] = [
       {
@@ -2708,6 +2767,47 @@ Details with a &gt; comparison.</result>
       const items = preprocessMessages(messages);
       expect(items).toHaveLength(1);
       expect(items[0]?.type).toBe("codex_native_item");
+    });
+
+    it("suppresses known canonical placeholders but keeps native UI and future types", () => {
+      const messages: Message[] = [
+        ...["reasoning", "commandExecution", "agentMessage"].map(
+          (type, index) => ({
+            id: `known-${index}`,
+            type: "system" as const,
+            subtype: "codex_native_item",
+            codexThreadItem: { type, id: `thread-item-${index}` },
+            codexThreadItemLifecycle: "completed",
+            _source: "jsonl" as const,
+          }),
+        ),
+        {
+          id: "turn-plan",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: {
+            type: "turnPlan",
+            steps: [{ step: "Fix the renderer", status: "in_progress" }],
+          },
+          codexThreadItemLifecycle: "completed",
+          _source: "jsonl",
+        },
+        {
+          id: "future-item",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: { type: "futureThreadItem" },
+          codexThreadItemLifecycle: "started",
+          _source: "jsonl",
+        },
+      ];
+
+      const items = preprocessMessages(messages);
+
+      expect(items.map((item) => item.id)).toEqual([
+        "turn-plan",
+        "future-item",
+      ]);
     });
 
     it("skips codex_native_item without a valid threadItem payload", () => {

@@ -12,7 +12,7 @@ import {
 import { useOptionalI18n } from "../i18n";
 import {
   type ActiveToolApproval,
-  isPlanProgressItem,
+  isPlanTimelineItem,
   preprocessMessages,
 } from "../lib/preprocessMessages";
 import type { Message } from "../types";
@@ -221,7 +221,7 @@ export const MessageList = memo(function MessageList({
     [preprocessedItems, messages, markdownAugments, activeToolApproval],
   );
   const visibleRenderItems = useMemo(
-    () => renderItems.filter((item) => !isPlanProgressItem(item)),
+    () => renderItems.filter((item) => !isPlanTimelineItem(item)),
     [renderItems],
   );
   const focusedBranchItemId = useMemo(() => {

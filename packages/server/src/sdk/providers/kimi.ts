@@ -646,12 +646,21 @@ function inferKimiAcpToolName(
     glob: "Glob",
     grep: "Grep",
     read: "Read",
+    todolist: "TodoList",
     webfetch: "WebFetch",
     websearch: "WebSearch",
     write: "Write",
   };
   const exactName = exactNames[lowerTitle];
   if (exactName) return exactName;
+
+  if (
+    lowerTitle === "reading todo list" ||
+    lowerTitle === "clearing todo list" ||
+    lowerTitle === "updating todo list"
+  ) {
+    return "TodoList";
+  }
 
   // Subagent dispatch: AgentSwarm also accepts `subagent_type`, so its
   // distinctive batch fields must be checked before the single-Agent shape.
@@ -664,6 +673,10 @@ function inferKimiAcpToolName(
   ) {
     return "Agent";
   }
+
+  // Retain the structured-input fallback in case a future adapter changes
+  // the descriptive title used for TodoList writes.
+  if (Array.isArray(input.todos)) return "TodoList";
 
   if ("old_string" in input || "new_string" in input) return "Edit";
   if (typeof input.path === "string" && typeof input.content === "string") {
@@ -1598,28 +1611,11 @@ export class KimiProvider implements AgentProvider {
       }
 
       case "plan": {
-        if (update.entries.length > 0) {
-          const planText = update.entries
-            .map((entry) => {
-              const marker =
-                entry.status === "completed"
-                  ? "x"
-                  : entry.status === "in_progress"
-                    ? ">"
-                    : " ";
-              return `- [${marker}] ${entry.content}`;
-            })
-            .join("\n");
-          return {
-            type: "assistant",
-            uuid: randomUUID(),
-            session_id: sessionId,
-            message: {
-              role: "assistant",
-              content: [{ type: "thinking", thinking: planText }],
-            },
-          } as SDKMessage;
-        }
+        // Kimi's ACP adapter emits this immediately after the TodoList
+        // `tool_call` for the same structured display. The tool call is the
+        // durable source (and is also present in wire replay), so projecting
+        // the duplicate plan as thinking created a transient fake-reasoning
+        // row that disappeared after refresh.
         return null;
       }
 

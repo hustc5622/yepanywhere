@@ -33,10 +33,9 @@ function asArray(value: unknown): unknown[] | undefined {
  *
  * ThreadItem types that already have a first-class representation elsewhere
  * (agentMessage → text, reasoning → thinking, commandExecution/fileChange →
- * tool_call, userMessage → user_prompt) are not double-rendered here: the
- * canonical overlay only projects the ThreadItem variants that lack a legacy
- * RenderItem equivalent, so this dispatcher only needs to cover the subset
- * that would otherwise be invisible.
+ * tool_call, userMessage → user_prompt) are filtered during preprocessing,
+ * so this dispatcher only handles dedicated native UI and future unknown
+ * variants that would otherwise be invisible.
  */
 export function CodexNativeItemBlock({ item }: Props) {
   const { threadItem, lifecycle } = item;
