@@ -3,7 +3,6 @@ import { type OhMyRouterThroughputStatus, api } from "../../api/client";
 import { useProviders } from "../../hooks/useProviders";
 import { useI18n } from "../../i18n";
 import { getAllProviders } from "../../providers/registry";
-import { RemoteExecutorsSettings } from "./RemoteExecutorsSettings";
 
 function formatMilliseconds(value: number | undefined): string {
   if (value === undefined) return "—";
@@ -162,8 +161,7 @@ function OhMyRouterThroughputBenchmark() {
 
 export function ProvidersSettings() {
   const { t } = useI18n();
-  const { providers: serverProviders, loading: providersLoading } =
-    useProviders();
+  const { providers: serverProviders } = useProviders();
 
   // Merge server detection status with client-side metadata
   const registeredProviders = getAllProviders();
@@ -224,7 +222,6 @@ export function ProvidersSettings() {
           ))}
         </div>
       </section>
-      <RemoteExecutorsSettings />
       <OhMyRouterThroughputBenchmark />
     </>
   );

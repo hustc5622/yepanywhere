@@ -3,13 +3,12 @@ import type { ProviderInfo } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useProviders } from "../useProviders";
 
-const { mockGetProvider, mockGetProviders } = vi.hoisted(() => ({
-  mockGetProvider: vi.fn(),
+const { mockGetProviders } = vi.hoisted(() => ({
   mockGetProviders: vi.fn(),
 }));
 
 vi.mock("../../api/client", () => ({
-  api: { getProvider: mockGetProvider, getProviders: mockGetProviders },
+  api: { getProviders: mockGetProviders },
 }));
 
 function deferred<T>() {
@@ -35,14 +34,12 @@ const codexProvider = {
 describe("useProviders", () => {
   afterEach(() => {
     cleanup();
-    mockGetProvider.mockReset();
     mockGetProviders.mockReset();
   });
 
   it("shares provider probes and keeps the last snapshot during revalidation", async () => {
     const initial = deferred<{ providers: ProviderInfo[] }>();
     mockGetProviders.mockReturnValueOnce(initial.promise);
-    mockGetProvider.mockResolvedValue({ provider: codexProvider });
 
     const first = renderHook(() => useProviders());
     const second = renderHook(() => useProviders());

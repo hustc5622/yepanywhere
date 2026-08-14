@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { encodeProjectId } from "../../src/projects/paths.js";
 import { createProvidersRoutes } from "../../src/routes/providers.js";
+import { getAllProviders, getProvider } from "../../src/sdk/providers/index.js";
 import type { AgentProvider } from "../../src/sdk/providers/types.js";
 import { ZCodeProtocolError } from "../../src/sdk/providers/zcode-protocol/types.js";
 
@@ -13,6 +14,13 @@ function deferred() {
 }
 
 describe("provider routes", () => {
+  it("retires Claude SSH from discovery while preserving history lookup", () => {
+    expect(getAllProviders().map((provider) => provider.name)).not.toContain(
+      "claude",
+    );
+    expect(getProvider("claude")?.name).toBe("claude");
+  });
+
   it("loads provider metadata concurrently without waiting for remote refreshes", async () => {
     const gate = deferred();
     const started: string[] = [];

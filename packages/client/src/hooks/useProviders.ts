@@ -4,7 +4,6 @@ import { api } from "../api/client";
 
 let cachedProviders: ProviderInfo[] | null = null;
 let providersRequest: Promise<{ providers: ProviderInfo[] }> | null = null;
-let claudeRefreshRequest: Promise<{ provider: ProviderInfo }> | null = null;
 
 function fetchProvidersShared(): Promise<{ providers: ProviderInfo[] }> {
   if (!providersRequest) {
@@ -13,26 +12,6 @@ function fetchProvidersShared(): Promise<{ providers: ProviderInfo[] }> {
     });
   }
   return providersRequest;
-}
-
-function refreshClaudeProviderShared(): Promise<{ provider: ProviderInfo }> {
-  if (!claudeRefreshRequest) {
-    claudeRefreshRequest = api
-      .getProvider("claude", { fresh: true })
-      .finally(() => {
-        claudeRefreshRequest = null;
-      });
-  }
-  return claudeRefreshRequest;
-}
-
-function replaceProvider(
-  providers: ProviderInfo[],
-  nextProvider: ProviderInfo,
-): ProviderInfo[] {
-  return providers.map((provider) =>
-    provider.name === nextProvider.name ? nextProvider : provider,
-  );
 }
 
 /**
@@ -62,24 +41,6 @@ export function useProviders() {
       const data = await fetchProvidersShared();
       cachedProviders = data.providers;
       setProviders(data.providers);
-
-      // The aggregate endpoint deliberately returns Claude's cached/fallback
-      // catalog without waiting for SSH. Join its background probe and replace
-      // that one entry when fresh remote metadata becomes available.
-      if (data.providers.some((provider) => provider.name === "claude")) {
-        void refreshClaudeProviderShared()
-          .then(({ provider }) => {
-            const nextProviders = replaceProvider(
-              cachedProviders ?? data.providers,
-              provider,
-            );
-            cachedProviders = nextProviders;
-            setProviders(nextProviders);
-          })
-          .catch(() => {
-            // The fast aggregate snapshot remains usable when SSH is offline.
-          });
-      }
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
@@ -108,7 +69,7 @@ export function getAvailableProviders(
 
 /**
  * Get the default provider from available providers.
- * Prefers Claude if available, otherwise the first available provider.
+ * Prefers the configured default provider, otherwise the first available one.
  */
 export function getDefaultProvider(
   providers: ProviderInfo[],

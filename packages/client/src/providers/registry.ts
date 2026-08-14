@@ -10,8 +10,7 @@ import { OpenCodeProvider } from "./implementations/OpenCodeProvider";
 import { ZCodeProvider } from "./implementations/ZCodeProvider";
 import type { Provider, ProviderMetadata } from "./types";
 
-const providers: Record<string, Provider> = {
-  claude: new ClaudeProvider(),
+const activeProviders: Record<string, Provider> = {
   gemini: new GeminiProvider(),
   "gemini-acp": new GeminiACPProvider(),
   codex: new CodexProvider(),
@@ -21,11 +20,18 @@ const providers: Record<string, Provider> = {
   zcode: new ZCodeProvider(),
 };
 
+const providers: Record<string, Provider> = {
+  // Retain Claude capabilities for rendering historical sessions, but keep the
+  // retired SSH channel out of settings and new-session provider discovery.
+  claude: new ClaudeProvider(),
+  ...activeProviders,
+};
+
 /**
- * Get all registered providers for settings display.
+ * Get all active providers for settings display.
  */
 export function getAllProviders(): Provider[] {
-  return Object.values(providers);
+  return Object.values(activeProviders);
 }
 
 /**

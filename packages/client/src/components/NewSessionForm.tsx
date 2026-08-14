@@ -47,7 +47,6 @@ import {
   useProviders,
 } from "../hooks/useProviders";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
-import { useRemoteExecutors } from "../hooks/useRemoteExecutors";
 import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
 import { getStaticAgentCommandConfigs } from "../lib/agentCommands";
@@ -67,7 +66,7 @@ import {
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
 import type { PermissionMode, SessionNavigationState } from "../types";
-import { ClaudeUsageCard, CodexUsageCard } from "./CodexUsageCard";
+import { CodexUsageCard } from "./CodexUsageCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
 import { SlashCommandButton } from "./SlashCommandButton";
@@ -381,7 +380,6 @@ export function NewSessionForm({
   const newSessionThemeStyle = {
     "--new-session-accent": selectedProviderAccent,
   } as CSSProperties;
-  const [selectedExecutor, setSelectedExecutor] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<
     string | null
@@ -498,9 +496,6 @@ export function NewSessionForm({
     isLoading: settingsLoading,
     updateSetting: updateServerSetting,
   } = useServerSettings();
-  const { executors: remoteExecutors, loading: executorsLoading } =
-    useRemoteExecutors();
-
   const availableProviders = getAvailableProviders(providers);
   const resolvedPlaceholder = placeholder ?? t("newSessionPlaceholder");
   const selectedProviderInfo = providers.find(
@@ -1145,18 +1140,6 @@ export function NewSessionForm({
     }
   }, [autoFocus]);
 
-  useEffect(() => {
-    if (selectedProvider !== "claude") {
-      setSelectedExecutor(null);
-      return;
-    }
-    setSelectedExecutor((current) =>
-      current && remoteExecutors.some((executor) => executor.host === current)
-        ? current
-        : (remoteExecutors[0]?.host ?? null),
-    );
-  }, [remoteExecutors, selectedProvider]);
-
   // Check for FAB pre-fill on mount (when coming from FloatingActionButton)
   useEffect(() => {
     const prefill = getFabPrefill();
@@ -1314,9 +1297,6 @@ export function NewSessionForm({
   const thinkingForRequest = supportsThinkingToggle
     ? getThinkingOption(thinkingMode, effectiveThinkingEffort)
     : undefined;
-  const claudeExecutorUnavailable =
-    selectedProvider === "claude" &&
-    (executorsLoading || selectedExecutor === null);
   const currentProviderDefaults = useMemo(
     (): NewSessionProviderDefaults => ({
       model: modelForRequest,
@@ -1391,8 +1371,7 @@ export function NewSessionForm({
       !hasContent ||
       isStarting ||
       startRetryBlockedMessage ||
-      hasOpenCodeConfigError ||
-      claudeExecutorUnavailable
+      hasOpenCodeConfigError
     ) {
       return;
     }
@@ -1422,10 +1401,6 @@ export function NewSessionForm({
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
         codexModelProvider: codexModelProviderForRequest,
         opencodeConfig: opencodeConfigForRequest,
-        executor:
-          selectedProvider === "claude"
-            ? (selectedExecutor ?? undefined)
-            : undefined,
       };
 
       if (pendingFiles.length > 0) {
@@ -1922,8 +1897,7 @@ export function NewSessionForm({
             isStarting ||
             Boolean(startRetryBlockedMessage) ||
             !hasContent ||
-            hasOpenCodeConfigError ||
-            claudeExecutorUnavailable
+            hasOpenCodeConfigError
           }
           className="send-button"
           aria-label={t("newSessionStartAction")}
@@ -2101,7 +2075,6 @@ export function NewSessionForm({
       </div>
 
       {selectedProvider === "codex" && <CodexUsageCard />}
-      {selectedProvider === "claude" && <ClaudeUsageCard />}
 
       <div className="new-session-input-area">{inputArea}</div>
 
@@ -2415,44 +2388,6 @@ export function NewSessionForm({
               </button>
             ))}
           </div>
-        </div>
-      )}
-
-      {selectedProvider === "claude" && (
-        <div className="new-session-executor-section">
-          <h3>{t("newSessionRunOnTitle")}</h3>
-          {executorsLoading ? (
-            <p className="settings-hint">
-              {t("newSessionRemoteExecutorLoading")}
-            </p>
-          ) : remoteExecutors.length === 0 ? (
-            <p className="new-session-limit-error" role="alert">
-              {t("newSessionRemoteExecutorRequired")}
-            </p>
-          ) : (
-            <div className="executor-options">
-              {remoteExecutors.map((executor) => (
-                <button
-                  key={executor.host}
-                  type="button"
-                  className={`executor-option ${selectedExecutor === executor.host ? "selected" : ""}`}
-                  onClick={() => setSelectedExecutor(executor.host)}
-                  disabled={isStarting}
-                >
-                  <span className="executor-option-dot executor-remote" />
-                  <div className="executor-option-content">
-                    <span className="executor-option-label">
-                      {executor.user ? `${executor.user}@` : ""}
-                      {executor.host}
-                    </span>
-                    <span className="executor-option-desc">
-                      {executor.localRoot} → {executor.remoteRoot}
-                    </span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       )}
 

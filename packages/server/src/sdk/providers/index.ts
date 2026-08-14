@@ -83,12 +83,14 @@ export {
 } from "./zcode.js";
 
 /**
- * Get all available provider instances.
- * Useful for provider detection UI.
+ * Get all active provider instances exposed by the provider catalog.
+ *
+ * Claude remains available through getProvider() for historical session
+ * compatibility, but its retired SSH channel must not participate in provider
+ * discovery because that would trigger a remote control probe.
  */
 export function getAllProviders(): AgentProvider[] {
   return [
-    claudeProvider,
     codexProvider,
     codexOSSProvider,
     geminiProvider,
