@@ -177,6 +177,8 @@ interface Props {
   onApproveStrictAutoReview?: () => Promise<void>;
   onApproveAlways?: () => Promise<void>;
   onDenyWithFeedback?: (feedback: string) => Promise<void>;
+  /** Approve ExitPlanMode without changing the session permission mode. */
+  preserveModeOnPlanApproval?: boolean;
   /** Whether the panel is collapsed (controlled externally) */
   collapsed?: boolean;
   /** Callback when collapse state changes */
@@ -197,6 +199,7 @@ export function ToolApprovalPanel({
   onApproveStrictAutoReview,
   onApproveAlways,
   onDenyWithFeedback,
+  preserveModeOnPlanApproval = false,
   collapsed = false,
   onCollapsedChange,
 }: Props) {
@@ -401,6 +404,16 @@ export function ToolApprovalPanel({
           handleApprove();
         }
       } else if (isPlanMode) {
+        if (preserveModeOnPlanApproval) {
+          if (e.key === "1" || (e.key === "Enter" && !e.shiftKey)) {
+            e.preventDefault();
+            handleApprove();
+          } else if (e.key === "2" || e.key === "Escape") {
+            e.preventDefault();
+            handleDeny();
+          }
+          return;
+        }
         // ExitPlanMode: 1=auto-accept, 2=manual, 3=deny
         if (e.key === "1" && onApproveAcceptEdits) {
           e.preventDefault();
@@ -475,6 +488,7 @@ export function ToolApprovalPanel({
     onApproveAcceptEdits,
     onApproveForSession,
     onApproveStrictAutoReview,
+    preserveModeOnPlanApproval,
     request.toolName,
   ]);
 
@@ -732,6 +746,28 @@ export function ToolApprovalPanel({
                 >
                   <kbd>{canApproveOpenCodeAlways ? "3" : "2"}</kbd>
                   <span>{t("toolApprovalCancel")}</span>
+                </button>
+              </>
+            ) : isExitPlanMode(request.toolName) &&
+              preserveModeOnPlanApproval ? (
+              <>
+                <button
+                  type="button"
+                  className="tool-approval-option primary"
+                  onClick={handleApprove}
+                  disabled={!armed || submitting}
+                >
+                  <kbd>1</kbd>
+                  <span>{t("toolApprovalApproveKeepMode")}</span>
+                </button>
+                <button
+                  type="button"
+                  className="tool-approval-option"
+                  onClick={handleDeny}
+                  disabled={!armed || submitting}
+                >
+                  <kbd>2</kbd>
+                  <span>{t("toolApprovalNoKeepPlanning")}</span>
                 </button>
               </>
             ) : isExitPlanMode(request.toolName) ? (

@@ -509,6 +509,7 @@
   "toolApprovalDetailsTitle": "{tool} details",
   "toolApprovalYesAuto": "Yes, and auto-accept",
   "toolApprovalYesManual": "Yes, and manually approve edits",
+  "toolApprovalApproveKeepMode": "Approve and keep current permission mode",
   "toolApprovalNoKeepPlanning": "No, keep planning",
   "toolApprovalAllowOnce": "Allow",
   "toolApprovalAllowForSession": "Allow for this session",

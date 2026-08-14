@@ -90,6 +90,43 @@ describe("ToolApprovalPanel", () => {
     expect(screen.queryByRole("link")).toBeNull();
   });
 
+  it("approves a Kimi plan without switching its permission mode", async () => {
+    const onApprove = vi.fn(async () => undefined);
+    const onApproveAcceptEdits = vi.fn(async () => undefined);
+    const request: InputRequest = {
+      id: "approval-kimi-plan",
+      sessionId: "session-kimi-plan",
+      type: "tool-approval",
+      prompt: "Accept this plan?",
+      toolName: "ExitPlanMode",
+      toolInput: { kind: "switch_mode", title: "ExitPlanMode" },
+      timestamp: "2026-08-14T00:00:00.000Z",
+    };
+    render(
+      <I18nProvider>
+        <ToolApprovalPanel
+          request={request}
+          sessionId="session-kimi-plan"
+          onApprove={onApprove}
+          onApproveAcceptEdits={onApproveAcceptEdits}
+          onDeny={vi.fn(async () => undefined)}
+          preserveModeOnPlanApproval
+        />
+      </I18nProvider>,
+    );
+
+    const approve = screen.getByRole("button", {
+      name: /Approve and keep current permission mode/i,
+    });
+    expect(screen.queryByRole("button", { name: /auto-accept/i })).toBeNull();
+    await waitFor(() =>
+      expect((approve as HTMLButtonElement).disabled).toBe(false),
+    );
+    fireEvent.click(approve);
+    await waitFor(() => expect(onApprove).toHaveBeenCalledTimes(1));
+    expect(onApproveAcceptEdits).not.toHaveBeenCalled();
+  });
+
   it("offers every Codex permission decision, including strict review", async () => {
     const onApprove = vi.fn(async () => undefined);
     const onApproveStrictAutoReview = vi.fn(async () => undefined);

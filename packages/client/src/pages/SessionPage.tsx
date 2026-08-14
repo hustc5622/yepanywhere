@@ -2150,6 +2150,7 @@ function SessionPageContent({
                     onApproveStrictAutoReview={handleApproveStrictAutoReview}
                     onApproveAlways={handleApproveAlways}
                     onDenyWithFeedback={handleDenyWithFeedback}
+                    preserveModeOnPlanApproval={effectiveProvider === "kimi"}
                     collapsed={approvalCollapsed}
                     onCollapsedChange={setApprovalCollapsed}
                   />

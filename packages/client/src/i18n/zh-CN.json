@@ -509,6 +509,7 @@
   "toolApprovalDetailsTitle": "{tool} 详情",
   "toolApprovalYesAuto": "是，并自动接受",
   "toolApprovalYesManual": "是，并手动审批修改",
+  "toolApprovalApproveKeepMode": "批准并保持当前权限模式",
   "toolApprovalNoKeepPlanning": "否，继续规划",
   "toolApprovalAllowOnce": "允许",
   "toolApprovalAllowForSession": "本会话允许",
