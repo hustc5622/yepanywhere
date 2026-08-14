@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ContentBlock, ContentRenderer, RenderContext } from "../types";
 
 interface ThinkingBlock extends ContentBlock {
@@ -7,7 +8,7 @@ interface ThinkingBlock extends ContentBlock {
 }
 
 /**
- * Thinking renderer - collapsible block with shared expanded state across all blocks
+ * Thinking renderer used by legacy nested content blocks.
  */
 function ThinkingRendererComponent({
   block,
@@ -17,7 +18,7 @@ function ThinkingRendererComponent({
   context: RenderContext;
 }) {
   const thinking = block.thinking || "";
-  const isExpanded = context.thinkingExpanded ?? false;
+  const [isExpanded, setIsExpanded] = useState(false);
 
   if (isExpanded) {
     // Expanded: whole block is clickable to collapse
@@ -25,7 +26,7 @@ function ThinkingRendererComponent({
       <button
         type="button"
         className="thinking-block thinking-block-expanded"
-        onClick={context.toggleThinkingExpanded}
+        onClick={() => setIsExpanded(false)}
         aria-expanded={true}
       >
         <div className="thinking-toggle-expanded">
@@ -47,7 +48,7 @@ function ThinkingRendererComponent({
       <button
         type="button"
         className="thinking-toggle-collapsed"
-        onClick={context.toggleThinkingExpanded}
+        onClick={() => setIsExpanded(true)}
         aria-expanded={false}
       >
         <span className="thinking-label">

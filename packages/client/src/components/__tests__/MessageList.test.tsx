@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "../../types";
 import type { RenderItem } from "../../types/renderItems";
@@ -26,14 +32,32 @@ vi.mock("../ProcessingIndicator", () => ({
 }));
 
 vi.mock("../RenderItemComponent", () => ({
-  RenderItemComponent: ({ item }: { item: RenderItem }) => (
-    <div
-      data-testid={`render-item-${item.id}`}
-      data-phase={item.type === "text" ? item.phase : undefined}
-    >
-      {"content" in item ? String(item.content) : item.id}
-    </div>
-  ),
+  RenderItemComponent: ({
+    item,
+    thinkingExpanded,
+    toggleThinkingExpanded,
+  }: {
+    item: RenderItem;
+    thinkingExpanded: boolean;
+    toggleThinkingExpanded: (itemId: string) => void;
+  }) =>
+    item.type === "thinking" ? (
+      <button
+        type="button"
+        data-testid={`render-item-${item.id}`}
+        aria-expanded={thinkingExpanded}
+        onClick={() => toggleThinkingExpanded(item.id)}
+      >
+        {item.id}
+      </button>
+    ) : (
+      <div
+        data-testid={`render-item-${item.id}`}
+        data-phase={item.type === "text" ? item.phase : undefined}
+      >
+        {"content" in item ? String(item.content) : item.id}
+      </div>
+    ),
 }));
 
 function userPromptItem(id: string, messageId = id): RenderItem {
@@ -66,6 +90,27 @@ function assistantTextItem(
         type: "assistant",
         timestamp,
         message: { role: "assistant", content: text },
+      } satisfies Message,
+    ],
+  };
+}
+
+function assistantThinkingItem(
+  id: string,
+): Extract<RenderItem, { type: "thinking" }> {
+  return {
+    id,
+    type: "thinking",
+    thinking: `Reasoning for ${id}`,
+    status: "complete",
+    sourceMessages: [
+      {
+        uuid: id,
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: `Reasoning for ${id}` }],
+        },
       } satisfies Message,
     ],
   };
@@ -314,6 +359,59 @@ describe("MessageList plan progress", () => {
 
     expect(screen.queryByTestId("render-item-kimi-todo-write")).toBeNull();
     expect(screen.getByTestId("render-item-kimi-todo-read")).not.toBeNull();
+  });
+});
+
+describe("MessageList thinking disclosure", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("expands thinking items independently", () => {
+    render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantThinkingItem("thinking-one"),
+          assistantThinkingItem("thinking-two"),
+        ]}
+      />,
+    );
+
+    const first = screen.getByTestId("render-item-thinking-one");
+    const second = screen.getByTestId("render-item-thinking-two");
+
+    expect(first.getAttribute("aria-expanded")).toBe("false");
+    expect(second.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(first);
+    expect(first.getAttribute("aria-expanded")).toBe("true");
+    expect(second.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(second);
+    expect(first.getAttribute("aria-expanded")).toBe("true");
+    expect(second.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(first);
+    expect(first.getAttribute("aria-expanded")).toBe("false");
+    expect(second.getAttribute("aria-expanded")).toBe("true");
   });
 });
 

@@ -154,7 +154,9 @@ export const MessageList = memo(function MessageList({
   > | null>(null);
   const virtualizeEnabledRef = useRef(false);
   const rowCountRef = useRef(0);
-  const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [expandedThinkingItemIds, setExpandedThinkingItemIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
 
   const setFollowingBottom = useCallback((followingBottom: boolean) => {
     if (shouldAutoScrollRef.current === followingBottom) return;
@@ -312,8 +314,16 @@ export const MessageList = memo(function MessageList({
   virtualizeEnabledRef.current = shouldVirtualize;
   rowCountRef.current = rows.length;
 
-  const toggleThinkingExpanded = useCallback(() => {
-    setThinkingExpanded((prev) => !prev);
+  const toggleThinkingExpanded = useCallback((itemId: string) => {
+    setExpandedThinkingItemIds((previousIds) => {
+      const nextIds = new Set(previousIds);
+      if (nextIds.has(itemId)) {
+        nextIds.delete(itemId);
+      } else {
+        nextIds.add(itemId);
+      }
+      return nextIds;
+    });
   }, []);
 
   // Load older messages with scroll position preservation
@@ -593,7 +603,7 @@ export const MessageList = memo(function MessageList({
           <RenderItemComponent
             item={item}
             isStreaming={isStreaming}
-            thinkingExpanded={thinkingExpanded}
+            thinkingExpanded={expandedThinkingItemIds.has(item.id)}
             toggleThinkingExpanded={toggleThinkingExpanded}
             sessionProvider={provider}
             onEditUserPrompt={onEditUserPrompt}
@@ -645,7 +655,7 @@ export const MessageList = memo(function MessageList({
                   key={item.id}
                   item={renderedItem}
                   isStreaming={isStreaming}
-                  thinkingExpanded={thinkingExpanded}
+                  thinkingExpanded={expandedThinkingItemIds.has(item.id)}
                   toggleThinkingExpanded={toggleThinkingExpanded}
                   sessionProvider={provider}
                   onSelectBranch={onSelectBranch}

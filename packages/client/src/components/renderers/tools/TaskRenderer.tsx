@@ -255,10 +255,20 @@ function SubagentTranscript({
   messages: Message[];
   isStreaming: boolean;
 }) {
-  const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [expandedThinkingItemIds, setExpandedThinkingItemIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const preprocessCacheRef = useRef<PreprocessMessagesCache | null>(null);
-  const toggleThinkingExpanded = useCallback(() => {
-    setThinkingExpanded((prev) => !prev);
+  const toggleThinkingExpanded = useCallback((itemId: string) => {
+    setExpandedThinkingItemIds((previousIds) => {
+      const nextIds = new Set(previousIds);
+      if (nextIds.has(itemId)) {
+        nextIds.delete(itemId);
+      } else {
+        nextIds.add(itemId);
+      }
+      return nextIds;
+    });
   }, []);
 
   const renderItems = useMemo(() => {
@@ -278,7 +288,7 @@ function SubagentTranscript({
           key={item.id}
           item={item}
           isStreaming={isStreaming}
-          thinkingExpanded={thinkingExpanded}
+          thinkingExpanded={expandedThinkingItemIds.has(item.id)}
           toggleThinkingExpanded={toggleThinkingExpanded}
         />
       ))}

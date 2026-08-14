@@ -34,10 +34,6 @@ export interface RenderContext {
   getToolUse?: (id: string) => { name: string; input: unknown } | undefined;
   /** Structured tool result data (from message.toolUseResult) */
   toolUseResult?: unknown;
-  /** Whether thinking blocks are expanded (shared state) */
-  thinkingExpanded?: boolean;
-  /** Toggle thinking blocks expanded state */
-  toggleThinkingExpanded?: () => void;
   /** Provider type - tool renderers may use fallback rendering for non-Claude providers */
   provider?: string;
 }

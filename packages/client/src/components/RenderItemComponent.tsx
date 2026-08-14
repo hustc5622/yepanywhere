@@ -14,7 +14,7 @@ interface Props {
   item: RenderItem;
   isStreaming: boolean;
   thinkingExpanded: boolean;
-  toggleThinkingExpanded: () => void;
+  toggleThinkingExpanded: (itemId: string) => void;
   sessionProvider?: string;
   /**
    * When provided, user prompts show an edit button. Called with the prompt's
@@ -187,7 +187,7 @@ export const RenderItemComponent = memo(function RenderItemComponent({
             thinking={item.thinking}
             status={item.status}
             isExpanded={thinkingExpanded}
-            onToggle={toggleThinkingExpanded}
+            onToggle={() => toggleThinkingExpanded(item.id)}
           />
         );
 
