@@ -3,6 +3,8 @@
   var CHANNEL_STATUS_MESSAGE = "yep-anywhere:mobile-shell-channel";
   var GET_CHANNEL_MESSAGE = "yep-anywhere:mobile-shell-get-channel";
   var SET_CHANNEL_MESSAGE = "yep-anywhere:mobile-shell-set-channel";
+  var OPEN_SETTINGS_MESSAGE = "yep-anywhere:mobile-shell-open-settings";
+  var THEME_MESSAGE = "yep-anywhere:mobile-shell-theme";
   var NATIVE_PUSH_REQUEST_MESSAGE = "yep-anywhere:native-push-request";
   var NATIVE_PUSH_RESPONSE_MESSAGE = "yep-anywhere:native-push-response";
   var NATIVE_PUSH_DEBUG_MESSAGE = "yep-anywhere:native-push-debug";
@@ -176,6 +178,63 @@
         ? String(values[name])
         : "";
     });
+  }
+
+  function isAppTheme(value) {
+    return (
+      value === "auto" ||
+      value === "light" ||
+      value === "dark" ||
+      value === "verydark"
+    );
+  }
+
+  function isResolvedTheme(value) {
+    return value === "light" || value === "dark";
+  }
+
+  function syncNativeSystemBars(resolvedTheme) {
+    try {
+      if (
+        window.YepNativePush &&
+        typeof window.YepNativePush.setSystemBarTheme === "function"
+      ) {
+        window.YepNativePush.setSystemBarTheme(resolvedTheme);
+      }
+    } catch (_err) {
+      // Theme synchronization is best-effort on older APK shells.
+    }
+  }
+
+  function applyAppTheme(theme, resolvedTheme) {
+    if (!isAppTheme(theme) || !isResolvedTheme(resolvedTheme)) return;
+
+    document.documentElement.setAttribute("data-app-theme", theme);
+    document.documentElement.setAttribute("data-resolved-theme", resolvedTheme);
+    document.documentElement.style.colorScheme = resolvedTheme;
+    syncNativeSystemBars(resolvedTheme);
+  }
+
+  function bindSystemThemeFallback() {
+    if (typeof window.matchMedia !== "function") {
+      applyAppTheme("auto", "dark");
+      return;
+    }
+
+    var mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
+    var applyFallback = function () {
+      var appTheme =
+        document.documentElement.getAttribute("data-app-theme") || "auto";
+      if (appTheme !== "auto") return;
+      applyAppTheme("auto", mediaQuery.matches ? "light" : "dark");
+    };
+
+    applyFallback();
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", applyFallback);
+    } else if (typeof mediaQuery.addListener === "function") {
+      mediaQuery.addListener(applyFallback);
+    }
   }
 
   function applyTranslations() {
@@ -1122,6 +1181,16 @@
           return;
         }
 
+        if (event.data.type === THEME_MESSAGE) {
+          applyAppTheme(event.data.theme, event.data.resolvedTheme);
+          return;
+        }
+
+        if (event.data.type === OPEN_SETTINGS_MESSAGE) {
+          openSettings();
+          return;
+        }
+
         if (event.data.type === APP_READY_MESSAGE) {
           if (activeTarget && event.origin !== activeTarget.origin) {
             logNativePush(
@@ -1166,8 +1235,10 @@
   });
 
   if (document.readyState === "loading") {
+    bindSystemThemeFallback();
     document.addEventListener("DOMContentLoaded", bindFrameLoad, { once: true });
   } else {
+    bindSystemThemeFallback();
     bindFrameLoad();
   }
 })();

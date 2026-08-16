@@ -15,6 +15,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
@@ -79,6 +80,25 @@ class MainActivity : TauriActivity() {
     }
 
     handleNotificationIntent(intent)
+  }
+
+  private fun setSystemBarTheme(resolvedTheme: String) {
+    if (resolvedTheme != "light" && resolvedTheme != "dark") {
+      Log.w(TAG, "setSystemBarTheme: ignored invalid theme=$resolvedTheme")
+      return
+    }
+
+    val useDarkIcons = resolvedTheme == "light"
+    runOnUiThread {
+      WindowCompat.getInsetsController(window, window.decorView).apply {
+        isAppearanceLightStatusBars = useDarkIcons
+        isAppearanceLightNavigationBars = useDarkIcons
+      }
+      Log.d(
+        TAG,
+        "setSystemBarTheme: theme=$resolvedTheme darkIcons=$useDarkIcons"
+      )
+    }
   }
 
   override fun onDestroy() {
@@ -374,6 +394,11 @@ class MainActivity : TauriActivity() {
     fun configureSessionWatcher(origin: String) {
       Log.i(TAG, "bridge.configureSessionWatcher: origin=$origin")
       activity.configureSessionWatcher(origin)
+    }
+
+    @JavascriptInterface
+    fun setSystemBarTheme(resolvedTheme: String) {
+      activity.setSystemBarTheme(resolvedTheme)
     }
 
     @JavascriptInterface

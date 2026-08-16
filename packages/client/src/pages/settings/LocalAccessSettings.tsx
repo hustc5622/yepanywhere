@@ -15,8 +15,14 @@ import { useI18n } from "../../i18n";
 
 function MobileShellChannelSettings() {
   const { t } = useI18n();
-  const { isMobileShell, channel, nodeOrigin, setChannel, setNode } =
-    useMobileShellChannel();
+  const {
+    isMobileShell,
+    channel,
+    nodeOrigin,
+    setChannel,
+    setNode,
+    openConnectionSettings,
+  } = useMobileShellChannel();
 
   if (!isMobileShell) return null;
 
@@ -28,6 +34,13 @@ function MobileShellChannelSettings() {
             <strong>{t("localAccessMobileNodeTitle")}</strong>
             <p>{t("localAccessMobileNodeDescription")}</p>
           </div>
+          <button
+            type="button"
+            className="settings-button"
+            onClick={openConnectionSettings}
+          >
+            {t("localAccessMobileShellSettings")}
+          </button>
         </div>
         <div
           className="settings-mobile-node-options"

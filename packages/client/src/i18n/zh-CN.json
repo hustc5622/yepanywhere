@@ -1081,6 +1081,7 @@
   "localAccessMobileChannelHttp": "HTTP",
   "localAccessMobileNodeTitle": "移动端服务节点",
   "localAccessMobileNodeDescription": "切换 APK 当前连接的服务端节点。选择后会立即通过该节点重载当前页面。",
+  "localAccessMobileShellSettings": "自定义地址与诊断",
   "localAccessMobileRelay": "HTTPS relay",
   "localAccessMobileCurrentNode": "当前节点：{node}",
   "localAccessMobileCurrentHttp": "当前节点：HTTPS relay",

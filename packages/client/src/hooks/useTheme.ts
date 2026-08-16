@@ -12,13 +12,61 @@ const themeLabels: Record<Theme, string> = {
 
 export const THEMES: Theme[] = ["auto", "light", "dark", "verydark"];
 
+const MOBILE_SHELL_THEME_MESSAGE = "yep-anywhere:mobile-shell-theme";
+let mobileShellThemeListenerInstalled = false;
+
 export function getThemeLabel(theme: Theme): string {
   return themeLabels[theme];
+}
+
+function isMobileShellFrame(): boolean {
+  return (
+    document.documentElement.dataset.mobileShell === "true" &&
+    window.parent !== window
+  );
+}
+
+function resolveTheme(theme: Theme): "light" | "dark" {
+  if (theme !== "auto") return theme === "light" ? "light" : "dark";
+  return typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: light)").matches
+    ? "light"
+    : "dark";
+}
+
+function syncMobileShellTheme(theme: Theme): void {
+  if (!isMobileShellFrame()) return;
+
+  window.parent.postMessage(
+    {
+      type: MOBILE_SHELL_THEME_MESSAGE,
+      theme,
+      resolvedTheme: resolveTheme(theme),
+    },
+    "*",
+  );
+}
+
+function installMobileShellThemeListener(): void {
+  if (mobileShellThemeListenerInstalled || !isMobileShellFrame()) return;
+  mobileShellThemeListenerInstalled = true;
+
+  const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
+  const handleChange = () => {
+    const theme = loadTheme();
+    if (theme === "auto") syncMobileShellTheme(theme);
+  };
+  if (typeof mediaQuery.addEventListener === "function") {
+    mediaQuery.addEventListener("change", handleChange);
+  } else {
+    mediaQuery.addListener(handleChange);
+  }
 }
 
 function applyTheme(theme: Theme) {
   const root = document.documentElement;
   root.setAttribute("data-theme", theme);
+  syncMobileShellTheme(theme);
 }
 
 function loadTheme(): Theme {
@@ -58,6 +106,7 @@ export function useTheme() {
  */
 export function initializeTheme() {
   const theme = loadTheme();
+  installMobileShellThemeListener();
   applyTheme(theme);
 }
 
@@ -66,13 +115,7 @@ export function initializeTheme() {
  * to know if we're actually in light or dark mode when auto)
  */
 export function getResolvedTheme(): "light" | "dark" {
-  const stored = loadTheme();
-  if (stored === "auto") {
-    return window.matchMedia("(prefers-color-scheme: light)").matches
-      ? "light"
-      : "dark";
-  }
-  return stored === "light" ? "light" : "dark";
+  return resolveTheme(loadTheme());
 }
 
 /**

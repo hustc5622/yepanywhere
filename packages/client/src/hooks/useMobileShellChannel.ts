@@ -41,6 +41,7 @@ export function formatMobileShellNodeOrigin(origin: string | null): string {
 const CHANNEL_STATUS_MESSAGE = "yep-anywhere:mobile-shell-channel";
 const GET_CHANNEL_MESSAGE = "yep-anywhere:mobile-shell-get-channel";
 const SET_CHANNEL_MESSAGE = "yep-anywhere:mobile-shell-set-channel";
+const OPEN_SETTINGS_MESSAGE = "yep-anywhere:mobile-shell-open-settings";
 
 function isMobileShellDocument(): boolean {
   if (document.documentElement.dataset.mobileShell === "true") {
@@ -130,5 +131,17 @@ export function useMobileShellChannel() {
     [isMobileShell],
   );
 
-  return { isMobileShell, channel, nodeOrigin, setChannel, setNode };
+  const openConnectionSettings = useCallback(() => {
+    if (!isMobileShell || window.parent === window) return;
+    window.parent.postMessage({ type: OPEN_SETTINGS_MESSAGE }, "*");
+  }, [isMobileShell]);
+
+  return {
+    isMobileShell,
+    channel,
+    nodeOrigin,
+    setChannel,
+    setNode,
+    openConnectionSettings,
+  };
 }

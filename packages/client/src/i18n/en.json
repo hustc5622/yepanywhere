@@ -1081,6 +1081,7 @@
   "localAccessMobileChannelHttp": "HTTP",
   "localAccessMobileNodeTitle": "Mobile Server Node",
   "localAccessMobileNodeDescription": "Switch the server node used by the APK. The current page reloads through the selected node immediately.",
+  "localAccessMobileShellSettings": "Custom address & diagnostics",
   "localAccessMobileRelay": "HTTPS relay",
   "localAccessMobileCurrentNode": "Current node: {node}",
   "localAccessMobileCurrentHttp": "Current node: HTTPS relay",

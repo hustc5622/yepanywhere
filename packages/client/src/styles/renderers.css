@@ -2224,6 +2224,8 @@ details[open] .collapsible__icon {
   padding: 0;
   background: var(--bg-code);
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  max-width: 100%;
   tab-size: var(--tab-size);
 }
 
@@ -2260,6 +2262,8 @@ details[open] .collapsible__icon {
   background: var(--bg-code) !important;
   border-radius: 4px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  max-width: 100%;
 }
 
 .highlighted-diff code {

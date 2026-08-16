@@ -3245,9 +3245,20 @@ a.sidebar-nav-item {
 .session-messages {
   flex: 1;
   overflow-y: auto;
+  /* overflow-y:auto promotes the default overflow-x:visible to auto. A wide
+     code/diff child would therefore make the entire transcript horizontally
+     pannable in Android WebView, leaving the fixed header/composer in place. */
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+  max-width: 100%;
   padding: 1rem;
   min-height: 0;
   -webkit-overflow-scrolling: touch;
+}
+
+.message-list {
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Full-width scroll container pattern for pages (like inbox, settings)

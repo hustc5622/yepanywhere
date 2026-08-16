@@ -17,6 +17,7 @@ const openDoms: JSDOM[] = [];
 function mountShell(options?: {
   appReadyTimeoutMs?: number;
   language?: string;
+  nativeSystemBarThemes?: string[];
   storedChannel?: string;
   storedNode?: string;
 }) {
@@ -30,6 +31,18 @@ function mountShell(options?: {
     configurable: true,
     value: options?.language ?? "en-US",
   });
+
+  if (options?.nativeSystemBarThemes) {
+    const themes = options.nativeSystemBarThemes;
+    Object.defineProperty(dom.window, "YepNativePush", {
+      configurable: true,
+      value: {
+        setSystemBarTheme(theme: string) {
+          themes.push(theme);
+        },
+      },
+    });
+  }
 
   if (options?.storedChannel) {
     dom.window.localStorage.setItem(
@@ -64,6 +77,19 @@ function postAppReady(dom: JSDOM, frame: HTMLIFrameElement, origin: string) {
     new dom.window.MessageEvent("message", {
       data: { type: "yep-anywhere:app-ready" },
       origin,
+      source: frame.contentWindow,
+    }),
+  );
+}
+
+function postClientMessage(
+  dom: JSDOM,
+  frame: HTMLIFrameElement,
+  data: Record<string, unknown>,
+) {
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent("message", {
+      data,
       source: frame.contentWindow,
     }),
   );
@@ -122,6 +148,17 @@ describe("APK mobile shell recovery", () => {
     expect(
       dom.window.document.querySelector("[data-diagnostic-state]")?.textContent,
     ).toBe("Timed out");
+
+    dom.window.document
+      .querySelector<HTMLButtonElement>("[data-open-anyway]")
+      ?.click();
+    const fallbackToolbar = dom.window.document.querySelector<HTMLElement>(
+      "[data-open-settings]",
+    );
+    expect(dom.window.document.body.dataset.connectionState).toBe("unverified");
+    expect(
+      dom.window.getComputedStyle(fallbackToolbar as HTMLElement).display,
+    ).toBe("flex");
   });
 
   it("only reveals the remote page after a ready message from the active origin", () => {
@@ -138,9 +175,17 @@ describe("APK mobile shell recovery", () => {
       dom.window.document.querySelector("[data-diagnostic-state]")?.textContent,
     ).toBe("Ready");
 
-    dom.window.document
-      .querySelector<HTMLButtonElement>("[data-open-settings]")
-      ?.click();
+    const fallbackToolbar = dom.window.document.querySelector<HTMLElement>(
+      "[data-open-settings]",
+    );
+    expect(fallbackToolbar).not.toBeNull();
+    expect(
+      dom.window.getComputedStyle(fallbackToolbar as HTMLElement).display,
+    ).toBe("none");
+
+    postClientMessage(dom, frame, {
+      type: "yep-anywhere:mobile-shell-open-settings",
+    });
     expect(dom.window.document.body.classList.contains("is-panel-open")).toBe(
       true,
     );
@@ -150,6 +195,56 @@ describe("APK mobile shell recovery", () => {
     expect(dom.window.document.body.classList.contains("is-panel-open")).toBe(
       false,
     );
+  });
+
+  it("uses the embedded app theme for the safe area and native system bars", () => {
+    const nativeSystemBarThemes: string[] = [];
+    const { dom, frame } = mountShell({ nativeSystemBarThemes });
+
+    postClientMessage(dom, frame, {
+      type: "yep-anywhere:mobile-shell-theme",
+      theme: "verydark",
+      resolvedTheme: "dark",
+    });
+
+    expect(dom.window.document.documentElement.dataset.appTheme).toBe(
+      "verydark",
+    );
+    expect(dom.window.document.documentElement.dataset.resolvedTheme).toBe(
+      "dark",
+    );
+    expect(
+      dom.window
+        .getComputedStyle(dom.window.document.documentElement)
+        .getPropertyValue("--shell-page-bg")
+        .trim(),
+    ).toBe("#181818");
+    expect(nativeSystemBarThemes.at(-1)).toBe("dark");
+
+    postClientMessage(dom, frame, {
+      type: "yep-anywhere:mobile-shell-theme",
+      theme: "light",
+      resolvedTheme: "light",
+    });
+
+    expect(dom.window.document.documentElement.dataset.appTheme).toBe("light");
+    expect(dom.window.document.documentElement.dataset.resolvedTheme).toBe(
+      "light",
+    );
+    expect(
+      dom.window
+        .getComputedStyle(dom.window.document.documentElement)
+        .getPropertyValue("--shell-page-bg")
+        .trim(),
+    ).toBe("#faf9f5");
+    expect(nativeSystemBarThemes.at(-1)).toBe("light");
+
+    postClientMessage(dom, frame, {
+      type: "yep-anywhere:mobile-shell-theme",
+      theme: "neon",
+      resolvedTheme: "light",
+    });
+    expect(dom.window.document.documentElement.dataset.appTheme).toBe("light");
   });
 
   it("keeps a newly entered endpoint recoverable and persists it", () => {
