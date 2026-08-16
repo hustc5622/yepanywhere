@@ -29,6 +29,10 @@ const OPENCODE_PLUGIN_SOURCE = path.join(
   SERVER_PACKAGE,
   "resources/opencode-plugin/yep-bridge.ts",
 );
+const PI_EXTENSION_SOURCE = path.join(
+  SERVER_PACKAGE,
+  "resources/pi-yep-extension.mjs",
+);
 const OPENCODE_PLUGIN_INSTALLER = path.join(
   ROOT_DIR,
   "scripts/install-opencode-yep-plugin.sh",
@@ -432,6 +436,22 @@ step("Bundle OpenCode approval plugin", () => {
   fs.copyFileSync(OPENCODE_PLUGIN_INSTALLER, installerDest);
   fs.chmodSync(installerDest, 0o755);
   log("  OpenCode plugin and installer bundled into staging");
+});
+
+// Pi loads this extension explicitly for every Yep-owned RPC process. It is
+// bundled as data (not installed into ~/.pi), keeping user configuration
+// untouched while making packaged and source runs behave identically.
+step("Bundle Pi RPC extension", () => {
+  const extensionDest = path.join(
+    STAGING_DIR,
+    "resources/pi-yep-extension.mjs",
+  );
+  if (!fs.existsSync(PI_EXTENSION_SOURCE)) {
+    throw new Error(`Pi extension not found at ${PI_EXTENSION_SOURCE}`);
+  }
+  fs.mkdirSync(path.dirname(extensionDest), { recursive: true });
+  fs.copyFileSync(PI_EXTENSION_SOURCE, extensionDest);
+  log("  Pi RPC extension bundled into staging");
 });
 
 // Generate the bundle package.json in staging without modifying the workspace.

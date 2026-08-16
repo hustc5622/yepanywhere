@@ -346,7 +346,13 @@ function parseNewSessionProviderDefaults(
     const config = parseOpenCodeSessionConfig(raw.opencodeConfig);
     if (config === null) return null;
     if (config) {
-      if (provider !== undefined && provider !== "opencode") return null;
+      if (
+        provider !== undefined &&
+        provider !== "opencode" &&
+        provider !== "pi"
+      ) {
+        return null;
+      }
       parsed.opencodeConfig = config;
     }
   }

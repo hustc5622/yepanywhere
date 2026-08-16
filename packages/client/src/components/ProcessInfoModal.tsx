@@ -238,6 +238,8 @@ export function ProcessInfoModal({
         return "Gemini (Google)";
       case "opencode":
         return "OpenCode";
+      case "pi":
+        return "Pi";
       default:
         return p;
     }

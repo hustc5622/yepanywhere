@@ -119,6 +119,14 @@ function isFinalAssistantResponseMessage(
     );
   }
 
+  if (session.provider === "pi") {
+    // Pi persists one assistant message before each tool execution. Only the
+    // later tool-free stop response is the completed answer suitable for a
+    // generated session title.
+    if (hasOpenCodeToolPart(message)) return false;
+    return (message as { stopReason?: unknown }).stopReason === "stop";
+  }
+
   // Claude, Gemini and legacy Codex sessions do not consistently carry an
   // explicit completion phase. Preserve their existing text-based fallback.
   return true;

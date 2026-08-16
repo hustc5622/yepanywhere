@@ -26,12 +26,14 @@ import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { canonicalizeProjectPath, isAbsolutePath } from "../projects/paths.js";
+import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RuntimeController } from "../runtime/types.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
+import type { PiSessionReader } from "../sessions/pi-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
@@ -74,11 +76,15 @@ export interface ProjectsDeps {
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   /** OpenCode scanner for checking if a project has OpenCode sessions */
   opencodeScanner?: OpenCodeSessionScanner;
+  /** Pi scanner for checking if a project has Pi sessions */
+  piScanner?: PiSessionScanner;
   /** OpenCode sqlite database path (defaults to ~/.local/share/opencode/opencode.db) */
   opencodeDbPath?: string;
   zcodeDbPath?: string;
   /** Optional shared OpenCode reader factory for cross-provider session lookups */
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  piSessionsDir?: string;
+  piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   /** Kimi scanner for checking if a project has Kimi sessions */
   kimiScanner?: KimiSessionScanner;
@@ -677,6 +683,7 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
       opencodeScanner: deps.opencodeScanner,
+      piScanner: deps.piScanner,
       kimiScanner: deps.kimiScanner,
     });
     let sessions = await listSessionsAcrossProviders(
@@ -692,6 +699,8 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
         geminiHashToCwd: providerCatalog.geminiHashToCwd,
         opencodeDbPath: deps.opencodeDbPath,
         opencodeReaderFactory: deps.opencodeReaderFactory,
+        piSessionsDir: deps.piSessionsDir,
+        piReaderFactory: deps.piReaderFactory,
         kimiSessionsDir: deps.kimiSessionsDir,
         kimiReaderFactory: deps.kimiReaderFactory,
       },

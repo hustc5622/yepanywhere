@@ -8,6 +8,8 @@ import { KimiSessionReader } from "./kimi-reader.js";
 import { collapseEditForkFamilies } from "./opencode-branch.js";
 import { OPENCODE_DB_PATH } from "./opencode-db.js";
 import { OpenCodeSessionReader } from "./opencode-reader.js";
+import { PI_SESSIONS_DIR } from "./pi-files.js";
+import { PiSessionReader } from "./pi-reader.js";
 import {
   type ProviderGroup,
   normalizeProviderGroup,
@@ -21,6 +23,7 @@ export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
   opencodePaths: Set<string>;
+  piPaths: Set<string>;
   kimiPaths: Set<string>;
   zcodePaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
@@ -36,6 +39,8 @@ export interface ProviderResolutionDeps {
   geminiHashToCwd?: Promise<Map<string, string>>;
   opencodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  piSessionsDir?: string;
+  piReaderFactory?: (projectPath: string) => PiSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   zcodeDbPath?: string;
@@ -51,7 +56,7 @@ export interface SessionSource {
   provider: ProviderName;
   reader: ISessionReader;
   sessionDir: string;
-  kind: "primary" | "codex" | "gemini" | "opencode" | "kimi" | "zcode";
+  kind: "primary" | "codex" | "gemini" | "opencode" | "pi" | "kimi" | "zcode";
 }
 
 export interface ResolvedSessionSummary {
@@ -103,6 +108,23 @@ function mayHaveKimiSessions(
     provider === "claude" ||
     provider === "codex" ||
     provider === "gemini" ||
+    provider === "opencode" ||
+    provider === "pi"
+  );
+}
+
+function mayHavePiSessions(
+  project: Project,
+  catalog?: ProviderProjectCatalog,
+): boolean {
+  if (catalog) {
+    return catalog.piPaths.has(canonicalizeProjectPath(project.path));
+  }
+  const provider = normalizeProviderGroup(project.provider);
+  return (
+    provider === "claude" ||
+    provider === "codex" ||
+    provider === "gemini" ||
     provider === "opencode"
   );
 }
@@ -120,6 +142,7 @@ function mayHaveZCodeSessions(
     provider === "codex" ||
     provider === "gemini" ||
     provider === "opencode" ||
+    provider === "pi" ||
     provider === "kimi"
   );
 }
@@ -220,6 +243,22 @@ function createKimiSource(
   };
 }
 
+function createPiSource(
+  project: Project,
+  deps: ProviderResolutionDeps,
+): SessionSource {
+  const sessionsDir = deps.piSessionsDir ?? PI_SESSIONS_DIR;
+  const reader =
+    deps.piReaderFactory?.(project.path) ??
+    new PiSessionReader({ sessionsDir, projectPath: project.path });
+  return {
+    provider: "pi",
+    reader,
+    sessionDir: sessionsDir,
+    kind: "pi",
+  };
+}
+
 function createZCodeSource(
   project: Project,
   deps: ProviderResolutionDeps,
@@ -262,6 +301,9 @@ function buildCandidateGroups(
   if (mayHaveOpenCodeSessions(project, catalog)) {
     pushGroup("opencode");
   }
+  if (mayHavePiSessions(project, catalog)) {
+    pushGroup("pi");
+  }
   if (mayHaveKimiSessions(project, catalog)) {
     pushGroup("kimi");
   }
@@ -283,6 +325,8 @@ function getSourceForGroup(
       return createClaudeSource(project, deps);
     case "opencode":
       return createOpenCodeSource(project, deps);
+    case "pi":
+      return createPiSource(project, deps);
     case "codex":
       return createCodexSource(project, deps);
     case "gemini":
@@ -431,7 +475,7 @@ export async function findSessionSummaryAcrossProviders(
 }
 
 /**
- * Resolve the de-duplicated session sources (Claude/Codex/Gemini) for a project.
+ * Resolve the de-duplicated provider session sources for a project.
  * Exposed so callers like the search route can iterate each provider's session
  * directory + reader directly (e.g. to build/query a content index per source).
  */

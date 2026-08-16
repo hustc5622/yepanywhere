@@ -26,6 +26,11 @@ import type {
   KimiTurnEndedRecord,
   OpenCodeSessionEntry,
   OpenCodeStoredPart,
+  PiAgentMessage,
+  PiAssistantMessage,
+  PiSessionContent,
+  PiSessionEntry,
+  PiToolResultMessage,
   SessionBranchOption,
   SessionBranchState,
   UnifiedSession,
@@ -87,6 +92,7 @@ import {
   CODEX_TURN_ABORTED_DISPLAY_TEXT,
   isCodexTurnAbortedNoticeText,
 } from "./codex-turn-aborted.js";
+import { canonicalizePiToolName, normalizePiToolInput } from "./pi-tools.js";
 import {
   MANAGED_ATTACHMENT_MARKER,
   sanitizePublicUserPrompt,
@@ -459,6 +465,16 @@ export function normalizeSession(loaded: LoadedSession): Session {
           : messages,
       });
     }
+    case "pi": {
+      const messages = convertPiMessages(data.session);
+      return sanitizePublicNormalizedSession({
+        ...summary,
+        branchState: loaded.branchState,
+        messages: loaded.branchState
+          ? annotateBranchMessages(messages, loaded.branchState)
+          : messages,
+      });
+    }
     case "kimi":
       return sanitizePublicNormalizedSession({
         ...summary,
@@ -475,6 +491,219 @@ export function normalizeSession(loaded: LoadedSession): Session {
       });
     }
   }
+}
+
+// --- Pi Conversion Logic ---
+
+function isPiSessionMessageEntry(
+  entry: PiSessionEntry,
+): entry is PiSessionEntry & { type: "message"; message: PiAgentMessage } {
+  return entry.type === "message" && "message" in entry;
+}
+
+function piInputContent(
+  message: Extract<PiAgentMessage, { role: "user" | "custom" }>,
+): string | ContentBlock[] {
+  if (typeof message.content === "string") return message.content;
+  const blocks: ContentBlock[] = [];
+  for (const block of message.content) {
+    if (block.type === "text") {
+      blocks.push({ type: "text", text: block.text });
+    } else if (block.type === "image") {
+      blocks.push({
+        type: "input_image",
+        mime_type: block.mimeType,
+        image_url: `data:${block.mimeType};base64,${block.data}`,
+      });
+    }
+  }
+  return blocks;
+}
+
+function piAssistantContent(
+  message: PiAssistantMessage,
+  resultDetailsByCallId: ReadonlyMap<string, unknown>,
+): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  for (const block of message.content) {
+    switch (block.type) {
+      case "text":
+        blocks.push({ type: "text", text: block.text });
+        break;
+      case "thinking":
+        blocks.push({
+          type: "thinking",
+          thinking: block.thinking,
+          ...((block.thinkingSignature ?? block.signature)
+            ? { signature: block.thinkingSignature ?? block.signature }
+            : {}),
+        });
+        break;
+      case "toolCall":
+        blocks.push({
+          type: "tool_use",
+          id: block.id,
+          name: canonicalizePiToolName(block.name),
+          input: normalizePiToolInput(
+            block.name,
+            block.arguments,
+            resultDetailsByCallId.get(block.id),
+          ),
+        });
+        break;
+      case "image":
+        blocks.push({
+          type: "image",
+          mime_type: block.mimeType,
+          image_url: `data:${block.mimeType};base64,${block.data}`,
+        });
+        break;
+    }
+  }
+  return blocks;
+}
+
+function piToolResultContent(message: PiToolResultMessage): string {
+  const parts: string[] = [];
+  for (const block of message.content) {
+    if (block.type === "text") parts.push(block.text);
+    else if (block.type === "image") parts.push("[Image]");
+  }
+  return parts.join("\n");
+}
+
+/** Convert Pi's active JSONL branch into Yep's provider-neutral transcript. */
+export function convertPiMessages(session: PiSessionContent): Message[] {
+  const messages: Message[] = [];
+  const resultDetailsByCallId = new Map<string, unknown>();
+  for (const entry of session.activeEntries) {
+    if (isPiSessionMessageEntry(entry) && entry.message.role === "toolResult") {
+      resultDetailsByCallId.set(
+        entry.message.toolCallId,
+        entry.message.details,
+      );
+    }
+  }
+
+  for (const entry of session.activeEntries) {
+    if (entry.type === "compaction" && "summary" in entry) {
+      messages.push({
+        uuid: entry.id,
+        parentUuid: entry.parentId,
+        type: "system",
+        subtype: "compact_boundary",
+        content:
+          typeof entry.summary === "string"
+            ? entry.summary
+            : "Context compacted",
+        timestamp: entry.timestamp,
+      });
+      continue;
+    }
+    if (entry.type === "branch_summary" && "summary" in entry) {
+      messages.push({
+        uuid: entry.id,
+        parentUuid: entry.parentId,
+        type: "summary",
+        message: {
+          role: "assistant",
+          content: typeof entry.summary === "string" ? entry.summary : "",
+        },
+        timestamp: entry.timestamp,
+      });
+      continue;
+    }
+    if (!isPiSessionMessageEntry(entry)) continue;
+
+    const message = entry.message;
+    switch (message.role) {
+      case "user":
+        messages.push({
+          uuid: entry.id,
+          parentUuid: entry.parentId,
+          type: "user",
+          message: { role: "user", content: piInputContent(message) },
+          timestamp: entry.timestamp,
+        });
+        break;
+      case "assistant":
+        messages.push({
+          uuid: entry.id,
+          parentUuid: entry.parentId,
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: piAssistantContent(message, resultDetailsByCallId),
+            ...(message.model ? { model: message.model } : {}),
+          },
+          usage: message.usage,
+          stopReason: message.stopReason,
+          ...(message.errorMessage ? { error: message.errorMessage } : {}),
+          timestamp: entry.timestamp,
+        });
+        break;
+      case "toolResult": {
+        const content = piToolResultContent(message);
+        messages.push({
+          uuid: entry.id,
+          parentUuid: entry.parentId,
+          type: "user",
+          tool_use_id: message.toolCallId,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: message.toolCallId,
+                content,
+                ...(message.isError ? { is_error: true } : {}),
+              },
+            ],
+          },
+          timestamp: entry.timestamp,
+        });
+        break;
+      }
+      case "bashExecution":
+        messages.push({
+          uuid: entry.id,
+          parentUuid: entry.parentId,
+          type: "system",
+          subtype: "bash_execution",
+          content: `Ran \`${message.command}\`\n\n${message.output}`,
+          exitCode: message.exitCode,
+          timestamp: entry.timestamp,
+        });
+        break;
+      case "custom":
+        if (message.display) {
+          messages.push({
+            uuid: entry.id,
+            parentUuid: entry.parentId,
+            type: "system",
+            subtype: message.customType,
+            message: {
+              role: "user",
+              content: piInputContent(message),
+            },
+            timestamp: entry.timestamp,
+          });
+        }
+        break;
+      case "branchSummary":
+      case "compactionSummary":
+        messages.push({
+          uuid: entry.id,
+          parentUuid: entry.parentId,
+          type: "summary",
+          message: { role: "assistant", content: message.summary },
+          timestamp: entry.timestamp,
+        });
+        break;
+    }
+  }
+
+  return messages;
 }
 
 // --- Claude Conversion Logic ---

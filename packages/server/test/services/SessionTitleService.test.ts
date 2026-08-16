@@ -817,6 +817,68 @@ describe("SessionTitleService", () => {
     expect(prompt).not.toContain("large tool output");
   });
 
+  it("waits for Pi's tool-free stop response before generating a title", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"title":"完成 Pi 分析"}' } }],
+          }),
+          { status: 200 },
+        ),
+    );
+    let currentSession = createSession({
+      provider: "pi",
+      messages: [
+        {
+          type: "user",
+          message: { role: "user", content: "分析 Pi 会话" },
+        },
+        {
+          type: "assistant",
+          stopReason: "toolUse",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "我先读取文件。" },
+              { type: "tool_use", id: "call-1", name: "Read", input: {} },
+            ],
+          },
+        },
+      ],
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      minRetryIntervalMs: 0,
+      fetchImpl: fetchMock,
+      loadSession: async () => currentSession,
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    currentSession = createSession({
+      provider: "pi",
+      messageCount: 3,
+      messages: [
+        ...currentSession.messages,
+        {
+          type: "assistant",
+          stopReason: "stop",
+          message: { role: "assistant", content: "Pi 会话分析完成。" },
+        },
+      ],
+    });
+
+    await service.generateForSession("session-1", "project-1" as UrlProjectId);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.messages[1].content).toContain("Pi 会话分析完成。");
+    expect(body.messages[1].content).not.toContain("我先读取文件。");
+  });
+
   it.each(["tool-calls", "error", "content-filter", "length", "unknown"])(
     "does not generate from an OpenCode %s response with partial text",
     async (finish) => {

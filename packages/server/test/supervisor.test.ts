@@ -400,106 +400,112 @@ describe("Supervisor", () => {
       await providerSupervisor.abortProcess((process2 as { id: string }).id);
     });
 
-    it("replaces an OpenCode process and registers the native fork session id", async () => {
-      const starts: Array<{
-        aborted: boolean;
-        options: StartSessionOptions;
-      }> = [];
-      const startSession = vi.fn(async (options: StartSessionOptions) => {
-        const start = { aborted: false, options };
-        starts.push(start);
-        const actualSessionId = options.resumeSessionAt
-          ? "ses_forked"
-          : (options.resumeSessionId ?? "ses_created");
+    it.each([
+      { providerName: "opencode" as const, displayName: "OpenCode" },
+      { providerName: "pi" as const, displayName: "Pi" },
+    ])(
+      "replaces a $displayName process and registers the native fork session id",
+      async ({ providerName, displayName }) => {
+        const starts: Array<{
+          aborted: boolean;
+          options: StartSessionOptions;
+        }> = [];
+        const startSession = vi.fn(async (options: StartSessionOptions) => {
+          const start = { aborted: false, options };
+          starts.push(start);
+          const actualSessionId = options.resumeSessionAt
+            ? "ses_forked"
+            : (options.resumeSessionId ?? "ses_created");
 
-        async function* iterator() {
-          yield {
-            type: "system",
-            subtype: "init",
-            session_id: actualSessionId,
-          };
-          while (!start.aborted) {
-            await new Promise((resolve) => setTimeout(resolve, 10));
+          async function* iterator() {
+            yield {
+              type: "system",
+              subtype: "init",
+              session_id: actualSessionId,
+            };
+            while (!start.aborted) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
           }
-        }
 
-        return {
-          iterator: iterator(),
-          queue: new MessageQueue(),
-          abort: () => {
-            start.aborted = true;
-          },
+          return {
+            iterator: iterator(),
+            queue: new MessageQueue(),
+            abort: () => {
+              start.aborted = true;
+            },
+          };
+        });
+        const provider: AgentProvider = {
+          name: providerName,
+          displayName,
+          supportsPermissionMode: true,
+          supportsThinkingToggle: true,
+          supportsSlashCommands: false,
+          isInstalled: async () => true,
+          isAuthenticated: async () => true,
+          getAuthStatus: async () => ({
+            installed: true,
+            authenticated: true,
+            enabled: true,
+          }),
+          startSession,
+          getAvailableModels: async () => [],
         };
-      });
-      const provider: AgentProvider = {
-        name: "opencode",
-        displayName: "OpenCode",
-        supportsPermissionMode: true,
-        supportsThinkingToggle: true,
-        supportsSlashCommands: false,
-        isInstalled: async () => true,
-        isAuthenticated: async () => true,
-        getAuthStatus: async () => ({
-          installed: true,
-          authenticated: true,
-          enabled: true,
-        }),
-        startSession,
-        getAvailableModels: async () => [],
-      };
-      const providerSupervisor = new Supervisor({
-        provider,
-        idleTimeoutMs: 100,
-      });
+        const providerSupervisor = new Supervisor({
+          provider,
+          idleTimeoutMs: 100,
+        });
 
-      const original = await providerSupervisor.resumeSession(
-        "ses_parent",
-        "/tmp/test",
-        { text: "original" },
-      );
-      const forked = await providerSupervisor.resumeSession(
-        "ses_parent",
-        "/tmp/test",
-        { text: "edited" },
-        "acceptEdits",
-        {
-          resumeSessionAt: "msg_native_user",
-          reasoningEffort: "max",
-          opencodeConfig: {
-            model: "glm-5.2",
-            requestProtocol: "anthropic",
-            limits: { context: 200_000, output: 16_000 },
+        const original = await providerSupervisor.resumeSession(
+          "ses_parent",
+          "/tmp/test",
+          { text: "original" },
+        );
+        const forked = await providerSupervisor.resumeSession(
+          "ses_parent",
+          "/tmp/test",
+          { text: "edited" },
+          "acceptEdits",
+          {
+            resumeSessionAt: "msg_native_user",
+            reasoningEffort: "max",
+            opencodeConfig: {
+              model: "glm-5.2",
+              requestProtocol: "anthropic",
+              limits: { context: 200_000, output: 16_000 },
+            },
           },
-        },
-      );
+        );
 
-      expect(starts[0]?.aborted).toBe(true);
-      expect((forked as { id: string }).id).not.toBe(
-        (original as { id: string }).id,
-      );
-      expect((forked as { sessionId: string }).sessionId).toBe("ses_forked");
-      expect(providerSupervisor.getProcessForSession("ses_parent")).toBe(
-        undefined,
-      );
-      expect(providerSupervisor.getProcessForSession("ses_forked")?.id).toBe(
-        (forked as { id: string }).id,
-      );
-      expect(starts[1]?.options).toEqual(
-        expect.objectContaining({
-          resumeSessionId: "ses_parent",
-          resumeSessionAt: "msg_native_user",
-          permissionMode: "acceptEdits",
-          reasoningEffort: "max",
-          opencodeConfig: expect.objectContaining({ model: "glm-5.2" }),
-        }),
-      );
+        expect(starts[0]?.aborted).toBe(true);
+        expect((forked as { id: string }).id).not.toBe(
+          (original as { id: string }).id,
+        );
+        expect((forked as { sessionId: string }).sessionId).toBe("ses_forked");
+        expect(providerSupervisor.getProcessForSession("ses_parent")).toBe(
+          undefined,
+        );
+        expect(providerSupervisor.getProcessForSession("ses_forked")?.id).toBe(
+          (forked as { id: string }).id,
+        );
+        expect(starts[1]?.options).toEqual(
+          expect.objectContaining({
+            resumeSessionId: "ses_parent",
+            resumeSessionAt: "msg_native_user",
+            permissionMode: "acceptEdits",
+            reasoningEffort: "max",
+            opencodeConfig: expect.objectContaining({ model: "glm-5.2" }),
+          }),
+        );
 
-      const forkStart = starts[1];
-      if (forkStart) {
-        forkStart.aborted = true;
-      }
-      await providerSupervisor.abortProcess((forked as { id: string }).id);
-    });
+        const forkStart = starts[1];
+        if (forkStart) {
+          forkStart.aborted = true;
+        }
+        await providerSupervisor.abortProcess((forked as { id: string }).id);
+      },
+    );
 
     it("replaces a ZCode process and registers the native fork session id", async () => {
       const starts: Array<{

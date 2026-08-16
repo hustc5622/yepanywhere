@@ -38,6 +38,16 @@ describe("provider permission modes", () => {
     expect(normalizeProviderPermissionMode("opencode", "plan")).toBe("default");
   });
 
+  it("uses Codex-style explicit approval modes for Pi", () => {
+    expect(getProviderPermissionModes("pi")).toEqual([
+      "default",
+      "acceptEdits",
+      "plan",
+      "bypassPermissions",
+    ]);
+    expect(normalizeProviderPermissionMode("pi", undefined)).toBe("default");
+  });
+
   it("excludes ZCode auto, whose native mode denies every tool call", () => {
     // ZCode CLI 0.16.1 denies all tools in native `auto`
     // (`mode.auto.unimplemented`), and its own picker offers only

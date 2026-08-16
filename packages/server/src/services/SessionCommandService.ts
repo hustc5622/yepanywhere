@@ -60,6 +60,7 @@ import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
+import type { PiSessionReader } from "../sessions/pi-reader.js";
 import {
   type ProviderResolutionDeps,
   findSessionSummaryAcrossProviders,
@@ -100,6 +101,8 @@ export interface SessionCommandServiceDeps {
   opencodeDbPath?: string;
   zcodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  piSessionsDir?: string;
+  piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
@@ -169,7 +172,7 @@ export interface StartSessionBody {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only used for Codex. */
   codexModelProvider?: string;
-  /** OpenCode-only managed provider/model configuration. */
+  /** OpenCode/Pi managed gateway provider/model configuration. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Client-generated temp ID for optimistic UI tracking. */
   tempId?: string;
@@ -326,7 +329,10 @@ function supportsResumeSessionAt(
   provider: ProviderName | string | undefined,
 ): boolean {
   return (
-    provider === "claude" || provider === "opencode" || provider === "zcode"
+    provider === "claude" ||
+    provider === "opencode" ||
+    provider === "pi" ||
+    provider === "zcode"
   );
 }
 
@@ -648,7 +654,8 @@ export function normalizeReasoningEffortForProvider(
   provider: ProviderName | undefined,
   reasoningEffort: string | undefined,
 ): string | undefined {
-  return provider === "opencode" && reasoningEffort === "default"
+  return (provider === "opencode" || provider === "pi") &&
+    reasoningEffort === "default"
     ? undefined
     : reasoningEffort;
 }
@@ -1014,6 +1021,7 @@ export class SessionCommandService {
     const providerRestoresReasoningEffort =
       providerName === "codex" ||
       providerName === "opencode" ||
+      providerName === "pi" ||
       providerName === "kimi";
     const resumeReasoningEffort =
       parsedReasoningEffort.reasoningEffort ??
@@ -1050,7 +1058,9 @@ export class SessionCommandService {
     const isSourcePreservingFork =
       (providerName === "codex" &&
         effectiveCodexForkExcludedTurns !== undefined) ||
-      ((providerName === "opencode" || providerName === "zcode") &&
+      ((providerName === "opencode" ||
+        providerName === "pi" ||
+        providerName === "zcode") &&
         Boolean(body.resumeSessionAt));
     const result = await this.deps.runtimeController.resumeSession({
       sessionId,
@@ -1178,7 +1188,10 @@ export class SessionCommandService {
           );
         }
       }
-      if (providerName === "zcode" && body.resumeSessionAt) {
+      if (
+        (providerName === "pi" || providerName === "zcode") &&
+        body.resumeSessionAt
+      ) {
         // Record edit-fork lineage so list views can collapse the family.
         await this.deps.sessionMetadataService?.setForkParentSessionId?.(
           actualSessionId,
@@ -1750,6 +1763,8 @@ export class SessionCommandService {
       geminiHashToCwd: this.deps.geminiScanner?.getHashToCwd(),
       opencodeDbPath: this.deps.opencodeDbPath,
       opencodeReaderFactory: this.deps.opencodeReaderFactory,
+      piSessionsDir: this.deps.piSessionsDir,
+      piReaderFactory: this.deps.piReaderFactory,
       kimiSessionsDir: this.deps.kimiSessionsDir,
       kimiReaderFactory: this.deps.kimiReaderFactory,
       zcodeDbPath: this.deps.zcodeDbPath,
@@ -1870,7 +1885,7 @@ export class SessionCommandService {
     limits?: OpenCodeModelLimits;
   }): void {
     if (
-      input.provider !== "opencode" ||
+      (input.provider !== "opencode" && input.provider !== "pi") ||
       !input.limits ||
       input.limits.context <= 0
     ) {
@@ -1880,14 +1895,14 @@ export class SessionCommandService {
       this.deps.modelInfoService?.recordContextWindow(
         input.model,
         input.limits.context,
-        "opencode",
+        input.provider,
       );
     }
     if (input.sessionId) {
       this.deps.modelInfoService?.recordSessionContextWindow(
         input.sessionId,
         input.limits.context,
-        "opencode",
+        input.provider,
       );
     }
   }

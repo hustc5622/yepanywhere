@@ -211,6 +211,43 @@ describe("Settings Routes", () => {
       });
     });
 
+    it("accepts the shared gateway model configuration for Pi defaults", async () => {
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+      });
+      const opencodeConfig = {
+        model: "claude-opus-4-8",
+        requestProtocol: "anthropic" as const,
+      };
+
+      const response = await routes.request("/", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          newSessionDefaults: {
+            provider: "pi",
+            permissionMode: "acceptEdits",
+            opencodeConfig,
+            byProvider: {
+              pi: { permissionMode: "acceptEdits", opencodeConfig },
+            },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(mockServerSettingsService.updateSettings).toHaveBeenCalledWith({
+        newSessionDefaults: {
+          provider: "pi",
+          permissionMode: "acceptEdits",
+          opencodeConfig,
+          byProvider: {
+            pi: { permissionMode: "acceptEdits", opencodeConfig },
+          },
+        },
+      });
+    });
+
     it("rejects provider-specific options stored under the wrong provider", async () => {
       const routes = createSettingsRoutes({
         serverSettingsService: mockServerSettingsService,

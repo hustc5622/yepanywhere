@@ -580,7 +580,7 @@ export function getModelContextWindow(
   // `opencode models --verbose` and the gateway `/v1/models` catalog). This
   // curated table is only the offline/last-resort fallback for callers that
   // resolve straight from a model id without a cached window.
-  if (provider === "opencode") {
+  if (provider === "opencode" || provider === "pi") {
     const limits = getOpenCodeModelDefaultLimits(model);
     if (limits) return limits.context;
   }
@@ -672,6 +672,7 @@ export function escalateContextWindow(
   if (provider === "gemini" || provider === "gemini-acp") return contextWindow;
   if (provider === "kimi") return contextWindow;
   if (provider === "opencode") return contextWindow;
+  if (provider === "pi") return contextWindow;
   // Default to Claude's 1M tier for Claude and unknown providers.
   return Math.max(contextWindow, CLAUDE_EXTENDED_CONTEXT_WINDOW);
 }

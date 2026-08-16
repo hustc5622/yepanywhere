@@ -55,6 +55,7 @@ import type { OpenCodeBridgeController } from "./opencode-bridge/types.js";
 import { CodexSessionScanner } from "./projects/codex-scanner.js";
 import { GeminiSessionScanner } from "./projects/gemini-scanner.js";
 import { OpenCodeSessionScanner } from "./projects/opencode-scanner.js";
+import { PiSessionScanner } from "./projects/pi-scanner.js";
 import { ProjectScanner } from "./projects/scanner.js";
 import { ZCodeSessionScanner } from "./projects/zcode-scanner.js";
 import {
@@ -84,6 +85,7 @@ import {
 } from "./services/index.js";
 import { ensureOpenCodeDbIndexes } from "./sessions/opencode-db-indexes.js";
 import { OPENCODE_DB_PATH } from "./sessions/opencode-db.js";
+import { PI_SESSIONS_DIR } from "./sessions/pi-files.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
 import { ZCODE_DB_PATH } from "./sessions/zcode-db.js";
 import { TerminalService } from "./terminal/TerminalService.js";
@@ -434,7 +436,7 @@ console.log(
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
   watchDir: string,
-  provider: "claude" | "gemini" | "codex" | "kimi",
+  provider: "claude" | "gemini" | "codex" | "pi" | "kimi",
   ensureDirectory = false,
   persistent = false,
   periodicRescanOverrideMs?: number,
@@ -515,6 +517,7 @@ createWatcherIfExists(config.claudeSessionsDir, "claude", true, true);
 createWatcherIfExists(config.geminiSessionsDir, "gemini", false, true);
 createWatcherIfExists(config.codexSessionsDir, "codex", false, true);
 createWatcherIfExists(config.kimiSessionsDir, "kimi", false, true);
+createWatcherIfExists(PI_SESSIONS_DIR, "pi", true, true);
 
 // When running without tsx watch (NO_BACKEND_RELOAD=true), start source watcher
 // to notify the UI when server code changes and needs manual reload
@@ -982,6 +985,14 @@ async function startServer() {
     }
   }
 
+  const focusedPiScanner = new PiSessionScanner({
+    sessionsDir: PI_SESSIONS_DIR,
+  });
+  eventBus.subscribe((event) => {
+    if (event.type === "file-change" && event.provider === "pi") {
+      focusedPiScanner.invalidateCache();
+    }
+  });
   const focusedSessionWatchManager = new FocusedSessionWatchManager({
     scanner,
     codexScanner: new CodexSessionScanner({
@@ -991,6 +1002,7 @@ async function startServer() {
       sessionsDir: config.geminiSessionsDir,
     }),
     opencodeScanner: new OpenCodeSessionScanner(),
+    piScanner: focusedPiScanner,
     zcodeScanner: new ZCodeSessionScanner(),
   });
 

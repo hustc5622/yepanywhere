@@ -11,4 +11,16 @@ describe("provider registry", () => {
       displayName: "Claude Code (SSH)",
     });
   });
+
+  it("registers Pi for provider settings and transcript capabilities", () => {
+    expect(getAllProviders().map((provider) => provider.id)).toContain("pi");
+    expect(getProvider("pi")).toMatchObject({
+      id: "pi",
+      displayName: "Pi",
+      capabilities: {
+        supportsDag: false,
+        supportsCloning: false,
+      },
+    });
+  });
 });

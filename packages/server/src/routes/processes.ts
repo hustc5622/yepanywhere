@@ -246,12 +246,16 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
           ? (process.requestedReasoningEffort ??
             process.reasoningEffort ??
             "default")
-          : undefined,
+          : process.provider === "pi"
+            ? (process.reasoningEffort ??
+              process.requestedReasoningEffort ??
+              "default")
+            : undefined,
     });
   });
 
   // POST /api/processes/:processId/compact - Trigger a provider-native
-  // context compaction (currently ZCode session/compact).
+  // context compaction (Pi compact / ZCode session/compact).
   routes.post("/:processId/compact", async (c) => {
     const processId = c.req.param("processId");
 
@@ -278,8 +282,8 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   });
 
   // POST /api/processes/:processId/reasoning-effort - Change the
-  // provider-native reasoning effort mid-session (currently ZCode
-  // session/setThoughtLevel). Body: { effort: string }
+  // provider-native reasoning effort mid-session (Pi set_thinking_level /
+  // ZCode session/setThoughtLevel). Body: { effort: string }
   routes.post("/:processId/reasoning-effort", async (c) => {
     const processId = c.req.param("processId");
 

@@ -89,6 +89,7 @@ const NEW_SESSION_PROVIDER_ACCENTS = {
   gemini: "var(--provider-gemini)",
   "gemini-acp": "var(--provider-gemini)",
   opencode: "var(--provider-opencode)",
+  pi: "var(--provider-pi)",
   kimi: "var(--provider-kimi)",
   zcode: "var(--provider-zcode)",
 } satisfies Record<ProviderName, string>;
@@ -532,7 +533,7 @@ export function NewSessionForm({
     (model) => model.id === selectedModel,
   );
   const selectedOpenCodeProtocols =
-    selectedProvider === "opencode"
+    selectedProvider === "opencode" || selectedProvider === "pi"
       ? (selectedModelInfo?.supportedRequestProtocols ?? [])
       : [];
   const isManagedOpenCodeModel = selectedOpenCodeProtocols.length > 0;
@@ -550,6 +551,13 @@ export function NewSessionForm({
   const kimiReasoningEfforts = useMemo(
     () =>
       selectedProvider === "kimi"
+        ? getModelReasoningEfforts(selectedModelInfo)
+        : [],
+    [selectedModelInfo, selectedProvider],
+  );
+  const piReasoningEfforts = useMemo(
+    () =>
+      selectedProvider === "pi"
         ? getModelReasoningEfforts(selectedModelInfo)
         : [],
     [selectedModelInfo, selectedProvider],
@@ -574,12 +582,21 @@ export function NewSessionForm({
     selectedProvider === "opencode" && opencodeReasoningEffort
       ? opencodeReasoningEffort
       : undefined;
+  const resolvedPiThinkingEffort =
+    selectedProvider === "pi"
+      ? resolveModelReasoningEffort(
+          selectedModelInfo,
+          thinkingMode === "on" ? thinkingLevel : null,
+        )
+      : undefined;
   const selectedReasoningEffort =
     selectedProvider === "codex" && thinkingMode === "on"
       ? effectiveCodexReasoningEffort
       : selectedProvider === "kimi"
         ? effectiveKimiReasoningEffort
-        : effectiveOpenCodeReasoningEffort;
+        : selectedProvider === "pi" && thinkingMode !== "off"
+          ? resolvedPiThinkingEffort
+          : effectiveOpenCodeReasoningEffort;
   const getEffortLabel = useCallback(
     (effort: string): string => {
       return isEffortLevel(effort) ? t(EFFORT_LABEL_KEYS[effort]) : effort;
@@ -593,7 +610,9 @@ export function NewSessionForm({
   const effectiveThinkingEffort =
     resolvedClaudeThinkingEffort && isEffortLevel(resolvedClaudeThinkingEffort)
       ? resolvedClaudeThinkingEffort
-      : thinkingLevel;
+      : resolvedPiThinkingEffort && isEffortLevel(resolvedPiThinkingEffort)
+        ? resolvedPiThinkingEffort
+        : thinkingLevel;
   const selectedThinkingPreset: ThinkingPreset =
     selectedProvider === "codex" &&
     thinkingMode === "on" &&
@@ -608,10 +627,13 @@ export function NewSessionForm({
       { value: "off" },
       { value: "auto" },
       ...((selectedProvider === "codex" && codexReasoningEfforts.length > 0) ||
-      (selectedProvider === "claude" && claudeReasoningEfforts.length > 0)
+      (selectedProvider === "claude" && claudeReasoningEfforts.length > 0) ||
+      (selectedProvider === "pi" && piReasoningEfforts.length > 0)
         ? (selectedProvider === "claude"
             ? claudeReasoningEfforts
-            : codexReasoningEfforts
+            : selectedProvider === "pi"
+              ? piReasoningEfforts
+              : codexReasoningEfforts
           ).map((option) => ({
             value: `on:${option.reasoningEffort}` as ThinkingPreset,
             description: option.description,
@@ -645,6 +667,7 @@ export function NewSessionForm({
     claudeReasoningEfforts,
     codexReasoningEfforts,
     getEffortLabel,
+    piReasoningEfforts,
     selectedProvider,
     t,
   ]);
@@ -759,7 +782,7 @@ export function NewSessionForm({
           : undefined;
 
       const preferredModel =
-        providerName === "opencode"
+        providerName === "opencode" || providerName === "pi"
           ? getPreferredOpenCodeModelId(
               models,
               savedOpenCodeConfig?.model ??
@@ -793,7 +816,7 @@ export function NewSessionForm({
           : null,
       );
 
-      if (providerName === "opencode") {
+      if (providerName === "opencode" || providerName === "pi") {
         const modelInfo = models.find((model) => model.id === preferredModel);
         const supportedProtocols = modelInfo?.supportedRequestProtocols ?? [];
         const savedProtocol = savedOpenCodeConfig?.requestProtocol;
@@ -811,7 +834,11 @@ export function NewSessionForm({
           ...getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
           ...savedOpenCodeConfig?.capabilities,
         });
-        setOpenCodeReasoningEffort(savedDefaults?.reasoningEffort ?? null);
+        setOpenCodeReasoningEffort(
+          providerName === "opencode"
+            ? (savedDefaults?.reasoningEffort ?? null)
+            : null,
+        );
         opencodeLimitsTouchedRef.current = Boolean(savedOpenCodeConfig?.limits);
         setOpencodeContextLimit(
           formatOpenCodeLimitInput(savedOpenCodeConfig?.limits?.context),
@@ -936,7 +963,7 @@ export function NewSessionForm({
       // catalog only when the live catalog omits one.
       const effectiveContextWindow =
         model.contextWindow ??
-        (selectedProvider === "opencode"
+        (selectedProvider === "opencode" || selectedProvider === "pi"
           ? getOpenCodeModelDefaultLimits(model.id)?.context
           : undefined);
       if (effectiveContextWindow) {
@@ -1018,7 +1045,7 @@ export function NewSessionForm({
   }, [selectedProvider, selectedProviderInfo?.codexModelSources, t]);
 
   const selectedModelCapabilitySummary = useMemo(() => {
-    if (selectedProvider === "opencode") {
+    if (selectedProvider === "opencode" || selectedProvider === "pi") {
       const limits = resolveOpenCodeModelLimits(selectedModelInfo);
       if (!limits) return null;
       return t("newSessionModelContextWindow", {
@@ -1048,7 +1075,7 @@ export function NewSessionForm({
   }, [getEffortLabel, selectedModelInfo, selectedProvider, t]);
 
   const showOpenCodeEndpointSelector =
-    selectedProvider === "opencode" &&
+    (selectedProvider === "opencode" || selectedProvider === "pi") &&
     selectedModel !== null &&
     isManagedOpenCodeModel;
 
@@ -1056,7 +1083,7 @@ export function NewSessionForm({
   const handleModelSelect = useCallback(
     (selected: string[]) => {
       const nextModel = selected[0] ?? null;
-      if (selectedProvider === "opencode") {
+      if (selectedProvider === "opencode" || selectedProvider === "pi") {
         const nextInfo = availableModels.find(
           (model) => model.id === nextModel,
         );
@@ -1106,7 +1133,12 @@ export function NewSessionForm({
   // to the session config. A manual edit (opencodeLimitsTouchedRef) pins the
   // values until the model changes.
   useEffect(() => {
-    if (selectedProvider !== "opencode" || !isManagedOpenCodeModel) return;
+    if (
+      (selectedProvider !== "opencode" && selectedProvider !== "pi") ||
+      !isManagedOpenCodeModel
+    ) {
+      return;
+    }
     if (opencodeLimitsTouchedRef.current) return;
     const limits = resolveOpenCodeModelLimits(selectedModelInfo);
     setOpencodeContextLimit(
@@ -1208,7 +1240,9 @@ export function NewSessionForm({
   const opencodeModelDefaultLimits = useMemo(():
     | OpenCodeModelLimits
     | undefined => {
-    if (selectedProvider !== "opencode") return undefined;
+    if (selectedProvider !== "opencode" && selectedProvider !== "pi") {
+      return undefined;
+    }
     return resolveOpenCodeModelLimits(selectedModelInfo);
   }, [selectedProvider, selectedModelInfo]);
   const opencodeProviderPatchResult = useMemo(
@@ -1220,7 +1254,7 @@ export function NewSessionForm({
     [opencodeModelPatch],
   );
   const hasOpenCodeConfigError =
-    selectedProvider === "opencode" &&
+    (selectedProvider === "opencode" || selectedProvider === "pi") &&
     isManagedOpenCodeModel &&
     (!!opencodeModelLimitResult.error ||
       !!opencodeProviderPatchResult.error ||
@@ -1240,7 +1274,7 @@ export function NewSessionForm({
     | OpenCodeSessionConfig
     | undefined => {
     if (
-      selectedProvider !== "opencode" ||
+      (selectedProvider !== "opencode" && selectedProvider !== "pi") ||
       !isManagedOpenCodeModel ||
       !selectedModel ||
       hasOpenCodeConfigError
@@ -1279,7 +1313,8 @@ export function NewSessionForm({
     selectedProvider,
   ]);
   const selectedModelForRequest =
-    selectedProvider === "opencode" && isManagedOpenCodeModel
+    (selectedProvider === "opencode" || selectedProvider === "pi") &&
+    isManagedOpenCodeModel
       ? undefined
       : (selectedModel ?? undefined);
   // Codex picker ids may be composite `source/model`; the API takes the bare
@@ -1685,12 +1720,13 @@ export function NewSessionForm({
   const reasoningEffortDefaultsMatch =
     selectedProvider === "codex" ||
     selectedProvider === "opencode" ||
+    selectedProvider === "pi" ||
     selectedProvider === "kimi"
       ? (savedProviderDefaults?.reasoningEffort ?? undefined) ===
         selectedReasoningEffort
       : true;
   const opencodeDefaultsMatch =
-    selectedProvider === "opencode"
+    selectedProvider === "opencode" || selectedProvider === "pi"
       ? sameOpenCodeConfig(
           savedProviderDefaults?.opencodeConfig,
           opencodeConfigForRequest,

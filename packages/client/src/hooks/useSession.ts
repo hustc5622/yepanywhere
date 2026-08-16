@@ -292,7 +292,7 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
   expectedSessionId: string,
 ): boolean {
   return (
-    (provider === "opencode" || provider === "kimi") &&
+    (provider === "opencode" || provider === "pi" || provider === "kimi") &&
     owner === "self" &&
     processState === "idle" &&
     eventSessionId === expectedSessionId
@@ -431,6 +431,7 @@ export function shouldRefreshFullPersistedSession(
     provider === "codex" ||
     provider === "codex-oss" ||
     provider === "opencode" ||
+    provider === "pi" ||
     provider === "kimi"
   );
 }
@@ -823,7 +824,7 @@ export function useSession(
     messagesRef.current = messages;
   }, [messages]);
 
-  // OpenCode and Kimi both use different identities for live and persisted
+  // OpenCode, Pi, and Kimi use different identities for live and persisted
   // messages. Once a turn settles, replace the whole visible snapshot so a
   // full persisted response cannot be appended as duplicate historical turns.
   const authoritativeSnapshotRefreshTimerRef = useRef<ReturnType<
@@ -832,7 +833,7 @@ export function useSession(
   const authoritativeSnapshotRefreshGenerationRef = useRef(0);
   const scheduleAuthoritativeSnapshotRefresh = useCallback(() => {
     const provider = session?.provider;
-    if (provider !== "opencode" && provider !== "kimi") {
+    if (provider !== "opencode" && provider !== "pi" && provider !== "kimi") {
       return;
     }
 

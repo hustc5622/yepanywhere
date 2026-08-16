@@ -91,6 +91,36 @@ describe("Processes Routes", () => {
     );
   });
 
+  it("returns Pi's active reasoning level after a live model switch", async () => {
+    const setModel = vi.fn(async () => ({ success: true }));
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({
+          provider: "pi",
+          reasoningEffort: "low",
+          requestedReasoningEffort: "high",
+        })),
+        setModel,
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/model", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-pro" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      success: true,
+      model: "deepseek-v4-pro",
+      reasoningEffort: "low",
+    });
+  });
+
   it("falls back to the live summary title when the index lookup misses", async () => {
     const project = createProject();
     const process = createProcessInfo();

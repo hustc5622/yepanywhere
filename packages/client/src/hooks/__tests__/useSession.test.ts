@@ -249,7 +249,7 @@ describe("mergeSessionMetadataChange", () => {
 });
 
 describe("shouldRefreshSettledAuthoritativeSnapshot", () => {
-  it.each(["opencode", "kimi"] as const)(
+  it.each(["opencode", "pi", "kimi"] as const)(
     "refreshes an owned %s session once its turn becomes idle",
     (provider) => {
       expect(
@@ -495,6 +495,16 @@ describe("isKimiAuthoritativeSnapshotReady", () => {
 });
 
 describe("extractSessionIdFromFileEvent", () => {
+  it("extracts Pi's native id from its timestamped JSONL filename", () => {
+    expect(
+      extractSessionIdFromFileEvent({
+        provider: "pi",
+        relativePath:
+          "--Users-yue-project--/2026-08-15T01-02-03-000Z_186997d7-2289-4e62-993c-c97c703ded86.jsonl",
+      }),
+    ).toBe("186997d7-2289-4e62-993c-c97c703ded86");
+  });
+
   it("extracts Kimi's session directory instead of the wire.jsonl basename", () => {
     expect(
       extractSessionIdFromFileEvent({
@@ -540,7 +550,7 @@ describe("shouldFetchSessionMetadataForUpdate", () => {
 });
 
 describe("shouldRefreshFullPersistedSession", () => {
-  it.each(["codex", "codex-oss", "opencode", "kimi"] as const)(
+  it.each(["codex", "codex-oss", "opencode", "pi", "kimi"] as const)(
     "reloads the authoritative window for %s in-place updates",
     (provider) => {
       expect(shouldRefreshFullPersistedSession(provider)).toBe(true);

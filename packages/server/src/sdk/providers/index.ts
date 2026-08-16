@@ -66,6 +66,10 @@ export {
   type OpenCodeProviderConfig,
 } from "./opencode.js";
 
+// Pi provider (uses `pi --mode rpc` with a process-local Yep extension)
+import { piProvider } from "./pi.js";
+export { PiProvider, piProvider, type PiProviderConfig } from "./pi.js";
+
 // Kimi provider (uses `kimi acp` for ACP-based agent execution)
 import { kimiProvider } from "./kimi.js";
 export {
@@ -96,6 +100,7 @@ export function getAllProviders(): AgentProvider[] {
     geminiProvider,
     geminiACPProvider,
     opencodeProvider,
+    piProvider,
     kimiProvider,
     zcodeProvider,
   ];
@@ -122,6 +127,8 @@ export function getProvider(name: ProviderName): AgentProvider | null {
       return geminiACPProvider;
     case "opencode":
       return opencodeProvider;
+    case "pi":
+      return piProvider;
     case "kimi":
       return kimiProvider;
     case "zcode":

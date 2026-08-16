@@ -9,6 +9,7 @@ import type { ProviderName } from "../types.js";
 import { MockCodexOSSProvider, MockCodexProvider } from "./codex.js";
 import { MockGeminiProvider } from "./gemini.js";
 import { MockOpenCodeProvider } from "./opencode.js";
+import { MockPiProvider } from "./pi.js";
 import type {
   MockAgentProvider,
   MockProviderConfig,
@@ -31,6 +32,8 @@ export function createMockProvider(
       return new MockGeminiProvider(config);
     case "opencode":
       return new MockOpenCodeProvider(config);
+    case "pi":
+      return new MockPiProvider(config);
     default:
       throw new Error(`Unknown provider type: ${type}`);
   }
@@ -47,6 +50,7 @@ export function createAllMockProviders(
   providers.set("codex-oss", new MockCodexOSSProvider(config));
   providers.set("gemini", new MockGeminiProvider(config));
   providers.set("opencode", new MockOpenCodeProvider(config));
+  providers.set("pi", new MockPiProvider(config));
   return providers;
 }
 
@@ -68,6 +72,7 @@ export const MOCK_PROVIDER_TYPES: ProviderName[] = [
   "codex-oss",
   "gemini",
   "opencode",
+  "pi",
 ];
 
 /**

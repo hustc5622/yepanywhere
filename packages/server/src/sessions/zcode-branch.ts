@@ -1,10 +1,10 @@
 /**
- * ZCode edit-fork branch view.
+ * Copied-prefix edit-fork branch view, shared by ZCode and Pi.
  *
  * Mirrors buildOpenCodeBranchView (opencode-branch.ts) with one protocol
- * difference: ZCode's `session/fork` copies messages into the child with
- * FRESH ids and Yep never persisted the fork boundary, so the boundary is
- * derived instead of stored.
+ * difference: providers such as ZCode copy messages into the child with
+ * FRESH ids, while Pi copies entries into a new session file. Yep does not
+ * persist the fork boundary for either provider, so the boundary is derived.
  *
  * Fork recap (ZCode CLI 0.16.1): editing user message M forks the source at
  * the message BEFORE M (message targets are inclusive). The child therefore
@@ -30,6 +30,7 @@
  */
 
 import type {
+  ProviderName,
   SessionBranchOption,
   SessionBranchState,
   ZCodeStoredMessage,
@@ -57,6 +58,13 @@ export interface ZCodeBranchDiagnostic {
 export interface ZCodeBranchView {
   branchState?: SessionBranchState;
   diagnostics: ZCodeBranchDiagnostic[];
+}
+
+export interface CopiedPrefixBranchViewOptions {
+  /** Provider identity written into the provider-neutral branch state. */
+  provider?: ProviderName;
+  /** Prefix for the synthetic root parent of each family root session. */
+  sessionRootPrefix?: string;
 }
 
 interface ValidForkRelation {
@@ -155,11 +163,15 @@ function orderFamilySessions(
  * leaves); edges come from each session's `parentId` (.zcode sqlite
  * parent_id and/or Yep's forkParentSessionId metadata, unioned upstream).
  */
-export function buildZCodeBranchView(
+export function buildCopiedPrefixForkBranchView(
   familySessions: ZCodeBranchFamilySession[],
   currentSessionId: string,
   selectedBranchId?: string,
+  options: CopiedPrefixBranchViewOptions = {},
 ): ZCodeBranchView {
+  const provider = options.provider ?? "zcode";
+  const sessionRootPrefix =
+    options.sessionRootPrefix ?? `${provider}-session-root`;
   const diagnostics: ZCodeBranchDiagnostic[] = [];
   const sessionsById = new Map(
     familySessions.map((session) => [session.id, session]),
@@ -269,7 +281,7 @@ export function buildZCodeBranchView(
       const branch: SessionBranchOption = {
         id,
         sessionId: session.id,
-        parentId: previousUserId ?? `zcode-session-root:${session.id}`,
+        parentId: previousUserId ?? `${sessionRootPrefix}:${session.id}`,
         prompt,
         title: branchTitle(prompt),
         depth: userDepth,
@@ -278,7 +290,7 @@ export function buildZCodeBranchView(
         siblingCount: 1,
         isActive: session.id === currentSessionId,
         createdAt: messageCreatedAt(entry),
-        provider: "zcode",
+        provider,
       };
       branches.push(branch);
       branchById.set(id, branch);
@@ -345,8 +357,21 @@ export function buildZCodeBranchView(
       sessionId: currentSessionId,
       activeBranchId,
       selectedBranchId: requestedBranchId,
-      provider: "zcode",
+      provider,
       branches,
     },
   };
+}
+
+/** ZCode-flavoured compatibility wrapper around the shared branch builder. */
+export function buildZCodeBranchView(
+  familySessions: ZCodeBranchFamilySession[],
+  currentSessionId: string,
+  selectedBranchId?: string,
+): ZCodeBranchView {
+  return buildCopiedPrefixForkBranchView(
+    familySessions,
+    currentSessionId,
+    selectedBranchId,
+  );
 }

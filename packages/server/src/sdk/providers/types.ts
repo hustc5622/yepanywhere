@@ -22,6 +22,7 @@ export type ProviderName =
   | "gemini"
   | "gemini-acp"
   | "opencode"
+  | "pi"
   | "kimi"
   | "zcode";
 
@@ -61,8 +62,9 @@ export interface StartSessionOptions {
   allowMissingRolloutReplacement?: boolean;
   /**
    * Provider-native edit boundary used with resumeSessionId. Claude resumes
-   * through the supplied ancestor UUID; OpenCode forks before the supplied
-   * native user message ID. Maps to the provider's `resumeSessionAt` option.
+   * through the supplied ancestor UUID; OpenCode and Pi fork before the
+   * supplied native user message ID. Maps to the provider's
+   * `resumeSessionAt` option.
    */
   resumeSessionAt?: string;
   /**
@@ -90,7 +92,7 @@ export interface StartSessionOptions {
   codexEventAccountId?: string;
   /** Optional stable project key recorded on canonical Codex event envelopes. */
   codexEventProjectId?: string;
-  /** Managed provider/model configuration consumed by OpenCode. */
+  /** Managed provider/model configuration consumed by OpenCode and Pi. */
   opencodeConfig?: OpenCodeSessionConfig;
   /** Tool approval callback */
   onToolApproval?: CanUseTool;

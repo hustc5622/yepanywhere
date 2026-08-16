@@ -46,6 +46,7 @@ export {
   createOpenCodeToolScenario,
   createOpenCodeErrorScenario,
 } from "./opencode.js";
+export { MockPiProvider } from "./pi.js";
 
 // Factory functions
 export {

@@ -1,6 +1,8 @@
+import type { ProviderName } from "@yep-anywhere/shared";
+
 export interface SessionFileEvent {
   relativePath: string;
-  provider?: "claude" | "gemini" | "codex" | "opencode" | "kimi";
+  provider?: ProviderName;
 }
 
 export function extractSessionIdFromFileEvent(
@@ -28,7 +30,7 @@ export function extractSessionIdFromFileEvent(
     base = base.slice(0, -5);
   }
 
-  if (event.provider === "codex") {
+  if (event.provider === "codex" || event.provider === "pi") {
     const match = base.match(/([0-9a-fA-F-]{36})$/);
     if (match) return match[1] ?? null;
   }

@@ -112,3 +112,31 @@ describe("BashRenderer benchmark review output", () => {
     expect(screen.queryByText(/BENCHMARK_RUN_REVIEW_RESULT_START/)).toBeNull();
   });
 });
+
+describe("BashRenderer provider command context", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("keeps the normalized Pi command beside an expanded result", () => {
+    render(
+      <div>
+        {bashRenderer.renderToolResult(
+          {
+            stdout: "done",
+            stderr: "",
+            interrupted: false,
+            isImage: false,
+          },
+          false,
+          { ...renderContext, provider: "pi" },
+          { command: "echo pi" },
+        )}
+      </div>,
+    );
+
+    expect(screen.getByText("Command")).toBeDefined();
+    expect(screen.getByText("echo pi")).toBeDefined();
+    expect(screen.getByText("done")).toBeDefined();
+  });
+});

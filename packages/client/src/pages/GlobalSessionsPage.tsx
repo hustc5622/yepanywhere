@@ -44,6 +44,7 @@ const PROVIDER_COLORS: Record<ProviderName, string> = {
   gemini: "#4285f4",
   "gemini-acp": "#4285f4", // Same as gemini
   opencode: "#9333ea", // Purple for OpenCode
+  pi: "var(--provider-pi)",
   kimi: "var(--provider-kimi)", // Kimi KMBlue
   zcode: "var(--provider-zcode)", // ZCode
 };

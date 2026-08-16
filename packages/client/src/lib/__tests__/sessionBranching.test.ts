@@ -47,6 +47,22 @@ describe("provider-specific historical message editing", () => {
     });
   });
 
+  it("uses Pi's persisted entry id as the native edit-fork boundary", () => {
+    expect(canEditPersistedUserPrompt("pi", "jsonl")).toBe(true);
+    expect(canEditPersistedUserPrompt("pi", "sdk")).toBe(false);
+    expect(
+      resolveSessionEditSubmission("pi", {
+        uuid: "pi-user-entry",
+        parentUuid: "pi-parent-entry",
+      }),
+    ).toEqual({
+      kind: "opencode-fork",
+      resumeSessionAt: "pi-user-entry",
+      optimisticTruncate: false,
+      refreshSameSessionBranches: false,
+    });
+  });
+
   it("keeps Claude parent-boundary and gives Codex source-preserving fork semantics", () => {
     expect(
       resolveSessionEditSubmission("claude", {
@@ -77,7 +93,7 @@ describe("provider-specific historical message editing", () => {
     });
   });
 
-  it("only enables OpenCode/ZCode editing after the authoritative disk message arrives", () => {
+  it("only enables native-entry forks after the authoritative disk message arrives", () => {
     expect(canEditPersistedUserPrompt("opencode", "jsonl")).toBe(true);
     expect(canEditPersistedUserPrompt("opencode", "sdk")).toBe(false);
     expect(canEditPersistedUserPrompt("opencode", undefined)).toBe(false);

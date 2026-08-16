@@ -14,7 +14,7 @@
   <a href="https://yepanywhere.com">yepanywhere.com</a>
 </p>
 
-Yep Anywhere 是 Claude Code、Codex 和 OpenCode 的远程操作界面。它自托管、无需云账号，让智能体继续在你的开发机上运行，你可以从手机上查看进度、处理审批并继续对话。
+Yep Anywhere 是 Claude Code、Codex、OpenCode 和 Pi 的远程操作界面。它自托管、无需云账号，让智能体继续在你的开发机上运行，你可以从手机上查看进度、处理审批并继续对话。
 
 ## 功能
 
@@ -39,6 +39,7 @@ Yep Anywhere 是 Claude Code、Codex 和 OpenCode 的远程操作界面。它自
 | Claude Code | 完整支持 | 支持 | 支持 | 主要提供商，功能支持最完整 |
 | Codex | 完整支持 | 支持 | 支持 | 支持 diff 和审批 |
 | OpenCode | 基础支持 | 支持 | 支持 | 通过 4520 OpenCode CLI bridge 接入 |
+| Pi | 完整支持 | 支持 | 支持 | 通过原生 RPC 接入，复用 OpenCode gateway 模型目录 |
 
 ## 截图
 
@@ -63,7 +64,7 @@ Yep Anywhere 是 Claude Code、Codex 和 OpenCode 的远程操作界面。它自
 
 ## 快速开始
 
-如果你已经能安装 Claude Code、Codex 或 OpenCode，就能安装 Yep Anywhere。依赖很少。
+如果你已经能安装 Claude Code、Codex、OpenCode 或 Pi，就能安装 Yep Anywhere。依赖很少。
 
 ```bash
 npm i -g yepanywhere

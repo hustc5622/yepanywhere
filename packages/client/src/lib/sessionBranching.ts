@@ -94,8 +94,8 @@ export interface EditablePromptIdentity {
 
 export function isOpenCodeProvider(
   provider: ProviderName | string | undefined | null,
-): provider is "opencode" {
-  return provider === "opencode";
+): provider is "opencode" | "pi" {
+  return provider === "opencode" || provider === "pi";
 }
 
 export function supportsHistoricalMessageEditing(
@@ -106,12 +106,13 @@ export function supportsHistoricalMessageEditing(
     provider === "claude" ||
     provider === "codex" ||
     provider === "opencode" ||
+    provider === "pi" ||
     provider === "zcode"
   );
 }
 
 /**
- * OpenCode and ZCode can only fork at an authoritative native message ID.
+ * OpenCode, Pi, and ZCode can only fork at an authoritative native message ID.
  * Their live echo temporarily carries a Yep UUID, so editing stays
  * unavailable until the persisted message replaces that echo. Other
  * supported providers retain their existing edit behavior.

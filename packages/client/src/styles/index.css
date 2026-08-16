@@ -19,6 +19,7 @@
   --provider-codex: #10a37f;
   --provider-gemini: #4285f4;
   --provider-opencode: #9333ea;
+  --provider-pi: #0891b2;
   --provider-kimi: #1783ff;
   --provider-zcode: #6366f1;
 
@@ -9296,6 +9297,10 @@ button.context-usage-indicator--button:focus-visible {
   background: var(--provider-opencode);
 }
 
+.provider-option-dot.provider-pi {
+  background: var(--provider-pi);
+}
+
 .provider-option-dot.provider-kimi {
   background: var(--provider-kimi);
 }
@@ -10646,6 +10651,11 @@ button.context-usage-indicator--button:focus-visible {
 
 .agent-provider-gemini {
   background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  color: white;
+}
+
+.agent-provider-pi {
+  background: linear-gradient(135deg, #0e7490 0%, #06b6d4 100%);
   color: white;
 }
 

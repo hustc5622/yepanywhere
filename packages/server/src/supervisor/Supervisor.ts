@@ -709,16 +709,18 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message, messageUuid, message.tempId);
 
-    // OpenCode and ZCode both edit-fork around a native message boundary and
+    // OpenCode, Pi, and ZCode edit-fork around a native message boundary and
     // preserve the source session, so the supervisor must re-key the process
     // onto the fork's native id once the provider reports it.
-    const isOpenCodeFork =
-      (activeProvider.name === "opencode" || activeProvider.name === "zcode") &&
+    const isCrossSessionEditFork =
+      (activeProvider.name === "opencode" ||
+        activeProvider.name === "pi" ||
+        activeProvider.name === "zcode") &&
       Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
     const isCodexFork =
       activeProvider.name === "codex" &&
       Boolean(resumeSessionId && modelSettings?.rollbackNumTurns);
-    const isForkedResume = isOpenCodeFork || isCodexFork;
+    const isForkedResume = isCrossSessionEditFork || isCodexFork;
     const requiresStrictSessionId =
       isForkedResume || activeProvider.name === "codex";
 

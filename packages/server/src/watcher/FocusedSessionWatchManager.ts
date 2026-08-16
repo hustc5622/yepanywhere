@@ -11,6 +11,7 @@ type WatchProvider =
   | "codex"
   | "gemini"
   | "opencode"
+  | "pi"
   | "kimi"
   | "zcode";
 type ChangeSource = "fs-watch" | "poll";
@@ -32,6 +33,12 @@ interface OpenCodeSessionInfo {
    * to distinguish an update to the selected session from another session's
    * database write. */
   mtime?: number;
+}
+
+interface PiSessionInfo {
+  id?: string;
+  sessionId: string;
+  filePath: string;
 }
 
 interface SessionWatchTarget {
@@ -85,6 +92,9 @@ export interface FocusedSessionWatchManagerOptions {
   opencodeScanner?: {
     getSessionsForProject(projectPath: string): Promise<OpenCodeSessionInfo[]>;
   };
+  piScanner?: {
+    getSessionsForProject(projectPath: string): Promise<PiSessionInfo[]>;
+  };
   zcodeScanner?: {
     getSessionsForProject(projectPath: string): Promise<ZCodeSessionInfo[]>;
   };
@@ -115,6 +125,7 @@ export class FocusedSessionWatchManager {
   private readonly codexScanner: FocusedSessionWatchManagerOptions["codexScanner"];
   private readonly geminiScanner: FocusedSessionWatchManagerOptions["geminiScanner"];
   private readonly opencodeScanner: FocusedSessionWatchManagerOptions["opencodeScanner"];
+  private readonly piScanner: FocusedSessionWatchManagerOptions["piScanner"];
   private readonly zcodeScanner: FocusedSessionWatchManagerOptions["zcodeScanner"];
   private readonly pollMs: number;
   private readonly debounceMs: number;
@@ -126,6 +137,7 @@ export class FocusedSessionWatchManager {
     this.codexScanner = options.codexScanner;
     this.geminiScanner = options.geminiScanner;
     this.opencodeScanner = options.opencodeScanner;
+    this.piScanner = options.piScanner;
     this.zcodeScanner = options.zcodeScanner;
     this.pollMs = Math.max(250, options.pollMs ?? 1500);
     this.debounceMs = Math.max(50, options.debounceMs ?? 200);
@@ -461,6 +473,21 @@ export class FocusedSessionWatchManager {
             sessionMtime: match.mtime,
           };
         }
+        continue;
+      }
+
+      if (provider === "pi") {
+        const sessions =
+          (await this.piScanner?.getSessionsForProject(project.path)) ?? [];
+        const match = sessions.find(
+          (session) =>
+            session.sessionId === target.sessionId ||
+            session.id === target.sessionId,
+        );
+        if (match) {
+          return { filePath: match.filePath, provider };
+        }
+        continue;
       }
 
       if (provider === "zcode") {
@@ -498,6 +525,7 @@ export class FocusedSessionWatchManager {
     pushCandidate("codex");
     pushCandidate("gemini");
     pushCandidate("opencode");
+    pushCandidate("pi");
     pushCandidate("zcode");
     return candidates;
   }

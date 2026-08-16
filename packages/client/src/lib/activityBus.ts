@@ -4,6 +4,7 @@ import type {
   ContextCumulativeUsage,
   ContextUsage,
   PendingInputType,
+  ProviderName,
   SessionLastTurnStatus,
   SessionRetryStatus,
   UrlProjectId,
@@ -30,7 +31,7 @@ export type FileType =
 
 export interface FileChangeEvent {
   type: "file-change";
-  provider: "claude" | "gemini" | "codex" | "opencode" | "kimi";
+  provider: ProviderName;
   path: string;
   relativePath: string;
   changeType: FileChangeType;

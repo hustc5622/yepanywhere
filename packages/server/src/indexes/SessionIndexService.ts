@@ -656,6 +656,12 @@ export class SessionIndexService implements ISessionIndexService {
       return;
     }
 
+    if (event.provider === "pi") {
+      // Pi sessions share one native tree and are filtered by header cwd.
+      this.markMatchingScopesDirty("pi::");
+      return;
+    }
+
     if (event.provider === "kimi") {
       // Kimi sessions also share one tree and are filtered by state.json cwd.
       this.markMatchingScopesDirty("kimi::");

@@ -299,6 +299,8 @@ export class FileWatcher {
         return this.parseCodexFileType(relativePath);
       case "opencode":
         return this.parseOpenCodeFileType(relativePath);
+      case "pi":
+        return relativePath.endsWith(".jsonl") ? "session" : "other";
       case "kimi":
         return this.parseKimiFileType(relativePath);
       case "zcode":

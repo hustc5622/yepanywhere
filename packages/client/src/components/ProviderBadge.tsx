@@ -9,6 +9,7 @@ const PROVIDER_COLORS: Record<ProviderName, string> = {
   gemini: "var(--provider-gemini)", // Google blue
   "gemini-acp": "var(--provider-gemini)", // Google blue (same as gemini)
   opencode: "var(--provider-opencode)", // OpenCode purple
+  pi: "var(--provider-pi)", // Pi cyan
   kimi: "var(--provider-kimi, #1783ff)", // Kimi KMBlue
   zcode: "var(--provider-zcode)", // ZCode
 };
@@ -25,6 +26,7 @@ const PROVIDER_LABELS: Record<ProviderName, string> = {
   gemini: "Gemini",
   "gemini-acp": "Gemini ACP",
   opencode: "OpenCode",
+  pi: "Pi",
   kimi: "Kimi",
   zcode: "ZCode",
 };
@@ -79,7 +81,8 @@ export function ProviderBadge({
     if (
       !normalized ||
       normalized === "none" ||
-      (provider === "opencode" && normalized === "default")
+      ((provider === "opencode" || provider === "pi") &&
+        normalized === "default")
     ) {
       return null;
     }

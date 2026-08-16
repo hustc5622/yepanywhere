@@ -54,6 +54,7 @@ import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { encodeProjectId } from "../projects/paths.js";
+import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
 import { EmbeddedRuntimeController } from "../runtime/EmbeddedRuntimeController.js";
@@ -85,6 +86,7 @@ import {
 } from "../sessions/pagination.js";
 import { augmentPersistedSessionMessages } from "../sessions/persisted-augments.js";
 import { getPersistedAskUserQuestionInputRequest } from "../sessions/persisted-pending-input.js";
+import type { PiSessionReader } from "../sessions/pi-reader.js";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import {
   type ProviderResolutionDeps,
@@ -139,10 +141,13 @@ export interface SessionsDeps {
   /** Optional shared Gemini reader factory for cross-provider session lookups */
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   opencodeScanner?: OpenCodeSessionScanner;
+  piScanner?: PiSessionScanner;
   opencodeDbPath?: string;
   zcodeDbPath?: string;
   /** Optional shared OpenCode reader factory for cross-provider session lookups */
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  piSessionsDir?: string;
+  piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiScanner?: KimiSessionScanner;
   kimiSessionsDir?: string;
@@ -543,6 +548,8 @@ function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     opencodeDbPath: deps.opencodeDbPath,
     opencodeReaderFactory: deps.opencodeReaderFactory,
+    piSessionsDir: deps.piSessionsDir,
+    piReaderFactory: deps.piReaderFactory,
     kimiSessionsDir: deps.kimiSessionsDir,
     kimiReaderFactory: deps.kimiReaderFactory,
     zcodeDbPath: deps.zcodeDbPath,
@@ -642,7 +649,11 @@ function emitArchiveFileEvents(
   const providerRoot =
     record.provider === "codex"
       ? deps.codexSessionsDir
-      : deps.claudeProjectsDir;
+      : record.provider === "pi"
+        ? deps.piSessionsDir
+        : record.provider === "kimi"
+          ? deps.kimiSessionsDir
+          : deps.claudeProjectsDir;
   if (!providerRoot) return;
 
   for (const file of record.files) {
@@ -762,6 +773,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       geminiReaderFactory: deps.geminiReaderFactory,
       opencodeDbPath: deps.opencodeDbPath,
       opencodeReaderFactory: deps.opencodeReaderFactory,
+      piSessionsDir: deps.piSessionsDir,
+      piReaderFactory: deps.piReaderFactory,
       kimiSessionsDir: deps.kimiSessionsDir,
       kimiReaderFactory: deps.kimiReaderFactory,
     });

@@ -71,7 +71,7 @@ export function useProviderPermissionModeConfig(
     };
   }
 
-  if (provider === "opencode") {
+  if (provider === "opencode" || provider === "pi") {
     return {
       labels: {
         ...genericLabels,

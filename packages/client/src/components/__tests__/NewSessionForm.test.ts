@@ -14,7 +14,9 @@ describe("New session form", () => {
     ["gemini", "var(--provider-gemini)"],
     ["gemini-acp", "var(--provider-gemini)"],
     ["opencode", "var(--provider-opencode)"],
+    ["pi", "var(--provider-pi)"],
     ["kimi", "var(--provider-kimi)"],
+    ["zcode", "var(--provider-zcode)"],
   ] as const)("uses the %s provider accent", (provider, expected) => {
     expect(getNewSessionProviderAccent(provider)).toBe(expected);
   });

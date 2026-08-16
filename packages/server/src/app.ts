@@ -65,6 +65,7 @@ import {
   canonicalizeProjectPath,
   encodeProjectId,
 } from "./projects/paths.js";
+import { PiSessionScanner } from "./projects/pi-scanner.js";
 import { ProjectScanner } from "./projects/scanner.js";
 import { ZCodeSessionScanner } from "./projects/zcode-scanner.js";
 import {
@@ -139,6 +140,8 @@ import { GeminiSessionReader } from "./sessions/gemini-reader.js";
 import { KimiSessionReader } from "./sessions/kimi-reader.js";
 import { normalizeSession } from "./sessions/normalization.js";
 import { OpenCodeSessionReader } from "./sessions/opencode-reader.js";
+import { PI_SESSIONS_DIR } from "./sessions/pi-files.js";
+import { PiSessionReader } from "./sessions/pi-reader.js";
 import { normalizeProviderGroup } from "./sessions/provider-groups.js";
 import {
   findSessionSummaryAcrossProviders,
@@ -424,6 +427,7 @@ export function createApp(options: AppOptions): AppResult {
   const geminiScanner = new GeminiSessionScanner();
   const opencodeScanner = new OpenCodeSessionScanner();
   const kimiScanner = new KimiSessionScanner();
+  const piScanner = new PiSessionScanner({ sessionsDir: PI_SESSIONS_DIR });
   const zcodeScanner = new ZCodeSessionScanner();
   const scanner = new ProjectScanner({
     projectsDir: options.projectsDir,
@@ -433,6 +437,7 @@ export function createApp(options: AppOptions): AppResult {
     geminiScanner,
     opencodeScanner,
     kimiScanner,
+    piScanner,
     zcodeScanner,
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
@@ -453,13 +458,23 @@ export function createApp(options: AppOptions): AppResult {
   const readerCache = new Map<string, ISessionReader>();
   const maxReaderCacheSize = 500;
 
-  // Kimi readers cache their shared-tree directory scan briefly. Clear that
-  // cache on wire/state changes before the next project/session request so a
-  // watcher-driven index refresh cannot reconcile against a stale file list.
+  // Kimi and Pi readers cache their shared-tree directory scans briefly. Clear
+  // them on file changes before the next project/session request so a watcher-
+  // driven index refresh cannot reconcile against a stale file list.
   options.eventBus?.subscribe((event) => {
-    if (event.type !== "file-change" || event.provider !== "kimi") return;
+    if (
+      event.type !== "file-change" ||
+      (event.provider !== "kimi" && event.provider !== "pi")
+    ) {
+      return;
+    }
     for (const reader of readerCache.values()) {
-      if (reader instanceof KimiSessionReader) reader.invalidateCache();
+      if (event.provider === "kimi" && reader instanceof KimiSessionReader) {
+        reader.invalidateCache();
+      }
+      if (event.provider === "pi" && reader instanceof PiSessionReader) {
+        reader.invalidateCache();
+      }
     }
   });
 
@@ -536,6 +551,21 @@ export function createApp(options: AppOptions): AppResult {
           `opencode::${project.path}`,
           () =>
             new OpenCodeSessionReader({
+              projectPath: project.path,
+              getContextWindow: mis
+                ? (model, provider, sessionId) =>
+                    mis.getCachedContextWindow(model, provider, sessionId)
+                : undefined,
+            }),
+        );
+      }
+      case "pi": {
+        const mis = options.modelInfoService;
+        return getOrCreateReader(
+          `pi::${PI_SESSIONS_DIR}::${project.path}`,
+          () =>
+            new PiSessionReader({
+              sessionsDir: PI_SESSIONS_DIR,
               projectPath: project.path,
               getContextWindow: mis
                 ? (model, provider, sessionId) =>
@@ -624,6 +654,18 @@ export function createApp(options: AppOptions): AppResult {
         });
       },
     );
+  const piReaderFactory = (projectPath: string): PiSessionReader =>
+    getOrCreateReader(`pi-extra::${PI_SESSIONS_DIR}::${projectPath}`, () => {
+      const mis = options.modelInfoService;
+      return new PiSessionReader({
+        sessionsDir: PI_SESSIONS_DIR,
+        projectPath,
+        getContextWindow: mis
+          ? (model, provider, sessionId) =>
+              mis.getCachedContextWindow(model, provider, sessionId)
+          : undefined,
+      });
+    });
   const kimiReaderFactory = (projectPath: string): KimiSessionReader =>
     getOrCreateReader(
       `kimi-extra::${KIMI_SESSIONS_DIR}::${projectPath}`,
@@ -663,8 +705,10 @@ export function createApp(options: AppOptions): AppResult {
         geminiReaderFactory,
         geminiHashToCwd: geminiScanner.getHashToCwd(),
         opencodeDbPath: OPENCODE_DB_PATH,
+        piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
@@ -736,6 +780,8 @@ export function createApp(options: AppOptions): AppResult {
     opencodeDbPath: OPENCODE_DB_PATH,
     zcodeDbPath: ZCODE_DB_PATH,
     opencodeReaderFactory,
+    piSessionsDir: PI_SESSIONS_DIR,
+    piReaderFactory,
     zcodeReaderFactory,
     kimiSessionsDir: KIMI_SESSIONS_DIR,
     kimiReaderFactory,
@@ -835,6 +881,7 @@ export function createApp(options: AppOptions): AppResult {
           codexScanner,
           geminiScanner,
           opencodeScanner,
+          piScanner,
           kimiScanner,
         });
         const candidates: Array<{
@@ -863,8 +910,10 @@ export function createApp(options: AppOptions): AppResult {
                 geminiReaderFactory,
                 geminiHashToCwd: providerCatalog.geminiHashToCwd,
                 opencodeDbPath: OPENCODE_DB_PATH,
+                piSessionsDir: PI_SESSIONS_DIR,
                 zcodeDbPath: ZCODE_DB_PATH,
                 opencodeReaderFactory,
+                piReaderFactory,
                 zcodeReaderFactory,
                 kimiSessionsDir: KIMI_SESSIONS_DIR,
                 kimiReaderFactory,
@@ -947,8 +996,10 @@ export function createApp(options: AppOptions): AppResult {
             geminiReaderFactory,
             geminiHashToCwd: geminiScanner.getHashToCwd(),
             opencodeDbPath: OPENCODE_DB_PATH,
+            piSessionsDir: PI_SESSIONS_DIR,
             zcodeDbPath: ZCODE_DB_PATH,
             opencodeReaderFactory,
+            piReaderFactory,
             zcodeReaderFactory,
             kimiSessionsDir: KIMI_SESSIONS_DIR,
             kimiReaderFactory,
@@ -1002,6 +1053,7 @@ export function createApp(options: AppOptions): AppResult {
         codexScanner,
         geminiScanner,
         opencodeScanner,
+        piScanner,
         kimiScanner,
       });
       const roots = {
@@ -1016,8 +1068,10 @@ export function createApp(options: AppOptions): AppResult {
         geminiReaderFactory,
         geminiHashToCwd: geminiScanner.getHashToCwd(),
         opencodeDbPath: OPENCODE_DB_PATH,
+        piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
@@ -1335,10 +1389,13 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      piScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
@@ -1365,10 +1422,13 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      piScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
@@ -1415,6 +1475,11 @@ export function createApp(options: AppOptions): AppResult {
               reader: opencodeReaderFactory(project.path),
               sessionDir: OPENCODE_DB_PATH,
             };
+          case "pi":
+            return {
+              reader: piReaderFactory(project.path),
+              sessionDir: PI_SESSIONS_DIR,
+            };
           case "kimi":
             return {
               reader: kimiReaderFactory(project.path),
@@ -1455,10 +1520,13 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      piScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
@@ -1486,10 +1554,13 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       opencodeScanner,
+      piScanner,
       kimiScanner,
       opencodeDbPath: OPENCODE_DB_PATH,
+      piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       opencodeReaderFactory,
+      piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
@@ -1520,10 +1591,13 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         opencodeScanner,
+        piScanner,
         kimiScanner,
         opencodeDbPath: OPENCODE_DB_PATH,
+        piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
@@ -1555,10 +1629,13 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         opencodeScanner,
+        piScanner,
         kimiScanner,
         opencodeDbPath: OPENCODE_DB_PATH,
+        piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
         opencodeReaderFactory,
+        piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,

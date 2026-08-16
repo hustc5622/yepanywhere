@@ -124,8 +124,12 @@ function getApprovalAgentName(
       return "Gemini";
     case "opencode":
       return "OpenCode";
+    case "pi":
+      return "Pi";
     case "kimi":
       return "Kimi";
+    case "zcode":
+      return "ZCode";
     default:
       return "Claude";
   }

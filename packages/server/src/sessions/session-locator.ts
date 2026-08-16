@@ -33,6 +33,7 @@ import type { GeminiSessionReader } from "./gemini-reader.js";
 import type { KimiSessionReader } from "./kimi-reader.js";
 import { queryOpenCodeRow } from "./opencode-db.js";
 import type { OpenCodeSessionReader } from "./opencode-reader.js";
+import type { PiSessionReader } from "./pi-reader.js";
 import { findSessionSummaryAcrossProviders } from "./provider-resolution.js";
 import type { ISessionReader } from "./types.js";
 
@@ -53,6 +54,8 @@ export interface SessionLocatorDeps {
   opencodeDbPath?: string;
   zcodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  piSessionsDir?: string;
+  piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
@@ -289,6 +292,8 @@ async function locateViaProviderScan(
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     opencodeDbPath: deps.opencodeDbPath,
     opencodeReaderFactory: deps.opencodeReaderFactory,
+    piSessionsDir: deps.piSessionsDir,
+    piReaderFactory: deps.piReaderFactory,
     kimiSessionsDir: deps.kimiSessionsDir,
     kimiReaderFactory: deps.kimiReaderFactory,
   };

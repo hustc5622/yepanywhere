@@ -250,6 +250,66 @@ describe("ExternalSessionTracker", () => {
     ).toBe(false);
   });
 
+  it("uses Pi's native session header instead of its timestamped filename", async () => {
+    const externalProcessProbe = vi.fn(async () => true);
+    const getSessionSummary = vi.fn(async (sessionId) => ({
+      ...createSummary(sessionId),
+      provider: "pi" as const,
+    }));
+    tracker = new ExternalSessionTracker({
+      eventBus,
+      supervisor: {
+        getProcessForSession: vi.fn(() => undefined),
+        getAllProcesses: vi.fn(() => []),
+      } as unknown as Supervisor,
+      scanner: {
+        getProject: vi.fn(async () => project),
+        getProjectBySessionDirSuffix: vi.fn(async () => project),
+      } as never,
+      externalProcessProbe,
+      getSessionSummary,
+    });
+
+    const dir = await mkdtemp(join(tmpdir(), "yep-pi-external-"));
+    tempDirs.push(dir);
+    const sessionId = "019f4af6-57d5-73e1-96d0-b3ee3a8eceda";
+    const fileName = `2026-08-15T10-00-00-000Z_${sessionId}.jsonl`;
+    const filePath = join(dir, fileName);
+    await writeFile(
+      filePath,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: sessionId,
+        timestamp: "2026-08-15T10:00:00.000Z",
+        cwd: "/tmp/project",
+      })}\n`,
+    );
+
+    eventBus.emit({
+      type: "file-change",
+      provider: "pi",
+      path: filePath,
+      relativePath: `--tmp-project--/${fileName}`,
+      changeType: "modify",
+      timestamp: "2026-08-15T10:00:01.000Z",
+      fileType: "session",
+    });
+    await vi.waitFor(() => {
+      expect(externalProcessProbe).toHaveBeenCalled();
+    });
+    await flushTrackerWork();
+
+    expect(externalProcessProbe).toHaveBeenCalledWith({
+      provider: "pi",
+      projectPath: "/tmp/project",
+      excludePids: [],
+    });
+    expect(getSessionSummary).toHaveBeenCalledWith(sessionId, projectId);
+    expect(tracker.isExternal(sessionId)).toBe(true);
+    expect(tracker.isExternal(fileName.slice(0, -6))).toBe(false);
+  });
+
   it("creates unowned sessions without external ownership when no provider process is active", async () => {
     tracker = createTracker(vi.fn(async () => false));
 

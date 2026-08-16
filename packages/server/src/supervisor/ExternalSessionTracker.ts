@@ -6,6 +6,7 @@ import {
   type DirProjectId,
   type UrlProjectId,
   asDirProjectId,
+  parsePiSessionHeader,
 } from "@yep-anywhere/shared";
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { decodeProjectId, encodeProjectId } from "../projects/paths.js";
@@ -460,6 +461,11 @@ export class ExternalSessionTracker {
       return;
     }
 
+    if (event.provider === "pi") {
+      await this.handlePiFileChange(event);
+      return;
+    }
+
     // Parse sessionId and projectId from path
     // Format: projects/<projectId>/<sessionId>.jsonl
     const parsed = this.parseSessionPath(event.relativePath);
@@ -553,6 +559,48 @@ export class ExternalSessionTracker {
     return Boolean(
       value && (value.startsWith("-") || /^[a-zA-Z]--/.test(value)),
     );
+  }
+
+  private async handlePiFileChange(event: FileChangeEvent): Promise<void> {
+    const firstLine = await readFirstLine(event.path).catch(() => null);
+    if (!firstLine) return;
+
+    let header: ReturnType<typeof parsePiSessionHeader>;
+    try {
+      header = parsePiSessionHeader(JSON.parse(firstLine));
+    } catch {
+      return;
+    }
+    if (!header) return;
+
+    const sessionId = header.id;
+    const projectId = encodeProjectId(header.cwd);
+    const process = this.supervisor.getProcessForSession(sessionId);
+    const runtimeProcess = process
+      ? null
+      : await this.getRuntimeProcess?.(sessionId);
+    if (runtimeProcess) this.runtimeOwnedSessions.add(sessionId);
+    else this.runtimeOwnedSessions.delete(sessionId);
+
+    if (process || runtimeProcess) {
+      this.removeExternal(sessionId);
+      if (this.getSessionSummary) {
+        const getSessionSummary = this.getSessionSummary;
+        const ownedProjectId = process?.projectId ?? runtimeProcess?.projectId;
+        if (!ownedProjectId) return;
+        this.sessionParser.enqueue(sessionId, () =>
+          getSessionSummary(sessionId, ownedProjectId),
+        );
+      }
+      return;
+    }
+
+    if (this.isInAbortGracePeriod(sessionId)) return;
+
+    await this.handleUnownedSessionActivity(sessionId, {
+      provider: "pi",
+      projectId,
+    });
   }
 
   private async handleCodexFileChange(event: FileChangeEvent): Promise<void> {

@@ -398,6 +398,11 @@ export class SessionContentIndexService {
       return;
     }
 
+    if (event.provider === "pi") {
+      this.markMatchingScopesDirty("pi::");
+      return;
+    }
+
     if (event.provider === "kimi") {
       this.markMatchingScopesDirty("kimi::");
     }

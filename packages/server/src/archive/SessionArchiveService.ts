@@ -18,6 +18,7 @@ export type ArchiveProvider =
   | "claude"
   | "codex"
   | "opencode"
+  | "pi"
   | "kimi"
   | "zcode";
 export type ArchiveReason = "manual" | "auto";

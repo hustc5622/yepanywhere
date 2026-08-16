@@ -266,7 +266,13 @@ export interface SearchResponse {
   searchDurationMs: number;
 }
 
-export type ArchiveProvider = "claude" | "codex";
+export type ArchiveProvider =
+  | "claude"
+  | "codex"
+  | "opencode"
+  | "pi"
+  | "kimi"
+  | "zcode";
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {

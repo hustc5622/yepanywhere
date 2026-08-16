@@ -22,6 +22,7 @@ export type WatchProvider =
   | "gemini"
   | "codex"
   | "opencode"
+  | "pi"
   | "kimi"
   | "zcode";
 

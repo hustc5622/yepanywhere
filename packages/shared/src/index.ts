@@ -173,6 +173,9 @@ export {
   DEFAULT_PROVIDER,
 } from "./types.js";
 
+// Pi coding-agent native JSONL session format.
+export * from "./pi-schema/index.js";
+
 export type { SessionKind } from "./session-kind.js";
 export {
   COMMAND_MESSAGE_SESSION_TITLE,

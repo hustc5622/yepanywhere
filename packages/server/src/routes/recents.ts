@@ -13,12 +13,14 @@ import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { decodeProjectId, getProjectName } from "../projects/paths.js";
+import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
+import type { PiSessionReader } from "../sessions/pi-reader.js";
 import { findSessionSummaryAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
@@ -38,9 +40,12 @@ export interface RecentsDeps {
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   opencodeScanner?: OpenCodeSessionScanner;
+  piScanner?: PiSessionScanner;
   opencodeDbPath?: string;
   zcodeDbPath?: string;
   opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
+  piSessionsDir?: string;
+  piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiScanner?: KimiSessionScanner;
   kimiSessionsDir?: string;
@@ -94,6 +99,8 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
           geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
           opencodeDbPath: deps.opencodeDbPath,
           opencodeReaderFactory: deps.opencodeReaderFactory,
+          piSessionsDir: deps.piSessionsDir,
+          piReaderFactory: deps.piReaderFactory,
           kimiSessionsDir: deps.kimiSessionsDir,
           kimiReaderFactory: deps.kimiReaderFactory,
         },
