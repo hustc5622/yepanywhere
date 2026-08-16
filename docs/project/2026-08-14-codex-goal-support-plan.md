@@ -26,7 +26,7 @@ Yep Anywhere 对 Codex Goal 的适配目前应定义为：**原生 RPC 控制和
 - 能对一个正在由 Yep 托管的 Codex process 调用原生 `thread/goal/get`、`thread/goal/set`、`thread/goal/clear`；
 - 能执行 set、replace、pause、resume、clear，并展示 provider 返回的目标摘要；
 - canonical event journal 能归并 `thread/goal/updated` / `thread/goal/cleared`；
-- Session transcript 在 canonical 视图下能显示最新目标的 objective、六种 status、token usage/budget 和累计时间；
+- Session Inspector 在 canonical 视图下能显示最新目标的 objective、六种 status、token usage/budget 和累计时间；
 - 现有 reducer、projection 和 RPC shape 测试已经覆盖静态控制与刷新后的目标卡片。
 
 关键缺口：
@@ -278,17 +278,17 @@ P0/P1 必须把 `startedTurn` 改成“非权威提示”或移除 Codex 的固�
 
 1. `classification.ts` 把 goal updated/cleared 归为 thread reduce event；
 2. `reducer.ts` 保存每个 thread 最新 goal snapshot；
-3. `session-projection.ts` 生成一个最新 `threadGoal` native item；
+3. `session-projection.ts` 生成一个最新 `threadGoal` native state carrier；
 4. 即使 goal mutation 已超出 recent item window，当前 snapshot 仍会保留；
 5. clear 后删除当前 goal card；
-6. `CodexNativeGoalBlock` 显示 objective、六种状态、token 和 time；
+6. `SessionInspector` 从该 carrier 读取权威 objective，并复用 `CodexNativeGoalBlock` 显示六种状态、token 和 time；
 7. `useSessionMessages` 的普通 SessionPage 初始加载显式请求 `view=canonical`。
 
 这部分适合继续作为“刷新后的当前 goal 状态”数据源，但不能替代 runtime event pump：
 
 - journal observer 会立即持久化通知，不代表 Process iterator 已实时消费；
 - owned session 的页面不会把 provider 文件变化自动等价为 live stream；
-- goal card 出现在 transcript 内，滚动离开后不再持续可见；
+- current goal 仍通过 canonical message carrier 到达客户端，还没有提升为 REST/WebSocket 顶层的结构化 session snapshot；
 - elapsed time 是 snapshot 值，不会像 TUI 一样动态增长；
 - clear 会移除当前状态，不提供完整历史 timeline；
 - legacy `codex-reader.ts` 没有解析 rollout 内的 goal markers，缺 journal 或非 canonical consumer 时无法恢复 goal。
@@ -329,7 +329,7 @@ P0/P1 必须把 `startedTurn` 改成“非权威提示”或移除 Codex 的固�
 
 | 展示能力                              | 当前状态                | 结论                   |
 | ------------------------------------- | ----------------------- | ---------------------- |
-| transcript 当前 goal 卡片             | 已有                    | canonical refresh 可见 |
+| Inspector 当前 goal 卡片              | 已有                    | canonical refresh 可见 |
 | 六种状态本地化                        | 已有                    | `en` / `zh-CN` 已覆盖  |
 | token usage/budget                    | 卡片已有，编辑无入口    | 部分                   |
 | elapsed time                          | 静态 snapshot           | 部分                   |
@@ -577,6 +577,7 @@ Session Page：
 - header 或 composer footer 持续显示 Goal status chip；
 - active/handoff/running 有明确状态，不依赖 transcript 滚动位置；
 - elapsed time 在 active/running 时按本地 tick 展示，定期由 snapshot 校正；
+- Session Inspector 持续展示来自当前 `ThreadGoal` snapshot 的 objective、status 和 usage，不从用户 prompt 推导；
 - 点击 chip 打开结构化 GoalModal；
 - modal 支持 objective、token budget、set/replace/pause/resume/clear；
 - clear/replace 二次确认，特别是 active goal；
@@ -585,9 +586,9 @@ Session Page：
 
 Transcript：
 
-- 保留现有单张“当前 goal snapshot”卡片；
+- 不展示“当前 goal snapshot”卡片；它是 thread state，由 Session Inspector 承载，不占用时间线位置；
 - 不把每个 accounting update 都渲染成新行；
-- clear 后当前卡片消失；完整 mutation timeline 只在 Inspector/debug 中按需查看，不作为 P0–P3 必需范围。
+- clear 后 Inspector 当前卡片消失；完整 mutation timeline 只在 debug 中按需查看，不作为 P0–P3 必需范围。
 
 ### 7.7 resume、fork 与 edit
 

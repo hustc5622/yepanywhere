@@ -128,6 +128,40 @@ describe("SessionInspector", () => {
     ).not.toBeNull();
   });
 
+  it("shows the authoritative Codex goal instead of deriving it from the user prompt", () => {
+    const { container } = renderInspector("codex", [
+      {
+        uuid: "original-user-prompt",
+        type: "user",
+        message: {
+          role: "user",
+          content: "Original broad request from the user",
+        },
+      },
+      {
+        id: "current-thread-goal",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem: {
+          type: "threadGoal",
+          objective: "Authoritative persisted goal objective",
+          status: "active",
+          tokenBudget: 100_000,
+          tokensUsed: 12_500,
+          timeUsedSeconds: 90,
+        },
+      },
+    ]);
+
+    expect(
+      container.querySelector(".codex-native-goal-objective")?.textContent,
+    ).toBe("Authoritative persisted goal objective");
+    expect(screen.getByText("Active")).not.toBeNull();
+    expect(screen.getByText("Tokens: 12.5K / 100.0K")).not.toBeNull();
+    expect(screen.getByText("Time: 1m 30s")).not.toBeNull();
+  });
+
   it("uses a persisted Kimi TodoList write in the inspector", () => {
     renderInspector("kimi", [
       {

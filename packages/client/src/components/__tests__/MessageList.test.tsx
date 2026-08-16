@@ -167,6 +167,27 @@ function codexNativeTurnPlanItem(id: string): RenderItem {
   };
 }
 
+function codexNativeGoalItem(id: string): RenderItem {
+  return {
+    id,
+    type: "codex_native_item",
+    threadItem: {
+      type: "threadGoal",
+      objective: "Persisted current goal",
+      status: "active",
+    },
+    lifecycle: "completed",
+    sourceMessages: [
+      {
+        id,
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItem: { type: "threadGoal" },
+      } satisfies Message,
+    ],
+  };
+}
+
 function kimiTodoListItem(
   id: string,
   todos?: Array<{ title: string; status: string }>,
@@ -305,7 +326,7 @@ describe("MessageList target loading", () => {
   });
 });
 
-describe("MessageList plan progress", () => {
+describe("MessageList inspector state", () => {
   beforeEach(() => {
     vi.stubGlobal(
       "ResizeObserver",
@@ -342,6 +363,23 @@ describe("MessageList plan progress", () => {
     expect(screen.getByTestId("render-item-exec-plan")).not.toBeNull();
     expect(screen.queryByTestId("render-item-update-plan")).toBeNull();
     expect(screen.queryByTestId("render-item-native-turn-plan")).toBeNull();
+  });
+
+  it("hides the current Codex goal from the transcript", () => {
+    render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          userPromptItem("visible-user-prompt"),
+          codexNativeGoalItem("current-thread-goal"),
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("render-item-visible-user-prompt"),
+    ).not.toBeNull();
+    expect(screen.queryByTestId("render-item-current-thread-goal")).toBeNull();
   });
 
   it("hides Kimi TodoList writes but keeps TodoList reads visible", () => {

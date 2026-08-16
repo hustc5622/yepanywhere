@@ -1643,6 +1643,16 @@ h2 {
   min-width: 0;
 }
 
+.session-inspector-goal-card {
+  min-width: 0;
+  margin: 0 var(--space-3) var(--space-3);
+}
+
+.session-inspector-goal-card .codex-native-goal-objective {
+  max-height: 8rem;
+  overflow-y: auto;
+}
+
 .session-inspector-plan-card {
   display: flex;
   flex-direction: column;

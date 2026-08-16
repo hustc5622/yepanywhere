@@ -3,7 +3,7 @@ import { useOptionalI18n } from "../../../i18n";
 interface Props {
   objective: string | undefined;
   status: string | undefined;
-  tokenBudget?: number | null;
+  tokenBudget: number | null | undefined;
   tokensUsed: number | undefined;
   timeUsedSeconds: number | undefined;
 }

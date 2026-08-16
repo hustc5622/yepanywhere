@@ -8,6 +8,7 @@ import { formatSmartTime } from "../lib/datetime";
 import { getOpenCodeSubagentSessionId } from "../lib/openCodeSubagents";
 import {
   type ActiveToolApproval,
+  isNativeGoalStateItem,
   isNativePlanProgressItem,
   isPlanProgressItem,
   preprocessMessages,
@@ -24,6 +25,7 @@ import type {
   ToolCallItem,
 } from "../types/renderItems";
 import { ProviderBadge } from "./ProviderBadge";
+import { CodexNativeGoalBlock } from "./blocks/codex/CodexNativeGoalBlock";
 import {
   type ChecklistItem,
   normalizeChecklistStatus,
@@ -87,6 +89,14 @@ interface PlanProgress {
   total: number;
   items: ChecklistItem[];
   note?: string;
+}
+
+interface CodexGoalState {
+  objective: string;
+  status: string | undefined;
+  tokenBudget: number | null | undefined;
+  tokensUsed: number | undefined;
+  timeUsedSeconds: number | undefined;
 }
 
 /** A provider-native subagent session spawned from this session's task tool. */
@@ -176,6 +186,10 @@ export function SessionInspector({
   const planProgress = useMemo(
     () => buildPlanProgress(renderItems, t),
     [renderItems, t],
+  );
+  const currentCodexGoal = useMemo(
+    () => (isCodexProvider ? buildCurrentCodexGoal(renderItems) : null),
+    [isCodexProvider, renderItems],
   );
   const codexChannelSummaries = useMemo(
     () => (isCodexProvider ? buildCodexChannelSummaries(messages) : []),
@@ -314,6 +328,12 @@ export function SessionInspector({
           </button>
         </div>
       </div>
+
+      {currentCodexGoal && (
+        <div className="session-inspector-goal-card">
+          <CodexNativeGoalBlock {...currentCodexGoal} />
+        </div>
+      )}
 
       {planProgress && <InspectorPlanProgress progress={planProgress} t={t} />}
 
@@ -656,6 +676,49 @@ function InspectorPlanProgress({
 
 function getPlanStatusClassName(status: ChecklistItem["status"]): string {
   return status === "in_progress" ? "in-progress" : status;
+}
+
+/**
+ * Read the latest canonical thread-goal snapshot. Its objective comes from
+ * `thread/goal/updated`, never from the first or latest user prompt.
+ */
+function buildCurrentCodexGoal(items: RenderItem[]): CodexGoalState | null {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (!item || !isNativeGoalStateItem(item)) continue;
+
+    const objective = readNonEmptyString(item.threadItem.objective);
+    if (!objective) continue;
+
+    const status = readNonEmptyString(item.threadItem.status);
+    const tokenBudget =
+      item.threadItem.tokenBudget === null
+        ? null
+        : readFiniteNumber(item.threadItem.tokenBudget);
+    const tokensUsed = readFiniteNumber(item.threadItem.tokensUsed);
+    const timeUsedSeconds = readFiniteNumber(item.threadItem.timeUsedSeconds);
+    return {
+      objective,
+      status,
+      tokenBudget,
+      tokensUsed,
+      timeUsedSeconds,
+    };
+  }
+
+  return null;
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== ""
+    ? value.trim()
+    : undefined;
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function buildPlanProgress(

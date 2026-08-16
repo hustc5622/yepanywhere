@@ -408,8 +408,27 @@ export function isNativePlanProgressItem(
   );
 }
 
+/**
+ * The canonical Codex overlay carries the current thread goal as a native
+ * item, but it is thread state rather than a chronological transcript row.
+ * Keep it available to the Session Inspector without pinning it to the latest
+ * message position.
+ */
+export function isNativeGoalStateItem(
+  item: RenderItem,
+): item is CodexNativeItem {
+  return (
+    item.type === "codex_native_item" && item.threadItem.type === "threadGoal"
+  );
+}
+
 export function isPlanTimelineItem(item: RenderItem): boolean {
   return isPlanProgressItem(item) || isNativePlanProgressItem(item);
+}
+
+/** Render items represented by persistent state cards in Session Inspector. */
+export function isSessionInspectorOnlyItem(item: RenderItem): boolean {
+  return isPlanTimelineItem(item) || isNativeGoalStateItem(item);
 }
 
 function uniqueSourceMessages(messages: Message[]): Message[] {
