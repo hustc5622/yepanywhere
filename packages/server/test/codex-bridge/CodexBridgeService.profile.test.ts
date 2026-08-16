@@ -215,6 +215,54 @@ describe("CodexBridgeService managed upstream profiles", () => {
           },
         },
       });
+
+      const compatibilityMessages = receiveMessages(lightClient, 4);
+      lightClient.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 106,
+          method: "thread/start",
+          params: {
+            cwd: "/tmp/mcp-startup-compatibility",
+            compatibilityTest: true,
+          },
+        }),
+      );
+      const [startResponse, compatibilityStatus, larkStatus, nodeStatus] =
+        await compatibilityMessages;
+      expect(startResponse).toMatchObject({
+        id: 106,
+        result: { thread: { id: "thread-mcp-startup-compatibility" } },
+      });
+      expect(compatibilityStatus).toEqual({
+        method: "mcpServer/startupStatus/updated",
+        params: {
+          threadId: "thread-mcp-startup-compatibility",
+          name: "web",
+          status: "ready",
+          error: null,
+          failureReason: null,
+        },
+      });
+      expect([larkStatus, nodeStatus]).toEqual([
+        expect.objectContaining({
+          method: "mcpServer/startupStatus/updated",
+          params: expect.objectContaining({ name: "lark", status: "ready" }),
+        }),
+        expect.objectContaining({
+          method: "mcpServer/startupStatus/updated",
+          params: expect.objectContaining({
+            name: "node_repl",
+            status: "ready",
+          }),
+        }),
+      ]);
+      await waitFor(
+        () => bridge?.getStatus().recentMcpStartupEvents.length === 2,
+      );
+      expect(
+        bridge.getStatus().recentMcpStartupEvents.map((event) => event.name),
+      ).toEqual(["lark", "node_repl"]);
     } finally {
       lightClient.close();
       fullClient.close();
@@ -291,6 +339,35 @@ wss.on("connection", (ws) => {
           },
         },
       }));
+      return;
+    }
+    if (
+      ["thread/start", "thread/resume", "thread/fork"].includes(message.method) &&
+      message.params?.compatibilityTest === true
+    ) {
+      const threadId = "thread-mcp-startup-compatibility";
+      ws.send(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          thread: {
+            id: threadId,
+            cwd: message.params.cwd ?? "/tmp/fake-codex-project",
+          },
+        },
+      }));
+      for (const name of ["lark", "node_repl"]) {
+        ws.send(JSON.stringify({
+          method: "mcpServer/startupStatus/updated",
+          params: {
+            threadId,
+            name,
+            status: "ready",
+            error: null,
+            failureReason: null,
+          },
+        }));
+      }
       return;
     }
     ws.send(JSON.stringify(message));
@@ -371,6 +448,27 @@ async function sendAndReceive(
       resolve(JSON.parse(data.toString()) as { params?: unknown });
     });
     ws.send(JSON.stringify(message));
+  });
+}
+
+async function receiveMessages(
+  ws: WebSocket,
+  count: number,
+): Promise<Record<string, unknown>[]> {
+  return await new Promise((resolve, reject) => {
+    const messages: Record<string, unknown>[] = [];
+    const timeout = setTimeout(() => {
+      ws.off("message", onMessage);
+      reject(new Error(`Timed out waiting for ${count} bridge messages`));
+    }, 5000);
+    const onMessage = (data: WebSocket.RawData) => {
+      messages.push(JSON.parse(data.toString()) as Record<string, unknown>);
+      if (messages.length < count) return;
+      clearTimeout(timeout);
+      ws.off("message", onMessage);
+      resolve(messages);
+    };
+    ws.on("message", onMessage);
   });
 }
 

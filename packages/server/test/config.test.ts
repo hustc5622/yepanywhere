@@ -234,6 +234,10 @@ describe("loadConfig codex paths", () => {
       "node_repl",
       "project.custom",
     ]);
+    expect(resolved.clientExpectedDisabledServerIds).toEqual([
+      "client_only",
+      "project.custom",
+    ]);
     expect(resolved.threadConfig.mcp_servers).toEqual({
       client_only: {
         command: "/client/mcp",

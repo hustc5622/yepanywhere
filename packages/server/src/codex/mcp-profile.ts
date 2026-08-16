@@ -74,6 +74,13 @@ export interface CodexMcpThreadConfig {
 export interface ResolvedCodexMcpThreadProfile {
   threadConfig: CodexMcpThreadConfig;
   configuredServerIds: string[];
+  /**
+   * Servers the client config considers enabled but this profile disables.
+   * App-server emits no startup event for them, so bridge clients that derive
+   * their expected startup set from the unprofiled config need a terminal
+   * compatibility event for each name.
+   */
+  clientExpectedDisabledServerIds: string[];
 }
 
 function getProfileBaseArgs(mode: CodexMcpMode | undefined): readonly string[] {
@@ -202,6 +209,19 @@ function isServerEnabled(
   );
 }
 
+function getConfiguredEnabled(
+  servers: Record<string, unknown> | null,
+  serverId: string,
+): boolean | undefined {
+  if (!servers) return undefined;
+  for (const [name, value] of Object.entries(servers)) {
+    if (name.trim() !== serverId) continue;
+    const enabled = asRecord(value)?.enabled;
+    return typeof enabled === "boolean" ? enabled : undefined;
+  }
+  return undefined;
+}
+
 export function getCodexMcpThreadConfig(
   mode: CodexMcpMode | undefined,
   entries: Iterable<CodexMcpConfigEntry>,
@@ -233,6 +253,7 @@ export function resolveCodexMcpThreadProfile(
   effectiveConfig: unknown,
   existingThreadConfig?: unknown,
 ): ResolvedCodexMcpThreadProfile {
+  const effectiveServers = getMcpServerConfigMap(effectiveConfig);
   const effectiveEntries = getCodexMcpConfigEntries(effectiveConfig);
   const entriesByName = new Map(
     effectiveEntries.map((entry) => [entry.name, entry] as const),
@@ -280,5 +301,20 @@ export function resolveCodexMcpThreadProfile(
   return {
     threadConfig,
     configuredServerIds: entries.map((entry) => entry.name),
+    clientExpectedDisabledServerIds: entries
+      .filter((entry) => {
+        const existingEnabled = getConfiguredEnabled(
+          existingServers,
+          entry.name,
+        );
+        const effectiveEnabled = getConfiguredEnabled(
+          effectiveServers,
+          entry.name,
+        );
+        const clientExpectedEnabled =
+          existingEnabled ?? effectiveEnabled ?? true;
+        return clientExpectedEnabled && !isServerEnabled(mode, entry.name);
+      })
+      .map((entry) => entry.name),
   };
 }

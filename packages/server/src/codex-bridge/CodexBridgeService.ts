@@ -101,6 +101,12 @@ interface ClientRequestRecord {
   method: string;
   params?: unknown;
   eventScope: CodexBridgeClientRequestScope;
+  mcpStartupCompatibilityServerIds?: string[];
+}
+
+interface ProfiledClientMessage {
+  message: JsonRpcMessage;
+  mcpStartupCompatibilityServerIds?: string[];
 }
 
 interface BridgeConnection {
@@ -1094,16 +1100,18 @@ export class CodexBridgeService implements CodexBridgeController {
       upstream.on("message", (data, isBinary) => {
         this.enqueueFrameTask(connection, "server", async () => {
           if (connection.closed) return;
-          const forwardedFrame = await this.observeServerData(
+          const forwardedFrames = await this.observeServerData(
             connection,
             data,
             isBinary,
           );
-          if (
-            !connection.closed &&
-            connection.downstream.readyState === WebSocket.OPEN &&
-            forwardedFrame
-          ) {
+          for (const forwardedFrame of forwardedFrames) {
+            if (
+              connection.closed ||
+              connection.downstream.readyState !== WebSocket.OPEN
+            ) {
+              break;
+            }
             sendFrame(
               connection.downstream,
               forwardedFrame.data,
@@ -1288,10 +1296,11 @@ export class CodexBridgeService implements CodexBridgeController {
         messagesToForward.length = 0;
         flushedPrefix = true;
       }
-      const message = await this.applyMcpProfileToClientMessage(
+      const profiledMessage = await this.applyMcpProfileToClientMessage(
         connection,
         originalMessage,
       );
+      const message = profiledMessage.message;
       if (message !== originalMessage) modified = true;
       if (message.method && message.id !== undefined) {
         const eventScope =
@@ -1304,6 +1313,12 @@ export class CodexBridgeService implements CodexBridgeController {
           method: message.method,
           params: message.params,
           eventScope,
+          ...(profiledMessage.mcpStartupCompatibilityServerIds?.length
+            ? {
+                mcpStartupCompatibilityServerIds:
+                  profiledMessage.mcpStartupCompatibilityServerIds,
+              }
+            : {}),
         });
         messagesToForward.push(message);
         continue;
@@ -1342,9 +1357,9 @@ export class CodexBridgeService implements CodexBridgeController {
   private async applyMcpProfileToClientMessage(
     connection: BridgeConnection,
     message: JsonRpcMessage,
-  ): Promise<JsonRpcMessage> {
+  ): Promise<ProfiledClientMessage> {
     if (!isMcpThreadLifecycleMethod(message.method)) {
-      return message;
+      return { message };
     }
 
     const params = asRecord(message.params) ?? {};
@@ -1371,14 +1386,18 @@ export class CodexBridgeService implements CodexBridgeController {
       existingConfig,
     );
     return {
-      ...message,
-      params: {
-        ...params,
-        config: {
-          ...existingConfig,
-          mcp_servers: mcpProfile.threadConfig.mcp_servers,
+      message: {
+        ...message,
+        params: {
+          ...params,
+          config: {
+            ...existingConfig,
+            mcp_servers: mcpProfile.threadConfig.mcp_servers,
+          },
         },
       },
+      mcpStartupCompatibilityServerIds:
+        mcpProfile.clientExpectedDisabledServerIds,
     };
   }
 
@@ -1467,14 +1486,15 @@ export class CodexBridgeService implements CodexBridgeController {
     connection: BridgeConnection,
     data: RawData,
     isBinary: boolean,
-  ): Promise<ForwardedFrame | null> {
+  ): Promise<ForwardedFrame[]> {
     const envelope = parseJsonRpcEnvelope(data);
     const messages = envelope?.messages;
     if (!messages) {
-      return { data, isBinary };
+      return [{ data, isBinary }];
     }
 
     const messagesToForward: JsonRpcMessage[] = [];
+    const compatibilityMessages: JsonRpcMessage[] = [];
     let modified = false;
     for (const message of messages) {
       if (!message.method && message.id !== undefined) {
@@ -1534,34 +1554,42 @@ export class CodexBridgeService implements CodexBridgeController {
           );
           connection.pendingClientRequests.delete(idKey(message.id));
           if (!connection.closed) {
-            this.handleClientRequestResponse(connection, request, message);
+            compatibilityMessages.push(
+              ...this.handleClientRequestResponse(connection, request, message),
+            );
           }
         }
       }
     }
-    if (!modified) return { data, isBinary };
-    if (messagesToForward.length === 0) return null;
-    return serializeJsonRpcEnvelope(envelope.isBatch, messagesToForward);
+    const primaryFrame = modified
+      ? serializeJsonRpcEnvelope(envelope.isBatch, messagesToForward)
+      : { data, isBinary };
+    const frames = primaryFrame ? [primaryFrame] : [];
+    for (const message of compatibilityMessages) {
+      const frame = serializeJsonRpcEnvelope(false, [message]);
+      if (frame) frames.push(frame);
+    }
+    return frames;
   }
 
   private handleClientRequestResponse(
     connection: BridgeConnection,
     request: ClientRequestRecord,
     response: JsonRpcMessage,
-  ): void {
+  ): JsonRpcMessage[] {
     if (
       request.method !== "thread/start" &&
       request.method !== "thread/resume" &&
       request.method !== "thread/fork" &&
       request.method !== "thread/read"
     ) {
-      return;
+      return [];
     }
 
     const result = asRecord(response.result);
-    if (!result) return;
+    if (!result) return [];
     const thread = asRecord(result.thread);
-    if (!thread) return;
+    if (!thread) return [];
 
     this.upsertThread(connection, thread, {
       cwd: getString(result.cwd) ?? getString(thread.cwd),
@@ -1569,6 +1597,27 @@ export class CodexBridgeService implements CodexBridgeController {
       reasoningEffort: getString(result.reasoningEffort),
       serviceTier: getString(result.serviceTier),
     });
+
+    const threadId = getString(thread.id);
+    if (!threadId || !request.mcpStartupCompatibilityServerIds?.length) {
+      return [];
+    }
+
+    // Codex 0.147's TUI derives its expected MCP startup set from the local,
+    // unprofiled config, while app-server correctly emits events only for the
+    // thread's effective profile. Terminal ready sentinels make that client-
+    // side accounting converge; they do not enable servers or advertise tools,
+    // and deliberately stay out of the bridge event spine and diagnostics.
+    return request.mcpStartupCompatibilityServerIds.map((name) => ({
+      method: "mcpServer/startupStatus/updated",
+      params: {
+        threadId,
+        name,
+        status: "ready",
+        error: null,
+        failureReason: null,
+      },
+    }));
   }
 
   private handleServerNotification(
