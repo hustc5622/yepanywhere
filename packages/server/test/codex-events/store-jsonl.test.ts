@@ -284,3 +284,115 @@ describe("JsonlCodexEventStore replay allocation", () => {
     expect(after.map((event) => event.eventId)).toEqual(["event-1", "event-2"]);
   });
 });
+
+/**
+ * Pruning is permanent data loss, so it must not be silent.
+ *
+ * Retention is a fixed segment count, so any long-lived session eventually has
+ * its earliest events deleted. The in-memory indexes keep rotated events for the
+ * life of the process (deliberately, so replay and sequences stay continuous),
+ * which means the loss only becomes observable after a restart -- and nothing
+ * observed it: `matchesReplaySnapshot` compares a cached projection against the
+ * replay, so an incomplete replay validates cleanly against an equally
+ * incomplete cache, and the reducer folds a partial history without complaint.
+ *
+ * Measured retention on a production install: 256 MiB per segment, 3 segments
+ * kept, one rotation every ~17 h, so roughly 2.9 days of history.
+ */
+describe("JsonlCodexEventStore journal loss reporting", () => {
+  async function fillUntilPruned(filePath: string) {
+    const rotations: Array<{
+      pruned: string[];
+      prunedSummary: Array<{
+        path: string;
+        known: boolean;
+        eventCount: number;
+        sessions: Array<{ sessionId: string; eventCount: number }>;
+      }>;
+    }> = [];
+    const store = new JsonlCodexEventStore({
+      filePath,
+      rotation: { maxBytes: 400, keepSegments: 1 },
+      onRotate: (details) => rotations.push(details),
+    });
+    for (let index = 1; index <= 8; index += 1) {
+      await store.append(
+        testDraft(
+          "warning",
+          { message: `event-${index} ${"x".repeat(200)}` },
+          { eventId: `event-${index}` },
+        ),
+      );
+    }
+    return rotations;
+  }
+
+  it("reports which sessions a pruned segment took history from", async () => {
+    const filePath = join(tempDir(), "events.jsonl");
+    const rotations = await fillUntilPruned(filePath);
+
+    const pruning = rotations.filter((r) => r.pruned.length > 0);
+    expect(pruning.length).toBeGreaterThanOrEqual(1);
+    const summary = pruning.at(-1)?.prunedSummary ?? [];
+    expect(summary).toHaveLength(pruning.at(-1)?.pruned.length ?? 0);
+    // Described from load-time bookkeeping, never by re-reading the segment we
+    // are deleting for being large.
+    expect(summary[0]?.known).toBe(true);
+    expect(summary[0]?.eventCount).toBeGreaterThan(0);
+    expect(summary[0]?.sessions).toEqual([
+      { sessionId: "session-1", eventCount: summary[0]?.eventCount },
+    ]);
+  });
+
+  it("warns a restarted process that a session's journal prefix is gone", async () => {
+    const filePath = join(tempDir(), "events.jsonl");
+    await fillUntilPruned(filePath);
+
+    // The restart is what makes the loss visible: this instance can only load
+    // the surviving files.
+    const gapReports: Array<{
+      gaps: Array<{
+        sessionId: string;
+        firstSequence: number;
+        missingLeadingEvents: number;
+        remainingEvents: number;
+      }>;
+      sessionCount: number;
+      journalFiles: number;
+    }> = [];
+    const reopened = new JsonlCodexEventStore({
+      filePath,
+      onJournalGaps: (details) => gapReports.push(details),
+    });
+    const replayed = await reopened.replay({ sessionId: "session-1" });
+
+    expect(gapReports).toHaveLength(1);
+    const gap = gapReports[0]?.gaps[0];
+    expect(gap?.sessionId).toBe("session-1");
+    // Per-session sequences are dense and start at 1, so a surviving first
+    // sequence above 1 is exactly the count of deleted leading events.
+    expect(gap?.firstSequence).toBeGreaterThan(1);
+    expect(gap?.missingLeadingEvents).toBe((gap?.firstSequence ?? 0) - 1);
+    expect(gap?.remainingEvents).toBe(replayed.length);
+    expect(gap?.missingLeadingEvents).toBe(8 - replayed.length);
+  });
+
+  it("stays quiet when the journal still holds every session from the start", async () => {
+    const filePath = join(tempDir(), "events.jsonl");
+    const store = new JsonlCodexEventStore({ filePath });
+    await store.append(
+      testDraft("warning", { message: "a" }, { eventId: "event-a" }),
+    );
+    await store.append(
+      testDraft("warning", { message: "b" }, { eventId: "event-b" }),
+    );
+
+    const gapReports: unknown[] = [];
+    const reopened = new JsonlCodexEventStore({
+      filePath,
+      onJournalGaps: (details) => gapReports.push(details),
+    });
+    expect(await reopened.replay({ sessionId: "session-1" })).toHaveLength(2);
+    expect(gapReports).toHaveLength(0);
+  });
+});

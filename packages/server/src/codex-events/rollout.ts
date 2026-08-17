@@ -1,4 +1,8 @@
-import type { CodexEventStore } from "./store.js";
+import type {
+  CodexEventStore,
+  CodexJournalGap,
+  CodexPrunedSegmentSummary,
+} from "./store.js";
 
 export type CodexEventProjectionMode = "legacy" | "shadow" | "primary";
 
@@ -25,6 +29,13 @@ export interface CodexEventRolloutConfig {
     from: string;
     to: string;
     pruned: string[];
+    prunedSummary: CodexPrunedSegmentSummary[];
+  }) => void;
+  /** Observes sessions whose journal prefix was lost to earlier pruning. */
+  onStoreJournalGaps?: (details: {
+    gaps: CodexJournalGap[];
+    sessionCount: number;
+    journalFiles: number;
   }) => void;
   store?: CodexEventStore;
 }

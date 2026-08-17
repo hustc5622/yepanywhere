@@ -1257,6 +1257,9 @@ export class CodexProvider implements AgentProvider {
             ...(this.eventSpineConfig.onStoreRotate
               ? { onRotate: this.eventSpineConfig.onStoreRotate }
               : {}),
+            ...(this.eventSpineConfig.onStoreJournalGaps
+              ? { onJournalGaps: this.eventSpineConfig.onStoreJournalGaps }
+              : {}),
           })
         : new InMemoryCodexEventStore());
   }
@@ -5825,7 +5828,7 @@ export const codexProvider = new CodexProvider({
         process.env.YEP_CODEX_EVENT_STORE_KEEP_SEGMENTS,
       ),
     },
-    onStoreRotate: ({ from, to, pruned }) => {
+    onStoreRotate: ({ from, to, pruned, prunedSummary }) => {
       log.info(
         {
           event: "codex_event_store_rotated",
@@ -5833,8 +5836,37 @@ export const codexProvider = new CodexProvider({
           to,
           prunedCount: pruned.length,
           pruned,
+          // Pruning permanently deletes the earliest events of every session the
+          // segment held. Naming them is the difference between a recoverable
+          // question ("was this session's canonical history cut?") and an
+          // unanswerable one.
+          prunedSessions: prunedSummary.map((segment) => ({
+            path: segment.path,
+            known: segment.known,
+            eventCount: segment.eventCount,
+            sessionCount: segment.sessions.length,
+            topSessions: segment.sessions.slice(0, 10),
+          })),
         },
-        "Rotated canonical Codex event journal",
+        pruned.length > 0
+          ? "Rotated canonical Codex event journal and pruned closed segments"
+          : "Rotated canonical Codex event journal",
+      );
+    },
+    onStoreJournalGaps: ({ gaps, sessionCount, journalFiles }) => {
+      log.warn(
+        {
+          event: "codex_event_store_journal_truncated",
+          sessionCount,
+          journalFiles,
+          truncatedSessionCount: gaps.length,
+          missingLeadingEventsTotal: gaps.reduce(
+            (sum, gap) => sum + gap.missingLeadingEvents,
+            0,
+          ),
+          topGaps: gaps.slice(0, 10),
+        },
+        "Canonical Codex journal no longer contains the start of some sessions; their projections are incomplete",
       );
     },
   },

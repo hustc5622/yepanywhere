@@ -152,6 +152,29 @@ export class InMemoryCodexEventStore implements CodexEventStore {
   }
 }
 
+/** What a pruned segment contained, so its loss is reportable. */
+export interface CodexPrunedSegmentSummary {
+  path: string;
+  /**
+   * False when this process never loaded the segment, so its contents are
+   * unknown. Reported rather than re-read: the file is being deleted precisely
+   * because it is large, and re-reading 256 MiB to describe it is worse than
+   * saying "unknown".
+   */
+  known: boolean;
+  eventCount: number;
+  sessions: Array<{ sessionId: string; eventCount: number }>;
+}
+
+/** A session whose journal no longer starts at its first event. */
+export interface CodexJournalGap {
+  sessionId: string;
+  firstSequence: number;
+  /** Leading events absent from disk: sequences are per session and start at 1. */
+  missingLeadingEvents: number;
+  remainingEvents: number;
+}
+
 export interface JsonlCodexEventStoreOptions {
   filePath: string;
   now?: () => number;
@@ -169,7 +192,36 @@ export interface JsonlCodexEventStoreOptions {
     keepSegments?: number;
   };
   /** Called after a successful rotation with the pruned segment paths. */
-  onRotate?: (details: { from: string; to: string; pruned: string[] }) => void;
+  onRotate?: (details: {
+    from: string;
+    to: string;
+    pruned: string[];
+    /** Per-segment description of what the pruning removed. */
+    prunedSummary: CodexPrunedSegmentSummary[];
+  }) => void;
+  /**
+   * Called after a cold load that found sessions whose journal no longer starts
+   * at sequence 1.
+   *
+   * Retention is a fixed number of segments, so a long-lived session eventually
+   * has its early events deleted. In-memory indexes keep rotated events for the
+   * life of the process, which means the loss only becomes observable after a
+   * restart -- and until now nothing observed it. A projection built from a
+   * partial journal is not an error and does not fail; it is simply missing
+   * history, silently. This callback is the signal that it happened.
+   *
+   * Known limit: a session whose events were removed *entirely* cannot be
+   * detected here, because sequence assignment is `last-in-memory + 1` and
+   * restarts at 1 once nothing survives. That case makes a session vanish rather
+   * than appear with a truncated history, so there is no partial projection to
+   * warn about; the detectable and harmful case is the one where a prefix is
+   * gone while later events survive with their original sequences.
+   */
+  onJournalGaps?: (details: {
+    gaps: CodexJournalGap[];
+    sessionCount: number;
+    journalFiles: number;
+  }) => void;
 }
 
 interface CodexEventFileSnapshot {
@@ -200,6 +252,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private readonly rotateMaxBytes: number;
   private readonly rotateKeepSegments: number;
   private readonly onRotate?: JsonlCodexEventStoreOptions["onRotate"];
+  private readonly onJournalGaps?: JsonlCodexEventStoreOptions["onJournalGaps"];
   private readonly eventsBySession = new Map<string, CodexEventEnvelope[]>();
   private readonly eventsBySessionMethod = new Map<
     string,
@@ -207,6 +260,22 @@ export class JsonlCodexEventStore implements CodexEventStore {
   >();
   private readonly eventsByIdentity = new Map<string, CodexEventEnvelope>();
   private readonly eventsByDedupeKey = new Map<string, CodexEventEnvelope>();
+  /**
+   * Per-journal-file session event counts, captured while loading.
+   *
+   * Kept so pruning can describe what it deletes without re-reading a segment
+   * that is being removed for being large.
+   */
+  private readonly sessionCountsByFile = new Map<string, Map<string, number>>();
+  /**
+   * Counts for the file currently being appended to.
+   *
+   * Tracked separately from `sessionCountsByFile` because rotation renames the
+   * active file into a segment inside this process: without carrying the counts
+   * across that rename, the segment we later prune would be the one file we
+   * cannot describe.
+   */
+  private activeFileSessionCounts = new Map<string, number>();
   private loaded: Promise<void> | null = null;
   private appendTail: Promise<void> = Promise.resolve();
   private needsAppendSeparator = false;
@@ -232,6 +301,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
       options.rotation?.keepSegments ?? DEFAULT_ROTATE_KEEP_SEGMENTS,
     );
     this.onRotate = options.onRotate;
+    this.onJournalGaps = options.onJournalGaps;
   }
 
   async append(event: CodexEventDraft): Promise<CodexEventAppendResult> {
@@ -264,6 +334,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
       );
       this.needsAppendSeparator = false;
       this.index(persisted);
+      this.noteActiveFileEvent(persisted.sessionId);
       // Deliberately leave the file snapshot at its pre-append boundary. The
       // next refresh will read this line (and any concurrent external lines)
       // from that exact offset, deduplicating the event already indexed here.
@@ -523,6 +594,44 @@ export class JsonlCodexEventStore implements CodexEventStore {
     for (const sessionId of this.eventsBySession.keys()) {
       this.sortSessionEvents(sessionId);
     }
+    this.reportJournalGaps(journalFiles.length);
+  }
+
+  /**
+   * Report sessions whose on-disk journal no longer starts at their first event.
+   *
+   * Per-session sequences are dense and start at 1 (`append` assigns
+   * `last + 1`), so a surviving first sequence above 1 means the leading events
+   * were deleted by segment pruning. Nothing else in the pipeline notices:
+   * `matchesReplaySnapshot` only compares a cached projection against the
+   * replay, so an incomplete replay validates cleanly against an equally
+   * incomplete cache, and the reducer happily folds a partial history.
+   *
+   * Gaps *inside* a session are deliberately not reported here: rejected and
+   * deduplicated events never consume a sequence, so interior holes are not
+   * evidence of data loss the way a missing prefix is.
+   */
+  private reportJournalGaps(journalFiles: number): void {
+    if (!this.onJournalGaps) return;
+    const gaps: CodexJournalGap[] = [];
+    for (const [sessionId, events] of this.eventsBySession) {
+      const firstSequence = events[0]?.sequence ?? 0;
+      if (firstSequence > 1) {
+        gaps.push({
+          sessionId,
+          firstSequence,
+          missingLeadingEvents: firstSequence - 1,
+          remainingEvents: events.length,
+        });
+      }
+    }
+    if (gaps.length === 0) return;
+    gaps.sort((a, b) => b.missingLeadingEvents - a.missingLeadingEvents);
+    this.onJournalGaps({
+      gaps,
+      sessionCount: this.eventsBySession.size,
+      journalFiles,
+    });
   }
 
   /**
@@ -537,6 +646,13 @@ export class JsonlCodexEventStore implements CodexEventStore {
     endsWithNewline: boolean;
   } | null> {
     let handle: FileHandle | null = null;
+    // Counted per file so a later prune can say which sessions it removed
+    // history from.
+    const sessionCounts = new Map<string, number>();
+    const countIndexed = (sessionId: string | null): void => {
+      if (!sessionId) return;
+      sessionCounts.set(sessionId, (sessionCounts.get(sessionId) ?? 0) + 1);
+    };
     try {
       handle = await open(filePath, "r");
       const snapshot = fileSnapshot(await handle.stat());
@@ -557,14 +673,19 @@ export class JsonlCodexEventStore implements CodexEventStore {
           const line = carry.slice(0, newlineIndex);
           carry = carry.slice(newlineIndex + 1);
           lineNumber += 1;
-          this.indexLoadedLine(line, lineNumber);
+          countIndexed(this.indexLoadedLine(line, lineNumber));
           newlineIndex = carry.indexOf("\n");
         }
       }
       carry += decoder.end();
       if (carry.length > 0) {
         lineNumber += 1;
-        this.indexLoadedLine(carry, lineNumber);
+        countIndexed(this.indexLoadedLine(carry, lineNumber));
+      }
+      this.sessionCountsByFile.set(filePath, sessionCounts);
+      if (filePath === this.filePath) {
+        // Appends continue into this file, so its counts keep growing.
+        this.activeFileSessionCounts = sessionCounts;
       }
       return { snapshot, bytesRead, endsWithNewline };
     } catch (error) {
@@ -588,6 +709,12 @@ export class JsonlCodexEventStore implements CodexEventStore {
     if (this.lastKnownFileSize < this.rotateMaxBytes) return;
     const segmentPath = await this.nextSegmentPath();
     await rename(this.filePath, segmentPath);
+    // Carry the active file's bookkeeping with it: after this rename the segment
+    // is a closed file that a later prune may delete, and this is the only
+    // record of what it holds.
+    this.sessionCountsByFile.delete(this.filePath);
+    this.sessionCountsByFile.set(segmentPath, this.activeFileSessionCounts);
+    this.activeFileSessionCounts = new Map();
     // The active journal starts over; the next append recreates it and the
     // following refresh reads the new file from offset 0, deduplicating the
     // lines this instance already indexed.
@@ -596,7 +723,12 @@ export class JsonlCodexEventStore implements CodexEventStore {
     this.lastKnownFileIdentity = null;
     this.needsAppendSeparator = false;
     const pruned = await this.pruneSegments();
-    this.onRotate?.({ from: this.filePath, to: segmentPath, pruned });
+    this.onRotate?.({
+      from: this.filePath,
+      to: segmentPath,
+      pruned: pruned.map((summary) => summary.path),
+      prunedSummary: pruned,
+    });
   }
 
   /** Segment names carry a fixed-width UTC timestamp so name order is time order. */
@@ -619,15 +751,36 @@ export class JsonlCodexEventStore implements CodexEventStore {
     }
   }
 
-  private async pruneSegments(): Promise<string[]> {
+  /**
+   * Delete closed segments beyond the retention count.
+   *
+   * Each deletion permanently removes the earliest events of every session the
+   * segment held, so it reports what it removed rather than deleting silently.
+   * The description comes from bookkeeping captured at load time: re-reading a
+   * 256 MiB segment to describe it would cost more than the pruning saves.
+   */
+  private async pruneSegments(): Promise<CodexPrunedSegmentSummary[]> {
     const segments = await this.listSegmentFiles();
     const excess = segments.length - this.rotateKeepSegments;
     if (excess <= 0) return [];
-    const pruned: string[] = [];
+    const pruned: CodexPrunedSegmentSummary[] = [];
     for (const segment of segments.slice(0, excess)) {
+      const counts = this.sessionCountsByFile.get(segment);
       try {
         await rm(segment);
-        pruned.push(segment);
+        pruned.push({
+          path: segment,
+          known: counts !== undefined,
+          eventCount: counts
+            ? [...counts.values()].reduce((sum, n) => sum + n, 0)
+            : 0,
+          sessions: counts
+            ? [...counts.entries()]
+                .map(([sessionId, eventCount]) => ({ sessionId, eventCount }))
+                .sort((a, b) => b.eventCount - a.eventCount)
+            : [],
+        });
+        this.sessionCountsByFile.delete(segment);
       } catch {
         // Best-effort: a locked or already-removed segment must not block appends.
       }
@@ -672,9 +825,10 @@ export class JsonlCodexEventStore implements CodexEventStore {
     return basename(this.filePath, ".jsonl");
   }
 
-  private indexLoadedLine(rawLine: string, lineNumber: number): void {
+  /** Index one loaded line; returns its sessionId when the line was indexed. */
+  private indexLoadedLine(rawLine: string, lineNumber: number): string | null {
     const line = rawLine.trim();
-    if (!line) return;
+    if (!line) return null;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line) as unknown;
@@ -686,17 +840,26 @@ export class JsonlCodexEventStore implements CodexEventStore {
         // can never be copied into logs.
         reason: "invalid_json",
       });
-      return;
+      return null;
     }
     if (!isCodexEventEnvelope(parsed)) {
       this.onCorruptLine?.({
         lineNumber,
         reason: "invalid_envelope",
       });
-      return;
+      return null;
     }
     const existing = this.findExisting(parsed);
     if (!existing) this.index(parsed);
+    return parsed.sessionId;
+  }
+
+  /** Count one event written to the file currently being appended to. */
+  private noteActiveFileEvent(sessionId: string): void {
+    this.activeFileSessionCounts.set(
+      sessionId,
+      (this.activeFileSessionCounts.get(sessionId) ?? 0) + 1,
+    );
   }
 
   private resetLoadedState(): void {
@@ -704,6 +867,8 @@ export class JsonlCodexEventStore implements CodexEventStore {
     this.eventsBySessionMethod.clear();
     this.eventsByIdentity.clear();
     this.eventsByDedupeKey.clear();
+    this.sessionCountsByFile.clear();
+    this.activeFileSessionCounts = new Map();
     this.needsAppendSeparator = false;
     this.lastKnownFileSize = 0;
     this.lastKnownMtimeMs = 0;
