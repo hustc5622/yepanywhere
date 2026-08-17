@@ -1260,3 +1260,114 @@ describe("SessionIndexService full-validation throttling", () => {
     expect(peak).toBe(1);
   });
 });
+
+/**
+ * Serializing full validations moved wall time from the work into the queue, so
+ * the metric had to learn the difference.
+ *
+ * Before the split, a scope that waited 20 s for another scope's scan and then
+ * worked for 380 ms was recorded as a 20.4 s scan. That made the fix for the
+ * pile-up read as a regression -- observed on a live server as p50 rising from
+ * 379 ms to 1492 ms with a 26.8 s maximum -- while hiding both the real per-scan
+ * cost and the real contention.
+ */
+describe("SessionIndexService full-validation accounting", () => {
+  let testDir: string;
+  let dataDir: string;
+  let projectsDir: string;
+  let sessionDir: string;
+  let projectId: string;
+
+  beforeEach(async () => {
+    testDir = join(tmpdir(), `index-accounting-${randomUUID()}`);
+    dataDir = join(testDir, "indexes");
+    projectsDir = join(testDir, "projects");
+    sessionDir = join(testDir, "sessions");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(sessionDir, { recursive: true });
+    projectId = toUrlProjectId("/test/project");
+  });
+
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  function slowReader(scope: string, workMs: number): ISessionReader {
+    return {
+      getIndexScopeKey: (dir) => `opencode::${dir}::${scope}`,
+      listSessionFiles: async (dir) => {
+        await new Promise((resolve) => setTimeout(resolve, workMs));
+        return [
+          { sessionId: "session-1", filePath: join(dir, "session-1.jsonl") },
+        ];
+      },
+      getSessionSummary: async (
+        sessionId: string,
+        pid: string,
+      ): Promise<SessionSummary> => ({
+        id: sessionId,
+        projectId: pid,
+        title: "t",
+        fullTitle: "t",
+        createdAt: "2026-08-17T00:00:00.000Z",
+        updatedAt: "2026-08-17T00:00:00.000Z",
+        messageCount: 1,
+        ownership: { owner: "none" },
+        provider: "opencode",
+      }),
+      getAgentMappings: async () => [],
+      getAgentSession: async () => null,
+    };
+  }
+
+  it("charges queue wait separately from scan duration", async () => {
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      fullValidationIntervalMs: 0,
+      maxConcurrentFullValidations: 1,
+    });
+    await service.initialize();
+
+    // Two scopes sharing one store: the second must wait for the first.
+    await Promise.all(
+      ["/a", "/b"].map((scope) =>
+        service.getSessionsWithCache(
+          sessionDir,
+          projectId,
+          slowReader(scope, 120),
+        ),
+      ),
+    );
+
+    const stats = service.getDebugStats();
+    expect(stats.fullScans).toBe(2);
+    // One of the two waited behind the other, so the queue total reflects a real
+    // wait rather than being folded into scan duration.
+    expect(stats.fullValidationQueueWaitMs).toBeGreaterThanOrEqual(80);
+    expect(stats.avgFullValidationQueueWaitMs).toBeGreaterThan(0);
+    // Each scan is ~120 ms of work; without the split the queued one would have
+    // been recorded at roughly double that.
+    expect(stats.avgDurationMs).toBeLessThan(200);
+  });
+
+  it("reports no queue wait when nothing contends", async () => {
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      fullValidationIntervalMs: 0,
+      maxConcurrentFullValidations: 1,
+    });
+    await service.initialize();
+
+    await service.getSessionsWithCache(
+      sessionDir,
+      projectId,
+      slowReader("/solo", 10),
+    );
+
+    const stats = service.getDebugStats();
+    expect(stats.fullScans).toBe(1);
+    expect(stats.fullValidationQueueWaitMs).toBe(0);
+  });
+});

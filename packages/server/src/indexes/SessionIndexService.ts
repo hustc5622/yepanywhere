@@ -169,6 +169,14 @@ export class SessionIndexService implements ISessionIndexService {
     statCalls: 0,
     parseCalls: 0,
     totalDurationMs: 0,
+    /**
+     * Time full validations spent queued for a concurrency slot.
+     *
+     * Tracked apart from `totalDurationMs` because serializing full validations
+     * moved wall time out of the work and into the queue: without the split, the
+     * fix for the pile-up reads as a regression in per-call duration.
+     */
+    fullValidationQueueWaitMs: 0,
   };
   private unsubscribeEventBus: (() => void) | null = null;
 
@@ -627,25 +635,43 @@ export class SessionIndexService implements ISessionIndexService {
     };
   }
 
+  /**
+   * Record one cache-path outcome.
+   *
+   * `durationMs` is the request's own work. `queueWaitMs` is time spent waiting
+   * for a full-validation slot and is deliberately excluded from it, because
+   * conflating the two makes serialization look like slowness: a scope that
+   * waited 20 s for another scope's scan and then worked for 380 ms is not a
+   * 20.4 s scan, and reading it as one hides both the real per-scan cost and the
+   * real contention.
+   *
+   * `scopeKey` is logged next to `dir` because throttling and slot admission are
+   * keyed by scope, while many scopes share one directory. Without it, log lines
+   * for the same directory look like a broken throttle when they are simply
+   * different scopes.
+   */
   private recordCallStats(
     mode: "fast" | "incremental" | "full",
     durationMs: number,
     statCalls: number,
     parseCalls: number,
     sessionDir: string,
+    scopeKey: string,
+    queueWaitMs = 0,
   ): void {
     this.cacheStats.requests += 1;
     this.cacheStats.statCalls += statCalls;
     this.cacheStats.parseCalls += parseCalls;
     this.cacheStats.totalDurationMs += durationMs;
+    this.cacheStats.fullValidationQueueWaitMs += queueWaitMs;
 
     if (mode === "fast") this.cacheStats.fastHits += 1;
     if (mode === "incremental") this.cacheStats.incrementalRuns += 1;
     if (mode === "full") this.cacheStats.fullScans += 1;
 
-    if (LOG_CACHE_PERF || durationMs >= 250) {
+    if (LOG_CACHE_PERF || durationMs >= 250 || queueWaitMs >= 250) {
       logger.info(
-        `[SessionIndexService] mode=${mode} dir=${sessionDir} durationMs=${durationMs} statCalls=${statCalls} parseCalls=${parseCalls}`,
+        `[SessionIndexService] mode=${mode} dir=${sessionDir} scope=${scopeKey} durationMs=${durationMs} queueWaitMs=${queueWaitMs} statCalls=${statCalls} parseCalls=${parseCalls}`,
       );
     }
   }
@@ -972,6 +998,9 @@ export class SessionIndexService implements ISessionIndexService {
     statCalls: number;
     parseCalls: number;
     avgDurationMs: number;
+    /** Mean full-validation queue wait, excluded from avgDurationMs. */
+    avgFullValidationQueueWaitMs: number;
+    fullValidationQueueWaitMs: number;
     dirtyDirCount: number;
     dirtySessionCount: number;
   } {
@@ -984,6 +1013,11 @@ export class SessionIndexService implements ISessionIndexService {
       avgDurationMs:
         this.cacheStats.requests > 0
           ? this.cacheStats.totalDurationMs / this.cacheStats.requests
+          : 0,
+      avgFullValidationQueueWaitMs:
+        this.cacheStats.fullScans > 0
+          ? this.cacheStats.fullValidationQueueWaitMs /
+            this.cacheStats.fullScans
           : 0,
       dirtyDirCount: this.dirtyDirs.size,
       dirtySessionCount,
@@ -1079,16 +1113,24 @@ export class SessionIndexService implements ISessionIndexService {
    * Without this, every scope sharing a backing store starts its own scan
    * concurrently and they contend for the same file handles and CPU while the
    * event loop stalls.
+   *
+   * The queue wait is returned alongside the value so callers can report the two
+   * costs separately. They are not interchangeable: waiting means some other
+   * scope is scanning, working means this one is.
    */
-  private async withFullValidationSlot<T>(run: () => Promise<T>): Promise<T> {
+  private async withFullValidationSlot<T>(
+    run: () => Promise<T>,
+  ): Promise<{ value: T; queueWaitMs: number }> {
+    const queueStartedMs = Date.now();
     if (this.activeFullValidations >= this.maxConcurrentFullValidations) {
       await new Promise<void>((resolve) => {
         this.fullValidationWaiters.push(resolve);
       });
     }
+    const queueWaitMs = Date.now() - queueStartedMs;
     this.activeFullValidations += 1;
     try {
-      return await run();
+      return { value: await run(), queueWaitMs };
     } finally {
       this.activeFullValidations -= 1;
       this.fullValidationWaiters.shift()?.();
@@ -1149,6 +1191,7 @@ export class SessionIndexService implements ISessionIndexService {
       statCalls,
       parseCalls,
       sessionDir,
+      scopeKey,
     );
     return summaries;
   }
@@ -1180,7 +1223,14 @@ export class SessionIndexService implements ISessionIndexService {
     // Fast path: no actionable dirty signals and recent full validation.
     if (!fullValidationDue && !dirDirtyDue && !hasDirtySessions) {
       const summaries = this.buildSummariesFromIndex(index, projectId);
-      this.recordCallStats("fast", Date.now() - start, 0, 0, sessionDir);
+      this.recordCallStats(
+        "fast",
+        Date.now() - start,
+        0,
+        0,
+        sessionDir,
+        scopeKey,
+      );
       return summaries;
     }
 
@@ -1202,19 +1252,24 @@ export class SessionIndexService implements ISessionIndexService {
         incremental.statCalls,
         incremental.parseCalls,
         sessionDir,
+        scopeKey,
       );
       return summaries;
     }
 
-    const full = await this.withFullValidationSlot(() =>
+    const { value: full, queueWaitMs } = await this.withFullValidationSlot(() =>
       this.runFullValidation(sessionDir, projectId, reader, index),
     );
     this.recordCallStats(
       "full",
-      Date.now() - start,
+      // The queue wait is subtracted so this stays the cost of scanning, not the
+      // cost of waiting for a turn to scan.
+      Date.now() - start - queueWaitMs,
       full.statCalls,
       full.parseCalls,
       sessionDir,
+      scopeKey,
+      queueWaitMs,
     );
     return full.summaries;
   }
