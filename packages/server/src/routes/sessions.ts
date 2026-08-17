@@ -167,6 +167,14 @@ export interface SessionsDeps {
   codexEventStoreSources?: readonly CodexEventStoreSource[];
   /** Process-level projection cache for incremental canonical replay. */
   codexProjectionCache?: CodexProjectionCache;
+  /**
+   * Soft time budget for the canonical overlay's own work, in ms.
+   *
+   * Bounds the artifact scan plus the projection, measured from after the
+   * journal replay. Injectable so the boundary is testable without sleeping for
+   * the production default.
+   */
+  canonicalOverlayBudgetMs?: number;
   /** Reads restart-safe generated manifests from the managed upload root. */
   generatedArtifactUploadManager?: Pick<
     UploadManager,
@@ -743,6 +751,16 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   );
   const codexProjectionCache =
     deps.codexProjectionCache ?? new CodexProjectionCache();
+  /**
+   * Bounds the canonical overlay's own work. Deliberately not a bound on the
+   * whole canonical phase: journal replay precedes it and cannot be interrupted,
+   * so charging replay here only ever converted a slow load into no canonical
+   * view at all.
+   */
+  const canonicalOverlayBudgetMs = Math.max(
+    1,
+    deps.canonicalOverlayBudgetMs ?? 2_000,
+  );
   const generatedArtifactUploadManager =
     deps.generatedArtifactUploadManager ?? new UploadManager();
   const runtimeController =
@@ -1386,7 +1404,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       // from a slow overlay without it.
       let journalReplayMs: number | undefined;
       try {
-        const canonicalBudgetMs = 2_000;
         const selectStartedMs = Date.now();
         const selected = await selectCodexEventSourceWithCache(
           codexEventStoreSources,
@@ -1394,6 +1411,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           codexProjectionCache,
         );
         journalReplayMs = Date.now() - selectStartedMs;
+        // The budget starts here, after the journal is in memory. Selection and
+        // replay are an uninterruptible cold-load cost that no amount of budget
+        // can shorten, and including them meant the overlay was skipped because
+        // *loading* was slow rather than because projecting was. Everything from
+        // this point on -- the artifact scan and the overlay itself -- is work
+        // this budget can actually bound.
+        const budgetStartedMs = Date.now();
         if (selected) {
           // A windowed request only builds and matches the recent candidate
           // tail, which is what makes long sessions affordable, so viability
@@ -1447,8 +1471,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               generatedArtifacts,
               sourceId: selected.sourceId,
               projectionCache: codexProjectionCache,
-              startedMs: canonicalStartedMs,
-              budgetMs: canonicalBudgetMs,
+              startedMs: budgetStartedMs,
+              budgetMs: canonicalOverlayBudgetMs,
               ...(candidateWindow === undefined
                 ? {}
                 : { maxCandidateCount: candidateWindow }),
@@ -1499,6 +1523,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               : undefined,
           ...(notViable ? { maxEvents: error.maxEvents } : {}),
           budgetExceeded,
+          budgetMs: canonicalOverlayBudgetMs,
           errorName: error instanceof Error ? error.name : typeof error,
           errorMessage: error instanceof Error ? error.message : String(error),
           journalReplayMs,

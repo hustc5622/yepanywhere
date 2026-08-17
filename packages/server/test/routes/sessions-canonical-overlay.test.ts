@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { CodexSessionEntry, UrlProjectId } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  type CodexEventEnvelope,
   type CodexEventStore,
   type CodexEventStoreSource,
   InMemoryCodexEventStore,
@@ -487,6 +488,7 @@ function createTestRoutes(
     entries?: CodexSessionEntry[];
     title?: string;
     generatedArtifactUploadManager?: SessionsDeps["generatedArtifactUploadManager"];
+    canonicalOverlayBudgetMs?: number;
   } = {},
 ) {
   const project: Project = {
@@ -548,6 +550,9 @@ function createTestRoutes(
         }) as unknown as ReturnType<SessionsDeps["readerFactory"]>,
     ),
     codexEventStoreSources,
+    ...(options.canonicalOverlayBudgetMs === undefined
+      ? {}
+      : { canonicalOverlayBudgetMs: options.canonicalOverlayBudgetMs }),
     ...(options.generatedArtifactUploadManager
       ? {
           generatedArtifactUploadManager:
@@ -659,5 +664,109 @@ describe("sessions route canonical ceiling ordering", () => {
       ),
     ).toEqual(["tail-item-1", "tail-item-2", "tail-item-3"]);
     expect(listReplayableGeneratedArtifacts).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The budget bounds the overlay, not the journal load.
+ *
+ * The 2 s clock used to start when the canonical phase began, so journal
+ * selection and replay were charged to it. Journal replay is an uninterruptible
+ * cold-load cost -- measured at 3.4 s per store on a production journal, against
+ * a 2 s budget -- so the very first canonical request after every restart was
+ * denied its overlay because *loading* was slow, not because projecting was.
+ * Live logs showed exactly one such fallback ~17 s after each of the last three
+ * restarts.
+ */
+describe("sessions route canonical overlay budget", () => {
+  /** A store whose replay is slow enough to exhaust a small budget on its own. */
+  function slowStore(
+    events: readonly CodexEventEnvelope[],
+    replayDelayMs: number,
+  ): CodexEventStore {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+    return {
+      append: vi.fn(),
+      appendMany: vi.fn(),
+      latestSequence: vi.fn(async () => events.at(-1)?.sequence ?? 0),
+      latestEventAtMs: vi.fn(async () => events.at(-1)?.receivedAtMs ?? 0),
+      replay: vi.fn(async () => {
+        await sleep(replayDelayMs);
+        return events;
+      }),
+    } as unknown as CodexEventStore;
+  }
+
+  const canonicalItem = testEvent(
+    1,
+    "item/completed",
+    {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "budget-item",
+        type: "agentMessage",
+        text: "budget answer",
+      },
+    },
+    { eventId: "budget-event" },
+  );
+
+  it("still overlays when the journal load alone outlasts the budget", async () => {
+    const routes = createTestRoutes(
+      "provider answer",
+      [fixedSource("provider", slowStore([canonicalItem], 120))],
+      { canonicalOverlayBudgetMs: 60 },
+    );
+
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // 120 ms of replay against a 60 ms budget: under the old clock the first
+    // deadline check inside the overlay tripped immediately and the response
+    // fell back to legacy normalization with no canonical rows at all.
+    const canonical = body.messages.filter(
+      (message: { codexThreadItem?: { id?: string } }) =>
+        message.codexThreadItem !== undefined,
+    );
+    expect(canonical).toHaveLength(1);
+    expect(String(canonical[0].codexThreadItem.id)).toBe("budget-item");
+  });
+
+  it("still enforces the budget on work that happens after the load", async () => {
+    // The budget must remain a real bound on everything it now covers. The
+    // generated-artifact scan runs inside the window on purpose: it walks every
+    // replayed event, so it is exactly the kind of post-load work that has to be
+    // bounded rather than excluded along with the replay.
+    const routes = createTestRoutes(
+      "provider answer",
+      [fixedSource("provider", slowStore([canonicalItem], 0))],
+      {
+        canonicalOverlayBudgetMs: 10,
+        generatedArtifactUploadManager: {
+          listReplayableGeneratedArtifacts: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            return [];
+          },
+        },
+      },
+    );
+
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(
+      body.messages.some(
+        (message: { codexThreadItem?: unknown }) =>
+          message.codexThreadItem !== undefined,
+      ),
+    ).toBe(false);
   });
 });

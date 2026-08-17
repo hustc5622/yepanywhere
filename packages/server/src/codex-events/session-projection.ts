@@ -48,7 +48,17 @@ export interface CanonicalCodexSessionOverlayOptions {
   sourceId?: string;
   /** Optional process-level cache for incremental projection replay. */
   projectionCache?: CodexProjectionCache;
-  /** Wall-clock start of the request; used with budgetMs for deadline checks. */
+  /**
+   * Wall-clock start of the budgeted work.
+   *
+   * This must be the moment the overlay's own work begins, not the moment the
+   * request began: the journal replay that precedes it is an unavoidable,
+   * uninterruptible cold-load cost, and charging it to this budget meant a
+   * session was denied its canonical view *because loading the journal was
+   * slow*. Measured on a live install, the first canonical request after every
+   * restart failed this way, ~17 s after boot, with a 3.4 s cold load against a
+   * 2 s budget.
+   */
   startedMs?: number;
   /** Soft budget in milliseconds. When exceeded, overlay throws BudgetExceededError so the route can fall back to legacy. */
   budgetMs?: number;
