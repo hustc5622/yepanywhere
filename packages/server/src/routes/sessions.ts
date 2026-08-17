@@ -34,7 +34,9 @@ import type { CodexBridgeController } from "../codex-bridge/types.js";
 import {
   type CodexEventStoreSource,
   CodexOverlayBudgetExceededError,
+  CodexOverlayNotViableError,
   CodexProjectionCache,
+  assessCanonicalOverlayViability,
   normalizeCodexEventStoreSources,
   overlayCanonicalCodexSessionMessages,
   overlayCodexProviderErrorMessages,
@@ -1379,6 +1381,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       codexEventStoreSources.length > 0
     ) {
       const canonicalStartedMs = Date.now();
+      // Declared outside the try so a failure log can say which phase consumed
+      // the budget. A cold journal replay that eats all 2 s is indistinguishable
+      // from a slow overlay without it.
+      let journalReplayMs: number | undefined;
       try {
         const canonicalBudgetMs = 2_000;
         const selectStartedMs = Date.now();
@@ -1387,8 +1393,34 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           sessionId,
           codexProjectionCache,
         );
-        const journalReplayMs = Date.now() - selectStartedMs;
+        journalReplayMs = Date.now() - selectStartedMs;
         if (selected) {
+          // A windowed request only builds and matches the recent candidate
+          // tail, which is what makes long sessions affordable, so viability
+          // depends on it. Computed here rather than just before the overlay
+          // because the decision has to precede the artifact scan below.
+          const canWindowCanonicalTail =
+            boundedMaxMessages !== undefined &&
+            afterMessageId === undefined &&
+            beforeMessageId === undefined &&
+            aroundMessageId === undefined &&
+            afterWindowMessageId === undefined &&
+            branchId === undefined;
+          const candidateWindow = canWindowCanonicalTail
+            ? boundedMaxMessages
+            : undefined;
+          const viability = assessCanonicalOverlayViability({
+            eventCount: selected.events.length,
+            ...(candidateWindow === undefined
+              ? {}
+              : { maxCandidateCount: candidateWindow }),
+          });
+          if (!viability.viable) {
+            // Bail before the generated-artifact scan: it walks every replayed
+            // event, and an out-of-bounds session used to pay for that scan only
+            // to have the result discarded by the very next statement.
+            throw new CodexOverlayNotViableError(viability);
+          }
           let generatedArtifacts: GeneratedArtifactManifest[] = [];
           try {
             generatedArtifacts =
@@ -1405,13 +1437,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             );
           }
           const overlayStartedMs = Date.now();
-          const canWindowCanonicalTail =
-            boundedMaxMessages !== undefined &&
-            afterMessageId === undefined &&
-            beforeMessageId === undefined &&
-            aroundMessageId === undefined &&
-            afterWindowMessageId === undefined &&
-            branchId === undefined;
           const overlay = overlayCanonicalCodexSessionMessages(
             sessionId,
             session.messages,
@@ -1424,9 +1449,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               projectionCache: codexProjectionCache,
               startedMs: canonicalStartedMs,
               budgetMs: canonicalBudgetMs,
-              ...(!canWindowCanonicalTail
+              ...(candidateWindow === undefined
                 ? {}
-                : { maxCandidateCount: boundedMaxMessages }),
+                : { maxCandidateCount: candidateWindow }),
             },
           );
           session = {
@@ -1450,23 +1475,48 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           );
         }
       } catch (error) {
-        const isBudgetExceeded =
-          error instanceof CodexOverlayBudgetExceededError;
         // Refresh remains available from the provider rollout if a canonical
-        // journal is temporarily unreadable, exceeds its safety bound, or
-        // blows the soft time budget.
-        getLogger().warn(
-          {
-            sessionId,
-            eventCount:
-              error instanceof CodexOverlayBudgetExceededError
-                ? error.eventCount
-                : undefined,
-            budgetExceeded: isBudgetExceeded,
-            totalMs: Date.now() - canonicalStartedMs,
-          },
-          "Canonical Codex session overlay unavailable; using legacy normalization",
-        );
+        // journal is temporarily unreadable, is known to be out of bounds, or
+        // blows the soft time budget. Those are three different situations and
+        // the log has to say which one happened: this line previously recorded
+        // neither the error name nor its message, so a hard event-limit
+        // rejection appeared as `budgetExceeded: false` with an unexplained
+        // duration, and 98% of these entries were misread as budget timeouts.
+        const notViable = error instanceof CodexOverlayNotViableError;
+        const budgetExceeded = error instanceof CodexOverlayBudgetExceededError;
+        const details = {
+          sessionId,
+          outcome: notViable
+            ? ("skipped" as const)
+            : budgetExceeded
+              ? ("budget_exceeded" as const)
+              : ("failed" as const),
+          ...(notViable ? { reason: error.reason } : {}),
+          eventCount:
+            error instanceof CodexOverlayBudgetExceededError ||
+            error instanceof CodexOverlayNotViableError
+              ? error.eventCount
+              : undefined,
+          ...(notViable ? { maxEvents: error.maxEvents } : {}),
+          budgetExceeded,
+          errorName: error instanceof Error ? error.name : typeof error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          journalReplayMs,
+          totalMs: Date.now() - canonicalStartedMs,
+        };
+        if (notViable) {
+          // A known bound, not a fault: every request for this session takes
+          // this path, so warning on each one is pure noise.
+          getLogger().debug(
+            details,
+            "Canonical Codex overlay skipped; using legacy normalization",
+          );
+        } else {
+          getLogger().warn(
+            details,
+            "Canonical Codex session overlay unavailable; using legacy normalization",
+          );
+        }
       }
     }
 

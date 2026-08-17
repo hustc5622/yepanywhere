@@ -22,6 +22,14 @@ import {
   createCanonicalCodexSessionState,
 } from "./types.js";
 
+/**
+ * Ceiling on the unwindowed full-history pass.
+ *
+ * This is a work bound, not a complexity cliff: the overlay is linear in event
+ * count (measured 35-47 us/event across 2k..144k events on a production
+ * journal, with no knee in the curve). See `assessCanonicalOverlayViability`
+ * for which regime it applies to.
+ */
 const DEFAULT_MAX_REFRESH_EVENTS = 100_000;
 const SAFE_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SAFE_NATIVE_TYPE = /^[A-Za-z][A-Za-z0-9._:-]{0,127}$/;
@@ -77,6 +85,30 @@ export class CodexOverlayBudgetExceededError extends Error {
   }
 }
 
+/**
+ * Thrown by a caller that pre-checked viability and decided not to overlay.
+ *
+ * Distinct from the budget error because the two mean opposite things: the
+ * budget error says "this was worth trying and ran out of time", this one says
+ * "this was known up front to be out of bounds, so nothing was attempted".
+ * Conflating them is what made a hard event-limit rejection show up in the logs
+ * as `budgetExceeded: false` with no further explanation.
+ */
+export class CodexOverlayNotViableError extends Error {
+  readonly reason: "event_limit";
+  readonly eventCount: number;
+  readonly maxEvents: number;
+  constructor(
+    viability: Extract<CanonicalOverlayViability, { viable: false }>,
+  ) {
+    super(`Canonical Codex overlay not viable: ${viability.reason}`);
+    this.name = "CodexOverlayNotViableError";
+    this.reason = viability.reason;
+    this.eventCount = viability.eventCount;
+    this.maxEvents = viability.maxEvents;
+  }
+}
+
 interface CanonicalMessageCandidate {
   message: Message;
   sequence: number;
@@ -84,6 +116,65 @@ interface CanonicalMessageCandidate {
   kind: "item" | "unknown" | "retry" | "provider_error" | "interaction";
   originalItemId?: string;
   nativeType?: string;
+}
+
+/** Why an overlay cannot run, when it cannot. */
+export type CanonicalOverlayViability =
+  | { viable: true }
+  | {
+      viable: false;
+      reason: "event_limit";
+      eventCount: number;
+      maxEvents: number;
+    };
+
+/**
+ * Whether the overlay may run for a journal of this size.
+ *
+ * The ceiling exists to bound work, and the work has two very different
+ * regimes:
+ *
+ *   - **Windowed** (`maxCandidateCount` set): candidate construction stops at
+ *     the recent tail, so both the candidate build and the legacy matching are
+ *     bounded by the window no matter how long the session is. Measured on a
+ *     144,029-event session with 10,494 legacy rows: **139 ms** for a
+ *     50-message window.
+ *   - **Unwindowed** (explicit cursor, branch projection, or no window): every
+ *     canonical candidate is built and matched against the legacy rows on every
+ *     request. Same session: **6.8 s**, and the projection cache does not help
+ *     because it memoizes the reduce, not the matching (warm 6.7 s vs cold
+ *     7.0 s).
+ *
+ * So the ceiling only applies to the unwindowed regime. It used to be checked
+ * against total history for both, which permanently disabled the canonical view
+ * for long sessions even though the windowed request the client actually makes
+ * is two orders of magnitude cheaper and comfortably inside the time budget.
+ * The check also ran after the journal replay and after the generated-artifact
+ * scan, so a rejected session paid for work that was then thrown away; callers
+ * can now consult this before either.
+ */
+export function assessCanonicalOverlayViability(args: {
+  eventCount: number;
+  /** Window size when the caller only needs the recent candidate tail. */
+  maxCandidateCount?: number;
+  maxEvents?: number;
+}): CanonicalOverlayViability {
+  const maxEvents = args.maxEvents ?? DEFAULT_MAX_REFRESH_EVENTS;
+  if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) {
+    throw new RangeError("Canonical Codex refresh maxEvents must be positive");
+  }
+  if (args.maxCandidateCount !== undefined) {
+    return { viable: true };
+  }
+  if (args.eventCount > maxEvents) {
+    return {
+      viable: false,
+      reason: "event_limit",
+      eventCount: args.eventCount,
+      maxEvents,
+    };
+  }
+  return { viable: true };
 }
 
 /**
@@ -105,9 +196,6 @@ export function overlayCanonicalCodexSessionMessages(
   if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) {
     throw new RangeError("Canonical Codex refresh maxEvents must be positive");
   }
-  if (events.length > maxEvents) {
-    throw new RangeError("Canonical Codex refresh event limit exceeded");
-  }
   if (
     options.maxCandidateCount !== undefined &&
     (!Number.isSafeInteger(options.maxCandidateCount) ||
@@ -116,6 +204,18 @@ export function overlayCanonicalCodexSessionMessages(
     throw new RangeError(
       "Canonical Codex refresh maxCandidateCount must be positive",
     );
+  }
+  // Same predicate the route consults before replaying, so a caller that skips
+  // the pre-check still gets identical behaviour.
+  const viability = assessCanonicalOverlayViability({
+    eventCount: events.length,
+    maxEvents,
+    ...(options.maxCandidateCount === undefined
+      ? {}
+      : { maxCandidateCount: options.maxCandidateCount }),
+  });
+  if (!viability.viable) {
+    throw new RangeError("Canonical Codex refresh event limit exceeded");
   }
   if (events.length === 0) {
     return {

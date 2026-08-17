@@ -3,6 +3,7 @@ import {
   type CodexEventEnvelope,
   type CodexEventStore,
   CodexProjectionCache,
+  assessCanonicalOverlayViability,
   overlayCanonicalCodexSessionMessages,
   selectCodexEventSource,
   selectCodexEventSourceWithCache,
@@ -994,3 +995,139 @@ function fixedStore(events: CodexEventEnvelope[]): {
     } as unknown as CodexEventStore,
   };
 }
+
+/**
+ * The event ceiling is a *work* bound, not a history bound.
+ *
+ * Measured on a production journal (144,029 events for one session, 10,494
+ * legacy rows): the overlay is linear at 35-47 us/event with no knee, a windowed
+ * request costs 139 ms, and an unwindowed one costs 6.8 s. The projection cache
+ * does not close that gap because it memoizes the reduce, not the candidate
+ * build and legacy matching (warm 6.7 s vs cold 7.0 s).
+ *
+ * So the ceiling has to apply to the unwindowed regime only. Checking it against
+ * total history, as it originally did, permanently disabled the canonical view
+ * for exactly the long sessions whose windowed requests are cheap.
+ */
+describe("canonical Codex overlay viability", () => {
+  const legacy: Message[] = [
+    {
+      uuid: "legacy-1",
+      type: "assistant",
+      message: { role: "assistant", content: "hello" },
+    },
+  ];
+
+  function events(count: number): CodexEventEnvelope[] {
+    return Array.from({ length: count }, (_, index) =>
+      testEvent(
+        index + 1,
+        "item/completed",
+        {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: `item-${index + 1}`,
+            type: "agentMessage",
+            text: `answer-${index + 1}`,
+          },
+        },
+        { eventId: `event-${index + 1}` },
+      ),
+    );
+  }
+
+  it("rejects an unwindowed request above the ceiling", () => {
+    expect(
+      assessCanonicalOverlayViability({ eventCount: 11, maxEvents: 10 }),
+    ).toEqual({
+      viable: false,
+      reason: "event_limit",
+      eventCount: 11,
+      maxEvents: 10,
+    });
+  });
+
+  it("accepts a windowed request above the ceiling", () => {
+    // The whole point: the window bounds the work, so history size stops
+    // mattering.
+    expect(
+      assessCanonicalOverlayViability({
+        eventCount: 1_000_000,
+        maxEvents: 10,
+        maxCandidateCount: 50,
+      }),
+    ).toEqual({ viable: true });
+  });
+
+  it("accepts an unwindowed request at the ceiling", () => {
+    expect(
+      assessCanonicalOverlayViability({ eventCount: 10, maxEvents: 10 }),
+    ).toEqual({ viable: true });
+  });
+
+  it("rejects a nonsensical ceiling instead of silently ignoring it", () => {
+    expect(() =>
+      assessCanonicalOverlayViability({ eventCount: 1, maxEvents: 0 }),
+    ).toThrow(/maxEvents must be positive/);
+  });
+
+  it("still throws from the overlay when a caller skips the pre-check", () => {
+    expect(() =>
+      overlayCanonicalCodexSessionMessages("session-1", legacy, events(4), {
+        maxEvents: 3,
+      }),
+    ).toThrow(/event limit exceeded/);
+  });
+
+  it("overlays a journal above the ceiling when the request is windowed", () => {
+    // Before this, the same call threw and the session fell back to legacy
+    // normalization on every single request.
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      legacy,
+      events(4),
+      { maxEvents: 3, maxCandidateCount: 2 },
+    );
+
+    expect(result.eventCount).toBe(4);
+    // Only the recent tail is projected, which is what bounds the work.
+    expect(result.projectedMessageCount).toBe(2);
+    expect(
+      result.messages.map((message) => message.codexEventSequence),
+    ).toEqual([undefined, 3, 4]);
+  });
+});
+
+describe("canonical Codex projection cache retention", () => {
+  it("keeps a single projection that exceeds the event waterline on its own", () => {
+    // Regression: evictIfNeeded used to take the only key in the map and delete
+    // it, leaving an empty cache. Every later request then paid a full cold
+    // projection -- measured 8 s on the real 144k-event session, with
+    // `cache.size === 0` after each apply.
+    const cache = new CodexProjectionCache({ maxTotalEvents: 1 });
+
+    cache.apply("provider", "session-1", [
+      testEvent(1, "warning", { message: "first" }),
+      testEvent(2, "warning", { message: "second" }),
+      testEvent(3, "warning", { message: "third" }),
+    ]);
+
+    expect(cache.size).toBe(1);
+    expect(cache.getLastSequence("provider", "session-1")).toBe(3);
+  });
+
+  it("still evicts other sessions to respect the waterline", () => {
+    const cache = new CodexProjectionCache({ maxTotalEvents: 1 });
+    cache.apply("provider", "session-1", [
+      testEvent(1, "warning", { message: "first" }),
+    ]);
+    cache.apply("provider", "session-2", [
+      testEvent(1, "warning", { message: "second" }, { sessionId: "session-2" }),
+    ]);
+
+    expect(cache.size).toBe(1);
+    expect(cache.getLastSequence("provider", "session-1")).toBe(0);
+    expect(cache.getLastSequence("provider", "session-2")).toBe(1);
+  });
+});

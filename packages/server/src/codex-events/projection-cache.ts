@@ -17,7 +17,12 @@ export interface CodexProjectionCacheEntry {
 
 export interface CodexProjectionCacheOptions {
   maxEntries?: number;
-  /** Approximate memory waterline expressed as total accepted events. */
+  /**
+   * Approximate memory waterline expressed as total accepted events.
+   *
+   * A single session may exceed this on its own; see `evictIfNeeded` for why
+   * such an entry is kept rather than evicted.
+   */
   maxTotalEvents?: number;
   now?: () => number;
 }
@@ -92,7 +97,7 @@ export class CodexProjectionCache {
         lastAccessedMs: this.now(),
       };
       this.entries.set(cacheKey, entry);
-      this.evictIfNeeded();
+      this.evictIfNeeded(cacheKey);
     }
 
     // Fast path: no new events.
@@ -117,7 +122,7 @@ export class CodexProjectionCache {
     entry.eventCount = entry.state.appliedEventIds.length;
     entry.lastAccessedMs = this.now();
     this.touch(cacheKey);
-    this.evictIfNeeded();
+    this.evictIfNeeded(cacheKey);
     return entry.state;
   }
 
@@ -222,15 +227,42 @@ export class CodexProjectionCache {
     }
   }
 
-  private evictIfNeeded(): void {
+  /**
+   * Enforce the entry-count and event-count waterlines by dropping
+   * least-recently-used entries.
+   *
+   * `protectedKey` is the entry the current `apply` call just built or
+   * refreshed, and it is never evicted. Without that exemption a session whose
+   * own projection exceeds `maxTotalEvents` evicted *itself* on the way out of
+   * `apply`: the while loop saw the waterline breached, took the only key in the
+   * map, deleted it, then found no further key and stopped. The cache ended up
+   * empty, so every subsequent request replayed the whole journal from scratch —
+   * exactly the sessions that need the incremental projection most were the ones
+   * guaranteed never to have it. Measured on a real 144,029-event session: the
+   * cache held 0 entries and each refresh paid a full ~8 s cold projection.
+   *
+   * Keeping an oversized entry means the waterline can be exceeded by one
+   * session. That is the intended trade: the waterline is a hint for bounding
+   * *aggregate* retention across sessions, not a correctness bound, and one
+   * live projection is cheaper than rebuilding it on every request.
+   */
+  private evictIfNeeded(protectedKey?: string): void {
     while (
       this.entries.size > this.maxEntries ||
       this.totalEventCount() > this.maxTotalEvents
     ) {
-      const oldestKey = this.entries.keys().next().value;
+      const oldestKey = this.oldestEvictableKey(protectedKey);
       if (oldestKey === undefined) break;
       this.entries.delete(oldestKey);
     }
+  }
+
+  /** Least-recently-used key that is not the entry the caller is using. */
+  private oldestEvictableKey(protectedKey?: string): string | undefined {
+    for (const key of this.entries.keys()) {
+      if (key !== protectedKey) return key;
+    }
+    return undefined;
   }
 
   private totalEventCount(): number {

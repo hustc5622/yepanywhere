@@ -18,7 +18,7 @@ import type { LoadedSession } from "../../src/sessions/types.js";
 import type { Project } from "../../src/supervisor/types.js";
 import { GeneratedArtifactMaterializer } from "../../src/uploads/generated-artifact.js";
 import { UploadManager } from "../../src/uploads/manager.js";
-import { testDraft } from "../codex-events/helpers.js";
+import { testDraft, testEvent } from "../codex-events/helpers.js";
 
 const projectId = "proj-1" as UrlProjectId;
 const sessionId = "session-1";
@@ -550,3 +550,107 @@ function createTestRoutes(
       : {}),
   });
 }
+
+/**
+ * Ordering contract around the event ceiling.
+ *
+ * The ceiling used to be evaluated inside the overlay, i.e. after the journal
+ * replay *and* after the generated-artifact scan had already walked every
+ * replayed event. A session above the ceiling therefore paid for that scan on
+ * every request and had the result discarded by the next statement. On the real
+ * 144k-event session that waste measured 25-39 ms warm and ~1 s on a cold store,
+ * repeated 692 times in one day's logs.
+ */
+describe("sessions route canonical ceiling ordering", () => {
+  /**
+   * A journal that is mostly filler so it clears the ceiling, with a few real
+   * items at the tail so a windowed overlay leaves observable traces.
+   */
+  function oversizedStore(fillerCount: number): CodexEventStore {
+    const filler = Array.from({ length: fillerCount }, (_, index) =>
+      testEvent(index + 1, "warning", { message: `w${index}` }),
+    );
+    const items = Array.from({ length: 3 }, (_, index) =>
+      testEvent(
+        fillerCount + index + 1,
+        "item/completed",
+        {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: `tail-item-${index + 1}`,
+            type: "agentMessage",
+            text: `tail answer ${index + 1}`,
+          },
+        },
+        { eventId: `tail-event-${index + 1}` },
+      ),
+    );
+    const events = [...filler, ...items];
+    return {
+      append: vi.fn(),
+      appendMany: vi.fn(),
+      latestSequence: vi.fn(async () => events.length),
+      replay: vi.fn(async () => events),
+    } as unknown as CodexEventStore;
+  }
+
+  it("skips the generated-artifact scan for an unwindowed journal above the ceiling", async () => {
+    const listReplayableGeneratedArtifacts = vi.fn(async () => []);
+    const routes = createTestRoutes(
+      "provider answer",
+      [fixedSource("provider", oversizedStore(100_001))],
+      { generatedArtifactUploadManager: { listReplayableGeneratedArtifacts } },
+    );
+
+    // No maxMessages, so the request cannot be windowed and the ceiling applies.
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(listReplayableGeneratedArtifacts).not.toHaveBeenCalled();
+    // Legacy normalization still answers the request, with no canonical rows.
+    const body = await response.json();
+    expect(body.messages).toHaveLength(1);
+    expect(JSON.stringify(body.messages[0].message.content)).toContain(
+      "provider answer",
+    );
+    expect(
+      body.messages.some(
+        (message: { codexThreadItem?: unknown }) =>
+          message.codexThreadItem !== undefined,
+      ),
+    ).toBe(false);
+  });
+
+  it("still overlays a windowed journal above the ceiling", async () => {
+    const listReplayableGeneratedArtifacts = vi.fn(async () => []);
+    const routes = createTestRoutes(
+      "provider answer",
+      [fixedSource("provider", oversizedStore(100_001))],
+      { generatedArtifactUploadManager: { listReplayableGeneratedArtifacts } },
+    );
+
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}?view=canonical&maxMessages=50`,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // The observable proof that the overlay ran: canonical rows from the tail
+    // are present. Asserting only that the artifact scan happened would pass
+    // against the old ordering too, where the scan ran before the rejection.
+    const canonical = body.messages.filter(
+      (message: { codexThreadItem?: { id?: string } }) =>
+        message.codexThreadItem !== undefined,
+    );
+    expect(canonical).toHaveLength(3);
+    expect(
+      canonical.map((message: { codexThreadItem: { id?: string } }) =>
+        String(message.codexThreadItem.id),
+      ),
+    ).toEqual(["tail-item-1", "tail-item-2", "tail-item-3"]);
+    expect(listReplayableGeneratedArtifacts).toHaveBeenCalledTimes(1);
+  });
+});
