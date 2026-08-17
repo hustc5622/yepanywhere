@@ -1371,3 +1371,160 @@ describe("SessionIndexService full-validation accounting", () => {
     expect(stats.fullValidationQueueWaitMs).toBe(0);
   });
 });
+
+/**
+ * The concurrency cap must shape a stampede, not gate the request path.
+ *
+ * Capping full validations at one removed the concurrency storm but introduced
+ * head-of-line blocking, and the measured cost distribution made that a bad
+ * trade: scan work has a p50 of 20 ms while queue waits reached 8291 ms,
+ * including a scope that waited 8.3 s to do 40 ms of work behind a single 5 s
+ * Kimi scan. Full validation runs on the request path, so those waits were
+ * user-visible latency.
+ */
+describe("SessionIndexService full-validation admission", () => {
+  let testDir: string;
+  let dataDir: string;
+  let projectsDir: string;
+  let sessionDir: string;
+  let projectId: string;
+
+  beforeEach(async () => {
+    testDir = join(tmpdir(), `index-admission-${randomUUID()}`);
+    dataDir = join(testDir, "indexes");
+    projectsDir = join(testDir, "projects");
+    sessionDir = join(testDir, "sessions");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(sessionDir, { recursive: true });
+    projectId = toUrlProjectId("/test/project");
+  });
+
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  function reader(scope: string, workMs: number): ISessionReader {
+    return {
+      getIndexScopeKey: (dir) => `opencode::${dir}::${scope}`,
+      listSessionFiles: async (dir) => {
+        if (workMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, workMs));
+        }
+        return [
+          { sessionId: "session-1", filePath: join(dir, "session-1.jsonl") },
+        ];
+      },
+      getSessionSummary: async (
+        sessionId: string,
+        pid: string,
+      ): Promise<SessionSummary> => ({
+        id: sessionId,
+        projectId: pid,
+        title: "t",
+        fullTitle: "t",
+        createdAt: "2026-08-17T00:00:00.000Z",
+        updatedAt: "2026-08-17T00:00:00.000Z",
+        messageCount: 1,
+        ownership: { owner: "none" },
+        provider: "opencode",
+      }),
+      getAgentMappings: async () => [],
+      getAgentSession: async () => null,
+    };
+  }
+
+  it("lets a historically cheap scope skip the queue", async () => {
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      fullValidationIntervalMs: 0,
+      maxConcurrentFullValidations: 1,
+      fullValidationFastPathMs: 50,
+      // High enough that only the bypass, never the cap, can end a wait.
+      fullValidationMaxQueueWaitMs: 10_000,
+    });
+    await service.initialize();
+    const cheap = reader("/cheap", 0);
+    const slow = reader("/slow", 300);
+
+    // First pass records the cheap scope's cost; nothing to contend with yet.
+    await service.getSessionsWithCache(sessionDir, projectId, cheap);
+
+    const slowPass = service.getSessionsWithCache(sessionDir, projectId, slow);
+    // Let the slow scope actually take the slot first: getSessionsWithCache does
+    // async index I/O before reaching admission, so without this the cheap scope
+    // can arrive while nothing holds the slot and the test proves nothing.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const startedMs = Date.now();
+    await service.getSessionsWithCache(sessionDir, projectId, cheap);
+    const cheapElapsedMs = Date.now() - startedMs;
+    await slowPass;
+
+    // Without the bypass this waits out the rest of the 300 ms scan.
+    expect(cheapElapsedMs).toBeLessThan(120);
+    expect(
+      service.getDebugStats().fullValidationQueueBypasses,
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still queues a scope whose last scan was expensive", async () => {
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      fullValidationIntervalMs: 0,
+      maxConcurrentFullValidations: 1,
+      fullValidationFastPathMs: 50,
+      fullValidationMaxQueueWaitMs: 10_000,
+    });
+    await service.initialize();
+    const slowA = reader("/slow-a", 150);
+    const slowB = reader("/slow-b", 150);
+
+    // Give both scopes an expensive history.
+    await service.getSessionsWithCache(sessionDir, projectId, slowA);
+    await service.getSessionsWithCache(sessionDir, projectId, slowB);
+
+    await Promise.all([
+      service.getSessionsWithCache(sessionDir, projectId, slowA),
+      service.getSessionsWithCache(sessionDir, projectId, slowB),
+    ]);
+
+    // One of the two contended, so a real wait was recorded.
+    expect(
+      service.getDebugStats().fullValidationQueueWaitMs,
+    ).toBeGreaterThanOrEqual(100);
+  });
+
+  it("gives up waiting for a slot rather than starving the request", async () => {
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      fullValidationIntervalMs: 0,
+      maxConcurrentFullValidations: 1,
+      // Bypass disabled, so only the wait cap can rescue the second scope.
+      fullValidationFastPathMs: 0,
+      fullValidationMaxQueueWaitMs: 40,
+    });
+    await service.initialize();
+
+    const blocker = service.getSessionsWithCache(
+      sessionDir,
+      projectId,
+      reader("/blocker", 400),
+    );
+    const startedMs = Date.now();
+    await service.getSessionsWithCache(
+      sessionDir,
+      projectId,
+      reader("/waiter", 0),
+    );
+    const waiterElapsedMs = Date.now() - startedMs;
+    await blocker;
+
+    // Bounded by the cap, not by the blocking scan.
+    expect(waiterElapsedMs).toBeLessThan(300);
+    expect(
+      service.getDebugStats().fullValidationQueueBypasses,
+    ).toBeGreaterThanOrEqual(1);
+  });
+});

@@ -124,6 +124,33 @@ export interface SessionIndexServiceOptions {
   fullValidationMinIntervalMs?: number;
   /** Max number of full validations allowed to run at once, across all scopes. */
   maxConcurrentFullValidations?: number;
+  /**
+   * A scope whose last full validation took at most this long skips the
+   * concurrency queue entirely.
+   *
+   * Serializing full validations removed the concurrency storm but replaced it
+   * with head-of-line blocking, and the measured cost distribution makes that a
+   * bad trade: on a live server the actual scan work has a p50 of 20 ms while
+   * queue waits reached 8291 ms, including a scope that waited 8.3 s to perform
+   * 40 ms of work behind one 5 s Kimi scan. The queue exists to keep several
+   * heavy scans off the event loop at once; cheap scans never needed it. A scope
+   * with no history still queues, because its cost is unknown.
+   *
+   * 0 disables the bypass and makes every full validation queue.
+   */
+  fullValidationFastPathMs?: number;
+  /**
+   * Upper bound on how long a full validation waits for a slot before running
+   * anyway.
+   *
+   * Full validation happens on the request path, so an unbounded wait is an
+   * unbounded user-visible delay. This keeps the concurrency cap as a shaping
+   * mechanism rather than a hard gate: a stampede is still spread out, but no
+   * single request is starved behind it.
+   *
+   * 0 disables the cap and waits indefinitely.
+   */
+  fullValidationMaxQueueWaitMs?: number;
   /** Optional event bus for watcher-driven invalidation. */
   eventBus?: EventBus;
   /** Max time to wait for cross-process write lock (ms). */
@@ -149,8 +176,12 @@ export class SessionIndexService implements ISessionIndexService {
   private fullValidationIntervalMs: number;
   private fullValidationMinIntervalMs: number;
   private maxConcurrentFullValidations: number;
+  private fullValidationFastPathMs: number;
+  private fullValidationMaxQueueWaitMs: number;
   private activeFullValidations = 0;
   private fullValidationWaiters: Array<() => void> = [];
+  /** Last observed scan cost per scope, used for queue-bypass admission. */
+  private lastFullValidationDurationMs: Map<string, number> = new Map();
   private writeLockTimeoutMs: number;
   private writeLockStaleMs: number;
   private lastFullValidationAt: Map<string, number> = new Map();
@@ -177,6 +208,12 @@ export class SessionIndexService implements ISessionIndexService {
      * fix for the pile-up reads as a regression in per-call duration.
      */
     fullValidationQueueWaitMs: 0,
+    /**
+     * Full validations that skipped the queue: either a historically cheap scope
+     * or a wait that hit its cap. A high share against `fullScans` means the cap
+     * is shaping little and can be revisited.
+     */
+    fullValidationQueueBypasses: 0,
   };
   private unsubscribeEventBus: (() => void) | null = null;
 
@@ -198,6 +235,14 @@ export class SessionIndexService implements ISessionIndexService {
     this.maxConcurrentFullValidations = Math.max(
       1,
       options.maxConcurrentFullValidations ?? 1,
+    );
+    this.fullValidationFastPathMs = Math.max(
+      0,
+      options.fullValidationFastPathMs ?? 50,
+    );
+    this.fullValidationMaxQueueWaitMs = Math.max(
+      0,
+      options.fullValidationMaxQueueWaitMs ?? 1_000,
     );
     this.writeLockTimeoutMs = Math.max(0, options.writeLockTimeoutMs ?? 2000);
     this.writeLockStaleMs = Math.max(1000, options.writeLockStaleMs ?? 10000);
@@ -658,6 +703,7 @@ export class SessionIndexService implements ISessionIndexService {
     sessionDir: string,
     scopeKey: string,
     queueWaitMs = 0,
+    bypassedQueue = false,
   ): void {
     this.cacheStats.requests += 1;
     this.cacheStats.statCalls += statCalls;
@@ -668,10 +714,11 @@ export class SessionIndexService implements ISessionIndexService {
     if (mode === "fast") this.cacheStats.fastHits += 1;
     if (mode === "incremental") this.cacheStats.incrementalRuns += 1;
     if (mode === "full") this.cacheStats.fullScans += 1;
+    if (bypassedQueue) this.cacheStats.fullValidationQueueBypasses += 1;
 
     if (LOG_CACHE_PERF || durationMs >= 250 || queueWaitMs >= 250) {
       logger.info(
-        `[SessionIndexService] mode=${mode} dir=${sessionDir} scope=${scopeKey} durationMs=${durationMs} queueWaitMs=${queueWaitMs} statCalls=${statCalls} parseCalls=${parseCalls}`,
+        `[SessionIndexService] mode=${mode} dir=${sessionDir} scope=${scopeKey} durationMs=${durationMs} queueWaitMs=${queueWaitMs}${bypassedQueue ? " queueBypassed=1" : ""} statCalls=${statCalls} parseCalls=${parseCalls}`,
       );
     }
   }
@@ -1001,6 +1048,7 @@ export class SessionIndexService implements ISessionIndexService {
     /** Mean full-validation queue wait, excluded from avgDurationMs. */
     avgFullValidationQueueWaitMs: number;
     fullValidationQueueWaitMs: number;
+    fullValidationQueueBypasses: number;
     dirtyDirCount: number;
     dirtySessionCount: number;
   } {
@@ -1108,33 +1156,89 @@ export class SessionIndexService implements ISessionIndexService {
   }
 
   /**
-   * Run one full validation at a time (per `maxConcurrentFullValidations`).
+   * Run a full validation under the concurrency cap, with two escapes.
    *
-   * Without this, every scope sharing a backing store starts its own scan
-   * concurrently and they contend for the same file handles and CPU while the
-   * event loop stalls.
+   * Without any cap, every scope sharing a backing store scans concurrently and
+   * they contend for the same file handles and CPU while the event loop stalls
+   * (measured: 709% occupancy, unrelated 15 ms reads taking 3-11 s). With a hard
+   * cap of one, the opposite failure appeared: head-of-line blocking, where a
+   * single 5 s Kimi scan made twenty cheap scopes wait behind it -- one of them
+   * 8291 ms to do 40 ms of work -- on the request path, so those waits were
+   * user-visible.
    *
-   * The queue wait is returned alongside the value so callers can report the two
-   * costs separately. They are not interchangeable: waiting means some other
-   * scope is scanning, working means this one is.
+   * So the cap now shapes rather than gates:
+   *
+   *   - a scope whose previous scan was cheap skips the queue, because the queue
+   *     exists to keep heavy scans from piling up and a 20 ms scan is not one;
+   *   - anyone who does queue gives up waiting after a bounded time and runs.
+   *
+   * Both escapes admit extra concurrency on purpose. That is strictly better
+   * than the pre-cap behaviour, which admitted unlimited concurrency, and it
+   * keeps the worst case bounded by wait cap rather than by the slowest scan in
+   * the system.
    */
   private async withFullValidationSlot<T>(
+    scopeKey: string,
     run: () => Promise<T>,
-  ): Promise<{ value: T; queueWaitMs: number }> {
+  ): Promise<{ value: T; queueWaitMs: number; bypassedQueue: boolean }> {
+    const lastDurationMs = this.lastFullValidationDurationMs.get(scopeKey);
+    const cheapScope =
+      this.fullValidationFastPathMs > 0 &&
+      lastDurationMs !== undefined &&
+      lastDurationMs <= this.fullValidationFastPathMs;
+
     const queueStartedMs = Date.now();
-    if (this.activeFullValidations >= this.maxConcurrentFullValidations) {
-      await new Promise<void>((resolve) => {
-        this.fullValidationWaiters.push(resolve);
-      });
+    let bypassedQueue = cheapScope;
+    if (
+      !cheapScope &&
+      this.activeFullValidations >= this.maxConcurrentFullValidations
+    ) {
+      bypassedQueue = !(await this.awaitFullValidationSlot());
     }
     const queueWaitMs = Date.now() - queueStartedMs;
+
     this.activeFullValidations += 1;
     try {
-      return { value: await run(), queueWaitMs };
+      const startedMs = Date.now();
+      const value = await run();
+      this.lastFullValidationDurationMs.set(scopeKey, Date.now() - startedMs);
+      return { value, queueWaitMs, bypassedQueue };
     } finally {
       this.activeFullValidations -= 1;
       this.fullValidationWaiters.shift()?.();
     }
+  }
+
+  /**
+   * Wait for a slot. Resolves true when a slot was granted, false when the wait
+   * cap expired first and the caller should proceed regardless.
+   */
+  private async awaitFullValidationSlot(): Promise<boolean> {
+    if (this.fullValidationMaxQueueWaitMs <= 0) {
+      await new Promise<void>((resolve) => {
+        this.fullValidationWaiters.push(resolve);
+      });
+      return true;
+    }
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        // Leave the waiter in place: removing it would mean the slot released
+        // next wakes nobody. It resolves into a no-op instead.
+        resolve(false);
+      }, this.fullValidationMaxQueueWaitMs);
+      // Node keeps the process alive for pending timers; this one must never do
+      // that on an otherwise idle server.
+      timer.unref?.();
+      this.fullValidationWaiters.push(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
   }
 
   private async getSessionsWithStaleCache(
@@ -1257,7 +1361,11 @@ export class SessionIndexService implements ISessionIndexService {
       return summaries;
     }
 
-    const { value: full, queueWaitMs } = await this.withFullValidationSlot(() =>
+    const {
+      value: full,
+      queueWaitMs,
+      bypassedQueue,
+    } = await this.withFullValidationSlot(scopeKey, () =>
       this.runFullValidation(sessionDir, projectId, reader, index),
     );
     this.recordCallStats(
@@ -1270,6 +1378,7 @@ export class SessionIndexService implements ISessionIndexService {
       sessionDir,
       scopeKey,
       queueWaitMs,
+      bypassedQueue,
     );
     return full.summaries;
   }
