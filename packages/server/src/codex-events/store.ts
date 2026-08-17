@@ -36,7 +36,11 @@ export interface CodexEventStore {
   appendMany(
     events: readonly CodexEventDraft[],
   ): Promise<CodexEventAppendResult[]>;
-  replay(query: CodexEventReplayQuery): Promise<CodexEventEnvelope[]>;
+  /**
+   * Replayed events are shared, read-only references into the store's indexes.
+   * Callers must not mutate them; see the note on the JSONL implementation.
+   */
+  replay(query: CodexEventReplayQuery): Promise<readonly CodexEventEnvelope[]>;
   latestSequence(sessionId: string): Promise<number>;
 }
 
@@ -109,7 +113,14 @@ export class InMemoryCodexEventStore implements CodexEventStore {
     return results;
   }
 
-  async replay(query: CodexEventReplayQuery): Promise<CodexEventEnvelope[]> {
+  /**
+   * Copies are kept here on purpose: this reference store backs tests and
+   * embedded callers where journals are tiny and per-caller isolation is worth
+   * more than the allocation.
+   */
+  async replay(
+    query: CodexEventReplayQuery,
+  ): Promise<readonly CodexEventEnvelope[]> {
     const after = query.afterSequence ?? 0;
     const through = query.throughSequence ?? Number.MAX_SAFE_INTEGER;
     const methods = query.methods ? new Set(query.methods) : null;
@@ -270,7 +281,23 @@ export class JsonlCodexEventStore implements CodexEventStore {
     return results;
   }
 
-  async replay(query: CodexEventReplayQuery): Promise<CodexEventEnvelope[]> {
+  /**
+   * Replay one session's events.
+   *
+   * The returned array is fresh, but the envelopes inside it are the store's own
+   * objects rather than copies. This used to `structuredClone` every event: on a
+   * session with 144k journalled events that cost ~650 ms and produced ~250 MB
+   * of garbage *per request*, which dominated the canonical overlay and drove
+   * the server's heap to several GB after a handful of session opens.
+   *
+   * No consumer mutates a replayed envelope — the overlay copies the array
+   * before sorting, and the reducer, candidate builder and artifact scan only
+   * read — so the copy bought nothing. The `readonly` return type is what keeps
+   * it that way; do not widen it.
+   */
+  async replay(
+    query: CodexEventReplayQuery,
+  ): Promise<readonly CodexEventEnvelope[]> {
     await this.ensureLoaded();
     return await this.withAppendLock(async () => {
       await this.refreshFromDisk();
@@ -287,9 +314,9 @@ export class JsonlCodexEventStore implements CodexEventStore {
             )
             .sort(compareStoredEvents)
         : (this.eventsBySession.get(query.sessionId) ?? []);
-      return events
-        .filter((event) => event.sequence > after && event.sequence <= through)
-        .map((event) => structuredClone(event));
+      return events.filter(
+        (event) => event.sequence > after && event.sequence <= through,
+      );
     });
   }
 

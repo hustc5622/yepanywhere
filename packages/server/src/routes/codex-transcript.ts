@@ -108,7 +108,10 @@ export function createCodexTranscriptRoutes(
     }
     const format: CodexTranscriptFormat = requestedFormat ?? "markdown";
 
-    let selected: { sourceId: string; events: CodexEventEnvelope[] } | null;
+    let selected: {
+      sourceId: string;
+      events: readonly CodexEventEnvelope[];
+    } | null;
     try {
       selected = await selectCodexEventSource(sources, sessionId);
     } catch {

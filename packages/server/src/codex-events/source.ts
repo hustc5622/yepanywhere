@@ -18,7 +18,8 @@ export interface CodexEventStoreSource {
 
 export interface SelectedCodexEventSource {
   sourceId: string;
-  events: CodexEventEnvelope[];
+  /** Read-only: shared references into the store's indexes, never copies. */
+  events: readonly CodexEventEnvelope[];
 }
 
 /** Validate source ids once at route construction or an injectable boundary. */
@@ -85,7 +86,8 @@ export async function selectCodexProviderErrorEventSource(
 
 export interface SelectedCodexEventSourceWithCache {
   sourceId: string;
-  events: CodexEventEnvelope[];
+  /** Read-only: shared references into the store's indexes, never copies. */
+  events: readonly CodexEventEnvelope[];
   /** True when an existing compatible projection can consume this replay. */
   warm: boolean;
 }

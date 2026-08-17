@@ -246,3 +246,41 @@ describe("JsonlCodexEventStore rotation", () => {
     expect(await disabled.replay({ sessionId: "session-1" })).toHaveLength(4);
   });
 });
+
+describe("JsonlCodexEventStore replay allocation", () => {
+  it("returns shared references instead of deep copies", async () => {
+    // Cloning every envelope on replay cost ~650 ms and ~250 MB of garbage per
+    // request on a session with 144k journalled events. Identity across replays
+    // is what proves the copy is gone; if this ever regresses, the canonical
+    // overlay silently becomes the slowest part of opening a session again.
+    const filePath = join(tempDir(), "events.jsonl");
+    const store = new JsonlCodexEventStore({ filePath });
+    await store.append(testDraft("item/started", {}, { eventId: "event-1" }));
+    await store.append(testDraft("item/completed", {}, { eventId: "event-2" }));
+
+    const first = await store.replay({ sessionId: "session-1" });
+    const second = await store.replay({ sessionId: "session-1" });
+
+    expect(first).toHaveLength(2);
+    expect(second).toHaveLength(2);
+    // Fresh array each call...
+    expect(second).not.toBe(first);
+    // ...but the envelopes themselves are not re-allocated.
+    expect(second[0]).toBe(first[0]);
+    expect(second[1]).toBe(first[1]);
+  });
+
+  it("does not let a caller's array operations disturb the store", async () => {
+    const filePath = join(tempDir(), "events.jsonl");
+    const store = new JsonlCodexEventStore({ filePath });
+    await store.append(testDraft("item/started", {}, { eventId: "event-1" }));
+    await store.append(testDraft("item/completed", {}, { eventId: "event-2" }));
+
+    const replayed = await store.replay({ sessionId: "session-1" });
+    // The overlay sorts a copy; make sure the array we hand out is detached.
+    [...replayed].reverse();
+
+    const after = await store.replay({ sessionId: "session-1" });
+    expect(after.map((event) => event.eventId)).toEqual(["event-1", "event-2"]);
+  });
+});
