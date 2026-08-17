@@ -7,6 +7,7 @@ import {
   overlayCanonicalCodexSessionMessages,
   selectCodexEventSource,
   selectCodexEventSourceWithCache,
+  selectCodexProviderErrorEventSource,
 } from "../../src/codex-events/index.js";
 import type { Message } from "../../src/supervisor/types.js";
 import { testEvent } from "./helpers.js";
@@ -671,6 +672,7 @@ describe("canonical Codex persisted session projection", () => {
     let replayed = [original];
     const store = {
       replay: vi.fn(async () => structuredClone(replayed)),
+      latestEventAtMs: vi.fn(async () => replayed.at(-1)?.receivedAtMs ?? 0),
     } as unknown as CodexEventStore;
     const sources = [{ id: "provider", createStore: () => store }];
     const cache = new CodexProjectionCache();
@@ -992,6 +994,7 @@ function fixedStore(events: CodexEventEnvelope[]): {
       appendMany: vi.fn(),
       replay,
       latestSequence: vi.fn(async () => events.at(-1)?.sequence ?? 0),
+      latestEventAtMs: vi.fn(async () => events.at(-1)?.receivedAtMs ?? 0),
     } as unknown as CodexEventStore,
   };
 }
@@ -1123,11 +1126,152 @@ describe("canonical Codex projection cache retention", () => {
       testEvent(1, "warning", { message: "first" }),
     ]);
     cache.apply("provider", "session-2", [
-      testEvent(1, "warning", { message: "second" }, { sessionId: "session-2" }),
+      testEvent(
+        1,
+        "warning",
+        { message: "second" },
+        { sessionId: "session-2" },
+      ),
     ]);
 
     expect(cache.size).toBe(1);
     expect(cache.getLastSequence("provider", "session-1")).toBe(0);
     expect(cache.getLastSequence("provider", "session-2")).toBe(1);
+  });
+});
+
+/**
+ * Journal precedence.
+ *
+ * Selection used to be positional: the first source holding any event for the
+ * session won. On a live install one session existed in both journals --
+ * provider with 142,555 events ending 2026-08-16T05:09:30Z, bridge with 118,753
+ * ending 2026-08-16T18:18:37Z -- and because provider came first, every
+ * canonical projection of that session was 13.2 hours stale with nothing to
+ * indicate it.
+ */
+describe("canonical Codex journal precedence", () => {
+  function storeFor(events: CodexEventEnvelope[]): CodexEventStore {
+    return {
+      append: vi.fn(),
+      appendMany: vi.fn(),
+      replay: vi.fn(async () => events),
+      latestSequence: vi.fn(async () => events.at(-1)?.sequence ?? 0),
+      latestEventAtMs: vi.fn(async () => events.at(-1)?.receivedAtMs ?? 0),
+    } as unknown as CodexEventStore;
+  }
+
+  function eventAt(receivedAtMs: number, eventId: string): CodexEventEnvelope {
+    return testEvent(
+      1,
+      "warning",
+      { message: eventId },
+      {
+        eventId,
+        receivedAtMs,
+      },
+    );
+  }
+
+  it("prefers a fresher later journal over a stale earlier one", async () => {
+    const stale = eventAt(1_000, "provider-old");
+    const fresh = eventAt(9_000, "bridge-new");
+
+    const selected = await selectCodexEventSource(
+      [
+        { id: "provider", createStore: () => storeFor([stale]) },
+        { id: "bridge", createStore: () => storeFor([fresh]) },
+      ],
+      "session-1",
+    );
+
+    expect(selected?.sourceId).toBe("bridge");
+    // Still exactly one journal: sequence spaces are never merged.
+    expect(selected?.events).toEqual([fresh]);
+  });
+
+  it("keeps the earlier journal when freshness ties", async () => {
+    const provider = eventAt(5_000, "provider-tie");
+    const bridge = eventAt(5_000, "bridge-tie");
+
+    const selected = await selectCodexEventSource(
+      [
+        { id: "provider", createStore: () => storeFor([provider]) },
+        { id: "bridge", createStore: () => storeFor([bridge]) },
+      ],
+      "session-1",
+    );
+
+    expect(selected?.sourceId).toBe("provider");
+  });
+
+  it("ignores journals that do not hold the session at all", async () => {
+    const fresh = eventAt(3_000, "bridge-only");
+
+    const selected = await selectCodexEventSource(
+      [
+        { id: "provider", createStore: () => storeFor([]) },
+        { id: "bridge", createStore: () => storeFor([fresh]) },
+      ],
+      "session-1",
+    );
+
+    expect(selected?.sourceId).toBe("bridge");
+  });
+
+  it("applies the same precedence to the cached selector", async () => {
+    const stale = eventAt(1_000, "provider-old");
+    const fresh = eventAt(9_000, "bridge-new");
+
+    const selected = await selectCodexEventSourceWithCache(
+      [
+        { id: "provider", createStore: () => storeFor([stale]) },
+        { id: "bridge", createStore: () => storeFor([fresh]) },
+      ],
+      "session-1",
+      new CodexProjectionCache(),
+    );
+
+    expect(selected?.sourceId).toBe("bridge");
+    expect(selected?.events).toEqual([fresh]);
+  });
+
+  it("applies the same precedence to the provider-error selector", async () => {
+    // Provider failures reconstructed from a 13-hour-stale journal would show
+    // errors the user already moved past.
+    const stale = eventAt(1_000, "provider-old");
+    const fresh = eventAt(9_000, "bridge-new");
+
+    const selected = await selectCodexProviderErrorEventSource(
+      [
+        { id: "provider", createStore: () => storeFor([stale]) },
+        { id: "bridge", createStore: () => storeFor([fresh]) },
+      ],
+      "session-1",
+    );
+
+    expect(selected?.sourceId).toBe("bridge");
+  });
+
+  it("still selects a journal whose events carry no usable timestamp", async () => {
+    // Freshness of 0 must mean \"unknown\", not \"empty\": skipping such a journal
+    // would drop canonical data entirely.
+    const untimed = testEvent(
+      1,
+      "warning",
+      { message: "untimed" },
+      {
+        eventId: "untimed",
+        receivedAtMs: 0,
+      },
+    );
+
+    const selected = await selectCodexEventSource(
+      [{ id: "provider", createStore: () => storeFor([untimed]) }],
+      "session-1",
+    );
+
+    expect(selected?.sourceId).toBe("provider");
+    expect(selected?.events).toEqual([untimed]);
   });
 });

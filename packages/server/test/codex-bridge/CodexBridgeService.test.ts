@@ -3051,6 +3051,10 @@ class InspectableCodexEventStore implements CodexEventStore {
   latestSequence(sessionId: string): Promise<number> {
     return this.inner.latestSequence(sessionId);
   }
+
+  latestEventAtMs(sessionId: string): Promise<number> {
+    return this.inner.latestEventAtMs(sessionId);
+  }
 }
 
 async function findAvailablePort(): Promise<number> {

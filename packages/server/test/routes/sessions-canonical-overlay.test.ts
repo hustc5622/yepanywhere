@@ -245,7 +245,13 @@ describe("sessions route canonical Codex refresh overlay", () => {
   });
 
   it("falls back to normalized rollout when the canonical journal is unreadable", async () => {
+    // An unreadable journal now fails at the freshness probe rather than at
+    // replay, because source selection has to compare journals before choosing
+    // one. Either way the request must fall back to legacy normalization.
     const failingStore = {
+      latestEventAtMs: vi.fn(async () => {
+        throw new Error("synthetic canonical read failure");
+      }),
       replay: vi.fn(async () => {
         throw new Error("synthetic canonical read failure");
       }),
@@ -264,7 +270,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
       { type: "text", text: "legacy fallback" },
     ]);
     expect(body.messages[0]?.codexCanonicalRefresh).toBeUndefined();
-    expect(failingStore.replay).toHaveBeenCalledOnce();
+    expect(failingStore.latestEventAtMs).toHaveBeenCalledOnce();
   });
 
   it("keeps canonical refresh responses path-free without mutating rollout input", async () => {
@@ -591,6 +597,7 @@ describe("sessions route canonical ceiling ordering", () => {
       append: vi.fn(),
       appendMany: vi.fn(),
       latestSequence: vi.fn(async () => events.length),
+      latestEventAtMs: vi.fn(async () => events.at(-1)?.receivedAtMs ?? 0),
       replay: vi.fn(async () => events),
     } as unknown as CodexEventStore;
   }

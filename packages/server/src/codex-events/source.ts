@@ -45,7 +45,57 @@ export function normalizeCodexEventStoreSources(
 }
 
 /**
- * Select the first complete journal containing the session.
+ * Pick the journal that holds the freshest view of a session.
+ *
+ * Precedence used to be positional: the first source that held *any* event for
+ * the session won. That silently preferred a stale journal. Measured on a live
+ * install, one session existed in both journals:
+ *
+ *   provider  142,555 events, newest 2026-08-16T05:09:30Z
+ *   bridge    118,753 events, newest 2026-08-16T18:18:37Z
+ *
+ * and provider came first, so every canonical projection of that session was
+ * 13.2 hours behind what had actually been recorded, with nothing to indicate it.
+ *
+ * Journals are still never merged: their sequence spaces are independent, so one
+ * of them is chosen whole. Freshest wins because the overlay's job is to enrich
+ * the rows the client is looking at, which are the recent ones, and because the
+ * legacy rollout - not this journal - is the source of full history. Ties keep
+ * the original positional precedence, so a single-journal install and any
+ * equal-freshness case behave exactly as before.
+ *
+ * Cost: every source is probed, where previously the search stopped at the first
+ * hit. The probe is O(1) per source once a store is loaded, but it does force a
+ * cold load of journals that positional precedence might have skipped. That is
+ * accepted: a mixed workload loads them all anyway, since any session absent
+ * from the first journal already required loading the next one.
+ */
+async function selectFreshestSourceStore(
+  sources: readonly CodexEventStoreSource[],
+  sessionId: string,
+): Promise<{ source: CodexEventStoreSource; store: CodexEventStore } | null> {
+  let best: {
+    source: CodexEventStoreSource;
+    store: CodexEventStore;
+    freshnessMs: number;
+  } | null = null;
+  for (const source of sources) {
+    const store = source.createStore();
+    const freshnessMs = await store.latestEventAtMs(sessionId);
+    if (freshnessMs <= 0 && (await store.latestSequence(sessionId)) < 1) {
+      // No events for this session in this journal at all.
+      continue;
+    }
+    // Strictly greater, so equal freshness keeps the earlier source.
+    if (!best || freshnessMs > best.freshnessMs) {
+      best = { source, store, freshnessMs };
+    }
+  }
+  return best ? { source: best.source, store: best.store } : null;
+}
+
+/**
+ * Select the journal holding the freshest view of the session.
  *
  * Provider and bridge journals have independent sequence spaces. They must
  * never be concatenated or sorted together; callers share this selector so a
@@ -55,33 +105,28 @@ export async function selectCodexEventSource(
   sources: readonly CodexEventStoreSource[],
   sessionId: string,
 ): Promise<SelectedCodexEventSource | null> {
-  for (const source of sources) {
-    const events = await source.createStore().replay({ sessionId });
-    if (events.length > 0) {
-      return { sourceId: source.id, events };
-    }
-  }
-  return null;
+  const selected = await selectFreshestSourceStore(sources, sessionId);
+  if (!selected) return null;
+  const events = await selected.store.replay({ sessionId });
+  if (events.length === 0) return null;
+  return { sourceId: selected.source.id, events };
 }
 
 /**
- * Select the provider-first journal while materializing only events needed to
+ * Select the freshest journal while materializing only events needed to
  * reconstruct user-visible provider failures.
  */
 export async function selectCodexProviderErrorEventSource(
   sources: readonly CodexEventStoreSource[],
   sessionId: string,
 ): Promise<SelectedCodexEventSource | null> {
-  for (const source of sources) {
-    const store = source.createStore();
-    if ((await store.latestSequence(sessionId)) < 1) continue;
-    const events = await store.replay({
-      sessionId,
-      methods: ["error", "turn/completed"],
-    });
-    return { sourceId: source.id, events };
-  }
-  return null;
+  const selected = await selectFreshestSourceStore(sources, sessionId);
+  if (!selected) return null;
+  const events = await selected.store.replay({
+    sessionId,
+    methods: ["error", "turn/completed"],
+  });
+  return { sourceId: selected.source.id, events };
 }
 
 export interface SelectedCodexEventSourceWithCache {
@@ -93,8 +138,8 @@ export interface SelectedCodexEventSourceWithCache {
 }
 
 /**
- * Select the first complete journal containing the session while validating
- * any cached projection against the journal's persisted prefix.
+ * Select the freshest journal containing the session while validating any
+ * cached projection against that journal's persisted prefix.
  *
  * The JSONL store performs incremental file-tail hydration internally, but the
  * selector returns a complete in-memory replay because candidate timestamps,
@@ -106,22 +151,16 @@ export async function selectCodexEventSourceWithCache(
   sessionId: string,
   cache: CodexProjectionCache,
 ): Promise<SelectedCodexEventSourceWithCache | null> {
-  for (const source of sources) {
-    const cachedSequence = cache.getLastSequence(source.id, sessionId);
-    const store = source.createStore();
-    const events = await store.replay({ sessionId });
-    let warm = cachedSequence > 0;
-    if (warm && !cache.matchesReplaySnapshot(source.id, sessionId, events)) {
-      cache.invalidate(source.id, sessionId);
-      warm = false;
-    }
-    if (events.length > 0) {
-      return {
-        sourceId: source.id,
-        events,
-        warm,
-      };
-    }
+  const selected = await selectFreshestSourceStore(sources, sessionId);
+  if (!selected) return null;
+  const sourceId = selected.source.id;
+  const cachedSequence = cache.getLastSequence(sourceId, sessionId);
+  const events = await selected.store.replay({ sessionId });
+  if (events.length === 0) return null;
+  let warm = cachedSequence > 0;
+  if (warm && !cache.matchesReplaySnapshot(sourceId, sessionId, events)) {
+    cache.invalidate(sourceId, sessionId);
+    warm = false;
   }
-  return null;
+  return { sourceId, events, warm };
 }

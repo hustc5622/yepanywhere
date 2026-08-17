@@ -42,6 +42,27 @@ export interface CodexEventStore {
    */
   replay(query: CodexEventReplayQuery): Promise<readonly CodexEventEnvelope[]>;
   latestSequence(sessionId: string): Promise<number>;
+  /**
+   * Wall-clock time of the newest event this store holds for the session, or 0
+   * when it holds none.
+   *
+   * Sequences are per session *and* per journal, so they cannot rank two
+   * journals against each other; this can. `receivedAtMs` is used because it is
+   * always set by our own ingress, on both the provider and the bridge path,
+   * which keeps the comparison on a single clock.
+   */
+  latestEventAtMs(sessionId: string): Promise<number>;
+}
+
+/** Newest-event timestamp for one already-sorted session event list. */
+function latestEventTimestamp(
+  events: readonly CodexEventEnvelope[] | undefined,
+): number {
+  // Session lists are kept sorted by sequence, which is append order, so the
+  // tail is the newest event and no scan is needed.
+  const last = events?.at(-1);
+  if (!last) return 0;
+  return last.receivedAtMs || last.persistedAtMs || 0;
 }
 
 export interface InMemoryCodexEventStoreOptions {
@@ -141,6 +162,10 @@ export class InMemoryCodexEventStore implements CodexEventStore {
 
   async latestSequence(sessionId: string): Promise<number> {
     return this.eventsBySession.get(sessionId)?.at(-1)?.sequence ?? 0;
+  }
+
+  async latestEventAtMs(sessionId: string): Promise<number> {
+    return latestEventTimestamp(this.eventsBySession.get(sessionId));
   }
 
   private identityKey(sessionId: string, identity: string): string {
@@ -396,6 +421,14 @@ export class JsonlCodexEventStore implements CodexEventStore {
     return await this.withAppendLock(async () => {
       await this.refreshFromDisk();
       return this.eventsBySession.get(sessionId)?.at(-1)?.sequence ?? 0;
+    });
+  }
+
+  async latestEventAtMs(sessionId: string): Promise<number> {
+    await this.ensureLoaded();
+    return await this.withAppendLock(async () => {
+      await this.refreshFromDisk();
+      return latestEventTimestamp(this.eventsBySession.get(sessionId));
     });
   }
 
