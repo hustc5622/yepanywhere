@@ -97,6 +97,8 @@ export interface Config {
    * 0 = validate every request (legacy behavior).
    */
   sessionIndexFullValidationMs: number;
+  sessionIndexFullValidationMinMs: number;
+  sessionIndexMaxConcurrentFullValidations: number;
   /** Session index write lock timeout (ms) for cross-process coordination. */
   sessionIndexWriteLockTimeoutMs: number;
   /** Session index lock staleness threshold (ms). */
@@ -291,6 +293,20 @@ export function loadConfig(): Config {
     0,
     parseIntOrDefault(process.env.SESSION_INDEX_FULL_VALIDATION_MS, 30000),
   );
+  // Watcher events for non-Claude providers mark every scope of that provider
+  // dirty, which used to force a full validation per scope per event. This is
+  // the floor between dir-dirty-driven full passes for one scope.
+  const sessionIndexFullValidationMinMs = Math.max(
+    0,
+    parseIntOrDefault(process.env.SESSION_INDEX_FULL_VALIDATION_MIN_MS, 5000),
+  );
+  const sessionIndexMaxConcurrentFullValidations = Math.max(
+    1,
+    parseIntOrDefault(
+      process.env.SESSION_INDEX_MAX_CONCURRENT_FULL_VALIDATIONS,
+      1,
+    ),
+  );
   const sessionIndexWriteLockTimeoutMs = Math.max(
     0,
     parseIntOrDefault(process.env.SESSION_INDEX_WRITE_LOCK_TIMEOUT_MS, 2000),
@@ -442,6 +458,8 @@ export function loadConfig(): Config {
     ),
     codexWatchPeriodicRescanMs,
     sessionIndexFullValidationMs,
+    sessionIndexFullValidationMinMs,
+    sessionIndexMaxConcurrentFullValidations,
     sessionIndexWriteLockTimeoutMs,
     sessionIndexWriteLockStaleMs,
     projectScanCacheTtlMs,

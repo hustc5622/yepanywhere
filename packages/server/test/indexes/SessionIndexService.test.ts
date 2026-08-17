@@ -1079,3 +1079,184 @@ describe("SessionIndexService", () => {
     });
   });
 });
+
+describe("SessionIndexService full-validation throttling", () => {
+  let testDir: string;
+  let dataDir: string;
+  let projectsDir: string;
+  let sessionDir: string;
+  let projectId: string;
+
+  beforeEach(async () => {
+    testDir = join(tmpdir(), `index-throttle-${randomUUID()}`);
+    dataDir = join(testDir, "indexes");
+    projectsDir = join(testDir, "projects");
+    sessionDir = join(testDir, "opencode-sessions");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(sessionDir, { recursive: true });
+    projectId = toUrlProjectId("/test/project");
+  });
+
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Reader standing in for a provider whose scopes share one backing store, and
+   * which counts how often the service asks it to enumerate that store.
+   */
+  function countingReader(scope: string, onList?: () => Promise<void>) {
+    let listCalls = 0;
+    const reader: ISessionReader = {
+      getIndexScopeKey: (dir) => `opencode::${dir}::${scope}`,
+      listSessionFiles: async (dir) => {
+        listCalls += 1;
+        await onList?.();
+        return [
+          { sessionId: "session-1", filePath: join(dir, "session-1.jsonl") },
+        ];
+      },
+      getSessionSummary: async (
+        sessionId: string,
+        pid: string,
+      ): Promise<SessionSummary> => ({
+        id: sessionId,
+        projectId: pid,
+        title: "t",
+        fullTitle: "t",
+        createdAt: "2026-08-17T00:00:00.000Z",
+        updatedAt: "2026-08-17T00:00:00.000Z",
+        messageCount: 1,
+        ownership: { owner: "none" },
+        provider: "opencode",
+      }),
+      getAgentMappings: async () => [],
+      getAgentSession: async () => null,
+    };
+    return {
+      reader,
+      // A method, not a getter: spreading this object would snapshot a getter's
+      // value and silently freeze the counter at 0.
+      listCalls: () => listCalls,
+    };
+  }
+
+  function emitOpencodeChange(bus: EventBus): void {
+    bus.emit({
+      type: "file-change",
+      provider: "opencode",
+      path: join(sessionDir, "session-1.jsonl"),
+      relativePath: "session-1.jsonl",
+      changeType: "modify",
+      timestamp: new Date().toISOString(),
+      fileType: "session",
+    });
+  }
+
+  it("collapses a burst of dirty-directory events into one full validation", async () => {
+    const eventBus = new EventBus();
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      eventBus,
+      fullValidationIntervalMs: 60_000,
+      fullValidationMinIntervalMs: 60_000,
+    });
+    await service.initialize();
+    const probe = countingReader("/p1");
+    const reader = probe.reader;
+
+    // Prime the index; this is the one legitimate full pass.
+    await service.getSessionsWithCache(sessionDir, projectId, reader);
+    const primed = probe.listCalls();
+    // Guard against a vacuous assertion: the priming pass must have scanned.
+    expect(primed).toBeGreaterThan(0);
+
+    // A watcher storm: every event marks the scope dirty.
+    for (let i = 0; i < 20; i++) {
+      emitOpencodeChange(eventBus);
+      await service.getSessionsWithCache(sessionDir, projectId, reader);
+    }
+
+    // Inside the minimum interval none of those may trigger a re-scan.
+    expect(probe.listCalls()).toBe(primed);
+  });
+
+  it("still reconciles once the minimum interval has passed", async () => {
+    const eventBus = new EventBus();
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      eventBus,
+      fullValidationIntervalMs: 60_000,
+      fullValidationMinIntervalMs: 20,
+    });
+    await service.initialize();
+    const probe = countingReader("/p2");
+    const reader = probe.reader;
+
+    await service.getSessionsWithCache(sessionDir, projectId, reader);
+    const primed = probe.listCalls();
+
+    emitOpencodeChange(eventBus);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await service.getSessionsWithCache(sessionDir, projectId, reader);
+
+    expect(probe.listCalls()).toBeGreaterThan(primed);
+  });
+
+  it("keeps every dirty event actionable when throttling is disabled", async () => {
+    // The service default is 0 so existing embedders keep the old behaviour;
+    // only the config layer opts into a floor.
+    const eventBus = new EventBus();
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      eventBus,
+      fullValidationIntervalMs: 60_000,
+    });
+    await service.initialize();
+    const probe = countingReader("/p3");
+    const reader = probe.reader;
+
+    await service.getSessionsWithCache(sessionDir, projectId, reader);
+    const primed = probe.listCalls();
+
+    emitOpencodeChange(eventBus);
+    await service.getSessionsWithCache(sessionDir, projectId, reader);
+
+    expect(probe.listCalls()).toBeGreaterThan(primed);
+  });
+
+  it("runs full validations one at a time", async () => {
+    const service = new SessionIndexService({
+      dataDir,
+      projectsDir,
+      fullValidationIntervalMs: 0,
+      maxConcurrentFullValidations: 1,
+    });
+    await service.initialize();
+
+    let concurrent = 0;
+    let peak = 0;
+    const hold = async () => {
+      concurrent += 1;
+      peak = Math.max(peak, concurrent);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      concurrent -= 1;
+    };
+
+    // Distinct scopes sharing one store, exactly the OpenCode shape.
+    const readers = ["/a", "/b", "/c", "/d"].map(
+      (scope) => countingReader(scope, hold).reader,
+    );
+
+    await Promise.all(
+      readers.map((reader) =>
+        service.getSessionsWithCache(sessionDir, projectId, reader),
+      ),
+    );
+
+    expect(peak).toBe(1);
+  });
+});

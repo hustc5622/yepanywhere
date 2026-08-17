@@ -107,6 +107,23 @@ export interface SessionIndexServiceOptions {
    * 0 disables fast-path and validates every request.
    */
   fullValidationIntervalMs?: number;
+  /**
+   * Floor on how often one scope may run a full validation, applied even when a
+   * dirty-directory signal is pending.
+   *
+   * Watcher events for every provider except Claude cannot say which project
+   * scope owns the changed file, so they mark *all* of that provider's scopes
+   * dirty (see `handleFileChange`). With a shared backing store — OpenCode's
+   * single sqlite file across 43 projects, for example — one write therefore
+   * queued one full validation per scope, each a full store scan. Measured on a
+   * live server that reached 29 full validations per second at 250–800 ms each,
+   * which saturated the event loop and pushed unrelated 15 ms session reads to
+   * 3–11 s. A dirty directory still forces a full pass; it just cannot do so
+   * more often than this.
+   */
+  fullValidationMinIntervalMs?: number;
+  /** Max number of full validations allowed to run at once, across all scopes. */
+  maxConcurrentFullValidations?: number;
   /** Optional event bus for watcher-driven invalidation. */
   eventBus?: EventBus;
   /** Max time to wait for cross-process write lock (ms). */
@@ -130,6 +147,10 @@ export class SessionIndexService implements ISessionIndexService {
   private pendingSaves: Set<string> = new Set();
   private maxCacheSize: number;
   private fullValidationIntervalMs: number;
+  private fullValidationMinIntervalMs: number;
+  private maxConcurrentFullValidations: number;
+  private activeFullValidations = 0;
+  private fullValidationWaiters: Array<() => void> = [];
   private writeLockTimeoutMs: number;
   private writeLockStaleMs: number;
   private lastFullValidationAt: Map<string, number> = new Map();
@@ -161,6 +182,14 @@ export class SessionIndexService implements ISessionIndexService {
     this.fullValidationIntervalMs = Math.max(
       0,
       options.fullValidationIntervalMs ?? 0,
+    );
+    this.fullValidationMinIntervalMs = Math.max(
+      0,
+      options.fullValidationMinIntervalMs ?? 0,
+    );
+    this.maxConcurrentFullValidations = Math.max(
+      1,
+      options.maxConcurrentFullValidations ?? 1,
     );
     this.writeLockTimeoutMs = Math.max(0, options.writeLockTimeoutMs ?? 2000);
     this.writeLockStaleMs = Math.max(1000, options.writeLockStaleMs ?? 10000);
@@ -1028,6 +1057,44 @@ export class SessionIndexService implements ISessionIndexService {
       });
   }
 
+  /**
+   * Whether a pending dirty-directory signal may force a full validation now.
+   *
+   * Returns false while the scope is inside its minimum spacing window, which
+   * collapses a burst of watcher events into one pass instead of one per event.
+   * The signal itself is left in place, so the next request after the window
+   * still reconciles.
+   */
+  private isDirDirtyFullValidationDue(scopeKey: string, now: number): boolean {
+    if (this.fullValidationMinIntervalMs <= 0) return true;
+    const last = this.lastFullValidationAt.get(scopeKey) ?? 0;
+    // Never validated: reconcile immediately, there is nothing to serve from.
+    if (last === 0) return true;
+    return now - last >= this.fullValidationMinIntervalMs;
+  }
+
+  /**
+   * Run one full validation at a time (per `maxConcurrentFullValidations`).
+   *
+   * Without this, every scope sharing a backing store starts its own scan
+   * concurrently and they contend for the same file handles and CPU while the
+   * event loop stalls.
+   */
+  private async withFullValidationSlot<T>(run: () => Promise<T>): Promise<T> {
+    if (this.activeFullValidations >= this.maxConcurrentFullValidations) {
+      await new Promise<void>((resolve) => {
+        this.fullValidationWaiters.push(resolve);
+      });
+    }
+    this.activeFullValidations += 1;
+    try {
+      return await run();
+    } finally {
+      this.activeFullValidations -= 1;
+      this.fullValidationWaiters.shift()?.();
+    }
+  }
+
   private async getSessionsWithStaleCache(
     sessionDir: string,
     projectId: UrlProjectId,
@@ -1068,7 +1135,10 @@ export class SessionIndexService implements ISessionIndexService {
       }
     }
 
-    if (hasDirDirty || fullValidationDue) {
+    if (
+      fullValidationDue ||
+      (hasDirDirty && this.isDirDirtyFullValidationDue(scopeKey, now))
+    ) {
       this.refreshSessionsInBackground(sessionDir, projectId, reader);
     }
 
@@ -1102,15 +1172,20 @@ export class SessionIndexService implements ISessionIndexService {
       lastFullValidation === 0 ||
       now - lastFullValidation >= this.fullValidationIntervalMs;
 
-    // Fast path: no dirty signals and recent full validation.
-    if (!fullValidationDue && !hasDirDirty && !hasDirtySessions) {
+    // A dirty directory only forces a full pass once per minimum interval; in
+    // between it behaves like "not dirty yet" so bursts collapse.
+    const dirDirtyDue =
+      hasDirDirty && this.isDirDirtyFullValidationDue(scopeKey, now);
+
+    // Fast path: no actionable dirty signals and recent full validation.
+    if (!fullValidationDue && !dirDirtyDue && !hasDirtySessions) {
       const summaries = this.buildSummariesFromIndex(index, projectId);
       this.recordCallStats("fast", Date.now() - start, 0, 0, sessionDir);
       return summaries;
     }
 
     // Incremental path: only specific sessions are dirty.
-    if (!fullValidationDue && !hasDirDirty && hasDirtySessions) {
+    if (!fullValidationDue && !dirDirtyDue && hasDirtySessions) {
       const incremental = await this.applyIncrementalDirtyUpdates(
         sessionDir,
         projectId,
@@ -1131,11 +1206,8 @@ export class SessionIndexService implements ISessionIndexService {
       return summaries;
     }
 
-    const full = await this.runFullValidation(
-      sessionDir,
-      projectId,
-      reader,
-      index,
+    const full = await this.withFullValidationSlot(() =>
+      this.runFullValidation(sessionDir, projectId, reader, index),
     );
     this.recordCallStats(
       "full",
