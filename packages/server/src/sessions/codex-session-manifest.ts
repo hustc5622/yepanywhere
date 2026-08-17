@@ -7,12 +7,30 @@ import {
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { getLogger } from "../logging/logger.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
-import { readFirstLine } from "../utils/jsonl.js";
+import {
+  CODEX_ROLLOUT_COMPRESSED_SUFFIX,
+  isCodexRolloutDecompressionSupported,
+  isCompressedCodexRolloutPath,
+  plainCodexRolloutPath,
+  readCodexRolloutFirstLine,
+} from "./codex-rollout-file.js";
 
 export interface CodexSessionManifestEntry {
   id: string;
   cwd: string;
+  /**
+   * Path to the rollout on disk.
+   *
+   * This may be either a plain `.jsonl` file or Codex's compressed
+   * `.jsonl.zst`, so it is NOT safe to treat as text. Decode it only through
+   * `codex-rollout-file.ts` (or `readSharedCodexEntries`, which builds on it);
+   * `readFile(path, "utf-8")` does not fail on compressed bytes, it silently
+   * returns mojibake. Stat-ing, moving and copying the path are byte-level and
+   * remain safe for both forms.
+   */
   filePath: string;
+  /** True when `filePath` holds compressed bytes rather than JSONL text. */
+  compressed: boolean;
   timestamp: string;
   mtime: number;
   size: number;
@@ -111,9 +129,9 @@ async function buildCodexSessionManifest(
     return createManifest([]);
   }
 
-  const files = await findJsonlFiles(sessionsDir);
+  const files = await findRolloutFiles(sessionsDir);
   getLogger().debug(
-    `[CodexManifest] Found ${files.length} .jsonl files in ${sessionsDir}`,
+    `[CodexManifest] Found ${files.length} rollout files in ${sessionsDir}`,
   );
 
   const sessions: CodexSessionManifestEntry[] = [];
@@ -133,7 +151,7 @@ async function buildCodexSessionManifest(
 
   if (files.length > 0 && sessions.length === 0) {
     getLogger().warn(
-      `[CodexManifest] Found ${files.length} .jsonl files but parsed 0 sessions (${failCount} failed). First file: ${files[0]}`,
+      `[CodexManifest] Found ${files.length} rollout files but parsed 0 sessions (${failCount} failed). First file: ${files[0]}`,
     );
   } else if (failCount > 0) {
     getLogger().debug(
@@ -184,27 +202,56 @@ function createManifest(
   };
 }
 
-async function findJsonlFiles(dir: string): Promise<string[]> {
-  const files: string[] = [];
+/**
+ * Collect rollout files, accepting both plain `.jsonl` and Codex's compressed
+ * `.jsonl.zst` form.
+ *
+ * During a resume Codex materializes a compressed rollout back to plain without
+ * immediately removing the `.zst`, so both can exist for the same session. The
+ * plain file is the live copy in that window, so it wins and the compressed
+ * sibling is dropped rather than scanned into a duplicate manifest entry.
+ *
+ * On a runtime without zstd support (Node < 22.15.0, still within this package's
+ * supported range) compressed rollouts are skipped entirely: surfacing a session
+ * whose every read is guaranteed to fail is worse than leaving it hidden, which
+ * is what those runtimes did before compressed rollouts were understood at all.
+ */
+async function findRolloutFiles(dir: string): Promise<string[]> {
+  const canReadCompressed = isCodexRolloutDecompressionSupported();
+  const plain = new Set<string>();
+  const compressed: string[] = [];
 
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        files.push(...(await findJsonlFiles(fullPath)));
-      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-        files.push(fullPath);
+  const walk = async (current: string): Promise<void> => {
+    try {
+      const entries = await readdir(current, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = join(current, entry.name);
+        if (entry.isDirectory()) {
+          await walk(fullPath);
+        } else if (!entry.isFile()) {
+          // Symlinks and special files are not rollouts.
+        } else if (entry.name.endsWith(".jsonl")) {
+          plain.add(fullPath);
+        } else if (
+          canReadCompressed &&
+          entry.name.endsWith(`.jsonl${CODEX_ROLLOUT_COMPRESSED_SUFFIX}`)
+        ) {
+          compressed.push(fullPath);
+        }
       }
+    } catch (error) {
+      getLogger().debug(
+        `[CodexManifest] Error scanning directory ${current}: ${error instanceof Error ? error.message : error}`,
+      );
     }
-  } catch (error) {
-    getLogger().debug(
-      `[CodexManifest] Error scanning directory ${dir}: ${error instanceof Error ? error.message : error}`,
-    );
-  }
+  };
 
-  return files;
+  await walk(dir);
+
+  return [
+    ...plain,
+    ...compressed.filter((path) => !plain.has(plainCodexRolloutPath(path))),
+  ];
 }
 
 async function readSessionManifestEntry(
@@ -213,7 +260,7 @@ async function readSessionManifestEntry(
   try {
     const [stats, firstLine] = await Promise.all([
       stat(filePath),
-      readFirstLine(filePath, CODEX_META_READ_MAX_BYTES),
+      readCodexRolloutFirstLine(filePath, CODEX_META_READ_MAX_BYTES),
     ]);
 
     if (!firstLine) {
@@ -244,6 +291,7 @@ async function readSessionManifestEntry(
       id: meta.id,
       cwd: meta.cwd,
       filePath,
+      compressed: isCompressedCodexRolloutPath(filePath),
       timestamp: meta.timestamp,
       mtime: stats.mtimeMs,
       size: stats.size,

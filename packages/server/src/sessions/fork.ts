@@ -10,6 +10,10 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import {
+  plainCodexRolloutPath,
+  readCodexRolloutText,
+} from "./codex-rollout-file.js";
 
 /**
  * Result of cloning a session.
@@ -84,7 +88,20 @@ export async function cloneClaudeSession(
  * Codex sessions are linear (no DAG). Only the first line (session_meta)
  * contains the session ID in `payload.id`; all other lines are copied as-is.
  *
- * @param sourceFilePath - Full path to the source JSONL file
+ * This is the only place Yep writes a rollout file, which makes it the only
+ * place where mis-decoding a rollout produces a *new corrupt artifact* rather
+ * than a failed read. Two rules follow, and both matter more than the zstd
+ * support that prompted them:
+ *
+ *   1. Decoding goes through `readCodexRolloutText`, the single chokepoint that
+ *      knows how rollout bytes are stored. `readFile(path, "utf-8")` used to be
+ *      inlined here; it does not fail on compressed bytes, it silently yields
+ *      mojibake.
+ *   2. The decoded text is validated before anything is written, so an encoding
+ *      this build does not understand degrades to a clean error instead of a
+ *      garbage `rollout-*.jsonl` that then pollutes the manifest forever.
+ *
+ * @param sourceFilePath - Full path to the source rollout (`.jsonl` or `.jsonl.zst`)
  * @param newSessionId - Optional new session ID (generated if not provided)
  * @returns Clone result with new session ID and entry count
  */
@@ -92,7 +109,7 @@ export async function cloneCodexSession(
   sourceFilePath: string,
   newSessionId?: string,
 ): Promise<CloneResult> {
-  const content = await readFile(sourceFilePath, "utf-8");
+  const content = await readCodexRolloutText(sourceFilePath);
   const trimmed = content.trim();
 
   if (!trimmed) {
@@ -100,6 +117,7 @@ export async function cloneCodexSession(
   }
 
   const lines = trimmed.split("\n");
+  assertDecodedRolloutLine(lines[0], sourceFilePath);
   const targetId = newSessionId ?? randomUUID();
 
   // Update session_meta (first line) with new session ID
@@ -121,12 +139,44 @@ export async function cloneCodexSession(
   });
 
   // Write clone next to the source file (same date directory) using
-  // Codex's standard rollout-* naming for consistency with native files.
-  const targetPath = join(dirname(sourceFilePath), `rollout-${targetId}.jsonl`);
+  // Codex's standard rollout-* naming for consistency with native files. The
+  // clone is always plain, whatever the source was: Yep never compresses.
+  const targetPath = join(
+    dirname(plainCodexRolloutPath(sourceFilePath)),
+    `rollout-${targetId}.jsonl`,
+  );
   await writeFile(targetPath, `${transformedLines.join("\n")}\n`, "utf-8");
 
   return {
     newSessionId: targetId,
     entries: lines.length,
   };
+}
+
+/**
+ * Refuse to clone from bytes that were not decoded into JSONL.
+ *
+ * Checking the first line is enough and is the cheapest possible guard: every
+ * rollout starts with `session_meta`, and the manifest already refuses to list a
+ * file whose first line does not parse. Undecoded binary — a storage format this
+ * build does not know, a truncated frame, a file that is not a rollout at all —
+ * fails here, before a single byte is written.
+ */
+function assertDecodedRolloutLine(
+  line: string | undefined,
+  sourceFilePath: string,
+): void {
+  if (line) {
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return;
+      }
+    } catch {
+      // Fall through to the shared error below.
+    }
+  }
+  throw new Error(
+    `Source session is not decodable JSONL: ${sourceFilePath}. Refusing to write a clone from content that could not be decoded.`,
+  );
 }

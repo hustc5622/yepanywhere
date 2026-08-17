@@ -3,6 +3,7 @@ import type {
   CodexBranchState,
   CodexSessionEntry,
 } from "@yep-anywhere/shared";
+import { codexEntryAnchor } from "./codex-entry-anchor.js";
 import { isCodexTurnAbortedNoticeText } from "./codex-turn-aborted.js";
 import { sanitizeCodexPublicUserPrompt } from "./public-user-prompt.js";
 import {
@@ -28,7 +29,9 @@ export interface CodexBranchView {
   branchState: CodexBranchState;
 }
 
-function hasResponseItemUserMessages(entries: CodexSessionEntry[]): boolean {
+function hasResponseItemUserMessages(
+  entries: readonly CodexSessionEntry[],
+): boolean {
   return entries.some(
     (entry) =>
       entry.type === "response_item" &&
@@ -224,7 +227,7 @@ function buildBranchState(args: {
  * latest branch by default or project an older sibling branch for review.
  */
 export function buildCodexBranchView(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
   sessionId: string,
   selectedBranchId?: string,
 ): CodexBranchView {
@@ -276,7 +279,9 @@ export function buildCodexBranchView(
         activePathIds.length > 0
           ? (activePathIds[activePathIds.length - 1] ?? null)
           : null;
-      const id = `codex-branch-${entryIndex}`;
+      // Branch ids round-trip to the client as `?branchId=`, so they must be
+      // anchored to the entry rather than to its position in this array.
+      const id = `codex-branch-${codexEntryAnchor(entry, String(entryIndex))}`;
       const parent = parentId ? nodesById.get(parentId) : undefined;
       const node: CodexBranchNode = {
         id,

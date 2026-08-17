@@ -87,6 +87,7 @@ import {
 } from "../opencode/error.js";
 import type { ContentBlock, Message, Session } from "../supervisor/types.js";
 import { collectVisibleClaudeEntries } from "./claude-messages.js";
+import { codexEntryAnchor } from "./codex-entry-anchor.js";
 import { applyCodexRollbackMarkers } from "./codex-rollback.js";
 import {
   CODEX_TURN_ABORTED_DISPLAY_TEXT,
@@ -810,7 +811,7 @@ interface CodexContextSnapshotOptions {
 }
 
 function isCodexTokenCountImmediatelyAfterCompaction(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
   tokenCountIndex: number,
 ): boolean {
   for (let i = tokenCountIndex - 1; i >= 0; i--) {
@@ -832,7 +833,7 @@ function isCodexTokenCountImmediatelyAfterCompaction(
 }
 
 function extractCodexTokenCountContextUsage(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
   tokenCountIndex: number,
   options: CodexContextSnapshotOptions,
 ): ContextUsage | undefined {
@@ -881,7 +882,7 @@ function extractCodexTokenCountContextUsage(
 }
 
 export function convertCodexEntries(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
   sessionId: string,
   branchState?: SessionBranchState,
   contextOptions: CodexContextSnapshotOptions = { provider: "codex" },
@@ -906,10 +907,18 @@ export function convertCodexEntries(
     const entry = entries[entryIndex];
     if (!entry) continue;
 
+    // Identity is anchored to the entry, not to how far into this array we are,
+    // so a tail read of the same rollout produces the same ids.
+    const anchor = codexEntryAnchor(
+      entry,
+      `${messageIndex}-${entry.timestamp}`,
+    );
+
     if (entry.type === "response_item") {
+      messageIndex++;
       const converted = convertCodexResponseItem(
         entry,
-        messageIndex++,
+        anchor,
         toolCallContexts,
         externalToolCalls,
         {
@@ -951,7 +960,8 @@ export function convertCodexEntries(
       }
     } else if (entry.type === "compacted") {
       pendingContextMessage = null;
-      const msg = convertCodexCompactedEntry(entry, messageIndex++);
+      messageIndex++;
+      const msg = convertCodexCompactedEntry(entry, anchor);
       if (msg) {
         if (isCodexCorrelationDebugEnabled()) {
           logCodexCorrelationDebug({
@@ -992,18 +1002,18 @@ export function convertCodexEntries(
         entry.payload.type === "item_completed"
           ? convertCodexItemCompletedImageGeneration(
               entry,
-              messageIndex,
+              anchor,
               responseItemImageGenerationIds,
             )
           : entry.payload.type === "image_generation_end"
-            ? convertCodexImageGenerationEndEvent(entry, messageIndex)
+            ? convertCodexImageGenerationEndEvent(entry, anchor)
             : null;
       const patchApplyPayload =
         entry.payload.type === "patch_apply_end" ? entry.payload : null;
       const patchApplyMessages = patchApplyPayload
         ? convertCodexPatchApplyEndEvent(
             entry,
-            messageIndex,
+            anchor,
             !directEditCallIds.has(patchApplyPayload.call_id),
           )
         : null;
@@ -1054,7 +1064,8 @@ export function convertCodexEntries(
         shouldIncludeTurnAborted ||
         shouldIncludeContextCompacted
       ) {
-        const msg = convertCodexEventMsg(entry, messageIndex++);
+        messageIndex++;
+        const msg = convertCodexEventMsg(entry, anchor);
         if (msg) {
           if (isCodexCorrelationDebugEnabled()) {
             logCodexCorrelationDebug({
@@ -1274,7 +1285,7 @@ function getCodexEventPayloadItemId(
 }
 
 function hasCodexResponseItemUserMessages(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
 ): boolean {
   return entries.some(
     (entry) =>
@@ -1285,7 +1296,7 @@ function hasCodexResponseItemUserMessages(
 }
 
 function collectResponseItemImageGenerationIds(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
 ): Set<string> {
   const ids = new Set<string>();
   for (const entry of entries) {
@@ -1301,7 +1312,7 @@ function collectResponseItemImageGenerationIds(
 }
 
 function collectCodexPatchApplyEndEvents(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
 ): Map<string, CodexPatchApplyEndEvent> {
   const events = new Map<string, CodexPatchApplyEndEvent>();
   for (const entry of entries) {
@@ -1316,7 +1327,7 @@ function collectCodexPatchApplyEndEvents(
 }
 
 function collectCodexDirectEditCallIds(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
 ): Set<string> {
   const callIds = new Set<string>();
   for (const entry of entries) {
@@ -1342,7 +1353,7 @@ function collectCodexDirectEditCallIds(
 }
 
 function collectCodexImageGenerationEndKeys(
-  entries: CodexSessionEntry[],
+  entries: readonly CodexSessionEntry[],
 ): Set<string> {
   const keys = new Set<string>();
   for (const entry of entries) {
@@ -1386,7 +1397,7 @@ function hasMatchingCodexImageGenerationRecordKey(
 
 function convertCodexItemCompletedImageGeneration(
   entry: CodexEventMsgEntry,
-  index: number,
+  anchor: string,
   responseItemImageGenerationIds: Set<string>,
 ): Message[] | null {
   if (entry.payload.type !== "item_completed") {
@@ -1405,14 +1416,14 @@ function convertCodexItemCompletedImageGeneration(
 
   return convertCodexImageGenerationRecord(
     item,
-    `codex-event-${index}-${entry.timestamp}`,
+    `codex-event-${anchor}`,
     entry.timestamp,
   );
 }
 
 function convertCodexImageGenerationEndEvent(
   entry: CodexEventMsgEntry,
-  index: number,
+  anchor: string,
 ): Message[] | null {
   if (entry.payload.type !== "image_generation_end") {
     return null;
@@ -1420,14 +1431,14 @@ function convertCodexImageGenerationEndEvent(
 
   return convertCodexImageGenerationRecord(
     entry.payload as Record<string, unknown>,
-    `codex-event-${index}-${entry.timestamp}`,
+    `codex-event-${anchor}`,
     entry.timestamp,
   );
 }
 
 function convertCodexPatchApplyEndEvent(
   entry: CodexEventMsgEntry,
-  index: number,
+  anchor: string,
   includeToolUse = true,
 ): Message[] | null {
   if (entry.payload.type !== "patch_apply_end") {
@@ -1447,7 +1458,7 @@ function convertCodexPatchApplyEndEvent(
   const resultText = isError
     ? [stderr, stdout].filter(Boolean).join("\n") || fallbackResult
     : stdout || stderr || fallbackResult;
-  const uuid = `codex-${index}-${entry.timestamp}-patch`;
+  const uuid = `codex-${anchor}-patch`;
 
   const toolUseMessage: Message = {
     uuid,
@@ -1491,7 +1502,7 @@ function convertCodexPatchApplyEndEvent(
 
 function convertCodexResponseItem(
   entry: CodexResponseItemEntry,
-  index: number,
+  anchor: string,
   toolCallContexts: Map<string, CodexToolCallContext>,
   externalToolCalls: PendingExternalCodexToolCall[],
   options: {
@@ -1500,7 +1511,7 @@ function convertCodexResponseItem(
   } = {},
 ): Message | Message[] | null {
   const payload = entry.payload;
-  const uuid = `codex-${index}-${entry.timestamp}`;
+  const uuid = `codex-${anchor}`;
 
   switch (payload.type) {
     case "message":
@@ -2400,9 +2411,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function convertCodexCompactedEntry(
   entry: CodexCompactedEntry,
-  index: number,
+  anchor: string,
 ): Message {
-  const uuid = `codex-compacted-${index}-${entry.timestamp}`;
+  const uuid = `codex-compacted-${anchor}`;
   return {
     uuid,
     type: "system",
@@ -2414,10 +2425,10 @@ function convertCodexCompactedEntry(
 
 function convertCodexEventMsg(
   entry: CodexEventMsgEntry,
-  index: number,
+  anchor: string,
 ): Message | null {
   const payload = entry.payload;
-  const uuid = `codex-event-${index}-${entry.timestamp}`;
+  const uuid = `codex-event-${anchor}`;
 
   switch (payload.type) {
     case "user_message":

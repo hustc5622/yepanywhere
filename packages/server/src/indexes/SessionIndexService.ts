@@ -79,12 +79,16 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
-  version: 10;
+  // v11 anchors Codex message/question ids to entry byte offsets instead of a
+  // running counter, so cached `userQuestions[].id` values from v10 no longer
+  // match the ids the reader now produces. The strict equality check below
+  // discards the old index and rebuilds it.
+  version: 11;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 10;
+const CURRENT_VERSION = 11;
 
 interface SessionFileStat {
   mtimeMs: number;

@@ -34,7 +34,6 @@ import {
   type UnifiedSession,
   type UrlProjectId,
   getModelContextWindow,
-  parseCodexSessionEntry,
 } from "@yep-anywhere/shared";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type {
@@ -44,7 +43,8 @@ import type {
   Session,
   SessionSummary,
 } from "../supervisor/types.js";
-import { readJsonlLines } from "../utils/jsonl.js";
+import { readSharedCodexEntries } from "./codex-entries-reader.js";
+import { codexEntryAnchor } from "./codex-entry-anchor.js";
 import { buildCodexBranchView } from "./codex-rollback.js";
 import {
   type CodexSessionManifest,
@@ -99,7 +99,7 @@ const LOCAL_CODEX_MODEL_PROVIDERS = new Set(["ollama", "lmstudio", "local"]);
  * neither while still running (`running`). We scan the event_msg entries in
  * reverse to find the last terminal marker.
  */
-function deriveCodexSubagentStatus(entries: CodexSessionEntry[]): {
+function deriveCodexSubagentStatus(entries: readonly CodexSessionEntry[]): {
   status: AgentStatus;
   descriptorStatus: SubagentStatus;
 } {
@@ -166,13 +166,8 @@ function getCodexSpawnMapping(
 
 async function readCodexEntries(
   filePath: string,
-): Promise<CodexSessionEntry[]> {
-  const lines = await readJsonlLines(filePath);
-  const entries: CodexSessionEntry[] = [];
-  for (const line of lines) {
-    const parsed = parseCodexSessionEntry(line);
-    if (parsed) entries.push(parsed);
-  }
+): Promise<readonly CodexSessionEntry[]> {
+  const { entries } = await readSharedCodexEntries(filePath);
   return entries;
 }
 
@@ -287,25 +282,18 @@ export class CodexSessionReader implements ISessionReader {
    */
   private async loadSessionEntries(sessionId: string): Promise<{
     stats: Stats;
-    entries: CodexSessionEntry[];
+    entries: readonly CodexSessionEntry[];
   } | null> {
     const sessionFile = await this.findSessionFile(sessionId);
     if (!sessionFile) return null;
 
     try {
-      const lines = await readJsonlLines(sessionFile.filePath);
-      if (lines.length === 0 || (lines.length === 1 && !lines[0])) return null;
-
-      const entries: CodexSessionEntry[] = [];
-      for (const line of lines) {
-        const entry = parseCodexSessionEntry(line);
-        if (entry) {
-          entries.push(entry);
-        }
-      }
+      const { entries, stats } = await readSharedCodexEntries(
+        sessionFile.filePath,
+      );
+      // An empty or unparseable rollout yields no entries; both cases are "not a
+      // readable session" for every caller here.
       if (entries.length === 0) return null;
-
-      const stats = await stat(sessionFile.filePath);
       return { stats, entries };
     } catch {
       return null;
@@ -320,7 +308,7 @@ export class CodexSessionReader implements ISessionReader {
    * with no conversation messages.
    */
   private buildSummaryFromEntries(
-    entries: CodexSessionEntry[],
+    entries: readonly CodexSessionEntry[],
     stats: Stats,
     sessionId: string,
     projectId: UrlProjectId,
@@ -769,13 +757,19 @@ export class CodexSessionReader implements ISessionReader {
 
         const payload = entry.payload;
         if (payload.type === "message" && payload.role === "user") {
+          // Question ids intentionally mirror the message uuid so the inspector
+          // can jump to the message; they must use the same anchor scheme.
+          const anchor = codexEntryAnchor(
+            entry,
+            `${currentIndex}-${entry.timestamp}`,
+          );
           const question = createSessionQuestion(
             {
-              id: `codex-${currentIndex}-${entry.timestamp}`,
+              id: `codex-${anchor}`,
               text: this.extractCodexUserMessageText(payload.content),
               timestamp: entry.timestamp,
             },
-            `codex-user-${currentIndex}`,
+            `codex-user-${anchor}`,
           );
           if (question) {
             questions.push(question);
@@ -794,16 +788,20 @@ export class CodexSessionReader implements ISessionReader {
       }
 
       if (entry.payload.type === "user_message" && !hasResponseItemUser) {
+        const anchor = codexEntryAnchor(
+          entry,
+          `${messageIndex}-${entry.timestamp}`,
+        );
         const question = createSessionQuestion(
           {
-            id: `codex-event-${messageIndex}-${entry.timestamp}`,
+            id: `codex-event-${anchor}`,
             text: [
               sanitizeCodexPublicUserPrompt(entry.payload.message),
               ...(entry.payload.images?.length ? ["[image]"] : []),
             ].join("\n"),
             timestamp: entry.timestamp,
           },
-          `codex-event-user-${messageIndex}`,
+          `codex-event-user-${anchor}`,
         );
         messageIndex += 1;
         if (question) {
@@ -1200,7 +1198,9 @@ export class CodexSessionReader implements ISessionReader {
   /**
    * Extract the model from turn_context entries.
    */
-  private extractModel(entries: CodexSessionEntry[]): string | undefined {
+  private extractModel(
+    entries: readonly CodexSessionEntry[],
+  ): string | undefined {
     // Find first turn_context entry with a model
     for (const entry of entries) {
       if (entry.type === "turn_context" && entry.payload.model) {
@@ -1294,7 +1294,7 @@ export class CodexSessionReader implements ISessionReader {
    * Helper to determine provider from a list of entries.
    */
   private determineProviderFromEntries(
-    entries: CodexSessionEntry[],
+    entries: readonly CodexSessionEntry[],
   ): "codex" | "codex-oss" {
     const metaEntry = entries.find((e) => e.type === "session_meta") as
       | CodexSessionMetaEntry
