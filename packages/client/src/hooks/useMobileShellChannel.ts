@@ -15,8 +15,8 @@ export const MOBILE_SHELL_NODES: MobileShellNode[] = [
   },
   {
     alias: "mini",
-    label: "39.106.200.1:18022",
-    origin: "http://39.106.200.1:18022",
+    label: "39.106.189.88:18022",
+    origin: "http://39.106.189.88:18022",
   },
   {
     alias: "home",

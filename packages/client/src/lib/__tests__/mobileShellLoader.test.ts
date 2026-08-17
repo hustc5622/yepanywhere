@@ -129,6 +129,18 @@ describe("APK mobile shell recovery", () => {
     );
   });
 
+  it("migrates the retired mini endpoint to the current default", () => {
+    const { dom, frame } = mountShell({
+      storedChannel: "tcp",
+      storedNode: "http://39.106.200.1:18022",
+    });
+
+    expect(frame.src).toBe("http://43.226.60.75:46789/yep/?yep-mobile-shell=1");
+    expect(
+      dom.window.localStorage.getItem("yep-anywhere-mobile-active-node"),
+    ).toBeNull();
+  });
+
   it("does not treat an iframe load event as an app-ready handshake", async () => {
     const { dom, frame } = mountShell({ appReadyTimeoutMs: 20 });
 
@@ -280,10 +292,10 @@ describe("APK mobile shell recovery", () => {
     frame.src =
       "http://43.226.60.75:46789/yep/projects/old-project/sessions/old-session?branch=old-branch";
 
-    clickSavedNode(dom, "http://39.106.200.1:18022");
+    clickSavedNode(dom, "http://39.106.189.88:18022");
 
     expect(frame.src).toBe(
-      "http://39.106.200.1:18022/yep/projects?yep-mobile-shell=1",
+      "http://39.106.189.88:18022/yep/projects?yep-mobile-shell=1",
     );
   });
 
@@ -295,7 +307,7 @@ describe("APK mobile shell recovery", () => {
         data: {
           type: "yep-anywhere:mobile-shell-set-channel",
           channel: "tcp",
-          node: "http://39.106.200.1:18022",
+          node: "http://39.106.189.88:18022",
           path: "/yep/new-session?projectId=old-project",
         },
         source: frame.contentWindow,
@@ -303,7 +315,7 @@ describe("APK mobile shell recovery", () => {
     );
 
     expect(frame.src).toBe(
-      "http://39.106.200.1:18022/yep/projects?yep-mobile-shell=1",
+      "http://39.106.189.88:18022/yep/projects?yep-mobile-shell=1",
     );
   });
 

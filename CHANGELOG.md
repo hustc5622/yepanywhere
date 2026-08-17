@@ -7,6 +7,9 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Changed
+- Point the `mini` mobile-shell TCP node at the new frp server (`39.106.189.88:18022`, previously `39.106.200.1:18022`) in both the client node list and the APK static shim, and treat the retired `http://39.106.200.1:18022` origin as a deprecated default so persisted app data falls back to the current endpoint instead of dialing the dead address
+
 ## [2026.8.3] - 2026-08-17
 
 ### Added

@@ -20,8 +20,8 @@
     },
     {
       alias: "mini",
-      label: "39.106.200.1:18022",
-      origin: "http://39.106.200.1:18022"
+      label: "39.106.189.88:18022",
+      origin: "http://39.106.189.88:18022"
     },
     {
       alias: "home",
@@ -37,7 +37,8 @@
   ];
   var DEPRECATED_DEFAULT_TCP_ORIGINS = [
     "http://123.56.106.49:37160",
-    "http://43.226.60.75:61874"
+    "http://43.226.60.75:61874",
+    "http://39.106.200.1:18022"
   ];
   var NODE_HISTORY_LIMIT = 8;
   var TARGET_CHANGE_PATH = "/yep/projects";
