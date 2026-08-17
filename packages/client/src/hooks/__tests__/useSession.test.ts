@@ -56,7 +56,6 @@ function session(overrides?: Partial<Session>): Session {
     messageCount: 2,
     ownership: { owner: "none" },
     provider: "opencode",
-    messages: [],
     ...overrides,
   };
 }

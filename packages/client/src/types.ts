@@ -187,11 +187,14 @@ export interface SessionNavigationState {
 }
 
 /**
- * Full session with messages.
- * Uses Message type (AppMessage with required id).
+ * Full session metadata for the session page.
+ *
+ * Messages are intentionally NOT part of this type. The API returns them once,
+ * as a sibling `messages` field, and message state is owned by
+ * `useSessionMessages`. Keeping a `messages` array here previously invited the
+ * server to serialize a second, unread copy of the whole window.
  */
 export interface Session extends SessionSummary {
-  messages: Message[];
   /** Provider-agnostic branch state for sessions with editable DAG/rollback history. */
   branchState?: SessionBranchState;
   /** Codex-only branch state derived from thread_rolled_back markers. */

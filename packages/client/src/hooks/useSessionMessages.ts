@@ -676,11 +676,11 @@ export function useSessionMessages(
   const fetchSessionMetadata = useCallback(async () => {
     try {
       const data = await api.getSessionMetadata(projectId, sessionId);
-      // For new sessions, prev may be null if JSONL didn't exist on initial load
+      // For new sessions, prev may be null if JSONL didn't exist on initial load.
+      // Message state lives in this hook's own `messages`, not on `session`, so
+      // a metadata merge no longer has to carry an array across.
       setSession((prev) =>
-        prev
-          ? { ...prev, ...data.session, messages: prev.messages }
-          : { ...data.session, messages: [] },
+        prev ? { ...prev, ...data.session } : data.session,
       );
     } catch {
       // Silent fail for metadata updates
@@ -970,9 +970,7 @@ export function useSessionMessages(
       // For new sessions, prev may be null if JSONL didn't exist on initial load
       if (data.session.provider !== "kimi") {
         setSession((prev) =>
-          prev
-            ? { ...prev, ...data.session, messages: prev.messages }
-            : data.session,
+          prev ? { ...prev, ...data.session } : data.session,
         );
       }
       onLoadComplete?.({

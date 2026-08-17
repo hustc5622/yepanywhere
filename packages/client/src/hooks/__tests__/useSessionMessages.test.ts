@@ -42,7 +42,6 @@ function codexSession(
     messageCount: messages.length,
     ownership: { owner: "none" },
     provider: "codex",
-    messages,
     ...extra,
   };
 }

@@ -1755,9 +1755,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       );
     }
 
+    // `messages` is returned once at the top level. Spreading `session` here
+    // used to emit a byte-identical second copy that no client ever read, which
+    // doubled the serialized message payload on every session open.
+    const { messages: _sessionMessages, ...sessionWithoutMessages } = session;
+
     return c.json({
       session: {
-        ...session,
+        ...sessionWithoutMessages,
         ownership,
         pendingInputType,
         activity: runtime.activity,
