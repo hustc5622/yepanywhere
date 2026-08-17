@@ -7,6 +7,7 @@ import {
   isSlashCommandSession,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import { compress } from "hono/compress";
 import {
   ArchiveError,
   type ArchiveProvider,
@@ -305,6 +306,14 @@ export interface AppResult {
 const AUTO_ARCHIVE_AGE_DAYS = 7;
 const AUTO_ARCHIVE_AGE_MS = AUTO_ARCHIVE_AGE_DAYS * 24 * 60 * 60 * 1000;
 
+/**
+ * Smallest response worth compressing.
+ *
+ * Below roughly a packet's worth of payload the CPU and header cost outweigh the
+ * saving, and most small responses here are status probes on the hot path.
+ */
+const COMPRESSION_THRESHOLD_BYTES = 1024;
+
 function normalizeArchiveProviderName(
   provider: string | undefined,
 ): ArchiveProvider | null {
@@ -390,6 +399,23 @@ export function createApp(options: AppOptions): AppResult {
   const basePath = options.basePath ?? "";
   const root = new Hono<{ Bindings: HttpBindings }>();
   const app = basePath ? root.basePath(basePath) : root;
+
+  // Response compression, registered before the security middleware so it wraps
+  // every `/api/*` response including error bodies.
+  //
+  // Session payloads are dominated by server-rendered augment output — on a
+  // measured 1.72 MB pi session response, `_highlightedContentHtml` alone was
+  // 1.49 MB (73%) — and that HTML is highly redundant: gzip took the whole body
+  // to 0.238 MB, a 7.2:1 ratio. Uncompressed that response needed roughly two
+  // minutes over a throttled remote tunnel.
+  //
+  // Hono's middleware is safe to apply broadly here: it skips responses that
+  // already carry `Content-Encoding` or `Transfer-Encoding` (so `streamSSE`
+  // output is untouched, and `text/event-stream` is excluded from its
+  // compressible-type list as well), skips non-compressible content types (the
+  // APK and image downloads served through `stream()`), honours
+  // `Cache-Control: no-transform`, and leaves bodies under the threshold alone.
+  app.use("/api/*", compress({ threshold: COMPRESSION_THRESHOLD_BYTES }));
 
   // Security middleware: host validation, CORS, custom header requirement
   app.use("/api/*", hostCheckMiddleware);
