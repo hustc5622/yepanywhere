@@ -14,11 +14,15 @@ export interface PiImageContent {
   type: "image";
   data: string;
   mimeType: string;
+  /** True when the binary payload was intentionally omitted for a fast load. */
+  deferred?: boolean;
 }
 
 export interface PiThinkingContent {
   type: "thinking";
   thinking: string;
+  /** True when the reasoning text was intentionally omitted for a fast load. */
+  deferred?: boolean;
   /** Pi's native opaque reasoning signature field. */
   thinkingSignature?: string;
   /** Compatibility alias accepted from older/custom Pi providers. */
@@ -207,6 +211,13 @@ export interface PiSessionContent {
   activeEntries: PiSessionEntry[];
 }
 
+export interface ParsePiSessionJsonlOptions {
+  /** Omit inline image data while preserving an image placeholder block. */
+  deferMedia?: boolean;
+  /** Omit thinking text while preserving the block shape. */
+  deferThinking?: boolean;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -255,7 +266,46 @@ export function collectPiActiveEntries(
   return reversed.reverse();
 }
 
-export function parsePiSessionJsonl(content: string): PiSessionContent | null {
+function deferPiContentBlock(
+  block: unknown,
+  options: ParsePiSessionJsonlOptions,
+): unknown {
+  if (!isRecord(block)) return block;
+  if (block.type === "image" && options.deferMedia) {
+    return { ...block, data: "", deferred: true };
+  }
+  if (block.type === "thinking" && options.deferThinking) {
+    return { ...block, thinking: "", deferred: true };
+  }
+  return block;
+}
+
+function deferPiMessage(
+  message: PiAgentMessage,
+  options: ParsePiSessionJsonlOptions,
+): PiAgentMessage {
+  if (!options.deferMedia && !options.deferThinking) return message;
+  if (
+    !isRecord(message) ||
+    !("content" in message) ||
+    !Array.isArray(message.content)
+  ) {
+    return message;
+  }
+
+  let changed = false;
+  const content = message.content.map((block) => {
+    const projected = deferPiContentBlock(block, options);
+    if (projected !== block) changed = true;
+    return projected;
+  });
+  return changed ? ({ ...message, content } as PiAgentMessage) : message;
+}
+
+export function parsePiSessionJsonl(
+  content: string,
+  options: ParsePiSessionJsonlOptions = {},
+): PiSessionContent | null {
   let header: PiSessionHeader | null = null;
   const entries: PiSessionEntry[] = [];
 
@@ -273,7 +323,16 @@ export function parsePiSessionJsonl(content: string): PiSessionContent | null {
       if (header) continue;
     }
     const entry = parsePiSessionEntry(value);
-    if (entry) entries.push(entry);
+    if (entry) {
+      entries.push(
+        entry.type === "message" && "message" in entry
+          ? {
+              ...entry,
+              message: deferPiMessage(entry.message as PiAgentMessage, options),
+            }
+          : entry,
+      );
+    }
   }
 
   if (!header) return null;
@@ -289,20 +348,28 @@ export function getPiMessageText(message: PiAgentMessage): string {
   }
   if (message.role === "bashExecution") return message.output;
   if (message.role === "toolResult") {
+    if (!Array.isArray(message.content)) return "";
     return message.content
-      .filter((block): block is PiTextContent => block.type === "text")
+      .filter(
+        (block): block is PiTextContent =>
+          isRecord(block) && block.type === "text",
+      )
       .map((block) => block.text)
       .join("\n");
   }
   if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
   return message.content
-    .map((block) =>
-      block.type === "text"
-        ? block.text
-        : block.type === "thinking"
+    .map((block) => {
+      if (!isRecord(block)) return "";
+      return block.type === "text"
+        ? typeof block.text === "string"
+          ? block.text
+          : ""
+        : block.type === "thinking" && typeof block.thinking === "string"
           ? block.thinking
-          : "",
-    )
+          : "";
+    })
     .filter(Boolean)
     .join("\n");
 }
