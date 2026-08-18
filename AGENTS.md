@@ -25,7 +25,7 @@ Yep Anywhere 是一个面向移动端优先的 coding agent 监督器。核心�
 - Hono 服务端管理 provider 进程，并暴露 REST/WebSocket API。
 - React 客户端通过 WebSocket 流式展示 session 状态。
 - session 数据以 provider JSONL/session 文件持久化，并在展示前做 normalize。
-- 支持多个 provider：Claude Code、Codex、Gemini、opencode、Pi、Kimi、ZCode 以及相关 bridge 模式。
+- 支持多个 provider：Claude Code、Codex、Gemini、Pi、Kimi、ZCode 以及相关 bridge 模式。
 
 从过去的 Codex session 看，本仓库高频工作主要集中在：
 - Codex bridge / remote app-server 行为（`4510`、`cf`、MCP profiles）。
@@ -33,8 +33,6 @@ Yep Anywhere 是一个面向移动端优先的 coding agent 监督器。核心�
 - 工具结果 renderer，包括 search/fetch/detail 展示。
 - 本地 `8022` web/API 服务的部署检查和 build metadata 校验。
 - 日志、诊断、schema normalization 和 provider 兼容性。
-
-涉及 opencode 的行为、协议、事件流、工具调用或展示改动时，先查看仓库内已有的 opencode 参考源码，不要凭印象实现。参考源码位于 `references/opencode/`；本项目自身的实现入口通常在 `packages/server/src/opencode-bridge/` 和 `packages/shared/src/opencode-schema/`。
 
 涉及 Pi（`@earendil-works/pi-coding-agent`）的 RPC 协议、扩展、原生 session tree/fork、工具调用或展示改动时，先查看 `references/pi/`；RPC 重点看 `packages/coding-agent/src/modes/rpc/`，session/extension 重点看 `packages/coding-agent/src/core/`。本项目实现入口通常在 `packages/server/src/sdk/providers/pi.ts`、`packages/server/resources/pi-yep-extension.mjs`、`packages/server/src/sessions/pi-*` 和 `packages/shared/src/pi-schema/`。
 
@@ -65,7 +63,7 @@ PORT=4000 YEP_ANYWHERE_PROFILE=dev pnpm dev
 - `YEP_ANYWHERE_PROFILE`：创建 `~/.yep-anywhere-{profile}/`。
 - `YEP_ANYWHERE_DATA_DIR`：显式覆盖数据目录。
 - `CLAUDE_CONFIG_DIR`：Claude Code 配置/session 根目录，默认 `~/.claude`。
-- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`opencode`、`pi`、`kimi`、`zcode`。
+- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`kimi`、`zcode`。
 - `VOICE_INPUT=false`：在服务端禁用语音输入按钮。
 
 ## 验证

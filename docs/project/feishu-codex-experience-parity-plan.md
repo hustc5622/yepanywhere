@@ -270,4 +270,4 @@ Stuck detector 按阶段判断：accepted 未 dispatch、dispatch 未获得 turn
 - Shared contracts：`packages/shared/src/`
 - Client Codex/Feishu surfaces：`packages/client/src/components/`、`packages/client/src/lib/codex*`
 
-涉及 Codex 或 OpenCode 协议行为时，先读取仓库内固定 reference，再以目标 runtime generated schema 和 tests 为准；reference 只作只读语义来源，不作为 merge base。
+涉及 Codex 协议行为时，先读取仓库内固定 reference，再以目标 runtime generated schema 和 tests 为准；reference 只作只读语义来源，不作为 merge base。

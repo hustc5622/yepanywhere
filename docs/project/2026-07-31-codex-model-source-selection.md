@@ -1,5 +1,7 @@
 # Codex 多模型源选择能力开发设计
 
+> 历史说明：本文中的 OpenCode UI/config 对比仅反映设计时基线；该集成已于 2026-08-18 退役，现行共享模型路由使用 provider-neutral LLM gateway 类型。
+
 状态：Implemented
 
 调研日期：2026-07-31

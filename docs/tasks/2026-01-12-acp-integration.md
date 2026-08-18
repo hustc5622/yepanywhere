@@ -1,5 +1,7 @@
 # Agent Client Protocol (ACP) Integration
 
+> Historical plan: OpenCode integration was retired from Yep Anywhere on 2026-08-18. Any OpenCode ACP/provider steps below are obsolete.
+
 ## Executive Summary
 
 Replace our custom provider implementations (Codex, CodexOSS, Gemini, OpenCode) with a standardized ACP client. This separates concerns cleanly:

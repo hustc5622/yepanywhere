@@ -48,8 +48,8 @@ Pi RPC 是严格的一行一个 JSON 对象的 stdin/stdout 协议。Yep 使用�
 
 ## 模型范围
 
-Pi 和 OpenCode 共用 `fetchOpenCodeGatewayModels()`，因此选择器展示同一份
-gateway `/v1/models` 结果，也复用每个模型声明的 endpoint 范围：
+Pi 通过 provider-neutral `fetchLlmGatewayModels()` 读取 gateway
+`/v1/models` 结果，并复用每个模型声明的 endpoint 范围：
 
 - `chat/completions` 走动态 `openai-completions` provider；
 - `anthropic/messages` 走动态 `anthropic-messages` provider；

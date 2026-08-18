@@ -1,5 +1,7 @@
 # Codex canonical overlay 长会话加载性能修复方案
 
+> 历史说明：本文提到的 OpenCode 数据库问题已随 2026-08-18 集成退役而退出 Yep 运行路径；Yep 不会自动修改该数据库。
+>
 > 状态：核心修复已实施（2026-08-11）。P0 默认 legacy / canonical 显式 opt-in、P1 线性 reducer、P2 有内存水位的 projection cache、JSONL 尾读、候选窗口与有界 fallback 已落地；worker 隔离和完整 metrics 留作后续增强。实施过程未重启服务或清理数据。
 >
 > 日期：2026-08-10

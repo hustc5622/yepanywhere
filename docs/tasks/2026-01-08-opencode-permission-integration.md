@@ -1,5 +1,7 @@
 # Integrate OpenCode Permission Model with YepAnywhere Mode Selector
 
+> Historical reference: the OpenCode provider and 4520/4521 bridge were retired from Yep Anywhere on 2026-08-18. This task no longer describes a live product surface.
+
 ## Overview
 
 This task describes the integration of OpenCode's granular permission system with YepAnywhere's existing mode selector UI, providing users with fine-grained control over tool permissions while maintaining the familiar mode interface.

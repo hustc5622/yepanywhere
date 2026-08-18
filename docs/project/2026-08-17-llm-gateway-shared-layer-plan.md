@@ -1,5 +1,7 @@
 # LLM 网关公共层与 Pi 多网关计划
 
+> 历史说明：本文记录从 OpenCode 命名模块抽取公共层的过程。OpenCode 集成已于 2026-08-18 退役；现行实现只有 provider-neutral LLM gateway API。
+
 状态：第 1 步（公共层抽取）与第 2 步（Pi 多 channel）均已落地。
 
 ## 1. 背景

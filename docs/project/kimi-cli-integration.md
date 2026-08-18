@@ -9,7 +9,7 @@
 | 维度 | 决策 | 理由 |
 | --- | --- | --- |
 | 传输机制 | **走 ACP over stdio（`kimi acp`）**，复用现有 `ACPClient` + gemini-acp 那套 | Kimi 原生 ACP 比 Gemini 更完整（支持 `session/load`+`session/resume`+`configOptions`+`terminal-auth`）；无需新增进程 |
-| 权限审批 | **进程内 ACP `session/request_permission` 回调**，复用 `onToolApproval` 审批流 | Kimi 审批是 ACP 协议内建 request/response，**不需要 4510/4520 那种常驻 bridge** |
+| 权限审批 | **进程内 ACP `session/request_permission` 回调**，复用 `onToolApproval` 审批流 | Kimi 审批是 ACP 协议内建 request/response，**不需要常驻 bridge** |
 | fork / branch / rollback | **一期不做**，`supportsDag=false / supportsCloning=false`（对齐 gemini-acp） | Kimi 的 fork/undo 只在 node-sdk / kap-server REST 暴露，**ACP 层完全不暴露**；二期再评估 |
 | 历史展示 | reader 解析 `wire.jsonl` + scanner 读 `session_index.jsonl`（对齐 codex/gemini） | ACP 会话与 TUI 共用 `~/.kimi-code/sessions/` 存储，可直接读文件 |
 
@@ -81,7 +81,7 @@ kimi acp ──session/request_permission──▶ ACPClient.requestPermission (
                                               → Yep pending-input / 移动端审批 / 推送通知
 ```
 
-**4510/4520 的本质**：codex bridge(4510) 是给 `codex --remote ws://` app-server 协议做的常驻 `http+WebSocketServer` 进程；opencode bridge(4520) 是给 opencode HTTP server 做的。审批只是搭车在它们的 JSON-RPC 上。Kimi 走 ACP stdio，审批是协议内建 request/response，**无需任何常驻端口进程**。
+Codex bridge（4510）是给 `codex --remote ws://` app-server 协议使用的常驻 `http+WebSocketServer` 进程。Kimi 走 ACP stdio，审批是协议内建 request/response，**无需任何常驻端口进程**。
 
 ### 2.4 Fork 机制（说明为何一期不做）
 

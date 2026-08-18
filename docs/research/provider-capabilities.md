@@ -1,5 +1,7 @@
 # Provider Capabilities Research
 
+> Historical research snapshot. Yep Anywhere retired its OpenCode provider and 4520/4521 bridge on 2026-08-18; OpenCode rows and sections below do not describe current support.
+
 Research notes on what each AI provider offers for mobile supervision use cases.
 
 ## Summary Table

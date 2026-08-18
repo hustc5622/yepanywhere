@@ -10,7 +10,7 @@ Yep Anywhere 是一个移动端优先的 coding agent 监督器。agent 运行�
 
 可以把它理解为一个独立于具体 coding agent 的监督面板，重点是：
 
-- **多提供商**：统一监督 Claude、Codex、Gemini、OpenCode、Kimi、ZCode 等不同 runtime
+- **多提供商**：统一监督 Claude、Codex、Gemini、Pi、Kimi、ZCode 等不同 runtime
 - **移动优先**：触控友好的 UI、推送通知，适合在手机上使用
 - **多会话**：从一个面板查看所有项目，不需要来回切换窗口
 - **服务端托管**：断开后可以重新连接，不丢失状态
@@ -59,7 +59,7 @@ Yep Anywhere 是一个移动端优先的 coding agent 监督器。agent 运行�
 - Claude Code / Claude Ollama
 - Codex / Codex OSS，包括 stdio app-server、remote bridge、canonical event projection 和原生 ThreadItem 展示
 - Gemini / Gemini ACP
-- OpenCode，包括托管 server、事件流和插件/bridge 路径
+- Pi，包括原生 RPC、session tree/fork 和中性 LLM gateway
 - Kimi
 - ZCode，包括 app-server、SQLite 历史读取和 hook bridge
 
@@ -87,7 +87,7 @@ Codex Goal 当前属于“部分支持”：已有原生状态控制和 canonica
                           │ provider-native protocol
 ┌─────────────────────────▼───────────────────────────────────┐
 │  Coding agent runtimes                                      │
-│  - Claude / Codex / Gemini / OpenCode / Kimi / ZCode        │
+│  - Claude / Codex / Gemini / Pi / Kimi / ZCode              │
 │  - 本地、remote executor 或 bridge                           │
 │  - 各自的 session store 与事件协议                           │
 └─────────────────────────────────────────────────────────────┘

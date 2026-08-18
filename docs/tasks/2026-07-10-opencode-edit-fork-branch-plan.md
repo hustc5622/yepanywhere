@@ -1,5 +1,7 @@
 # OpenCode 编辑消息后创建分支开发计划
 
+> 历史资料：OpenCode provider 与 4520/4521 bridge 已于 2026-08-18 退役；本文只保留原分支语义研究。
+
 ## 背景
 
 当前 Codex CLI 已支持在 Yep 前端编辑历史用户消息后创建会话分支，并能在前端切换分支查看不同历史。目标是把这套体验扩展到 `opencode` provider：
@@ -380,4 +382,3 @@ pnpm typecheck
 4. normalization 注入 `branch` metadata。
 5. 前端跨 session branch navigation。
 6. 补测试并跑聚焦验证。
-

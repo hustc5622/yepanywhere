@@ -1,5 +1,7 @@
 # OpenCode Permission API Research
 
+> Historical reference: Yep Anywhere retired its OpenCode provider and bridge on 2026-08-18. The upstream protocol notes below are not current product documentation.
+
 Research findings on how OpenCode handles tool approvals and dynamic permission mode switching.
 
 ## Summary

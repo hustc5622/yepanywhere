@@ -1,5 +1,7 @@
 # Yep Runtime 热重载重构开发计划
 
+> 历史说明：本文的 OpenCode runtime/bridge 阶段已于 2026-08-18 随 provider 退役作废；Codex 与其他现存 provider 的 runtime 分层内容仍可参考。
+
 ## 背景
 
 当前 `pnpm dev:8022` 的热重载路径能保护外置 `4510` Codex bridge，但不能保护仍由 `8022` web/API 进程直接持有的 agent runtime。后端源码变更会触发 `scripts/dev.js` 杀掉 server 子进程；server 收到 `SIGTERM` 后进入 `gracefulShutdown`，主动 abort `Supervisor` 中的 active sessions。结果是：

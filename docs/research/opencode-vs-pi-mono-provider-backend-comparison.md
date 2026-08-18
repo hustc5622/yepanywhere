@@ -1,5 +1,7 @@
 # OpenCode vs pi-mono for a Yep Anywhere Agnostic Provider Backend
 
+> Historical reference: Yep Anywhere retired its OpenCode provider and bridge on 2026-08-18. Pi remains supported through provider-neutral RPC, SQLite, edit-fork, and LLM gateway modules.
+
 Date: 2026-02-18
 
 ## Executive Summary

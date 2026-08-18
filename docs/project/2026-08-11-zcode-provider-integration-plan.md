@@ -1,5 +1,7 @@
 # Yep Anywhere ZCode Provider 调研报告与分阶段开发计划
 
+> 历史说明：文中与 OpenCode 的实现对比只反映当时的迁移背景；该集成已于 2026-08-18 退役，ZCode 当前使用 provider-neutral SQLite 与 edit-fork 模块。
+>
 > 文档状态：P0–P4 已完成；原 P5 中的 fork、mcp/list、bridge 已于 2026-08-13 以 v1 形态落地（详见 `2026-08-12-zcode-support-current-state.md` §15，含真实 CLI 探测证据与剩余差距清单）
 >
 > 调研基线日期：2026-08-11

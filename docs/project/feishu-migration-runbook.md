@@ -122,7 +122,7 @@ curl -fsS <base-url>/build-info.json
 
 | Profile | 必须证明 |
 | --- | --- |
-| clean/default host | Node pin 与 pnpm pin 一致；无 Feishu config/secret 仍可 build/test；channel inert；既有 Claude/Codex/OpenCode/Gemini/Kimi 路径不因 Lark SDK 初始化失败 |
+| clean/default host | Node pin 与 pnpm pin 一致；无 Feishu config/secret 仍可 build/test；channel inert；既有 Claude/Codex/Gemini/Pi/Kimi/ZCode 路径不因 Lark SDK 初始化失败 |
 | Feishu-enabled fake host | 只使用 synthetic config、mock SDK、临时 data dir 和 fake provider；protocol、interaction、session、artifact、channel tests 通过；不访问真实 tenant |
 
 仓库同时维护 `.nvmrc` 和 `.node-version`，两者必须相同。部署脚本会拒绝不一致的 Node pin 或错误 pnpm 版本；不要因为某台主机恰好安装了更高 Node 或全局 pnpm 就跳过门禁。
@@ -135,7 +135,6 @@ LaunchAgent 使用仓库外 runtime copy。构建源仍在 `dist/npm-package`，
 
 - 是否构建新的 server/client bundle；
 - 是否更新 LaunchAgent runtime copy 和 `.previous`；
-- 是否更新 OpenCode forwarder plugin；
 - 哪些 listener 会重启，哪些 bridge PID 必须保持不变；
 - enabled channel 的 long connection 是否会断开并 reconciliation；
 - 失败时 code/runtime/plist/plugin 各自如何回滚。
