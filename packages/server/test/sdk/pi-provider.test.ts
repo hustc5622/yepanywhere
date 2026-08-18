@@ -130,8 +130,8 @@ describe("PiProvider RPC integration", () => {
       })}\n`,
     );
 
-    vi.stubEnv("OPENCODE_LLM_API_KEY", "test-only-secret");
-    vi.stubEnv("OPENCODE_LLM_API_BASE", "https://gateway.example/v1");
+    vi.stubEnv("YEP_LLM_GATEWAY_API_KEY", "test-only-secret");
+    vi.stubEnv("YEP_LLM_GATEWAY_API_BASE", "https://gateway.example/v1");
     // The picker only offers a curated set of production model families; an
     // empty allowlist keeps this fixture's synthetic model visible.
     vi.stubEnv("YEP_LLM_GATEWAY_MODELS", "");
@@ -187,7 +187,7 @@ describe("PiProvider RPC integration", () => {
       resumeSessionId: "source-session",
       resumeSessionAt: "source-user-entry",
       initialMessage: { text: "edited prompt", uuid: "yep-user" },
-      opencodeConfig: {
+      llmGatewayConfig: {
         model: "test-model",
         requestProtocol: "anthropic",
         limits: { context: 96_000, output: 12_000 },

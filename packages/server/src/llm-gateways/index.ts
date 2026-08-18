@@ -2,9 +2,8 @@
  * Provider-neutral LLM gateway channels.
  *
  * Yep talks to OpenAI-/Anthropic-compatible aggregator gateways from several
- * independent places: the OpenCode bridge and its managed provider overlay,
- * the Pi provider's generated provider catalog, session-title generation, and
- * the gateway benchmark. Each of those grew its own copy of "resolve a base
+ * independent places: provider catalogs, session-title generation, and the
+ * gateway benchmark. Each grew its own copy of "resolve a base
  * URL, an API key and an optional `X-Sub-Module` header", which is why adding
  * a second gateway previously meant touching every consumer.
  *
@@ -13,7 +12,10 @@
  * from the bridge sidecars, which do not boot the full server config.
  */
 
-import type { ModelInfo, OpenCodeRequestProtocol } from "@yep-anywhere/shared";
+import type {
+  LlmGatewayRequestProtocol,
+  ModelInfo,
+} from "@yep-anywhere/shared";
 
 export type Env = NodeJS.ProcessEnv;
 
@@ -44,7 +46,7 @@ export interface LlmGatewayChannel extends LlmGatewayCredentials {
   apiKeyEnv?: string;
 }
 
-/** Id of the channel derived from the legacy `LLM_*`/`OPENCODE_LLM_*` vars. */
+/** Id of the channel derived from the single-gateway variables. */
 export const DEFAULT_LLM_GATEWAY_CHANNEL_ID = "default";
 
 /** Historic default aggregator; kept as the fallback base URL. */
@@ -151,29 +153,25 @@ export function gatewayAuthHeaders(
 /**
  * Resolve the channel described by the legacy single-gateway variables.
  *
- * `OPENCODE_LLM_*` wins over the generic `LLM_*` aliases (LaunchAgents set the
- * dedicated names, while user shells and existing opencode.json files still
- * reference the generic ones). Returns null when no API key is configured,
- * which every caller treats as "gateway features unavailable".
+ * The provider-neutral `YEP_LLM_GATEWAY_*` names take precedence. Generic
+ * `LLM_*` variables remain fallback aliases for existing gateway deployments.
  */
 export function resolveDefaultLlmGatewayChannel(
   env: Env,
 ): LlmGatewayChannel | null {
-  const apiKeyEnv = clean(env.OPENCODE_LLM_API_KEY)
-    ? "OPENCODE_LLM_API_KEY"
-    : clean(env.LLM_API_KEY)
-      ? "LLM_API_KEY"
-      : undefined;
+  const apiKeyEnv = ["YEP_LLM_GATEWAY_API_KEY", "LLM_API_KEY"].find((name) =>
+    clean(env[name]),
+  );
   const apiKey = apiKeyEnv ? clean(env[apiKeyEnv]) : undefined;
   if (!apiKey || !apiKeyEnv) return null;
 
   const apiBase = withV1Path(
-    clean(env.OPENCODE_LLM_API_BASE) ??
+    clean(env.YEP_LLM_GATEWAY_API_BASE) ??
       clean(env.LLM_API_BASE) ??
       DEFAULT_LLM_GATEWAY_API_BASE,
   );
   const subModule =
-    clean(env.OPENCODE_LLM_SUB_MODULE) ??
+    clean(env.YEP_LLM_GATEWAY_SUB_MODULE) ??
     clean(env.LLM_SUB_MODULE) ??
     defaultSubModuleForApiBase(apiBase);
 
@@ -186,6 +184,19 @@ export function resolveDefaultLlmGatewayChannel(
     apiBase,
     ...(subModule ? { subModule } : {}),
   };
+}
+
+const LLM_GATEWAY_PROXY_URL_ENVS = [
+  "YEP_LLM_GATEWAY_PROXY_URL",
+  "LLM_GATEWAY_PROXY_URL",
+] as const;
+
+/** Resolve an optional OpenAI-compatible transport proxy at its `/gateway/v1` root. */
+export function resolveLlmGatewayProxyBaseUrl(env: Env): string | undefined {
+  const proxyUrl = LLM_GATEWAY_PROXY_URL_ENVS.map((key) =>
+    clean(env[key]),
+  ).find(Boolean);
+  return proxyUrl ? `${proxyUrl.replace(/\/+$/, "")}/gateway/v1` : undefined;
 }
 
 /** A rejected `YEP_LLM_GATEWAYS` entry, for the caller to log. */
@@ -416,12 +427,12 @@ interface GatewayModelsResponse {
  */
 export function normalizeGatewayProtocols(
   value: unknown,
-): OpenCodeRequestProtocol[] {
+): LlmGatewayRequestProtocol[] {
   if (!Array.isArray(value)) {
     return ["openai-compatible", "anthropic"];
   }
 
-  const protocols = new Set<OpenCodeRequestProtocol>();
+  const protocols = new Set<LlmGatewayRequestProtocol>();
   for (const item of value) {
     if (typeof item !== "string") continue;
     const normalized = item.toLowerCase();
@@ -459,12 +470,12 @@ export async function fetchLlmGatewayModels(
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) {
-    throw new Error(`OpenCode model gateway returned ${response.status}`);
+    throw new Error(`LLM model gateway returned ${response.status}`);
   }
 
   const payload = (await response.json()) as GatewayModelsResponse;
   if (payload.success === false || !Array.isArray(payload.data)) {
-    throw new Error("OpenCode model gateway returned an invalid catalog");
+    throw new Error("LLM model gateway returned an invalid catalog");
   }
 
   const seen = new Set<string>();

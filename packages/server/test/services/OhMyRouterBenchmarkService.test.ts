@@ -107,8 +107,8 @@ describe("OhMyRouterBenchmarkService", () => {
     const service = new OhMyRouterBenchmarkService({
       serverSettingsService: serverSettingsService as ServerSettingsService,
       env: {
-        OPENCODE_LLM_API_KEY: "test-key",
-        OPENCODE_LLM_API_BASE: "https://api.ohmyrouter.com",
+        YEP_LLM_GATEWAY_API_KEY: "test-key",
+        YEP_LLM_GATEWAY_API_BASE: "https://api.ohmyrouter.com",
       },
       fetchImpl,
     });

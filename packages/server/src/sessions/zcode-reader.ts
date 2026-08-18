@@ -5,11 +5,8 @@
  * the `session`, `message`, and `part` tables. All queries are read-only;
  * the reader never writes, migrates, or repairs the ZCode SQLite database.
  *
- * The reader reuses the OpenCode DB helpers (`queryOpenCodeRowsOrEmpty`,
- * `queryOpenCodeRow`, `runOpenCodeDbStatements`) from `opencode-db.ts`
- * because they are db-path-keyed and work with any SQLite file. The worker
- * pool handles are cached per `dbPath`, so ZCode queries get their own
- * pooled connections.
+ * Provider-neutral SQLite worker handles are cached per `dbPath`, so ZCode
+ * queries get their own pooled connections.
  *
  * Column mapping (verified against the actual ZCode SQLite schema):
  *   - session: id, project_id, parent_id, directory, title, permission,
@@ -40,9 +37,9 @@ import type {
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
+import { querySqliteRow, querySqliteRowsOrEmpty } from "../sqlite/query.js";
 import type { Message, SessionSummary } from "../supervisor/types.js";
 import { convertZCodeMessages } from "./normalization.js";
-import { queryOpenCodeRow, queryOpenCodeRowsOrEmpty } from "./opencode-db.js";
 import type {
   GetSessionOptions,
   ISessionReader,
@@ -175,7 +172,7 @@ export class ZCodeSessionReader implements ISessionReader {
   // -------------------------------------------------------------------------
 
   async listSessions(projectId: UrlProjectId): Promise<SessionSummary[]> {
-    const rows = await queryOpenCodeRowsOrEmpty(
+    const rows = await querySqliteRowsOrEmpty(
       this.dbPath,
       LIST_SESSIONS_SQL,
       [this.projectPath],
@@ -189,7 +186,7 @@ export class ZCodeSessionReader implements ISessionReader {
     sessionId: string,
     projectId: UrlProjectId,
   ): Promise<SessionSummary | null> {
-    const result = await queryOpenCodeRow(
+    const result = await querySqliteRow(
       this.dbPath,
       GET_SESSION_SQL,
       [sessionId, this.projectPath],
@@ -207,7 +204,7 @@ export class ZCodeSessionReader implements ISessionReader {
     _afterMessageId?: string,
     options?: GetSessionOptions,
   ): Promise<LoadedSession | null> {
-    const sessionResult = await queryOpenCodeRow(
+    const sessionResult = await querySqliteRow(
       this.dbPath,
       GET_SESSION_SQL,
       [sessionId, this.projectPath],
@@ -246,7 +243,7 @@ export class ZCodeSessionReader implements ISessionReader {
   }
 
   // -------------------------------------------------------------------------
-  // Edit-fork branch state (aligned with the OpenCode branch view)
+  // Provider-native edit-fork branch state.
   // -------------------------------------------------------------------------
 
   private async loadStoredMessages(
@@ -254,10 +251,10 @@ export class ZCodeSessionReader implements ISessionReader {
     label: string,
   ): Promise<ZCodeStoredMessage[]> {
     const [messageRows, partRows] = await Promise.all([
-      queryOpenCodeRowsOrEmpty(this.dbPath, LIST_MESSAGES_SQL, [sessionId], {
+      querySqliteRowsOrEmpty(this.dbPath, LIST_MESSAGES_SQL, [sessionId], {
         label: `${label}.messages`,
       }),
-      queryOpenCodeRowsOrEmpty(this.dbPath, LIST_PARTS_SQL, [sessionId], {
+      querySqliteRowsOrEmpty(this.dbPath, LIST_PARTS_SQL, [sessionId], {
         label: `${label}.parts`,
       }),
     ]);
@@ -275,7 +272,7 @@ export class ZCodeSessionReader implements ISessionReader {
     currentSessionId: string,
     selectedBranchId?: string,
   ): Promise<SessionBranchState | undefined> {
-    const rows = await queryOpenCodeRowsOrEmpty(
+    const rows = await querySqliteRowsOrEmpty(
       this.dbPath,
       LIST_FAMILY_CANDIDATES_SQL,
       [this.projectPath],
@@ -376,7 +373,7 @@ export class ZCodeSessionReader implements ISessionReader {
     cachedMtime: number,
     cachedSize: number,
   ): Promise<{ summary: SessionSummary; mtime: number; size: number } | null> {
-    const statsResult = await queryOpenCodeRow(
+    const statsResult = await querySqliteRow(
       this.dbPath,
       GET_SESSION_STATS_SQL,
       [sessionId, this.projectPath],
@@ -492,7 +489,7 @@ export class ZCodeSessionReader implements ISessionReader {
       if (!metadata) return null;
     }
 
-    const sessionResult = await queryOpenCodeRow(
+    const sessionResult = await querySqliteRow(
       this.dbPath,
       GET_SESSION_SQL,
       [agentId, this.projectPath],
@@ -566,7 +563,7 @@ export class ZCodeSessionReader implements ISessionReader {
   async getSessionFileStats(
     sessionId: string,
   ): Promise<{ mtime: number; size: number } | null> {
-    const result = await queryOpenCodeRow(
+    const result = await querySqliteRow(
       this.dbPath,
       GET_SESSION_STATS_SQL,
       [sessionId, this.projectPath],
@@ -581,7 +578,7 @@ export class ZCodeSessionReader implements ISessionReader {
   }
 
   async listSessionFiles(_sessionDir: string): Promise<SessionFileEntry[]> {
-    const rows = await queryOpenCodeRowsOrEmpty(
+    const rows = await querySqliteRowsOrEmpty(
       this.dbPath,
       LIST_SESSION_IDS_FOR_PROJECT_SQL,
       [this.projectPath],

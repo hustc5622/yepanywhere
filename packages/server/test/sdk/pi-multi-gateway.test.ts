@@ -22,6 +22,8 @@ append({
   apiKeys: process.env.YEP_PI_LLM_API_KEYS,
   legacyApiKey: process.env.YEP_PI_LLM_API_KEY ?? null,
   leakedEnv: [
+    "YEP_LLM_GATEWAY_API_KEY",
+    "YEP_LLM_GATEWAY_API_BASE",
     "LLM_API_KEY",
     "LLM_API_BASE",
     "OPENCODE_LLM_API_KEY",
@@ -187,6 +189,7 @@ describe("PiProvider multi-gateway channels", () => {
   });
 
   it("returns nothing when no gateway channel is configured", async () => {
+    vi.stubEnv("YEP_LLM_GATEWAY_API_KEY", "");
     vi.stubEnv("LLM_API_KEY", "");
     vi.stubEnv("OPENCODE_LLM_API_KEY", "");
     vi.stubGlobal(

@@ -1,8 +1,8 @@
 /**
  * ZCode session scanner tests.
  *
- * Uses synthetic SQLite fixtures (same pattern as opencode-scanner.test.ts)
- * to test `ZCodeSessionScanner.listProjects` and `getSessionsForProject`.
+ * Uses synthetic SQLite fixtures to test `ZCodeSessionScanner.listProjects`
+ * and `getSessionsForProject`.
  */
 
 import { mkdtemp, rm } from "node:fs/promises";
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ZCodeSessionScanner } from "../../src/projects/zcode-scanner.js";
-import { shutdownOpenCodeDbWorker } from "../../src/sessions/opencode-db-worker.js";
+import { shutdownSqliteWorker } from "../../src/sqlite/query-worker.js";
 
 // =============================================================================
 // SQLite fixture helper
@@ -166,7 +166,7 @@ describe("ZCodeSessionScanner", () => {
   });
 
   afterEach(async () => {
-    await shutdownOpenCodeDbWorker();
+    await shutdownSqliteWorker();
     await rm(tempDir, { recursive: true, force: true });
   });
 

@@ -7,15 +7,16 @@ import {
   resolveDefaultLlmGatewayChannel,
   resolveLlmGatewayChannels,
   resolveLlmGatewayChannelsDetailed,
+  resolveLlmGatewayProxyBaseUrl,
 } from "../../src/llm-gateways/index.js";
 
 describe("resolveDefaultLlmGatewayChannel", () => {
-  it("prefers the dedicated OPENCODE_LLM_* variables over the generic aliases", () => {
+  it("prefers provider-neutral variables over generic aliases", () => {
     expect(
       resolveDefaultLlmGatewayChannel({
-        OPENCODE_LLM_API_KEY: "opencode-key",
-        OPENCODE_LLM_API_BASE: "https://gateway.example/v1/",
-        OPENCODE_LLM_SUB_MODULE: "coding",
+        YEP_LLM_GATEWAY_API_KEY: "gateway-key",
+        YEP_LLM_GATEWAY_API_BASE: "https://gateway.example/v1/",
+        YEP_LLM_GATEWAY_SUB_MODULE: "coding",
         LLM_API_KEY: "global-key",
         LLM_API_BASE: "https://global.example/v1",
         LLM_SUB_MODULE: "global-module",
@@ -24,8 +25,8 @@ describe("resolveDefaultLlmGatewayChannel", () => {
       id: DEFAULT_LLM_GATEWAY_CHANNEL_ID,
       label: "gateway.example",
       isDefault: true,
-      apiKey: "opencode-key",
-      apiKeyEnv: "OPENCODE_LLM_API_KEY",
+      apiKey: "gateway-key",
+      apiKeyEnv: "YEP_LLM_GATEWAY_API_KEY",
       apiBase: "https://gateway.example/v1",
       subModule: "coding",
     });
@@ -51,16 +52,26 @@ describe("resolveDefaultLlmGatewayChannel", () => {
     ).toBe("LLM_API_KEY");
     expect(
       resolveDefaultLlmGatewayChannel({
-        OPENCODE_LLM_API_KEY: "k",
+        YEP_LLM_GATEWAY_API_KEY: "k",
         LLM_API_KEY: "other",
       })?.apiKeyEnv,
-    ).toBe("OPENCODE_LLM_API_KEY");
+    ).toBe("YEP_LLM_GATEWAY_API_KEY");
   });
 
   it("returns null without an API key", () => {
     expect(
       resolveDefaultLlmGatewayChannel({ LLM_API_BASE: "https://x.example" }),
     ).toBeNull();
+  });
+});
+
+describe("resolveLlmGatewayProxyBaseUrl", () => {
+  it("uses the provider-neutral proxy variable", () => {
+    expect(
+      resolveLlmGatewayProxyBaseUrl({
+        YEP_LLM_GATEWAY_PROXY_URL: "http://127.0.0.1:9999/",
+      }),
+    ).toBe("http://127.0.0.1:9999/gateway/v1");
   });
 });
 

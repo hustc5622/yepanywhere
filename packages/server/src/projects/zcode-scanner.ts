@@ -2,23 +2,23 @@
  * ZCode session scanner.
  *
  * Aggregates ZCode sessions from the SQLite `session` table by project
- * directory. Mirrors `OpenCodeSessionScanner` but targets
- * `~/.zcode/cli/db/db.sqlite`.
- *
- * The scanner reuses OpenCode DB helpers (`queryOpenCodeRowsOrEmpty`)
- * because they are db-path-keyed and work with any SQLite file.
+ * directory through the provider-neutral query layer.
  */
 
 import { basename } from "node:path";
-import {
-  type OpenCodeDbStatement,
-  queryOpenCodeRows,
-  queryOpenCodeRowsOrEmpty,
-  runOpenCodeDbStatements,
-} from "../sessions/opencode-db.js";
 import { ZCODE_DB_PATH } from "../sessions/zcode-db.js";
+import {
+  type SqliteFailureReason,
+  type SqliteStatement,
+  querySqliteRows,
+  querySqliteRowsOrEmpty,
+  runSqliteStatements,
+} from "../sqlite/query.js";
+import {
+  SESSION_DIGEST_SQL,
+  sessionDigestFromRow,
+} from "../sqlite/session-change-sql.js";
 import type { Project } from "../supervisor/types.js";
-import { SESSION_DIGEST_SQL } from "./opencode-scanner.js";
 import { canonicalizeProjectPath, encodeProjectId } from "./paths.js";
 
 // =============================================================================
@@ -76,13 +76,10 @@ export interface ZCodeSessionChangeScanResult {
 }
 
 export class ZCodeSessionScanError extends Error {
-  readonly reason: import("../sessions/opencode-db.js").OpenCodeDbFailureReason;
+  readonly reason: SqliteFailureReason;
   readonly detail: unknown;
 
-  constructor(
-    reason: import("../sessions/opencode-db.js").OpenCodeDbFailureReason,
-    detail?: unknown,
-  ) {
+  constructor(reason: SqliteFailureReason, detail?: unknown) {
     super(`ZCode session scan failed: ${reason}`);
     this.name = "ZCodeSessionScanError";
     this.reason = reason;
@@ -116,8 +113,7 @@ const GET_SESSIONS_FOR_PROJECT_SQL = `
 `;
 
 /**
- * ZCode-specific copies of the OpenCode incremental queries. ZCode uses
- * `parent_id` for both edit forks and subagents, so `task_type` must travel
+ * ZCode uses `parent_id` for both edit forks and subagents, so `task_type` must travel
  * with each row; filtering every parent would incorrectly suppress edit-fork
  * updates from the provider-agnostic event stream.
  */
@@ -238,21 +234,6 @@ function asNumber(value: unknown): number | undefined {
  * alters at least one of the row count, the maximum row id, the maximum
  * `time_updated`, or the total payload length.
  */
-function digestFromRow(row: Record<string, unknown> | null): string {
-  if (!row) return "";
-  return JSON.stringify([
-    row.session_updated ?? null,
-    row.message_count ?? 0,
-    row.message_max_id ?? null,
-    row.message_updated ?? null,
-    row.message_bytes ?? 0,
-    row.part_count ?? 0,
-    row.part_max_id ?? null,
-    row.part_updated ?? null,
-    row.part_bytes ?? 0,
-  ]);
-}
-
 export class ZCodeSessionScanner {
   private readonly dbPath: string;
   private cachedProjects: {
@@ -304,7 +285,7 @@ export class ZCodeSessionScanner {
     projectPath: string,
   ): Promise<ZCodeSessionInfo[]> {
     const canonical = canonicalizeProjectPath(projectPath);
-    const rows = await queryOpenCodeRowsOrEmpty(
+    const rows = await querySqliteRowsOrEmpty(
       this.dbPath,
       GET_SESSIONS_FOR_PROJECT_SQL,
       [canonical],
@@ -330,9 +311,8 @@ export class ZCodeSessionScanner {
   /**
    * Consume changed ZCode session rows in stable `(time_updated, id)` order.
    *
-   * Mirrors `OpenCodeSessionScanner.scanSessionChanges`. The ZCode SQLite
-   * schema (session/message/part tables with identical column names) allows
-   * reusing the same SQL and digest logic.
+   * The session/message/part schema uses the shared digest while preserving
+   * ZCode-specific child filtering.
    *
    * The cursor advances across filtered archived/child rows too. Otherwise a
    * busy child session at the head of the result set could be revisited on
@@ -353,7 +333,7 @@ export class ZCodeSessionScanner {
         ? this.incrementalReplayState.fingerprints
         : new Map<string, { updatedAt: number; value: string }>();
 
-    const pageResult = await queryOpenCodeRows(
+    const pageResult = await querySqliteRows(
       this.dbPath,
       ZCODE_SESSION_CHANGE_PAGE_SQL,
       [
@@ -422,7 +402,7 @@ export class ZCodeSessionScanner {
     );
     const replayRows = hasMore
       ? []
-      : await queryOpenCodeRowsOrEmpty(
+      : await querySqliteRowsOrEmpty(
           this.dbPath,
           ZCODE_SESSION_CHANGE_REPLAY_SQL,
           [
@@ -556,12 +536,12 @@ export class ZCodeSessionScanner {
     const uniqueIds = [...new Set(sessionIds)];
     if (uniqueIds.length === 0) return new Map();
 
-    const statements: OpenCodeDbStatement[] = uniqueIds.map((sessionId) => ({
+    const statements: SqliteStatement[] = uniqueIds.map((sessionId) => ({
       sql: SESSION_DIGEST_SQL,
       params: [sessionId],
       mode: "get" as const,
     }));
-    const result = await runOpenCodeDbStatements(this.dbPath, statements, {
+    const result = await runSqliteStatements(this.dbPath, statements, {
       label: "zcode.scanSessionChanges.digest",
     });
     if (!result.ok) return new Map();
@@ -570,7 +550,10 @@ export class ZCodeSessionScanner {
     for (const [index, sessionId] of uniqueIds.entries()) {
       const row = result.value[index];
       if (!row || typeof row !== "object") continue;
-      digests.set(sessionId, digestFromRow(row as Record<string, unknown>));
+      digests.set(
+        sessionId,
+        sessionDigestFromRow(row as Record<string, unknown>),
+      );
     }
     return digests;
   }
@@ -588,7 +571,7 @@ export class ZCodeSessionScanner {
       return this.cachedProjects.result;
     }
 
-    const rows = await queryOpenCodeRowsOrEmpty(
+    const rows = await querySqliteRowsOrEmpty(
       this.dbPath,
       SCAN_PROJECTS_SQL,
       [],

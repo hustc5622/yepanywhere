@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { ModelInfo, OpenCodeRequestProtocol } from "@yep-anywhere/shared";
+import type {
+  LlmGatewayRequestProtocol,
+  ModelInfo,
+} from "@yep-anywhere/shared";
 import {
-  type OpenCodeGatewayConfig,
-  fetchOpenCodeGatewayModels,
-  resolveOpenCodeGatewayConfig,
-} from "../opencode-bridge/gateway-config.js";
+  type LlmGatewayCredentials,
+  fetchLlmGatewayModels,
+  resolveDefaultLlmGatewayChannel,
+} from "../llm-gateways/index.js";
 import type { ServerSettingsService } from "./ServerSettingsService.js";
 
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -15,7 +18,7 @@ const BENCHMARK_PROMPT =
 export interface OhMyRouterThroughputResult {
   modelId: string;
   modelName: string;
-  protocol: OpenCodeRequestProtocol;
+  protocol: LlmGatewayRequestProtocol;
   testedAt: string;
   outputTokens?: number;
   /** Whether the gateway reported the output token count or it was estimated from streamed text. */
@@ -44,12 +47,12 @@ export interface OhMyRouterThroughputStatus {
 }
 
 export interface BenchmarkModelOptions {
-  config: OpenCodeGatewayConfig;
+  config: LlmGatewayCredentials;
   model: ModelInfo;
   fetchImpl?: typeof fetch;
 }
 
-function isOhMyRouterGateway(config: OpenCodeGatewayConfig): boolean {
+function isOhMyRouterGateway(config: LlmGatewayCredentials): boolean {
   try {
     return new URL(config.apiBase).hostname === "api.ohmyrouter.com";
   } catch {
@@ -57,7 +60,7 @@ function isOhMyRouterGateway(config: OpenCodeGatewayConfig): boolean {
   }
 }
 
-function selectProtocol(model: ModelInfo): OpenCodeRequestProtocol {
+function selectProtocol(model: ModelInfo): LlmGatewayRequestProtocol {
   return model.supportedRequestProtocols?.includes("anthropic") &&
     !model.supportedRequestProtocols.includes("openai-compatible")
     ? "anthropic"
@@ -65,8 +68,8 @@ function selectProtocol(model: ModelInfo): OpenCodeRequestProtocol {
 }
 
 function getRequestUrl(
-  config: OpenCodeGatewayConfig,
-  protocol: OpenCodeRequestProtocol,
+  config: LlmGatewayCredentials,
+  protocol: LlmGatewayRequestProtocol,
 ): string {
   const apiBase = config.apiBase.replace(/\/+$/, "");
   return protocol === "anthropic"
@@ -75,8 +78,8 @@ function getRequestUrl(
 }
 
 function getRequestHeaders(
-  config: OpenCodeGatewayConfig,
-  protocol: OpenCodeRequestProtocol,
+  config: LlmGatewayCredentials,
+  protocol: LlmGatewayRequestProtocol,
 ): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "text/event-stream",
@@ -95,7 +98,7 @@ function getRequestHeaders(
 function getRequestBody(
   modelId: string,
   model: ModelInfo,
-  protocol: OpenCodeRequestProtocol,
+  protocol: LlmGatewayRequestProtocol,
 ): Record<string, unknown> {
   // OhMyRouter's Claude Opus 4.8 rejects explicit temperature with
   // "temperature is deprecated for this model". Only send temperature for
@@ -144,7 +147,7 @@ function getReportedOutputTokens(
 
 function parseStreamPayload(
   payload: unknown,
-  protocol: OpenCodeRequestProtocol,
+  protocol: LlmGatewayRequestProtocol,
 ): { content?: string; outputTokens?: number } {
   if (!payload || typeof payload !== "object") return {};
   const data = payload as Record<string, unknown>;
@@ -317,7 +320,7 @@ export class OhMyRouterBenchmarkService {
   }
 
   getStatus(): OhMyRouterThroughputStatus {
-    const config = resolveOpenCodeGatewayConfig(this.env);
+    const config = resolveDefaultLlmGatewayChannel(this.env);
     const benchmark = this.serverSettingsService.getSetting(
       "ohmyrouterThroughputBenchmark",
     );
@@ -341,7 +344,7 @@ export class OhMyRouterBenchmarkService {
 
   async start(): Promise<OhMyRouterThroughputBenchmark> {
     if (this.activeRun) return this.activeRun;
-    const config = resolveOpenCodeGatewayConfig(this.env);
+    const config = resolveDefaultLlmGatewayChannel(this.env);
     if (!config || !isOhMyRouterGateway(config)) {
       throw new Error(this.getStatus().unavailableReason ?? "Unavailable");
     }
@@ -367,10 +370,10 @@ export class OhMyRouterBenchmarkService {
 
   private async run(
     run: OhMyRouterThroughputBenchmark,
-    config: OpenCodeGatewayConfig,
+    config: LlmGatewayCredentials,
   ): Promise<void> {
     try {
-      const models = await fetchOpenCodeGatewayModels(config, this.fetchImpl);
+      const models = await fetchLlmGatewayModels(config, this.fetchImpl);
       if (models.length === 0) {
         throw new Error("OhMyRouter did not return any models to benchmark.");
       }

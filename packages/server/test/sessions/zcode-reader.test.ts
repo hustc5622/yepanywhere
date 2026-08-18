@@ -1,8 +1,8 @@
 /**
  * ZCode session reader tests.
  *
- * Uses synthetic SQLite fixtures (same pattern as opencode-db-worker.test.ts)
- * to test `ZCodeSessionReader.listSessions`, `getSessionSummary`,
+ * Uses synthetic SQLite fixtures to test `ZCodeSessionReader.listSessions`,
+ * `getSessionSummary`,
  * `getSession`, `getSessionSummaryIfChanged`, and `listSessionFiles`.
  *
  * Privacy: the fixture only uses synthetic titles and content. No real
@@ -18,8 +18,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { shutdownOpenCodeDbWorker } from "../../src/sessions/opencode-db-worker.js";
 import { ZCodeSessionReader } from "../../src/sessions/zcode-reader.js";
+import { shutdownSqliteWorker } from "../../src/sqlite/query-worker.js";
 
 // =============================================================================
 // SQLite fixture helper
@@ -271,7 +271,7 @@ describe("ZCodeSessionReader", () => {
   });
 
   afterEach(async () => {
-    await shutdownOpenCodeDbWorker();
+    await shutdownSqliteWorker();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -690,7 +690,7 @@ describe("ZCodeSessionReader branchState (edit-fork family)", () => {
   });
 
   afterEach(async () => {
-    await shutdownOpenCodeDbWorker();
+    await shutdownSqliteWorker();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -964,7 +964,7 @@ describe("ZCodeSessionReader subagents", () => {
   });
 
   afterEach(async () => {
-    await shutdownOpenCodeDbWorker();
+    await shutdownSqliteWorker();
     await rm(tempDir, { recursive: true, force: true });
   });
 

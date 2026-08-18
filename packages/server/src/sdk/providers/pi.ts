@@ -9,9 +9,9 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type {
   ContextStatusSdkPayload,
+  LlmGatewayRequestProtocol,
+  LlmGatewaySessionConfig,
   ModelInfo,
-  OpenCodeRequestProtocol,
-  OpenCodeSessionConfig,
   SlashCommand,
   ThinkingConfig,
 } from "@yep-anywhere/shared";
@@ -22,9 +22,9 @@ import {
   fetchLlmGatewayModels,
   isVisibleGatewayModel,
   resolveLlmGatewayChannels,
+  resolveLlmGatewayProxyBaseUrl,
 } from "../../llm-gateways/index.js";
 import { getLogger } from "../../logging/logger.js";
-import { resolveOpenCodeOpenAICompatibleBaseURL } from "../../opencode-bridge/gateway-config.js";
 import {
   PI_SESSIONS_DIR,
   PI_SESSION_DIR_IS_EXACT,
@@ -82,7 +82,7 @@ const PI_PICKER_REASONING_EFFORTS = ["low", "medium", "high"] as const;
  * Pi's detectCompat targets api.openai.com by default: it promotes the system
  * prompt to the "developer" role and sends `store`/`max_completion_tokens`.
  * Generic OpenAI-compatible gateways (LiteLLM/one-api style, including the
- * shared OpenCode gateway) reject the developer role with a 400, so pin the
+ * shared aggregator gateways) reject the developer role with a 400, so pin the
  * strictly portable request shape for every dynamically registered model.
  */
 const PI_OPENAI_COMPLETIONS_COMPAT = {
@@ -122,14 +122,14 @@ interface PiModelRoute {
   channel: LlmGatewayChannel;
   /** Model id as the gateway (and therefore Pi) knows it. */
   bareModelId: string;
-  protocols: OpenCodeRequestProtocol[];
+  protocols: LlmGatewayRequestProtocol[];
 }
 
 /** Route metadata retained at catalog-fetch time, before ids are flattened. */
 interface PiCatalogRoute {
   channelId: string;
   bareModelId: string;
-  protocols: OpenCodeRequestProtocol[];
+  protocols: LlmGatewayRequestProtocol[];
 }
 
 interface PiModelCatalog {
@@ -143,7 +143,7 @@ interface PiRuntimeRef {
   models: ModelInfo[];
   /** Yep-facing (channel-qualified) model id -> routing information. */
   routes: Map<string, PiModelRoute>;
-  currentProtocol?: OpenCodeRequestProtocol;
+  currentProtocol?: LlmGatewayRequestProtocol;
   currentModel?: string;
   sessionId?: string;
   contextWindow?: number;
@@ -211,7 +211,7 @@ function toIsoTimestamp(value: unknown): string {
 }
 
 function protocolApi(
-  protocol: OpenCodeRequestProtocol,
+  protocol: LlmGatewayRequestProtocol,
 ): "openai-completions" | "anthropic-messages" {
   return protocol === "anthropic" ? "anthropic-messages" : "openai-completions";
 }
@@ -281,7 +281,7 @@ function withPiReasoningCapabilities(models: ModelInfo[]): ModelInfo[] {
   }));
 }
 
-function modelProtocols(model: ModelInfo): OpenCodeRequestProtocol[] {
+function modelProtocols(model: ModelInfo): LlmGatewayRequestProtocol[] {
   return model.supportedRequestProtocols?.length
     ? [...model.supportedRequestProtocols]
     : ["openai-compatible", "anthropic"];
@@ -289,7 +289,7 @@ function modelProtocols(model: ModelInfo): OpenCodeRequestProtocol[] {
 
 function applyPiSessionModelConfig(
   models: ModelInfo[],
-  sessionConfig: OpenCodeSessionConfig | undefined,
+  sessionConfig: LlmGatewaySessionConfig | undefined,
 ): ModelInfo[] {
   if (!sessionConfig) return models;
   return models.map((model) => {
@@ -322,7 +322,7 @@ function buildPiExtensionConfig(
     string,
     {
       channel: LlmGatewayChannel;
-      protocol: OpenCodeRequestProtocol;
+      protocol: LlmGatewayRequestProtocol;
       models: PiExtensionProviderConfig["providers"][number]["config"]["models"];
     }
   >();
@@ -377,7 +377,7 @@ function buildPiExtensionConfig(
           // its sub-module header, so routing another channel through it would
           // silently send the request to the wrong gateway.
           ((channel.isDefault
-            ? resolveOpenCodeOpenAICompatibleBaseURL(process.env)
+            ? resolveLlmGatewayProxyBaseUrl(process.env)
             : undefined) ?? channel.apiBase);
     providers.push({
       id,
@@ -816,7 +816,7 @@ export class PiProvider implements AgentProvider {
     };
     const routeModel = async (
       requestedModelId: string,
-      preferredProtocol?: OpenCodeRequestProtocol,
+      preferredProtocol?: LlmGatewayRequestProtocol,
     ) => {
       const resolved = resolvePiModelRoute(runtime.routes, requestedModelId);
       if (!resolved) {
@@ -976,16 +976,17 @@ export class PiProvider implements AgentProvider {
       yield {
         type: "error",
         error:
-          "Pi requires an LLM gateway (OPENCODE_LLM_API_KEY or LLM_API_KEY, plus any extra channels in YEP_LLM_GATEWAYS).",
+          "Pi requires an LLM gateway (YEP_LLM_GATEWAY_API_KEY or a compatible legacy alias, plus any extra channels in YEP_LLM_GATEWAYS).",
       };
       return;
     }
 
     try {
       const catalog = await this.loadRoutableCatalog();
+      const gatewaySessionConfig = options.llmGatewayConfig;
       const models = applyPiSessionModelConfig(
         catalog.models,
-        options.opencodeConfig,
+        gatewaySessionConfig,
       );
       if (models.length === 0) {
         throw new Error("No LLM gateway channel returned any model for Pi");
@@ -994,7 +995,7 @@ export class PiProvider implements AgentProvider {
       runtime.routes = buildPiModelRoutes(channels, catalog.routes);
 
       const requestedModelId =
-        options.opencodeConfig?.model ?? options.model ?? models[0]?.id;
+        gatewaySessionConfig?.model ?? options.model ?? models[0]?.id;
       if (!requestedModelId) throw new Error("No Pi model is available");
       // Sessions created before multi-gateway support stored bare model ids,
       // so an unqualified id resolves against any serving channel instead of
@@ -1020,9 +1021,9 @@ export class PiProvider implements AgentProvider {
       }
       const requestedProtocols = requestedRoute.protocols;
       const requestedProtocol =
-        options.opencodeConfig?.requestProtocol &&
-        requestedProtocols.includes(options.opencodeConfig.requestProtocol)
-          ? options.opencodeConfig.requestProtocol
+        gatewaySessionConfig?.requestProtocol &&
+        requestedProtocols.includes(gatewaySessionConfig.requestProtocol)
+          ? gatewaySessionConfig.requestProtocol
           : requestedProtocols[0];
       if (!requestedProtocol) {
         throw new Error(`Pi model "${requestedModel}" has no usable endpoint`);
@@ -1068,7 +1069,14 @@ export class PiProvider implements AgentProvider {
       // Pi's bash tool inherits this environment, so every gateway credential
       // and the channel declaration itself are removed. The extension receives
       // the keys through YEP_PI_LLM_API_KEYS and deletes them once captured.
+      // Scrub retired aliases too so a stale operator environment cannot leak
+      // an unused credential into Pi tools.
       for (const key of [
+        "YEP_LLM_GATEWAY_API_KEY",
+        "YEP_LLM_GATEWAY_API_BASE",
+        "YEP_LLM_GATEWAY_SUB_MODULE",
+        "YEP_LLM_GATEWAY_PROXY_URL",
+        "LLM_GATEWAY_PROXY_URL",
         "OPENCODE_LLM_API_KEY",
         "OPENCODE_LLM_API_BASE",
         "OPENCODE_LLM_SUB_MODULE",

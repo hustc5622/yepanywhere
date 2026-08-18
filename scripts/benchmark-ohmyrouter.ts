@@ -1,18 +1,18 @@
 import {
-  fetchOpenCodeGatewayModels,
-  resolveOpenCodeGatewayConfig,
-} from "../packages/server/src/opencode-bridge/gateway-config.js";
+  fetchLlmGatewayModels,
+  resolveDefaultLlmGatewayChannel,
+} from "../packages/server/src/llm-gateways/index.js";
 import { benchmarkOhMyRouterModel } from "../packages/server/src/services/OhMyRouterBenchmarkService.js";
 
-const config = resolveOpenCodeGatewayConfig(process.env);
+const config = resolveDefaultLlmGatewayChannel(process.env);
 if (!config || new URL(config.apiBase).hostname !== "api.ohmyrouter.com") {
   throw new Error(
-    "Configure OPENCODE_LLM_API_KEY, SESSION_TITLE_LLM_API_KEY, or LLM_API_KEY for api.ohmyrouter.com before running this script.",
+    "Configure YEP_LLM_GATEWAY_API_KEY or LLM_API_KEY for api.ohmyrouter.com before running this script.",
   );
 }
 
 const startedAt = new Date().toISOString();
-const models = await fetchOpenCodeGatewayModels(config);
+const models = await fetchLlmGatewayModels(config);
 const results = [];
 for (const model of models) {
   const result = await benchmarkOhMyRouterModel({ config, model });

@@ -195,7 +195,7 @@ describe("buildZCodeBranchView", () => {
   });
 
   it("detects cycles with a diagnostic while keeping the surviving edge", () => {
-    // Mirrors buildOpenCodeBranchView: the cycle edge is dropped so the view
+    // The cycle edge is dropped so the view
     // degrades to the remaining valid relation instead of looping forever.
     const sessions = family(
       { id: "a", parentId: "b", messages: [msg("u1", "user", "xa", 1)] },

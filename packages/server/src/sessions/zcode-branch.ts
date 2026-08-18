@@ -1,8 +1,7 @@
 /**
  * Copied-prefix edit-fork branch view, shared by ZCode and Pi.
  *
- * Mirrors buildOpenCodeBranchView (opencode-branch.ts) with one protocol
- * difference: providers such as ZCode copy messages into the child with
+ * Providers such as ZCode copy messages into the child with
  * FRESH ids, while Pi copies entries into a new session file. Yep does not
  * persist the fork boundary for either provider, so the boundary is derived.
  *
@@ -20,7 +19,7 @@
  *   2. Boundary = the first USER message in the parent at index
  *      >= prefixMessageCount — i.e. the original edited message M. M'
  *      inherits M's logical parentId/depth so M and M' render as siblings,
- *      exactly like OpenCode's forkMessageId boundary. When no such user
+ *      at the native forkMessageId boundary. When no such user
  *      message exists the edge cannot be reproduced: a diagnostic is
  *      recorded and the edge is skipped.
  *
