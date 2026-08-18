@@ -338,7 +338,7 @@ describe("session detail view", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project-1/sessions/session-1?view=canonical&maxMessages=100",
+      "/api/projects/project-1/sessions/session-1?view=canonical&maxMessages=100&deferMedia=1",
       expect.any(Object),
     );
   });

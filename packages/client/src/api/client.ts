@@ -65,6 +65,7 @@ export interface PaginationInfo {
   totalCompactions: number;
   targetMessageId?: string;
   targetMessageFound?: boolean;
+  rolloutRevision?: string;
 }
 
 export interface ResumeSessionStartedResponse {
@@ -974,8 +975,13 @@ export const api = {
       beforeMessageId?: string;
       aroundMessageId?: string;
       afterWindowMessageId?: string;
+      rolloutRevision?: string;
       branchId?: string;
       maxMessages?: number;
+      /** Omit inline Pi image payloads from the initial transcript response. */
+      deferMedia?: boolean;
+      /** Omit Pi thinking blocks when explicitly requested. */
+      deferThinking?: boolean;
     },
   ) => {
     const params = new URLSearchParams();
@@ -989,9 +995,18 @@ export const api = {
       params.set("aroundMessageId", options.aroundMessageId);
     if (options?.afterWindowMessageId)
       params.set("afterWindowMessageId", options.afterWindowMessageId);
+    if (options?.rolloutRevision)
+      params.set("rolloutRevision", options.rolloutRevision);
     if (options?.branchId) params.set("branchId", options.branchId);
     if (options?.maxMessages !== undefined)
       params.set("maxMessages", String(options.maxMessages));
+    // Pi sessions can contain very large inline images. Keep the fast path
+    // lightweight by default while allowing callers to request the complete
+    // media payload explicitly.
+    params.set("deferMedia", options?.deferMedia === false ? "0" : "1");
+    if (options?.deferThinking !== undefined) {
+      params.set("deferThinking", options.deferThinking ? "1" : "0");
+    }
     const qs = params.toString();
     return fetchJSON<{
       session: Session;

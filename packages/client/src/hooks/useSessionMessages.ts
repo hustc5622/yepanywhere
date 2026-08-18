@@ -201,6 +201,14 @@ function mergeNewerPagination(
   };
 }
 
+function isCodexHistoryCursorStale(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "SESSION_HISTORY_CURSOR_STALE"
+  );
+}
+
 function mergeRefreshPagination(
   current: PaginationInfo | undefined,
   incoming: PaginationInfo | undefined,
@@ -1070,6 +1078,7 @@ export function useSessionMessages(
         tailCompactions: 2,
         maxMessages: INITIAL_MESSAGE_LIMIT,
         beforeMessageId: pagination.truncatedBeforeMessageId,
+        rolloutRevision: pagination.rolloutRevision,
         branchId,
       });
       setMessages((prev) => {
@@ -1086,8 +1095,10 @@ export function useSessionMessages(
       setPagination((current) =>
         mergeOlderPagination(current, data.pagination),
       );
-    } catch {
-      // Silent fail for loading older messages
+    } catch (error) {
+      if (isCodexHistoryCursorStale(error)) {
+        await refreshSessionMessages({ replaceMessages: true });
+      }
     } finally {
       setLoadingOlder(false);
     }
@@ -1097,6 +1108,7 @@ export function useSessionMessages(
     branchId,
     pagination,
     updatePersistedTimestampWatermark,
+    refreshSessionMessages,
   ]);
 
   const loadNewerMessages = useCallback(async () => {
@@ -1110,6 +1122,7 @@ export function useSessionMessages(
         view: "canonical",
         maxMessages: INITIAL_MESSAGE_LIMIT,
         afterWindowMessageId: pagination.truncatedAfterMessageId,
+        rolloutRevision: pagination.rolloutRevision,
         branchId,
       });
       setMessages((prev) => {
@@ -1126,8 +1139,10 @@ export function useSessionMessages(
       setPagination((current) =>
         mergeNewerPagination(current, data.pagination),
       );
-    } catch {
-      // Silent fail for loading newer messages
+    } catch (error) {
+      if (isCodexHistoryCursorStale(error)) {
+        await refreshSessionMessages({ replaceMessages: true });
+      }
     } finally {
       setLoadingNewer(false);
     }
@@ -1137,6 +1152,7 @@ export function useSessionMessages(
     branchId,
     pagination,
     updatePersistedTimestampWatermark,
+    refreshSessionMessages,
   ]);
 
   const loadTargetMessageWindow = useCallback(
@@ -1152,6 +1168,7 @@ export function useSessionMessages(
           view: "canonical",
           aroundMessageId: messageId,
           maxMessages: INITIAL_MESSAGE_LIMIT,
+          rolloutRevision: pagination?.rolloutRevision,
           branchId,
         });
         const targetFound =
@@ -1177,7 +1194,14 @@ export function useSessionMessages(
         setLoadingTargetMessage(false);
       }
     },
-    [projectId, sessionId, branchId, applySessionSnapshot, onLoadComplete],
+    [
+      projectId,
+      sessionId,
+      branchId,
+      pagination?.rolloutRevision,
+      applySessionSnapshot,
+      onLoadComplete,
+    ],
   );
 
   /**
