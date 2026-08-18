@@ -7,6 +7,12 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Changed
+- Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
+
+### Fixed
+- Bound Codex rollout session loading before normalization. Summary, agent-mapping, and paginated detail reads now stream one UTF-8 JSONL line at a time with byte/line budgets, weighted admission, stable byte-offset cursors and file revisions, bounded page projection, and explicit fallback for rollback histories that still require the legacy branch reducer. Large rollouts no longer materialize the full file, `split("\\n")`, and complete parsed-entry array on the normal summary/detail path; canonical journal overlay is conservatively skipped for rollouts above the 64 MiB safety threshold (configurable via `YEP_CODEX_CANONICAL_MAX_ROLLOUT_BYTES`), and cold journals above the 512 MiB admission budget (configurable via `YEP_CODEX_EVENT_STORE_ADMISSION_BYTES`) are rejected before hydration. Codex clone/fork copies use the same bounded decoder instead of materializing the source text.
+
 ## [2026.8.5] - 2026-08-18
 
 ### Added
