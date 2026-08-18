@@ -327,7 +327,6 @@ const PROVIDER_COLORS: Partial<Record<ProviderName, string>> = {
   "codex-oss": "#f97316",
   gemini: "#4285f4",
   "gemini-acp": "#4285f4",
-  opencode: "#9333ea",
   pi: "var(--provider-pi)",
   kimi: "var(--provider-kimi)",
 };

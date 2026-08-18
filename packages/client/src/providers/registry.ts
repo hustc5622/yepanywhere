@@ -6,7 +6,6 @@ import {
 import { GeminiACPProvider } from "./implementations/GeminiACPProvider";
 import { GeminiProvider } from "./implementations/GeminiProvider";
 import { KimiProvider } from "./implementations/KimiProvider";
-import { OpenCodeProvider } from "./implementations/OpenCodeProvider";
 import { PiProvider } from "./implementations/PiProvider";
 import { ZCodeProvider } from "./implementations/ZCodeProvider";
 import type { Provider, ProviderMetadata } from "./types";
@@ -16,7 +15,6 @@ const activeProviders: Record<string, Provider> = {
   "gemini-acp": new GeminiACPProvider(),
   codex: new CodexProvider(),
   "codex-oss": new CodexOssProvider(),
-  opencode: new OpenCodeProvider(),
   pi: new PiProvider(),
   kimi: new KimiProvider(),
   zcode: new ZCodeProvider(),

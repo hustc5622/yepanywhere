@@ -1,5 +1,6 @@
 import {
   ALL_PROVIDERS,
+  type LiveProviderName,
   type ProviderName,
   SLASH_COMMAND_SESSION_KIND,
   type SessionKind,
@@ -36,14 +37,13 @@ type StatusFilter = "all" | "unread" | "starred" | "archived";
 type AgeFilter = "3" | "7" | "14" | "30";
 
 // Provider colors for filter dropdown (matching ProviderBadge)
-const PROVIDER_COLORS: Record<ProviderName, string> = {
+const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   claude: "var(--app-yep-green)",
   "claude-ollama": "var(--app-yep-green)", // Same as Claude
   codex: "#10a37f",
   "codex-oss": "#f97316",
   gemini: "#4285f4",
   "gemini-acp": "#4285f4", // Same as gemini
-  opencode: "#9333ea", // Purple for OpenCode
   pi: "var(--provider-pi)",
   kimi: "var(--provider-kimi)", // Kimi KMBlue
   zcode: "var(--provider-zcode)", // ZCode

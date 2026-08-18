@@ -236,8 +236,6 @@ export function ProcessInfoModal({
         return "Codex OSS (Local)";
       case "gemini":
         return "Gemini (Google)";
-      case "opencode":
-        return "OpenCode";
       case "pi":
         return "Pi";
       default:

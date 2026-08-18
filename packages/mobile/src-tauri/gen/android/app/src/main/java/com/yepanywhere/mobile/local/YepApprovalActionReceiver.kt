@@ -37,10 +37,8 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
     }
 
     YepLog.i("onReceive", "action=$action sessionId=$sessionId requestId=$requestId")
-    // goAsync only buys ~10s of broadcast budget, but external OpenCode
-    // approvals can legitimately take up to ~45s to confirm. Release the
-    // broadcast on a watchdog and let the worker thread run to completion in
-    // the app process (kept alive by the activity / ongoing notifications).
+    // Release the broadcast before Android's ANR budget while letting the
+    // network worker finish in the app process.
     val pending = goAsync()
     val finished = AtomicBoolean(false)
     val finishBroadcast = {
@@ -138,11 +136,6 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
   }
 
   private fun postJson(url: String, body: String) {
-    // Bridge approvals for external OpenCode TUIs are applied asynchronously:
-    // the sidecar queues the decision for the forwarder plugin's long-poll
-    // (up to 25s) and waits up to 30s for the confirming event. A short read
-    // timeout here reported "failed" while the decision was still being
-    // (successfully) delivered.
     request(url, "POST", body, DECISION_READ_TIMEOUT_MS)
   }
 
@@ -194,11 +187,7 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val READ_TIMEOUT_MS = 8_000
 
-    /**
-     * External-instance OpenCode approvals resolve only after the forwarder
-     * plugin picks the decision up from a long-poll (<=25s) and OpenCode
-     * echoes the terminal event (bridge waits <=30s). Budget past both.
-     */
+    /** Allow asynchronous provider approvals to confirm before showing fallback. */
     private const val DECISION_READ_TIMEOUT_MS = 45_000
 
     /** Broadcast budget: finish() before the ~10s system ANR limit. */

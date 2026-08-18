@@ -3,8 +3,8 @@ import {
   CLAUDE_EXTENDED_CONTEXT_WINDOW,
   CODEX_DEFAULT_CONTEXT_WINDOW,
   DEFAULT_CONTEXT_WINDOW,
+  getLlmGatewayModelDefaultLimits,
   getModelContextWindow,
-  getOpenCodeModelDefaultLimits,
   resolveClaudeModelLabel,
   resolveModelDisplayLabel,
 } from "../src/app-types.js";
@@ -50,52 +50,50 @@ describe("getModelContextWindow", () => {
     );
   });
 
-  it("resolves OpenCode gateway models via the curated catalog", () => {
+  it("resolves Pi gateway models via the curated catalog", () => {
     // ohmyrouter exposes no context_window, so these must come from the table.
-    expect(getModelContextWindow("claude-opus-4-8", "opencode")).toBe(
-      1_000_000,
-    );
-    expect(getModelContextWindow("claude-haiku-4-5-20251001", "opencode")).toBe(
+    expect(getModelContextWindow("claude-opus-4-8", "pi")).toBe(1_000_000);
+    expect(getModelContextWindow("claude-haiku-4-5-20251001", "pi")).toBe(
       200_000,
     );
-    expect(getModelContextWindow("glm-5.2", "opencode")).toBe(1_000_000);
-    expect(getModelContextWindow("glm-5.1", "opencode")).toBe(200_000);
+    expect(getModelContextWindow("glm-5.2", "pi")).toBe(1_000_000);
+    expect(getModelContextWindow("glm-5.1", "pi")).toBe(200_000);
     // Namespaced refs strip the provider prefix before matching.
-    expect(
-      getModelContextWindow("yep-anthropic/claude-opus-4-8", "opencode"),
-    ).toBe(1_000_000);
-    // Unknown OpenCode model still falls back to the 200K default.
-    expect(getModelContextWindow("gpt-image-2", "opencode")).toBe(
+    expect(getModelContextWindow("yep-anthropic/claude-opus-4-8", "pi")).toBe(
+      1_000_000,
+    );
+    // Unknown gateway model still falls back to the 200K default.
+    expect(getModelContextWindow("gpt-image-2", "pi")).toBe(
       DEFAULT_CONTEXT_WINDOW,
     );
   });
 });
 
-describe("getOpenCodeModelDefaultLimits", () => {
+describe("getLlmGatewayModelDefaultLimits", () => {
   it("returns curated context/output limits by longest-prefix match", () => {
-    expect(getOpenCodeModelDefaultLimits("deepseek-v4-pro")).toEqual({
+    expect(getLlmGatewayModelDefaultLimits("deepseek-v4-pro")).toEqual({
       context: 1_000_000,
       output: 384_000,
     });
-    expect(getOpenCodeModelDefaultLimits("gpt-5.4-mini")).toEqual({
+    expect(getLlmGatewayModelDefaultLimits("gpt-5.4-mini")).toEqual({
       context: 400_000,
       output: 128_000,
     });
-    expect(getOpenCodeModelDefaultLimits("gpt-5.5")).toEqual({
+    expect(getLlmGatewayModelDefaultLimits("gpt-5.5")).toEqual({
       context: 1_000_000,
       output: 128_000,
     });
-    expect(getOpenCodeModelDefaultLimits("doubao-seed-2-1-pro-260628")).toEqual(
-      {
-        context: 256_000,
-        output: 128_000,
-      },
-    );
+    expect(
+      getLlmGatewayModelDefaultLimits("doubao-seed-2-1-pro-260628"),
+    ).toEqual({
+      context: 256_000,
+      output: 128_000,
+    });
   });
 
   it("returns undefined for unknown families", () => {
-    expect(getOpenCodeModelDefaultLimits("gpt-image-2")).toBeUndefined();
-    expect(getOpenCodeModelDefaultLimits(undefined)).toBeUndefined();
+    expect(getLlmGatewayModelDefaultLimits("gpt-image-2")).toBeUndefined();
+    expect(getLlmGatewayModelDefaultLimits(undefined)).toBeUndefined();
   });
 });
 

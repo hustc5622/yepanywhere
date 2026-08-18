@@ -15,12 +15,6 @@ import type {
 } from "../types/renderItems";
 import { getCodexExecResultOverview } from "./codexExec";
 import { getMessageId } from "./mergeMessages";
-import {
-  extractOpenCodeTaskStateUpdates,
-  getOpenCodeSubagentSessionId,
-  isOpenCodeBackgroundTask,
-  resolveOpenCodeTaskStatus,
-} from "./openCodeSubagents";
 
 const CODEX_TURN_ABORTED_DISPLAY_TEXT = "Conversation stopped by user";
 
@@ -115,70 +109,7 @@ export function preprocessMessages(
 
   const enrichedItems = enrichWriteStdinWithCommand(items);
   const compactWaits = collapseCodexWaitPolls(enrichedItems);
-  return reconcileOpenCodeBackgroundTaskStatuses(
-    collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits)),
-  );
-}
-
-function getOpenCodeTaskStateText(item: RenderItem): string[] {
-  switch (item.type) {
-    case "tool_call":
-      return item.toolResult?.content ? [item.toolResult.content] : [];
-    case "text":
-      return [item.text];
-    case "user_prompt":
-      return [getPromptText(item.content)];
-    case "session_setup":
-      return item.prompts.map(getPromptText);
-    case "system":
-      return [item.content];
-    case "thinking":
-      return [];
-    case "codex_native_item":
-      return [];
-  }
-}
-
-/**
- * OpenCode background task tools finish after launching the child, then emit a
- * later synthetic `<task state="completed|error">` notification. Reconcile the
- * launcher card with the latest persisted child lifecycle marker so refreshes
- * and resumed task sessions retain the real status.
- */
-export function reconcileOpenCodeBackgroundTaskStatuses(
-  items: RenderItem[],
-): RenderItem[] {
-  const latestStates = new Map<
-    string,
-    ReturnType<typeof extractOpenCodeTaskStateUpdates>[number]["state"]
-  >();
-
-  for (const item of items) {
-    for (const text of getOpenCodeTaskStateText(item)) {
-      for (const update of extractOpenCodeTaskStateUpdates(text)) {
-        latestStates.set(update.sessionId, update.state);
-      }
-    }
-  }
-
-  return items.map((item) => {
-    if (
-      item.type !== "tool_call" ||
-      item.toolName.toLowerCase() !== "task" ||
-      !isOpenCodeBackgroundTask(item.toolInput)
-    ) {
-      return item;
-    }
-
-    const sessionId = getOpenCodeSubagentSessionId(item.toolInput);
-    const status = resolveOpenCodeTaskStatus(
-      item.toolInput,
-      item.toolResult?.content,
-      item.status,
-      sessionId ? latestStates.get(sessionId) : undefined,
-    );
-    return status === item.status ? item : { ...item, status };
-  });
+  return collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits));
 }
 
 const SESSION_SETUP_PREFIXES = [
@@ -899,8 +830,7 @@ function processMessage(
       if (block.id && block.name) {
         // Stream reconnects/resume can replay the same tool_use id from a
         // different assistant message snapshot. Keep one render item per tool
-        // id, but let a richer input snapshot refresh the arguments (OpenCode
-        // streams pending tools with empty input and fills it while running).
+        // id, but let a richer input snapshot refresh the arguments.
         const existingIndex = toolCallIndices.get(block.id);
         if (existingIndex !== undefined) {
           const existingItem = items[existingIndex];
@@ -973,9 +903,8 @@ function processMessage(
         items.push(toolCall);
       }
     } else if (block.type === "tool_result" && block.tool_use_id) {
-      // OpenCode persists tool_use and tool_result blocks together in the
-      // assistant message. Pair those results here; Claude/Codex usually put
-      // tool_result blocks in a following user message handled above.
+      // Some providers persist tool_use and tool_result blocks together in the
+      // assistant message; pair those results here too.
       attachToolResult(block, msg, items, toolCallIndices, pendingToolCalls);
     }
   }
@@ -989,8 +918,7 @@ function getInitialToolStatus(
     return "aborted";
   }
 
-  const providerStatus =
-    getStringField(block, "opencodeStatus") ?? getStringField(block, "status");
+  const providerStatus = getStringField(block, "status");
 
   switch (providerStatus?.toLowerCase()) {
     case "complete":
@@ -1013,14 +941,6 @@ function normalizeToolInput(block: ContentBlock): unknown {
   const input = isRecord(block.input) ? { ...block.input } : block.input;
   if (!isRecord(input)) {
     return input;
-  }
-
-  const title = getStringField(block, "opencodeTitle");
-  if (title) {
-    input.opencodeTitle = title;
-  }
-  if (isRecord(block) && block.opencodeMetadata !== undefined) {
-    input.opencodeMetadata = block.opencodeMetadata;
   }
 
   const name = typeof block.name === "string" ? block.name.toLowerCase() : "";
@@ -1085,59 +1005,7 @@ function normalizeToolInput(block: ContentBlock): unknown {
     input.glob = input.include;
   }
 
-  if (name === "question" && Array.isArray(input.questions)) {
-    input.questions = normalizeOpenCodeQuestions(input.questions);
-  }
-
   return input;
-}
-
-/**
- * Normalize opencode's `question` tool prompts into the shape the shared
- * AskUserQuestion renderer expects: stable ids, `multiSelect` (opencode uses
- * `multiple`), and `{ label, description }` options.
- */
-function normalizeOpenCodeQuestions(raw: unknown[]): unknown[] {
-  return raw
-    .map((item, index) => {
-      if (!isRecord(item)) return null;
-      const question = typeof item.question === "string" ? item.question : "";
-      if (!question) return null;
-
-      const options = Array.isArray(item.options)
-        ? item.options
-            .map((option) => {
-              if (!isRecord(option)) return null;
-              const label =
-                typeof option.label === "string" ? option.label : "";
-              if (!label) return null;
-              return {
-                label,
-                description:
-                  typeof option.description === "string"
-                    ? option.description
-                    : "",
-              };
-            })
-            .filter(
-              (option): option is { label: string; description: string } =>
-                option !== null,
-            )
-        : [];
-
-      return {
-        id: `question-${index}`,
-        question,
-        header:
-          typeof item.header === "string" && item.header.trim()
-            ? item.header
-            : "Question",
-        options,
-        multiSelect: Boolean(item.multiSelect ?? item.multiple),
-        ...(typeof item.custom === "boolean" ? { custom: item.custom } : {}),
-      };
-    })
-    .filter((question) => question !== null);
 }
 
 function getStringField(value: unknown, field: string): string | undefined {
@@ -1497,8 +1365,8 @@ function scoreToolResult(result: ToolResultData): number {
     // JSONL-complete result beats a partial streaming snapshot.
     score += 10_000;
   }
-  // For OpenCode `question` results, richer answer sets should outrank
-  // partial ones. A live-stream `{questions, answers:{}}` snapshot arrives
+  // For question results, richer answer sets should outrank partial ones. A
+  // live-stream `{questions, answers:{}}` snapshot arrives
   // before the completed tool_result carries the real `metadata.answers`;
   // without this, the empty-answers copy scores equal to the filled one and
   // `attachToolResult` keeps the stale copy on duplicate arrival.
@@ -1558,13 +1426,15 @@ function attachToolResult(
         (resultMessage as Record<string, unknown>).tool_use_result)
       : undefined;
 
+  if (!structured && item.toolName.toLowerCase() === "askuserquestion") {
+    structured = normalizeAskUserQuestionResult(item.toolInput, content);
+  }
+
   if (!structured) {
-    structured = normalizeOpenCodeToolResult(
+    structured = normalizeKimiFileToolResult(
       item.toolName,
-      content,
-      block.is_error || false,
       item.toolInput,
-      getBlockMetadata(block),
+      content,
     );
   }
 
@@ -1610,98 +1480,63 @@ function attachToolResult(
 }
 
 /**
- * Pull the provider-stamped metadata bag off a tool_result block. OpenCode
- * writes the final `state.metadata` (including `answers` for the `question`
- * tool) onto the completed `tool_result` as `opencodeMetadata`; the streamed
- * `tool_use` snapshot may never be re-emitted with that metadata, so the
- * result block is the authoritative source.
+ * Kimi's native Read/Write tools persist string results and camel/snake-case
+ * input variants. Build the shared file result shape without depending on a
+ * retired provider's result normalizer.
  */
-function getBlockMetadata(block: ContentBlock): unknown {
-  if (!isRecord(block)) return undefined;
-  const metadata = block.opencodeMetadata;
-  return metadata !== undefined ? metadata : undefined;
-}
-
-function normalizeOpenCodeToolResult(
+function normalizeKimiFileToolResult(
   toolName: string,
-  content: string,
-  isError: boolean,
   input: unknown,
-  resultMetadata?: unknown,
+  resultContent: string,
 ): unknown {
-  const normalized = toolName.toLowerCase();
+  if (!isRecord(input) || (toolName !== "Read" && toolName !== "Write")) {
+    return undefined;
+  }
 
-  if (normalized === "bash" || normalized === "shell") {
+  const filePath = [input.file_path, input.path, input.filePath].find(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  if (!filePath) return undefined;
+
+  if (toolName === "Write") {
+    if (typeof input.content !== "string") return undefined;
+    const numLines = input.content.split("\n").length;
     return {
-      stdout: isError ? "" : content,
-      stderr: isError ? content : "",
-      interrupted: false,
-      isImage: false,
+      type: "text",
+      file: {
+        filePath,
+        content: input.content,
+        numLines,
+        startLine: 1,
+        totalLines: numLines,
+      },
     };
   }
 
-  if (normalized === "read") {
-    return normalizeOpenCodeReadResult(content, input);
-  }
+  const numberedLines = resultContent.split("\n").map((line) => {
+    const match = /^(\d+)\t(.*)$/.exec(line);
+    return match?.[1]
+      ? { line: Number.parseInt(match[1], 10), text: match[2] }
+      : null;
+  });
+  if (numberedLines.some((line) => line === null)) return undefined;
+  const lines = numberedLines.filter(
+    (line): line is { line: number; text: string } => line !== null,
+  );
+  const firstLine = lines[0]?.line;
+  const lastLine = lines.at(-1)?.line;
+  if (firstLine === undefined || lastLine === undefined) return undefined;
 
-  if (normalized === "write") {
-    return normalizeOpenCodeWriteResult(input);
-  }
-
-  if (normalized === "edit" || normalized === "apply_patch") {
-    return normalizeOpenCodeEditResult(input);
-  }
-
-  if (normalized === "glob") {
-    const filenames = content
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("("));
-    return {
-      filenames,
-      numFiles: filenames.length,
-      durationMs: 0,
-      truncated: content.includes("Results are truncated"),
-    };
-  }
-
-  if (normalized === "grep") {
-    const filenames = new Set<string>();
-    for (const line of content.split("\n")) {
-      if (!line.trim() || line.startsWith("  Line ")) continue;
-      if (line.endsWith(":")) {
-        filenames.add(line.slice(0, -1));
-      }
-    }
-    return {
-      mode: "content",
-      filenames: Array.from(filenames),
-      numFiles: filenames.size,
-      content,
-      numLines: content.split("\n").filter(Boolean).length,
-    };
-  }
-
-  if (normalized === "todowrite" || normalized === "todo") {
-    try {
-      const todos = JSON.parse(content);
-      if (Array.isArray(todos)) {
-        return { oldTodos: [], newTodos: todos };
-      }
-    } catch {
-      return undefined;
-    }
-  }
-
-  if (normalized === "question") {
-    return normalizeOpenCodeQuestionResult(input, resultMetadata);
-  }
-
-  if (normalized === "askuserquestion") {
-    return normalizeAskUserQuestionResult(input, content);
-  }
-
-  return undefined;
+  return {
+    type: "text",
+    file: {
+      filePath,
+      content: lines.map((line) => line.text).join("\n"),
+      numLines: lines.length,
+      startLine: firstLine,
+      totalLines: lastLine,
+    },
+  };
 }
 
 /**
@@ -1739,237 +1574,6 @@ function normalizeAskUserQuestionResult(
   }
 
   return { questions: input.questions, answers };
-}
-
-/**
- * Build an AskUserQuestion-shaped result for opencode's `question` tool by
- * pairing the (already normalized) prompts with the selected answers.
- *
- * Answer precedence:
- * 1. `resultMetadata.answers` — stamped on the completed `tool_result`
- *    block's `opencodeMetadata` during live streaming. This is the
- *    authoritative source because the server emits the `tool_result` once
- *    the user submits, without re-emitting the `tool_use` with the final
- *    metadata (the `tool_use` dedup keys off the input fingerprint, which
- *    doesn't change when answers arrive).
- * 2. `input.opencodeMetadata.answers` — fallback for persisted snapshots
- *    where the metadata was also copied onto the `tool_use` block. Without
- *    this, full-session refreshes would regress.
- */
-function normalizeOpenCodeQuestionResult(
-  input: unknown,
-  resultMetadata?: unknown,
-): unknown {
-  if (!isRecord(input) || !Array.isArray(input.questions)) {
-    return undefined;
-  }
-  const questions = input.questions;
-  if (questions.length === 0) {
-    return undefined;
-  }
-
-  const resultMeta = isRecord(resultMetadata) ? resultMetadata : undefined;
-  const inputMeta = isRecord(input.opencodeMetadata)
-    ? input.opencodeMetadata
-    : undefined;
-  const rawAnswers = Array.isArray(resultMeta?.answers)
-    ? resultMeta.answers
-    : Array.isArray(inputMeta?.answers)
-      ? inputMeta.answers
-      : [];
-
-  const answers: Record<string, string[]> = {};
-  questions.forEach((question, index) => {
-    if (!isRecord(question) || typeof question.id !== "string") return;
-    const rawAnswer = rawAnswers[index];
-    const values = Array.isArray(rawAnswer)
-      ? rawAnswer.filter(
-          (value): value is string =>
-            typeof value === "string" && value.length > 0,
-        )
-      : typeof rawAnswer === "string" && rawAnswer
-        ? [rawAnswer]
-        : [];
-    // Only record questions the user actually answered so the summary and
-    // per-question selection reflect unanswered prompts correctly.
-    if (values.length > 0) {
-      answers[question.id] = values;
-    }
-  });
-
-  return { questions, answers };
-}
-
-function normalizeOpenCodeEditResult(input: unknown): unknown {
-  if (!isRecord(input)) {
-    return undefined;
-  }
-
-  const filePath = getOpenCodeFilePath(input);
-  const oldString = getStringInputField(input, "old_string", "oldString");
-  const newString = getStringInputField(input, "new_string", "newString");
-  const replaceAll =
-    typeof input.replace_all === "boolean"
-      ? input.replace_all
-      : typeof input.replaceAll === "boolean"
-        ? input.replaceAll
-        : false;
-
-  if (!filePath || oldString === undefined || newString === undefined) {
-    return undefined;
-  }
-
-  return {
-    filePath,
-    oldString,
-    newString,
-    originalFile: oldString,
-    replaceAll,
-    userModified: false,
-    structuredPatch: createReplacementPatch(oldString, newString),
-  };
-}
-
-function createReplacementPatch(oldString: string, newString: string) {
-  const oldLines = oldString.length > 0 ? oldString.split("\n") : [];
-  const newLines = newString.length > 0 ? newString.split("\n") : [];
-  const lines = [
-    ...oldLines.map((line) => `-${line}`),
-    ...newLines.map((line) => `+${line}`),
-  ];
-
-  return [
-    {
-      oldStart: 1,
-      oldLines: Math.max(oldLines.length, 1),
-      newStart: 1,
-      newLines: Math.max(newLines.length, 1),
-      lines,
-    },
-  ];
-}
-
-function normalizeOpenCodeWriteResult(input: unknown): unknown {
-  if (!isRecord(input)) {
-    return undefined;
-  }
-
-  const filePath = getOpenCodeFilePath(input);
-  const content = typeof input.content === "string" ? input.content : undefined;
-  if (!filePath || content === undefined) {
-    return undefined;
-  }
-
-  const lineCount = content.split("\n").length;
-  return {
-    type: "text",
-    file: {
-      filePath,
-      content,
-      numLines: lineCount,
-      startLine: 1,
-      totalLines: lineCount,
-    },
-  };
-}
-
-function getOpenCodeFilePath(
-  input: Record<string, unknown>,
-): string | undefined {
-  return getStringInputField(input, "file_path", "filePath", "path");
-}
-
-function getStringInputField(
-  input: Record<string, unknown>,
-  ...fields: string[]
-): string | undefined {
-  for (const field of fields) {
-    const value = input[field];
-    if (typeof value === "string") {
-      return value;
-    }
-  }
-  return undefined;
-}
-
-function normalizeOpenCodeReadResult(content: string, input: unknown): unknown {
-  const filePath =
-    getXmlTag(content, "path") ??
-    (isRecord(input) &&
-    (typeof input.file_path === "string" || typeof input.filePath === "string")
-      ? String(input.file_path ?? input.filePath)
-      : "");
-  if (!filePath) {
-    return undefined;
-  }
-
-  const type = getXmlTag(content, "type");
-  const taggedContent =
-    getXmlTag(content, "content") ?? getXmlTag(content, "entries");
-  const isKimiNumberedText =
-    taggedContent === undefined && /^\d+\t/m.test(content);
-  if (!taggedContent && !isKimiNumberedText) {
-    return {
-      type: "text",
-      file: {
-        filePath,
-        content,
-        numLines: content.split("\n").length,
-        startLine: 1,
-        totalLines: content.split("\n").length,
-      },
-    };
-  }
-  const rawContent = taggedContent ?? content;
-
-  const startLine = parseOpenCodeReadStartLine(rawContent);
-  const text =
-    type === "directory"
-      ? rawContent.trim()
-      : stripOpenCodeReadLineNumbers(rawContent);
-  const numLines = text ? text.split("\n").length : 0;
-  const totalLines =
-    parseOpenCodeReadTotalLines(content) ??
-    Math.max(startLine + Math.max(numLines - 1, 0), numLines);
-
-  return {
-    type: "text",
-    file: {
-      filePath,
-      content: text,
-      numLines,
-      startLine,
-      totalLines,
-    },
-  };
-}
-
-function getXmlTag(text: string, tag: string): string | undefined {
-  const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
-  return match?.[1]?.trim();
-}
-
-function stripOpenCodeReadLineNumbers(text: string): string {
-  return text
-    .split("\n")
-    .filter(
-      (line) =>
-        !line.startsWith("(End of file") && !line.startsWith("(Showing lines"),
-    )
-    .map((line) => line.replace(/^\d+(?::\s?|\t)/, ""))
-    .join("\n")
-    .trimEnd();
-}
-
-function parseOpenCodeReadStartLine(text: string): number {
-  const firstNumberedLine = text.match(/^(\d+)(?::|\t)/m);
-  return firstNumberedLine?.[1] ? Number.parseInt(firstNumberedLine[1], 10) : 1;
-}
-
-function parseOpenCodeReadTotalLines(text: string): number | undefined {
-  const totalMatch =
-    text.match(/total\s+(\d+)\s+lines/i) ?? text.match(/of\s+(\d+)\./i);
-  return totalMatch?.[1] ? Number.parseInt(totalMatch[1], 10) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

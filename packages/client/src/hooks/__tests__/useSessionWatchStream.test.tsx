@@ -38,7 +38,7 @@ describe("useSessionWatchStream", () => {
         {
           sessionId: "ses_1",
           projectId: "project_1",
-          provider: "opencode",
+          provider: "pi",
         },
         { onChange: vi.fn() },
       ),

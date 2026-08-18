@@ -2,7 +2,6 @@ import type { ModelInfo } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import {
   getModelReasoningEfforts,
-  getOpenCodeReasoningPickerEfforts,
   resolveModelReasoningEffort,
 } from "../codexReasoning";
 
@@ -60,7 +59,7 @@ describe("Codex model reasoning efforts", () => {
     expect(resolveModelReasoningEffort(kimiK3, "xhigh")).toBe("high");
   });
 
-  it("uses the variants advertised for the selected OpenCode protocol", () => {
+  it("uses the variants advertised for the selected gateway protocol", () => {
     const glm: ModelInfo = {
       id: "glm-5.2",
       name: "GLM-5.2",
@@ -97,12 +96,7 @@ describe("Codex model reasoning efforts", () => {
     expect(getModelReasoningEfforts(openAiOnly, "anthropic")).toEqual([]);
   });
 
-  it("keeps the OpenCode picker independent from model metadata", () => {
-    expect(
-      getOpenCodeReasoningPickerEfforts().map(
-        (option) => option.reasoningEffort,
-      ),
-    ).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  it("returns no efforts without model metadata", () => {
     expect(getModelReasoningEfforts(undefined)).toEqual([]);
   });
 });

@@ -43,36 +43,36 @@ describe("new session defaults", () => {
       permissionMode: "bypassPermissions",
       codexMcpMode: "full",
     });
-    const opencodeConfig = {
+    const llmGatewayConfig = {
       model: "claude-opus-4-8",
       requestProtocol: "anthropic" as const,
     };
 
     const merged = mergeNewSessionDefaults(current, {
-      provider: "opencode",
+      provider: "pi",
       permissionMode: "acceptEdits",
-      opencodeConfig,
+      llmGatewayConfig,
       byProvider: {
-        opencode: {
+        pi: {
           permissionMode: "acceptEdits",
-          opencodeConfig,
+          llmGatewayConfig,
         },
       },
     });
 
-    expect(merged?.provider).toBe("opencode");
+    expect(merged?.provider).toBe("pi");
     expect(getNewSessionProviderDefaults(merged, "codex")).toEqual({
       model: "gpt-5.6-sol",
       permissionMode: "bypassPermissions",
       codexMcpMode: "full",
     });
-    expect(getNewSessionProviderDefaults(merged, "opencode")).toEqual({
+    expect(getNewSessionProviderDefaults(merged, "pi")).toEqual({
       permissionMode: "acceptEdits",
-      opencodeConfig,
+      llmGatewayConfig,
     });
     expect(merged).toMatchObject({
       permissionMode: "acceptEdits",
-      opencodeConfig,
+      llmGatewayConfig,
     });
     expect(merged).not.toHaveProperty("codexMcpMode");
   });

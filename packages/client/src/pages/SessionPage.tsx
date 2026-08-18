@@ -122,8 +122,6 @@ function getApprovalAgentName(
     case "gemini":
     case "gemini-acp":
       return "Gemini";
-    case "opencode":
-      return "OpenCode";
     case "pi":
       return "Pi";
     case "kimi":
@@ -316,8 +314,8 @@ function SessionPageContent({
   const { showToast } = useToastContext();
 
   // Historical edit boundary for the next send.
-  // Claude uses `parentUuid` as its resume point. OpenCode uses the persisted
-  // prompt's own native `uuid` as a fork boundary. Codex keeps the legacy
+  // Claude uses `parentUuid` as its resume point. Native edit-fork providers
+  // use the persisted prompt's own `uuid`. Codex keeps the legacy
   // `rollbackNumTurns` wire field as a trailing-turn exclusion count for a
   // source-preserving native fork.
   const [editRewind, setEditRewind] = useState<{
@@ -702,12 +700,6 @@ function SessionPageContent({
       ? sessionUpdatedAt
       : lastStreamActivityAt;
   }, [sessionUpdatedAt, lastStreamActivityAt]);
-  // OpenCode task children run inside their parent process, so a directly
-  // opened child can be owner=none even though its persisted updatedAt keeps
-  // advancing. Preserve that authoritative time on the child's latest turn.
-  const isOpenCodeSubagentSession =
-    session?.provider === "opencode" && Boolean(session.parentSessionId);
-
   useEngagementTracking({
     sessionId,
     activityAt,
@@ -748,7 +740,7 @@ function SessionPageContent({
     }
 
     try {
-      // Provider-specific edit semantics: Codex, OpenCode and ZCode create a
+      // Provider-specific edit semantics: Codex, Pi and ZCode create a
       // new native session while preserving the source; Claude resumes
       // through the prompt parent.
       if (editRewind) {
@@ -845,7 +837,7 @@ function SessionPageContent({
           } else {
             reconnectStream();
           }
-        } else if (editSubmission.kind === "opencode-fork") {
+        } else if (editSubmission.kind === "edit-fork") {
           historicalEditPostAttempted = true;
           const result = await requireStartedHistoricalEdit(
             await api.resumeSession(
@@ -2078,12 +2070,7 @@ function SessionPageContent({
                   isProcessing={
                     status.owner === "self" && processState === "in-turn"
                   }
-                  lastActivityAt={
-                    isOpenCodeSubagentSession
-                      ? activityAt
-                      : lastStreamActivityAt
-                  }
-                  latestTurnUsesUpdateTime={isOpenCodeSubagentSession}
+                  lastActivityAt={lastStreamActivityAt}
                   isCompacting={isCompacting}
                   scrollTrigger={scrollTrigger + activeWindowTrimRevision}
                   pendingMessages={pendingMessages}

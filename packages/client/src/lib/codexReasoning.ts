@@ -1,31 +1,15 @@
-import type { ModelInfo, OpenCodeRequestProtocol } from "@yep-anywhere/shared";
+import type {
+  LlmGatewayRequestProtocol,
+  ModelInfo,
+} from "@yep-anywhere/shared";
 
 export type ModelReasoningEffort = NonNullable<
   ModelInfo["supportedReasoningEfforts"]
 >[number];
 
-const OPENCODE_REASONING_PREFERENCES = [
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
-
-/**
- * OpenCode accepts a variant as a generic preference. The runtime applies it
- * only when the selected model advertises a matching variant; otherwise it is
- * a safe no-op. Keep the picker independent from any individual model catalog.
- */
-export function getOpenCodeReasoningPickerEfforts(): ModelReasoningEffort[] {
-  return OPENCODE_REASONING_PREFERENCES.map((reasoningEffort) => ({
-    reasoningEffort,
-  }));
-}
-
 export function getModelReasoningEfforts(
   model: ModelInfo | undefined,
-  protocol?: OpenCodeRequestProtocol,
+  protocol?: LlmGatewayRequestProtocol,
 ): ModelReasoningEffort[] {
   const seen = new Set<string>();
   const efforts: ModelReasoningEffort[] = [];
@@ -48,7 +32,7 @@ export function getModelReasoningEfforts(
 export function resolveModelReasoningEffort(
   model: ModelInfo | undefined,
   preferredReasoningEffort?: string | null,
-  protocol?: OpenCodeRequestProtocol,
+  protocol?: LlmGatewayRequestProtocol,
 ): string | undefined {
   const efforts = getModelReasoningEfforts(model, protocol);
   const preferred = preferredReasoningEffort?.trim();

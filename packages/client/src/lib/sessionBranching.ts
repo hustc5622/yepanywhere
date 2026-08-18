@@ -77,7 +77,7 @@ export type SessionEditSubmission =
       refreshSameSessionBranches: true;
     }
   | {
-      kind: "opencode-fork";
+      kind: "edit-fork";
       resumeSessionAt: string;
       optimisticTruncate: false;
       refreshSameSessionBranches: false;
@@ -92,10 +92,10 @@ export interface EditablePromptIdentity {
   rollbackNumTurns?: number | null;
 }
 
-export function isOpenCodeProvider(
+export function usesNativeEditForkBoundary(
   provider: ProviderName | string | undefined | null,
-): provider is "opencode" | "pi" {
-  return provider === "opencode" || provider === "pi";
+): provider is "pi" {
+  return provider === "pi";
 }
 
 export function supportsHistoricalMessageEditing(
@@ -105,14 +105,13 @@ export function supportsHistoricalMessageEditing(
     provider == null ||
     provider === "claude" ||
     provider === "codex" ||
-    provider === "opencode" ||
     provider === "pi" ||
     provider === "zcode"
   );
 }
 
 /**
- * OpenCode, Pi, and ZCode can only fork at an authoritative native message ID.
+ * Pi and ZCode can only fork at an authoritative native message ID.
  * Their live echo temporarily carries a Yep UUID, so editing stays
  * unavailable until the persisted message replaces that echo. Other
  * supported providers retain their existing edit behavior.
@@ -123,7 +122,7 @@ export function canEditPersistedUserPrompt(
 ): boolean {
   if (!supportsHistoricalMessageEditing(provider)) return false;
   return (
-    (!isOpenCodeProvider(provider) && provider !== "zcode") ||
+    (!usesNativeEditForkBoundary(provider) && provider !== "zcode") ||
     source === "jsonl"
   );
 }
@@ -143,11 +142,9 @@ export function resolveSessionEditSubmission(
       : { kind: "invalid-codex-boundary" };
   }
 
-  if (isOpenCodeProvider(provider) || provider === "zcode") {
+  if (usesNativeEditForkBoundary(provider) || provider === "zcode") {
     return {
-      // The "opencode-fork" submission shape is provider-agnostic: SessionPage
-      // only consumes `resumeSessionAt` and navigates to the returned fork id.
-      kind: "opencode-fork",
+      kind: "edit-fork",
       // The native fork excludes this message and everything after it.
       // This must be the persisted user message's own native ID.
       resumeSessionAt: edit.uuid,

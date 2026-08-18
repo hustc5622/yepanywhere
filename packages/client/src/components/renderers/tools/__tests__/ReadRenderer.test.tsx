@@ -130,7 +130,7 @@ describe("ReadRenderer", () => {
     expect(screen.getByText(/continues in Shell/)).toBeDefined();
   });
 
-  it("renders raw OpenCode read XML instead of a failed read fallback", () => {
+  it("renders tagged read output instead of a failed read fallback", () => {
     const rawResult =
       '<path>/repo/data/benchmark_runs/j-9oi4c3ufw4__aime_25_hf/task.json</path>\n<type>file</type>\n<content>\n1: {\n2:   "task_id": "j-9oi4c3ufw4"\n3: }\n(End of file - total 3 lines)\n</content>';
 

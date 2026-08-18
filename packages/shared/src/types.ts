@@ -4,7 +4,6 @@
  * - "codex": OpenAI Codex via SDK (cloud models)
  * - "codex-oss": Codex via CLI with --oss (local models via Ollama)
  * - "gemini": Google Gemini via CLI
- * - "opencode": OpenCode via HTTP server (multi-provider agent)
  * - "pi": Pi coding agent via its JSONL RPC mode
  * - "kimi": Kimi Code CLI via Agent Client Protocol (`kimi acp`)
  */
@@ -15,24 +14,28 @@ export type ProviderName =
   | "codex-oss"
   | "gemini"
   | "gemini-acp"
-  | "opencode"
   | "pi"
   | "kimi"
   | "zcode";
+
+/** Providers that can be registered or selected by the current product. */
+export type LiveProviderName = ProviderName;
+
+/** Provider identifiers accepted only while reading legacy persisted state. */
+export type PersistedProviderName = ProviderName | "opencode";
 
 /**
  * All provider names in display order.
  * Used for filter dropdowns, iteration, etc.
  * Keep in sync with ProviderName type above.
  */
-export const ALL_PROVIDERS: readonly ProviderName[] = [
+export const ALL_PROVIDERS: readonly LiveProviderName[] = [
   "claude",
   "claude-ollama",
   "codex",
   "codex-oss",
   "gemini",
   "gemini-acp",
-  "opencode",
   "pi",
   "kimi",
   "zcode",
@@ -42,7 +45,7 @@ export const ALL_PROVIDERS: readonly ProviderName[] = [
  * The default provider when none is specified.
  * Used when a new session does not explicitly select a provider.
  */
-export const DEFAULT_PROVIDER: ProviderName = "codex";
+export const DEFAULT_PROVIDER: LiveProviderName = "codex";
 
 export type RemoteSessionStorageMode = "shared" | "ssh-replica";
 
@@ -100,7 +103,7 @@ export interface ReasoningEffortInfo {
 export interface ModelInfo {
   /**
    * Model identifier used in the picker. For providers that expose multiple
-   * upstream channels (OpenCode, Codex) this is a composite `source/model`
+   * upstream channels this may be a composite `source/model`
    * id (e.g. "deepseek/deepseek-v4-flash"); otherwise it is the bare slug.
    */
   id: string;
@@ -122,9 +125,9 @@ export interface ModelInfo {
   description?: string;
   /** Reasoning efforts advertised by the provider, in picker display order. */
   supportedReasoningEfforts?: ReasoningEffortInfo[];
-  /** OpenCode reasoning efforts keyed by the request protocol used upstream. */
+  /** Reasoning efforts keyed by the request protocol used upstream. */
   supportedReasoningEffortsByProtocol?: Partial<
-    Record<OpenCodeRequestProtocol, ReasoningEffortInfo[]>
+    Record<LlmGatewayRequestProtocol, ReasoningEffortInfo[]>
   >;
   /** Provider-recommended reasoning effort for this model. */
   defaultReasoningEffort?: string;
@@ -148,21 +151,21 @@ export interface ModelInfo {
   parentModel?: string;
   /** Quantization level, e.g. "Q4_K_M" */
   quantizationLevel?: string;
-  /** Request protocols exposed for this model by an OpenCode gateway. */
-  supportedRequestProtocols?: OpenCodeRequestProtocol[];
+  /** Request protocols exposed for this model by an LLM gateway. */
+  supportedRequestProtocols?: LlmGatewayRequestProtocol[];
   /** Upstream owner reported by a model gateway. */
   ownedBy?: string;
 }
 
 /**
- * Protocol used by the generated per-session OpenCode provider.
+ * Wire protocol used by a managed LLM gateway model.
  */
-export type OpenCodeRequestProtocol = "openai-compatible" | "anthropic";
+export type LlmGatewayRequestProtocol = "openai-compatible" | "anthropic";
 
-export const ALL_OPENCODE_REQUEST_PROTOCOLS: readonly OpenCodeRequestProtocol[] =
+export const ALL_LLM_GATEWAY_REQUEST_PROTOCOLS: readonly LlmGatewayRequestProtocol[] =
   ["openai-compatible", "anthropic"] as const;
 
-export interface OpenCodeModelLimits {
+export interface LlmGatewayModelLimits {
   /** Maximum context window in tokens */
   context: number;
   /** Maximum input tokens, when it differs from the total context window. */
@@ -171,17 +174,17 @@ export interface OpenCodeModelLimits {
   output: number;
 }
 
-export type OpenCodeJsonValue =
+export type LlmGatewayJsonValue =
   | string
   | number
   | boolean
   | null
-  | OpenCodeJsonValue[]
-  | { [key: string]: OpenCodeJsonValue };
+  | LlmGatewayJsonValue[]
+  | { [key: string]: LlmGatewayJsonValue };
 
-export type OpenCodeJsonObject = Record<string, OpenCodeJsonValue>;
+export type LlmGatewayJsonObject = Record<string, LlmGatewayJsonValue>;
 
-export interface OpenCodeModelCapabilities {
+export interface LlmGatewayModelCapabilities {
   attachment?: boolean;
   reasoning?: boolean;
   temperature?: boolean;
@@ -189,25 +192,21 @@ export interface OpenCodeModelCapabilities {
 }
 
 /**
- * Full configuration for a managed OpenCode session.
- *
- * The browser selects an upstream model and request protocol. Yep then creates
- * an isolated OpenCode provider/model entry before spawning `opencode serve`,
- * so one global OpenCode config never has to pretend a model only supports one
- * API shape. Credentials and the gateway base URL remain server-owned.
+ * Provider-neutral configuration for a model served by a managed LLM gateway.
+ * Credentials and the gateway base URL remain server-owned.
  */
-export interface OpenCodeSessionConfig {
+export interface LlmGatewaySessionConfig {
   /** Upstream model ID as returned by the gateway's /v1/models endpoint. */
   model: string;
-  requestProtocol: OpenCodeRequestProtocol;
-  /** Optional display name used in OpenCode's model catalog. */
+  requestProtocol: LlmGatewayRequestProtocol;
+  /** Optional display name used in a provider model catalog. */
   name?: string;
-  limits?: OpenCodeModelLimits;
-  capabilities?: OpenCodeModelCapabilities;
-  /** OpenCode provider/model patches for fields not yet modeled by Yep's UI. */
+  limits?: LlmGatewayModelLimits;
+  capabilities?: LlmGatewayModelCapabilities;
+  /** Provider/model patches for fields not yet modeled by Yep's UI. */
   advanced?: {
-    provider?: OpenCodeJsonObject;
-    model?: OpenCodeJsonObject;
+    provider?: LlmGatewayJsonObject;
+    model?: LlmGatewayJsonObject;
   };
 }
 
@@ -246,7 +245,7 @@ export interface CodexModelSourceInfo {
  * Provider info for UI display.
  */
 export interface ProviderInfo {
-  name: ProviderName;
+  name: LiveProviderName;
   displayName: string;
   installed: boolean;
   authenticated: boolean;
@@ -329,14 +328,16 @@ export const ALL_CODEX_MCP_MODES: readonly CodexMcpMode[] = [
 export interface NewSessionProviderDefaults {
   model?: string;
   thinking?: ThinkingOption;
-  /** Exact provider reasoning effort / OpenCode model variant. */
+  /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
   permissionMode?: PermissionMode;
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
   codexModelProvider?: string;
-  /** OpenCode-only managed provider/model configuration. */
-  opencodeConfig?: OpenCodeSessionConfig;
+  /** Managed LLM gateway provider/model configuration. */
+  llmGatewayConfig?: LlmGatewaySessionConfig;
+  /** @deprecated Persisted compatibility; live clients use `llmGatewayConfig`. */
+  opencodeConfig?: LlmGatewaySessionConfig;
 }
 
 /**
@@ -348,8 +349,8 @@ export interface NewSessionProviderDefaults {
  * older clients and servers.
  */
 export interface NewSessionDefaults extends NewSessionProviderDefaults {
-  provider?: ProviderName;
-  byProvider?: Partial<Record<ProviderName, NewSessionProviderDefaults>>;
+  provider?: LiveProviderName;
+  byProvider?: Partial<Record<LiveProviderName, NewSessionProviderDefaults>>;
 }
 
 /**
@@ -435,8 +436,9 @@ function getLegacyNewSessionProviderDefaults(
   if (defaults.codexModelProvider !== undefined) {
     providerDefaults.codexModelProvider = defaults.codexModelProvider;
   }
-  if (defaults.opencodeConfig !== undefined) {
-    providerDefaults.opencodeConfig = defaults.opencodeConfig;
+  const llmGatewayConfig = defaults.llmGatewayConfig ?? defaults.opencodeConfig;
+  if (llmGatewayConfig !== undefined) {
+    providerDefaults.llmGatewayConfig = llmGatewayConfig;
   }
 
   return Object.keys(providerDefaults).length > 0
@@ -450,7 +452,7 @@ function getLegacyNewSessionProviderDefaults(
  */
 export function getNewSessionProviderDefaults(
   defaults: NewSessionDefaults | undefined,
-  provider: ProviderName,
+  provider: LiveProviderName,
 ): NewSessionProviderDefaults | undefined {
   const mappedDefaults = defaults?.byProvider?.[provider];
   if (mappedDefaults) return mappedDefaults;
@@ -467,20 +469,32 @@ export function normalizeNewSessionDefaults(
 ): NewSessionDefaults | undefined {
   if (!defaults) return undefined;
 
-  const byProvider = { ...defaults.byProvider };
-  if (defaults.provider) {
+  const provider = ALL_PROVIDERS.includes(defaults.provider as LiveProviderName)
+    ? defaults.provider
+    : undefined;
+  const byProvider: Partial<
+    Record<LiveProviderName, NewSessionProviderDefaults>
+  > = {};
+  for (const providerName of ALL_PROVIDERS) {
+    const saved = defaults.byProvider?.[providerName];
+    if (!saved) continue;
+    const { opencodeConfig, ...current } = saved;
+    byProvider[providerName] = {
+      ...current,
+      llmGatewayConfig: current.llmGatewayConfig ?? opencodeConfig,
+    };
+  }
+  if (provider) {
     const legacyDefaults = getLegacyNewSessionProviderDefaults(defaults);
-    const mappedDefaults = byProvider[defaults.provider];
+    const mappedDefaults = byProvider[provider];
     if (!mappedDefaults && legacyDefaults) {
-      byProvider[defaults.provider] = legacyDefaults;
+      byProvider[provider] = legacyDefaults;
     }
   }
 
-  const activeDefaults = defaults.provider
-    ? byProvider[defaults.provider]
-    : undefined;
+  const activeDefaults = provider ? byProvider[provider] : undefined;
   const normalized: NewSessionDefaults = {
-    ...(defaults.provider ? { provider: defaults.provider } : {}),
+    ...(provider ? { provider } : {}),
     ...activeDefaults,
     ...(Object.keys(byProvider).length > 0 ? { byProvider } : {}),
   };

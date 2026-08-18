@@ -23,7 +23,7 @@ interface SessionStatusBadgeProps {
   lastTurnStatus?: SessionLastTurnStatus;
   /** Most recent provider error message, shown as tooltip on the failed badge */
   lastErrorMessage?: string;
-  /** Present while the provider is retrying a failed request (OpenCode) */
+  /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
 }
 

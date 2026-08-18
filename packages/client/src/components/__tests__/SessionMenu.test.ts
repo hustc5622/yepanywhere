@@ -22,14 +22,14 @@ describe("buildSessionInfoText", () => {
         sessionId: SESSION_ID,
         projectId: PROJECT_ID,
         title: "Yep Anywhere Session",
-        provider: "opencode",
+        provider: "zcode",
       }),
     );
 
     expect(rows).toEqual({
       Title: "Yep Anywhere Session",
       "Session ID": SESSION_ID,
-      Provider: "opencode",
+      Provider: "zcode",
       Project: PROJECT_PATH,
       Link: `${window.location.origin}/projects/${PROJECT_ID}/sessions/${SESSION_ID}`,
     });

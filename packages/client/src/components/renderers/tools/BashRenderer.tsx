@@ -470,7 +470,7 @@ export const bashRenderer: ToolRenderer<BashInput, BashResult> = {
         result={result as BashResult}
         isError={isError}
         input={
-          context.provider === "opencode" || context.provider === "pi"
+          context.provider === "pi"
             ? (input as BashInput | undefined)
             : undefined
         }

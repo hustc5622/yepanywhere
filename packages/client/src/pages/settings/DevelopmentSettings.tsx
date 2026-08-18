@@ -25,7 +25,6 @@ const LAST_DEPLOY_JOB_KEY = "yepanywhere:lastDeployJobId";
 const DEFAULT_RESTART_TARGETS: Required<DeploymentRestartTargets> = {
   server: true,
   codexBridge: false,
-  opencodeBridge: false,
 };
 
 function getErrorMessage(err: unknown): string {
@@ -256,9 +255,7 @@ export function DevelopmentSettings() {
   const stagedBuildId = deployStatus?.stagedBuild?.buildId?.slice(0, 12);
   const latestApk = deployStatus?.apk.latest ?? null;
   const hasSelectedRestartTarget =
-    restartTargets.server ||
-    restartTargets.codexBridge ||
-    restartTargets.opencodeBridge;
+    restartTargets.server || restartTargets.codexBridge;
 
   const setRestartTarget = (
     target: keyof Required<DeploymentRestartTargets>,
@@ -369,12 +366,11 @@ export function DevelopmentSettings() {
                   onClick={() =>
                     void handleStartDeployment("server", {
                       // A server deploy always rebuilds/restarts 8022. Include
-                      // the selected bridge sidecars so they restart onto the
+                      // the selected bridge sidecar so it restarts onto the
                       // same freshly built bundle instead of keeping the old
                       // JavaScript loaded in memory.
                       restartTargets: {
                         codexBridge: restartTargets.codexBridge,
-                        opencodeBridge: restartTargets.opencodeBridge,
                       },
                     })
                   }
@@ -416,17 +412,6 @@ export function DevelopmentSettings() {
                   disabled={deployRunning}
                 />
                 <span>{t("deploymentRestartTargetCodexBridge")}</span>
-              </label>
-              <label className="settings-checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={restartTargets.opencodeBridge}
-                  onChange={(e) =>
-                    setRestartTarget("opencodeBridge", e.target.checked)
-                  }
-                  disabled={deployRunning}
-                />
-                <span>{t("deploymentRestartTargetOpenCodeBridge")}</span>
               </label>
               <button
                 type="button"

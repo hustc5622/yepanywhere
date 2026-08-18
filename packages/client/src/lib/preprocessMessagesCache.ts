@@ -7,7 +7,6 @@ import {
   type PreprocessAugments,
   collapsePlanProgressItems,
   preprocessMessages,
-  reconcileOpenCodeBackgroundTaskStatuses,
 } from "./preprocessMessages";
 
 export interface PreprocessMessagesCache {
@@ -70,12 +69,10 @@ function tryPreprocessStreamingTail(
     previous.messages.length === messages.length - 1 &&
     hasSameMessagePrefix(previous.messages, messages, previous.messages.length)
   ) {
-    return reconcileOpenCodeBackgroundTaskStatuses(
-      collapsePlanProgressItems([
-        ...previous.renderItems,
-        ...preprocessMessages([nextTail], augments),
-      ]),
-    );
+    return collapsePlanProgressItems([
+      ...previous.renderItems,
+      ...preprocessMessages([nextTail], augments),
+    ]);
   }
 
   if (
@@ -100,12 +97,10 @@ function tryPreprocessStreamingTail(
       return null;
     }
 
-    return reconcileOpenCodeBackgroundTaskStatuses(
-      collapsePlanProgressItems([
-        ...prefixItems,
-        ...preprocessMessages([nextTail], augments),
-      ]),
-    );
+    return collapsePlanProgressItems([
+      ...prefixItems,
+      ...preprocessMessages([nextTail], augments),
+    ]);
   }
 
   return null;

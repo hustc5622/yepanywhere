@@ -168,7 +168,7 @@ function hasRecordedQuestionAnswer(item: RenderItem): boolean {
 
 /**
  * A successful question result is an implicit user interaction. Providers such
- * as OpenCode persist the answer on the tool result instead of emitting a new
+ * as some providers persist the answer on the tool result instead of emitting a new
  * user-prompt message, so it still needs to end the current visual turn.
  */
 function isAnsweredQuestion(item: RenderItem): boolean {
@@ -238,7 +238,7 @@ export function groupItemsIntoTurns(items: RenderItem[]): MessageTurnGroup[] {
 }
 
 /**
- * OpenCode has no commentary/final channel marker. Treat only the contiguous
+ * Providers without commentary/final markers treat only the contiguous
  * text immediately before an answered question as progress: it is a checkpoint
  * leading into a decision, not the final response for the whole user turn.
  */

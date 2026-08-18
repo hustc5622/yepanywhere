@@ -18,7 +18,6 @@ export type SessionLocationSource =
   | "archive"
   | "bridge"
   | "codex-manifest"
-  | "opencode-db"
   | "claude-file"
   | "metadata"
   | "provider-scan";

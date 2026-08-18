@@ -325,8 +325,8 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "gpt-4-turbo": 128_000,
 };
 
-/** Max context window / output caps for an OpenCode gateway model. */
-export interface OpenCodeModelDefaultLimits {
+/** Max context window / output caps for an LLM gateway model. */
+export interface LlmGatewayModelDefaultLimits {
   /** Maximum context window in tokens. */
   context: number;
   /** Maximum output tokens per response. */
@@ -334,15 +334,12 @@ export interface OpenCodeModelDefaultLimits {
 }
 
 /**
- * Curated context/output limits for models served through the OpenCode
- * ohmyrouter gateway.
+ * Curated context/output limits for models served through LLM gateways.
  *
  * This is a LAST-RESORT fallback only. The authoritative windows come from the
- * live catalog: `opencode models --verbose` reports each model's
- * `limit.context`/`limit.output`, and the gateway `/v1/models` catalog reports
- * `context_window`. The OpenCode provider surfaces those real values on
- * `ModelInfo` (see `enrichWithGatewayContextWindows`), and the new-session form
- * prefers them. This table is consulted only when neither live source reports a
+ * live gateway `/v1/models` catalog reports `context_window`, and providers
+ * surface those real values on `ModelInfo`. This table is consulted only when
+ * the live source does not report a
  * window (e.g. a custom provider that advertises a zero/blank limit and a model
  * id the gateway doesn't list), so the meter avoids the misleading 200K default.
  *
@@ -350,8 +347,8 @@ export interface OpenCodeModelDefaultLimits {
  * longest prefix so specific variants win over the family default (e.g.
  * `glm-5.2` → 1M beats `glm-5.1` → 200K). Keep entries lowercase.
  */
-const OPENCODE_MODEL_LIMIT_RULES: ReadonlyArray<
-  readonly [prefix: string, limits: OpenCodeModelDefaultLimits]
+const LLM_GATEWAY_MODEL_LIMIT_RULES: ReadonlyArray<
+  readonly [prefix: string, limits: LlmGatewayModelDefaultLimits]
 > = [
   // Anthropic Claude — Opus 4.6/4.7/4.8, Sonnet 4.6/5, Fable 5 ship 1M; Haiku 4.5 is 200K.
   ["claude-haiku", { context: 200_000, output: 64_000 }],
@@ -392,22 +389,22 @@ const OPENCODE_MODEL_LIMIT_RULES: ReadonlyArray<
 ];
 
 /**
- * Resolve curated context/output limits for an OpenCode gateway model id.
+ * Resolve curated context/output limits for an LLM gateway model id.
  * Accepts bare ids ("claude-opus-4-8") or namespaced refs
  * ("yep-anthropic/claude-opus-4-8"); strips any provider prefix and `[..]`
  * suffix before matching. Returns undefined when the model family is unknown.
  */
-export function getOpenCodeModelDefaultLimits(
+export function getLlmGatewayModelDefaultLimits(
   model: string | undefined,
-): OpenCodeModelDefaultLimits | undefined {
+): LlmGatewayModelDefaultLimits | undefined {
   if (!model) return undefined;
   const slash = model.lastIndexOf("/");
   const raw = (slash >= 0 ? model.slice(slash + 1) : model)
     .toLowerCase()
     .replace(/\[.*?\]/g, "");
-  let best: OpenCodeModelDefaultLimits | undefined;
+  let best: LlmGatewayModelDefaultLimits | undefined;
   let bestLen = -1;
-  for (const [prefix, limits] of OPENCODE_MODEL_LIMIT_RULES) {
+  for (const [prefix, limits] of LLM_GATEWAY_MODEL_LIMIT_RULES) {
     const normalizedPrefix = prefix.toLowerCase();
     if (raw.startsWith(normalizedPrefix) && normalizedPrefix.length > bestLen) {
       best = limits;
@@ -434,8 +431,8 @@ const CLAUDE_SHORT_LABELS: Record<string, string> = {
  *
  * `anthropic`/`yep-anthropic`/`yep-openai-compatible` are Yep's own default
  * routes, and `default` is the id of the default LLM gateway channel. Every
- * other channel (an OpenCode custom provider such as `mafia`, or an extra Pi
- * gateway channel declared through `YEP_LLM_GATEWAYS`) is surfaced, because the
+ * other channel (such as an extra Pi gateway declared through
+ * `YEP_LLM_GATEWAYS`) is surfaced, because the
  * same Claude model id can be served by several gateways with different
  * behaviour and billing.
  */
@@ -512,12 +509,12 @@ export function resolveClaudeModelLabel(
  * ProviderBadge component.
  *
  * Accepts:
- * - Namespaced OpenCode refs: "mafia/claude-opus-5", "anthropic/claude-opus-4-8"
+ * - Namespaced gateway refs: "mafia/claude-opus-5", "anthropic/claude-opus-4-8"
  * - Bare model IDs: "claude-opus-4-8-fast", "claude-opus-5"
  * - Claude SDK short names: "opus", "sonnet", "default"
  * - Extended context suffix: "[1m]"
  *
- * For namespaced OpenCode models routed through a non-default channel
+ * For namespaced gateway models routed through a non-default channel
  * (e.g. "mafia"), the channel name is prepended to disambiguate.
  *
  * @param model - Model string (may include provider prefix)
@@ -579,13 +576,10 @@ export function getModelContextWindow(
         : DEFAULT_CONTEXT_WINDOW;
   }
 
-  // OpenCode models resolve their window from the live catalog first (see
-  // ModelInfoService, which caches the real `limit.context` reported by
-  // `opencode models --verbose` and the gateway `/v1/models` catalog). This
-  // curated table is only the offline/last-resort fallback for callers that
-  // resolve straight from a model id without a cached window.
-  if (provider === "opencode" || provider === "pi") {
-    const limits = getOpenCodeModelDefaultLimits(model);
+  // Pi gateway models resolve their window from the live catalog first. This
+  // table is only the offline/last-resort fallback for callers without one.
+  if (provider === "pi") {
+    const limits = getLlmGatewayModelDefaultLimits(model);
     if (limits) return limits.context;
   }
 
@@ -599,7 +593,7 @@ export function getModelContextWindow(
     const isOpenAiCodexSlug =
       lower.startsWith("gpt-") || lower.includes("codex");
     if (!isOpenAiCodexSlug) {
-      const limits = getOpenCodeModelDefaultLimits(model);
+      const limits = getLlmGatewayModelDefaultLimits(model);
       if (limits) return limits.context;
     }
   }
@@ -663,7 +657,7 @@ export function getModelContextWindow(
  * (1M), so escalating to that recovers the right denominator.
  *
  * No-op for provider/model combos that don't have a known larger tier (Codex,
- * Gemini, OpenCode); the >100% display there indicates a real limit/config
+ * Gemini, Pi); the >100% display there indicates a real limit/config
  * mismatch that the UI should surface instead of hiding.
  */
 export function escalateContextWindow(
@@ -675,7 +669,6 @@ export function escalateContextWindow(
   if (provider === "codex" || provider === "codex-oss") return contextWindow;
   if (provider === "gemini" || provider === "gemini-acp") return contextWindow;
   if (provider === "kimi") return contextWindow;
-  if (provider === "opencode") return contextWindow;
   if (provider === "pi") return contextWindow;
   // Default to Claude's 1M tier for Claude and unknown providers.
   return Math.max(contextWindow, CLAUDE_EXTENDED_CONTEXT_WINDOW);
@@ -764,7 +757,7 @@ export interface EnrichedRecentEntry {
 /** Terminal status of a session's most recent turn (bridge/provider-reported). */
 export type SessionLastTurnStatus = "completed" | "interrupted" | "failed";
 
-/** Provider retry/backoff state while a turn is being retried (OpenCode). */
+/** Provider retry/backoff state while a turn is being retried. */
 export interface SessionRetryStatus {
   attempt?: number;
   message?: string;
@@ -791,8 +784,8 @@ export interface AppSessionSummary {
   // Provider field - which AI provider is running this session
   provider: ProviderName;
   /**
-   * For provider-native subagent sessions (e.g. OpenCode task/subagent
-   * children), the id of the session that spawned this one. Set on the session
+   * For provider-native subagent sessions, the id of the session that spawned
+   * this one. Set on the session
    * detail so the UI can link back to the parent. Subagent children are hidden
    * from session lists and shown inline under their parent instead.
    */
@@ -856,7 +849,7 @@ export interface AppSessionSummary {
   lastTurnStatus?: SessionLastTurnStatus;
   /** Most recent provider error message, if the last turn failed. */
   lastErrorMessage?: string;
-  /** Present while the provider is retrying a failed request (OpenCode). */
+  /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
 }
 
@@ -1020,7 +1013,7 @@ export interface InputRequest {
    * Where the request came from. Persisted requests are reconstructed from a
    * provider JSONL owned by another process, so they are display-only.
    */
-  source?: "process" | "codex-bridge" | "opencode-bridge" | "persisted";
+  source?: "process" | "codex-bridge" | "persisted";
   /**
    * Server-authoritative interaction identity and CAS version. This contains
    * only the safe public projection; answers and provider-private payloads are

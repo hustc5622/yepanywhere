@@ -152,11 +152,6 @@ describe("DevelopmentSettings", () => {
         name: "deploymentRestartTargetCodexBridge",
       }),
     );
-    fireEvent.click(
-      screen.getByRole("checkbox", {
-        name: "deploymentRestartTargetOpenCodeBridge",
-      }),
-    );
     fireEvent.click(redeployButton);
 
     await waitFor(() => {
@@ -165,7 +160,6 @@ describe("DevelopmentSettings", () => {
           action: "server",
           restartTargets: {
             codexBridge: true,
-            opencodeBridge: true,
           },
         }),
       );

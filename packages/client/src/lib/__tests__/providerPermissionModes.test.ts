@@ -28,16 +28,6 @@ describe("provider permission modes", () => {
     );
   });
 
-  it("shows only distinct OpenCode tool-approval policies", () => {
-    expect(getProviderPermissionModes("opencode")).toEqual([
-      "default",
-      "acceptEdits",
-      "bypassPermissions",
-    ]);
-    expect(normalizeProviderPermissionMode("opencode", "auto")).toBe("default");
-    expect(normalizeProviderPermissionMode("opencode", "plan")).toBe("default");
-  });
-
   it("uses Codex-style explicit approval modes for Pi", () => {
     expect(getProviderPermissionModes("pi")).toEqual([
       "default",

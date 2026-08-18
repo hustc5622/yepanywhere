@@ -1,20 +1,19 @@
-import type { ProviderName } from "@yep-anywhere/shared";
+import type { LiveProviderName, ProviderName } from "@yep-anywhere/shared";
 import { resolveModelDisplayLabel } from "@yep-anywhere/shared";
 
-const PROVIDER_COLORS: Record<ProviderName, string> = {
+const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   claude: "var(--provider-claude)", // Claude orange
   "claude-ollama": "var(--provider-claude)", // Same as Claude (uses Claude SDK)
   codex: "var(--provider-codex)", // OpenAI green
   "codex-oss": "var(--provider-codex)", // OpenAI green (same as codex)
   gemini: "var(--provider-gemini)", // Google blue
   "gemini-acp": "var(--provider-gemini)", // Google blue (same as gemini)
-  opencode: "var(--provider-opencode)", // OpenCode purple
   pi: "var(--provider-pi)", // Pi cyan
   kimi: "var(--provider-kimi, #1783ff)", // Kimi KMBlue
   zcode: "var(--provider-zcode)", // ZCode
 };
 
-const PROVIDER_LABELS: Record<ProviderName, string> = {
+const PROVIDER_LABELS: Record<LiveProviderName, string> = {
   claude: "Claude",
   // Same product brand as `claude` (both use the Claude SDK + Anthropic agent
   // loop). The model name is what distinguishes them — e.g. "Sonnet 4" vs a
@@ -25,7 +24,6 @@ const PROVIDER_LABELS: Record<ProviderName, string> = {
   "codex-oss": "CodexOSS",
   gemini: "Gemini",
   "gemini-acp": "Gemini ACP",
-  opencode: "OpenCode",
   pi: "Pi",
   kimi: "Kimi",
   zcode: "ZCode",
@@ -59,8 +57,8 @@ export function ProviderBadge({
   isThinking = false,
   className = "",
 }: ProviderBadgeProps) {
-  const color = PROVIDER_COLORS[provider];
-  const label = PROVIDER_LABELS[provider];
+  const color = PROVIDER_COLORS[provider as LiveProviderName] ?? "currentColor";
+  const label = PROVIDER_LABELS[provider as LiveProviderName] ?? provider;
 
   // Format model name for display
   const getModelLabel = (modelName: string | undefined): string | null => {
@@ -81,8 +79,7 @@ export function ProviderBadge({
     if (
       !normalized ||
       normalized === "none" ||
-      ((provider === "opencode" || provider === "pi") &&
-        normalized === "default")
+      (provider === "pi" && normalized === "default")
     ) {
       return null;
     }

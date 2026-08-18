@@ -23,7 +23,7 @@ describe("WebSearchRenderer", () => {
     cleanup();
   });
 
-  it("renders OpenCode text search output and extracts links", () => {
+  it("renders plain-text search output and extracts links", () => {
     render(
       <div>
         {webSearchRenderer.renderToolResult(

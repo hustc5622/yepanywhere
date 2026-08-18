@@ -27,17 +27,11 @@ export function getToolSummary(
   input: unknown,
   result: ToolResultData | undefined,
   status: "pending" | "complete" | "error" | "aborted",
-  options?: { provider?: string },
+  _options?: { provider?: string },
 ): string {
   const renderer = toolRegistry.get(toolName);
-  const provider = options?.provider;
-  const opencodeInputSummary =
-    provider === "opencode" ? getOpenCodeInputSummary(toolName, input) : "";
 
   if (status === "pending" || status === "aborted") {
-    if (opencodeInputSummary) {
-      return opencodeInputSummary;
-    }
     // Show input summary while pending or aborted (no result available)
     if (renderer.getUseSummary) {
       const summary = safeCall(() => renderer.getUseSummary?.(input));
@@ -49,9 +43,7 @@ export function getToolSummary(
   // Show result summary when complete or error
   // For some tools, combine input + result for a complete summary
   let inputSummary: string;
-  if (opencodeInputSummary) {
-    inputSummary = opencodeInputSummary;
-  } else if (renderer.getUseSummary) {
+  if (renderer.getUseSummary) {
     const summary = safeCall(() => renderer.getUseSummary?.(input));
     inputSummary = summary ?? getDefaultInputSummary(toolName, input);
   } else {
@@ -74,16 +66,6 @@ export function getToolSummary(
   }
 
   // Combine input and result for tools where the input context is valuable
-  if (provider === "opencode" && inputSummary && inputSummary !== "...") {
-    if (status === "error" || result?.isError) {
-      return `${inputSummary} → failed`;
-    }
-    if (!resultSummary || resultSummary === "done") {
-      return inputSummary;
-    }
-    return `${inputSummary} → ${resultSummary}`;
-  }
-
   if (toolName === "Glob" || toolName === "Grep") {
     return `${inputSummary} → ${resultSummary}`;
   }
@@ -167,68 +149,6 @@ function getDefaultInputSummary(toolName: string, input: unknown): string {
   }
 
   // Fallback: try to find first meaningful string property to show
-  return getFirstStringValue(i);
-}
-
-function getOpenCodeInputSummary(toolName: string, input: unknown): string {
-  if (!input || typeof input !== "object") {
-    return "";
-  }
-
-  const i = input as Record<string, unknown>;
-  const lowerToolName = toolName.toLowerCase();
-  const stringField = (...fields: string[]) => {
-    for (const field of fields) {
-      const value = i[field];
-      if (typeof value === "string" && value.trim()) {
-        return value.trim();
-      }
-    }
-    return "";
-  };
-
-  switch (lowerToolName) {
-    case "skill":
-      return truncate(stringField("name", "opencodeTitle"), 120);
-    case "bash":
-    case "shell":
-      return truncate(
-        getDisplayBashCommandFromInput(i) || stringField("command"),
-        160,
-      );
-    case "read":
-      return truncate(stringField("file_path", "filePath", "path"), 120);
-    case "write":
-    case "edit":
-      return truncate(stringField("file_path", "filePath", "path"), 120);
-    case "glob":
-      return truncate(stringField("pattern", "path"), 120);
-    case "grep":
-      return truncate(stringField("pattern"), 120);
-    case "websearch":
-    case "web_search":
-      return truncate(stringField("query"), 120);
-    case "webfetch":
-    case "web_fetch":
-      return truncate(stringField("url"), 120);
-    case "todowrite":
-    case "todo":
-      if (Array.isArray(i.todos)) {
-        return `${i.todos.length} todos`;
-      }
-      break;
-    case "question":
-      if (Array.isArray(i.questions)) {
-        const count = i.questions.length;
-        return `${count} question${count === 1 ? "" : "s"}`;
-      }
-      break;
-  }
-
-  if (typeof i.opencodeTitle === "string" && i.opencodeTitle.trim()) {
-    return truncate(i.opencodeTitle.trim(), 160);
-  }
-
   return getFirstStringValue(i);
 }
 

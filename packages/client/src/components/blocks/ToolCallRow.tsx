@@ -3,7 +3,6 @@ import {
   getDisplayBashCommandFromInput,
   isCodexLikeBashInput,
 } from "../../lib/bashCommand";
-import { getOpenCodeSubagentSessionId } from "../../lib/openCodeSubagents";
 import type { ToolResultData } from "../../types/renderItems";
 import { toolRegistry } from "../renderers/tools";
 import type { RenderContext } from "../renderers/types";
@@ -21,45 +20,6 @@ interface Props {
 }
 
 type ToolCallStatus = Props["status"];
-
-const OPENCODE_ACTION_DISPLAY_NAMES = {
-  run: {
-    pending: "Running",
-    complete: "Ran",
-    error: "Run failed",
-    aborted: "Run",
-  },
-  read: {
-    pending: "Reading",
-    complete: "Read",
-    error: "Read failed",
-    aborted: "Read",
-  },
-  write: {
-    pending: "Writing",
-    complete: "Wrote",
-    error: "Write failed",
-    aborted: "Write",
-  },
-  edit: {
-    pending: "Editing",
-    complete: "Edited",
-    error: "Edit failed",
-    aborted: "Edit",
-  },
-  search: {
-    pending: "Searching",
-    complete: "Searched",
-    error: "Search failed",
-    aborted: "Search",
-  },
-  skill: {
-    pending: "Loading skill",
-    complete: "Skill",
-    error: "Skill failed",
-    aborted: "Skill",
-  },
-} as const satisfies Record<string, Record<ToolCallStatus, string>>;
 
 export const ToolCallRow = memo(function ToolCallRow({
   id,
@@ -84,31 +44,7 @@ export const ToolCallRow = memo(function ToolCallRow({
   // Get structured result for interactive summary
   const structuredResult = toolResult?.structured ?? toolResult?.content;
 
-  // Check if this tool renders inline (bypasses entire tool-row structure)
-  // OpenCode tools normally prefer the expandable row, but its `task` tool is a
-  // subagent launcher we render as a dedicated inline card (linking to the
-  // child session), so it opts back into inline rendering.
-  const isOpenCodeSubagentTool =
-    sessionProvider === "opencode" && toolName.toLowerCase() === "task";
-  const canLinkOpenCodeSubagent = Boolean(
-    getOpenCodeSubagentSessionId(toolInput),
-  );
-  // Message preprocessing has already reconciled background launcher output
-  // with later task lifecycle markers. Trust that normalized status here so
-  // the launcher's initial `running` result cannot overwrite a later terminal
-  // state.
-  const openCodeSubagentStatus = status;
-  const openCodeSubagentNeedsDetails =
-    isOpenCodeSubagentTool &&
-    (!canLinkOpenCodeSubagent ||
-      openCodeSubagentStatus === "error" ||
-      openCodeSubagentStatus === "aborted" ||
-      toolResult?.isError === true);
-  const preferExpandableRow =
-    sessionProvider === "opencode" &&
-    (!isOpenCodeSubagentTool || openCodeSubagentNeedsDetails);
-  const hasInlineRenderer =
-    !preferExpandableRow && toolRegistry.hasInlineRenderer(toolName);
+  const hasInlineRenderer = toolRegistry.hasInlineRenderer(toolName);
   const suppressCollapsedPreview = shouldSuppressBashCollapsedPreview(
     toolName,
     toolInput,
@@ -117,9 +53,6 @@ export const ToolCallRow = memo(function ToolCallRow({
   );
 
   const interactiveSummaryContent = useMemo(() => {
-    if (preferExpandableRow) {
-      return null;
-    }
     if (status !== "complete") {
       return null;
     }
@@ -137,7 +70,6 @@ export const ToolCallRow = memo(function ToolCallRow({
     structuredResult,
     toolResult,
     renderContext,
-    preferExpandableRow,
   ]);
 
   const hasInteractiveSummary =
@@ -146,9 +78,6 @@ export const ToolCallRow = memo(function ToolCallRow({
     interactiveSummaryContent !== false;
 
   const collapsedPreviewContent = useMemo(() => {
-    if (preferExpandableRow) {
-      return null;
-    }
     if (suppressCollapsedPreview) {
       return null;
     }
@@ -166,7 +95,6 @@ export const ToolCallRow = memo(function ToolCallRow({
     structuredResult,
     toolResult,
     renderContext,
-    preferExpandableRow,
   ]);
 
   const hasCollapsedPreview =
@@ -241,7 +169,7 @@ export const ToolCallRow = memo(function ToolCallRow({
         )}
 
         <span className="tool-name">
-          {getToolDisplayName(toolName, toolInput, status, sessionProvider)}
+          {toolRegistry.getDisplayName(toolName, toolInput)}
         </span>
 
         {hasInteractiveSummary && status === "complete" ? (
@@ -298,37 +226,6 @@ export const ToolCallRow = memo(function ToolCallRow({
   );
 });
 
-function getToolDisplayName(
-  toolName: string,
-  toolInput: unknown,
-  status: ToolCallStatus,
-  sessionProvider?: string,
-): string {
-  if (sessionProvider !== "opencode") {
-    return toolRegistry.getDisplayName(toolName, toolInput);
-  }
-
-  switch (toolName.toLowerCase()) {
-    case "bash":
-    case "shell":
-      return OPENCODE_ACTION_DISPLAY_NAMES.run[status];
-    case "read":
-      return OPENCODE_ACTION_DISPLAY_NAMES.read[status];
-    case "write":
-      return OPENCODE_ACTION_DISPLAY_NAMES.write[status];
-    case "edit":
-    case "apply_patch":
-      return OPENCODE_ACTION_DISPLAY_NAMES.edit[status];
-    case "glob":
-    case "grep":
-      return OPENCODE_ACTION_DISPLAY_NAMES.search[status];
-    case "skill":
-      return OPENCODE_ACTION_DISPLAY_NAMES.skill[status];
-    default:
-      return toolRegistry.getDisplayName(toolName, toolInput);
-  }
-}
-
 function shouldSuppressBashCollapsedPreview(
   toolName: string,
   toolInput: unknown,
@@ -337,10 +234,6 @@ function shouldSuppressBashCollapsedPreview(
 ): boolean {
   if (!isBashToolName(toolName)) {
     return false;
-  }
-
-  if (sessionProvider === "opencode") {
-    return true;
   }
 
   if (!isCodexLikeBashInput(toolInput, sessionProvider)) {

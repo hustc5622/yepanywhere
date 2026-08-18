@@ -47,43 +47,10 @@ function renderItem(item: RenderItem) {
   );
 }
 
-describe("RenderItemComponent OpenCode edit identity", () => {
+describe("RenderItemComponent edit availability", () => {
   afterEach(() => {
     cleanup();
     window.localStorage.clear();
-  });
-
-  it("shows edit for a persisted OpenCode user prompt with its native ID", () => {
-    const onEdit = renderPrompt(
-      {
-        uuid: "msg_native_user",
-        type: "user",
-        _source: "jsonl",
-        message: { role: "user", content: "persisted prompt" },
-      },
-      "opencode",
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    expect(onEdit).toHaveBeenCalledWith({
-      text: "persisted prompt",
-      uuid: "msg_native_user",
-      parentUuid: null,
-    });
-  });
-
-  it("hides edit for a live OpenCode echo carrying a temporary Yep UUID", () => {
-    renderPrompt(
-      {
-        uuid: "temporary-yep-uuid",
-        type: "user",
-        _source: "sdk",
-        message: { role: "user", content: "pending prompt" },
-      },
-      "opencode",
-    );
-
-    expect(screen.queryByRole("button", { name: /edit/i })).toBeNull();
   });
 
   it("does not accidentally expose edit for unsupported providers", () => {

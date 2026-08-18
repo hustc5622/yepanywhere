@@ -5,7 +5,6 @@ import { Link } from "react-router-dom";
 import { useGitStatus } from "../hooks/useGitStatus";
 import { useI18n } from "../i18n";
 import { formatSmartTime } from "../lib/datetime";
-import { getOpenCodeSubagentSessionId } from "../lib/openCodeSubagents";
 import {
   type ActiveToolApproval,
   isNativeGoalStateItem,
@@ -1015,9 +1014,7 @@ function getMessageIdLike(message: Message): string {
 /**
  * Collect subagent sessions from the render items.
  *
- * Two sources:
- * - Claude/OpenCode `task` tool calls (sessionId in the tool input)
- * - Codex native `subAgentActivity` and `collabAgentToolCall` ThreadItems
+ * Codex native `subAgentActivity` and `collabAgentToolCall` ThreadItems
  *   (agentThreadId / receiverThreadIds), projected as `codex_native_item`
  *   render items by the canonical overlay.
  */
@@ -1026,43 +1023,6 @@ function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
   const resultIndexBySessionId = new Map<string, number>();
 
   for (const item of items) {
-    if (item.type === "tool_call") {
-      if (item.toolName.toLowerCase() !== "task") continue;
-      if (!isRecord(item.toolInput)) continue;
-
-      const sessionId = getOpenCodeSubagentSessionId(item.toolInput);
-      if (!sessionId) continue;
-
-      const description =
-        (typeof item.toolInput.description === "string" &&
-          item.toolInput.description.trim()) ||
-        (typeof item.toolInput.opencodeTitle === "string" &&
-          item.toolInput.opencodeTitle.trim()) ||
-        "";
-      const agent =
-        typeof item.toolInput.subagent_type === "string"
-          ? item.toolInput.subagent_type.trim()
-          : undefined;
-
-      const next = { sessionId, description, agent, status: item.status };
-      const existingIndex = resultIndexBySessionId.get(sessionId);
-      if (existingIndex === undefined) {
-        resultIndexBySessionId.set(sessionId, result.length);
-        result.push(next);
-        continue;
-      }
-
-      const existing = result[existingIndex];
-      if (existing) {
-        result[existingIndex] = {
-          ...next,
-          description: description || existing.description,
-          agent: agent || existing.agent,
-        };
-      }
-      continue;
-    }
-
     // Codex native sub-agent ThreadItems.
     if (item.type !== "codex_native_item") continue;
     const threadItem = item.threadItem;

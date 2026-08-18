@@ -15,7 +15,6 @@ const FALLBACK_PERMISSION_MODES: Partial<
   claude: ALL_PERMISSION_MODES,
   "claude-ollama": ALL_PERMISSION_MODES,
   codex: ["auto", "plan", "bypassPermissions"],
-  opencode: ["default", "acceptEdits", "bypassPermissions"],
   pi: ["default", "acceptEdits", "plan", "bypassPermissions"],
   "gemini-acp": ["default", "acceptEdits", "bypassPermissions"],
   // ZCode's native `auto` denies every tool call, so it is not offered.

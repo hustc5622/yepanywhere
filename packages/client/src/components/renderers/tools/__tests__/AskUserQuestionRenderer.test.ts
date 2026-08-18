@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getQuestionErrorMessage } from "../AskUserQuestionRenderer";
 
 describe("getQuestionErrorMessage", () => {
-  it("shows the OpenCode question rejection reason", () => {
+  it("shows a provider question rejection reason", () => {
     expect(
       getQuestionErrorMessage({
         state: { error: "The user dismissed this question" },

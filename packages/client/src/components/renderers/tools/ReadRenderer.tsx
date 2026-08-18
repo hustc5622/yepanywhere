@@ -83,11 +83,11 @@ function normalizeReadResult(
   const text =
     type === "directory"
       ? (rawContent ?? result).trim()
-      : stripOpenCodeReadLineNumbers(rawContent ?? result);
-  const startLine = parseOpenCodeReadStartLine(rawContent ?? "");
+      : stripNumberedReadLines(rawContent ?? result);
+  const startLine = parseReadStartLine(rawContent ?? "");
   const numLines = text ? text.split("\n").length : 0;
   const totalLines =
-    parseOpenCodeReadTotalLines(result) ??
+    parseReadTotalLines(result) ??
     Math.max(startLine + Math.max(numLines - 1, 0), numLines);
 
   return {
@@ -107,7 +107,7 @@ function getXmlTag(text: string, tag: string): string | undefined {
   return match?.[1]?.trim();
 }
 
-function stripOpenCodeReadLineNumbers(text: string): string {
+function stripNumberedReadLines(text: string): string {
   return text
     .split("\n")
     .filter(
@@ -119,12 +119,12 @@ function stripOpenCodeReadLineNumbers(text: string): string {
     .trimEnd();
 }
 
-function parseOpenCodeReadStartLine(text: string): number {
+function parseReadStartLine(text: string): number {
   const firstNumberedLine = text.match(/^(\d+):/m);
   return firstNumberedLine?.[1] ? Number.parseInt(firstNumberedLine[1], 10) : 1;
 }
 
-function parseOpenCodeReadTotalLines(text: string): number | undefined {
+function parseReadTotalLines(text: string): number | undefined {
   const totalMatch =
     text.match(/total\s+(\d+)\s+lines/i) ?? text.match(/of\s+(\d+)\s+lines/i);
   return totalMatch?.[1] ? Number.parseInt(totalMatch[1], 10) : undefined;

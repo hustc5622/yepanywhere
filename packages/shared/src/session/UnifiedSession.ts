@@ -2,7 +2,6 @@ import type { ClaudeSessionEntry } from "../claude-sdk-schema/types.js";
 import type { CodexSessionEntry } from "../codex-schema/index.js";
 import type { GeminiSessionFile } from "../gemini-schema/session.js";
 import type { KimiSessionContent } from "../kimi-schema/types.js";
-import type { OpenCodeSessionContent } from "../opencode-schema/session.js";
 import type { PiSessionContent } from "../pi-schema/session.js";
 import type { ZCodeSessionContent } from "../zcode-schema/session.js";
 
@@ -25,7 +24,6 @@ export type UnifiedSession =
   | { provider: "codex"; session: CodexSessionContent }
   | { provider: "codex-oss"; session: CodexSessionContent }
   | { provider: "gemini"; session: GeminiSessionFile }
-  | { provider: "opencode"; session: OpenCodeSessionContent }
   | { provider: "pi"; session: PiSessionContent }
   | { provider: "kimi"; session: KimiSessionContent }
   | { provider: "zcode"; session: ZCodeSessionContent };

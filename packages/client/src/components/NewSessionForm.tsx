@@ -1,18 +1,17 @@
 import {
   type CodexMcpMode,
   DEFAULT_PERMISSION_MODE,
+  type LiveProviderName,
+  type LlmGatewayModelCapabilities,
+  type LlmGatewayModelLimits,
+  type LlmGatewayRequestProtocol,
+  type LlmGatewaySessionConfig,
   type ModelInfo,
   type NewSessionProviderDefaults,
-  type OpenCodeJsonObject,
-  type OpenCodeModelCapabilities,
-  type OpenCodeModelLimits,
-  type OpenCodeRequestProtocol,
-  type OpenCodeSessionConfig,
   type ProviderInfo,
   type ProviderMcpServerStatus,
-  type ProviderName,
+  getLlmGatewayModelDefaultLimits,
   getNewSessionProviderDefaults,
-  getOpenCodeModelDefaultLimits,
   resolveModel,
 } from "@yep-anywhere/shared";
 import {
@@ -52,7 +51,6 @@ import { useI18n } from "../i18n";
 import { getStaticAgentCommandConfigs } from "../lib/agentCommands";
 import {
   getModelReasoningEfforts,
-  getOpenCodeReasoningPickerEfforts,
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
 import { hasCoarsePointer } from "../lib/deviceDetection";
@@ -88,14 +86,13 @@ const NEW_SESSION_PROVIDER_ACCENTS = {
   "codex-oss": "var(--provider-codex)",
   gemini: "var(--provider-gemini)",
   "gemini-acp": "var(--provider-gemini)",
-  opencode: "var(--provider-opencode)",
   pi: "var(--provider-pi)",
   kimi: "var(--provider-kimi)",
   zcode: "var(--provider-zcode)",
-} satisfies Record<ProviderName, string>;
+} satisfies Record<LiveProviderName, string>;
 
 export function getNewSessionProviderAccent(
-  provider: ProviderName | null | undefined,
+  provider: LiveProviderName | null | undefined,
 ): string {
   return provider
     ? NEW_SESSION_PROVIDER_ACCENTS[provider]
@@ -137,19 +134,18 @@ const THINKING_PRESET_ORDER: readonly ThinkingPreset[] = [
   "on:xhigh",
   "on:max",
 ];
-const OPENCODE_DEFAULT_VARIANT = "__yep_default_variant__";
-const DEFAULT_OPENCODE_CAPABILITIES: OpenCodeModelCapabilities = {
+const DEFAULT_GATEWAY_CAPABILITIES: LlmGatewayModelCapabilities = {
   attachment: false,
   reasoning: false,
   temperature: true,
   toolCall: true,
 };
 
-function getDefaultOpenCodeCapabilities(
+function getDefaultGatewayCapabilities(
   hasReasoningVariants = false,
-): OpenCodeModelCapabilities {
+): LlmGatewayModelCapabilities {
   return {
-    ...DEFAULT_OPENCODE_CAPABILITIES,
+    ...DEFAULT_GATEWAY_CAPABILITIES,
     reasoning: hasReasoningVariants,
   };
 }
@@ -238,7 +234,7 @@ function getPreferredModelId(
   );
 }
 
-function getPreferredOpenCodeModelId(
+function getPreferredGatewayModelId(
   models: ModelInfo[],
   preferredModelId?: string | null,
 ): string | null {
@@ -254,96 +250,29 @@ function getPreferredOpenCodeModelId(
   return models[0]?.id ?? null;
 }
 
-function parseOpenCodeLimitInput(value: string): number | undefined | null {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-
-  const normalized = trimmed.replace(/[,_\s]/g, "").toLowerCase();
-  const match = normalized.match(/^(\d+(?:\.\d+)?)([km])?$/);
-  if (!match) return null;
-
-  const amount = Number(match[1]);
-  const suffix = match[2];
-  const multiplier = suffix === "m" ? 1_000_000 : 1_000;
-  const tokens = Math.round(amount * multiplier);
-
-  if (!Number.isSafeInteger(tokens) || tokens <= 0) return null;
-  return tokens;
-}
-
-function formatOpenCodeLimitInput(tokens: number | undefined): string {
-  if (!tokens || tokens <= 0) return "";
-  const valueInK = tokens / 1_000;
-  return Number.isInteger(valueInK)
-    ? String(valueInK)
-    : String(Number(valueInK.toFixed(3)));
-}
-
 /**
- * Resolve a managed OpenCode model's context/output window.
+ * Resolve a managed gateway model's context/output window.
  *
  * Prefers the real limits the model advertises (populated from
- * `opencode models --verbose` and the gateway `/v1/models` catalog, carried on
- * ModelInfo). Only backfills per-field from the curated catalog when the live
+ * the gateway `/v1/models` catalog, carried on ModelInfo. Only backfills
+ * per-field from the curated catalog when the live
  * catalog omits a value. Returns limits only when both context and output are
  * known, since the session config requires both.
  */
-function resolveOpenCodeModelLimits(
+function resolveGatewayModelLimits(
   model: ModelInfo | undefined,
-): OpenCodeModelLimits | undefined {
+): LlmGatewayModelLimits | undefined {
   if (!model) return undefined;
-  const curated = getOpenCodeModelDefaultLimits(model.id);
+  const curated = getLlmGatewayModelDefaultLimits(model.id);
   const context = model.contextWindow ?? curated?.context;
   const output = model.maxOutputTokens ?? curated?.output;
   if (!context || !output) return undefined;
   return { context, output };
 }
 
-export function getOpenCodeModelLimits(
-  contextInput: string,
-  outputInput: string,
-): { limits?: OpenCodeModelLimits; error?: "invalid" | "incomplete" } {
-  const context = parseOpenCodeLimitInput(contextInput);
-  const output = parseOpenCodeLimitInput(outputInput);
-
-  if (context === null || output === null) return { error: "invalid" };
-  if (context === undefined && output === undefined) return {};
-  if (context === undefined || output === undefined) {
-    return { error: "incomplete" };
-  }
-  return { limits: { context, output } };
-}
-
-export function parseOpenCodeAdvancedInput(value: string): {
-  value?: OpenCodeJsonObject;
-  error?: "invalid";
-} {
-  const trimmed = value.trim();
-  if (!trimmed) return {};
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
-      return { error: "invalid" };
-    }
-    return { value: parsed as OpenCodeJsonObject };
-  } catch {
-    return { error: "invalid" };
-  }
-}
-
-function formatOpenCodeAdvancedInput(
-  value: OpenCodeJsonObject | undefined,
-): string {
-  return value ? JSON.stringify(value, null, 2) : "";
-}
-
-function sameOpenCodeConfig(
-  a: OpenCodeSessionConfig | undefined,
-  b: OpenCodeSessionConfig | undefined,
+function sameLlmGatewayConfig(
+  a: LlmGatewaySessionConfig | undefined,
+  b: LlmGatewaySessionConfig | undefined,
 ): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -374,9 +303,8 @@ export function NewSessionForm({
     `draft-new-session-${projectId}`,
   );
   const [mode, setMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE);
-  const [selectedProvider, setSelectedProvider] = useState<ProviderName | null>(
-    null,
-  );
+  const [selectedProvider, setSelectedProvider] =
+    useState<LiveProviderName | null>(null);
   const selectedProviderAccent = getNewSessionProviderAccent(selectedProvider);
   const newSessionThemeStyle = {
     "--new-session-accent": selectedProviderAccent,
@@ -388,20 +316,10 @@ export function NewSessionForm({
   const [kimiReasoningEffort, setKimiReasoningEffort] = useState<string | null>(
     null,
   );
-  const [opencodeReasoningEffort, setOpenCodeReasoningEffort] = useState<
-    string | null
-  >(null);
-  const [selectedOpenCodeProtocol, setSelectedOpenCodeProtocol] =
-    useState<OpenCodeRequestProtocol>("openai-compatible");
+  const [selectedGatewayProtocol, setSelectedGatewayProtocol] =
+    useState<LlmGatewayRequestProtocol>("openai-compatible");
   const [selectedCodexMcpMode, setSelectedCodexMcpMode] =
     useState<CodexMcpMode>("standard");
-  const [opencodeContextLimit, setOpencodeContextLimit] = useState("");
-  const [opencodeOutputLimit, setOpencodeOutputLimit] = useState("");
-  const [opencodeCapabilities, setOpencodeCapabilities] =
-    useState<OpenCodeModelCapabilities>(DEFAULT_OPENCODE_CAPABILITIES);
-  const [showOpenCodeAdvanced, setShowOpenCodeAdvanced] = useState(false);
-  const [opencodeProviderPatch, setOpencodeProviderPatch] = useState("");
-  const [opencodeModelPatch, setOpencodeModelPatch] = useState("");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const pendingFilesRef = useRef<PendingFile[]>(pendingFiles);
   pendingFilesRef.current = pendingFiles;
@@ -470,11 +388,6 @@ export function NewSessionForm({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const voiceButtonRef = useRef<VoiceInputButtonRef>(null);
   const hasInitializedDefaultsRef = useRef(false);
-  // Tracks whether the user manually edited the OpenCode context/output limit
-  // inputs. While false, the inputs auto-populate from the selected model's
-  // curated defaults; a manual edit pins the values until the model changes.
-  const opencodeLimitsTouchedRef = useRef(false);
-
   // Thinking toggle state
   const {
     thinkingMode,
@@ -532,11 +445,11 @@ export function NewSessionForm({
   const selectedModelInfo = availableModels.find(
     (model) => model.id === selectedModel,
   );
-  const selectedOpenCodeProtocols =
-    selectedProvider === "opencode" || selectedProvider === "pi"
+  const selectedGatewayProtocols =
+    selectedProvider === "pi"
       ? (selectedModelInfo?.supportedRequestProtocols ?? [])
       : [];
-  const isManagedOpenCodeModel = selectedOpenCodeProtocols.length > 0;
+  const isManagedGatewayModel = selectedGatewayProtocols.length > 0;
   const codexReasoningEfforts = useMemo(
     () => getModelReasoningEfforts(selectedModelInfo),
     [selectedModelInfo],
@@ -578,10 +491,6 @@ export function NewSessionForm({
     selectedProvider === "kimi" && kimiReasoningEfforts.length > 0
       ? resolveModelReasoningEffort(selectedModelInfo, kimiReasoningEffort)
       : undefined;
-  const effectiveOpenCodeReasoningEffort =
-    selectedProvider === "opencode" && opencodeReasoningEffort
-      ? opencodeReasoningEffort
-      : undefined;
   const resolvedPiThinkingEffort =
     selectedProvider === "pi"
       ? resolveModelReasoningEffort(
@@ -596,7 +505,7 @@ export function NewSessionForm({
         ? effectiveKimiReasoningEffort
         : selectedProvider === "pi" && thinkingMode !== "off"
           ? resolvedPiThinkingEffort
-          : effectiveOpenCodeReasoningEffort;
+          : undefined;
   const getEffortLabel = useCallback(
     (effort: string): string => {
       return isEffortLevel(effort) ? t(EFFORT_LABEL_KEYS[effort]) : effort;
@@ -700,25 +609,6 @@ export function NewSessionForm({
     },
     [applyThinkingPreset],
   );
-  const openCodeReasoningOptions = useMemo((): FilterOption<string>[] => {
-    return [
-      {
-        value: OPENCODE_DEFAULT_VARIANT,
-        label: t("processInfoDefaultModel"),
-      },
-      ...getOpenCodeReasoningPickerEfforts().map((option) => ({
-        value: option.reasoningEffort,
-        label: getEffortLabel(option.reasoningEffort),
-      })),
-    ];
-  }, [getEffortLabel, t]);
-  const handleOpenCodeReasoningSelect = useCallback((selected: string[]) => {
-    const effort = selected[0];
-    setOpenCodeReasoningEffort(
-      !effort || effort === OPENCODE_DEFAULT_VARIANT ? null : effort,
-    );
-  }, []);
-  const showOpenCodeReasoningSelector = selectedProvider === "opencode";
   const kimiReasoningOptions = useMemo((): FilterOption<string>[] => {
     return kimiReasoningEfforts.map((option) => {
       const effort = option.reasoningEffort;
@@ -766,7 +656,7 @@ export function NewSessionForm({
     (provider: ProviderInfo, savedDefaults?: NewSessionProviderDefaults) => {
       const providerName = provider.name;
       const models = provider.models ?? [];
-      const savedOpenCodeConfig = savedDefaults?.opencodeConfig;
+      const savedGatewayConfig = savedDefaults?.llmGatewayConfig;
       // Codex saved defaults store the bare model slug plus a separate model
       // source; map them back to the composite picker id (e.g.
       // "deepseek/deepseek-v4-flash") so the right grouped option preselects.
@@ -782,10 +672,10 @@ export function NewSessionForm({
           : undefined;
 
       const preferredModel =
-        providerName === "opencode" || providerName === "pi"
-          ? getPreferredOpenCodeModelId(
+        providerName === "pi"
+          ? getPreferredGatewayModelId(
               models,
-              savedOpenCodeConfig?.model ??
+              savedGatewayConfig?.model ??
                 savedDefaults?.model ??
                 provider.currentModel,
             )
@@ -816,42 +706,15 @@ export function NewSessionForm({
           : null,
       );
 
-      if (providerName === "opencode" || providerName === "pi") {
+      if (providerName === "pi") {
         const modelInfo = models.find((model) => model.id === preferredModel);
         const supportedProtocols = modelInfo?.supportedRequestProtocols ?? [];
-        const savedProtocol = savedOpenCodeConfig?.requestProtocol;
+        const savedProtocol = savedGatewayConfig?.requestProtocol;
         const protocol =
           savedProtocol && supportedProtocols.includes(savedProtocol)
             ? savedProtocol
             : (supportedProtocols[0] ?? "openai-compatible");
-        const reasoningEfforts = getModelReasoningEfforts(
-          modelInfo,
-          supportedProtocols.length > 0 ? protocol : undefined,
-        );
-
-        setSelectedOpenCodeProtocol(protocol);
-        setOpencodeCapabilities({
-          ...getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
-          ...savedOpenCodeConfig?.capabilities,
-        });
-        setOpenCodeReasoningEffort(
-          providerName === "opencode"
-            ? (savedDefaults?.reasoningEffort ?? null)
-            : null,
-        );
-        opencodeLimitsTouchedRef.current = Boolean(savedOpenCodeConfig?.limits);
-        setOpencodeContextLimit(
-          formatOpenCodeLimitInput(savedOpenCodeConfig?.limits?.context),
-        );
-        setOpencodeOutputLimit(
-          formatOpenCodeLimitInput(savedOpenCodeConfig?.limits?.output),
-        );
-        setOpencodeProviderPatch(
-          formatOpenCodeAdvancedInput(savedOpenCodeConfig?.advanced?.provider),
-        );
-        setOpencodeModelPatch(
-          formatOpenCodeAdvancedInput(savedOpenCodeConfig?.advanced?.model),
-        );
+        setSelectedGatewayProtocol(protocol);
       }
 
       setSelectedModel(preferredModel);
@@ -928,7 +791,7 @@ export function NewSessionForm({
   ]);
 
   // Restore each provider's own saved options when switching providers.
-  const handleProviderSelect = (providerName: ProviderName) => {
+  const handleProviderSelect = (providerName: LiveProviderName) => {
     const provider = providers.find((p) => p.name === providerName);
     if (!provider) return;
     applyProviderSelection(
@@ -963,8 +826,8 @@ export function NewSessionForm({
       // catalog only when the live catalog omits one.
       const effectiveContextWindow =
         model.contextWindow ??
-        (selectedProvider === "opencode" || selectedProvider === "pi"
-          ? getOpenCodeModelDefaultLimits(model.id)?.context
+        (selectedProvider === "pi"
+          ? getLlmGatewayModelDefaultLimits(model.id)?.context
           : undefined);
       if (effectiveContextWindow) {
         parts.push(
@@ -998,7 +861,7 @@ export function NewSessionForm({
 
       // Codex models carry an explicit model source (Codex `model_provider`);
       // group by its friendly display name so users can tell which channel a
-      // model routes through. OpenCode catalog ids are `provider/model` and
+      // model routes through. Gateway catalog ids can be `channel/model` and
       // group by the slash prefix. The synthetic "default" entry (no slash,
       // no source) stays ungrouped at the top.
       let group: string | undefined;
@@ -1045,8 +908,8 @@ export function NewSessionForm({
   }, [selectedProvider, selectedProviderInfo?.codexModelSources, t]);
 
   const selectedModelCapabilitySummary = useMemo(() => {
-    if (selectedProvider === "opencode" || selectedProvider === "pi") {
-      const limits = resolveOpenCodeModelLimits(selectedModelInfo);
+    if (selectedProvider === "pi") {
+      const limits = resolveGatewayModelLimits(selectedModelInfo);
       if (!limits) return null;
       return t("newSessionModelContextWindow", {
         size: formatContextWindow(limits.context),
@@ -1074,80 +937,41 @@ export function NewSessionForm({
     return parts.join(" · ") || null;
   }, [getEffortLabel, selectedModelInfo, selectedProvider, t]);
 
-  const showOpenCodeEndpointSelector =
-    (selectedProvider === "opencode" || selectedProvider === "pi") &&
+  const showGatewayEndpointSelector =
+    selectedProvider === "pi" &&
     selectedModel !== null &&
-    isManagedOpenCodeModel;
+    isManagedGatewayModel;
 
   // Handle model selection from FilterDropdown
   const handleModelSelect = useCallback(
     (selected: string[]) => {
       const nextModel = selected[0] ?? null;
-      if (selectedProvider === "opencode" || selectedProvider === "pi") {
+      if (selectedProvider === "pi") {
         const nextInfo = availableModels.find(
           (model) => model.id === nextModel,
         );
         const supportedProtocols = nextInfo?.supportedRequestProtocols ?? [];
         const nextProtocol = supportedProtocols.includes(
-          selectedOpenCodeProtocol,
+          selectedGatewayProtocol,
         )
-          ? selectedOpenCodeProtocol
+          ? selectedGatewayProtocol
           : (supportedProtocols[0] ?? "openai-compatible");
-        const reasoningEfforts = getModelReasoningEfforts(
-          nextInfo,
-          supportedProtocols.length > 0 ? nextProtocol : undefined,
-        );
-        setSelectedOpenCodeProtocol(nextProtocol);
-        setOpencodeCapabilities(
-          getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
-        );
-        // Re-apply curated default limits for the newly selected model.
-        opencodeLimitsTouchedRef.current = false;
+        setSelectedGatewayProtocol(nextProtocol);
         setSelectedModel(nextModel);
         return;
       }
       setSelectedModel(nextModel);
     },
-    [availableModels, selectedOpenCodeProtocol, selectedProvider],
+    [availableModels, selectedGatewayProtocol, selectedProvider],
   );
 
-  const handleOpenCodeProtocolSelect = useCallback(
-    (protocol: OpenCodeRequestProtocol) => {
-      if (!selectedOpenCodeProtocols.includes(protocol)) return;
-      const reasoningEfforts = getModelReasoningEfforts(
-        selectedModelInfo,
-        protocol,
-      );
-      setSelectedOpenCodeProtocol(protocol);
-      setOpencodeCapabilities(
-        getDefaultOpenCodeCapabilities(reasoningEfforts.length > 0),
-      );
+  const handleGatewayProtocolSelect = useCallback(
+    (protocol: LlmGatewayRequestProtocol) => {
+      if (!selectedGatewayProtocols.includes(protocol)) return;
+      setSelectedGatewayProtocol(protocol);
     },
-    [selectedModelInfo, selectedOpenCodeProtocols],
+    [selectedGatewayProtocols],
   );
-
-  // Auto-populate OpenCode context/output limits from the selected model's
-  // advertised window (`opencode models --verbose` / gateway catalog, with the
-  // curated catalog only as a per-field fallback). Without this the form falls
-  // back to 200K; filling the inputs both shows the real values and sends them
-  // to the session config. A manual edit (opencodeLimitsTouchedRef) pins the
-  // values until the model changes.
-  useEffect(() => {
-    if (
-      (selectedProvider !== "opencode" && selectedProvider !== "pi") ||
-      !isManagedOpenCodeModel
-    ) {
-      return;
-    }
-    if (opencodeLimitsTouchedRef.current) return;
-    const limits = resolveOpenCodeModelLimits(selectedModelInfo);
-    setOpencodeContextLimit(
-      limits ? formatOpenCodeLimitInput(limits.context) : "",
-    );
-    setOpencodeOutputLimit(
-      limits ? formatOpenCodeLimitInput(limits.output) : "",
-    );
-  }, [selectedProvider, isManagedOpenCodeModel, selectedModelInfo]);
 
   // Combined display text: committed text + interim transcript
   const displayText = interimTranscript
@@ -1228,93 +1052,49 @@ export function NewSessionForm({
     [setEffortLevel, setThinkingMode],
   );
 
-  const opencodeModelLimitResult = useMemo(
-    () => getOpenCodeModelLimits(opencodeContextLimit, opencodeOutputLimit),
-    [opencodeContextLimit, opencodeOutputLimit],
-  );
-  // Real context/output window advertised by the selected OpenCode model, as
-  // resolved by `opencode models --verbose` / the gateway catalog. Used both to
-  // prefill the limit placeholders and to seed the session config so the
-  // context meter reflects the true window instead of the generic 200K
-  // fallback.
-  const opencodeModelDefaultLimits = useMemo(():
-    | OpenCodeModelLimits
-    | undefined => {
-    if (selectedProvider !== "opencode" && selectedProvider !== "pi") {
-      return undefined;
-    }
-    return resolveOpenCodeModelLimits(selectedModelInfo);
+  const gatewayModelLimits = useMemo((): LlmGatewayModelLimits | undefined => {
+    if (selectedProvider !== "pi") return undefined;
+    return resolveGatewayModelLimits(selectedModelInfo);
   }, [selectedProvider, selectedModelInfo]);
-  const opencodeProviderPatchResult = useMemo(
-    () => parseOpenCodeAdvancedInput(opencodeProviderPatch),
-    [opencodeProviderPatch],
-  );
-  const opencodeModelPatchResult = useMemo(
-    () => parseOpenCodeAdvancedInput(opencodeModelPatch),
-    [opencodeModelPatch],
-  );
-  const hasOpenCodeConfigError =
-    (selectedProvider === "opencode" || selectedProvider === "pi") &&
-    isManagedOpenCodeModel &&
-    (!!opencodeModelLimitResult.error ||
-      !!opencodeProviderPatchResult.error ||
-      !!opencodeModelPatchResult.error ||
-      !selectedOpenCodeProtocols.includes(selectedOpenCodeProtocol));
-  const opencodeConfigErrorMessage =
-    opencodeModelLimitResult.error === "incomplete"
-      ? t("newSessionOpenCodeLimitsIncomplete")
-      : opencodeModelLimitResult.error === "invalid"
-        ? t("newSessionOpenCodeLimitsInvalid")
-        : opencodeProviderPatchResult.error || opencodeModelPatchResult.error
-          ? t("newSessionOpenCodeAdvancedInvalid")
-          : !selectedOpenCodeProtocols.includes(selectedOpenCodeProtocol)
-            ? t("newSessionOpenCodeProtocolUnsupported")
-            : "";
-  const opencodeConfigForRequest = useMemo(():
-    | OpenCodeSessionConfig
+  const hasGatewayConfigError =
+    selectedProvider === "pi" &&
+    isManagedGatewayModel &&
+    !selectedGatewayProtocols.includes(selectedGatewayProtocol);
+  const llmGatewayConfigForRequest = useMemo(():
+    | LlmGatewaySessionConfig
     | undefined => {
     if (
-      (selectedProvider !== "opencode" && selectedProvider !== "pi") ||
-      !isManagedOpenCodeModel ||
+      selectedProvider !== "pi" ||
+      !isManagedGatewayModel ||
       !selectedModel ||
-      hasOpenCodeConfigError
+      hasGatewayConfigError
     ) {
       return undefined;
     }
-    const providerPatch = opencodeProviderPatchResult.value;
-    const modelPatch = opencodeModelPatchResult.value;
-    // User-entered limits win; otherwise fall back to the model's advertised
-    // window so the generated OpenCode config and Yep's context meter agree.
-    const effectiveLimits =
-      opencodeModelLimitResult.limits ?? opencodeModelDefaultLimits;
+    const reasoningEfforts = getModelReasoningEfforts(
+      selectedModelInfo,
+      selectedGatewayProtocol,
+    );
     return {
       model: selectedModel,
-      requestProtocol: selectedOpenCodeProtocol,
+      requestProtocol: selectedGatewayProtocol,
       ...(selectedModelInfo?.name && selectedModelInfo.name !== selectedModel
         ? { name: selectedModelInfo.name }
         : {}),
-      ...(effectiveLimits ? { limits: effectiveLimits } : {}),
-      capabilities: opencodeCapabilities,
-      ...(providerPatch || modelPatch
-        ? { advanced: { provider: providerPatch, model: modelPatch } }
-        : {}),
+      ...(gatewayModelLimits ? { limits: gatewayModelLimits } : {}),
+      capabilities: getDefaultGatewayCapabilities(reasoningEfforts.length > 0),
     };
   }, [
-    hasOpenCodeConfigError,
-    isManagedOpenCodeModel,
-    opencodeCapabilities,
-    opencodeModelLimitResult.limits,
-    opencodeModelDefaultLimits,
-    opencodeModelPatchResult.value,
-    opencodeProviderPatchResult.value,
+    gatewayModelLimits,
+    hasGatewayConfigError,
+    isManagedGatewayModel,
     selectedModel,
-    selectedModelInfo?.name,
-    selectedOpenCodeProtocol,
+    selectedModelInfo,
+    selectedGatewayProtocol,
     selectedProvider,
   ]);
   const selectedModelForRequest =
-    (selectedProvider === "opencode" || selectedProvider === "pi") &&
-    isManagedOpenCodeModel
+    selectedProvider === "pi" && isManagedGatewayModel
       ? undefined
       : (selectedModel ?? undefined);
   // Codex picker ids may be composite `source/model`; the API takes the bare
@@ -1341,11 +1121,11 @@ export function NewSessionForm({
       codexMcpMode:
         selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
       codexModelProvider: codexModelProviderForRequest,
-      opencodeConfig: opencodeConfigForRequest,
+      llmGatewayConfig: llmGatewayConfigForRequest,
     }),
     [
       mode,
-      opencodeConfigForRequest,
+      llmGatewayConfigForRequest,
       selectedCodexMcpMode,
       codexModelProviderForRequest,
       modelForRequest,
@@ -1361,7 +1141,7 @@ export function NewSessionForm({
     setIsSavingDefaults(true);
     try {
       const byProvider: Partial<
-        Record<ProviderName, NewSessionProviderDefaults>
+        Record<LiveProviderName, NewSessionProviderDefaults>
       > = {
         [selectedProvider]: currentProviderDefaults,
       };
@@ -1406,7 +1186,7 @@ export function NewSessionForm({
       !hasContent ||
       isStarting ||
       startRetryBlockedMessage ||
-      hasOpenCodeConfigError
+      hasGatewayConfigError
     ) {
       return;
     }
@@ -1435,7 +1215,7 @@ export function NewSessionForm({
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
         codexModelProvider: codexModelProviderForRequest,
-        opencodeConfig: opencodeConfigForRequest,
+        llmGatewayConfig: llmGatewayConfigForRequest,
       };
 
       if (pendingFiles.length > 0) {
@@ -1719,17 +1499,16 @@ export function NewSessionForm({
     : true;
   const reasoningEffortDefaultsMatch =
     selectedProvider === "codex" ||
-    selectedProvider === "opencode" ||
     selectedProvider === "pi" ||
     selectedProvider === "kimi"
       ? (savedProviderDefaults?.reasoningEffort ?? undefined) ===
         selectedReasoningEffort
       : true;
-  const opencodeDefaultsMatch =
-    selectedProvider === "opencode" || selectedProvider === "pi"
-      ? sameOpenCodeConfig(
-          savedProviderDefaults?.opencodeConfig,
-          opencodeConfigForRequest,
+  const gatewayDefaultsMatch =
+    selectedProvider === "pi"
+      ? sameLlmGatewayConfig(
+          savedProviderDefaults?.llmGatewayConfig,
+          llmGatewayConfigForRequest,
         )
       : true;
   const savedPermissionMode = normalizeProviderPermissionMode(
@@ -1747,7 +1526,7 @@ export function NewSessionForm({
     thinkingDefaultsMatch &&
     reasoningEffortDefaultsMatch &&
     codexMcpDefaultsMatch &&
-    opencodeDefaultsMatch;
+    gatewayDefaultsMatch;
 
   // Split providers into available vs unavailable so the unavailable ones can
   // be tucked behind a toggle (keeps the grid from looking ragged).
@@ -1933,7 +1712,7 @@ export function NewSessionForm({
             isStarting ||
             Boolean(startRetryBlockedMessage) ||
             !hasContent ||
-            hasOpenCodeConfigError
+            hasGatewayConfigError
           }
           className="send-button"
           aria-label={t("newSessionStartAction")}
@@ -1972,36 +1751,6 @@ export function NewSessionForm({
                   aria-label={`${t("newSessionEffortTitle")}: ${label}`}
                 >
                   {label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-      {showOpenCodeReasoningSelector && compact && (
-        <div className="new-session-effort-control">
-          <span className="new-session-effort-label">
-            {t("newSessionEffortTitle")}
-          </span>
-          <div className="new-session-effort-options">
-            {openCodeReasoningOptions.map((option) => {
-              const isDefault = option.value === OPENCODE_DEFAULT_VARIANT;
-              const selected = isDefault
-                ? !effectiveOpenCodeReasoningEffort
-                : effectiveOpenCodeReasoningEffort === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`new-session-effort-option ${selected ? "selected" : ""}`}
-                  onClick={() =>
-                    setOpenCodeReasoningEffort(isDefault ? null : option.value)
-                  }
-                  disabled={isStarting}
-                  aria-pressed={selected}
-                  aria-label={`${t("newSessionEffortTitle")}: ${option.label}`}
-                >
-                  {option.label}
                 </button>
               );
             })}
@@ -2173,57 +1922,39 @@ export function NewSessionForm({
                   )}
                 </div>
               )}
-              {showOpenCodeEndpointSelector && (
+              {showGatewayEndpointSelector && (
                 <div className="new-session-config-field">
-                  <h3>{t("newSessionOpenCodeEndpointTitle")}</h3>
+                  <h3>{t("newSessionGatewayEndpointTitle")}</h3>
                   <div className="new-session-endpoint-options">
                     <button
                       type="button"
-                      className={`new-session-endpoint-option ${selectedOpenCodeProtocol === "openai-compatible" ? "selected" : ""}`}
+                      className={`new-session-endpoint-option ${selectedGatewayProtocol === "openai-compatible" ? "selected" : ""}`}
                       onClick={() =>
-                        handleOpenCodeProtocolSelect("openai-compatible")
+                        handleGatewayProtocolSelect("openai-compatible")
                       }
                       disabled={
                         isStarting ||
-                        !selectedOpenCodeProtocols.includes("openai-compatible")
+                        !selectedGatewayProtocols.includes("openai-compatible")
                       }
                       aria-pressed={
-                        selectedOpenCodeProtocol === "openai-compatible"
+                        selectedGatewayProtocol === "openai-compatible"
                       }
                     >
-                      {t("newSessionOpenCodeEndpointOpenAI")}
+                      {t("newSessionGatewayEndpointOpenAI")}
                     </button>
                     <button
                       type="button"
-                      className={`new-session-endpoint-option ${selectedOpenCodeProtocol === "anthropic" ? "selected" : ""}`}
-                      onClick={() => handleOpenCodeProtocolSelect("anthropic")}
+                      className={`new-session-endpoint-option ${selectedGatewayProtocol === "anthropic" ? "selected" : ""}`}
+                      onClick={() => handleGatewayProtocolSelect("anthropic")}
                       disabled={
                         isStarting ||
-                        !selectedOpenCodeProtocols.includes("anthropic")
+                        !selectedGatewayProtocols.includes("anthropic")
                       }
-                      aria-pressed={selectedOpenCodeProtocol === "anthropic"}
+                      aria-pressed={selectedGatewayProtocol === "anthropic"}
                     >
-                      {t("newSessionOpenCodeEndpointAnthropic")}
+                      {t("newSessionGatewayEndpointAnthropic")}
                     </button>
                   </div>
-                </div>
-              )}
-              {showOpenCodeReasoningSelector && (
-                <div className="new-session-config-field">
-                  <h3>{t("newSessionEffortTitle")}</h3>
-                  <FilterDropdown
-                    label={t("newSessionEffortTitle")}
-                    options={openCodeReasoningOptions}
-                    selected={[
-                      effectiveOpenCodeReasoningEffort ??
-                        OPENCODE_DEFAULT_VARIANT,
-                    ]}
-                    onChange={handleOpenCodeReasoningSelect}
-                    accentColor={selectedProviderAccent}
-                    multiSelect={false}
-                    placeholder={t("newSessionEffortTitle")}
-                    align="right"
-                  />
                 </div>
               )}
               {showKimiReasoningSelector && (
@@ -2263,134 +1994,6 @@ export function NewSessionForm({
             </div>
           </div>
         )}
-
-      {selectedProvider === "opencode" && isManagedOpenCodeModel && (
-        <div className="new-session-opencode-config-section">
-          <div className="new-session-opencode-config-heading">
-            <div>
-              <h3>{t("newSessionOpenCodeConfigTitle")}</h3>
-              <p>{t("newSessionOpenCodeConfigDescription")}</p>
-            </div>
-            <button
-              type="button"
-              className="new-session-opencode-advanced-toggle"
-              onClick={() => setShowOpenCodeAdvanced((value) => !value)}
-              aria-expanded={showOpenCodeAdvanced}
-              disabled={isStarting}
-            >
-              {showOpenCodeAdvanced
-                ? t("newSessionOpenCodeAdvancedHide")
-                : t("newSessionOpenCodeAdvancedShow")}
-            </button>
-          </div>
-
-          <h4>{t("newSessionOpenCodeLimitsTitle")}</h4>
-          <div className="new-session-opencode-limits-grid">
-            <label className="new-session-limit-field">
-              <span>{t("newSessionOpenCodeContextLimit")}</span>
-              <div className="new-session-limit-input-wrap">
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  className="new-session-limit-input"
-                  value={opencodeContextLimit}
-                  onChange={(event) => {
-                    opencodeLimitsTouchedRef.current = true;
-                    setOpencodeContextLimit(event.target.value);
-                  }}
-                  placeholder={t("newSessionOpenCodeContextPlaceholder")}
-                  disabled={isStarting}
-                />
-                <span className="new-session-limit-unit">K</span>
-              </div>
-            </label>
-            <label className="new-session-limit-field">
-              <span>{t("newSessionOpenCodeOutputLimit")}</span>
-              <div className="new-session-limit-input-wrap">
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  className="new-session-limit-input"
-                  value={opencodeOutputLimit}
-                  onChange={(event) => {
-                    opencodeLimitsTouchedRef.current = true;
-                    setOpencodeOutputLimit(event.target.value);
-                  }}
-                  placeholder={t("newSessionOpenCodeOutputPlaceholder")}
-                  disabled={isStarting}
-                />
-                <span className="new-session-limit-unit">K</span>
-              </div>
-            </label>
-          </div>
-
-          <h4>{t("newSessionOpenCodeCapabilitiesTitle")}</h4>
-          <div className="new-session-opencode-capabilities">
-            {(
-              [
-                ["reasoning", "newSessionOpenCodeCapabilityReasoning"],
-                ["toolCall", "newSessionOpenCodeCapabilityTools"],
-                ["temperature", "newSessionOpenCodeCapabilityTemperature"],
-                ["attachment", "newSessionOpenCodeCapabilityAttachments"],
-              ] as const
-            ).map(([capability, label]) => (
-              <label
-                className="new-session-opencode-capability"
-                key={capability}
-              >
-                <input
-                  type="checkbox"
-                  checked={Boolean(opencodeCapabilities[capability])}
-                  onChange={(event) =>
-                    setOpencodeCapabilities((current) => ({
-                      ...current,
-                      [capability]: event.target.checked,
-                    }))
-                  }
-                  disabled={isStarting}
-                />
-                <span>{t(label)}</span>
-              </label>
-            ))}
-          </div>
-
-          {showOpenCodeAdvanced && (
-            <div className="new-session-opencode-advanced">
-              <p>{t("newSessionOpenCodeAdvancedDescription")}</p>
-              <label className="new-session-opencode-json-field">
-                <span>{t("newSessionOpenCodeProviderPatch")}</span>
-                <textarea
-                  value={opencodeProviderPatch}
-                  onChange={(event) =>
-                    setOpencodeProviderPatch(event.target.value)
-                  }
-                  placeholder={'{"options":{"headers":{"X-Trace":"yep"}}}'}
-                  spellCheck={false}
-                  disabled={isStarting}
-                />
-              </label>
-              <label className="new-session-opencode-json-field">
-                <span>{t("newSessionOpenCodeModelPatch")}</span>
-                <textarea
-                  value={opencodeModelPatch}
-                  onChange={(event) =>
-                    setOpencodeModelPatch(event.target.value)
-                  }
-                  placeholder={'{"options":{"thinking":{"type":"disabled"}}}'}
-                  spellCheck={false}
-                  disabled={isStarting}
-                />
-              </label>
-            </div>
-          )}
-
-          {opencodeConfigErrorMessage && (
-            <p className="new-session-limit-error">
-              {opencodeConfigErrorMessage}
-            </p>
-          )}
-        </div>
-      )}
 
       {/* Codex MCP Profile - matches cf / cf -mcp launch modes */}
       {selectedProvider === "codex" && (
@@ -2507,7 +2110,7 @@ export function NewSessionForm({
                 isSavingDefaults ||
                 settingsLoading ||
                 !selectedProvider ||
-                hasOpenCodeConfigError ||
+                hasGatewayConfigError ||
                 defaultsMatchCurrent
               }
             >

@@ -21,32 +21,6 @@ async function captureError(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("provider-specific historical message editing", () => {
-  it("uses the persisted OpenCode user message itself as the native boundary", () => {
-    expect(
-      resolveSessionEditSubmission("opencode", {
-        uuid: "msg_user_native",
-        parentUuid: "not-the-boundary",
-      }),
-    ).toEqual({
-      kind: "opencode-fork",
-      resumeSessionAt: "msg_user_native",
-      optimisticTruncate: false,
-      refreshSameSessionBranches: false,
-    });
-  });
-
-  it("forks the first OpenCode prompt instead of starting a new session", () => {
-    expect(
-      resolveSessionEditSubmission("opencode", {
-        uuid: "msg_first_native",
-        parentUuid: null,
-      }),
-    ).toMatchObject({
-      kind: "opencode-fork",
-      resumeSessionAt: "msg_first_native",
-    });
-  });
-
   it("uses Pi's persisted entry id as the native edit-fork boundary", () => {
     expect(canEditPersistedUserPrompt("pi", "jsonl")).toBe(true);
     expect(canEditPersistedUserPrompt("pi", "sdk")).toBe(false);
@@ -56,7 +30,7 @@ describe("provider-specific historical message editing", () => {
         parentUuid: "pi-parent-entry",
       }),
     ).toEqual({
-      kind: "opencode-fork",
+      kind: "edit-fork",
       resumeSessionAt: "pi-user-entry",
       optimisticTruncate: false,
       refreshSameSessionBranches: false,
@@ -94,9 +68,8 @@ describe("provider-specific historical message editing", () => {
   });
 
   it("only enables native-entry forks after the authoritative disk message arrives", () => {
-    expect(canEditPersistedUserPrompt("opencode", "jsonl")).toBe(true);
-    expect(canEditPersistedUserPrompt("opencode", "sdk")).toBe(false);
-    expect(canEditPersistedUserPrompt("opencode", undefined)).toBe(false);
+    expect(canEditPersistedUserPrompt("pi", "jsonl")).toBe(true);
+    expect(canEditPersistedUserPrompt("pi", "sdk")).toBe(false);
     expect(canEditPersistedUserPrompt("zcode", "jsonl")).toBe(true);
     expect(canEditPersistedUserPrompt("zcode", "sdk")).toBe(false);
     expect(canEditPersistedUserPrompt("zcode", undefined)).toBe(false);
@@ -111,7 +84,7 @@ describe("provider-specific historical message editing", () => {
         parentUuid: "not-the-boundary",
       }),
     ).toEqual({
-      kind: "opencode-fork",
+      kind: "edit-fork",
       resumeSessionAt: "msg_user_native",
       optimisticTruncate: false,
       refreshSameSessionBranches: false,
@@ -124,7 +97,7 @@ describe("provider-specific historical message editing", () => {
         parentUuid: null,
       }),
     ).toMatchObject({
-      kind: "opencode-fork",
+      kind: "edit-fork",
       resumeSessionAt: "msg_first_native",
     });
   });
@@ -220,7 +193,7 @@ describe("queued historical edit recovery", () => {
 describe("session branch navigation", () => {
   const branchState: SessionBranchState = {
     sessionId: "ses_parent",
-    provider: "opencode",
+    provider: "zcode",
     activeBranchId: "msg_original",
     selectedBranchId: "msg_original",
     branches: [

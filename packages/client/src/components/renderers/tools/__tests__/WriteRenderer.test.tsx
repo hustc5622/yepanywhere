@@ -23,7 +23,7 @@ describe("WriteRenderer", () => {
     cleanup();
   });
 
-  it("renders raw OpenCode write success using the input file and content", () => {
+  it("renders raw write success using the input file and content", () => {
     render(
       <div>
         {writeRenderer.renderToolResult(

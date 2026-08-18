@@ -111,6 +111,8 @@ export {
 
 export type {
   ProviderName,
+  LiveProviderName,
+  PersistedProviderName,
   ProviderInfo,
   CodexModelSourceInfo,
   RemoteExecutorConfig,
@@ -118,12 +120,12 @@ export type {
   RemoteSessionStorageMode,
   ReasoningEffortInfo,
   ModelInfo,
-  OpenCodeRequestProtocol,
-  OpenCodeModelLimits,
-  OpenCodeJsonValue,
-  OpenCodeJsonObject,
-  OpenCodeModelCapabilities,
-  OpenCodeSessionConfig,
+  LlmGatewayRequestProtocol,
+  LlmGatewayModelLimits,
+  LlmGatewayJsonValue,
+  LlmGatewayJsonObject,
+  LlmGatewayModelCapabilities,
+  LlmGatewaySessionConfig,
   SlashCommand,
   PermissionMode,
   CodexMcpMode,
@@ -158,12 +160,12 @@ export type {
   ZCodeBridgePendingInput,
   ZCodeBridgeDecision,
 } from "./types.js";
+export { ALL_LLM_GATEWAY_REQUEST_PROTOCOLS } from "./types.js";
 export {
   ALL_PROVIDERS,
   DEFAULT_PERMISSION_MODE,
   ALL_PERMISSION_MODES,
   ALL_CODEX_MCP_MODES,
-  ALL_OPENCODE_REQUEST_PROTOCOLS,
   getNewSessionProviderDefaults,
   mergeNewSessionDefaults,
   normalizeNewSessionDefaults,
@@ -285,7 +287,7 @@ export type {
   SessionOriginChannel,
   SessionOwnership,
   SessionSandboxPolicy,
-  OpenCodeModelDefaultLimits,
+  LlmGatewayModelDefaultLimits,
   SessionBranchOption,
   SessionBranchState,
   SessionBranchMetadata,
@@ -326,7 +328,7 @@ export {
   CODEX_DEFAULT_CONTEXT_WINDOW,
   escalateContextWindow,
   getModelContextWindow,
-  getOpenCodeModelDefaultLimits,
+  getLlmGatewayModelDefaultLimits,
   resolveModelDisplayLabel,
   resolveClaudeModelLabel,
 } from "./app-types.js";
@@ -455,35 +457,6 @@ export {
   getGeminiUserMessageText,
   parseGeminiSessionFile,
 } from "./gemini-schema/session.js";
-
-// OpenCode SDK schema types (for opencode serve SSE events and session storage)
-export type {
-  // SSE event types
-  OpenCodeSessionStatus,
-  OpenCodeTokens,
-  OpenCodeTime,
-  OpenCodePart,
-  OpenCodeMessageInfo,
-  OpenCodeSessionInfo,
-  OpenCodeServerConnectedEvent,
-  OpenCodeSessionCreatedEvent,
-  OpenCodeSessionStatusEvent,
-  OpenCodeSessionUpdatedEvent,
-  OpenCodeSessionIdleEvent,
-  OpenCodeSessionDiffEvent,
-  OpenCodeMessageUpdatedEvent,
-  OpenCodeMessagePartUpdatedEvent,
-  OpenCodeMessagePartDeltaEvent,
-  OpenCodeSSEEvent,
-  // Session storage types
-  OpenCodeProject,
-  OpenCodeSession,
-  OpenCodeMessage,
-  OpenCodeStoredPart,
-  OpenCodeSessionEntry,
-  OpenCodeSessionContent,
-} from "./opencode-schema/types.js";
-export { parseOpenCodeSSEEvent } from "./opencode-schema/events.js";
 
 // Kimi Code CLI session schema (for reading ~/.kimi-code/sessions wire.jsonl)
 export type {

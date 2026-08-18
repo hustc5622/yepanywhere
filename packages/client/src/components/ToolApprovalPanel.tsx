@@ -56,64 +56,6 @@ function getSubagentOriginTitle(request: InputRequest): string | undefined {
   );
 }
 
-/**
- * OpenCode permission approvals come in two shapes: bridge requests are
- * tagged approvalKind "opencode_permission"; owned-session requests carry the
- * raw event fields (permission + patterns) with no approvalKind. Both offer
- * a persistent "always" grant when the upstream request advertised
- * non-empty always/persistent patterns.
- */
-function isOpenCodePermissionRequest(request: InputRequest): boolean {
-  const input = asRecord(request.toolInput);
-  if (!input) return false;
-  return (
-    input.approvalKind === "opencode_permission" ||
-    (input.approvalKind === undefined &&
-      typeof input.permission === "string" &&
-      Array.isArray(input.patterns))
-  );
-}
-
-function supportsOpenCodeAlwaysApproval(request: InputRequest): boolean {
-  const input = asRecord(request.toolInput);
-  if (!input) return false;
-  if (getAvailableApprovalDecisions(request).includes("always")) return true;
-  // Owned-session shape: the upstream event's `always` patterns signal that
-  // OpenCode can persist this grant.
-  return getStringArray(input.always).length > 0;
-}
-
-/**
- * OpenCode permission requests carry the actual resource in `patterns`
- * (e.g. the directory an external_directory approval is about). The generic
- * first-string-field fallback used to surface the `permission` name instead,
- * rendering "Allow external_directory external_directory?" with no path.
- */
-function getOpenCodePermissionDetail(
-  request: InputRequest,
-): string | undefined {
-  if (!isOpenCodePermissionRequest(request)) return undefined;
-  const input = asRecord(request.toolInput);
-  if (!input) return undefined;
-
-  const patterns = getStringArray(input.patterns);
-  if (patterns.length > 0) return patterns.join(", ");
-
-  const metadata = asRecord(input.metadata);
-  return (
-    getString(metadata?.directory) ??
-    getString(metadata?.resource) ??
-    getString(metadata?.path) ??
-    getString(metadata?.filePath) ??
-    getString(metadata?.filepath) ??
-    getString(metadata?.command) ??
-    // No resource info at all: return empty rather than undefined so the
-    // caller does not fall back to the generic first-string-field summary,
-    // which would surface the permission name a second time.
-    ""
-  );
-}
-
 function getAvailableApprovalDecisions(request: InputRequest): string[] {
   return getStringArray(asRecord(request.toolInput)?.availableDecisions);
 }
@@ -227,9 +169,6 @@ export function ToolApprovalPanel({
   const mcpApprovalScopes = getMcpApprovalScopes(request);
   const isScopedMcpApproval = mcpApprovalScopes.length > 0;
   const isPermissionsApproval = approvalKind === "permissions";
-  const isOpenCodeApproval = isOpenCodePermissionRequest(request);
-  const canApproveOpenCodeAlways =
-    isOpenCodeApproval && supportsOpenCodeAlwaysApproval(request);
   const usesProviderSessionApproval =
     approvalKind === "command_execution" || approvalKind === "file_change";
   const canApproveMcpForSession = mcpApprovalScopes.includes("session");
@@ -382,27 +321,6 @@ export function ToolApprovalPanel({
           e.preventDefault();
           handleApprove();
         }
-      } else if (isOpenCodeApproval) {
-        if (e.key === "1") {
-          e.preventDefault();
-          handleApprove();
-        } else if (
-          e.key === "2" &&
-          canApproveOpenCodeAlways &&
-          onApproveAlways
-        ) {
-          e.preventDefault();
-          handleApproveAlways();
-        } else if (
-          e.key === "Escape" ||
-          e.key === (canApproveOpenCodeAlways ? "3" : "2")
-        ) {
-          e.preventDefault();
-          handleDeny();
-        } else if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          handleApprove();
-        }
       } else if (isPlanMode) {
         if (preserveModeOnPlanApproval) {
           if (e.key === "1" || (e.key === "Enter" && !e.shiftKey)) {
@@ -479,9 +397,7 @@ export function ToolApprovalPanel({
     canApprovePersistently,
     canApproveMcpAlways,
     canApproveMcpForSession,
-    canApproveOpenCodeAlways,
     hasPersistentApprovalHandler,
-    isOpenCodeApproval,
     isPermissionsApproval,
     isScopedMcpApproval,
     onApproveAlways,
@@ -492,23 +408,10 @@ export function ToolApprovalPanel({
     request.toolName,
   ]);
 
-  const openCodePermissionDetail = getOpenCodePermissionDetail(request);
-  // Bridge requests use toolName "OpenCode"; the permission name (bash,
-  // external_directory, ...) is what the user actually needs to see.
-  const displayToolName =
-    (isOpenCodeApproval
-      ? getString(asRecord(request.toolInput)?.permission)
-      : undefined) ?? request.toolName;
-  const summary =
-    openCodePermissionDetail ??
-    (request.toolName
-      ? getToolSummary(
-          request.toolName,
-          request.toolInput,
-          undefined,
-          "pending",
-        )
-      : request.prompt);
+  const displayToolName = request.toolName;
+  const summary = request.toolName
+    ? getToolSummary(request.toolName, request.toolInput, undefined, "pending")
+    : request.prompt;
   const approvalPrompt = getApprovalPrompt(request);
   const approvalAction = getApprovalAction(request);
 
@@ -711,40 +614,6 @@ export function ToolApprovalPanel({
                   disabled={!armed || submitting}
                 >
                   <kbd>4</kbd>
-                  <span>{t("toolApprovalCancel")}</span>
-                </button>
-              </>
-            ) : isOpenCodeApproval ? (
-              <>
-                <button
-                  type="button"
-                  className="tool-approval-option primary"
-                  onClick={handleApprove}
-                  disabled={!armed || submitting}
-                >
-                  <kbd>1</kbd>
-                  <span>{t("toolApprovalAllowOnce")}</span>
-                </button>
-
-                {canApproveOpenCodeAlways && onApproveAlways && (
-                  <button
-                    type="button"
-                    className="tool-approval-option"
-                    onClick={handleApproveAlways}
-                    disabled={!armed || submitting}
-                  >
-                    <kbd>2</kbd>
-                    <span>{t("toolApprovalAlwaysAllow")}</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  className="tool-approval-option"
-                  onClick={handleDeny}
-                  disabled={!armed || submitting}
-                >
-                  <kbd>{canApproveOpenCodeAlways ? "3" : "2"}</kbd>
                   <span>{t("toolApprovalCancel")}</span>
                 </button>
               </>

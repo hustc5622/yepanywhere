@@ -10,25 +10,12 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("useProviderPermissionModeConfig", () => {
-  it("gives Pi its own copy instead of reusing OpenCode's", () => {
+  it("uses Pi-specific approval copy", () => {
     const pi = renderHook(() => useProviderPermissionModeConfig("pi"), {
       wrapper,
     }).result.current;
-    const opencode = renderHook(
-      () => useProviderPermissionModeConfig("opencode"),
-      { wrapper },
-    ).result.current;
-
     expect(pi.title).toBe(enMessages.newSessionPiPermissionTitle);
-    expect(pi.title).not.toBe(opencode.title);
-    expect(pi.description).not.toContain("OpenCode");
-    for (const mode of [
-      "default",
-      "acceptEdits",
-      "bypassPermissions",
-    ] as const) {
-      expect(pi.descriptions[mode]).not.toBe(opencode.descriptions[mode]);
-    }
+    expect(pi.description).toBe(enMessages.newSessionPiPermissionDescription);
   });
 
   it("describes Pi's plan mode as an approval gate without a plan prompt", () => {

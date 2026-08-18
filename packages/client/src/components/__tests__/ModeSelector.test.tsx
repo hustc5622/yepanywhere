@@ -31,15 +31,6 @@ describe("ModeSelector provider copy", () => {
         "No filesystem or network sandbox; Codex can still choose to request approval",
     },
     {
-      provider: "opencode",
-      mode: "default",
-      modes: ["default", "acceptEdits", "bypassPermissions"],
-      label: "Ask for changes",
-      title: "OpenCode Tool Approvals",
-      description:
-        "Allow reads, search, and web tools; ask before edits, shell commands, and other tools",
-    },
-    {
       provider: "kimi",
       mode: "bypassPermissions",
       modes: ["default", "plan", "auto", "bypassPermissions"],

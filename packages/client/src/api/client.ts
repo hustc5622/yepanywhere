@@ -12,8 +12,8 @@ import type {
   EnrichedRecentEntry,
   FileContentResponse,
   GitStatusInfo,
+  LlmGatewaySessionConfig,
   NewSessionDefaults,
-  OpenCodeSessionConfig,
   PendingInputType,
   ProviderGoalAction,
   ProviderGoalState,
@@ -178,7 +178,7 @@ export interface GlobalSessionItem {
   lastTurnStatus?: SessionLastTurnStatus;
   /** Most recent provider error message, if the last turn failed. */
   lastErrorMessage?: string;
-  /** Present while the provider is retrying a failed request (OpenCode). */
+  /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
 }
 
@@ -266,13 +266,7 @@ export interface SearchResponse {
   searchDurationMs: number;
 }
 
-export type ArchiveProvider =
-  | "claude"
-  | "codex"
-  | "opencode"
-  | "pi"
-  | "kimi"
-  | "zcode";
+export type ArchiveProvider = "claude" | "codex" | "pi" | "kimi" | "zcode";
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {
@@ -331,14 +325,14 @@ export interface SessionOptions {
   /** Model ID (e.g., "sonnet", "opus", "qwen2.5-coder:0.5b") */
   model?: string;
   thinking?: ThinkingOption;
-  /** Exact provider reasoning effort / OpenCode model variant. */
+  /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
   codexModelProvider?: string;
-  /** OpenCode-only managed provider/model configuration. */
-  opencodeConfig?: OpenCodeSessionConfig;
+  /** Managed LLM gateway provider/model configuration. */
+  llmGatewayConfig?: LlmGatewaySessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
   executor?: string;
   /** Ephemeral provider-native input. Never persist this in message drafts. */
@@ -680,7 +674,6 @@ export interface StartDeploymentRequest {
 export interface DeploymentRestartTargets {
   server?: boolean;
   codexBridge?: boolean;
-  opencodeBridge?: boolean;
 }
 
 export interface GetVersionOptions {
@@ -1073,7 +1066,7 @@ export const api = {
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         codexModelProvider: options?.codexModelProvider,
-        opencodeConfig: options?.opencodeConfig,
+        llmGatewayConfig: options?.llmGatewayConfig,
         executor: options?.executor,
         codexInputs: options?.codexInputs,
         attachments,
@@ -1095,7 +1088,7 @@ export const api = {
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         codexModelProvider: options?.codexModelProvider,
-        opencodeConfig: options?.opencodeConfig,
+        llmGatewayConfig: options?.llmGatewayConfig,
         executor: options?.executor,
       }),
     }),
@@ -1109,8 +1102,8 @@ export const api = {
     tempId?: string,
     /**
      * Provider-native edit boundary. Claude receives the edited message's
-     * parentUuid; OpenCode receives the edited persisted user message's own
-     * native ID and forks before it.
+     * parentUuid; native edit-fork providers receive the persisted user
+     * message's own id and fork before it.
      */
     resumeSessionAt?: string,
     /**
@@ -1139,7 +1132,7 @@ export const api = {
           provider: options?.provider,
           codexMcpMode: options?.codexMcpMode,
           codexModelProvider: options?.codexModelProvider,
-          opencodeConfig: options?.opencodeConfig,
+          llmGatewayConfig: options?.llmGatewayConfig,
           executor: options?.executor,
           codexInputs: options?.codexInputs,
           attachments,

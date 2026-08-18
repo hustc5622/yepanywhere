@@ -32,7 +32,6 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   image_generation: "ViewImage",
   imageGeneration: "ViewImage",
   skill: "Skill",
-  question: "AskUserQuestion", // opencode's `question` tool
 };
 
 function canonicalizeToolName(toolName: string): string {
@@ -199,7 +198,6 @@ import { exitPlanModeRenderer } from "./ExitPlanModeRenderer";
 import { globRenderer } from "./GlobRenderer";
 import { grepRenderer } from "./GrepRenderer";
 import { killShellRenderer } from "./KillShellRenderer";
-import { openCodeTaskRenderer } from "./OpenCodeTaskRenderer";
 import { readRenderer } from "./ReadRenderer";
 import { skillRenderer } from "./SkillRenderer";
 import { taskOutputRenderer } from "./TaskOutputRenderer";
@@ -226,9 +224,6 @@ toolRegistry.register(skillRenderer);
 
 // Tier 3: Less common tools
 toolRegistry.register(taskRenderer);
-// OpenCode's lowercase `task` tool spawns a standalone subagent session; render
-// it as a clickable card linking to that session (distinct from Claude's Task).
-toolRegistry.register(openCodeTaskRenderer);
 toolRegistry.register(webSearchRenderer);
 toolRegistry.register(webFetchRenderer);
 toolRegistry.register(askUserQuestionRenderer);

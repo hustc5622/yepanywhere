@@ -70,61 +70,6 @@ describe("getToolSummary", () => {
     );
   });
 
-  it("keeps OpenCode command context visible after bash completes", () => {
-    const summary = getToolSummary(
-      "bash",
-      {
-        command: 'rg -n "opencode" packages/client/src',
-        opencodeTitle: 'rg -n "opencode" packages/client/src',
-      },
-      {
-        content: "packages/client/src/pages/SessionPage.tsx:107:OpenCode",
-        isError: false,
-      },
-      "complete",
-      { provider: "opencode" },
-    );
-
-    expect(summary).toBe('rg -n "opencode" packages/client/src');
-  });
-
-  it("prefers OpenCode bash command over generic title", () => {
-    const summary = getToolSummary(
-      "Bash",
-      {
-        command: "pnpm test -- --runInBand",
-        opencodeTitle: "bash",
-      },
-      {
-        content: "ok",
-        isError: false,
-      },
-      "complete",
-      { provider: "opencode" },
-    );
-
-    expect(summary).toBe("pnpm test -- --runInBand");
-  });
-
-  it("shows OpenCode read target instead of generic done", () => {
-    const summary = getToolSummary(
-      "read",
-      {
-        filePath: "/repo/packages/client/src/components/blocks/ToolCallRow.tsx",
-      },
-      {
-        content: "file contents",
-        isError: false,
-      },
-      "complete",
-      { provider: "opencode" },
-    );
-
-    expect(summary).toBe(
-      "/repo/packages/client/src/components/blocks/ToolCallRow.tsx → ToolCallRow.tsx",
-    );
-  });
-
   it("keeps the Codex code-mode exec command overview after completion", () => {
     const summary = getToolSummary(
       "CodexExec",

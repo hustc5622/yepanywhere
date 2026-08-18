@@ -55,7 +55,7 @@ interface SessionListItemProps {
   lastTurnStatus?: SessionLastTurnStatus;
   /** Most recent provider error message, if the last turn failed. */
   lastErrorMessage?: string;
-  /** Present while the provider is retrying a failed request (OpenCode). */
+  /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
   /** SSH host for remote execution (undefined = local) */
   executor?: string;

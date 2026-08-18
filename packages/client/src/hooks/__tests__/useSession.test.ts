@@ -55,7 +55,7 @@ function session(overrides?: Partial<Session>): Session {
     updatedAt: "2026-07-06T12:00:01.000Z",
     messageCount: 2,
     ownership: { owner: "none" },
-    provider: "opencode",
+    provider: "pi",
     ...overrides,
   };
 }
@@ -248,7 +248,7 @@ describe("mergeSessionMetadataChange", () => {
 });
 
 describe("shouldRefreshSettledAuthoritativeSnapshot", () => {
-  it.each(["opencode", "pi", "kimi"] as const)(
+  it.each(["pi", "kimi"] as const)(
     "refreshes an owned %s session once its turn becomes idle",
     (provider) => {
       expect(
@@ -265,9 +265,9 @@ describe("shouldRefreshSettledAuthoritativeSnapshot", () => {
 
   it.each([
     ["claude", "self", "idle", "ses-current"],
-    ["opencode", "none", "idle", "ses-current"],
-    ["opencode", "self", "in-turn", "ses-current"],
-    ["opencode", "self", "idle", "ses-other"],
+    ["pi", "none", "idle", "ses-current"],
+    ["pi", "self", "in-turn", "ses-current"],
+    ["pi", "self", "idle", "ses-other"],
   ] as const)(
     "does not refresh for provider=%s owner=%s state=%s eventSession=%s",
     (provider, owner, state, eventSessionId) => {
@@ -295,7 +295,7 @@ describe("shouldDeferKimiPersistedSync", () => {
   it.each([
     ["kimi", "self", "idle"],
     ["kimi", "none", "in-turn"],
-    ["opencode", "self", "in-turn"],
+    ["pi", "self", "in-turn"],
   ] as const)(
     "does not defer provider=%s owner=%s state=%s",
     (provider, owner, state) => {
@@ -549,7 +549,7 @@ describe("shouldFetchSessionMetadataForUpdate", () => {
 });
 
 describe("shouldRefreshFullPersistedSession", () => {
-  it.each(["codex", "codex-oss", "opencode", "pi", "kimi"] as const)(
+  it.each(["codex", "codex-oss", "pi", "kimi"] as const)(
     "reloads the authoritative window for %s in-place updates",
     (provider) => {
       expect(shouldRefreshFullPersistedSession(provider)).toBe(true);

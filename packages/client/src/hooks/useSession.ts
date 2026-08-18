@@ -292,7 +292,7 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
   expectedSessionId: string,
 ): boolean {
   return (
-    (provider === "opencode" || provider === "pi" || provider === "kimi") &&
+    (provider === "pi" || provider === "kimi") &&
     owner === "self" &&
     processState === "idle" &&
     eventSessionId === expectedSessionId
@@ -430,7 +430,6 @@ export function shouldRefreshFullPersistedSession(
   return (
     provider === "codex" ||
     provider === "codex-oss" ||
-    provider === "opencode" ||
     provider === "pi" ||
     provider === "kimi"
   );
@@ -824,7 +823,7 @@ export function useSession(
     messagesRef.current = messages;
   }, [messages]);
 
-  // OpenCode, Pi, and Kimi use different identities for live and persisted
+  // Pi and Kimi use different identities for live and persisted
   // messages. Once a turn settles, replace the whole visible snapshot so a
   // full persisted response cannot be appended as duplicate historical turns.
   const authoritativeSnapshotRefreshTimerRef = useRef<ReturnType<
@@ -833,7 +832,7 @@ export function useSession(
   const authoritativeSnapshotRefreshGenerationRef = useRef(0);
   const scheduleAuthoritativeSnapshotRefresh = useCallback(() => {
     const provider = session?.provider;
-    if (provider !== "opencode" && provider !== "pi" && provider !== "kimi") {
+    if (provider !== "pi" && provider !== "kimi") {
       return;
     }
 
@@ -1134,8 +1133,7 @@ export function useSession(
       return;
     }
 
-    // Codex can rewrite recent transcript entries and OpenCode updates tool
-    // parts in place. Reload the authoritative bounded window for both cases.
+    // Providers can rewrite recent transcript entries and tool parts in place.
     if (shouldRefreshFullPersistedSession(provider)) {
       void refreshSessionMessages();
       return;
@@ -1361,8 +1359,8 @@ export function useSession(
       }
 
       // Always refresh the current request when the event advertises pending
-      // input. Codex can emit multiple approvals in one turn, and OpenCode's
-      // underlying runtime may still report in-turn while permission-blocked.
+      // input. Providers can emit multiple approvals in one turn while their
+      // runtime still reports in-turn.
       // Use the dedicated endpoint so the focused page only refreshes the
       // prompt instead of reloading all session metadata.
       if (event.pendingInputType) {
