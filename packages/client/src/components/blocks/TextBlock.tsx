@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { useOptionalSessionMetadata } from "../../contexts/SessionMetadataContext";
 import { useStreamingMarkdownContext } from "../../contexts/StreamingMarkdownContext";
@@ -249,6 +257,28 @@ export const TextBlock = memo(function TextBlock({
 
   const showStreamingContent = isStreaming && useStreamingContent;
 
+  // Server-rendered markdown is applied imperatively instead of through
+  // `dangerouslySetInnerHTML` so identical HTML is never re-applied. React
+  // re-runs that prop on some commits (a load-older prepend applies the exact
+  // same string twice), and every re-application recreates every node inside —
+  // which silently destroys a text selection the user is making inside it.
+  const augmentHostRef = useRef<HTMLDivElement | null>(null);
+  const appliedAugmentRef = useRef<{ host: HTMLElement; html: string } | null>(
+    null,
+  );
+  const showAugmentHost =
+    !showStreamingContent && !benchmarkEval && augmentHtml;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: showAugmentHost re-runs this when the branch (and therefore the host node) changes
+  useLayoutEffect(() => {
+    const host = augmentHostRef.current;
+    if (!host || !augmentHtml) return;
+    const applied = appliedAugmentRef.current;
+    if (applied && applied.host === host && applied.html === augmentHtml)
+      return;
+    host.innerHTML = augmentHtml;
+    appliedAugmentRef.current = { host, html: augmentHtml };
+  }, [augmentHtml, showAugmentHost]);
+
   // Always render streaming container when isStreaming so refs are attached
   // before first augment arrives. Hidden until useStreamingContent becomes true.
   const renderStreamingContainer = isStreaming;
@@ -284,8 +314,8 @@ export const TextBlock = memo(function TextBlock({
         (benchmarkEval ? (
           <BenchmarkEvalResult block={benchmarkEval} />
         ) : augmentHtml ? (
-          // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
-          <div dangerouslySetInnerHTML={{ __html: augmentHtml }} />
+          // Content is written by the layout effect above (see why there).
+          <div ref={augmentHostRef} />
         ) : (
           // Plain text fallback (no server augment available)
           <p className="text-block-plain">

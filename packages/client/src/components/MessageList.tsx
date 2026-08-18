@@ -5,11 +5,13 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { useOptionalI18n } from "../i18n";
+import { hasActiveTextSelectionWithin } from "../lib/clipboard";
 import {
   type ActiveToolApproval,
   isSessionInspectorOnlyItem,
@@ -26,8 +28,10 @@ import {
   type MessageRow,
   type PendingMessage,
   buildMessageRows,
+  createStickyTurnKeyResolver,
   getBranchId,
   getRowKey,
+  pruneTurnKeyRegistry,
 } from "./messageRows";
 
 /**
@@ -38,6 +42,98 @@ import {
 const VIRTUALIZE_ROW_THRESHOLD = 80;
 /** Rough per-row height guess used before a row has been measured. */
 const ESTIMATED_ROW_HEIGHT = 320;
+/** Distance from the top of the scroller that auto-loads the previous chunk. */
+const TOP_LOAD_THRESHOLD = 200;
+/**
+ * Height growth that counts as "the prepended chunk landed". Sub-pixel and
+ * one-pixel reflows happen constantly (timestamps, spinners) and must not
+ * consume the reading-position anchor.
+ */
+const PREPEND_MIN_HEIGHT_GROWTH = 8;
+
+/**
+ * Topmost row that is still (partly) in view, used as the anchor when older
+ * rows are prepended above it. The load-older row is skipped: it stays above
+ * every prepended row, so it never moves and would measure a zero delta.
+ */
+function findTopmostVisibleRow(
+  list: HTMLElement,
+  scrollTop: number,
+): HTMLElement | null {
+  for (const child of Array.from(list.children)) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (
+      child.classList.contains("load-older-messages") ||
+      child.querySelector(".load-older-messages")
+    ) {
+      continue;
+    }
+    if (child.offsetTop + child.offsetHeight > scrollTop) return child;
+  }
+  return null;
+}
+
+/**
+ * Element to keep visually still while older messages are prepended.
+ *
+ * The deepest element at the top edge of the viewport is preferred: load-older
+ * also prepends items *inside* the turn that sits at the top of the window, and
+ * a row-level anchor cannot see that part of the inserted height (measured on a
+ * real session: 1.2k of 21.7k prepended pixels landed inside the anchor row).
+ */
+function findPrependAnchorElement(
+  list: HTMLElement,
+  container: HTMLElement,
+): HTMLElement | null {
+  const viewport = container.getBoundingClientRect();
+  if (viewport.width > 0 && viewport.height > 0) {
+    // Probe below the load-older row: it is above every prepended row, so
+    // anchoring on it would measure no movement at all (visible at scrollTop 0).
+    const loadOlderRow = list.querySelector(".load-older-messages");
+    const loadOlderBottom = loadOlderRow
+      ? loadOlderRow.getBoundingClientRect().bottom
+      : Number.NEGATIVE_INFINITY;
+    const probeY = Math.round(
+      Math.min(
+        Math.max(viewport.top + 8, loadOlderBottom + 2),
+        viewport.bottom - 8,
+      ),
+    );
+    let deepestElement: HTMLElement | null = null;
+    let deepestDepth = -1;
+    // The gutter can hit an outer wrapper, so sample across the row width.
+    for (const fraction of [0.5, 0.25, 0.75]) {
+      try {
+        const probe = document.elementFromPoint(
+          Math.round(viewport.left + viewport.width * fraction),
+          probeY,
+        );
+        // The list itself is never a usable anchor: its top edge does not move
+        // when children are prepended, so it always measures a zero delta.
+        if (!(probe instanceof HTMLElement) || probe === list) continue;
+        if (!list.contains(probe)) continue;
+        if (probe.closest(".load-older-messages")) continue;
+        let depth = 0;
+        for (
+          let node: HTMLElement | null = probe;
+          node && node !== list;
+          node = node.parentElement
+        ) {
+          depth += 1;
+        }
+        if (depth > deepestDepth) {
+          deepestElement = probe;
+          deepestDepth = depth;
+        }
+      } catch {
+        // elementFromPoint is not implemented in jsdom; fall back to rows.
+        break;
+      }
+    }
+    if (deepestElement) return deepestElement;
+  }
+  return findTopmostVisibleRow(list, container.scrollTop);
+}
 
 interface Props {
   messages: Message[];
@@ -79,7 +175,7 @@ interface Props {
   /** Whether a target-message window is currently being loaded */
   loadingTargetMessage?: boolean;
   /** Callback to load the next chunk of older messages */
-  onLoadOlderMessages?: () => void;
+  onLoadOlderMessages?: () => void | Promise<void>;
   /** Callback to load the next chunk of newer messages */
   onLoadNewerMessages?: () => void;
   /** Callback to load a bounded window around a target message */
@@ -102,6 +198,12 @@ interface Props {
   targetMessageId?: string | null;
   /** Called after the target message has been focused. */
   onTargetFocused?: () => void;
+  /**
+   * Identity of the rendered transcript (session + branch). Turn keys are
+   * sticky per transcript, so this resets them when the route swaps sessions
+   * without remounting the component.
+   */
+  transcriptKey?: string;
 }
 
 export const MessageList = memo(function MessageList({
@@ -134,6 +236,7 @@ export const MessageList = memo(function MessageList({
   onBranchFocused,
   targetMessageId,
   onTargetFocused,
+  transcriptKey,
 }: Props) {
   const i18n = useOptionalI18n();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -154,9 +257,28 @@ export const MessageList = memo(function MessageList({
   > | null>(null);
   const virtualizeEnabledRef = useRef(false);
   const rowCountRef = useRef(0);
+  // Sticky turn identity. A turn must keep its React key when older messages are
+  // prepended, otherwise React unmounts the whole turn subtree and the browser
+  // re-homes any in-progress text selection on the list container.
+  const turnKeyRegistryRef = useRef<Map<string, string>>(new Map());
+  const transcriptKeyRef = useRef<string | undefined>(transcriptKey);
+  // Selection safety for auto-pagination.
+  const isPointerSelectingRef = useRef(false);
+  const pendingAutoLoadOlderRef = useRef(false);
+  // Reading-position anchor captured when a load-older request is issued.
+  const prependAnchorRef = useRef<{
+    element: HTMLElement | null;
+    rectTop: number;
+    offsetTop: number;
+    scrollTop: number;
+    scrollHeight: number;
+  } | null>(null);
   const [expandedThinkingItemIds, setExpandedThinkingItemIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
+  // Mirrors "the user currently has a selection inside the transcript", used to
+  // keep row identity stable while they select and copy.
+  const [hasActiveSelection, setHasActiveSelection] = useState(false);
 
   const setFollowingBottom = useCallback((followingBottom: boolean) => {
     if (shouldAutoScrollRef.current === followingBottom) return;
@@ -244,22 +366,23 @@ export const MessageList = memo(function MessageList({
     );
   }, [targetMessageId, visibleRenderItems]);
 
-  // Flatten everything (turns + header/footer blocks) into one row model so the
-  // list can be rendered — and later virtualized — as a single sequence.
-  const rows = useMemo(
-    () =>
-      buildMessageRows({
-        items: visibleRenderItems,
-        hasOlderMessages,
-        hasNewerMessages,
-        pendingMessages,
-        deferredMessages,
-        isCompacting,
-        focusedBranchItemId,
-        targetItemId,
-      }),
-    [
-      visibleRenderItems,
+  // Flatten everything (turns + header/footer blocks) into one flat row model so
+  // the list can be rendered — and later virtualized — as a single sequence.
+  //
+  // Turn keys come from a sticky registry (item id → turn key) instead of the
+  // window-relative `turn-<first item id>`: load-older prepends items into the
+  // turn that sits at the top of the window, and a changed key would remount
+  // that entire subtree (destroying selections and scroll anchors).
+  const rows = useMemo(() => {
+    const registry = turnKeyRegistryRef.current;
+    if (transcriptKeyRef.current !== transcriptKey) {
+      transcriptKeyRef.current = transcriptKey;
+      registry.clear();
+    }
+
+    const resolveTurnKey = createStickyTurnKeyResolver(registry);
+    const builtRows = buildMessageRows({
+      items: visibleRenderItems,
       hasOlderMessages,
       hasNewerMessages,
       pendingMessages,
@@ -267,8 +390,23 @@ export const MessageList = memo(function MessageList({
       isCompacting,
       focusedBranchItemId,
       targetItemId,
-    ],
-  );
+      resolveTurnKey,
+    });
+
+    pruneTurnKeyRegistry(registry, visibleRenderItems);
+
+    return builtRows;
+  }, [
+    visibleRenderItems,
+    hasOlderMessages,
+    hasNewerMessages,
+    pendingMessages,
+    deferredMessages,
+    isCompacting,
+    focusedBranchItemId,
+    targetItemId,
+    transcriptKey,
+  ]);
 
   // Only the assistant turn at the transcript tail can use last-update
   // semantics. Normally that means the locally running request. A
@@ -295,10 +433,17 @@ export const MessageList = memo(function MessageList({
   // those flows scroll to and highlight a specific DOM node, which must be
   // mounted. Both flags are transient (cleared by onBranchFocused /
   // onTargetFocused), so virtualization re-engages right after.
-  const shouldVirtualize =
+  const wantsVirtualization =
     rows.length > VIRTUALIZE_ROW_THRESHOLD &&
     !focusBranchId &&
     !targetMessageId;
+
+  // Never flip virtualization on or off while the user holds a selection: either
+  // direction remounts every row and destroys the range they are dragging, and
+  // load-older can push a transcript over the threshold mid-selection.
+  const shouldVirtualize = hasActiveSelection
+    ? virtualizeEnabledRef.current
+    : wantsVirtualization;
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -326,32 +471,100 @@ export const MessageList = memo(function MessageList({
     });
   }, []);
 
-  // Load older messages with scroll position preservation
+  // Snapshot where the reading position currently is, so a prepend can restore
+  // it. Re-measured whenever the user keeps scrolling during an in-flight
+  // request, so the correction never fights the user's own scrolling.
+  const capturePrependAnchor = useCallback(() => {
+    const container = containerRef.current?.parentElement;
+    const list = containerRef.current;
+    if (!container || !list) return;
+    const anchorElement = findPrependAnchorElement(list, container);
+    prependAnchorRef.current = {
+      element: anchorElement,
+      rectTop: anchorElement?.getBoundingClientRect().top ?? 0,
+      offsetTop: anchorElement?.offsetTop ?? 0,
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+    };
+  }, []);
+
+  // Load older messages, keeping the reading position stable.
+  //
+  // The request resolves asynchronously, so the correction can only run once the
+  // prepended rows are committed (see the prepend anchor effect below). The
+  // anchor records where an on-screen element sits; the correction then moves the
+  // scroller by however far that element drifted. Being relative to the live
+  // scroll position makes it a no-op when the browser's own scroll anchoring
+  // already did the work (Chrome does, unless scrollTop is 0; WebKit never does).
   const handleLoadOlder = useCallback(() => {
     if (!onLoadOlderMessages) return;
     const container = containerRef.current?.parentElement;
-    if (!container) {
+    const list = containerRef.current;
+    if (!container || !list) {
       onLoadOlderMessages();
       return;
     }
-    // Capture scroll state before prepending older messages
-    const scrollHeightBefore = container.scrollHeight;
-    const scrollTopBefore = container.scrollTop;
-    onLoadOlderMessages();
-    // Restore scroll position after React re-renders with prepended messages
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const scrollHeightAfter = container.scrollHeight;
-        const heightDelta = scrollHeightAfter - scrollHeightBefore;
-        isProgrammaticScrollRef.current = true;
-        container.scrollTop = scrollTopBefore + heightDelta;
-        lastHeightRef.current = container.scrollHeight;
-        requestAnimationFrame(() => {
-          isProgrammaticScrollRef.current = false;
-        });
-      });
+    capturePrependAnchor();
+    const result = onLoadOlderMessages();
+    if (!result || typeof result.then !== "function") return;
+    void result.catch(() => {
+      prependAnchorRef.current = null;
     });
-  }, [onLoadOlderMessages]);
+  }, [capturePrependAnchor, onLoadOlderMessages]);
+
+  // Apply the prepend correction in the commit that added the older rows.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rows is the commit trigger, not a read dependency
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    if (!anchor) return;
+    const container = containerRef.current?.parentElement;
+    if (!container) return;
+    if (
+      container.scrollHeight - anchor.scrollHeight <
+      PREPEND_MIN_HEIGHT_GROWTH
+    ) {
+      // Nothing landed yet. A large chunk can take several frames (or seconds)
+      // to render, so keep waiting while the request is in flight and only drop
+      // the snapshot once it settled — otherwise later growth (streaming, late
+      // images) would be mistaken for a prepend.
+      if (!loadingOlder) prependAnchorRef.current = null;
+      return;
+    }
+    prependAnchorRef.current = null;
+
+    const anchorElement = anchor.element;
+    const resolveScrollDelta = () => {
+      if (anchorElement?.isConnected) {
+        const rect = anchorElement.getBoundingClientRect();
+        if (rect.height > 0 || rect.top !== 0) return rect.top - anchor.rectTop;
+        // jsdom (and display:none) report empty rects: use layout bookkeeping.
+        return (
+          anchor.scrollTop +
+          (anchorElement.offsetTop - anchor.offsetTop) -
+          container.scrollTop
+        );
+      }
+      return (
+        anchor.scrollTop +
+        (container.scrollHeight - anchor.scrollHeight) -
+        container.scrollTop
+      );
+    };
+
+    const scrollDelta = resolveScrollDelta();
+    if (Math.abs(scrollDelta) <= 1) return;
+
+    isProgrammaticScrollRef.current = true;
+    container.scrollTop += scrollDelta;
+    lastHeightRef.current = container.scrollHeight;
+    requestAnimationFrame(() => {
+      // Late layout (fonts, images) can still shift the anchor element.
+      const followUpDelta = resolveScrollDelta();
+      if (Math.abs(followUpDelta) > 1) container.scrollTop += followUpDelta;
+      lastHeightRef.current = container.scrollHeight;
+      isProgrammaticScrollRef.current = false;
+    });
+  }, [rows, loadingOlder]);
 
   const handleLoadNewer = useCallback(() => {
     onLoadNewerMessages?.();
@@ -382,15 +595,18 @@ export const MessageList = memo(function MessageList({
     const container = containerRef.current?.parentElement;
     if (!container) return;
 
+    // A load-older request may still be in flight. Re-anchor on what the user is
+    // looking at *now*, so the correction preserves their latest position
+    // instead of undoing the scrolling they did while waiting.
+    if (prependAnchorRef.current) capturePrependAnchor();
+
     const threshold = 100; // pixels from bottom
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
     setFollowingBottom(distanceFromBottom < threshold);
 
-    // Top-of-list auto-load. handleLoadOlder anchors scroll position via the
-    // pre-/post-render scrollHeight delta, so the user's view stays put — no
-    // visible "jump" when the prepended chunk lands.
-    const TOP_LOAD_THRESHOLD = 200;
+    // Top-of-list auto-load. handleLoadOlder anchors the reading position, so the
+    // user's view stays put — no visible "jump" when the prepended chunk lands.
     const {
       hasOlderMessages: hasOlder,
       loadingOlder: loading,
@@ -402,9 +618,78 @@ export const MessageList = memo(function MessageList({
       loadOlder &&
       container.scrollTop < TOP_LOAD_THRESHOLD
     ) {
+      // Prepending rows while the user is selecting text destroys the selection:
+      // the turn that owns the range gains items, and any DOM churn makes the
+      // browser re-anchor the range at the list container — the copy then
+      // silently includes everything above. Defer the load instead.
+      if (
+        isPointerSelectingRef.current ||
+        hasActiveTextSelectionWithin(container)
+      ) {
+        pendingAutoLoadOlderRef.current = true;
+        return;
+      }
+      pendingAutoLoadOlderRef.current = false;
       loadOlder();
     }
-  }, [setFollowingBottom]);
+  }, [capturePrependAnchor, setFollowingBottom]);
+
+  // Retry a deferred auto-load once the selection is released/cleared.
+  const flushPendingAutoLoadOlder = useCallback(() => {
+    if (!pendingAutoLoadOlderRef.current) return;
+    const container = containerRef.current?.parentElement;
+    if (!container) return;
+    if (
+      isPointerSelectingRef.current ||
+      hasActiveTextSelectionWithin(container)
+    ) {
+      return;
+    }
+    pendingAutoLoadOlderRef.current = false;
+    if (container.scrollTop >= TOP_LOAD_THRESHOLD) return;
+    const {
+      hasOlderMessages: hasOlder,
+      loadingOlder: loading,
+      loadOlder,
+    } = loadOlderStateRef.current;
+    if (!hasOlder || loading || !loadOlder) return;
+    loadOlder();
+  }, []);
+
+  // Track mouse/pen drags so auto-pagination can stay out of the way while a
+  // selection is being made. Touch is excluded on purpose: a touch scroll always
+  // holds a pointer down, so gating on it would disable mobile infinite scroll.
+  useEffect(() => {
+    const container = containerRef.current?.parentElement;
+    if (!container) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType === "touch" || event.button !== 0) return;
+      isPointerSelectingRef.current = true;
+    };
+    const handlePointerRelease = () => {
+      if (!isPointerSelectingRef.current) return;
+      isPointerSelectingRef.current = false;
+      flushPendingAutoLoadOlder();
+    };
+
+    const handleSelectionChange = () => {
+      setHasActiveSelection(hasActiveTextSelectionWithin(container));
+      flushPendingAutoLoadOlder();
+    };
+
+    container.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("pointerup", handlePointerRelease);
+    document.addEventListener("pointercancel", handlePointerRelease);
+    document.addEventListener("selectionchange", handleSelectionChange);
+
+    return () => {
+      container.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("pointerup", handlePointerRelease);
+      document.removeEventListener("pointercancel", handlePointerRelease);
+      document.removeEventListener("selectionchange", handleSelectionChange);
+    };
+  }, [flushPendingAutoLoadOlder]);
 
   // Attach scroll listener to parent container
   useEffect(() => {

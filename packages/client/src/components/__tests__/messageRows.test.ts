@@ -4,9 +4,11 @@ import type { RenderItem } from "../../types/renderItems";
 import {
   type PendingMessage,
   buildMessageRows,
+  createStickyTurnKeyResolver,
   getBranchId,
   getRowKey,
   groupItemsIntoTurns,
+  pruneTurnKeyRegistry,
 } from "../messageRows";
 
 function msg(overrides: Partial<Message> = {}): Message {
@@ -350,5 +352,97 @@ describe("getRowKey", () => {
     });
     const keys = rows.map(getRowKey);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+describe("sticky turn keys", () => {
+  /** Row keys for assistant turns only, in render order. */
+  function turnKeys(
+    items: RenderItem[],
+    registry: Map<string, string>,
+    hasOlderMessages = true,
+  ): string[] {
+    return buildMessageRows({
+      items,
+      hasOlderMessages,
+      hasNewerMessages: false,
+      pendingMessages: [],
+      deferredMessages: [],
+      isCompacting: false,
+      focusedBranchItemId: null,
+      targetItemId: null,
+      resolveTurnKey: createStickyTurnKeyResolver(registry),
+    })
+      .filter((row) => row.kind === "assistant-turn")
+      .map(getRowKey);
+  }
+
+  it("keeps a turn key stable when load-older prepends items into it", () => {
+    const registry = new Map<string, string>();
+    // Window starts mid-turn: t3/t4 belong to a turn whose head is not loaded.
+    const windowed = [text("t3", "c"), text("t4", "d"), userPrompt("u2")];
+    const before = turnKeys(windowed, registry);
+
+    // load-older prepends the rest of that turn plus a full older turn.
+    const prepended = [
+      text("t1", "a"),
+      userPrompt("u1"),
+      text("t2", "b"),
+      ...windowed,
+    ];
+    const after = turnKeys(prepended, registry);
+
+    // The turn the user was reading keeps its identity...
+    expect(after).toContain(before[0]);
+    // ...and the older rows are additional, distinct turns.
+    expect(after.length).toBe(before.length + 1);
+    expect(new Set(after).size).toBe(after.length);
+  });
+
+  it("keeps the tail turn key stable while the live turn grows", () => {
+    const registry = new Map<string, string>();
+    const before = turnKeys([userPrompt("u1"), text("t1", "a")], registry);
+    const after = turnKeys(
+      [userPrompt("u1"), text("t1", "a"), text("t2", "b"), toolCall("c1")],
+      registry,
+    );
+    expect(after).toEqual(before);
+  });
+
+  it("hands the original key to the head half when a turn splits", () => {
+    const registry = new Map<string, string>();
+    const before = turnKeys(
+      [userPrompt("u1"), text("t1", "a"), text("t2", "b")],
+      registry,
+    );
+
+    // A question is answered mid-turn, so the group splits in two.
+    const after = turnKeys(
+      [
+        userPrompt("u1"),
+        text("t1", "a"),
+        answeredQuestion("q1"),
+        text("t2", "b"),
+      ],
+      registry,
+    );
+
+    expect(after).toHaveLength(2);
+    expect(after[0]).toBe(before[0]);
+    expect(new Set(after).size).toBe(2);
+  });
+
+  it("prunes registry entries for items that left the window", () => {
+    const registry = new Map<string, string>();
+    const older = [userPrompt("u1"), text("t1", "a"), text("t2", "b")];
+    turnKeys(older, registry);
+    // Only assistant items carry a turn key; user prompts are their own rows.
+    expect(Array.from(registry.keys())).toEqual(["t1", "t2"]);
+
+    // Active-window trim drops the oldest rows.
+    const trimmed = [text("t9", "z")];
+    turnKeys(trimmed, registry);
+    pruneTurnKeyRegistry(registry, trimmed);
+    expect(Array.from(registry.keys())).toEqual(["t9"]);
   });
 });

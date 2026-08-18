@@ -641,3 +641,332 @@ describe("MessageList virtualization", () => {
     expect(screen.queryAllByTestId(/^render-item-/).length).toBeLessThan(150);
   });
 });
+
+describe("MessageList selection-safe pagination", () => {
+  /** Make the RTL container behave like the scrollable `.session-messages`. */
+  function makeScrollable(container: HTMLElement, scrollHeight: number) {
+    const state = { scrollHeight };
+    Object.defineProperty(container, "scrollHeight", {
+      configurable: true,
+      get: () => state.scrollHeight,
+    });
+    Object.defineProperty(container, "clientHeight", {
+      configurable: true,
+      get: () => 600,
+    });
+    return state;
+  }
+
+  function selectTextOf(element: Element) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  afterEach(() => {
+    cleanup();
+    window.getSelection()?.removeAllRanges();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("auto-loads older messages near the top when nothing is selected", () => {
+    const onLoadOlderMessages = vi.fn();
+    const { container } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[assistantTextItem("a1", "2024-01-01T00:00:00Z")]}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+      />,
+    );
+    makeScrollable(container, 5000);
+    container.scrollTop = 50;
+    fireEvent.scroll(container);
+    expect(onLoadOlderMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers the auto-load while a text selection is in progress", () => {
+    const onLoadOlderMessages = vi.fn();
+    const { container } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantTextItem("a1", "2024-01-01T00:00:00Z", "selectable text"),
+        ]}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+      />,
+    );
+    makeScrollable(container, 5000);
+
+    // Mouse is held down inside the transcript: a drag-selection is underway.
+    fireEvent.pointerDown(container, { pointerType: "mouse", button: 0 });
+    selectTextOf(screen.getByTestId("render-item-a1"));
+    container.scrollTop = 50;
+    fireEvent.scroll(container);
+    expect(onLoadOlderMessages).not.toHaveBeenCalled();
+
+    // Releasing the mouse with the selection still active must not load either.
+    fireEvent.pointerUp(document);
+    expect(onLoadOlderMessages).not.toHaveBeenCalled();
+
+    // Clearing the selection releases the deferred load.
+    window.getSelection()?.removeAllRanges();
+    fireEvent(document, new Event("selectionchange"));
+    expect(onLoadOlderMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the turn DOM node when older messages are prepended into it", () => {
+    const windowedItems = [
+      assistantTextItem("a3", "2024-01-01T00:00:03Z"),
+      assistantTextItem("a4", "2024-01-01T00:00:04Z"),
+    ];
+    const { container, rerender } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={windowedItems}
+        hasOlderMessages
+        transcriptKey="session-1"
+      />,
+    );
+    const turnBefore = screen
+      .getByTestId("render-item-a3")
+      .closest(".assistant-turn");
+    const textNodeBefore = screen.getByTestId("render-item-a3");
+    expect(turnBefore).not.toBeNull();
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantTextItem("a0", "2024-01-01T00:00:00Z"),
+          userPromptItem("u1"),
+          assistantTextItem("a1", "2024-01-01T00:00:01Z"),
+          ...windowedItems,
+        ]}
+        hasOlderMessages
+        transcriptKey="session-1"
+      />,
+    );
+
+    const turnAfter = screen
+      .getByTestId("render-item-a3")
+      .closest(".assistant-turn");
+    // Same DOM element instance => React reused the subtree, so an in-progress
+    // selection anchored inside it survives the prepend.
+    expect(turnAfter).toBe(turnBefore);
+    expect(screen.getByTestId("render-item-a3")).toBe(textNodeBefore);
+    // a1 joined the turn the user was reading; a0 is an additional older turn.
+    expect(container.querySelectorAll(".assistant-turn")).toHaveLength(2);
+    expect(turnAfter?.contains(screen.getByTestId("render-item-a1"))).toBe(
+      true,
+    );
+  });
+
+  it("stays out of virtualized mode while a selection is live", () => {
+    const shortItems = Array.from({ length: 20 }, (_, i) =>
+      assistantTextItem(`a${i}`, "2024-01-01T00:00:00Z"),
+    );
+    const { container, rerender } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={shortItems}
+        transcriptKey="session-1"
+      />,
+    );
+    // Non-virtualized to start: every item is mounted.
+    expect(screen.queryAllByTestId(/^render-item-/)).toHaveLength(20);
+    selectTextOf(screen.getByTestId("render-item-a5"));
+    fireEvent(document, new Event("selectionchange"));
+    const turnBefore = screen
+      .getByTestId("render-item-a5")
+      .closest(".assistant-turn");
+
+    // A load-older round pushes the transcript past the virtualization
+    // threshold. Switching modes now would remount every row.
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          ...Array.from({ length: 200 }, (_, i) => userPromptItem(`u${i}`)),
+          ...shortItems,
+        ]}
+        transcriptKey="session-1"
+      />,
+    );
+    expect(container.querySelectorAll("[data-index]")).toHaveLength(0);
+    expect(
+      screen.getByTestId("render-item-a5").closest(".assistant-turn"),
+    ).toBe(turnBefore);
+
+    // Once the selection is gone, virtualization engages as before.
+    window.getSelection()?.removeAllRanges();
+    fireEvent(document, new Event("selectionchange"));
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          ...Array.from({ length: 200 }, (_, i) => userPromptItem(`u${i}`)),
+          ...shortItems,
+        ]}
+        transcriptKey="session-1"
+      />,
+    );
+    expect(screen.queryAllByTestId(/^render-item-/).length).toBeLessThan(220);
+  });
+
+  it("resets turn identity when the transcript changes", () => {
+    const { rerender } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantTextItem("a1", "2024-01-01T00:00:01Z"),
+          assistantTextItem("a2", "2024-01-01T00:00:02Z"),
+        ]}
+        transcriptKey="session-1"
+      />,
+    );
+    const turnBefore = screen
+      .getByTestId("render-item-a1")
+      .closest(".assistant-turn");
+
+    // Another session can reuse provider-scoped item ids. Without the reset, a2
+    // would inherit the previous session's `turn-a1` key and reuse its DOM.
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[assistantTextItem("a2", "2024-01-01T00:00:02Z")]}
+        transcriptKey="session-2"
+      />,
+    );
+    expect(
+      screen.getByTestId("render-item-a2").closest(".assistant-turn"),
+    ).not.toBe(turnBefore);
+  });
+
+  it("compensates the scroll position by the prepended height", async () => {
+    const onLoadOlderMessages = vi.fn().mockResolvedValue(undefined);
+    const windowedItems = [assistantTextItem("a3", "2024-01-01T00:00:03Z")];
+    const { container, rerender } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={windowedItems}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+        transcriptKey="session-1"
+      />,
+    );
+    const scroll = makeScrollable(container, 5000);
+    container.scrollTop = 120;
+
+    // jsdom has no layout, so give the anchor row a position to be measured at.
+    const anchorRow = screen
+      .getByTestId("render-item-a3")
+      .closest(".assistant-turn") as HTMLElement;
+    const offsets = { top: 4000 };
+    Object.defineProperty(anchorRow, "offsetTop", {
+      configurable: true,
+      get: () => offsets.top,
+    });
+    Object.defineProperty(anchorRow, "offsetHeight", {
+      configurable: true,
+      get: () => 1000,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /load older/i }));
+    expect(onLoadOlderMessages).toHaveBeenCalledTimes(1);
+
+    // The prepended chunk lands later: the content is taller and the anchor row
+    // has moved down by exactly the prepended height.
+    scroll.scrollHeight = 25000;
+    offsets.top = 24000;
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantTextItem("a1", "2024-01-01T00:00:01Z"),
+          userPromptItem("u1"),
+          ...windowedItems,
+        ]}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+        transcriptKey="session-1"
+      />,
+    );
+
+    // 120 + (24000 - 4000): the reading position stays on the same content.
+    expect(container.scrollTop).toBe(20120);
+  });
+
+  it("does not double-correct when the browser already anchored the scroll", () => {
+    const onLoadOlderMessages = vi.fn().mockResolvedValue(undefined);
+    const windowedItems = [assistantTextItem("a3", "2024-01-01T00:00:03Z")];
+    const { container, rerender } = render(
+      <MessageList
+        messages={[]}
+        preprocessedItems={windowedItems}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+        transcriptKey="session-1"
+      />,
+    );
+    const scroll = makeScrollable(container, 5000);
+    container.scrollTop = 120;
+
+    const anchorRow = screen
+      .getByTestId("render-item-a3")
+      .closest(".assistant-turn") as HTMLElement;
+    const offsets = { top: 4000 };
+    Object.defineProperty(anchorRow, "offsetTop", {
+      configurable: true,
+      get: () => offsets.top,
+    });
+    Object.defineProperty(anchorRow, "offsetHeight", {
+      configurable: true,
+      get: () => 1000,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /load older/i }));
+
+    // Chrome's native scroll anchoring keeps the row in place on its own.
+    scroll.scrollHeight = 25000;
+    offsets.top = 24000;
+    container.scrollTop = 20120;
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          assistantTextItem("a1", "2024-01-01T00:00:01Z"),
+          userPromptItem("u1"),
+          ...windowedItems,
+        ]}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+        transcriptKey="session-1"
+      />,
+    );
+
+    // Correcting again would land at ~40000 and skip past the read content.
+    expect(container.scrollTop).toBe(20120);
+  });
+});

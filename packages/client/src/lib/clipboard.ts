@@ -88,6 +88,30 @@ export function initTextSelectionTracking(): () => void {
   return selectionTrackingCleanup;
 }
 
+/**
+ * True while the user has a real (non-collapsed) text selection that touches
+ * `root`. Callers use this to avoid DOM mutations that would silently destroy
+ * an in-progress selection, e.g. prepending older transcript rows or switching
+ * the message list into virtualized mode.
+ *
+ * Deliberately avoids `selection.toString()`: this runs on `selectionchange`,
+ * and serializing a large selection on every drag frame is expensive.
+ */
+export function hasActiveTextSelectionWithin(root?: Node | null): boolean {
+  if (typeof window === "undefined" || !window.getSelection) return false;
+
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return false;
+  }
+  if (!root) return true;
+
+  const ranges = Array.from({ length: selection.rangeCount }, (_, index) =>
+    selection.getRangeAt(index),
+  );
+  return rangesIntersectRoot(ranges, root);
+}
+
 export function getSelectionAwareCopyText(
   fallbackText: string,
   root?: Node | null,

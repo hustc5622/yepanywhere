@@ -64,6 +64,84 @@ interface MessageTurnGroup {
   resumedAfterQuestion: boolean;
 }
 
+/**
+ * Assigns the React key for one assistant turn.
+ *
+ * `MessageList` supplies a sticky implementation so a turn keeps its key when
+ * older messages are prepended (load-older) or when the live turn grows. See
+ * `defaultTurnKey` for the window-relative fallback.
+ */
+export type TurnKeyResolver = (items: RenderItem[]) => string;
+
+/**
+ * Window-relative turn key. Only safe when the transcript window never gains
+ * items at the head of a turn, so it is a fallback for callers (mostly tests)
+ * that do not track turn identity across pagination.
+ */
+export function defaultTurnKey(items: RenderItem[]): string {
+  const firstItem = items[0];
+  return `turn-${firstItem ? firstItem.id : "empty"}`;
+}
+
+/**
+ * Build a resolver that keeps a turn's key stable across pagination.
+ *
+ * `registry` maps render-item id → the turn key that item was first rendered
+ * under, and is owned by the caller so it survives re-renders. Load-older
+ * prepends items into the turn at the top of the window; without this, the key
+ * would change and React would unmount the whole turn subtree — destroying any
+ * in-progress text selection and the scroll anchor with it.
+ *
+ * One resolver instance covers exactly one `buildMessageRows` pass: it tracks
+ * the keys it has already handed out so a turn that splits in two (an answered
+ * question ends a turn) cannot produce duplicate React keys.
+ */
+export function createStickyTurnKeyResolver(
+  registry: Map<string, string>,
+): TurnKeyResolver {
+  const claimedKeys = new Set<string>();
+
+  return (items: RenderItem[]): string => {
+    let key: string | undefined;
+    for (const item of items) {
+      const knownKey = registry.get(item.id);
+      if (knownKey && !claimedKeys.has(knownKey)) {
+        key = knownKey;
+        break;
+      }
+    }
+
+    if (!key) {
+      const fallbackKey = defaultTurnKey(items);
+      key = fallbackKey;
+      let suffix = 2;
+      while (claimedKeys.has(key)) {
+        key = `${fallbackKey}-${suffix}`;
+        suffix += 1;
+      }
+    }
+
+    claimedKeys.add(key);
+    for (const item of items) registry.set(item.id, key);
+    return key;
+  };
+}
+
+/**
+ * Forget registry entries for items that left the transcript window (active
+ * window trim, branch switch, load-newer) so the map cannot grow unbounded.
+ */
+export function pruneTurnKeyRegistry(
+  registry: Map<string, string>,
+  liveItems: RenderItem[],
+): void {
+  if (registry.size <= liveItems.length * 2) return;
+  const liveItemIds = new Set(liveItems.map((item) => item.id));
+  for (const itemId of Array.from(registry.keys())) {
+    if (!liveItemIds.has(itemId)) registry.delete(itemId);
+  }
+}
+
 function isQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase().replace(/[^a-z]/g, "");
   return normalized === "question" || normalized === "askuserquestion";
@@ -246,6 +324,8 @@ interface BuildMessageRowsParams {
   focusedBranchItemId: string | null;
   /** Render-item id containing the deep-link target message, if any. */
   targetItemId: string | null;
+  /** Turn-key strategy. Defaults to the window-relative `defaultTurnKey`. */
+  resolveTurnKey?: TurnKeyResolver;
 }
 
 /**
@@ -264,6 +344,7 @@ export function buildMessageRows({
   isCompacting,
   focusedBranchItemId,
   targetItemId,
+  resolveTurnKey = defaultTurnKey,
 }: BuildMessageRowsParams): MessageRow[] {
   const rows: MessageRow[] = [];
 
@@ -291,7 +372,7 @@ export function buildMessageRows({
     const turnCopyText = getTurnCopyText(group.items);
     rows.push({
       kind: "assistant-turn",
-      key: `turn-${firstItem.id}`,
+      key: resolveTurnKey(group.items),
       items: group.items,
       progressTextItemIds: getQuestionPreludeTextItemIds(group.items),
       resumedAfterQuestion: group.resumedAfterQuestion,

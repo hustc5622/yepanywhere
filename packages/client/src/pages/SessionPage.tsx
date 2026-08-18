@@ -2113,6 +2113,7 @@ function SessionPageContent({
                   onBranchFocused={handleBranchFocused}
                   targetMessageId={targetMessageId}
                   onTargetFocused={handleTargetFocused}
+                  transcriptKey={`${sessionId}:${selectedBranchId ?? ""}`}
                 />
               </AgentContentProvider>
             </SessionMetadataProvider>

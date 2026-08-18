@@ -177,3 +177,55 @@ describe("TextBlock", () => {
     expect(screen.queryByRole("button", { name: "Copy markdown" })).toBeNull();
   });
 });
+
+describe("TextBlock server-rendered markdown", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("keeps the rendered nodes when the same HTML is applied again", () => {
+    const html = "<p>stable paragraph</p>";
+    const { rerender } = renderWithSessionMetadata(
+      <TextBlock text="stable paragraph" augmentHtml={html} />,
+    );
+    const paragraph = screen.getByText("stable paragraph");
+
+    // React re-applies this prop on some commits (a load-older prepend applies
+    // the identical string twice); recreating the nodes would drop any live
+    // text selection inside them.
+    rerender(
+      <I18nProvider>
+        <SessionMetadataProvider
+          projectId="proj-1"
+          projectPath="/Users/yueyuan/project"
+          sessionId="session-1"
+        >
+          <TextBlock text="stable paragraph" augmentHtml={`${html}`} />
+        </SessionMetadataProvider>
+      </I18nProvider>,
+    );
+
+    expect(screen.getByText("stable paragraph")).toBe(paragraph);
+  });
+
+  it("replaces the rendered nodes when the HTML actually changes", () => {
+    const { rerender } = renderWithSessionMetadata(
+      <TextBlock text="first" augmentHtml="<p>first</p>" />,
+    );
+    expect(screen.getByText("first")).toBeTruthy();
+
+    rerender(
+      <I18nProvider>
+        <SessionMetadataProvider
+          projectId="proj-1"
+          projectPath="/Users/yueyuan/project"
+          sessionId="session-1"
+        >
+          <TextBlock text="second" augmentHtml="<p>second</p>" />
+        </SessionMetadataProvider>
+      </I18nProvider>,
+    );
+    expect(screen.getByText("second")).toBeTruthy();
+    expect(screen.queryByText("first")).toBeNull();
+  });
+});
