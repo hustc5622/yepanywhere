@@ -16,18 +16,25 @@ import type {
   ThinkingConfig,
 } from "@yep-anywhere/shared";
 import { getDataDir } from "../../config.js";
-import { getLogger } from "../../logging/logger.js";
 import {
-  fetchOpenCodeGatewayModels,
-  resolveOpenCodeGatewayConfig,
-  resolveOpenCodeOpenAICompatibleBaseURL,
-} from "../../opencode-bridge/gateway-config.js";
+  LLM_GATEWAYS_ENV,
+  type LlmGatewayChannel,
+  fetchLlmGatewayModels,
+  isVisibleGatewayModel,
+  resolveLlmGatewayChannels,
+} from "../../llm-gateways/index.js";
+import { getLogger } from "../../logging/logger.js";
+import { resolveOpenCodeOpenAICompatibleBaseURL } from "../../opencode-bridge/gateway-config.js";
 import {
   PI_SESSIONS_DIR,
   PI_SESSION_DIR_IS_EXACT,
   findPiSessionFile,
   getPiProjectSessionDir,
 } from "../../sessions/pi-files.js";
+import {
+  piProviderId,
+  qualifyPiModelId,
+} from "../../sessions/pi-model-refs.js";
 import {
   canonicalizePiToolName,
   normalizePiToolInput,
@@ -45,6 +52,11 @@ import type {
   UserMessage,
 } from "../types.js";
 import { filterEnvForChildProcess } from "./env-filter.js";
+import {
+  type PiAnthropicModelTraits,
+  type PiThinkingLevelMap,
+  piAnthropicModelTraits,
+} from "./pi-model-compat.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -54,8 +66,7 @@ import type {
 
 const execAsync = promisify(exec);
 const PI_APPROVAL_TITLE_PREFIX = "__YEP_PI_TOOL_APPROVAL__:";
-const PI_PROVIDER_OPENAI = "yep-openai-compatible";
-const PI_PROVIDER_ANTHROPIC = "yep-anthropic";
+const PI_MODEL_CATALOG_TTL_MS = 60_000;
 const PI_THINKING_LEVELS = new Set([
   "off",
   "minimal",
@@ -106,10 +117,32 @@ interface PiRpcResponse extends JsonRecord {
   error?: string;
 }
 
+interface PiModelRoute {
+  /** Gateway channel this model is served by. */
+  channel: LlmGatewayChannel;
+  /** Model id as the gateway (and therefore Pi) knows it. */
+  bareModelId: string;
+  protocols: OpenCodeRequestProtocol[];
+}
+
+/** Route metadata retained at catalog-fetch time, before ids are flattened. */
+interface PiCatalogRoute {
+  channelId: string;
+  bareModelId: string;
+  protocols: OpenCodeRequestProtocol[];
+}
+
+interface PiModelCatalog {
+  models: ModelInfo[];
+  /** Yep-facing model id -> unambiguous source route. */
+  routes: Map<string, PiCatalogRoute>;
+}
+
 interface PiRuntimeRef {
   client?: PiRpcClient;
   models: ModelInfo[];
-  routes: Map<string, OpenCodeRequestProtocol[]>;
+  /** Yep-facing (channel-qualified) model id -> routing information. */
+  routes: Map<string, PiModelRoute>;
   currentProtocol?: OpenCodeRequestProtocol;
   currentModel?: string;
   sessionId?: string;
@@ -144,7 +177,10 @@ interface PiExtensionProviderConfig {
         };
         contextWindow: number;
         maxTokens: number;
-        compat?: typeof PI_OPENAI_COMPLETIONS_COMPAT;
+        thinkingLevelMap?: PiThinkingLevelMap;
+        compat?:
+          | typeof PI_OPENAI_COMPLETIONS_COMPAT
+          | NonNullable<PiAnthropicModelTraits["compat"]>;
       }>;
     };
   }>;
@@ -174,8 +210,10 @@ function toIsoTimestamp(value: unknown): string {
   return new Date().toISOString();
 }
 
-function protocolProviderId(protocol: OpenCodeRequestProtocol): string {
-  return protocol === "anthropic" ? PI_PROVIDER_ANTHROPIC : PI_PROVIDER_OPENAI;
+function protocolApi(
+  protocol: OpenCodeRequestProtocol,
+): "openai-completions" | "anthropic-messages" {
+  return protocol === "anthropic" ? "anthropic-messages" : "openai-completions";
 }
 
 function anthropicGatewayBaseUrl(apiBase: string): string {
@@ -210,6 +248,21 @@ function cloneModels(models: readonly ModelInfo[]): ModelInfo[] {
       (effort) => ({ ...effort }),
     ),
   }));
+}
+
+function clonePiModelCatalog(catalog: PiModelCatalog): PiModelCatalog {
+  return {
+    models: cloneModels(catalog.models),
+    routes: new Map(
+      Array.from(
+        catalog.routes,
+        ([modelId, route]): [string, PiCatalogRoute] => [
+          modelId,
+          { ...route, protocols: [...route.protocols] },
+        ],
+      ),
+    ),
+  };
 }
 
 /**
@@ -250,20 +303,43 @@ function applyPiSessionModelConfig(
   });
 }
 
+/**
+ * Build the process-local Pi provider catalog: one generated provider per
+ * (gateway channel x request protocol) that has at least one model.
+ *
+ * Models are registered under their bare gateway id because Pi identifies a
+ * model as a (provider, modelId) pair; the channel namespace only exists on
+ * Yep's side.
+ */
 function buildPiExtensionConfig(
+  routes: Map<string, PiModelRoute>,
   models: ModelInfo[],
-  gateway: NonNullable<ReturnType<typeof resolveOpenCodeGatewayConfig>>,
   globalInstructions?: string,
 ): PiExtensionProviderConfig {
-  const headers = gateway.subModule
-    ? { "X-Sub-Module": gateway.subModule }
-    : undefined;
-  const toModels = (protocol: OpenCodeRequestProtocol) =>
-    models
-      .filter((model) => modelProtocols(model).includes(protocol))
-      .map((model) => ({
-        id: model.id,
-        name: model.name || model.id,
+  const modelsById = new Map(models.map((model) => [model.id, model]));
+  const providers: PiExtensionProviderConfig["providers"] = [];
+  const byProvider = new Map<
+    string,
+    {
+      channel: LlmGatewayChannel;
+      protocol: OpenCodeRequestProtocol;
+      models: PiExtensionProviderConfig["providers"][number]["config"]["models"];
+    }
+  >();
+
+  for (const [qualifiedId, route] of routes) {
+    const model = modelsById.get(qualifiedId);
+    if (!model) continue;
+    for (const protocol of route.protocols) {
+      const id = piProviderId(protocol, route.channel);
+      const entry = byProvider.get(id) ?? {
+        channel: route.channel,
+        protocol,
+        models: [],
+      };
+      entry.models.push({
+        id: route.bareModelId,
+        name: model.name || route.bareModelId,
         // The gateway catalog does not expose a universal reasoning flag.
         // Register reasoning support; the session starts with thinking off
         // unless the user opts in through Yep's Codex-style control.
@@ -276,46 +352,98 @@ function buildPiExtensionConfig(
           Math.min(32_768, Math.max(4_096, model.contextWindow ?? 32_768)),
         ...(protocol === "openai-compatible"
           ? { compat: PI_OPENAI_COMPLETIONS_COMPAT }
-          : {}),
-      }));
+          : // Current Claude releases reject the legacy budget-based thinking
+            // payload, which is all Pi sends for a model registered without
+            // these traits.
+            piAnthropicModelTraits(route.bareModelId)),
+      });
+      byProvider.set(id, entry);
+    }
+  }
 
-  const providers: PiExtensionProviderConfig["providers"] = [];
-  const openAIModels = toModels("openai-compatible");
-  if (openAIModels.length > 0) {
+  for (const [id, entry] of byProvider) {
+    if (entry.models.length === 0) continue;
+    const { channel, protocol } = entry;
+    const headers = channel.subModule
+      ? { "X-Sub-Module": channel.subModule }
+      : undefined;
+    const baseUrl =
+      protocol === "anthropic"
+        ? // @anthropic-ai/sdk appends /v1/messages itself; a gateway base
+          // already ends in /v1.
+          anthropicGatewayBaseUrl(channel.apiBase)
+        : // Only the default channel can use the bridge's gateway proxy: that
+          // proxy has one hardcoded upstream (the default gateway) and injects
+          // its sub-module header, so routing another channel through it would
+          // silently send the request to the wrong gateway.
+          ((channel.isDefault
+            ? resolveOpenCodeOpenAICompatibleBaseURL(process.env)
+            : undefined) ?? channel.apiBase);
     providers.push({
-      id: PI_PROVIDER_OPENAI,
+      id,
       config: {
-        name: "Yep gateway (OpenAI-compatible)",
-        baseUrl:
-          resolveOpenCodeOpenAICompatibleBaseURL(process.env) ??
-          gateway.apiBase,
-        api: "openai-completions",
+        name: `${channel.label} (${
+          protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible"
+        })`,
+        baseUrl,
+        api: protocolApi(protocol),
         headers,
-        models: openAIModels,
+        models: entry.models,
       },
     });
   }
-  const anthropicModels = toModels("anthropic");
-  if (anthropicModels.length > 0) {
-    providers.push({
-      id: PI_PROVIDER_ANTHROPIC,
-      config: {
-        name: "Yep gateway (Anthropic)",
-        // @anthropic-ai/sdk appends /v1/messages itself; the shared OpenCode
-        // gateway config already ends in /v1.
-        baseUrl: anthropicGatewayBaseUrl(gateway.apiBase),
-        api: "anthropic-messages",
-        headers,
-        models: anthropicModels,
-      },
-    });
-  }
+
   return {
     providers,
     ...(globalInstructions?.trim()
       ? { globalInstructions: globalInstructions.trim() }
       : {}),
   };
+}
+
+/** Map every catalog model back to the channel and protocols that serve it. */
+function buildPiModelRoutes(
+  channels: readonly LlmGatewayChannel[],
+  catalogRoutes: ReadonlyMap<string, PiCatalogRoute>,
+): Map<string, PiModelRoute> {
+  const channelsById = new Map(
+    channels.map((channel) => [channel.id, channel]),
+  );
+  const routes = new Map<string, PiModelRoute>();
+  for (const [modelId, catalogRoute] of catalogRoutes) {
+    const channel = channelsById.get(catalogRoute.channelId);
+    if (!channel) continue;
+    routes.set(modelId, {
+      channel,
+      bareModelId: catalogRoute.bareModelId,
+      protocols: [...catalogRoute.protocols],
+    });
+  }
+  return routes;
+}
+
+/**
+ * Resolve a requested model id against the active catalog.
+ *
+ * Sessions and saved defaults created before multi-gateway support store a
+ * bare id, and a channel can also be renamed or removed, so an unqualified id
+ * falls back to any channel that serves that bare model (preferring the
+ * default channel) instead of failing the session start.
+ */
+function resolvePiModelRoute(
+  routes: Map<string, PiModelRoute>,
+  requested: string,
+): { modelId: string; route: PiModelRoute } | null {
+  const exact = routes.get(requested);
+  if (exact) return { modelId: requested, route: exact };
+
+  const candidates = Array.from(routes.entries()).filter(
+    ([, route]) => route.bareModelId === requested,
+  );
+  const preferred =
+    candidates.find(([, route]) => route.channel.isDefault) ?? candidates[0];
+  if (!preferred) return null;
+  return { modelId: preferred[0], route: preferred[1] };
 }
 
 class AsyncEventQueue<T> {
@@ -517,7 +645,9 @@ export class PiProvider implements AgentProvider {
   private readonly agentDir: string;
   private readonly extensionPath: string;
   private readonly timeout: number;
-  private modelCache?: { models: ModelInfo[]; at: number };
+  private modelCache?: { catalog: PiModelCatalog; at: number };
+  /** Last successful catalog per channel, used when one gateway is failing. */
+  private readonly channelModelCache = new Map<string, ModelInfo[]>();
 
   constructor(config: PiProviderConfig = {}) {
     this.configuredPath = config.piPath;
@@ -539,7 +669,7 @@ export class PiProvider implements AgentProvider {
 
   async getAuthStatus(): Promise<AuthStatus> {
     const installed = await this.isInstalled();
-    const authenticated = Boolean(resolveOpenCodeGatewayConfig(process.env));
+    const authenticated = resolveLlmGatewayChannels(process.env).length > 0;
     return {
       installed,
       authenticated: installed && authenticated,
@@ -547,30 +677,122 @@ export class PiProvider implements AgentProvider {
     };
   }
 
-  /** Pi intentionally mirrors Yep's executable OpenCode gateway catalog. */
+  /**
+   * Pi mirrors Yep's executable gateway catalogs.
+   *
+   * Every configured channel is fetched concurrently and merged, with models
+   * from non-default channels namespaced as `<channelId>/<modelId>` because
+   * gateways commonly expose the same model id. A channel that fails keeps its
+   * last successful catalog instead of disappearing, so one unreachable gateway
+   * cannot empty the picker.
+   *
+   * Superseded families and non-chat endpoints are filtered out here only.
+   * Session start and mid-session routing use {@link loadRoutableCatalog}, so a
+   * session already pinned to a filtered-out model still resumes.
+   */
   async getAvailableModels(options?: {
     waitForRefresh?: boolean;
   }): Promise<ModelInfo[]> {
+    const catalog = await this.loadRoutableCatalog(options);
+    return catalog.models.filter((model) => {
+      const bareModelId = catalog.routes.get(model.id)?.bareModelId ?? model.id;
+      return isVisibleGatewayModel(bareModelId);
+    });
+  }
+
+  /** The full catalog, including models a picker does not offer. */
+  private async loadRoutableCatalog(options?: {
+    waitForRefresh?: boolean;
+  }): Promise<PiModelCatalog> {
     const cached = this.modelCache;
-    const cacheFresh = cached !== undefined && Date.now() - cached.at < 60_000;
+    const cacheFresh =
+      cached !== undefined && Date.now() - cached.at < PI_MODEL_CATALOG_TTL_MS;
     if (cached && (cacheFresh || options?.waitForRefresh === false)) {
-      return cloneModels(cached.models);
+      return clonePiModelCatalog(cached.catalog);
     }
-    const gateway = resolveOpenCodeGatewayConfig(process.env);
-    if (!gateway) return [];
-    try {
-      const models = withPiReasoningCapabilities(
-        await fetchOpenCodeGatewayModels(gateway),
-      );
-      this.modelCache = { models, at: Date.now() };
-      return cloneModels(models);
-    } catch (error) {
-      getLogger().warn(
-        { error: error instanceof Error ? error.message : String(error) },
-        "Unable to load Pi model catalog from the OpenCode gateway",
-      );
-      return this.modelCache ? cloneModels(this.modelCache.models) : [];
+    const channels = resolveLlmGatewayChannels(process.env);
+    if (channels.length === 0) return { models: [], routes: new Map() };
+
+    const results = await Promise.allSettled(
+      channels.map((channel) => fetchLlmGatewayModels(channel)),
+    );
+
+    const merged: ModelInfo[] = [];
+    const routes = new Map<string, PiCatalogRoute>();
+    let anyFresh = false;
+    for (const [index, channel] of channels.entries()) {
+      const result = results[index];
+      let channelModels: ModelInfo[] | undefined;
+      if (result?.status === "fulfilled") {
+        anyFresh = true;
+        // Keep the raw ids in the per-channel cache. Their source channel is
+        // the only unambiguous way to distinguish a default model such as
+        // `openai/gpt-5` from `gpt-5` on an extra channel named `openai`.
+        channelModels = cloneModels(result.value);
+        this.channelModelCache.set(channel.id, channelModels);
+      } else {
+        channelModels = this.channelModelCache.get(channel.id);
+        getLogger().warn(
+          {
+            channel: channel.id,
+            reusedCachedModels: channelModels?.length ?? 0,
+            error:
+              result?.reason instanceof Error
+                ? result.reason.message
+                : String(result?.reason),
+          },
+          "Unable to load a Pi model catalog from an LLM gateway channel",
+        );
+      }
+      for (const rawModel of channelModels ?? []) {
+        const modelId = qualifyPiModelId(channel, rawModel.id);
+        const retained = routes.get(modelId);
+        if (retained) {
+          // The public slash-qualified id cannot represent both routes. Keep
+          // the first channel (default is ordered first) and, crucially, keep
+          // its original route instead of reparsing the ambiguous display id.
+          getLogger().warn(
+            {
+              modelId,
+              retainedChannel: retained.channelId,
+              skippedChannel: channel.id,
+              skippedBareModelId: rawModel.id,
+            },
+            "Ignoring an ambiguous Pi model id from an LLM gateway channel",
+          );
+          continue;
+        }
+        routes.set(modelId, {
+          channelId: channel.id,
+          bareModelId: rawModel.id,
+          protocols: modelProtocols(rawModel),
+        });
+        merged.push({
+          ...rawModel,
+          id: modelId,
+          name: channel.isDefault
+            ? rawModel.name
+            : `${rawModel.name} (${channel.label})`,
+        });
+      }
     }
+
+    // Drop caches for channels that are no longer configured.
+    const configured = new Set(channels.map((channel) => channel.id));
+    for (const channelId of this.channelModelCache.keys()) {
+      if (!configured.has(channelId)) this.channelModelCache.delete(channelId);
+    }
+
+    if (!anyFresh && merged.length === 0) {
+      return cached
+        ? clonePiModelCatalog(cached.catalog)
+        : { models: [], routes: new Map() };
+    }
+
+    const models = withPiReasoningCapabilities(merged);
+    const catalog = { models, routes };
+    this.modelCache = { catalog: clonePiModelCatalog(catalog), at: Date.now() };
+    return clonePiModelCatalog(catalog);
   }
 
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
@@ -593,13 +815,17 @@ export class PiProvider implements AgentProvider {
       return runtime.client;
     };
     const routeModel = async (
-      modelId: string,
+      requestedModelId: string,
       preferredProtocol?: OpenCodeRequestProtocol,
     ) => {
-      const protocols = runtime.routes.get(modelId);
-      if (!protocols?.length) {
-        throw new Error(`Pi model "${modelId}" is not in the active catalog`);
+      const resolved = resolvePiModelRoute(runtime.routes, requestedModelId);
+      if (!resolved) {
+        throw new Error(
+          `Pi model "${requestedModelId}" is not in the active catalog`,
+        );
       }
+      const { modelId, route } = resolved;
+      const protocols = route.protocols;
       const protocol =
         preferredProtocol && protocols.includes(preferredProtocol)
           ? preferredProtocol
@@ -610,8 +836,10 @@ export class PiProvider implements AgentProvider {
       if (!protocol) throw new Error(`Pi model "${modelId}" has no endpoint`);
       await requireClient().send({
         type: "set_model",
-        provider: protocolProviderId(protocol),
-        modelId,
+        provider: piProviderId(protocol, route.channel),
+        // Pi knows the model under its bare gateway id; the channel namespace
+        // only exists on Yep's side.
+        modelId: route.bareModelId,
       });
       runtime.currentModel = modelId;
       runtime.currentProtocol = protocol;
@@ -743,36 +971,54 @@ export class PiProvider implements AgentProvider {
       return;
     }
 
-    const gateway = resolveOpenCodeGatewayConfig(process.env);
-    if (!gateway) {
+    const channels = resolveLlmGatewayChannels(process.env);
+    if (channels.length === 0) {
       yield {
         type: "error",
         error:
-          "Pi requires the same LLM gateway configuration as OpenCode (OPENCODE_LLM_API_KEY or LLM_API_KEY).",
+          "Pi requires an LLM gateway (OPENCODE_LLM_API_KEY or LLM_API_KEY, plus any extra channels in YEP_LLM_GATEWAYS).",
       };
       return;
     }
 
     try {
+      const catalog = await this.loadRoutableCatalog();
       const models = applyPiSessionModelConfig(
-        await this.getAvailableModels(),
+        catalog.models,
         options.opencodeConfig,
       );
       if (models.length === 0) {
-        throw new Error("The OpenCode gateway returned no models for Pi");
+        throw new Error("No LLM gateway channel returned any model for Pi");
       }
       runtime.models = models;
-      runtime.routes = new Map(
-        models.map((model) => [model.id, modelProtocols(model)]),
-      );
+      runtime.routes = buildPiModelRoutes(channels, catalog.routes);
 
-      const requestedModel =
+      const requestedModelId =
         options.opencodeConfig?.model ?? options.model ?? models[0]?.id;
-      if (!requestedModel) throw new Error("No Pi model is available");
-      const requestedProtocols = runtime.routes.get(requestedModel);
-      if (!requestedProtocols?.length) {
-        throw new Error(`Pi model "${requestedModel}" is not available`);
+      if (!requestedModelId) throw new Error("No Pi model is available");
+      // Sessions created before multi-gateway support stored bare model ids,
+      // so an unqualified id resolves against any serving channel instead of
+      // failing the resume.
+      const resolvedModel = resolvePiModelRoute(
+        runtime.routes,
+        requestedModelId,
+      );
+      if (!resolvedModel) {
+        throw new Error(`Pi model "${requestedModelId}" is not available`);
       }
+      const requestedModel = resolvedModel.modelId;
+      const requestedRoute = resolvedModel.route;
+      if (requestedModel !== requestedModelId) {
+        getLogger().info(
+          {
+            requestedModel: requestedModelId,
+            resolvedModel: requestedModel,
+            channel: requestedRoute.channel.id,
+          },
+          "Resolved a Pi model id without a channel prefix to a gateway channel",
+        );
+      }
+      const requestedProtocols = requestedRoute.protocols;
       const requestedProtocol =
         options.opencodeConfig?.requestProtocol &&
         requestedProtocols.includes(options.opencodeConfig.requestProtocol)
@@ -781,6 +1027,10 @@ export class PiProvider implements AgentProvider {
       if (!requestedProtocol) {
         throw new Error(`Pi model "${requestedModel}" has no usable endpoint`);
       }
+      const requestedProviderId = piProviderId(
+        requestedProtocol,
+        requestedRoute.channel,
+      );
 
       const existing = options.resumeSessionId
         ? await findPiSessionFile(options.resumeSessionId, this.sessionsDir)
@@ -801,9 +1051,9 @@ export class PiProvider implements AgentProvider {
         // Pin startup to the generated provider so a stale default persisted
         // in Yep's isolated Pi settings cannot block a later catalog change.
         "--provider",
-        protocolProviderId(requestedProtocol),
+        requestedProviderId,
         "--model",
-        requestedModel,
+        requestedRoute.bareModelId,
         "--session-dir",
         activeSessionDir,
         "--no-extensions",
@@ -815,6 +1065,9 @@ export class PiProvider implements AgentProvider {
       }
 
       const childEnv = filterEnvForChildProcess(process.env);
+      // Pi's bash tool inherits this environment, so every gateway credential
+      // and the channel declaration itself are removed. The extension receives
+      // the keys through YEP_PI_LLM_API_KEYS and deletes them once captured.
       for (const key of [
         "OPENCODE_LLM_API_KEY",
         "OPENCODE_LLM_API_BASE",
@@ -822,13 +1075,31 @@ export class PiProvider implements AgentProvider {
         "LLM_API_KEY",
         "LLM_API_BASE",
         "LLM_SUB_MODULE",
+        LLM_GATEWAYS_ENV,
+        ...channels.flatMap((channel) =>
+          channel.apiKeyEnv ? [channel.apiKeyEnv] : [],
+        ),
       ]) {
         delete childEnv[key];
       }
-      childEnv.YEP_PI_LLM_API_KEY = gateway.apiKey;
-      childEnv.YEP_PI_PROVIDER_CONFIG = JSON.stringify(
-        buildPiExtensionConfig(models, gateway, options.globalInstructions),
+      const extensionConfig = buildPiExtensionConfig(
+        runtime.routes,
+        models,
+        options.globalInstructions,
       );
+      childEnv.YEP_PI_LLM_API_KEYS = JSON.stringify(
+        Object.fromEntries(
+          extensionConfig.providers.flatMap((provider) => {
+            const channel = channels.find(
+              (candidate) =>
+                piProviderId("anthropic", candidate) === provider.id ||
+                piProviderId("openai-compatible", candidate) === provider.id,
+            );
+            return channel ? [[provider.id, channel.apiKey]] : [];
+          }),
+        ),
+      );
+      childEnv.YEP_PI_PROVIDER_CONFIG = JSON.stringify(extensionConfig);
       // Pi persists every RPC set_model/set_thinking_level call to its global
       // settings.json. Keep that managed state out of the user's ~/.pi tree;
       // sessions still use the explicit native session directory above.
@@ -855,8 +1126,8 @@ export class PiProvider implements AgentProvider {
       // that replacement so the edited turn uses the current form settings.
       await client.send({
         type: "set_model",
-        provider: protocolProviderId(requestedProtocol),
-        modelId: requestedModel,
+        provider: requestedProviderId,
+        modelId: requestedRoute.bareModelId,
       });
       runtime.currentModel = requestedModel;
       runtime.currentProtocol = requestedProtocol;

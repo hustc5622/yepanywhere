@@ -13,6 +13,10 @@ import {
   CODEX_STANDARD_MCP_APP_SERVER_ARGS,
 } from "./codex/mcp-profile.js";
 import {
+  DEFAULT_LLM_GATEWAY_API_BASE,
+  defaultSubModuleForApiBase,
+} from "./llm-gateways/index.js";
+import {
   getDefaultCodexHomeDir,
   getDefaultCodexSessionsDir,
 } from "./projects/codex-scanner.js";
@@ -342,7 +346,7 @@ export function loadConfig(): Config {
   const sessionTitleApiBase =
     process.env.SESSION_TITLE_LLM_API_BASE ??
     process.env.LLM_API_BASE ??
-    "https://api.ohmyrouter.com";
+    DEFAULT_LLM_GATEWAY_API_BASE;
   const sessionTitleGenerationRequested = parseBooleanOrDefault(
     process.env.SESSION_TITLE_GENERATION,
     Boolean(sessionTitleApiKey),
@@ -355,7 +359,7 @@ export function loadConfig(): Config {
     subModule:
       process.env.SESSION_TITLE_SUB_MODULE ??
       process.env.LLM_SUB_MODULE ??
-      getDefaultSessionTitleSubModule(sessionTitleApiBase),
+      defaultSubModuleForApiBase(sessionTitleApiBase),
     requestTimeoutMs: Math.max(
       1000,
       parseIntOrDefault(process.env.SESSION_TITLE_TIMEOUT_MS, 120000),
@@ -570,18 +574,6 @@ export function loadConfig(): Config {
     // `${basePath}/api/...`. Empty string keeps the legacy "no prefix" mode.
     basePath: normalizeBasePath(process.env.BASE_PATH),
   };
-}
-
-function getDefaultSessionTitleSubModule(apiBase: string): string | undefined {
-  try {
-    const hostname = new URL(apiBase).hostname;
-    if (hostname === "api.ohmyrouter.com") {
-      return "claude-code-internal";
-    }
-  } catch {
-    // Invalid API bases are handled by fetch at request time.
-  }
-  return undefined;
 }
 
 function normalizeBasePath(raw: string | undefined): string {

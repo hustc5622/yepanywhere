@@ -1561,8 +1561,11 @@ export class Process {
           return { behavior: "allow" };
         }
 
-        // Allow Write to .claude/plans/ directory for saving plans
-        if (toolName === "Write") {
+        // Claude plan mode writes its generated plan into .claude/plans/.
+        // Pi has no native plan prompt or plan lifecycle, so its plan mode is
+        // intentionally a strict approval gate and must not inherit this
+        // provider-specific write exception.
+        if (this.provider !== "pi" && toolName === "Write") {
           const filePath = (input as { file_path?: string })?.file_path ?? "";
           if (filePath.includes(".claude/plans/")) {
             return { behavior: "allow" };

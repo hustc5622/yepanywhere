@@ -1,0 +1,45 @@
+import { renderHook } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { describe, expect, it } from "vitest";
+import { I18nProvider } from "../../i18n";
+import enMessages from "../../i18n/en.json";
+import { useProviderPermissionModeConfig } from "../useProviderPermissionModeConfig";
+
+function wrapper({ children }: { children: ReactNode }) {
+  return <I18nProvider>{children}</I18nProvider>;
+}
+
+describe("useProviderPermissionModeConfig", () => {
+  it("gives Pi its own copy instead of reusing OpenCode's", () => {
+    const pi = renderHook(() => useProviderPermissionModeConfig("pi"), {
+      wrapper,
+    }).result.current;
+    const opencode = renderHook(
+      () => useProviderPermissionModeConfig("opencode"),
+      { wrapper },
+    ).result.current;
+
+    expect(pi.title).toBe(enMessages.newSessionPiPermissionTitle);
+    expect(pi.title).not.toBe(opencode.title);
+    expect(pi.description).not.toContain("OpenCode");
+    for (const mode of [
+      "default",
+      "acceptEdits",
+      "bypassPermissions",
+    ] as const) {
+      expect(pi.descriptions[mode]).not.toBe(opencode.descriptions[mode]);
+    }
+  });
+
+  it("describes Pi's plan mode as an approval gate without a plan prompt", () => {
+    const { result } = renderHook(() => useProviderPermissionModeConfig("pi"), {
+      wrapper,
+    });
+
+    expect(result.current.labels.plan).toBe(enMessages.modePiPlanLabel);
+    expect(result.current.descriptions.plan).toBe(
+      enMessages.modePiPlanDescription,
+    );
+    expect(result.current.descriptions.plan).toContain("no native plan mode");
+  });
+});

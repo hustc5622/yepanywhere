@@ -179,12 +179,21 @@ describe("LaunchAgent runtime isolation", () => {
         "ALLOWED_HOSTS=ignored.example",
         "SESSION_TITLE_LLM_API_KEY=fixture-title-key-from-file",
         "OPENCODE_LLM_API_KEY=fixture-opencode-key-from-file",
+        "CUSTOM_GATEWAY_KEY=fixture-extra-key-from-file",
+        // Extra Pi gateway channels reference their key by env var name, so
+        // this value itself carries no credential.
+        "YEP_LLM_GATEWAYS=aitl=https://fixture.example/v1|CUSTOM_GATEWAY_KEY",
+        // Empty is meaningful: show the gateway's complete model catalog.
+        "YEP_LLM_GATEWAY_MODELS=",
         `YEP_FCM_SERVICE_ACCOUNT_JSON='{"project_id":"fixture-project"}'`,
       ].join("\n"),
     );
     const fakeNode = join(fakeBin, "node");
     const fakeCodex = join(fakeBin, "codex");
-    executable(fakeNode, "#!/usr/bin/env bash\nexit 0\n");
+    executable(
+      fakeNode,
+      `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+    );
     executable(fakeCodex, "#!/usr/bin/env bash\nexit 0\n");
 
     // Keep credentials inherited from the developer environment from masking
@@ -198,6 +207,9 @@ describe("LaunchAgent runtime isolation", () => {
       "SESSION_TITLE_LLM_API_KEY",
       "LLM_API_KEY",
       "OPENCODE_LLM_API_KEY",
+      "CUSTOM_GATEWAY_KEY",
+      "YEP_LLM_GATEWAYS",
+      "YEP_LLM_GATEWAY_MODELS",
       "YEP_DEPLOY_ENV_FILE_PRECEDENCE",
       "YEP_REPORTS_DIR",
       "RESEARCH_TASKS_DIR",
@@ -244,6 +256,15 @@ describe("LaunchAgent runtime isolation", () => {
     expect(plist).toContain("<string>fixture-title-key-from-file</string>");
     expect(plist).toContain("<key>OPENCODE_LLM_API_KEY</key>");
     expect(plist).toContain("<string>fixture-opencode-key-from-file</string>");
+    expect(plist).toContain("<key>YEP_LLM_GATEWAYS</key>");
+    expect(plist).toContain(
+      "<string>aitl=https://fixture.example/v1|CUSTOM_GATEWAY_KEY</string>",
+    );
+    expect(plist.match(/<key>CUSTOM_GATEWAY_KEY<\/key>/g)).toHaveLength(1);
+    expect(plist).toContain("<string>fixture-extra-key-from-file</string>");
+    expect(plist).toMatch(
+      /<key>YEP_LLM_GATEWAY_MODELS<\/key>\s*<string><\/string>/,
+    );
     expect(plist).toContain("<key>YEP_FCM_SERVICE_ACCOUNT_JSON</key>");
     expect(plist).toContain("fixture-project");
     expect(readFileSync(join(runtimeDir, "marker.txt"), "utf8")).toBe("first");

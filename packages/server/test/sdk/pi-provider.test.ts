@@ -132,6 +132,9 @@ describe("PiProvider RPC integration", () => {
 
     vi.stubEnv("OPENCODE_LLM_API_KEY", "test-only-secret");
     vi.stubEnv("OPENCODE_LLM_API_BASE", "https://gateway.example/v1");
+    // The picker only offers a curated set of production model families; an
+    // empty allowlist keeps this fixture's synthetic model visible.
+    vi.stubEnv("YEP_LLM_GATEWAY_MODELS", "");
     vi.stubEnv("PI_FAKE_LOG_PATH", logPath);
     vi.stubGlobal(
       "fetch",

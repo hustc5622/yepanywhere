@@ -71,7 +71,32 @@ export function useProviderPermissionModeConfig(
     };
   }
 
-  if (provider === "opencode" || provider === "pi") {
+  // Pi has no native permission policy: Yep gates every Pi tool call itself
+  // (see PiProvider's `respectProviderDecision: false` approval callback), and
+  // Pi's `plan` mode is only a stricter approval gate — no plan prompt is
+  // injected. Keep this copy separate from OpenCode's server-side rules.
+  if (provider === "pi") {
+    return {
+      labels: {
+        ...genericLabels,
+        default: t("modePiAskLabel"),
+        acceptEdits: t("modePiEditLabel"),
+        plan: t("modePiPlanLabel"),
+        bypassPermissions: t("modePiAllowAllLabel"),
+      },
+      descriptions: {
+        ...genericDescriptions,
+        default: t("modePiAskDescription"),
+        acceptEdits: t("modePiEditDescription"),
+        plan: t("modePiPlanDescription"),
+        bypassPermissions: t("modePiAllowAllDescription"),
+      },
+      title: t("newSessionPiPermissionTitle"),
+      description: t("newSessionPiPermissionDescription"),
+    };
+  }
+
+  if (provider === "opencode") {
     return {
       labels: {
         ...genericLabels,

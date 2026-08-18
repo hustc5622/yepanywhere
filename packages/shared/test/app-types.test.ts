@@ -163,6 +163,17 @@ describe("resolveModelDisplayLabel", () => {
     );
   });
 
+  it("surfaces an extra Pi gateway channel", () => {
+    expect(resolveModelDisplayLabel("aitl/claude-opus-5")).toBe("Aitl Opus 5");
+  });
+
+  it("hides Yep's own default channels", () => {
+    expect(resolveModelDisplayLabel("yep-anthropic/claude-opus-5")).toBe(
+      "Opus 5",
+    );
+    expect(resolveModelDisplayLabel("default/claude-opus-5")).toBe("Opus 5");
+  });
+
   it("resolves namespaced Anthropic Opus 4.8 without channel prefix", () => {
     expect(resolveModelDisplayLabel("anthropic/claude-opus-4-8")).toBe(
       "Opus 4.8",

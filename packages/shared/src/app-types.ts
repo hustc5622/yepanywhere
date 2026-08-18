@@ -430,16 +430,20 @@ const CLAUDE_SHORT_LABELS: Record<string, string> = {
 };
 
 /**
- * Known OpenCode gateway provider channel IDs that should be surfaced as a
- * qualifier when the model is routed through a non-default channel. The
- * "anthropic" and "yep-anthropic" channels are treated as the default and
- * do not get a qualifier.
+ * Provider channels that carry no useful routing information for a label.
+ *
+ * `anthropic`/`yep-anthropic`/`yep-openai-compatible` are Yep's own default
+ * routes, and `default` is the id of the default LLM gateway channel. Every
+ * other channel (an OpenCode custom provider such as `mafia`, or an extra Pi
+ * gateway channel declared through `YEP_LLM_GATEWAYS`) is surfaced, because the
+ * same Claude model id can be served by several gateways with different
+ * behaviour and billing.
  */
-const VISIBLE_OPENCODE_CHANNELS = new Set([
-  "mafia",
-  "ohmyrouter",
-  "gemini",
-  "kimi",
+const HIDDEN_MODEL_CHANNELS = new Set([
+  "anthropic",
+  "yep-anthropic",
+  "yep-openai-compatible",
+  "default",
 ]);
 
 /**
@@ -531,10 +535,10 @@ export function resolveModelDisplayLabel(
 
   const label = resolveClaudeModelLabel(bareModel);
 
-  // Surface non-default routing channels for OpenCode namespaced models
+  // Surface non-default routing channels for namespaced models
   if (
     providerChannel &&
-    VISIBLE_OPENCODE_CHANNELS.has(providerChannel) &&
+    !HIDDEN_MODEL_CHANNELS.has(providerChannel) &&
     bareModel.startsWith("claude-")
   ) {
     return `${capitalize(providerChannel)} ${label}`;

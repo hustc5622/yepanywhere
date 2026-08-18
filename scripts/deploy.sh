@@ -138,6 +138,9 @@ AI session title deploy config:
   OPENCODE_LLM_API_BASE            API base for managed OpenCode model requests
   OPENCODE_LLM_SUB_MODULE          X-Sub-Module header for managed OpenCode model requests
   NEW_LLM_API_KEY                  Secondary API key for custom OpenCode providers
+  YEP_LLM_GATEWAYS                 Extra Pi LLM gateway channels; referenced key variables
+                                   are copied into the server LaunchAgent
+  YEP_LLM_GATEWAY_MODELS           Comma-separated Pi picker model prefixes; empty shows all
   SESSION_TITLE_MODEL              Title model (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION=false   Disable title generation
   SESSION_TITLE_TIMEOUT_MS         Title request timeout in milliseconds

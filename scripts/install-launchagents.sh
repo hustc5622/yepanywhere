@@ -129,6 +129,12 @@ Environment overrides:
   OPENCODE_LLM_API_BASE        API base for managed OpenCode model requests
   OPENCODE_LLM_SUB_MODULE      X-Sub-Module header for managed OpenCode model requests
   NEW_LLM_API_KEY              Secondary API key exposed to custom OpenCode providers
+  YEP_LLM_GATEWAYS             Extra LLM gateway channels for Pi (JSON array, or
+                               id=apiBase|API_KEY_ENV|subModule|Label entries).
+                               Prefer key env references so this value holds no secret;
+                               JSON also accepts a literal apiKey when unavoidable.
+  YEP_LLM_GATEWAY_MODELS       Comma-separated Pi picker model prefixes. Set to an
+                               empty value to show every gateway model.
   SESSION_TITLE_MODEL          Model for AI session titles (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION     Set false to disable AI session titles
   SESSION_TITLE_TIMEOUT_MS     Request timeout for AI session title generation
@@ -367,6 +373,41 @@ append_env() {
   } >>"$path"
 }
 
+# Print the API-key environment variables referenced by YEP_LLM_GATEWAYS.
+# The config itself may contain a literal key in JSON form, so read it on stdin
+# rather than exposing it in the process argument list. Invalid config is left
+# for the server's shared resolver to report at startup.
+llm_gateway_key_env_names() {
+  local raw="$1"
+  printf '%s' "$raw" | "$NODE_BIN" -e '
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  let names = [];
+  try {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+      const parsed = JSON.parse(trimmed);
+      const specs = Array.isArray(parsed) ? parsed : [parsed];
+      names = specs.map((spec) => spec && typeof spec === "object" ? spec.apiKeyEnv : undefined);
+    } else {
+      names = trimmed.split(",").map((entry) => {
+        const separator = entry.indexOf("=");
+        return separator > 0 ? entry.slice(separator + 1).split("|")[1] : undefined;
+      });
+    }
+  } catch {
+    return;
+  }
+  const valid = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  for (const name of new Set(names.map((value) => typeof value === "string" ? value.trim() : ""))) {
+    if (valid.test(name)) process.stdout.write(`${name}\n`);
+  }
+});
+'
+}
+
 append_program_arguments() {
   local path="$1"
   shift
@@ -450,6 +491,7 @@ write_opencode_bridge_plist() {
 
 write_server_plist() {
   local plist="$LAUNCH_AGENTS_DIR/$SERVER_LABEL.plist"
+  local gateway_key_env existing_index already_present
   local env_args=(
     "NODE_ENV" "production"
     "PATH" "$LAUNCHD_PATH"
@@ -500,6 +542,29 @@ write_server_plist() {
   fi
   if [[ -n "${NEW_LLM_API_KEY:-}" ]]; then
     env_args+=("NEW_LLM_API_KEY" "$NEW_LLM_API_KEY")
+  fi
+  # Extra gateway channels are consumed by the Pi provider inside the main
+  # server. The bridge sidecars only ever address the default gateway, so this
+  # is deliberately not forwarded to their plists.
+  if [[ -n "${YEP_LLM_GATEWAYS:-}" ]]; then
+    env_args+=("YEP_LLM_GATEWAYS" "$YEP_LLM_GATEWAYS")
+    while IFS= read -r gateway_key_env; do
+      [[ -z "$gateway_key_env" ]] && continue
+      already_present=false
+      for ((existing_index = 0; existing_index < ${#env_args[@]}; existing_index += 2)); do
+        if [[ "${env_args[$existing_index]}" == "$gateway_key_env" ]]; then
+          already_present=true
+          break
+        fi
+      done
+      if [[ "$already_present" == false && -n "${!gateway_key_env+x}" ]]; then
+        env_args+=("$gateway_key_env" "${!gateway_key_env}")
+      fi
+    done < <(llm_gateway_key_env_names "$YEP_LLM_GATEWAYS")
+  fi
+  # Set-but-empty is meaningful: it disables the default model allowlist.
+  if [[ -n "${YEP_LLM_GATEWAY_MODELS+x}" ]]; then
+    env_args+=("YEP_LLM_GATEWAY_MODELS" "$YEP_LLM_GATEWAY_MODELS")
   fi
   if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
     env_args+=("DEEPSEEK_API_KEY" "$DEEPSEEK_API_KEY")

@@ -3,7 +3,8 @@
  *
  * Loaded explicitly with `pi --extension`; it neither installs files under
  * ~/.pi nor mutates the user's models.json. The server supplies a generated
- * provider catalog through YEP_PI_PROVIDER_CONFIG for this child only.
+ * provider catalog through YEP_PI_PROVIDER_CONFIG for this child only, and the
+ * per-provider gateway credentials through YEP_PI_LLM_API_KEYS.
  */
 
 const APPROVAL_TITLE_PREFIX = "__YEP_PI_TOOL_APPROVAL__:";
@@ -15,14 +16,29 @@ function parseProviderConfig() {
   if (retained && Array.isArray(retained.providers)) return retained;
 
   const raw = process.env.YEP_PI_PROVIDER_CONFIG;
-  const apiKey = process.env.YEP_PI_LLM_API_KEY;
+  // One key per generated provider: Yep can register several gateways, and
+  // each gateway has its own credential. The legacy single-key variable is
+  // still honoured as a fallback for a provider with no entry in the map.
+  const rawKeys = process.env.YEP_PI_LLM_API_KEYS;
+  const fallbackApiKey = process.env.YEP_PI_LLM_API_KEY;
 
   // Pi's bash tool inherits process.env. Remove server-owned configuration as
   // soon as the extension has captured it so tool subprocesses cannot read it.
   Reflect.deleteProperty(process.env, "YEP_PI_PROVIDER_CONFIG");
+  Reflect.deleteProperty(process.env, "YEP_PI_LLM_API_KEYS");
   Reflect.deleteProperty(process.env, "YEP_PI_LLM_API_KEY");
 
-  if (!raw || !apiKey) {
+  let apiKeys = {};
+  if (rawKeys) {
+    try {
+      const parsedKeys = JSON.parse(rawKeys);
+      if (parsedKeys && typeof parsedKeys === "object") apiKeys = parsedKeys;
+    } catch {
+      // Fall through with no map; providers without a key are dropped below.
+    }
+  }
+
+  if (!raw || (!fallbackApiKey && Object.keys(apiKeys).length === 0)) {
     const empty = { providers: [] };
     globalThis[PROVIDER_STATE_KEY] = empty;
     return empty;
@@ -43,10 +59,18 @@ function parseProviderConfig() {
           provider.config &&
           typeof provider.config === "object",
       )
-      .map((provider) => ({
-        id: provider.id,
-        config: { ...provider.config, apiKey },
-      }));
+      .map((provider) => {
+        const apiKey =
+          typeof apiKeys[provider.id] === "string" && apiKeys[provider.id]
+            ? apiKeys[provider.id]
+            : fallbackApiKey;
+        return apiKey
+          ? { id: provider.id, config: { ...provider.config, apiKey } }
+          : null;
+      })
+      // Fail closed: a provider with no credential would surface as a model
+      // that always errors at request time.
+      .filter((provider) => provider !== null);
     // Pi recreates its AgentSession and reloads extensions after a native
     // fork/resume. Retain the captured config in this child process so the
     // generated provider is registered again without putting the gateway key

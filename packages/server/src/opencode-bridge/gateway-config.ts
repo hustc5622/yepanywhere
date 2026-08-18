@@ -4,12 +4,22 @@ import type {
   OpenCodeSessionConfig,
 } from "@yep-anywhere/shared";
 import { getOpenCodeModelDefaultLimits } from "@yep-anywhere/shared";
+import {
+  type LlmGatewayCredentials,
+  clean,
+  fetchLlmGatewayModels,
+  gatewaySubModuleHeaders,
+  isRecord,
+  resolveDefaultLlmGatewayChannel,
+  withV1Path,
+} from "../llm-gateways/index.js";
 
-export interface OpenCodeGatewayConfig {
-  apiKey: string;
-  apiBase: string;
-  subModule?: string;
-}
+/**
+ * OpenCode's view of one gateway. Structurally identical to the shared
+ * credentials type: the OpenCode paths only ever address a single gateway, so
+ * they deliberately do not carry the channel identity.
+ */
+export type OpenCodeGatewayConfig = LlmGatewayCredentials;
 
 export interface ManagedOpenCodeGatewayOverlayOptions {
   openAICompatibleBaseURL?: string;
@@ -28,8 +38,6 @@ export interface UserConfiguredOpenCodeEnvOptions {
 
 type Env = NodeJS.ProcessEnv;
 
-const DEFAULT_API_BASE = "https://api.ohmyrouter.com";
-const OHMYROUTER_SUB_MODULE = "claude-code-internal";
 const OPENCODE_GATEWAY_API_KEY_ENV = "YEP_OPENCODE_LLM_API_KEY";
 const OPENCODE_NATIVE_ATTACHMENT_MODALITIES = {
   input: ["text", "image", "pdf"],
@@ -45,29 +53,6 @@ const OPENCODE_BRIDGE_CONTROL_URL_ENVS = [
   "YEP_OPENCODE_BRIDGE_URL",
   "OPENCODE_BRIDGE_URL",
 ] as const;
-
-interface GatewayModelRecord {
-  id?: unknown;
-  name?: unknown;
-  owned_by?: unknown;
-  context_window?: unknown;
-  supported_endpoint_types?: unknown;
-}
-
-interface GatewayModelsResponse {
-  success?: unknown;
-  data?: unknown;
-}
-
-function clean(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed || undefined;
-}
-
-function withV1Path(apiBase: string): string {
-  const normalized = apiBase.replace(/\/+$/, "");
-  return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
-}
 
 /**
  * OpenAI-compatible traffic can optionally pass through the bridge. The
@@ -128,37 +113,23 @@ function parseBufferedModelTokens(env: Env): string[] {
     .filter(Boolean);
 }
 
-function defaultSubModule(apiBase: string): string | undefined {
-  try {
-    return new URL(apiBase).hostname === "api.ohmyrouter.com"
-      ? OHMYROUTER_SUB_MODULE
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
+/**
+ * Resolve the single gateway the OpenCode paths address.
+ *
+ * Thin wrapper over the shared channel resolver: OpenCode consumes only the
+ * credentials, so the channel identity is dropped here to keep this module's
+ * public shape unchanged.
+ */
 export function resolveOpenCodeGatewayConfig(
   env: Env,
 ): OpenCodeGatewayConfig | null {
-  const apiKey = clean(env.OPENCODE_LLM_API_KEY) ?? clean(env.LLM_API_KEY);
-  if (!apiKey) return null;
-
-  const apiBase = withV1Path(
-    clean(env.OPENCODE_LLM_API_BASE) ??
-      clean(env.LLM_API_BASE) ??
-      DEFAULT_API_BASE,
-  );
-  const subModule =
-    clean(env.OPENCODE_LLM_SUB_MODULE) ??
-    clean(env.LLM_SUB_MODULE) ??
-    defaultSubModule(apiBase);
-
-  return { apiKey, apiBase, subModule };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  const channel = resolveDefaultLlmGatewayChannel(env);
+  if (!channel) return null;
+  return {
+    apiKey: channel.apiKey,
+    apiBase: channel.apiBase,
+    subModule: channel.subModule,
+  };
 }
 
 function mergeOpenCodeConfig(
@@ -180,105 +151,15 @@ function mergeOpenCodeConfig(
 }
 
 function gatewayHeaders(config: OpenCodeGatewayConfig): Record<string, string> {
-  return config.subModule ? { "X-Sub-Module": config.subModule } : {};
-}
-
-function normalizeGatewayProtocols(value: unknown): OpenCodeRequestProtocol[] {
-  if (!Array.isArray(value)) {
-    return ["openai-compatible", "anthropic"];
-  }
-
-  const protocols = new Set<OpenCodeRequestProtocol>();
-  for (const item of value) {
-    if (typeof item !== "string") continue;
-    const normalized = item.toLowerCase();
-    if (
-      normalized.includes("anthropic") ||
-      normalized === "messages" ||
-      normalized.includes("/messages")
-    ) {
-      protocols.add("anthropic");
-    }
-    if (
-      normalized.includes("openai") ||
-      normalized.includes("chat/completions") ||
-      (normalized.includes("chat") && normalized.includes("completion")) ||
-      normalized.includes("openai-compatible")
-    ) {
-      protocols.add("openai-compatible");
-    }
-  }
-  return protocols.size > 0
-    ? Array.from(protocols)
-    : ["openai-compatible", "anthropic"];
+  return gatewaySubModuleHeaders(config);
 }
 
 /** Fetch the aggregator's model catalog, including each model's API shapes. */
-export async function fetchOpenCodeGatewayModels(
+export function fetchOpenCodeGatewayModels(
   config: OpenCodeGatewayConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ModelInfo[]> {
-  const response = await fetchImpl(`${config.apiBase}/models`, {
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${config.apiKey}`,
-      ...gatewayHeaders(config),
-    },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!response.ok) {
-    throw new Error(`OpenCode model gateway returned ${response.status}`);
-  }
-
-  const payload = (await response.json()) as GatewayModelsResponse;
-  if (payload.success === false || !Array.isArray(payload.data)) {
-    throw new Error("OpenCode model gateway returned an invalid catalog");
-  }
-
-  const seen = new Set<string>();
-  const models: ModelInfo[] = [];
-  for (const raw of payload.data) {
-    if (!isRecord(raw)) continue;
-    const item = raw as GatewayModelRecord;
-    const id = typeof item.id === "string" ? item.id.trim() : "";
-    if (
-      !id ||
-      id === "__proto__" ||
-      id === "prototype" ||
-      id === "constructor" ||
-      seen.has(id)
-    ) {
-      continue;
-    }
-    seen.add(id);
-
-    const ownedBy =
-      typeof item.owned_by === "string" && item.owned_by.trim()
-        ? item.owned_by.trim()
-        : undefined;
-    const contextWindow =
-      typeof item.context_window === "number" &&
-      Number.isFinite(item.context_window) &&
-      item.context_window > 0
-        ? Math.trunc(item.context_window)
-        : undefined;
-    const supportedRequestProtocols = normalizeGatewayProtocols(
-      item.supported_endpoint_types,
-    );
-
-    models.push({
-      id,
-      name:
-        typeof item.name === "string" && item.name.trim()
-          ? item.name.trim()
-          : id,
-      description: ownedBy,
-      ownedBy,
-      contextWindow,
-      supportedRequestProtocols,
-    });
-  }
-  return models.sort((a, b) => a.id.localeCompare(b.id));
+  return fetchLlmGatewayModels(config, fetchImpl);
 }
 
 export function getManagedOpenCodeModelRef(

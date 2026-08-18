@@ -29,6 +29,7 @@ import {
   type PiSessionFileRecord,
   listPiSessionFiles,
 } from "./pi-files.js";
+import { parsePiProviderId } from "./pi-model-refs.js";
 import { sanitizePublicUserPrompt } from "./public-user-prompt.js";
 import type { AgentSession as AgentSessionResult } from "./reader.js";
 import type {
@@ -62,6 +63,25 @@ interface PiDerivedSession {
   compactEvents?: ContextCompactEvent[];
   lastTurnStatus?: SessionSummary["lastTurnStatus"];
   lastErrorMessage?: string;
+}
+
+/**
+ * Re-attach the gateway channel namespace to a model id read from a Pi
+ * session.
+ *
+ * Pi records the bare gateway model id plus the generated provider id it used.
+ * Yep's picker (and every model id it stores) namespaces non-default channels
+ * as `<channelId>/<modelId>`, so a transcript would otherwise show the same id
+ * for two different gateways — and its context window would be looked up under
+ * an id the picker never uses.
+ */
+function qualifyPiSessionModel(
+  modelId: string,
+  providerId: string | undefined,
+): string {
+  const { channelId } = parsePiProviderId(providerId);
+  if (!channelId || modelId.startsWith(`${channelId}/`)) return modelId;
+  return `${channelId}/${modelId}`;
 }
 
 function isPiMessageEntry(entry: PiSessionEntry): entry is PiMessageEntry {
@@ -386,7 +406,14 @@ export class PiSessionReader implements ISessionReader {
         const name = entry.name;
         if (typeof name === "string" && name.trim()) explicitName = name;
       } else if (entry.type === "model_change" && "modelId" in entry) {
-        if (typeof entry.modelId === "string") model = entry.modelId;
+        if (typeof entry.modelId === "string") {
+          model = qualifyPiSessionModel(
+            entry.modelId,
+            "provider" in entry && typeof entry.provider === "string"
+              ? entry.provider
+              : undefined,
+          );
+        }
       } else if (
         entry.type === "thinking_level_change" &&
         "thinkingLevel" in entry &&
@@ -421,7 +448,9 @@ export class PiSessionReader implements ISessionReader {
         messageCount += 1;
         lastConversationRole = "assistant";
         lastAssistant = message;
-        model = message.model ?? model;
+        model = message.model
+          ? qualifyPiSessionModel(message.model, message.provider)
+          : model;
         if (message.usage) {
           cumulative.inputTokens += message.usage.input ?? 0;
           cumulative.outputTokens += message.usage.output ?? 0;

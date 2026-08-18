@@ -36,6 +36,10 @@ import {
 import { InteractionBroker } from "./interactions/InteractionBroker.js";
 import type { SessionInteractionService } from "./interactions/SessionInteractionService.js";
 import {
+  LLM_GATEWAYS_ENV,
+  resolveLlmGatewayChannelsDetailed,
+} from "./llm-gateways/index.js";
+import {
   getLogFilePath,
   initLogger,
   interceptConsole,
@@ -384,6 +388,25 @@ async function warnIfCodexVersionMismatch(): Promise<void> {
 }
 
 await warnIfCodexVersionMismatch();
+
+/**
+ * Report rejected `YEP_LLM_GATEWAYS` entries once at startup.
+ *
+ * Extra gateway channels are resolved lazily by their consumers, and an
+ * invalid entry is skipped there so one typo cannot take the working default
+ * gateway down. Without this warning that skip would be silent, and the only
+ * symptom would be a model that never appears in the picker.
+ */
+function warnAboutLlmGatewayConfig(): void {
+  const { problems } = resolveLlmGatewayChannelsDetailed(process.env);
+  for (const problem of problems) {
+    console.warn(
+      `[LLM gateways] Ignoring ${LLM_GATEWAYS_ENV} entry "${problem.entry}": ${problem.reason}`,
+    );
+  }
+}
+
+warnAboutLlmGatewayConfig();
 
 // Create EventBus and FileWatchers for all provider directories
 const eventBus = new EventBus();

@@ -1043,6 +1043,34 @@ describe("Process", () => {
       expect(result.behavior).toBe("deny");
     });
 
+    it("keeps Pi plan mode strict for writes under .claude/plans", async () => {
+      const process = new Process(createMockIterator([]), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-pi-plan",
+        idleTimeoutMs: 100,
+        permissionMode: "plan",
+        provider: "pi",
+      });
+
+      const approvalPromise = process.handleToolApproval(
+        "Write",
+        { file_path: "/test/.claude/plans/pi-plan.md" },
+        { signal: new AbortController().signal },
+      );
+
+      expect(process.state.type).toBe("waiting-input");
+      const pendingRequest = process.getPendingInputRequest();
+      expect(pendingRequest).toMatchObject({
+        toolName: "Write",
+        toolInput: { file_path: "/test/.claude/plans/pi-plan.md" },
+      });
+      process.respondToInput(pendingRequest?.id ?? "", "deny");
+      await expect(approvalPromise).resolves.toMatchObject({
+        behavior: "deny",
+      });
+    });
+
     it("queues deny feedback as follow-up message for Codex approvals", async () => {
       const iterator: AsyncIterator<SDKMessage> = {
         next: () => new Promise(() => undefined),
