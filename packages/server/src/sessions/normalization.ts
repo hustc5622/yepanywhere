@@ -14,6 +14,8 @@ import type {
   CodexResponseItemEntry,
   CodexSessionEntry,
   CodexWebSearchCallPayload,
+  ContextCompactEvent,
+  ContextCumulativeUsage,
   ContextUsage,
   GeminiAssistantMessage,
   GeminiSessionMessage,
@@ -29,6 +31,7 @@ import type {
   PiSessionContent,
   PiSessionEntry,
   PiToolResultMessage,
+  ProviderName,
   SessionBranchOption,
   SessionBranchState,
   UnifiedSession,
@@ -42,6 +45,7 @@ import {
   getKimiPromptText,
   getMessageContent,
   getModelContextWindow,
+  getPiMessageText,
   isConversationEntry,
   isKimiLoopEventRecord,
   isKimiTurnEndedRecord,
@@ -75,7 +79,12 @@ import {
   parseCodexToolArguments,
 } from "../codex/normalization.js";
 import { normalizeKimiToolInput } from "../kimi/tool-input.js";
-import type { ContentBlock, Message, Session } from "../supervisor/types.js";
+import type {
+  ContentBlock,
+  Message,
+  Session,
+  SessionSummary,
+} from "../supervisor/types.js";
 import { collectVisibleClaudeEntries } from "./claude-messages.js";
 import { codexEntryAnchor } from "./codex-entry-anchor.js";
 import { applyCodexRollbackMarkers } from "./codex-rollback.js";
@@ -83,6 +92,7 @@ import {
   CODEX_TURN_ABORTED_DISPLAY_TEXT,
   isCodexTurnAbortedNoticeText,
 } from "./codex-turn-aborted.js";
+import { parsePiProviderId } from "./pi-model-refs.js";
 import { canonicalizePiToolName, normalizePiToolInput } from "./pi-tools.js";
 import {
   MANAGED_ATTACHMENT_MARKER,
@@ -90,6 +100,7 @@ import {
 } from "./public-user-prompt.js";
 import type { LoadedSession } from "./types.js";
 import { isUserPromptMessage } from "./user-prompt-message.js";
+import { createSessionQuestion } from "./user-questions.js";
 
 interface CodexToolUseConversion {
   callId: string;
@@ -392,10 +403,20 @@ function sanitizePublicNormalizedSession(session: Session): Session {
   };
 }
 
+export interface NormalizeSessionOptions {
+  /** Omit inline image payloads from Pi messages. */
+  deferMedia?: boolean;
+  /** Omit Pi thinking blocks from messages. */
+  deferThinking?: boolean;
+}
+
 /**
  * Normalize a UnifiedSession into the generic Session format expected by the frontend.
  */
-export function normalizeSession(loaded: LoadedSession): Session {
+export function normalizeSession(
+  loaded: LoadedSession,
+  options?: NormalizeSessionOptions,
+): Session {
   const { summary, data } = loaded;
 
   switch (data.provider) {
@@ -426,19 +447,22 @@ export function normalizeSession(loaded: LoadedSession): Session {
     case "codex":
     case "codex-oss": {
       const branchState = loaded.codexBranchState ?? loaded.branchState;
+      const messages = loaded.projectedMessages
+        ? loaded.projectedMessages
+        : convertCodexEntries(
+            applyCodexRollbackMarkers(data.session.entries),
+            summary.id,
+            branchState,
+            {
+              model: summary.model,
+              provider: data.provider,
+            },
+          );
       return sanitizePublicNormalizedSession({
         ...summary,
         branchState,
         codexBranchState: loaded.codexBranchState,
-        messages: convertCodexEntries(
-          applyCodexRollbackMarkers(data.session.entries),
-          summary.id,
-          branchState,
-          {
-            model: summary.model,
-            provider: data.provider,
-          },
-        ),
+        messages,
       });
     }
     case "gemini":
@@ -447,7 +471,20 @@ export function normalizeSession(loaded: LoadedSession): Session {
         messages: convertGeminiMessages(data.session.messages),
       });
     case "pi": {
-      const messages = convertPiMessages(data.session);
+      const precomputed = loaded.precomputedPiMessages;
+      const deferMedia =
+        options?.deferMedia ?? precomputed?.deferMedia ?? false;
+      const deferThinking =
+        options?.deferThinking ?? precomputed?.deferThinking ?? false;
+      const messages =
+        precomputed &&
+        precomputed.deferMedia === deferMedia &&
+        precomputed.deferThinking === deferThinking
+          ? precomputed.messages
+          : convertPiSession(data.session, {
+              deferMedia,
+              deferThinking,
+            }).messages;
       return sanitizePublicNormalizedSession({
         ...summary,
         branchState: loaded.branchState,
@@ -476,42 +513,277 @@ export function normalizeSession(loaded: LoadedSession): Session {
 
 // --- Pi Conversion Logic ---
 
+export interface PiDerivedSession {
+  model?: string;
+  reasoningEffort?: string;
+  titleText: string;
+  messageCount: number;
+  userQuestions: NonNullable<SessionSummary["userQuestions"]>;
+  contextUsage?: ContextUsage;
+  cumulativeUsage?: ContextCumulativeUsage;
+  compactEvents?: ContextCompactEvent[];
+  lastTurnStatus?: SessionSummary["lastTurnStatus"];
+  lastErrorMessage?: string;
+}
+
+export interface PiSessionConversionOptions {
+  /** Omit inline image payloads from the normalized message blocks. */
+  deferMedia?: boolean;
+  /** Omit thinking blocks from the normalized message blocks. */
+  deferThinking?: boolean;
+  /** Resolve provider-specific context windows while deriving the summary. */
+  getContextWindow?: (
+    model: string | undefined,
+    provider?: ProviderName,
+    sessionId?: string,
+  ) => number | undefined;
+}
+
+export interface PiSessionConversion {
+  messages: Message[];
+  derived: PiDerivedSession;
+}
+
 function isPiSessionMessageEntry(
   entry: PiSessionEntry,
 ): entry is PiSessionEntry & { type: "message"; message: PiAgentMessage } {
-  return entry.type === "message" && "message" in entry;
+  return (
+    entry.type === "message" && "message" in entry && isRecord(entry.message)
+  );
+}
+
+function qualifyPiSessionModel(
+  modelId: string,
+  providerId: string | undefined,
+): string {
+  const { channelId } = parsePiProviderId(providerId);
+  if (!channelId || modelId.startsWith(`${channelId}/`)) return modelId;
+  return `${channelId}/${modelId}`;
+}
+
+interface PiDerivationAccumulator {
+  model?: string;
+  reasoningEffort?: string;
+  explicitName?: string;
+  firstUserText: string;
+  messageCount: number;
+  lastConversationRole?: string;
+  lastAssistant?: PiAssistantMessage;
+  userQuestions: NonNullable<SessionSummary["userQuestions"]>;
+  compactEvents: ContextCompactEvent[];
+  cumulative: ContextCumulativeUsage;
+}
+
+function createPiDerivationAccumulator(): PiDerivationAccumulator {
+  return {
+    firstUserText: "",
+    messageCount: 0,
+    userQuestions: [],
+    compactEvents: [],
+    cumulative: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 0,
+      turnCount: 0,
+    },
+  };
+}
+
+function consumePiDerivation(
+  accumulator: PiDerivationAccumulator,
+  entry: PiSessionEntry,
+): void {
+  if (entry.type === "session_info" && "name" in entry) {
+    const name = entry.name;
+    if (typeof name === "string" && name.trim()) {
+      accumulator.explicitName = name;
+    }
+  } else if (entry.type === "model_change" && "modelId" in entry) {
+    if (typeof entry.modelId === "string") {
+      accumulator.model = qualifyPiSessionModel(
+        entry.modelId,
+        "provider" in entry && typeof entry.provider === "string"
+          ? entry.provider
+          : undefined,
+      );
+    }
+  } else if (
+    entry.type === "thinking_level_change" &&
+    "thinkingLevel" in entry &&
+    typeof entry.thinkingLevel === "string"
+  ) {
+    accumulator.reasoningEffort = entry.thinkingLevel;
+  } else if (entry.type === "compaction" && "summary" in entry) {
+    const beforeTokens =
+      "tokensBefore" in entry && typeof entry.tokensBefore === "number"
+        ? entry.tokensBefore
+        : undefined;
+    accumulator.compactEvents.push({
+      timestamp: entry.timestamp,
+      beforeTokens,
+      trigger: "pi",
+    });
+  }
+
+  if (!isPiSessionMessageEntry(entry)) return;
+  const message = entry.message;
+  if (message.role === "user") {
+    accumulator.messageCount += 1;
+    accumulator.lastConversationRole = "user";
+    const text = getPiMessageText(message);
+    if (!accumulator.firstUserText && text.trim()) {
+      accumulator.firstUserText = text;
+    }
+    const question = createSessionQuestion(
+      { id: entry.id, text, timestamp: entry.timestamp },
+      `pi-user-${accumulator.userQuestions.length}`,
+    );
+    if (question) accumulator.userQuestions.push(question);
+  } else if (message.role === "assistant") {
+    accumulator.messageCount += 1;
+    accumulator.lastConversationRole = "assistant";
+    accumulator.lastAssistant = message;
+    accumulator.model = message.model
+      ? qualifyPiSessionModel(message.model, message.provider)
+      : accumulator.model;
+    if (message.usage) {
+      accumulator.cumulative.inputTokens += message.usage.input ?? 0;
+      accumulator.cumulative.outputTokens += message.usage.output ?? 0;
+      accumulator.cumulative.cacheReadTokens += message.usage.cacheRead ?? 0;
+      accumulator.cumulative.cacheCreationTokens +=
+        message.usage.cacheWrite ?? 0;
+      accumulator.cumulative.totalTokens =
+        (accumulator.cumulative.totalTokens ?? 0) +
+        (message.usage.totalTokens ?? 0);
+      accumulator.cumulative.turnCount += 1;
+    }
+  }
+}
+
+function finishPiDerivation(
+  session: PiSessionContent,
+  accumulator: PiDerivationAccumulator,
+  options: PiSessionConversionOptions,
+): PiDerivedSession {
+  const usage = accumulator.lastAssistant?.usage;
+  const contextWindow =
+    options.getContextWindow?.(accumulator.model, "pi", session.header.id) ??
+    (accumulator.model
+      ? getModelContextWindow(accumulator.model, "pi")
+      : undefined);
+  const inputTokens = usage
+    ? (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
+    : 0;
+  const contextUsage =
+    usage && contextWindow
+      ? {
+          inputTokens,
+          outputTokens: usage.output ?? 0,
+          cacheReadTokens: usage.cacheRead ?? 0,
+          cacheCreationTokens: usage.cacheWrite ?? 0,
+          contextWindow,
+          percentage: Math.min(100, (inputTokens / contextWindow) * 100),
+        }
+      : undefined;
+  const stopReason = accumulator.lastAssistant?.stopReason;
+  const lastTurnStatus =
+    accumulator.lastConversationRole === "user"
+      ? ("interrupted" as const)
+      : stopReason === "error"
+        ? ("failed" as const)
+        : stopReason === "aborted"
+          ? ("interrupted" as const)
+          : accumulator.lastAssistant
+            ? ("completed" as const)
+            : undefined;
+
+  return {
+    model: accumulator.model,
+    reasoningEffort: accumulator.reasoningEffort,
+    titleText: accumulator.explicitName ?? accumulator.firstUserText,
+    messageCount: accumulator.messageCount,
+    userQuestions: accumulator.userQuestions,
+    contextUsage,
+    cumulativeUsage:
+      accumulator.cumulative.turnCount > 0 ? accumulator.cumulative : undefined,
+    compactEvents:
+      accumulator.compactEvents.length > 0
+        ? accumulator.compactEvents
+        : undefined,
+    lastTurnStatus,
+    lastErrorMessage:
+      stopReason === "error"
+        ? accumulator.lastAssistant?.errorMessage
+        : undefined,
+  };
+}
+
+export function derivePiSession(
+  session: PiSessionContent,
+  options: PiSessionConversionOptions = {},
+): PiDerivedSession {
+  const accumulator = createPiDerivationAccumulator();
+  for (const entry of session.activeEntries) {
+    consumePiDerivation(accumulator, entry);
+  }
+  return finishPiDerivation(session, accumulator, options);
 }
 
 function piInputContent(
   message: Extract<PiAgentMessage, { role: "user" | "custom" }>,
+  options: PiSessionConversionOptions,
 ): string | ContentBlock[] {
   if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
   const blocks: ContentBlock[] = [];
   for (const block of message.content) {
+    if (!block || typeof block !== "object") continue;
     if (block.type === "text") {
       blocks.push({ type: "text", text: block.text });
     } else if (block.type === "image") {
-      blocks.push({
-        type: "input_image",
-        mime_type: block.mimeType,
-        image_url: `data:${block.mimeType};base64,${block.data}`,
-      });
+      blocks.push(
+        options.deferMedia || block.deferred
+          ? {
+              type: "input_image",
+              mime_type: block.mimeType,
+              deferred: true,
+            }
+          : {
+              type: "input_image",
+              mime_type: block.mimeType,
+              image_url: `data:${block.mimeType};base64,${block.data}`,
+            },
+      );
     }
   }
   return blocks;
 }
 
+interface PiToolCallRegistration {
+  id: string;
+  nativeName: string;
+  nativeInput: unknown;
+  block: ContentBlock;
+}
+
 function piAssistantContent(
   message: PiAssistantMessage,
   resultDetailsByCallId: ReadonlyMap<string, unknown>,
+  options: PiSessionConversionOptions,
+  onToolCall?: (registration: PiToolCallRegistration) => void,
 ): ContentBlock[] {
+  if (!Array.isArray(message.content)) return [];
   const blocks: ContentBlock[] = [];
   for (const block of message.content) {
+    if (!block || typeof block !== "object") continue;
     switch (block.type) {
       case "text":
         blocks.push({ type: "text", text: block.text });
         break;
       case "thinking":
+        if (options.deferThinking || block.deferred) break;
         blocks.push({
           type: "thinking",
           thinking: block.thinking,
@@ -520,8 +792,8 @@ function piAssistantContent(
             : {}),
         });
         break;
-      case "toolCall":
-        blocks.push({
+      case "toolCall": {
+        const toolBlock: ContentBlock = {
           type: "tool_use",
           id: block.id,
           name: canonicalizePiToolName(block.name),
@@ -530,14 +802,26 @@ function piAssistantContent(
             block.arguments,
             resultDetailsByCallId.get(block.id),
           ),
+        };
+        blocks.push(toolBlock);
+        onToolCall?.({
+          id: block.id,
+          nativeName: block.name,
+          nativeInput: block.arguments,
+          block: toolBlock,
         });
         break;
+      }
       case "image":
-        blocks.push({
-          type: "image",
-          mime_type: block.mimeType,
-          image_url: `data:${block.mimeType};base64,${block.data}`,
-        });
+        blocks.push(
+          options.deferMedia || block.deferred
+            ? { type: "image", mime_type: block.mimeType, deferred: true }
+            : {
+                type: "image",
+                mime_type: block.mimeType,
+                image_url: `data:${block.mimeType};base64,${block.data}`,
+              },
+        );
         break;
     }
   }
@@ -545,28 +829,47 @@ function piAssistantContent(
 }
 
 function piToolResultContent(message: PiToolResultMessage): string {
+  if (!Array.isArray(message.content)) return "";
   const parts: string[] = [];
   for (const block of message.content) {
+    if (!block || typeof block !== "object") continue;
     if (block.type === "text") parts.push(block.text);
     else if (block.type === "image") parts.push("[Image]");
   }
   return parts.join("\n");
 }
 
-/** Convert Pi's active JSONL branch into Yep's provider-neutral transcript. */
-export function convertPiMessages(session: PiSessionContent): Message[] {
+/**
+ * Convert Pi's active JSONL branch and derive its summary in one traversal.
+ * Tool-result details are applied retroactively to the corresponding tool-use
+ * block, so the old details pre-scan is no longer needed.
+ */
+export function convertPiSession(
+  session: PiSessionContent,
+  options: PiSessionConversionOptions = {},
+): PiSessionConversion {
   const messages: Message[] = [];
+  const accumulator = createPiDerivationAccumulator();
   const resultDetailsByCallId = new Map<string, unknown>();
-  for (const entry of session.activeEntries) {
-    if (isPiSessionMessageEntry(entry) && entry.message.role === "toolResult") {
-      resultDetailsByCallId.set(
-        entry.message.toolCallId,
-        entry.message.details,
+  const toolCallsById = new Map<string, PiToolCallRegistration[]>();
+
+  const registerToolCall = (registration: PiToolCallRegistration): void => {
+    const registrations = toolCallsById.get(registration.id) ?? [];
+    registrations.push(registration);
+    toolCallsById.set(registration.id, registrations);
+    const details = resultDetailsByCallId.get(registration.id);
+    if (details !== undefined) {
+      registration.block.input = normalizePiToolInput(
+        registration.nativeName,
+        registration.nativeInput,
+        details,
       );
     }
-  }
+  };
 
   for (const entry of session.activeEntries) {
+    consumePiDerivation(accumulator, entry);
+
     if (entry.type === "compaction" && "summary" in entry) {
       messages.push({
         uuid: entry.id,
@@ -603,7 +906,10 @@ export function convertPiMessages(session: PiSessionContent): Message[] {
           uuid: entry.id,
           parentUuid: entry.parentId,
           type: "user",
-          message: { role: "user", content: piInputContent(message) },
+          message: {
+            role: "user",
+            content: piInputContent(message, options),
+          },
           timestamp: entry.timestamp,
         });
         break;
@@ -614,7 +920,12 @@ export function convertPiMessages(session: PiSessionContent): Message[] {
           type: "assistant",
           message: {
             role: "assistant",
-            content: piAssistantContent(message, resultDetailsByCallId),
+            content: piAssistantContent(
+              message,
+              resultDetailsByCallId,
+              options,
+              registerToolCall,
+            ),
             ...(message.model ? { model: message.model } : {}),
           },
           usage: message.usage,
@@ -624,6 +935,15 @@ export function convertPiMessages(session: PiSessionContent): Message[] {
         });
         break;
       case "toolResult": {
+        resultDetailsByCallId.set(message.toolCallId, message.details);
+        for (const registration of toolCallsById.get(message.toolCallId) ??
+          []) {
+          registration.block.input = normalizePiToolInput(
+            registration.nativeName,
+            registration.nativeInput,
+            message.details,
+          );
+        }
         const content = piToolResultContent(message);
         messages.push({
           uuid: entry.id,
@@ -665,7 +985,7 @@ export function convertPiMessages(session: PiSessionContent): Message[] {
             subtype: message.customType,
             message: {
               role: "user",
-              content: piInputContent(message),
+              content: piInputContent(message, options),
             },
             timestamp: entry.timestamp,
           });
@@ -684,7 +1004,18 @@ export function convertPiMessages(session: PiSessionContent): Message[] {
     }
   }
 
-  return messages;
+  return {
+    messages,
+    derived: finishPiDerivation(session, accumulator, options),
+  };
+}
+
+/** Convert Pi's active JSONL branch into Yep's provider-neutral transcript. */
+export function convertPiMessages(
+  session: PiSessionContent,
+  options: PiSessionConversionOptions = {},
+): Message[] {
+  return convertPiSession(session, options).messages;
 }
 
 // --- Claude Conversion Logic ---
@@ -788,6 +1119,13 @@ function hasNearbyCodexCompactedEntry(
 interface CodexContextSnapshotOptions {
   model?: string;
   provider: "codex" | "codex-oss";
+  /** Global rollout fact used when the supplied page starts mid-file. */
+  hasResponseItemUser?: boolean;
+  /** Global semantic facts collected by the bounded Codex page scanner. */
+  patchApplyCallIds?: ReadonlySet<string>;
+  directEditCallIds?: ReadonlySet<string>;
+  responseImageGenerationIds?: ReadonlySet<string>;
+  imageGenerationEndIds?: ReadonlySet<string>;
 }
 
 function isCodexTokenCountImmediatelyAfterCompaction(
@@ -870,7 +1208,9 @@ export function convertCodexEntries(
   const messages: Message[] = [];
   let messageIndex = 0;
   let pendingContextMessage: Message | null = null;
-  const hasResponseItemUser = hasCodexResponseItemUserMessages(entries);
+  const hasResponseItemUser =
+    contextOptions.hasResponseItemUser ??
+    hasCodexResponseItemUserMessages(entries);
   const compactedTimestamps = entries
     .filter((entry) => entry.type === "compacted")
     .map((entry) => timestampToMs(entry.timestamp))
@@ -878,10 +1218,16 @@ export function convertCodexEntries(
   const toolCallContexts = new Map<string, CodexToolCallContext>();
   const externalToolCalls: PendingExternalCodexToolCall[] = [];
   const responseItemImageGenerationIds =
+    contextOptions.responseImageGenerationIds ??
     collectResponseItemImageGenerationIds(entries);
-  const imageGenerationEndKeys = collectCodexImageGenerationEndKeys(entries);
+  const imageGenerationEndKeys =
+    contextOptions.imageGenerationEndIds ??
+    collectCodexImageGenerationEndKeys(entries);
   const patchApplyEndByCallId = collectCodexPatchApplyEndEvents(entries);
-  const directEditCallIds = collectCodexDirectEditCallIds(entries);
+  const patchApplySkipCallIds =
+    contextOptions.patchApplyCallIds ?? new Set(patchApplyEndByCallId.keys());
+  const directEditCallIds =
+    contextOptions.directEditCallIds ?? collectCodexDirectEditCallIds(entries);
 
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
     const entry = entries[entryIndex];
@@ -904,6 +1250,7 @@ export function convertCodexEntries(
         {
           skippedImageGenerationCallKeys: imageGenerationEndKeys,
           patchApplyEndByCallId,
+          skippedPatchApplyCallIds: patchApplySkipCallIds,
         },
       );
       const convertedMessages = Array.isArray(converted)
@@ -1366,7 +1713,7 @@ function collectCodexImageGenerationRecordKeys(
 
 function hasMatchingCodexImageGenerationRecordKey(
   record: Record<string, unknown>,
-  keys?: Set<string>,
+  keys?: ReadonlySet<string>,
 ): boolean {
   if (!keys?.size) return false;
   return collectCodexImageGenerationRecordKeys(record).some((key) =>
@@ -1377,7 +1724,7 @@ function hasMatchingCodexImageGenerationRecordKey(
 function convertCodexItemCompletedImageGeneration(
   entry: CodexEventMsgEntry,
   anchor: string,
-  responseItemImageGenerationIds: Set<string>,
+  responseItemImageGenerationIds: ReadonlySet<string>,
 ): Message[] | null {
   if (entry.payload.type !== "item_completed") {
     return null;
@@ -1485,8 +1832,9 @@ function convertCodexResponseItem(
   toolCallContexts: Map<string, CodexToolCallContext>,
   externalToolCalls: PendingExternalCodexToolCall[],
   options: {
-    skippedImageGenerationCallKeys?: Set<string>;
+    skippedImageGenerationCallKeys?: ReadonlySet<string>;
     patchApplyEndByCallId?: ReadonlyMap<string, CodexPatchApplyEndEvent>;
+    skippedPatchApplyCallIds?: ReadonlySet<string>;
   } = {},
 ): Message | Message[] | null {
   const payload = entry.payload;
@@ -1522,7 +1870,10 @@ function convertCodexResponseItem(
     }
 
     case "function_call_output":
-      if (options.patchApplyEndByCallId?.has(payload.call_id)) {
+      if (
+        options.patchApplyEndByCallId?.has(payload.call_id) ||
+        options.skippedPatchApplyCallIds?.has(payload.call_id)
+      ) {
         return null;
       }
       return convertCodexToolCallOutputPayload(
@@ -1549,7 +1900,10 @@ function convertCodexResponseItem(
 
     case "custom_tool_call_output": {
       const customCallId = payload.call_id ?? `${uuid}-custom-tool-result`;
-      if (options.patchApplyEndByCallId?.has(customCallId)) {
+      if (
+        options.patchApplyEndByCallId?.has(customCallId) ||
+        options.skippedPatchApplyCallIds?.has(customCallId)
+      ) {
         return null;
       }
       return convertCodexToolCallOutputPayload(

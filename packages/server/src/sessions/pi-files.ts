@@ -43,7 +43,7 @@ export interface PiSessionFileRecord {
   size: number;
 }
 
-async function readFirstJsonlRecord(path: string): Promise<unknown> {
+export async function readFirstJsonlRecord(path: string): Promise<unknown> {
   const handle = await open(path, "r");
   try {
     const buffer = Buffer.alloc(64 * 1024);

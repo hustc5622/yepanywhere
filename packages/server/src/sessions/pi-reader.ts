@@ -2,9 +2,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
   type AgentMapping,
-  type ContextCompactEvent,
-  type ContextCumulativeUsage,
-  type PiAssistantMessage,
   type PiMessageEntry,
   type PiSessionContent,
   type PiSessionEntry,
@@ -13,23 +10,19 @@ import {
   type SessionBranchState,
   type UrlProjectId,
   type ZCodeStoredMessage,
-  getModelContextWindow,
   getPiMessageText,
   parsePiSessionHeader,
   parsePiSessionJsonl,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
-import type {
-  ContextUsage,
-  Message,
-  SessionSummary,
-} from "../supervisor/types.js";
+import type { SessionSummary } from "../supervisor/types.js";
+import { convertPiSession, derivePiSession } from "./normalization.js";
 import {
   PI_SESSIONS_DIR,
   type PiSessionFileRecord,
   listPiSessionFiles,
+  readFirstJsonlRecord,
 } from "./pi-files.js";
-import { parsePiProviderId } from "./pi-model-refs.js";
 import { sanitizePublicUserPrompt } from "./public-user-prompt.js";
 import type { AgentSession as AgentSessionResult } from "./reader.js";
 import type {
@@ -38,7 +31,6 @@ import type {
   LoadedSession,
   SessionFileEntry,
 } from "./types.js";
-import { createSessionQuestion } from "./user-questions.js";
 import { buildCopiedPrefixForkBranchView } from "./zcode-branch.js";
 
 export interface PiSessionReaderOptions {
@@ -52,46 +44,25 @@ export interface PiSessionReaderOptions {
   ) => number | undefined;
 }
 
-interface PiDerivedSession {
-  model?: string;
-  reasoningEffort?: string;
-  titleText: string;
-  messageCount: number;
-  userQuestions: NonNullable<SessionSummary["userQuestions"]>;
-  contextUsage?: ContextUsage;
-  cumulativeUsage?: ContextCumulativeUsage;
-  compactEvents?: ContextCompactEvent[];
-  lastTurnStatus?: SessionSummary["lastTurnStatus"];
-  lastErrorMessage?: string;
-}
-
-/**
- * Re-attach the gateway channel namespace to a model id read from a Pi
- * session.
- *
- * Pi records the bare gateway model id plus the generated provider id it used.
- * Yep's picker (and every model id it stores) namespaces non-default channels
- * as `<channelId>/<modelId>`, so a transcript would otherwise show the same id
- * for two different gateways — and its context window would be looked up under
- * an id the picker never uses.
- */
-function qualifyPiSessionModel(
-  modelId: string,
-  providerId: string | undefined,
-): string {
-  const { channelId } = parsePiProviderId(providerId);
-  if (!channelId || modelId.startsWith(`${channelId}/`)) return modelId;
-  return `${channelId}/${modelId}`;
+interface ParsedPiSessionCacheEntry {
+  sessionId: string;
+  content: PiSessionContent;
+  at: number;
+  mtime: number;
+  size: number;
+  filePath: string;
+  deferMedia: boolean;
+  deferThinking: boolean;
 }
 
 function isPiMessageEntry(entry: PiSessionEntry): entry is PiMessageEntry {
-  return entry.type === "message" && "message" in entry;
-}
-
-function isPiAssistantMessage(
-  entry: PiSessionEntry,
-): entry is PiMessageEntry & { message: PiAssistantMessage } {
-  return isPiMessageEntry(entry) && entry.message.role === "assistant";
+  return (
+    entry.type === "message" &&
+    "message" in entry &&
+    typeof entry.message === "object" &&
+    entry.message !== null &&
+    !Array.isArray(entry.message)
+  );
 }
 
 function truncateTitle(text: string): string | null {
@@ -106,11 +77,8 @@ async function readPiParentSessionId(
 ): Promise<string | undefined> {
   if (!parentSessionPath) return undefined;
   try {
-    const firstLine = (await readFile(parentSessionPath, "utf8"))
-      .split("\n")
-      .find((line) => line.trim());
-    if (!firstLine) return undefined;
-    return parsePiSessionHeader(JSON.parse(firstLine))?.id;
+    return parsePiSessionHeader(await readFirstJsonlRecord(parentSessionPath))
+      ?.id;
   } catch {
     return undefined;
   }
@@ -122,6 +90,14 @@ export class PiSessionReader implements ISessionReader {
   private readonly projectPath?: string;
   private readonly getContextWindow?: PiSessionReaderOptions["getContextWindow"];
   private cache: { records: PiSessionFileRecord[]; at: number } | null = null;
+  private readonly parsedCache = new Map<string, ParsedPiSessionCacheEntry>();
+  private readonly parsedInFlight = new Map<
+    string,
+    Promise<PiSessionContent | null>
+  >();
+  private parsedCacheGeneration = 0;
+
+  private static readonly PARSED_CACHE_TTL_MS = 15_000;
 
   constructor(options: PiSessionReaderOptions = {}) {
     this.sessionsDir = options.sessionsDir ?? PI_SESSIONS_DIR;
@@ -131,6 +107,9 @@ export class PiSessionReader implements ISessionReader {
 
   invalidateCache(): void {
     this.cache = null;
+    this.parsedCacheGeneration += 1;
+    this.parsedCache.clear();
+    this.parsedInFlight.clear();
   }
 
   async listSessions(projectId: UrlProjectId): Promise<SessionSummary[]> {
@@ -160,43 +139,56 @@ export class PiSessionReader implements ISessionReader {
     }
 
     try {
-      const parsed = parsePiSessionJsonl(
-        await readFile(record.filePath, "utf8"),
-      );
-      if (!parsed) return null;
-      const derived = this.derive(parsed);
-      if (derived.messageCount === 0) return null;
-      const fullTitle = sanitizePublicUserPrompt(derived.titleText).trim();
-      const forkParentSessionId = await readPiParentSessionId(
-        parsed.header.parentSession,
-      );
-
-      return {
-        id: sessionId,
-        projectId,
-        title: truncateTitle(fullTitle),
-        fullTitle: fullTitle || null,
-        createdAt: parsed.header.timestamp,
-        updatedAt:
-          parsed.activeEntries.at(-1)?.timestamp ??
-          new Date(record.mtime).toISOString(),
-        messageCount: derived.messageCount,
-        userQuestions: derived.userQuestions,
-        ownership: { owner: "none" },
-        provider: "pi",
-        model: derived.model,
-        reasoningEffort: derived.reasoningEffort,
-        contextUsage: derived.contextUsage,
-        cumulativeUsage: derived.cumulativeUsage,
-        compactCount: derived.compactEvents?.length ?? 0,
-        compactEvents: derived.compactEvents,
-        lastTurnStatus: derived.lastTurnStatus,
-        lastErrorMessage: derived.lastErrorMessage,
-        forkParentSessionId,
-      };
+      const parsed = await this.getParsedSession(record);
+      return parsed
+        ? await this.buildSummary(sessionId, projectId, record, parsed)
+        : null;
     } catch {
       return null;
     }
+  }
+
+  private async buildSummary(
+    sessionId: string,
+    projectId: UrlProjectId,
+    record: PiSessionFileRecord,
+    parsed: PiSessionContent,
+    derivedOverride?: ReturnType<typeof derivePiSession>,
+  ): Promise<SessionSummary | null> {
+    const derived =
+      derivedOverride ??
+      derivePiSession(parsed, {
+        getContextWindow: this.getContextWindow,
+      });
+    if (derived.messageCount === 0) return null;
+    const fullTitle = sanitizePublicUserPrompt(derived.titleText).trim();
+    const forkParentSessionId = await readPiParentSessionId(
+      parsed.header.parentSession,
+    );
+
+    return {
+      id: sessionId,
+      projectId,
+      title: truncateTitle(fullTitle),
+      fullTitle: fullTitle || null,
+      createdAt: parsed.header.timestamp,
+      updatedAt:
+        parsed.activeEntries.at(-1)?.timestamp ??
+        new Date(record.mtime).toISOString(),
+      messageCount: derived.messageCount,
+      userQuestions: derived.userQuestions,
+      ownership: { owner: "none" },
+      provider: "pi",
+      model: derived.model,
+      reasoningEffort: derived.reasoningEffort,
+      contextUsage: derived.contextUsage,
+      cumulativeUsage: derived.cumulativeUsage,
+      compactCount: derived.compactEvents?.length ?? 0,
+      compactEvents: derived.compactEvents,
+      lastTurnStatus: derived.lastTurnStatus,
+      lastErrorMessage: derived.lastErrorMessage,
+      forkParentSessionId,
+    };
   }
 
   async getSession(
@@ -209,19 +201,47 @@ export class PiSessionReader implements ISessionReader {
     if (!record || (this.projectPath && record.cwd !== this.projectPath)) {
       return null;
     }
-    const [summary, content] = await Promise.all([
-      this.getSessionSummary(sessionId, projectId),
-      readFile(record.filePath, "utf8"),
-    ]);
-    const session = parsePiSessionJsonl(content);
-    if (!summary || !session) return null;
-    const branchState = await this.loadBranchState(
+    const deferMedia = options?.deferMedia === true;
+    const deferThinking = options?.deferThinking === true;
+    const session = await this.getParsedSession(record, {
+      deferMedia,
+      deferThinking,
+    });
+    if (!session) return null;
+    const conversion = convertPiSession(session, {
+      deferMedia,
+      deferThinking,
+      getContextWindow: this.getContextWindow,
+    });
+    const summary = await this.buildSummary(
       sessionId,
-      options?.branchId,
+      projectId,
+      record,
+      session,
+      conversion.derived,
     );
+    if (!summary) return null;
+
+    // A normal Pi session has no cross-file branch family. Avoid the branch
+    // scan entirely in that common case, while still loading the state for a
+    // root session that has forked children.
+    const records = await this.scan();
+    const branchState = this.hasBranchRelation(record, records)
+      ? await this.loadBranchState(
+          sessionId,
+          options?.branchId,
+          records,
+          session,
+        )
+      : undefined;
     return {
       summary,
       data: { provider: "pi", session },
+      precomputedPiMessages: {
+        messages: conversion.messages,
+        deferMedia,
+        deferThinking,
+      },
       ...(branchState ? { branchState } : {}),
     };
   }
@@ -278,8 +298,10 @@ export class PiSessionReader implements ISessionReader {
   private async loadBranchState(
     currentSessionId: string,
     selectedBranchId?: string,
+    scannedRecords?: PiSessionFileRecord[],
+    currentSession?: PiSessionContent,
   ): Promise<SessionBranchState | undefined> {
-    const records = (await this.scan()).filter(
+    const records = (scannedRecords ?? (await this.scan())).filter(
       (record) => !this.projectPath || record.cwd === this.projectPath,
     );
     const byPath = new Map(
@@ -329,9 +351,12 @@ export class PiSessionReader implements ISessionReader {
         familyIds.map(async (id) => {
           const record = byId.get(id);
           if (!record) return null;
-          const parsed = parsePiSessionJsonl(
-            await readFile(record.filePath, "utf8"),
-          );
+          const parsed =
+            id === currentSessionId && currentSession
+              ? currentSession
+              : await this.getParsedSession(record, {
+                  deferMedia: true,
+                });
           if (!parsed) return null;
           const messages: ZCodeStoredMessage[] = parsed.activeEntries.flatMap(
             (entry): ZCodeStoredMessage[] => {
@@ -382,130 +407,96 @@ export class PiSessionReader implements ISessionReader {
     return view.branchState;
   }
 
-  private derive(session: PiSessionContent): PiDerivedSession {
-    let model: string | undefined;
-    let reasoningEffort: string | undefined;
-    let explicitName: string | undefined;
-    let firstUserText = "";
-    let messageCount = 0;
-    let lastConversationRole: string | undefined;
-    let lastAssistant: PiAssistantMessage | undefined;
-    const userQuestions: NonNullable<SessionSummary["userQuestions"]> = [];
-    const compactEvents: ContextCompactEvent[] = [];
-    const cumulative: ContextCumulativeUsage = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      totalTokens: 0,
-      turnCount: 0,
-    };
+  private hasBranchRelation(
+    currentRecord: PiSessionFileRecord,
+    records: PiSessionFileRecord[],
+  ): boolean {
+    if (currentRecord.parentSession) return true;
+    const currentPath = resolve(currentRecord.filePath);
+    return records.some((record) => {
+      if (!record.parentSession) return false;
+      const parentPath = isAbsolute(record.parentSession)
+        ? resolve(record.parentSession)
+        : resolve(dirname(record.filePath), record.parentSession);
+      return parentPath === currentPath;
+    });
+  }
 
-    for (const entry of session.activeEntries) {
-      if (entry.type === "session_info" && "name" in entry) {
-        const name = entry.name;
-        if (typeof name === "string" && name.trim()) explicitName = name;
-      } else if (entry.type === "model_change" && "modelId" in entry) {
-        if (typeof entry.modelId === "string") {
-          model = qualifyPiSessionModel(
-            entry.modelId,
-            "provider" in entry && typeof entry.provider === "string"
-              ? entry.provider
-              : undefined,
-          );
-        }
-      } else if (
-        entry.type === "thinking_level_change" &&
-        "thinkingLevel" in entry &&
-        typeof entry.thinkingLevel === "string"
-      ) {
-        reasoningEffort = entry.thinkingLevel;
-      } else if (entry.type === "compaction" && "summary" in entry) {
-        const beforeTokens =
-          "tokensBefore" in entry && typeof entry.tokensBefore === "number"
-            ? entry.tokensBefore
-            : undefined;
-        compactEvents.push({
-          timestamp: entry.timestamp,
-          beforeTokens,
-          trigger: "pi",
-        });
-      }
-
-      if (!isPiMessageEntry(entry)) continue;
-      const message = entry.message;
-      if (message.role === "user") {
-        messageCount += 1;
-        lastConversationRole = "user";
-        const text = getPiMessageText(message);
-        if (!firstUserText && text.trim()) firstUserText = text;
-        const question = createSessionQuestion(
-          { id: entry.id, text, timestamp: entry.timestamp },
-          `pi-user-${userQuestions.length}`,
-        );
-        if (question) userQuestions.push(question);
-      } else if (message.role === "assistant") {
-        messageCount += 1;
-        lastConversationRole = "assistant";
-        lastAssistant = message;
-        model = message.model
-          ? qualifyPiSessionModel(message.model, message.provider)
-          : model;
-        if (message.usage) {
-          cumulative.inputTokens += message.usage.input ?? 0;
-          cumulative.outputTokens += message.usage.output ?? 0;
-          cumulative.cacheReadTokens += message.usage.cacheRead ?? 0;
-          cumulative.cacheCreationTokens += message.usage.cacheWrite ?? 0;
-          cumulative.totalTokens =
-            (cumulative.totalTokens ?? 0) + (message.usage.totalTokens ?? 0);
-          cumulative.turnCount += 1;
-        }
-      }
+  private async getParsedSession(
+    record: PiSessionFileRecord,
+    options: { deferMedia?: boolean; deferThinking?: boolean } = {},
+  ): Promise<PiSessionContent | null> {
+    const deferMedia = options.deferMedia === true;
+    const deferThinking = options.deferThinking === true;
+    const generation = this.parsedCacheGeneration;
+    const cacheKey = [
+      record.sessionId,
+      record.filePath,
+      record.mtime,
+      record.size,
+      deferMedia ? "media" : "full-media",
+      deferThinking ? "thinking" : "full-thinking",
+    ].join("\u0000");
+    const now = Date.now();
+    const cached = this.parsedCache.get(cacheKey);
+    if (cached && now - cached.at < PiSessionReader.PARSED_CACHE_TTL_MS) {
+      return cached.content;
     }
 
-    const usage = lastAssistant?.usage;
-    const contextWindow =
-      this.getContextWindow?.(model, "pi", session.header.id) ??
-      (model ? getModelContextWindow(model, "pi") : undefined);
-    const inputTokens = usage
-      ? (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
-      : 0;
-    const contextUsage =
-      usage && contextWindow
-        ? {
-            inputTokens,
-            outputTokens: usage.output ?? 0,
-            cacheReadTokens: usage.cacheRead ?? 0,
-            cacheCreationTokens: usage.cacheWrite ?? 0,
-            contextWindow,
-            percentage: Math.min(100, (inputTokens / contextWindow) * 100),
-          }
-        : undefined;
-    const stopReason = lastAssistant?.stopReason;
-    const lastTurnStatus =
-      lastConversationRole === "user"
-        ? ("interrupted" as const)
-        : stopReason === "error"
-          ? ("failed" as const)
-          : stopReason === "aborted"
-            ? ("interrupted" as const)
-            : lastAssistant
-              ? ("completed" as const)
-              : undefined;
+    const inFlight = this.parsedInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
 
-    return {
-      model,
-      reasoningEffort,
-      titleText: explicitName ?? firstUserText,
-      messageCount,
-      userQuestions,
-      contextUsage,
-      cumulativeUsage: cumulative.turnCount > 0 ? cumulative : undefined,
-      compactEvents: compactEvents.length > 0 ? compactEvents : undefined,
-      lastTurnStatus,
-      lastErrorMessage:
-        stopReason === "error" ? lastAssistant?.errorMessage : undefined,
-    };
+    const pending = readFile(record.filePath, "utf8")
+      .then((content) =>
+        parsePiSessionJsonl(content, { deferMedia, deferThinking }),
+      )
+      .then((parsed) => {
+        if (parsed && generation === this.parsedCacheGeneration) {
+          this.parsedCache.set(cacheKey, {
+            sessionId: record.sessionId,
+            content: parsed,
+            at: Date.now(),
+            mtime: record.mtime,
+            size: record.size,
+            filePath: record.filePath,
+            deferMedia,
+            deferThinking,
+          });
+        } else if (!parsed && generation === this.parsedCacheGeneration) {
+          this.parsedCache.delete(cacheKey);
+        }
+        return parsed;
+      })
+      .catch(() => null);
+    const tracked = pending.finally(() => {
+      if (this.parsedInFlight.get(cacheKey) === tracked) {
+        this.parsedInFlight.delete(cacheKey);
+      }
+    });
+    this.parsedInFlight.set(cacheKey, tracked);
+    return tracked;
+  }
+
+  private invalidateParsedCacheForRecords(
+    records: PiSessionFileRecord[],
+  ): void {
+    const currentById = new Map(
+      records.map((record) => [record.sessionId, record]),
+    );
+    let invalidated = false;
+    for (const [cacheKey, cached] of this.parsedCache) {
+      const record = currentById.get(cached.sessionId);
+      if (
+        !record ||
+        record.filePath !== cached.filePath ||
+        record.mtime !== cached.mtime ||
+        record.size !== cached.size
+      ) {
+        this.parsedCache.delete(cacheKey);
+        invalidated = true;
+      }
+    }
+    if (invalidated) this.parsedCacheGeneration += 1;
   }
 
   private async scan(force = false): Promise<PiSessionFileRecord[]> {
@@ -514,6 +505,7 @@ export class PiSessionReader implements ISessionReader {
     }
     const records = await listPiSessionFiles(this.sessionsDir);
     this.cache = { records, at: Date.now() };
+    this.invalidateParsedCacheForRecords(records);
     return records;
   }
 

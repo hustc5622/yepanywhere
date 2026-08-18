@@ -15,6 +15,7 @@ import type {
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import type { Message, Session, SessionSummary } from "../supervisor/types.js";
+import type { PaginationInfo } from "./pagination.js";
 
 /**
  * Options for reading a session.
@@ -24,6 +25,22 @@ export interface GetSessionOptions {
   includeOrphans?: boolean;
   /** Choose a derived branch id to render instead of the latest branch. */
   branchId?: string;
+  /** Omit inline Pi image data from the normalized transcript. */
+  deferMedia?: boolean;
+  /** Omit Pi thinking blocks from the normalized transcript. */
+  deferThinking?: boolean;
+  /** Return only a bounded message window (Codex uses this before parsing). */
+  maxMessages?: number;
+  /** Number of compact boundaries to retain at the tail (Codex). */
+  tailCompactions?: number;
+  /** Return the window before this message cursor (Codex). */
+  beforeMessageId?: string;
+  /** Return a window centered around this message cursor (Codex). */
+  aroundMessageId?: string;
+  /** Return the window after this message cursor (Codex). */
+  afterWindowMessageId?: string;
+  /** Revision attached to a Codex pagination cursor. */
+  rolloutRevision?: string;
 }
 
 // Return type that includes both the computed summary and the raw provider data
@@ -34,10 +51,26 @@ export interface LoadedSession {
   messagesAlreadyProjected?: boolean;
   /** Internal: orphaned tool IDs computed while projecting Claude messages. */
   orphanedToolUses?: Set<string>;
+  /** Internal: Codex page projection, so route normalization does not re-convert it. */
+  projectedMessages?: Message[];
+  /** Internal: pagination already applied by a bounded Codex reader. */
+  pagination?: PaginationInfo;
+  paginationApplied?: boolean;
+  /** Physical Codex rollout bytes used for large-history admission. */
+  codexRolloutBytes?: number;
   /** Provider-agnostic branch state for sessions with editable DAG/rollback history. */
   branchState?: SessionBranchState;
   /** Codex-only branch state derived from thread_rolled_back markers. */
   codexBranchState?: CodexBranchState;
+  /**
+   * Pi messages projected while deriving the summary, avoiding a second
+   * conversion traversal in normalizeSession.
+   */
+  precomputedPiMessages?: {
+    messages: Message[];
+    deferMedia: boolean;
+    deferThinking: boolean;
+  };
 }
 
 export interface SessionFileEntry {

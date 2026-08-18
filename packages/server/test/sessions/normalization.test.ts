@@ -3,12 +3,14 @@ import type {
   ClaudeSessionEntry,
   CodexSessionContent,
   KimiSessionContent,
+  PiSessionContent,
   UnifiedSession,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import {
   convertKimiMessages,
+  convertPiSession,
   normalizeSession,
 } from "../../src/sessions/normalization.js";
 import type { LoadedSession } from "../../src/sessions/types.js";
@@ -116,6 +118,103 @@ describe("normalizeSession", () => {
     expect(toolResultIds).toContain("task-1");
     expect(toolResultIds).toContain("task-2");
     expect(toolResultIds).toContain("task-3");
+  });
+
+  it("defers Pi media and thinking while deriving summary data in one pass", () => {
+    const piSession: PiSessionContent = {
+      header: {
+        type: "session",
+        id: "session-pi-deferred",
+        timestamp: "2026-08-18T00:00:00.000Z",
+        cwd: "/tmp/project",
+      },
+      entries: [
+        {
+          type: "message",
+          id: "user-1",
+          parentId: null,
+          timestamp: "2026-08-18T00:00:01.000Z",
+          message: {
+            role: "user",
+            content: [
+              { type: "text", text: "Review this" },
+              {
+                type: "image",
+                mimeType: "image/png",
+                data: "a".repeat(256),
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          id: "assistant-1",
+          parentId: "user-1",
+          timestamp: "2026-08-18T00:00:02.000Z",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "private reasoning" },
+              { type: "text", text: "Done" },
+              {
+                type: "image",
+                mimeType: "image/jpeg",
+                data: "b".repeat(256),
+              },
+            ],
+          },
+        },
+      ],
+      activeEntries: [],
+    };
+    piSession.activeEntries = piSession.entries;
+
+    const conversion = convertPiSession(piSession, {
+      deferMedia: true,
+      deferThinking: true,
+    });
+    expect(conversion.derived.messageCount).toBe(2);
+    expect(conversion.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          uuid: "user-1",
+          message: expect.objectContaining({
+            content: [
+              { type: "text", text: "Review this" },
+              { type: "input_image", mime_type: "image/png", deferred: true },
+            ],
+          }),
+        }),
+        expect.objectContaining({
+          uuid: "assistant-1",
+          message: expect.objectContaining({
+            content: [
+              { type: "text", text: "Done" },
+              { type: "image", mime_type: "image/jpeg", deferred: true },
+            ],
+          }),
+        }),
+      ]),
+    );
+
+    const normalized = normalizeSession(
+      {
+        summary: {
+          id: "session-pi-deferred",
+          projectId: "test-project" as UrlProjectId,
+          title: "Pi images",
+          fullTitle: "Pi images",
+          createdAt: piSession.header.timestamp,
+          updatedAt: "2026-08-18T00:00:02.000Z",
+          messageCount: 2,
+          status: { state: "idle" },
+          provider: "pi",
+        },
+        data: { provider: "pi", session: piSession },
+      },
+      { deferMedia: true, deferThinking: true },
+    );
+    expect(JSON.stringify(normalized)).not.toContain("base64");
   });
 
   it("renders Kimi prompt images as input_image blocks and hides the compression notice", () => {
