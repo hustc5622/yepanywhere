@@ -5,7 +5,6 @@ set -euo pipefail
 
 SERVER_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
 BRIDGE_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
-OPENCODE_BRIDGE_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 USER_DOMAIN="gui/$(id -u)"
 
@@ -58,5 +57,4 @@ uninstall_agent() {
 log "Uninstalling Yep Anywhere LaunchAgents ..."
 uninstall_agent "$SERVER_LABEL"
 uninstall_agent "$BRIDGE_LABEL"
-uninstall_agent "$OPENCODE_BRIDGE_LABEL"
 log "Uninstalled LaunchAgents."

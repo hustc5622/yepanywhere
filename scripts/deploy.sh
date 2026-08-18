@@ -9,7 +9,6 @@
 #   scripts/deploy.sh --server-only           # non-interactive server deploy
 #   scripts/deploy.sh --dev-server            # replace 8022 with dev hot reload
 #   scripts/deploy.sh --codex-bridge-only     # non-interactive 4510 bridge deploy
-#   scripts/deploy.sh --opencode-bridge-only    # non-interactive 4520 bridge deploy
 #   scripts/deploy.sh --apk-only --debug
 #   scripts/deploy.sh --restart-only --no-apk
 #   scripts/deploy.sh --skip-checks --no-install
@@ -92,8 +91,6 @@ Options:
   --allow-yep-session-interrupt
                       Allow an 8022 restart/dev cutover to interrupt active Yep-managed work
   --codex-bridge-only Deploy only the 4510 Codex bridge sidecar
-  --opencode-bridge-only
-                      Deploy only the 4520 OpenCode CLI bridge sidecar
   --apk-only          Build/install only the APK
   --no-server         Skip server deploy
   --no-apk            Skip APK build/install
@@ -103,8 +100,6 @@ Options:
                       Keep the Codex bridge sidecar alive while restarting the web server (default)
   --restart-codex-bridge
                       Restart the Codex bridge sidecar too; disconnects active cf sessions
-  --restart-opencode-bridge
-                      Restart the OpenCode CLI bridge sidecar too; the bridge manages its paired 4521 OpenCode server
   --embedded-codex-bridge
                       Legacy mode: run the Codex bridge inside the web server
   --skip-checks       Skip pnpm lint/typecheck preflight
@@ -129,15 +124,14 @@ Native push deploy config:
 
 AI session title deploy config:
   SESSION_TITLE_LLM_API_KEY        OpenAI-compatible API key for title generation
-  LLM_API_KEY                      Shared fallback API key for titles and OpenCode
+  LLM_API_KEY                      Shared fallback API key for titles and Pi gateway
   SESSION_TITLE_LLM_API_BASE       OpenAI-compatible API base for title generation
-  LLM_API_BASE                     Shared fallback API base for titles and OpenCode
+  LLM_API_BASE                     Shared fallback API base for titles and Pi gateway
   SESSION_TITLE_SUB_MODULE         X-Sub-Module header for title generation
-  LLM_SUB_MODULE                   Shared fallback X-Sub-Module header for titles and OpenCode
-  OPENCODE_LLM_API_KEY             API key for managed OpenCode model requests
-  OPENCODE_LLM_API_BASE            API base for managed OpenCode model requests
-  OPENCODE_LLM_SUB_MODULE          X-Sub-Module header for managed OpenCode model requests
-  NEW_LLM_API_KEY                  Secondary API key for custom OpenCode providers
+  LLM_SUB_MODULE                   Shared fallback X-Sub-Module header for titles and Pi gateway
+  YEP_LLM_GATEWAY_API_KEY          API key for the default Pi LLM gateway
+  YEP_LLM_GATEWAY_API_BASE         API base for the default Pi LLM gateway
+  YEP_LLM_GATEWAY_SUB_MODULE       X-Sub-Module header for the default Pi LLM gateway
   YEP_LLM_GATEWAYS                 Extra Pi LLM gateway channels; referenced key variables
                                    are copied into the server LaunchAgent
   YEP_LLM_GATEWAY_MODELS           Comma-separated Pi picker model prefixes; empty shows all
@@ -169,7 +163,6 @@ DO_SERVER=true
 DO_DEV_SERVER=false
 ALLOW_YEP_SESSION_INTERRUPT=false
 DO_CODEX_BRIDGE=false
-DO_OPENCODE_BRIDGE=false
 DO_APK=true
 RUN_CHECKS=true
 SERVER_ARGS=()
@@ -296,7 +289,6 @@ choose_apk_build_type() {
 configure_interactive() {
   DO_SERVER=false
   DO_CODEX_BRIDGE=false
-  DO_OPENCODE_BRIDGE=false
   DO_APK=false
   RUN_CHECKS=false
   SERVER_ARGS=()
@@ -324,18 +316,6 @@ configure_interactive() {
     DO_CODEX_BRIDGE=true
     RUN_CHECKS=true
     SERVER_ARGS+=(--restart-codex-bridge)
-  fi
-
-  echo
-  log "4520 OpenCode bridge"
-  dim "4520 is the local HTTP bridge used by OpenCode CLI clients."
-  dim "The bridge manages its paired OpenCode server starting at 4521."
-  dim "Choosing no leaves the existing 4520 process untouched."
-  dim "Choosing yes restarts 4520; active terminal wrapper sessions may disconnect."
-  if ask_yes_no "Redeploy 4520 OpenCode bridge service?" "no"; then
-    DO_OPENCODE_BRIDGE=true
-    RUN_CHECKS=true
-    SERVER_ARGS+=(--restart-opencode-bridge)
   fi
 
   echo
@@ -686,7 +666,7 @@ sync_server_launchagent_env_if_needed() {
   if [[ ${#SERVER_LAUNCHAGENT_SYNC_REASONS[@]} -gt 0 ]]; then
     dim "reasons: ${SERVER_LAUNCHAGENT_SYNC_REASONS[*]}"
   fi
-  dim "4510 Codex bridge and 4520 OpenCode bridge are not touched"
+  dim "4510 Codex bridge is not touched"
   # The following server deploy reloads this plist and performs the one
   # intentional start after it has stopped the old process and arranged the
   # bridge sidecars. Starting here as well creates a start → immediate stop →
@@ -827,7 +807,6 @@ else
         DO_SERVER=true
         DO_DEV_SERVER=false
         DO_CODEX_BRIDGE=false
-        DO_OPENCODE_BRIDGE=false
         DO_APK=false
         shift
         ;;
@@ -835,7 +814,6 @@ else
         DO_SERVER=true
         DO_DEV_SERVER=true
         DO_CODEX_BRIDGE=false
-        DO_OPENCODE_BRIDGE=false
         DO_APK=false
         RUN_CHECKS=false
         shift
@@ -847,23 +825,13 @@ else
       --codex-bridge-only)
         DO_SERVER=false
         DO_CODEX_BRIDGE=true
-        DO_OPENCODE_BRIDGE=false
         DO_APK=false
         SERVER_ARGS+=(--restart-codex-bridge)
-        shift
-        ;;
-      --opencode-bridge-only)
-        DO_SERVER=false
-        DO_CODEX_BRIDGE=false
-        DO_OPENCODE_BRIDGE=true
-        DO_APK=false
-        SERVER_ARGS+=(--restart-opencode-bridge)
         shift
         ;;
       --apk-only)
         DO_SERVER=false
         DO_CODEX_BRIDGE=false
-        DO_OPENCODE_BRIDGE=false
         DO_APK=true
         RUN_CHECKS=false
         shift
@@ -892,11 +860,6 @@ else
       --restart-codex-bridge)
         DO_CODEX_BRIDGE=true
         SERVER_ARGS+=(--restart-codex-bridge)
-        shift
-        ;;
-      --restart-opencode-bridge)
-        DO_OPENCODE_BRIDGE=true
-        SERVER_ARGS+=(--restart-opencode-bridge)
         shift
         ;;
       --embedded-codex-bridge|--no-preserve-codex-bridge)
@@ -932,8 +895,8 @@ else
   done
 fi
 
-if ! $DO_SERVER && ! $DO_CODEX_BRIDGE && ! $DO_OPENCODE_BRIDGE && ! $DO_APK; then
-  err "Nothing to deploy: 8022 server, 4510 bridge, 4520 bridge, and APK are all disabled."
+if ! $DO_SERVER && ! $DO_CODEX_BRIDGE && ! $DO_APK; then
+  err "Nothing to deploy: 8022 server, 4510 bridge, and APK are all disabled."
   exit 2
 fi
 
@@ -945,7 +908,6 @@ dim "8022 web/API:        $DO_SERVER"
 dim "8022 dev hot reload: $DO_DEV_SERVER"
 dim "allow session interrupt: $ALLOW_YEP_SESSION_INTERRUPT"
 dim "4510 Codex bridge:   $DO_CODEX_BRIDGE"
-dim "4520 OpenCode bridge:  $DO_OPENCODE_BRIDGE"
 dim "server args:         ${SERVER_ARGS[*]:-}"
 dim "apk:                 $DO_APK ${APK_ARGS[*]:-}"
 dim "checks:              $RUN_CHECKS"
@@ -973,11 +935,11 @@ if ! $DO_DEV_SERVER; then
   check_local_media_preflight
 fi
 
-if $DO_DEV_SERVER || { $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; }; }; then
+if $DO_DEV_SERVER || { $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE; }; }; then
   ensure_pnpm
 fi
 
-if $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; }; then
+if $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE; }; then
   log "Running preflight checks ..."
   pnpm lint
   pnpm typecheck
@@ -989,7 +951,7 @@ fi
 
 if $DO_DEV_SERVER; then
   start_dev_server
-elif $DO_SERVER || $DO_CODEX_BRIDGE || $DO_OPENCODE_BRIDGE; then
+elif $DO_SERVER || $DO_CODEX_BRIDGE; then
   log "Deploying server services ..."
   if ! $DO_SERVER; then
     SERVER_ARGS+=(--no-restart)

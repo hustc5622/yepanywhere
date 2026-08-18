@@ -123,7 +123,6 @@ export interface StartDeploymentRequest {
 export interface DeploymentRestartTargets {
   server?: boolean;
   codexBridge?: boolean;
-  opencodeBridge?: boolean;
 }
 
 export interface DeployRoutesOptions {
@@ -290,18 +289,11 @@ function parseRestartTargets(value: unknown): DeploymentRestartTargets {
   if ("codexBridge" in input) {
     targets.codexBridge = input.codexBridge === true;
   }
-  if ("opencodeBridge" in input) {
-    targets.opencodeBridge = input.opencodeBridge === true;
-  }
   return targets;
 }
 
 function hasRestartTargets(targets: DeploymentRestartTargets): boolean {
-  return (
-    targets.server === true ||
-    targets.codexBridge === true ||
-    targets.opencodeBridge === true
-  );
+  return targets.server === true || targets.codexBridge === true;
 }
 
 function buildServicesRestartArgs(targets: DeploymentRestartTargets): string[] {
@@ -317,9 +309,6 @@ function buildServicesRestartArgs(targets: DeploymentRestartTargets): string[] {
   }
   if (targets.codexBridge) {
     args.push("--restart-codex-bridge");
-  }
-  if (targets.opencodeBridge) {
-    args.push("--restart-opencode-bridge");
   }
   return args;
 }
@@ -343,9 +332,6 @@ function appendOptionalRestartTargetArgs(
 
   if (targets.codexBridge) {
     args.push("--restart-codex-bridge");
-  }
-  if (targets.opencodeBridge) {
-    args.push("--restart-opencode-bridge");
   }
 }
 

@@ -3,7 +3,7 @@
 # running server process so the new code takes effect.
 #
 # Usage:
-#   scripts/redeploy-server.sh           # full rebuild + restart 8022, preserve bridge sidecars
+#   scripts/redeploy-server.sh           # full rebuild + restart 8022, preserve Codex bridge
 #   scripts/redeploy-server.sh --restart # restart only (skip rebuild)
 #   scripts/redeploy-server.sh --no-restart # rebuild only (skip restart)
 #   scripts/redeploy-server.sh --preserve-codex-bridge
@@ -12,8 +12,6 @@
 #                                      # restart the 4510 Codex bridge sidecar too
 #   scripts/redeploy-server.sh --no-restart --restart-codex-bridge
 #                                      # rebuild + restart only the 4510 sidecar
-#   scripts/redeploy-server.sh --no-restart --restart-opencode-bridge
-#                                      # rebuild + restart only the 4520 sidecar
 #   scripts/redeploy-server.sh --embedded-codex-bridge
 #                                      # legacy: run 4510 inside 8022
 #   scripts/redeploy-server.sh --allow-yep-session-interrupt
@@ -29,9 +27,6 @@
 #   - 4510 Codex bridge sessions are preserved by default. If 4510 is still
 #     embedded in the 8022 process, preserving it while restarting 8022 is
 #     impossible; choose --restart-codex-bridge to migrate/restart it.
-#   - 4520 OpenCode bridge sessions are preserved by default. Choose
-#     --restart-opencode-bridge to restart that sidecar too.
-#   - The 4520 bridge manages its paired OpenCode server starting at 4521.
 #   - Persisted session jsonl is unaffected.
 
 set -euo pipefail
@@ -67,7 +62,6 @@ DO_BUILD=true
 DO_RESTART=true
 USE_CODEX_BRIDGE_SIDECAR=true
 RESTART_CODEX_BRIDGE=false
-RESTART_OPENCODE_BRIDGE=false
 ALLOW_YEP_SESSION_INTERRUPT=false
 SERVER_PORT="${YEP_DEPLOY_PORT:-8022}"
 SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
@@ -86,9 +80,7 @@ SERVER_CLI_JS="$REPO_ROOT/dist/npm-package/dist/cli.js"
 LAUNCHD_RUNTIME_DIR="${YEP_LAUNCHD_RUNTIME_DIR:-$HOME/.yep-anywhere/runtime/npm-package}"
 LAUNCHD_SERVER_CLI_JS="$LAUNCHD_RUNTIME_DIR/dist/cli.js"
 CODEX_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
-OPENCODE_BRIDGE_LAUNCHD_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
 CODEX_BRIDGE_LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${CODEX_BRIDGE_LAUNCHD_LABEL}.plist"
-OPENCODE_BRIDGE_LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${OPENCODE_BRIDGE_LAUNCHD_LABEL}.plist"
 for arg in "$@"; do
   case "$arg" in
     --restart)    DO_BUILD=false ;;
@@ -100,9 +92,6 @@ for arg in "$@"; do
     --restart-codex-bridge)
       USE_CODEX_BRIDGE_SIDECAR=true
       RESTART_CODEX_BRIDGE=true
-      ;;
-    --restart-opencode-bridge)
-      RESTART_OPENCODE_BRIDGE=true
       ;;
     --allow-yep-session-interrupt)
       ALLOW_YEP_SESSION_INTERRUPT=true
@@ -311,82 +300,6 @@ reload_launchd_label_from_plist() {
   launchctl bootstrap "$domain" "$plist"
 }
 
-launchd_label_pid() {
-  local label="$1"
-  launchctl print "$(launchd_domain)/${label}" 2>/dev/null |
-    awk '$1 == "pid" && $2 == "=" { print $3; exit }'
-}
-
-alive_pids() {
-  local candidates="$1"
-  local pid
-  for pid in $candidates; do
-    if kill -0 "$pid" 2>/dev/null; then
-      printf '%s\n' "$pid"
-    fi
-  done
-}
-
-wait_pids_exited() {
-  local candidates="$1"
-  for _ in $(seq 1 20); do
-    if [[ -z "$(alive_pids "$candidates")" ]]; then
-      return 0
-    fi
-    sleep 0.25
-  done
-  return 1
-}
-
-direct_child_pids() {
-  local parents="$1"
-  local parent
-  for parent in $parents; do
-    pgrep -P "$parent" 2>/dev/null || true
-  done | sort -u
-}
-
-stop_opencode_bridge_sidecar() {
-  local listener_pids="${1:-}"
-  local job_pid=""
-  local target_pids child_pids remaining remaining_children
-
-  if launchd_label_loaded "$OPENCODE_BRIDGE_LAUNCHD_LABEL"; then
-    job_pid="$(launchd_label_pid "$OPENCODE_BRIDGE_LAUNCHD_LABEL")"
-  fi
-  target_pids="$(printf '%s\n%s\n' "$listener_pids" "$job_pid" | awk 'NF' | sort -u)"
-  [[ -z "$target_pids" ]] && return 0
-
-  # Capture managed children before asking the parent to shut down. A bridge
-  # stuck in server.close() may stop listening while its detached OpenCode
-  # child remains alive, so port checks alone are not sufficient.
-  child_pids="$(direct_child_pids "$target_pids")"
-  kill $target_pids 2>/dev/null || true
-  wait_pids_exited "$target_pids" || true
-
-  remaining="$(alive_pids "$target_pids")"
-  remaining_children="$(alive_pids "$child_pids")"
-  if [[ -n "$remaining" ]]; then
-    warn "OpenCode bridge process(es) did not stop after SIGTERM: ${remaining//$'\n'/, }. Sending SIGKILL ..."
-    [[ -n "$remaining_children" ]] && kill -9 $remaining_children 2>/dev/null || true
-    kill -9 $remaining 2>/dev/null || true
-    wait_pids_exited "$remaining" || true
-  fi
-
-  remaining_children="$(alive_pids "$child_pids")"
-  if [[ -n "$remaining_children" ]]; then
-    warn "Managed OpenCode child process(es) survived bridge shutdown: ${remaining_children//$'\n'/, }. Sending SIGKILL ..."
-    kill -9 $remaining_children 2>/dev/null || true
-    wait_pids_exited "$remaining_children" || true
-  fi
-
-  remaining="$(alive_pids "$target_pids")"
-  if [[ -n "$remaining" ]]; then
-    err "OpenCode bridge process(es) are still running after stop: ${remaining//$'\n'/, }"
-    return 1
-  fi
-}
-
 tail_server_launchagent_logs() {
   local stdout_log="$SERVER_LAUNCHD_LOG_DIR/server-launchd.out.log"
   local stderr_log="$SERVER_LAUNCHD_LOG_DIR/server-launchd.err.log"
@@ -448,30 +361,13 @@ start_server_fallback() {
     return 0
   fi
 
-  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
-    BASE_PATH="${SERVER_BASE_PATH:-/}" \
-      ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
-      YEP_CODEX_BRIDGE_MODE=external \
-      YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
-      YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
-      YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
-      YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
-      YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
-      YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$OPENCODE_BRIDGE_UPSTREAM_URL" \
-      env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-      nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
-  else
-    BASE_PATH="${SERVER_BASE_PATH:-/}" \
-      ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
-      YEP_CODEX_BRIDGE_MODE=external \
-      YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
-      YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
-      YEP_OPENCODE_BRIDGE_CONTROL_URL="$OPENCODE_BRIDGE_HTTP_URL" \
-      YEP_OPENCODE_BRIDGE_PORT="$OPENCODE_BRIDGE_PORT" \
-      YEP_OPENCODE_SERVER_START_PORT="$OPENCODE_SERVER_START_PORT" \
-      env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-      nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
-  fi
+  BASE_PATH="${SERVER_BASE_PATH:-/}" \
+    ALLOWED_IMAGE_PATHS="$SERVER_ALLOWED_IMAGE_PATHS" \
+    YEP_CODEX_BRIDGE_MODE=external \
+    YEP_CODEX_BRIDGE_CONTROL_URL="$CODEX_BRIDGE_HTTP_URL" \
+    YEP_CODEX_BRIDGE_PORT="$CODEX_BRIDGE_PORT" \
+    env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
+    nohup "$node_bin" "$SERVER_CLI_JS" --port "$SERVER_PORT" >/tmp/yep-server.log 2>&1 & disown
 }
 
 stop_launchagent_server_for_fallback() {
@@ -527,87 +423,6 @@ start_codex_bridge_sidecar() {
   return 1
 }
 
-start_opencode_bridge_sidecar() {
-  local bridge_port="$1"
-  local bridge_url="$2"
-  local server_url="$3"
-  local opencode_start_port="$4"
-  local opencode_bridge_upstream_url="${5:-}"
-  local using_launchd=false
-  local node_bin
-
-  if [[ "$(uname -s)" == "Darwin" && -f "$OPENCODE_BRIDGE_LAUNCHD_PLIST" ]] &&
-    command -v launchctl >/dev/null 2>&1; then
-    using_launchd=true
-    log "Reloading OpenCode bridge LaunchAgent ${OPENCODE_BRIDGE_LAUNCHD_LABEL} on ${bridge_url} ..."
-    if ! reload_launchd_label_from_plist "$OPENCODE_BRIDGE_LAUNCHD_LABEL" "$OPENCODE_BRIDGE_LAUNCHD_PLIST"; then
-      warn "Could not reload OpenCode bridge LaunchAgent; using a direct sidecar process."
-      using_launchd=false
-      node_bin="$(server_node_bin)" || return 1
-      if [[ -n "$opencode_bridge_upstream_url" ]]; then
-        YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
-          YEP_SERVER_URL="$server_url" \
-          YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
-          YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$opencode_bridge_upstream_url" \
-          env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
-          nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
-      else
-        YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
-          YEP_SERVER_URL="$server_url" \
-          YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
-          env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED \
-          nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
-      fi
-    fi
-  else
-    node_bin="$(server_node_bin)" || return 1
-    log "Starting OpenCode CLI bridge sidecar on ${bridge_url} (logs: /tmp/yep-opencode-bridge.log) ..."
-    if [[ -n "$opencode_bridge_upstream_url" ]]; then
-      YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
-        YEP_SERVER_URL="$server_url" \
-        YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
-        YEP_OPENCODE_BRIDGE_UPSTREAM_URL="$opencode_bridge_upstream_url" \
-        env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-        nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
-    else
-      YEP_OPENCODE_BRIDGE_PORT="$bridge_port" \
-        YEP_SERVER_URL="$server_url" \
-        YEP_OPENCODE_SERVER_START_PORT="$opencode_start_port" \
-        env -u YEP_DEPLOY_LOCK_HELD -u YEP_DEPLOY_LOCK_OWNED -u YEP_OPENCODE_SERVER_URL -u OPENCODE_SERVER_URL -u YEP_CLAUDE_BRIDGE_URL -u CLAUDE_BRIDGE_URL -u YEP_CLAUDE_SERVER_URL -u CLAUDE_SERVER_URL \
-        nohup "$node_bin" "$SERVER_CLI_JS" --opencode-bridge-only >/tmp/yep-opencode-bridge.log 2>&1 & disown
-    fi
-  fi
-
-  for _ in $(seq 1 60); do
-    if curl -fsS "${bridge_url}/status" >/dev/null 2>&1; then
-      log "OpenCode CLI bridge sidecar is up."
-      return 0
-    fi
-    sleep 0.25
-  done
-
-  err "OpenCode CLI bridge sidecar didn't answer ${bridge_url}/status within 15s."
-  if $using_launchd; then
-    local stdout_log="$SERVER_LAUNCHD_LOG_DIR/opencode-bridge-launchd.out.log"
-    local stderr_log="$SERVER_LAUNCHD_LOG_DIR/opencode-bridge-launchd.err.log"
-    if [[ -f "$stderr_log" ]]; then
-      err "Recent OpenCode bridge LaunchAgent stderr:"
-      tail -40 "$stderr_log" >&2 || true
-    fi
-    if [[ -f "$stdout_log" ]]; then
-      err "Recent OpenCode bridge lifecycle/error records:"
-      rg -a '\[OpenCodeBridge\]|Failed to start|ERROR|Error|error' "$stdout_log" |
-        tail -40 >&2 || true
-    fi
-    err "OpenCode bridge LaunchAgent status:"
-    launchctl print "$(launchd_domain)/${OPENCODE_BRIDGE_LAUNCHD_LABEL}" 2>/dev/null |
-      rg '^\s*(state|path|program|pid|runs|last exit code|last terminating signal|reason)\s*=' >&2 || true
-  else
-    tail -20 /tmp/yep-opencode-bridge.log >&2 || true
-  fi
-  return 1
-}
-
 runtime_dependencies_installed() {
   [[ -d "$REPO_ROOT/dist/npm-package/node_modules" ]] || return 1
   (
@@ -629,24 +444,12 @@ install_runtime_dependencies() {
   chmod +x "$REPO_ROOT"/dist/npm-package/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
 }
 
-sync_opencode_forwarder_plugin() {
-  local installer="$REPO_ROOT/dist/npm-package/scripts/install-opencode-yep-plugin.sh"
-  if [[ ! -x "$installer" ]]; then
-    err "Expected bundled OpenCode plugin installer at $installer, but it is missing or not executable."
-    return 1
-  fi
-
-  log "Syncing the OpenCode forwarder plugin from the new bundle ..."
-  "$installer"
-}
-
 sync_launchd_runtime_if_installed() {
   [[ "$(uname -s)" == "Darwin" ]] || return 0
 
   local agents_dir="$HOME/Library/LaunchAgents"
   if [[ ! -f "$agents_dir/${SERVER_LAUNCHD_LABEL}.plist" &&
-    ! -f "$agents_dir/${CODEX_BRIDGE_LAUNCHD_LABEL}.plist" &&
-    ! -f "$agents_dir/${OPENCODE_BRIDGE_LAUNCHD_LABEL}.plist" ]]; then
+    ! -f "$agents_dir/${CODEX_BRIDGE_LAUNCHD_LABEL}.plist" ]]; then
     return 0
   fi
 
@@ -657,22 +460,12 @@ sync_launchd_runtime_if_installed() {
 refresh_installed_bridge_launchagents() {
   [[ "$(uname -s)" == "Darwin" ]] || return 0
 
-  local codex_installed=false
-  local opencode_installed=false
-  [[ -f "$CODEX_BRIDGE_LAUNCHD_PLIST" ]] && codex_installed=true
-  [[ -f "$OPENCODE_BRIDGE_LAUNCHD_PLIST" ]] && opencode_installed=true
-  if ! $codex_installed && ! $opencode_installed; then
+  if [[ ! -f "$CODEX_BRIDGE_LAUNCHD_PLIST" ]]; then
     return 0
   fi
 
-  log "Refreshing installed bridge LaunchAgent definitions without restarting them ..."
-  if $codex_installed && $opencode_installed; then
-    "$SCRIPT_DIR/install-launchagents.sh" --bridges-only --no-start
-  elif $codex_installed; then
-    "$SCRIPT_DIR/install-launchagents.sh" --bridge-only --no-start
-  else
-    "$SCRIPT_DIR/install-launchagents.sh" --opencode-bridge-only --no-start
-  fi
+  log "Refreshing the installed Codex bridge LaunchAgent definition without restarting it ..."
+  "$SCRIPT_DIR/install-launchagents.sh" --bridge-only --no-start
 }
 
 ensure_bundle_ready() {
@@ -698,11 +491,6 @@ if $DO_BUILD; then
   # runtime dependencies. Local deployment must do that before promotion.
   install_runtime_dependencies
 
-  # Default OpenCode TUI/run processes load this global plugin instead of the
-  # server bundle directly. Keep it on the exact version being deployed so a
-  # bridge fix cannot remain dormant behind a stale, manually copied plugin.
-  sync_opencode_forwarder_plugin
-
   # Verify the bundle actually reports the version we asked for. Catches
   # silent build issues (e.g. NPM_VERSION not picked up by build-bundle).
   ACTUAL_VERSION="$(node "$SERVER_CLI_JS" --version 2>&1 | head -1 | awk '{print $NF}' || true)"
@@ -710,16 +498,15 @@ if $DO_BUILD; then
     warn "Bundle reports version '${ACTUAL_VERSION}' but expected 'v${NPM_VERSION}'."
   fi
 
-  # Promote only after the bundle and its companion plugin are ready. Running
-  # LaunchAgents are not restarted here; this updates what their next launch
-  # will execute and retains the former runtime as `.previous` for rollback.
+  # Running LaunchAgents are not restarted here; this updates what their next
+  # launch will execute and retains the former runtime as `.previous` for rollback.
   sync_launchd_runtime_if_installed
 fi
 
-if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
+if $DO_RESTART || $RESTART_CODEX_BRIDGE; then
   ensure_bundle_ready
 fi
-if $DO_BUILD || $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
+if $DO_BUILD || $DO_RESTART || $RESTART_CODEX_BRIDGE; then
   refresh_installed_bridge_launchagents
 fi
 
@@ -728,35 +515,24 @@ if $DO_RESTART; then
   wait_for_yep_sessions_before_cutover
 fi
 
-if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_OPENCODE_BRIDGE; then
+if $DO_RESTART || $RESTART_CODEX_BRIDGE; then
   CODEX_BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
   CODEX_BRIDGE_HTTP_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${CODEX_BRIDGE_PORT}}}"
-  OPENCODE_BRIDGE_PORT="${YEP_OPENCODE_BRIDGE_PORT:-${OPENCODE_BRIDGE_PORT:-4520}}"
-  OPENCODE_BRIDGE_HTTP_URL="${YEP_OPENCODE_BRIDGE_CONTROL_URL:-${OPENCODE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${OPENCODE_BRIDGE_PORT}}}"
-  OPENCODE_SERVER_START_PORT="${YEP_OPENCODE_SERVER_START_PORT:-${YEP_OPENCODE_PORT:-${OPENCODE_SERVER_START_PORT:-${OPENCODE_PORT:-$((OPENCODE_BRIDGE_PORT + 1))}}}}"
-  OPENCODE_BRIDGE_UPSTREAM_URL="${YEP_OPENCODE_BRIDGE_UPSTREAM_URL:-${OPENCODE_BRIDGE_UPSTREAM_URL:-}}"
   SERVER_LISTEN_PIDS="$(lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
   SERVER_PROCESS_PIDS="$(server_process_pids "$SERVER_PORT")"
   DEV_SUPERVISOR_PIDS="$(dev_supervisor_pids_for_server_listeners "$SERVER_LISTEN_PIDS")"
   CODEX_BRIDGE_LISTEN_PIDS="$(lsof -iTCP:"${CODEX_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
-  OPENCODE_BRIDGE_LISTEN_PIDS="$(lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
 else
   CODEX_BRIDGE_PORT=""
   CODEX_BRIDGE_HTTP_URL=""
-  OPENCODE_BRIDGE_PORT=""
-  OPENCODE_BRIDGE_HTTP_URL=""
-  OPENCODE_SERVER_START_PORT=""
-  OPENCODE_BRIDGE_UPSTREAM_URL=""
   SERVER_LISTEN_PIDS=""
   SERVER_PROCESS_PIDS=""
   DEV_SUPERVISOR_PIDS=""
   CODEX_BRIDGE_LISTEN_PIDS=""
-  OPENCODE_BRIDGE_LISTEN_PIDS=""
 fi
 
 if $DO_RESTART; then
   START_CODEX_BRIDGE_AFTER_STOP=false
-  START_OPENCODE_BRIDGE_AFTER_STOP=false
 
   if $USE_CODEX_BRIDGE_SIDECAR; then
     if $RESTART_CODEX_BRIDGE; then
@@ -782,21 +558,6 @@ if $DO_RESTART; then
     warn "Starting Codex bridge embedded in the web server; active cf / codex --remote sessions will disconnect."
   fi
 
-  if $RESTART_OPENCODE_BRIDGE; then
-    START_OPENCODE_BRIDGE_AFTER_STOP=true
-    if [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]]; then
-      warn "Restarting OpenCode bridge on port ${OPENCODE_BRIDGE_PORT}; active bridge clients may disconnect."
-    else
-      dim "OpenCode CLI bridge sidecar is not running; it will be started."
-    fi
-  elif [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] && ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
-    dim "preserving OpenCode bridge on port ${OPENCODE_BRIDGE_PORT} (PID ${OPENCODE_BRIDGE_LISTEN_PIDS//$'\n'/, })"
-  elif [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]]; then
-    err "Cannot restart 8022 without affecting 4520: port ${OPENCODE_BRIDGE_PORT} is owned by the web server process."
-    err "Run again with --restart-opencode-bridge to restart it too."
-    exit 1
-  fi
-
   log "Stopping running yepanywhere ..."
   if [[ -n "$DEV_SUPERVISOR_PIDS" ]]; then
     dim "stopping dev hot-reload supervisor(s): ${DEV_SUPERVISOR_PIDS//$'\n'/, }"
@@ -815,15 +576,6 @@ if $DO_RESTART; then
     ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$CODEX_BRIDGE_LISTEN_PIDS"; then
     kill $CODEX_BRIDGE_LISTEN_PIDS 2>/dev/null || true
   fi
-  if $RESTART_OPENCODE_BRIDGE; then
-    OPENCODE_BRIDGE_STOP_PIDS=""
-    if [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] &&
-      ! pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
-      OPENCODE_BRIDGE_STOP_PIDS="$OPENCODE_BRIDGE_LISTEN_PIDS"
-    fi
-    stop_opencode_bridge_sidecar "$OPENCODE_BRIDGE_STOP_PIDS"
-  fi
-
   # Wait briefly for the old process to release the port.
   wait_port_released "$SERVER_PORT" || true
   wait_server_processes_stopped "$SERVER_PORT" || true
@@ -883,15 +635,6 @@ if $DO_RESTART; then
       exit 1
     fi
     start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL"
-  fi
-
-  if $START_OPENCODE_BRIDGE_AFTER_STOP; then
-    wait_port_released "$OPENCODE_BRIDGE_PORT" || true
-    if lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
-      err "OpenCode bridge port ${OPENCODE_BRIDGE_PORT} is still in use; cannot start sidecar."
-      exit 1
-    fi
-    start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL" "$OPENCODE_SERVER_START_PORT" "$OPENCODE_BRIDGE_UPSTREAM_URL"
   fi
 
   log "Starting yepanywhere ..."
@@ -1012,34 +755,6 @@ if ! $DO_RESTART && $RESTART_CODEX_BRIDGE; then
   fi
 
   start_codex_bridge_sidecar "$CODEX_BRIDGE_PORT" "$CODEX_BRIDGE_HTTP_URL"
-fi
-
-if ! $DO_RESTART && $RESTART_OPENCODE_BRIDGE; then
-  log "Restarting OpenCode CLI bridge sidecar on port ${OPENCODE_BRIDGE_PORT} ..."
-  if [[ -n "$SERVER_LISTEN_PIDS" ]] &&
-    [[ -n "$OPENCODE_BRIDGE_LISTEN_PIDS" ]] &&
-    pid_sets_overlap "$SERVER_LISTEN_PIDS" "$OPENCODE_BRIDGE_LISTEN_PIDS"; then
-    err "Cannot restart only 4520: port ${OPENCODE_BRIDGE_PORT} is owned by the 8022 web/API process."
-    err "Redeploy 8022 with --restart-opencode-bridge to restart both."
-    exit 1
-  fi
-
-  stop_opencode_bridge_sidecar "$OPENCODE_BRIDGE_LISTEN_PIDS"
-  wait_port_released "$OPENCODE_BRIDGE_PORT" || true
-
-  LISTEN_PIDS="$(lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
-  if [[ -n "$LISTEN_PIDS" ]]; then
-    warn "OpenCode bridge port ${OPENCODE_BRIDGE_PORT} is still held by PID(s): ${LISTEN_PIDS//$'\n'/, }. Sending SIGKILL ..."
-    kill -9 $LISTEN_PIDS 2>/dev/null || true
-    wait_port_released "$OPENCODE_BRIDGE_PORT" || true
-  fi
-
-  if lsof -iTCP:"${OPENCODE_BRIDGE_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
-    err "OpenCode bridge port ${OPENCODE_BRIDGE_PORT} is still in use after stopping the old sidecar."
-    exit 1
-  fi
-
-  start_opencode_bridge_sidecar "$OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_HTTP_URL" "$SERVER_BASE_URL" "$OPENCODE_SERVER_START_PORT" "$OPENCODE_BRIDGE_UPSTREAM_URL"
 fi
 
 log "Done."

@@ -178,7 +178,7 @@ describe("LaunchAgent runtime isolation", () => {
       [
         "ALLOWED_HOSTS=ignored.example",
         "SESSION_TITLE_LLM_API_KEY=fixture-title-key-from-file",
-        "OPENCODE_LLM_API_KEY=fixture-opencode-key-from-file",
+        "YEP_LLM_GATEWAY_API_KEY=fixture-gateway-key-from-file",
         "CUSTOM_GATEWAY_KEY=fixture-extra-key-from-file",
         // Extra Pi gateway channels reference their key by env var name, so
         // this value itself carries no credential.
@@ -206,7 +206,7 @@ describe("LaunchAgent runtime isolation", () => {
       "GOOGLE_APPLICATION_CREDENTIALS",
       "SESSION_TITLE_LLM_API_KEY",
       "LLM_API_KEY",
-      "OPENCODE_LLM_API_KEY",
+      "YEP_LLM_GATEWAY_API_KEY",
       "CUSTOM_GATEWAY_KEY",
       "YEP_LLM_GATEWAYS",
       "YEP_LLM_GATEWAY_MODELS",
@@ -254,8 +254,8 @@ describe("LaunchAgent runtime isolation", () => {
     expect(plist).toContain(`<string>${fakeCodex}</string>`);
     expect(plist).toContain("<key>SESSION_TITLE_LLM_API_KEY</key>");
     expect(plist).toContain("<string>fixture-title-key-from-file</string>");
-    expect(plist).toContain("<key>OPENCODE_LLM_API_KEY</key>");
-    expect(plist).toContain("<string>fixture-opencode-key-from-file</string>");
+    expect(plist).toContain("<key>YEP_LLM_GATEWAY_API_KEY</key>");
+    expect(plist).toContain("<string>fixture-gateway-key-from-file</string>");
     expect(plist).toContain("<key>YEP_LLM_GATEWAYS</key>");
     expect(plist).toContain(
       "<string>aitl=https://fixture.example/v1|CUSTOM_GATEWAY_KEY</string>",

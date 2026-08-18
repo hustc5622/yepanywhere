@@ -25,17 +25,9 @@ const CLIENT_DIST = path.join(ROOT_DIR, "packages/client/dist");
 const SERVER_PACKAGE = path.join(ROOT_DIR, "packages/server");
 const SERVER_DIST = path.join(SERVER_PACKAGE, "dist");
 const SHARED_DIST = path.join(ROOT_DIR, "packages/shared/dist");
-const OPENCODE_PLUGIN_SOURCE = path.join(
-  SERVER_PACKAGE,
-  "resources/opencode-plugin/yep-bridge.ts",
-);
 const PI_EXTENSION_SOURCE = path.join(
   SERVER_PACKAGE,
   "resources/pi-yep-extension.mjs",
-);
-const OPENCODE_PLUGIN_INSTALLER = path.join(
-  ROOT_DIR,
-  "scripts/install-opencode-yep-plugin.sh",
 );
 
 // Build into an unpublished sibling first. The currently running 8022 process
@@ -410,34 +402,6 @@ step("Bundle client into staging", () => {
   log("  Client assets bundled into staging");
 });
 
-// Include the OpenCode forwarder and a stable npm bin entry that installs it
-// into the user's OpenCode plugin directory.
-step("Bundle OpenCode approval plugin", () => {
-  const pluginDest = path.join(
-    STAGING_DIR,
-    "resources/opencode-plugin/yep-bridge.ts",
-  );
-  const installerDest = path.join(
-    STAGING_DIR,
-    "scripts/install-opencode-yep-plugin.sh",
-  );
-  if (!fs.existsSync(OPENCODE_PLUGIN_SOURCE)) {
-    throw new Error(`OpenCode plugin not found at ${OPENCODE_PLUGIN_SOURCE}`);
-  }
-  if (!fs.existsSync(OPENCODE_PLUGIN_INSTALLER)) {
-    throw new Error(
-      `OpenCode plugin installer not found at ${OPENCODE_PLUGIN_INSTALLER}`,
-    );
-  }
-
-  fs.mkdirSync(path.dirname(pluginDest), { recursive: true });
-  fs.mkdirSync(path.dirname(installerDest), { recursive: true });
-  fs.copyFileSync(OPENCODE_PLUGIN_SOURCE, pluginDest);
-  fs.copyFileSync(OPENCODE_PLUGIN_INSTALLER, installerDest);
-  fs.chmodSync(installerDest, 0o755);
-  log("  OpenCode plugin and installer bundled into staging");
-});
-
 // Pi loads this extension explicitly for every Yep-owned RPC process. It is
 // bundled as data (not installed into ~/.pi), keeping user configuration
 // untouched while making packaged and source runs behave identically.
@@ -468,8 +432,7 @@ step("Generate bundle package.json", () => {
   // The bare `yepanywhere` name belongs to the upstream release line, which we
   // have no publish rights to and do not want to shadow. Scoping the name adds
   // a second defense against registry mistakes. The bin names are deliberately
-  // unchanged — redeploy-server.sh invokes `yepanywhere --codex-bridge-only`
-  // and friends.
+  // unchanged — redeploy-server.sh invokes `yepanywhere --codex-bridge-only`.
   const npmPackageJson: Record<string, unknown> = {
     name: "@hustc5622/yepanywhere",
     version: NPM_VERSION,
@@ -478,7 +441,6 @@ step("Generate bundle package.json", () => {
     bin: {
       yepanywhere: "./dist/cli.js",
       yc: "./dist/cli.js",
-      "yepanywhere-opencode-plugin": "./scripts/install-opencode-yep-plugin.sh",
     },
     scripts: {
       postinstall:
@@ -488,14 +450,7 @@ step("Generate bundle package.json", () => {
     exports: {
       ".": "./dist/index.js",
     },
-    files: [
-      "dist",
-      "client-dist",
-      "bundled",
-      "resources",
-      "scripts",
-      "README.md",
-    ],
+    files: ["dist", "client-dist", "bundled", "resources", "README.md"],
     // Copy dependencies from source, excluding workspace deps
     dependencies: Object.fromEntries(
       Object.entries(sourcePackageJson.dependencies || {}).filter(

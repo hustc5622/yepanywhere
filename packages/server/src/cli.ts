@@ -90,8 +90,6 @@ OPTIONS:
   --auth-disable        Disable authentication (bypass auth even if enabled in settings)
                         Emergency recovery mode; re-enable auth after fixing config
   --codex-bridge-only   Start only the Codex CLI bridge sidecar
-  --opencode-bridge-only
-                        Start only the OpenCode CLI bridge sidecar
   claude                Start or attach to a Yep-managed Claude provider session
 
 SETUP OPTIONS (for headless installation):
@@ -147,9 +145,6 @@ EXAMPLES:
 
   # Start a Yep-managed Claude provider session from the terminal
   yepanywhere claude "fix the failing tests"
-
-  # Start only the local OpenCode CLI bridge sidecar
-  yepanywhere --opencode-bridge-only
 
 DOCUMENTATION:
   For full documentation, see: https://github.com/hustc5622/yepanywhere
@@ -265,13 +260,6 @@ if (claudeWrapperInvocation) {
     args.splice(codexBridgeOnlyIndex, 1);
   }
 
-  // Parse --opencode-bridge-only flag
-  const opencodeBridgeOnlyIndex = args.indexOf("--opencode-bridge-only");
-  const opencodeBridgeOnly = opencodeBridgeOnlyIndex !== -1;
-  if (opencodeBridgeOnlyIndex !== -1) {
-    args.splice(opencodeBridgeOnlyIndex, 1);
-  }
-
   // Parse --setup-auth flag
   const setupAuthIndex = args.indexOf("--setup-auth");
   let setupAuthPassword: string | undefined;
@@ -306,8 +294,6 @@ if (claudeWrapperInvocation) {
     runSetup(setupAuthPassword);
   } else if (codexBridgeOnly) {
     runCodexBridgeOnly();
-  } else if (opencodeBridgeOnly) {
-    runOpenCodeBridgeOnly();
   } else {
     // Only check for Claude CLI when starting the server (not for setup commands)
     checkClaudeCli();
@@ -349,15 +335,6 @@ function runCodexBridgeOnly(): void {
     .then(({ runCodexBridgeOnly }) => runCodexBridgeOnly())
     .catch((error) => {
       console.error("Failed to start Codex bridge:", error);
-      process.exit(1);
-    });
-}
-
-function runOpenCodeBridgeOnly(): void {
-  import("./opencode-bridge/standalone.js")
-    .then(({ runOpenCodeBridgeOnly }) => runOpenCodeBridgeOnly())
-    .catch((error) => {
-      console.error("Failed to start OpenCode bridge:", error);
       process.exit(1);
     });
 }

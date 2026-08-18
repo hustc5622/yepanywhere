@@ -33,7 +33,6 @@ load_deploy_env_file
 
 SERVER_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
 BRIDGE_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
-OPENCODE_BRIDGE_LABEL="${YEP_LAUNCHD_OPENCODE_BRIDGE_LABEL:-com.yueyuan.yepanywhere.opencode-bridge}"
 SERVER_PORT="${YEP_DEPLOY_PORT:-8022}"
 SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
 SERVER_ALLOWED_IMAGE_PATHS="${ALLOWED_IMAGE_PATHS:-/tmp,$HOME/Downloads}"
@@ -41,12 +40,6 @@ SERVER_ALLOWED_HOSTS="${ALLOWED_HOSTS:-}"
 BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
 BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${BRIDGE_PORT}}}"
 CODEX_CLI_PATH="${YEP_CODEX_PATH:-${CODEX_PATH:-}}"
-OPENCODE_BRIDGE_PORT="${YEP_OPENCODE_BRIDGE_PORT:-${OPENCODE_BRIDGE_PORT:-4520}}"
-OPENCODE_BRIDGE_URL="${YEP_OPENCODE_BRIDGE_CONTROL_URL:-${OPENCODE_BRIDGE_CONTROL_URL:-http://127.0.0.1:${OPENCODE_BRIDGE_PORT}}}"
-OPENCODE_SERVER_HOST="${YEP_OPENCODE_HOST:-127.0.0.1}"
-OPENCODE_SERVER_START_PORT="${YEP_OPENCODE_SERVER_START_PORT:-${YEP_OPENCODE_PORT:-${OPENCODE_SERVER_START_PORT:-${OPENCODE_PORT:-$((OPENCODE_BRIDGE_PORT + 1))}}}}"
-OPENCODE_BRIDGE_UPSTREAM_URL="${YEP_OPENCODE_BRIDGE_UPSTREAM_URL:-${OPENCODE_BRIDGE_UPSTREAM_URL:-}}"
-SERVER_URL="http://127.0.0.1:${SERVER_PORT}${SERVER_BASE_PATH}"
 if [[ -n "${YEP_LAUNCHD_NODE:-}" ]]; then
   NODE_BIN="$YEP_LAUNCHD_NODE"
 elif [[ -n "${NVM_BIN:-}" && -x "$NVM_BIN/node" ]]; then
@@ -76,21 +69,18 @@ USER_DOMAIN="gui/$(id -u)"
 START_NOW=true
 INSTALL_SERVER=true
 INSTALL_CODEX_BRIDGE=true
-INSTALL_OPENCODE_BRIDGE=true
 
 usage() {
   sed -n '2,6p' "$0" | sed 's/^# *//'
   cat <<'EOF'
 
 Usage:
-  scripts/install-launchagents.sh [--server-only|--bridge-only|--opencode-bridge-only] [--no-start]
+  scripts/install-launchagents.sh [--server-only|--bridge-only] [--no-start]
 
 Options:
   --server-only                Write/reload only the 8022 server LaunchAgent
   --bridge-only, --codex-bridge-only
                                Write/reload only the 4510 Codex bridge LaunchAgent
-  --opencode-bridge-only         Write/reload only the 4520 OpenCode bridge LaunchAgent
-  --bridges-only               Write/reload both bridge LaunchAgents
   --no-start                   Write plist file(s) without unloading or starting LaunchAgents
 
 Environment overrides:
@@ -102,10 +92,6 @@ Environment overrides:
                                (default: sibling research_tasks directory)
   RESEARCH_TASKS_DIR           Legacy fallback when YEP_REPORTS_DIR is unset
   YEP_CODEX_BRIDGE_PORT        Codex bridge port (default: 4510)
-  YEP_OPENCODE_BRIDGE_PORT       OpenCode bridge port (default: 4520)
-  YEP_OPENCODE_SERVER_START_PORT OpenCode managed server start port (default: 4521)
-  YEP_OPENCODE_BRIDGE_UPSTREAM_URL
-                               Optional external OpenCode server URL observed by the bridge
   YEP_LAUNCHD_NODE             Absolute node binary path
   YEP_LAUNCHD_PATH             PATH stored in the LaunchAgent environment
   YEP_CODEX_PATH               Absolute Codex CLI path stored for server/bridge detection
@@ -120,15 +106,14 @@ Environment overrides:
   GOOGLE_APPLICATION_CREDENTIALS
                                Fallback Firebase service account JSON path
   SESSION_TITLE_LLM_API_KEY    OpenAI-compatible API key for AI session titles
-  LLM_API_KEY                  Shared fallback API key for session titles and OpenCode
+  LLM_API_KEY                  Shared fallback API key for session titles and Pi gateway
   SESSION_TITLE_LLM_API_BASE   OpenAI-compatible API base for AI session titles
-  LLM_API_BASE                 Shared fallback API base for session titles and OpenCode
+  LLM_API_BASE                 Shared fallback API base for session titles and Pi gateway
   SESSION_TITLE_SUB_MODULE     X-Sub-Module header for AI session titles
-  LLM_SUB_MODULE               Shared fallback X-Sub-Module header for session titles and OpenCode
-  OPENCODE_LLM_API_KEY         API key for managed OpenCode model requests
-  OPENCODE_LLM_API_BASE        API base for managed OpenCode model requests
-  OPENCODE_LLM_SUB_MODULE      X-Sub-Module header for managed OpenCode model requests
-  NEW_LLM_API_KEY              Secondary API key exposed to custom OpenCode providers
+  LLM_SUB_MODULE               Shared fallback X-Sub-Module header for session titles and Pi gateway
+  YEP_LLM_GATEWAY_API_KEY      API key for the default Pi LLM gateway
+  YEP_LLM_GATEWAY_API_BASE     API base for the default Pi LLM gateway
+  YEP_LLM_GATEWAY_SUB_MODULE   X-Sub-Module header for the default Pi LLM gateway
   YEP_LLM_GATEWAYS             Extra LLM gateway channels for Pi (JSON array, or
                                id=apiBase|API_KEY_ENV|subModule|Label entries).
                                Prefer key env references so this value holds no secret;
@@ -153,25 +138,11 @@ while [[ $# -gt 0 ]]; do
     --server-only)
       INSTALL_SERVER=true
       INSTALL_CODEX_BRIDGE=false
-      INSTALL_OPENCODE_BRIDGE=false
       shift
       ;;
     --bridge-only|--codex-bridge-only)
       INSTALL_SERVER=false
       INSTALL_CODEX_BRIDGE=true
-      INSTALL_OPENCODE_BRIDGE=false
-      shift
-      ;;
-    --opencode-bridge-only)
-      INSTALL_SERVER=false
-      INSTALL_CODEX_BRIDGE=false
-      INSTALL_OPENCODE_BRIDGE=true
-      shift
-      ;;
-    --bridges-only)
-      INSTALL_SERVER=false
-      INSTALL_CODEX_BRIDGE=true
-      INSTALL_OPENCODE_BRIDGE=true
       shift
       ;;
     -h|--help)
@@ -186,8 +157,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! $INSTALL_SERVER && ! $INSTALL_CODEX_BRIDGE && ! $INSTALL_OPENCODE_BRIDGE; then
-  err "Nothing to install: server and bridges are all disabled."
+if ! $INSTALL_SERVER && ! $INSTALL_CODEX_BRIDGE; then
+  err "Nothing to install: server and Codex bridge are both disabled."
   exit 2
 fi
 
@@ -228,9 +199,11 @@ fi
 SESSION_TITLE_API_KEY="${SESSION_TITLE_LLM_API_KEY:-${LLM_API_KEY:-}}"
 SESSION_TITLE_API_BASE="${SESSION_TITLE_LLM_API_BASE:-${LLM_API_BASE:-}}"
 SESSION_TITLE_SUB_MODULE_VALUE="${SESSION_TITLE_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
-OPENCODE_API_KEY="${OPENCODE_LLM_API_KEY:-${LLM_API_KEY:-}}"
-OPENCODE_API_BASE="${OPENCODE_LLM_API_BASE:-${LLM_API_BASE:-}}"
-OPENCODE_LLM_SUB_MODULE_VALUE="${OPENCODE_LLM_SUB_MODULE:-${LLM_SUB_MODULE:-}}"
+# Migration-only reads: an old deploy env is rewritten into the neutral
+# YEP_LLM_GATEWAY_* keys below; generated plists never retain these aliases.
+LLM_GATEWAY_API_KEY="${YEP_LLM_GATEWAY_API_KEY:-${OPENCODE_LLM_API_KEY:-${LLM_API_KEY:-}}}"
+LLM_GATEWAY_API_BASE="${YEP_LLM_GATEWAY_API_BASE:-${OPENCODE_LLM_API_BASE:-${LLM_API_BASE:-}}}"
+LLM_GATEWAY_SUB_MODULE_VALUE="${YEP_LLM_GATEWAY_SUB_MODULE:-${OPENCODE_LLM_SUB_MODULE:-${LLM_SUB_MODULE:-}}}"
 
 chmod +x "$SOURCE_CLI_JS" 2>/dev/null || true
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
@@ -268,10 +241,6 @@ fi
 if $INSTALL_CODEX_BRIDGE; then
   prepare_private_log "$LOG_DIR/codex-bridge-launchd.out.log"
   prepare_private_log "$LOG_DIR/codex-bridge-launchd.err.log"
-fi
-if $INSTALL_OPENCODE_BRIDGE; then
-  prepare_private_log "$LOG_DIR/opencode-bridge-launchd.out.log"
-  prepare_private_log "$LOG_DIR/opencode-bridge-launchd.err.log"
 fi
 
 log "Syncing LaunchAgent runtime outside the repository ..."
@@ -457,38 +426,6 @@ write_bridge_plist() {
   echo "$plist"
 }
 
-write_opencode_bridge_plist() {
-  local plist="$LAUNCH_AGENTS_DIR/$OPENCODE_BRIDGE_LABEL.plist"
-  local env_args=(
-    "NODE_ENV" "production"
-    "PATH" "$LAUNCHD_PATH"
-    "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT"
-    "YEP_OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_PORT"
-    "YEP_OPENCODE_SERVER_START_PORT" "$OPENCODE_SERVER_START_PORT"
-    "YEP_SERVER_URL" "$SERVER_URL"
-  )
-  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
-    env_args+=("YEP_OPENCODE_BRIDGE_UPSTREAM_URL" "$OPENCODE_BRIDGE_UPSTREAM_URL")
-  fi
-  if [[ -n "$OPENCODE_API_KEY" ]]; then
-    env_args+=("OPENCODE_LLM_API_KEY" "$OPENCODE_API_KEY")
-  fi
-  if [[ -n "$OPENCODE_API_BASE" ]]; then
-    env_args+=("OPENCODE_LLM_API_BASE" "$OPENCODE_API_BASE")
-  fi
-  if [[ -n "$OPENCODE_LLM_SUB_MODULE_VALUE" ]]; then
-    env_args+=("OPENCODE_LLM_SUB_MODULE" "$OPENCODE_LLM_SUB_MODULE_VALUE")
-  fi
-  if [[ -n "${NEW_LLM_API_KEY:-}" ]]; then
-    env_args+=("NEW_LLM_API_KEY" "$NEW_LLM_API_KEY")
-  fi
-
-  write_header "$plist" "$OPENCODE_BRIDGE_LABEL" "$LOG_DIR/opencode-bridge-launchd.out.log" "$LOG_DIR/opencode-bridge-launchd.err.log"
-  append_env "$plist" "${env_args[@]}"
-  append_program_arguments "$plist" "$NODE_BIN" "$CLI_JS" "--opencode-bridge-only"
-  echo "$plist"
-}
-
 write_server_plist() {
   local plist="$LAUNCH_AGENTS_DIR/$SERVER_LABEL.plist"
   local gateway_key_env existing_index already_present
@@ -502,15 +439,9 @@ write_server_plist() {
     "YEP_CODEX_BRIDGE_MODE" "external"
     "YEP_CODEX_BRIDGE_CONTROL_URL" "$BRIDGE_URL"
     "YEP_CODEX_BRIDGE_PORT" "$BRIDGE_PORT"
-    "YEP_OPENCODE_BRIDGE_CONTROL_URL" "$OPENCODE_BRIDGE_URL"
-    "YEP_OPENCODE_BRIDGE_PORT" "$OPENCODE_BRIDGE_PORT"
-    "YEP_OPENCODE_SERVER_START_PORT" "$OPENCODE_SERVER_START_PORT"
   )
   if [[ -n "$CODEX_CLI_PATH" ]]; then
     env_args+=("YEP_CODEX_PATH" "$CODEX_CLI_PATH")
-  fi
-  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
-    env_args+=("YEP_OPENCODE_BRIDGE_UPSTREAM_URL" "$OPENCODE_BRIDGE_UPSTREAM_URL")
   fi
   if [[ -n "$SERVER_ALLOWED_HOSTS" ]]; then
     env_args+=("ALLOWED_HOSTS" "$SERVER_ALLOWED_HOSTS")
@@ -531,21 +462,17 @@ write_server_plist() {
   if [[ -n "$SESSION_TITLE_SUB_MODULE_VALUE" ]]; then
     env_args+=("SESSION_TITLE_SUB_MODULE" "$SESSION_TITLE_SUB_MODULE_VALUE")
   fi
-  if [[ -n "$OPENCODE_API_KEY" ]]; then
-    env_args+=("OPENCODE_LLM_API_KEY" "$OPENCODE_API_KEY")
+  if [[ -n "$LLM_GATEWAY_API_KEY" ]]; then
+    env_args+=("YEP_LLM_GATEWAY_API_KEY" "$LLM_GATEWAY_API_KEY")
   fi
-  if [[ -n "$OPENCODE_API_BASE" ]]; then
-    env_args+=("OPENCODE_LLM_API_BASE" "$OPENCODE_API_BASE")
+  if [[ -n "$LLM_GATEWAY_API_BASE" ]]; then
+    env_args+=("YEP_LLM_GATEWAY_API_BASE" "$LLM_GATEWAY_API_BASE")
   fi
-  if [[ -n "$OPENCODE_LLM_SUB_MODULE_VALUE" ]]; then
-    env_args+=("OPENCODE_LLM_SUB_MODULE" "$OPENCODE_LLM_SUB_MODULE_VALUE")
-  fi
-  if [[ -n "${NEW_LLM_API_KEY:-}" ]]; then
-    env_args+=("NEW_LLM_API_KEY" "$NEW_LLM_API_KEY")
+  if [[ -n "$LLM_GATEWAY_SUB_MODULE_VALUE" ]]; then
+    env_args+=("YEP_LLM_GATEWAY_SUB_MODULE" "$LLM_GATEWAY_SUB_MODULE_VALUE")
   fi
   # Extra gateway channels are consumed by the Pi provider inside the main
-  # server. The bridge sidecars only ever address the default gateway, so this
-  # is deliberately not forwarded to their plists.
+  # server and are deliberately not forwarded to the Codex bridge plist.
   if [[ -n "${YEP_LLM_GATEWAYS:-}" ]]; then
     env_args+=("YEP_LLM_GATEWAYS" "$YEP_LLM_GATEWAYS")
     while IFS= read -r gateway_key_env; do
@@ -614,25 +541,9 @@ reload_agent() {
 
 log "Installing Yep Anywhere LaunchAgents ..."
 
-if $INSTALL_OPENCODE_BRIDGE; then
-  OPENCODE_PLUGIN_INSTALLER="$REPO_ROOT/dist/npm-package/scripts/install-opencode-yep-plugin.sh"
-  if [[ ! -x "$OPENCODE_PLUGIN_INSTALLER" ]]; then
-    err "Expected bundled OpenCode plugin installer at $OPENCODE_PLUGIN_INSTALLER."
-    err "Run scripts/deploy.sh --server-only once to rebuild dist/npm-package, then retry."
-    exit 1
-  fi
-  log "Syncing the OpenCode forwarder plugin ..."
-  "$OPENCODE_PLUGIN_INSTALLER"
-fi
-
 if $INSTALL_CODEX_BRIDGE; then
   BRIDGE_PLIST="$(write_bridge_plist)"
   reload_agent "$BRIDGE_LABEL" "$BRIDGE_PLIST"
-fi
-
-if $INSTALL_OPENCODE_BRIDGE; then
-  OPENCODE_BRIDGE_PLIST="$(write_opencode_bridge_plist)"
-  reload_agent "$OPENCODE_BRIDGE_LABEL" "$OPENCODE_BRIDGE_PLIST"
 fi
 
 if $INSTALL_SERVER; then
@@ -651,17 +562,6 @@ if $INSTALL_CODEX_BRIDGE; then
   dim "codex bridge:  $BRIDGE_LABEL -> $BRIDGE_URL"
 else
   dim "codex bridge:  skipped"
-fi
-if $INSTALL_OPENCODE_BRIDGE; then
-  dim "opencode bridge: $OPENCODE_BRIDGE_LABEL -> $OPENCODE_BRIDGE_URL"
-  dim "opencode bridge yep server: $SERVER_URL"
-  if [[ -n "$OPENCODE_BRIDGE_UPSTREAM_URL" ]]; then
-    dim "opencode server: external $OPENCODE_BRIDGE_UPSTREAM_URL"
-  else
-    dim "opencode server: managed from port $OPENCODE_SERVER_START_PORT"
-  fi
-else
-  dim "opencode bridge: skipped"
 fi
 dim "logs:   $LOG_DIR/*-launchd.*.log"
 dim "runtime: $LAUNCHD_RUNTIME_DIR"
@@ -690,4 +590,4 @@ if $INSTALL_SERVER; then
     dim "allowed hosts: $SERVER_ALLOWED_HOSTS"
   fi
 fi
-dim "8022 restarts after abnormal exits only (10s launchd throttle); bridge agents start at login only."
+dim "8022 restarts after abnormal exits only (10s launchd throttle); the Codex bridge starts at login only."

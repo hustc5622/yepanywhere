@@ -69,14 +69,13 @@ describe("deploy route argument mapping", () => {
     ).toEqual(["--restart-only", "--server-only"]);
   });
 
-  it("can restart selected bridge sidecars without restarting 8022", () => {
+  it("can restart the Codex bridge sidecar without restarting 8022", () => {
     expect(
       buildDeployArgs({
         action: "services-restart",
         restartTargets: {
           server: false,
           codexBridge: true,
-          opencodeBridge: true,
         },
       }).args,
     ).toEqual([
@@ -84,41 +83,29 @@ describe("deploy route argument mapping", () => {
       "--no-server",
       "--no-apk",
       "--restart-codex-bridge",
-      "--restart-opencode-bridge",
     ]);
   });
 
-  it("can include bridge sidecars in a normal server restart", () => {
+  it("can include the Codex bridge in a normal server restart", () => {
     expect(
       buildDeployArgs({
         action: "server-restart",
         restartTargets: {
           codexBridge: true,
-          opencodeBridge: true,
         },
       }).args,
-    ).toEqual([
-      "--server-only",
-      "--restart-only",
-      "--restart-codex-bridge",
-      "--restart-opencode-bridge",
-    ]);
+    ).toEqual(["--server-only", "--restart-only", "--restart-codex-bridge"]);
   });
 
-  it("can rebuild the server bundle and restart selected bridge sidecars", () => {
+  it("can rebuild the server bundle and restart the Codex bridge", () => {
     expect(
       buildDeployArgs({
         action: "server",
         restartTargets: {
           codexBridge: true,
-          opencodeBridge: true,
         },
       }).args,
-    ).toEqual([
-      "--server-only",
-      "--restart-codex-bridge",
-      "--restart-opencode-bridge",
-    ]);
+    ).toEqual(["--server-only", "--restart-codex-bridge"]);
   });
 
   it("rejects selected-services restart without any selected service", () => {
