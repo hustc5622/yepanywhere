@@ -3,7 +3,7 @@ import {
   type CodexMcpMode,
   DEFAULT_PERMISSION_MODE,
   type EffortLevel,
-  type OpenCodeSessionConfig,
+  type LlmGatewaySessionConfig,
   type PermissionRules,
   type ProviderName,
   SESSION_TITLE_MAX_LENGTH,
@@ -15,6 +15,7 @@ import {
 import type { AgentActivity, PendingInputType } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { getProvider } from "../sdk/providers/index.js";
+import { isProviderEnabled } from "../sdk/providers/policy.js";
 import type { AgentProvider } from "../sdk/providers/types.js";
 import type { ClaudeSDK, PermissionMode, UserMessage } from "../sdk/types.js";
 import type {
@@ -82,8 +83,8 @@ export interface ModelSettings {
   codexModelProvider?: string;
   /** Stable non-secret channel account key for Codex event-spine rollout. */
   codexEventAccountId?: string;
-  /** Managed OpenCode provider/model configuration. */
-  opencodeConfig?: OpenCodeSessionConfig;
+  /** Managed LLM gateway configuration. */
+  llmGatewayConfig?: LlmGatewaySessionConfig;
   /** Provider to use for this session. undefined = use the runtime default. */
   providerName?: ProviderName;
   /** Configured SSH host for Claude remote execution. */
@@ -94,7 +95,7 @@ export interface ModelSettings {
   permissions?: PermissionRules;
   /**
    * Provider-native edit boundary. Claude resumes through an ancestor UUID;
-   * OpenCode forks before the native user message ID supplied here.
+   * Pi and ZCode fork before the native user message ID supplied here.
    */
   resumeSessionAt?: string;
   /**
@@ -151,10 +152,9 @@ export type OnSessionSummaryCallback = (
 /** Delays for initial title/messageCount reconciliation after session creation */
 const INITIAL_RECONCILE_DELAYS_MS = [1000, 3000] as const;
 /**
- * OpenCode emits its fork ID only after server startup, configuration, native
- * fork creation, and lineage metadata persistence have all completed.
+ * Native edit-fork providers may emit the fork ID only after initialization.
  */
-const DEFAULT_OPENCODE_FORK_SESSION_ID_TIMEOUT_MS = 60_000;
+const DEFAULT_NATIVE_FORK_SESSION_ID_TIMEOUT_MS = 60_000;
 /** Includes MCP discovery and app-server thread initialization. */
 const CODEX_SESSION_ID_TIMEOUT_MS = 30_000;
 
@@ -180,8 +180,10 @@ export interface SupervisorOptions {
   onSessionIdChanged?: OnSessionIdChangedCallback;
   /** Callback to fetch session summary for initial metadata reconciliation */
   onSessionSummary?: OnSessionSummaryCallback;
-  /** Strict OpenCode edit-fork initialization budget. Primarily configurable for tests. */
-  opencodeForkSessionIdTimeoutMs?: number;
+  /** Strict native edit-fork initialization budget. */
+  nativeForkSessionIdTimeoutMs?: number;
+  /** Runtime provider allowlist. Empty/undefined enables all supported providers. */
+  enabledProviders?: readonly string[];
 }
 
 export class Supervisor {
@@ -200,7 +202,8 @@ export class Supervisor {
   private onSessionExecutor?: OnSessionExecutorCallback;
   private onSessionIdChanged?: OnSessionIdChangedCallback;
   private onSessionSummary?: OnSessionSummaryCallback;
-  private opencodeForkSessionIdTimeoutMs: number;
+  private nativeForkSessionIdTimeoutMs: number;
+  private readonly enabledProviders?: readonly string[];
   private staleCheckTimer: ReturnType<typeof setInterval>;
   private isShuttingDown = false;
   private queueProcessingPromise: Promise<void> | null = null;
@@ -226,13 +229,14 @@ export class Supervisor {
     this.onSessionExecutor = options.onSessionExecutor;
     this.onSessionIdChanged = options.onSessionIdChanged;
     this.onSessionSummary = options.onSessionSummary;
-    this.opencodeForkSessionIdTimeoutMs = Math.max(
+    this.nativeForkSessionIdTimeoutMs = Math.max(
       1,
       Math.floor(
-        options.opencodeForkSessionIdTimeoutMs ??
-          DEFAULT_OPENCODE_FORK_SESSION_ID_TIMEOUT_MS,
+        options.nativeForkSessionIdTimeoutMs ??
+          DEFAULT_NATIVE_FORK_SESSION_ID_TIMEOUT_MS,
       ),
     );
+    this.enabledProviders = options.enabledProviders;
     this.staleCheckTimer = setInterval(
       () => this.terminateStaleProcesses(),
       STALE_CHECK_INTERVAL_MS,
@@ -246,6 +250,13 @@ export class Supervisor {
 
   private resolveProvider(modelSettings?: ModelSettings): AgentProvider | null {
     if (modelSettings?.providerName) {
+      if (
+        !isProviderEnabled(modelSettings.providerName, this.enabledProviders)
+      ) {
+        throw new Error(
+          `Provider "${modelSettings.providerName}" is not enabled in this server.`,
+        );
+      }
       // Explicit SDK injection is the legacy unit-test seam. Production does
       // not provide it and therefore always resolves Claude to the SSH-only
       // provider below.
@@ -276,6 +287,14 @@ export class Supervisor {
       );
     }
 
+    if (
+      this.provider &&
+      !isProviderEnabled(this.provider.name, this.enabledProviders)
+    ) {
+      throw new Error(
+        `Provider "${this.provider.name}" is not enabled in this server.`,
+      );
+    }
     return this.provider;
   }
 
@@ -451,7 +470,7 @@ export class Supervisor {
       codexModelProvider: modelSettings?.codexModelProvider,
       codexEventAccountId: modelSettings?.codexEventAccountId,
       codexEventProjectId: projectId,
-      opencodeConfig: modelSettings?.opencodeConfig,
+      llmGatewayConfig: modelSettings?.llmGatewayConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,
       onToolApproval: async (toolName, input, opts) => {
@@ -617,7 +636,7 @@ export class Supervisor {
       codexModelProvider: modelSettings?.codexModelProvider,
       codexEventAccountId: modelSettings?.codexEventAccountId,
       codexEventProjectId: projectId,
-      opencodeConfig: modelSettings?.opencodeConfig,
+      llmGatewayConfig: modelSettings?.llmGatewayConfig,
       executor: modelSettings?.executor,
       globalInstructions: modelSettings?.globalInstructions,
       resumeSessionAt: modelSettings?.resumeSessionAt,
@@ -709,13 +728,11 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message, messageUuid, message.tempId);
 
-    // OpenCode, Pi, and ZCode edit-fork around a native message boundary and
+    // Pi and ZCode edit-fork around a native message boundary and
     // preserve the source session, so the supervisor must re-key the process
     // onto the fork's native id once the provider reports it.
     const isCrossSessionEditFork =
-      (activeProvider.name === "opencode" ||
-        activeProvider.name === "pi" ||
-        activeProvider.name === "zcode") &&
+      (activeProvider.name === "pi" || activeProvider.name === "zcode") &&
       Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
     const isCodexFork =
       activeProvider.name === "codex" &&
@@ -729,7 +746,7 @@ export class Supervisor {
       let resolvedSessionId: string;
       try {
         const sessionIdTimeoutMs = isForkedResume
-          ? this.opencodeForkSessionIdTimeoutMs
+          ? this.nativeForkSessionIdTimeoutMs
           : activeProvider.name === "codex"
             ? CODEX_SESSION_ID_TIMEOUT_MS
             : 5000;

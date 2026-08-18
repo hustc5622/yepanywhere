@@ -3,11 +3,9 @@ import type { ISessionIndexService } from "../indexes/types.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 import { CodexSessionReader } from "./codex-reader.js";
+import { collapseEditForkFamilies } from "./edit-fork-families.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
 import { KimiSessionReader } from "./kimi-reader.js";
-import { collapseEditForkFamilies } from "./opencode-branch.js";
-import { OPENCODE_DB_PATH } from "./opencode-db.js";
-import { OpenCodeSessionReader } from "./opencode-reader.js";
 import { PI_SESSIONS_DIR } from "./pi-files.js";
 import { PiSessionReader } from "./pi-reader.js";
 import {
@@ -22,7 +20,6 @@ import { ZCodeSessionReader } from "./zcode-reader.js";
 export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
-  opencodePaths: Set<string>;
   piPaths: Set<string>;
   kimiPaths: Set<string>;
   zcodePaths: Set<string>;
@@ -37,8 +34,6 @@ export interface ProviderResolutionDeps {
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   geminiHashToCwd?: Promise<Map<string, string>>;
-  opencodeDbPath?: string;
-  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   kimiSessionsDir?: string;
@@ -56,7 +51,7 @@ export interface SessionSource {
   provider: ProviderName;
   reader: ISessionReader;
   sessionDir: string;
-  kind: "primary" | "codex" | "gemini" | "opencode" | "pi" | "kimi" | "zcode";
+  kind: "primary" | "codex" | "gemini" | "pi" | "kimi" | "zcode";
 }
 
 export interface ResolvedSessionSummary {
@@ -85,17 +80,6 @@ function mayHaveGeminiSessions(
   return provider === "claude" || provider === "codex";
 }
 
-function mayHaveOpenCodeSessions(
-  project: Project,
-  catalog?: ProviderProjectCatalog,
-): boolean {
-  if (catalog) {
-    return catalog.opencodePaths.has(canonicalizeProjectPath(project.path));
-  }
-  const provider = normalizeProviderGroup(project.provider);
-  return provider === "claude" || provider === "codex" || provider === "gemini";
-}
-
 function mayHaveKimiSessions(
   project: Project,
   catalog?: ProviderProjectCatalog,
@@ -108,7 +92,6 @@ function mayHaveKimiSessions(
     provider === "claude" ||
     provider === "codex" ||
     provider === "gemini" ||
-    provider === "opencode" ||
     provider === "pi"
   );
 }
@@ -121,12 +104,7 @@ function mayHavePiSessions(
     return catalog.piPaths.has(canonicalizeProjectPath(project.path));
   }
   const provider = normalizeProviderGroup(project.provider);
-  return (
-    provider === "claude" ||
-    provider === "codex" ||
-    provider === "gemini" ||
-    provider === "opencode"
-  );
+  return provider === "claude" || provider === "codex" || provider === "gemini";
 }
 
 function mayHaveZCodeSessions(
@@ -141,7 +119,6 @@ function mayHaveZCodeSessions(
     provider === "claude" ||
     provider === "codex" ||
     provider === "gemini" ||
-    provider === "opencode" ||
     provider === "pi" ||
     provider === "kimi"
   );
@@ -200,25 +177,6 @@ function createGeminiSource(
     reader,
     sessionDir: deps.geminiSessionsDir ?? project.sessionDir,
     kind: "gemini",
-  };
-}
-
-function createOpenCodeSource(
-  project: Project,
-  deps: ProviderResolutionDeps,
-): SessionSource | null {
-  const dbPath = deps.opencodeDbPath ?? OPENCODE_DB_PATH;
-  const reader =
-    deps.opencodeReaderFactory?.(project.path) ??
-    new OpenCodeSessionReader({
-      dbPath,
-      projectPath: project.path,
-    });
-  return {
-    provider: "opencode",
-    reader,
-    sessionDir: dbPath,
-    kind: "opencode",
   };
 }
 
@@ -298,9 +256,6 @@ function buildCandidateGroups(
   if (mayHaveGeminiSessions(project, catalog)) {
     pushGroup("gemini");
   }
-  if (mayHaveOpenCodeSessions(project, catalog)) {
-    pushGroup("opencode");
-  }
   if (mayHavePiSessions(project, catalog)) {
     pushGroup("pi");
   }
@@ -323,8 +278,6 @@ function getSourceForGroup(
   switch (group) {
     case "claude":
       return createClaudeSource(project, deps);
-    case "opencode":
-      return createOpenCodeSource(project, deps);
     case "pi":
       return createPiSource(project, deps);
     case "codex":

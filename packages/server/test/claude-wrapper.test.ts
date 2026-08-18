@@ -10,8 +10,6 @@ describe("parseClaudeWrapperArgs", () => {
     vi.stubEnv("YEP_ANYWHERE_SERVER_URL", undefined);
     vi.stubEnv("YEP_DESKTOP_AUTH_TOKEN", undefined);
     vi.stubEnv("DESKTOP_AUTH_TOKEN", undefined);
-    vi.stubEnv("YEP_OPENCODE_BRIDGE", undefined);
-    vi.stubEnv("YEP_OPENCODE_BRIDGE_URL", undefined);
   });
 
   afterEach(() => {
@@ -55,27 +53,6 @@ describe("parseClaudeWrapperArgs", () => {
 
     expect(parsed.options.serverUrl).toBe("http://localhost:9000/yep");
     expect(parsed.options.desktopToken).toBe("desktop-token");
-  });
-
-  it("parses bridge options", () => {
-    const parsed = parseClaudeWrapperArgs([
-      "--bridge",
-      "http://127.0.0.1:4520/",
-      "--no-bridge",
-    ]);
-
-    expect(parsed.options.bridgeUrl).toBe("http://127.0.0.1:4520");
-    expect(parsed.options.useBridge).toBe(false);
-    expect(parsed.options.bridgeRequired).toBe(false);
-  });
-
-  it("prefers OpenCode bridge env defaults", () => {
-    vi.stubEnv("YEP_OPENCODE_BRIDGE_URL", "http://127.0.0.1:4620/");
-
-    const parsed = parseClaudeWrapperArgs([]);
-
-    expect(parsed.options.bridgeUrl).toBe("http://127.0.0.1:4620");
-    expect(parsed.options.bridgeRequired).toBe(true);
   });
 
   it("supports -- separator for prompt text beginning with dashes", () => {

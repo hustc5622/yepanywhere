@@ -80,13 +80,13 @@ describe("Process", () => {
     });
   });
 
-  it("keeps a generic OpenCode reasoning preference when switching models", async () => {
+  it("keeps a gateway reasoning preference when switching Pi models", async () => {
     const setModel = vi.fn(async () => {});
     const process = new Process(createMockIterator([]), {
       projectPath: "/test",
       projectId: "proj-1",
       sessionId: "sess-variant",
-      provider: "opencode",
+      provider: "pi",
       reasoningEffort: "max",
       setModelFn: setModel,
     });
@@ -852,8 +852,7 @@ describe("Process", () => {
     });
 
     it("does not publish a local mode change when the provider rejects it", async () => {
-      // Publishing anyway is what let the UI show bypassPermissions while the
-      // OpenCode session kept its `ask` rules and went on asking.
+      // Publishing anyway would let the UI diverge from the provider's policy.
       const setProviderMode = vi.fn(async () => {
         throw new Error("Failed to configure session permissions: 503");
       });
@@ -1501,8 +1500,8 @@ describe("Process", () => {
       const process = new Process(createMockIterator([]), {
         projectPath: "/test",
         projectId: "proj-1",
-        sessionId: "sess-opencode",
-        provider: "opencode",
+        sessionId: "sess-native-request",
+        provider: "pi",
         idleTimeoutMs: 100,
         permissionMode: "default",
       });

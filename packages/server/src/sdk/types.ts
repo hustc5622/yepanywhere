@@ -107,9 +107,8 @@ export interface UserMessage {
 /**
  * Provider-neutral wire representation of a queued user message.
  *
- * This used to reuse the Claude Agent SDK type even though OpenCode is the
- * only remaining runtime consumer. Keeping it local prevents a provider
- * dependency from leaking into the shared message queue.
+ * This stays local so provider dependencies do not leak into the shared
+ * message queue.
  */
 export interface QueuedUserMessage {
   type: "user";
@@ -161,7 +160,7 @@ export interface ToolApprovalResult {
   interrupt?: boolean;
   /**
    * Persistence scope of an approval. "always" asks the provider to remember
-   * the grant (OpenCode replies `always`, persisting the permission pattern).
+   * the grant.
    * Absent/"once" applies to this request only.
    */
   approvalScope?: "once" | "always";

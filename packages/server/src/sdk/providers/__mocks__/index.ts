@@ -40,12 +40,6 @@ export {
   createGeminiThoughtsScenario,
   createGeminiErrorScenario,
 } from "./gemini.js";
-export {
-  MockOpenCodeProvider,
-  createOpenCodeScenario,
-  createOpenCodeToolScenario,
-  createOpenCodeErrorScenario,
-} from "./opencode.js";
 export { MockPiProvider } from "./pi.js";
 
 // Factory functions

@@ -232,6 +232,103 @@ describe("SessionCommandService runtime boundary", () => {
     }
   });
 
+  it("rejects explicit creates for the retired OpenCode provider", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-retired-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-retired",
+        sessionCount: 0,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex" as const,
+      } satisfies Project;
+      const createSession = vi.fn(async () =>
+        processSnapshot({ provider: "opencode" }),
+      );
+      const service = new SessionCommandService({
+        runtimeController: { createSession } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+      });
+
+      await expect(
+        service.create({
+          projectId,
+          body: { provider: "opencode" },
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: 410,
+        body: {
+          error: "OpenCode provider has been retired",
+          code: "provider_retired",
+        },
+      });
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects resume when persisted metadata names the retired provider", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-legacy-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-legacy",
+        sessionCount: 0,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex" as const,
+      } satisfies Project;
+      const resumeSession = vi.fn(async () =>
+        processSnapshot({ provider: "opencode" }),
+      );
+      const service = new SessionCommandService({
+        runtimeController: { resumeSession } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+          mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+        sessionMetadataService: {
+          getProvider: vi.fn(() => "opencode"),
+        } as unknown as SessionMetadataService,
+      });
+
+      await expect(
+        service.resume({
+          projectId,
+          sessionId: "legacy-opencode-session",
+          body: { message: "continue" },
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: 410,
+        body: {
+          error: "OpenCode provider has been retired",
+          code: "provider_retired",
+        },
+      });
+      expect(resumeSession).not.toHaveBeenCalled();
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it("persists channel origin and scopes Codex rollout by stable account key", async () => {
     const projectPath = mkdtempSync(join(tmpdir(), "session-command-channel-"));
     try {

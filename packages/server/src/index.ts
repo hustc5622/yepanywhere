@@ -54,11 +54,8 @@ import {
 } from "./metadata/index.js";
 import { updateAllowedHosts } from "./middleware/allowed-hosts.js";
 import { NotificationService } from "./notifications/index.js";
-import { OpenCodeBridgeHttpClient } from "./opencode-bridge/OpenCodeBridgeHttpClient.js";
-import type { OpenCodeBridgeController } from "./opencode-bridge/types.js";
 import { CodexSessionScanner } from "./projects/codex-scanner.js";
 import { GeminiSessionScanner } from "./projects/gemini-scanner.js";
-import { OpenCodeSessionScanner } from "./projects/opencode-scanner.js";
 import { PiSessionScanner } from "./projects/pi-scanner.js";
 import { ProjectScanner } from "./projects/scanner.js";
 import { ZCodeSessionScanner } from "./projects/zcode-scanner.js";
@@ -74,7 +71,8 @@ import { HttpRuntimeController } from "./runtime/HttpRuntimeController.js";
 import type { RuntimeController } from "./runtime/types.js";
 import { detectCodexCli } from "./sdk/cli-detection.js";
 import { initMessageLogger } from "./sdk/messageLogger.js";
-import { codexProvider, opencodeProvider } from "./sdk/providers/index.js";
+import { codexProvider } from "./sdk/providers/index.js";
+import { isProviderEnabled } from "./sdk/providers/policy.js";
 import {
   BrowserProfileService,
   ConnectedBrowsersService,
@@ -82,13 +80,10 @@ import {
   ModelInfoService,
   NetworkBindingService,
   OhMyRouterBenchmarkService,
-  OpenCodeSessionChangeMonitor,
   ServerSettingsService,
   SharingService,
   ZCodeSessionChangeMonitor,
 } from "./services/index.js";
-import { ensureOpenCodeDbIndexes } from "./sessions/opencode-db-indexes.js";
-import { OPENCODE_DB_PATH } from "./sessions/opencode-db.js";
 import { PI_SESSIONS_DIR } from "./sessions/pi-files.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
 import { ZCODE_DB_PATH } from "./sessions/zcode-db.js";
@@ -143,16 +138,12 @@ codexProvider.configureBridgeExecution({
   authToken: config.desktopAuthToken,
   authTokenFile: config.runtimeTokenFile,
 });
-opencodeProvider.configureBridgeControlUrl(config.opencodeBridgeControlUrl);
 
 // Track services for graceful shutdown (set after createApp)
 let runtimeControllerForShutdown: RuntimeController | null = null;
 let deviceBridgeForShutdown: DeviceBridgeService | null = null;
 let codexBridgeForShutdown: CodexBridgeController | null = null;
-let opencodeBridgeForShutdown: OpenCodeBridgeController | null = null;
 let feishuChannelRuntimeForShutdown: FeishuChannelRuntime | null = null;
-let opencodeSessionChangeMonitorForShutdown: OpenCodeSessionChangeMonitor | null =
-  null;
 let zcodeSessionChangeMonitorForShutdown: ZCodeSessionChangeMonitor | null =
   null;
 let terminalServiceForShutdown: TerminalService | null = null;
@@ -218,31 +209,10 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
     }
   }
 
-  if (opencodeBridgeForShutdown) {
-    try {
-      await opencodeBridgeForShutdown.shutdown?.();
-      console.log("[Shutdown] OpenCode bridge client shut down");
-    } catch (error) {
-      console.error("[Shutdown] Error shutting down OpenCode bridge:", error);
-    }
-  }
-
   sessionInteractionServiceForShutdown?.dispose();
   sessionInteractionServiceForShutdown = null;
   interactionBrokerForShutdown?.shutdown();
   interactionBrokerForShutdown = null;
-
-  if (opencodeSessionChangeMonitorForShutdown) {
-    try {
-      await opencodeSessionChangeMonitorForShutdown.stop();
-      console.log("[Shutdown] OpenCode session change monitor stopped");
-    } catch (error) {
-      console.error(
-        "[Shutdown] Error stopping OpenCode session change monitor:",
-        error,
-      );
-    }
-  }
 
   if (zcodeSessionChangeMonitorForShutdown) {
     try {
@@ -444,18 +414,6 @@ console.log(
       : ""
   }`,
 );
-const opencodeBridgeService: OpenCodeBridgeController =
-  new OpenCodeBridgeHttpClient({
-    baseUrl: config.opencodeBridgeControlUrl,
-    eventBus,
-  });
-console.log(
-  `[OpenCodeBridge] control=${config.opencodeBridgeControlUrl} opencode=${
-    config.opencodeServerUrl ??
-    `managed-from-port:${config.opencodeServerStartPort}`
-  }`,
-);
-
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
   watchDir: string,
@@ -680,7 +638,6 @@ async function startServer() {
   await modelInfoService.initialize();
   await networkBindingService.initialize();
   await codexBridgeService?.start?.();
-  await opencodeBridgeService.start?.();
 
   // Seed allowed hosts middleware from persisted settings
   updateAllowedHosts(serverSettingsService.getSetting("allowedHosts"));
@@ -899,7 +856,6 @@ async function startServer() {
     sharingService,
     deviceBridgeService,
     codexBridgeService,
-    opencodeBridgeService,
     feishuChannelService: feishuChannelRuntime.service,
     feishuBindingStore: feishuChannelRuntime.bindingStore,
     feishuInbox: feishuChannelRuntime.inbox,
@@ -919,39 +875,10 @@ async function startServer() {
 
   await feishuChannelRuntime.start({ eventBus, sessionCommandService });
 
-  const opencodeProviderEnabled =
-    config.enabledProviders.length === 0 ||
-    config.enabledProviders.includes("opencode");
-  if (opencodeProviderEnabled) {
-    // OpenCode ships no `time_updated` index, so every incremental scan
-    // degrades into a full scan of message/part. Build the helper indexes in
-    // the background: session reads stay on the slow path until it finishes,
-    // but nothing blocks startup and a failure is non-fatal.
-    void ensureOpenCodeDbIndexes(OPENCODE_DB_PATH).catch(() => {});
-  }
-  const opencodeMonitorDisabled = ["false", "0", "off", "disabled"].includes(
-    (process.env.OPENCODE_SESSION_CHANGE_MONITOR ?? "").trim().toLowerCase(),
+  const zcodeProviderEnabled = isProviderEnabled(
+    "zcode",
+    config.enabledProviders,
   );
-  if (
-    config.sessionTitleGeneration.enabled &&
-    opencodeProviderEnabled &&
-    !opencodeMonitorDisabled
-  ) {
-    const opencodeChangeScanner = new OpenCodeSessionScanner();
-    const opencodeSessionChangeMonitor = new OpenCodeSessionChangeMonitor({
-      dbPath: opencodeChangeScanner.databasePath,
-      scanner: opencodeChangeScanner,
-      eventBus,
-    });
-    // createApp starts SessionTitleService before returning, so no database
-    // reconciliation event can race ahead of its EventBus subscription.
-    opencodeSessionChangeMonitor.start();
-    opencodeSessionChangeMonitorForShutdown = opencodeSessionChangeMonitor;
-  }
-
-  const zcodeProviderEnabled =
-    config.enabledProviders.length === 0 ||
-    config.enabledProviders.includes("zcode");
   const zcodeMonitorDisabled = ["false", "0", "off", "disabled"].includes(
     (process.env.ZCODE_SESSION_CHANGE_MONITOR ?? "").trim().toLowerCase(),
   );
@@ -1010,25 +937,33 @@ async function startServer() {
     }
   }
 
-  const focusedPiScanner = new PiSessionScanner({
-    sessionsDir: PI_SESSIONS_DIR,
-  });
-  eventBus.subscribe((event) => {
-    if (event.type === "file-change" && event.provider === "pi") {
-      focusedPiScanner.invalidateCache();
-    }
-  });
+  const focusedPiScanner = isProviderEnabled("pi", config.enabledProviders)
+    ? new PiSessionScanner({ sessionsDir: PI_SESSIONS_DIR })
+    : undefined;
+  if (focusedPiScanner) {
+    eventBus.subscribe((event) => {
+      if (event.type === "file-change" && event.provider === "pi") {
+        focusedPiScanner.invalidateCache();
+      }
+    });
+  }
+  const emptyFocusedScanner = {
+    getSessionsForProject: async () => [],
+  };
   const focusedSessionWatchManager = new FocusedSessionWatchManager({
     scanner,
-    codexScanner: new CodexSessionScanner({
-      sessionsDir: config.codexSessionsDir,
-    }),
-    geminiScanner: new GeminiSessionScanner({
-      sessionsDir: config.geminiSessionsDir,
-    }),
-    opencodeScanner: new OpenCodeSessionScanner(),
+    codexScanner:
+      isProviderEnabled("codex", config.enabledProviders) ||
+      isProviderEnabled("codex-oss", config.enabledProviders)
+        ? new CodexSessionScanner({ sessionsDir: config.codexSessionsDir })
+        : emptyFocusedScanner,
+    geminiScanner:
+      isProviderEnabled("gemini", config.enabledProviders) ||
+      isProviderEnabled("gemini-acp", config.enabledProviders)
+        ? new GeminiSessionScanner({ sessionsDir: config.geminiSessionsDir })
+        : emptyFocusedScanner,
     piScanner: focusedPiScanner,
-    zcodeScanner: new ZCodeSessionScanner(),
+    zcodeScanner: zcodeProviderEnabled ? new ZCodeSessionScanner() : undefined,
   });
 
   // Set service references for graceful shutdown
@@ -1036,7 +971,6 @@ async function startServer() {
   sessionInteractionServiceForShutdown = sessionInteractionService;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
   codexBridgeForShutdown = codexBridgeService ?? null;
-  opencodeBridgeForShutdown = opencodeBridgeService;
   sessionArchiveServiceForShutdown = sessionArchiveService;
 
   // Set up debug context for maintenance server
@@ -1061,6 +995,11 @@ async function startServer() {
   // These must be added BEFORE the frontend proxy catch-all
   const uploadScanner = new ProjectScanner({
     projectsDir: config.claudeProjectsDir,
+    enableCodex: false,
+    enableGemini: false,
+    enableKimi: false,
+    enablePi: false,
+    enableZCode: false,
   });
   const uploadRoutes = createUploadRoutes({
     scanner: uploadScanner,

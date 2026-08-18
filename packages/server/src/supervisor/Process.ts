@@ -1644,10 +1644,8 @@ export class Process {
     )?.question;
     const providerRequestId = options.requestId?.trim() || undefined;
     const request: InputRequest = {
-      // Preserve a provider-native id when available. OpenCode's bridge sees
-      // the same approval independently, so inventing a second UUID here can
-      // make notification actions look stale even though both ids represent
-      // the same request.
+      // Preserve a provider-native id when available so notification actions
+      // address the same request observed by the provider.
       id: providerRequestId || randomUUID(),
       providerRequestId,
       providerRequestMethod: options.requestMethod,
@@ -1773,8 +1771,8 @@ export class Process {
       behavior: approved ? "allow" : "deny",
       message: !approved ? denyMessage : undefined,
       interrupt: !approved ? shouldInterrupt : undefined,
-      // Providers with persistent grants (OpenCode `always` reply) honor
-      // this; others ignore it and treat the approval as one-shot.
+      // Providers with persistent grants honor this; others treat the
+      // approval as one-shot.
       approvalScope:
         response === "approve_always" || response === "approve_for_session"
           ? "always"

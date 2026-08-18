@@ -9,13 +9,14 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
   CodexMcpMode,
-  OpenCodeSessionConfig,
+  LlmGatewaySessionConfig,
   PermissionMode,
   ProviderName,
   SessionCreatedBy,
   SessionOriginChannel,
   UrlProjectId,
 } from "@yep-anywhere/shared";
+import { isLiveProviderName } from "../sdk/providers/policy.js";
 
 export interface SessionMetadata {
   /** Custom title that overrides auto-generated title */
@@ -29,7 +30,7 @@ export interface SessionMetadata {
   /** Model used for this session (resolved, not "default") */
   model?: string;
   /** Provider used for this session (for backward compatibility with sessions that don't have provider in JSONL) */
-  provider?: ProviderName;
+  provider?: ProviderName | string;
   /**
    * Project that owned this session when Yep started it.
    *
@@ -46,8 +47,10 @@ export interface SessionMetadata {
   codexMcpMode?: CodexMcpMode;
   /** Effective Codex model source (Codex `model_provider`) for this session. */
   codexModelProvider?: string;
-  /** Managed OpenCode provider/model settings used to resume the session. */
-  opencodeConfig?: OpenCodeSessionConfig;
+  /** Managed LLM gateway settings used to resume the session. */
+  llmGatewayConfig?: LlmGatewaySessionConfig;
+  /** @deprecated Persisted compatibility; never written by the live runtime. */
+  opencodeConfig?: LlmGatewaySessionConfig;
   /** Last permission/session mode selected for this session. */
   permissionMode?: PermissionMode;
   /** Source session for a provider-native, source-preserving edit fork. */
@@ -296,14 +299,14 @@ export class SessionMetadataService {
     await this.save();
   }
 
-  /** Persist the generated OpenCode provider/model contract for restarts. */
-  async setOpenCodeConfig(
+  /** Persist the managed LLM gateway contract for restarts. */
+  async setLlmGatewayConfig(
     sessionId: string,
-    opencodeConfig: OpenCodeSessionConfig | undefined,
+    llmGatewayConfig: LlmGatewaySessionConfig | undefined,
   ): Promise<void> {
     this.updateSessionMetadata(sessionId, (metadata) => ({
       ...metadata,
-      opencodeConfig,
+      llmGatewayConfig,
     }));
     await this.save();
   }
@@ -325,7 +328,13 @@ export class SessionMetadataService {
    * Get the provider for a session.
    * Returns undefined if the provider was never explicitly saved.
    */
-  getProvider(sessionId: string): string | undefined {
+  getProvider(sessionId: string): ProviderName | undefined {
+    const provider = this.getPersistedProvider(sessionId);
+    return isLiveProviderName(provider) ? provider : undefined;
+  }
+
+  /** Raw persisted value for explicit retired-provider error handling only. */
+  getPersistedProvider(sessionId: string): string | undefined {
     return this.getMetadata(sessionId)?.provider;
   }
 
@@ -366,8 +375,9 @@ export class SessionMetadataService {
     return this.getMetadata(sessionId)?.codexModelProvider;
   }
 
-  getOpenCodeConfig(sessionId: string): OpenCodeSessionConfig | undefined {
-    return this.getMetadata(sessionId)?.opencodeConfig;
+  getLlmGatewayConfig(sessionId: string): LlmGatewaySessionConfig | undefined {
+    const metadata = this.getMetadata(sessionId);
+    return metadata?.llmGatewayConfig ?? metadata?.opencodeConfig;
   }
 
   getPermissionMode(sessionId: string): PermissionMode | undefined {
@@ -520,8 +530,9 @@ export class SessionMetadataService {
     if (updated.codexModelProvider) {
       cleaned.codexModelProvider = updated.codexModelProvider;
     }
-    if (updated.opencodeConfig) {
-      cleaned.opencodeConfig = updated.opencodeConfig;
+    const llmGatewayConfig = updated.llmGatewayConfig ?? updated.opencodeConfig;
+    if (llmGatewayConfig) {
+      cleaned.llmGatewayConfig = llmGatewayConfig;
     }
     if (updated.permissionMode) {
       cleaned.permissionMode = updated.permissionMode;

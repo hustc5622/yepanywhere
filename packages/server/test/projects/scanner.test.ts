@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexSessionScanner } from "../../src/projects/codex-scanner.js";
-import type { OpenCodeSessionScanner } from "../../src/projects/opencode-scanner.js";
 import { ProjectScanner } from "../../src/projects/scanner.js";
 import { encodeProjectId } from "../../src/supervisor/types.js";
 import { EventBus } from "../../src/watcher/EventBus.js";
@@ -61,7 +60,6 @@ describe("ProjectScanner missing projectsDir", () => {
       codexSessionsDir: codexDir,
       enableCodex: true,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -100,7 +98,6 @@ describe("ProjectScanner cache", () => {
       projectsDir,
       enableCodex: false,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -140,7 +137,6 @@ describe("ProjectScanner cache", () => {
       projectsDir,
       enableCodex: false,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -179,7 +175,6 @@ describe("ProjectScanner cache", () => {
       projectsDir,
       enableCodex: false,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -243,7 +238,6 @@ describe("ProjectScanner cache", () => {
       projectsDir,
       enableCodex: true,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -300,7 +294,6 @@ describe("ProjectScanner cache", () => {
       codexScanner,
       enableCodex: true,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -331,66 +324,6 @@ describe("ProjectScanner cache", () => {
       path: "/home/user/project-one",
       hasCodexSessions: true,
     });
-  });
-
-  it("invalidates OpenCode project caches on database reconcile events", async () => {
-    const projectsDir = join(tmpdir(), `project-scanner-${randomUUID()}`);
-    tempDirs.push(projectsDir);
-    const eventBus = new EventBus();
-    const projectPath = "/home/user/external-opencode-project";
-    const projectId = encodeProjectId(projectPath);
-    const opencodeProject = {
-      id: projectId,
-      path: projectPath,
-      name: "external-opencode-project",
-      sessionCount: 1,
-      sessionDir: "/tmp/opencode.db",
-      activeOwnedCount: 0,
-      activeExternalCount: 0,
-      lastActivity: "2026-07-15T00:00:00.000Z",
-      provider: "opencode" as const,
-    };
-    let nextProjects: (typeof opencodeProject)[] = [];
-    let cachedProjects: (typeof opencodeProject)[] | null = null;
-    const opencodeScanner = {
-      listProjects: vi.fn(async () => {
-        if (cachedProjects) return cachedProjects;
-        cachedProjects = [...nextProjects];
-        return cachedProjects;
-      }),
-      invalidateCache: vi.fn(() => {
-        cachedProjects = null;
-      }),
-    } as unknown as OpenCodeSessionScanner;
-
-    const scanner = new ProjectScanner({
-      projectsDir,
-      opencodeScanner,
-      enableCodex: false,
-      enableGemini: false,
-      enableOpenCode: true,
-      enablePi: false,
-      cacheTtlMs: 60_000,
-      eventBus,
-    });
-
-    expect(await scanner.getProject(projectId)).toBeNull();
-    nextProjects = [opencodeProject];
-
-    eventBus.emit({
-      type: "session-updated",
-      trigger: "opencode-db-reconcile",
-      sessionId: "ses_external_cli",
-      projectId,
-      updatedAt: "2026-07-15T00:00:00.000Z",
-      timestamp: "2026-07-15T00:00:00.000Z",
-    });
-
-    expect(await scanner.getProject(projectId)).toMatchObject({
-      path: projectPath,
-      provider: "opencode",
-    });
-    expect(opencodeScanner.invalidateCache).toHaveBeenCalledOnce();
   });
 });
 
@@ -443,7 +376,6 @@ describe("ProjectScanner stale-cwd recovery", () => {
       projectsDir,
       enableCodex: false,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -503,7 +435,6 @@ describe("ProjectScanner shared Claude storage", () => {
       ],
       enableCodex: false,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -549,7 +480,6 @@ describe("ProjectScanner shared Claude storage", () => {
       ],
       enableCodex: false,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,
@@ -585,7 +515,6 @@ describe("ProjectScanner shared Claude storage", () => {
       ],
       enableCodex: false,
       enableGemini: false,
-      enableOpenCode: false,
       enableKimi: false,
       enablePi: false,
       enableZCode: false,

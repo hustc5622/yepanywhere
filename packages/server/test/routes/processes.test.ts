@@ -57,12 +57,12 @@ function createSummary(): SessionSummary {
 }
 
 describe("Processes Routes", () => {
-  it("preserves the OpenCode reasoning preference after a live model switch", async () => {
+  it("reports the resolved Pi reasoning preference after a live model switch", async () => {
     const setModel = vi.fn(async () => ({ success: true }));
     const routes = createProcessesRoutes({
       runtimeController: {
         getProcess: vi.fn(async () => ({
-          provider: "opencode",
+          provider: "pi",
           reasoningEffort: "default",
           requestedReasoningEffort: "max",
         })),
@@ -83,7 +83,7 @@ describe("Processes Routes", () => {
     await expect(response.json()).resolves.toEqual({
       success: true,
       model: "ohmyrouter/deepseek-v4-pro",
-      reasoningEffort: "max",
+      reasoningEffort: "default",
     });
     expect(setModel).toHaveBeenCalledWith(
       "proc-1",

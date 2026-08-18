@@ -25,14 +25,13 @@ import {
   getSessionFilePath,
 } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { Project } from "../supervisor/types.js";
 import type { CodexSessionReader } from "./codex-reader.js";
 import { getCodexSessionManifest } from "./codex-session-manifest.js";
 import type { GeminiSessionReader } from "./gemini-reader.js";
 import type { KimiSessionReader } from "./kimi-reader.js";
-import { queryOpenCodeRow } from "./opencode-db.js";
-import type { OpenCodeSessionReader } from "./opencode-reader.js";
 import type { PiSessionReader } from "./pi-reader.js";
 import { findSessionSummaryAcrossProviders } from "./provider-resolution.js";
 import type { ISessionReader } from "./types.js";
@@ -51,16 +50,13 @@ export interface SessionLocatorDeps {
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
-  opencodeDbPath?: string;
   zcodeDbPath?: string;
-  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   codexBridgeService?: BridgeController;
-  opencodeBridgeService?: BridgeController;
 }
 
 /** Session ids are used to build filesystem paths, so keep them inert. */
@@ -129,7 +125,6 @@ async function locateViaBridges(
 ): Promise<SessionLocation | null> {
   const candidates: Array<[ProviderName, BridgeController | undefined]> = [
     ["codex", deps.codexBridgeService],
-    ["opencode", deps.opencodeBridgeService],
   ];
 
   for (const [provider, controller] of candidates) {
@@ -184,37 +179,6 @@ async function locateViaCodexManifest(
 }
 
 /**
- * The OpenCode sqlite database is global and `session.directory` is indexed by
- * primary key, so this is a single-row lookup. `OpenCodeSessionReader` runs the
- * same query with `AND directory = ?` appended, which is precisely why a bare
- * id is otherwise unresolvable for this provider.
- */
-async function locateViaOpenCodeDb(
-  deps: SessionLocatorDeps,
-  sessionId: string,
-): Promise<SessionLocation | null> {
-  if (!deps.opencodeDbPath) return null;
-  const result = await queryOpenCodeRow(
-    deps.opencodeDbPath,
-    "SELECT directory FROM session WHERE id = ?",
-    [sessionId],
-    { label: "opencode.locateSession" },
-  );
-  const value = result.ok ? result.value?.directory : undefined;
-  const directory =
-    typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-  if (!directory) return null;
-  return {
-    sessionId,
-    requestedSessionId: sessionId,
-    provider: "opencode",
-    ...fromProjectPath(directory),
-    source: "opencode-db",
-    archived: false,
-  };
-}
-
-/**
  * Claude stores sessions as `<sessionDir>/<sessionId>.jsonl`, so a stat per
  * known session directory settles it without reading any file. Cheaper than
  * the reader fan-out, which parses each candidate session.
@@ -245,8 +209,8 @@ async function locateViaClaudeFile(
  * Project recorded by Yep when it started the session.
  *
  * Deliberately ranked below the provider-authoritative sources: the recorded
- * path goes stale when a project directory is moved, whereas the codex manifest
- * and the opencode row always report the current location. Its job is only to
+ * path goes stale when a project directory is moved, whereas provider-native
+ * manifests report the current location. Its job is only to
  * spare the expensive scan below, so an existence check is enough to keep a
  * stale entry from producing a confidently wrong answer.
  */
@@ -259,7 +223,7 @@ async function locateViaMetadata(
   if (!(await exists(recorded.projectPath))) return null;
 
   const provider = deps.sessionMetadataService?.getProvider(sessionId);
-  if (!provider) return null;
+  if (!provider || isRetiredProviderName(provider)) return null;
 
   return {
     sessionId,
@@ -290,8 +254,6 @@ async function locateViaProviderScan(
     geminiSessionsDir: deps.geminiSessionsDir,
     geminiReaderFactory: deps.geminiReaderFactory,
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
-    opencodeDbPath: deps.opencodeDbPath,
-    opencodeReaderFactory: deps.opencodeReaderFactory,
     piSessionsDir: deps.piSessionsDir,
     piReaderFactory: deps.piReaderFactory,
     kimiSessionsDir: deps.kimiSessionsDir,
@@ -304,7 +266,7 @@ async function locateViaProviderScan(
       sessionId,
       project.id,
       resolutionDeps,
-      preferredProvider,
+      isRetiredProviderName(preferredProvider) ? undefined : preferredProvider,
     );
     if (!resolved) continue;
     return {
@@ -348,9 +310,6 @@ export async function locateSession(
 
   const codex = await locateViaCodexManifest(deps, sessionId);
   if (codex) return withRequestedId(codex);
-
-  const opencode = await locateViaOpenCodeDb(deps, sessionId);
-  if (opencode) return withRequestedId(opencode);
 
   const projects = await deps.scanner.listProjects();
 

@@ -4,7 +4,7 @@ import type {
   BridgeInputResponse,
   BridgeSessionView,
 } from "../../src/bridge-common/types.js";
-import type { OpenCodeBridgeController } from "../../src/opencode-bridge/types.js";
+import type { CodexBridgeController } from "../../src/codex-bridge/types.js";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import { createSessionsRoutes } from "../../src/routes/sessions.js";
 import type {
@@ -48,7 +48,7 @@ function processSnapshot(
     state: "waiting-input",
     startedAt: new Date(0).toISOString(),
     queueDepth: 0,
-    provider: "opencode",
+    provider: "codex",
     permissionMode: "default",
     modeVersion: 0,
     pendingInputRequest,
@@ -117,7 +117,7 @@ function harness(options: {
     },
   } as unknown as RuntimeController;
 
-  const opencodeBridgeService = {
+  const codexBridgeService = {
     getStatus: () => {
       throw new Error("getStatus must not be called by these routes");
     },
@@ -138,7 +138,7 @@ function harness(options: {
       bridgePending = null;
       return true;
     },
-  } as unknown as OpenCodeBridgeController;
+  } as unknown as CodexBridgeController;
 
   const routes = createSessionsRoutes({
     runtimeController,
@@ -149,7 +149,7 @@ function harness(options: {
       invalidateCache: () => {},
     } as unknown as ProjectScanner,
     readerFactory: () => ({}) as unknown as ISessionReader,
-    opencodeBridgeService,
+    codexBridgeService,
   });
 
   return {

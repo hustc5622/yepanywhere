@@ -21,7 +21,7 @@ import {
  *
  * The fix makes ACP-backed providers (kimi, gemini-acp) report
  * `isProcessAlive`, so a live-but-silent process short-circuits at
- * `if (alive === true) continue;` exactly like codex/claude/opencode.
+ * `if (alive === true) continue;` exactly like other long-lived providers.
  */
 
 const FIVE_MIN = 5 * 60 * 1000;

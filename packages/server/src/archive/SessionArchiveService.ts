@@ -10,17 +10,13 @@ import {
 import { basename, dirname, join } from "node:path";
 import type { ProviderName, UrlProjectId } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
-import { withWritableOpenCodeDb } from "../sessions/opencode-db.js";
+import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
+import { withWritableSqliteDatabase } from "../sqlite/query.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 
-export type ArchiveProvider =
-  | "claude"
-  | "codex"
-  | "opencode"
-  | "pi"
-  | "kimi"
-  | "zcode";
+export type ArchiveProvider = "claude" | "codex" | "pi" | "kimi" | "zcode";
+type PersistedArchiveProvider = ArchiveProvider | "opencode";
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {
@@ -47,9 +43,22 @@ export interface ArchivedSessionRecord {
   files: ArchivedFileRecord[];
 }
 
+type PersistedArchivedSessionRecord = Omit<
+  ArchivedSessionRecord,
+  "provider"
+> & {
+  provider: PersistedArchiveProvider;
+};
+
 interface ArchiveManifest {
   version: 1;
-  sessions: Record<string, ArchivedSessionRecord>;
+  sessions: Record<string, PersistedArchivedSessionRecord>;
+}
+
+function isLiveArchivedSessionRecord(
+  record: PersistedArchivedSessionRecord,
+): record is ArchivedSessionRecord {
+  return !isRetiredProviderName(record.provider);
 }
 
 export interface SessionArchiveServiceOptions {
@@ -130,18 +139,21 @@ export class SessionArchiveService {
   }
 
   listArchivedSessions(): ArchivedSessionRecord[] {
-    return Object.values(this.manifest.sessions).sort(
-      (a, b) =>
-        new Date(b.archivedAt).getTime() - new Date(a.archivedAt).getTime(),
-    );
+    return Object.values(this.manifest.sessions)
+      .filter(isLiveArchivedSessionRecord)
+      .sort(
+        (a, b) =>
+          new Date(b.archivedAt).getTime() - new Date(a.archivedAt).getTime(),
+      );
   }
 
   getArchivedSession(sessionId: string): ArchivedSessionRecord | undefined {
-    return this.manifest.sessions[sessionId];
+    const record = this.manifest.sessions[sessionId];
+    return record && isLiveArchivedSessionRecord(record) ? record : undefined;
   }
 
   isArchived(sessionId: string): boolean {
-    return Boolean(this.manifest.sessions[sessionId]);
+    return Boolean(this.getArchivedSession(sessionId));
   }
 
   async archiveSession(
@@ -158,6 +170,7 @@ export class SessionArchiveService {
     const existing = this.manifest.sessions[params.sessionId];
     if (existing) {
       const primaryExists =
+        isRetiredProviderName(existing.provider) ||
         isSqliteArchiveProvider(existing.provider) ||
         (await fileExists(existing.files[0]?.archivePath));
       if (primaryExists) {
@@ -221,6 +234,12 @@ export class SessionArchiveService {
       throw new ArchiveError(
         "not_archived",
         `Session ${sessionId} is not physically archived`,
+      );
+    }
+    if (!isLiveArchivedSessionRecord(record)) {
+      throw new ArchiveError(
+        "unsupported_provider",
+        "The archived session belongs to a retired provider",
       );
     }
 
@@ -420,9 +439,9 @@ function normalizeArchiveProvider(
 }
 
 function isSqliteArchiveProvider(
-  provider: ArchiveProvider,
-): provider is "opencode" | "zcode" {
-  return provider === "opencode" || provider === "zcode";
+  provider: PersistedArchiveProvider,
+): provider is "zcode" {
+  return provider === "zcode";
 }
 
 async function setSqliteSessionArchived(params: {
@@ -431,7 +450,7 @@ async function setSqliteSessionArchived(params: {
   projectPath: string;
   archivedAtMs: number;
 }): Promise<void> {
-  const result = await withWritableOpenCodeDb<
+  const result = await withWritableSqliteDatabase<
     "archived" | "already_archived" | "not_found" | "unavailable"
   >(params.dbPath, "unavailable", (db) => {
     const row = db
@@ -473,7 +492,7 @@ async function setSqliteSessionUnarchived(params: {
   sessionId: string;
   projectPath: string;
 }): Promise<void> {
-  const result = await withWritableOpenCodeDb<
+  const result = await withWritableSqliteDatabase<
     "restored" | "not_found" | "unavailable"
   >(params.dbPath, "unavailable", (db) => {
     const row = db

@@ -1,5 +1,5 @@
 /**
- * Shared contracts for CLI bridge sidecars (codex-bridge, opencode-bridge).
+ * Shared contracts for CLI bridge sidecars.
  *
  * Each bridge exposes the same control surface to the main server: a status
  * endpoint, a list of externally-owned sessions, per-session views, and a

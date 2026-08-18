@@ -8,13 +8,13 @@ import {
   ALL_PROVIDERS,
   type CodexMcpMode,
   type EffortLevel,
+  type LiveProviderName,
+  type LlmGatewayJsonObject,
+  type LlmGatewayModelLimits,
+  type LlmGatewaySessionConfig,
   type NewSessionDefaults,
   type NewSessionProviderDefaults,
-  type OpenCodeJsonObject,
-  type OpenCodeModelLimits,
-  type OpenCodeSessionConfig,
   type PermissionMode,
-  type ProviderName,
   type RemoteExecutorConfig,
   type ThinkingOption,
   mergeNewSessionDefaults,
@@ -110,9 +110,9 @@ function parsePositiveTokenLimit(value: unknown): number | null {
   return value;
 }
 
-function parseOpenCodeModelLimits(
+function parseGatewayModelLimits(
   raw: unknown,
-): OpenCodeModelLimits | undefined | null {
+): LlmGatewayModelLimits | undefined | null {
   if (raw === undefined || raw === null || raw === "") return undefined;
   if (typeof raw !== "object") return null;
 
@@ -137,7 +137,7 @@ function parseOpenCodeModelLimits(
   };
 }
 
-function isJsonObject(value: unknown): value is OpenCodeJsonObject {
+function isJsonObject(value: unknown): value is LlmGatewayJsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
@@ -173,9 +173,9 @@ function isJsonValue(value: unknown, depth: number): boolean {
   );
 }
 
-function parseOpenCodeSessionConfig(
+function parseLlmGatewaySessionConfig(
   raw: unknown,
-): OpenCodeSessionConfig | undefined | null {
+): LlmGatewaySessionConfig | undefined | null {
   if (raw === undefined || raw === null || raw === "") return undefined;
   if (typeof raw !== "object" || Array.isArray(raw)) return null;
   const input = raw as Record<string, unknown>;
@@ -197,10 +197,10 @@ function parseOpenCodeSessionConfig(
     return null;
   }
 
-  const limits = parseOpenCodeModelLimits(input.limits);
+  const limits = parseGatewayModelLimits(input.limits);
   if (limits === null) return null;
 
-  let capabilities: OpenCodeSessionConfig["capabilities"];
+  let capabilities: LlmGatewaySessionConfig["capabilities"];
   if (input.capabilities !== undefined && input.capabilities !== null) {
     if (
       typeof input.capabilities !== "object" ||
@@ -223,7 +223,7 @@ function parseOpenCodeSessionConfig(
     }
   }
 
-  let advanced: OpenCodeSessionConfig["advanced"];
+  let advanced: LlmGatewaySessionConfig["advanced"];
   if (input.advanced !== undefined && input.advanced !== null) {
     if (typeof input.advanced !== "object" || Array.isArray(input.advanced)) {
       return null;
@@ -239,8 +239,8 @@ function parseOpenCodeSessionConfig(
       return null;
     }
     advanced = {
-      provider: rawAdvanced.provider as OpenCodeJsonObject | undefined,
-      model: rawAdvanced.model as OpenCodeJsonObject | undefined,
+      provider: rawAdvanced.provider as LlmGatewayJsonObject | undefined,
+      model: rawAdvanced.model as LlmGatewayJsonObject | undefined,
     };
   }
 
@@ -264,7 +264,7 @@ function parseOpenCodeSessionConfig(
 
 function parseNewSessionProviderDefaults(
   raw: Record<string, unknown>,
-  provider?: ProviderName,
+  provider?: LiveProviderName,
 ): NewSessionProviderDefaults | undefined | null {
   const parsed: NewSessionProviderDefaults = {};
 
@@ -342,27 +342,24 @@ function parseNewSessionProviderDefaults(
     }
   }
 
-  if ("opencodeConfig" in raw) {
-    const config = parseOpenCodeSessionConfig(raw.opencodeConfig);
+  if ("llmGatewayConfig" in raw) {
+    const config = parseLlmGatewaySessionConfig(raw.llmGatewayConfig);
     if (config === null) return null;
     if (config) {
-      if (
-        provider !== undefined &&
-        provider !== "opencode" &&
-        provider !== "pi"
-      ) {
+      if (provider !== undefined && provider !== "pi") {
         return null;
       }
-      parsed.opencodeConfig = config;
+      parsed.llmGatewayConfig = config;
     }
   }
 
   return Object.keys(parsed).length > 0 ? parsed : undefined;
 }
 
-function isSavedNewSessionProvider(value: string): value is ProviderName {
+function isSavedNewSessionProvider(value: string): value is LiveProviderName {
   return (
-    value !== "claude-ollama" && ALL_PROVIDERS.includes(value as ProviderName)
+    value !== "claude-ollama" &&
+    ALL_PROVIDERS.includes(value as LiveProviderName)
   );
 }
 
@@ -380,7 +377,7 @@ function parseNewSessionDefaults(
   if (typeof raw !== "object" || Array.isArray(raw)) return null;
 
   const input = raw as Record<string, unknown>;
-  let provider: ProviderName | undefined;
+  let provider: LiveProviderName | undefined;
   if (
     input.provider !== undefined &&
     input.provider !== null &&
@@ -398,8 +395,9 @@ function parseNewSessionDefaults(
   const flatDefaults = parseNewSessionProviderDefaults(input, provider);
   if (flatDefaults === null) return null;
 
-  const byProvider: Partial<Record<ProviderName, NewSessionProviderDefaults>> =
-    {};
+  const byProvider: Partial<
+    Record<LiveProviderName, NewSessionProviderDefaults>
+  > = {};
   if (
     input.byProvider !== undefined &&
     input.byProvider !== null &&

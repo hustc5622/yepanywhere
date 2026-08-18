@@ -93,7 +93,9 @@ async function enrichProcessInfo(
     // This fixes stale terminated-process rows that were started with the wrong
     // provider but whose session metadata and on-disk transcript are correct.
     enriched.provider =
-      summary?.provider ?? metadata?.provider ?? process.provider;
+      summary?.provider ??
+      deps.sessionMetadataService?.getProvider(process.sessionId) ??
+      process.provider;
 
     // Add context usage if available
     if (summary?.contextUsage) {
@@ -242,15 +244,11 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
       success: true,
       model: body.model,
       reasoningEffort:
-        process.provider === "opencode"
-          ? (process.requestedReasoningEffort ??
-            process.reasoningEffort ??
+        process.provider === "pi"
+          ? (process.reasoningEffort ??
+            process.requestedReasoningEffort ??
             "default")
-          : process.provider === "pi"
-            ? (process.reasoningEffort ??
-              process.requestedReasoningEffort ??
-              "default")
-            : undefined,
+          : undefined,
     });
   });
 

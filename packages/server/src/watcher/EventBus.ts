@@ -21,7 +21,6 @@ export type WatchProvider =
   | "claude"
   | "gemini"
   | "codex"
-  | "opencode"
   | "pi"
   | "kimi"
   | "zcode";
@@ -105,7 +104,7 @@ export interface ProcessStateEvent {
   lastTurnStatus?: SessionLastTurnStatus;
   /** Most recent provider error message, if the last turn failed. */
   lastErrorMessage?: string;
-  /** Present while the provider is retrying a failed request (OpenCode). */
+  /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
   timestamp: string;
 }
@@ -195,10 +194,7 @@ export interface SessionUpdatedEvent {
   sessionId: string;
   projectId: UrlProjectId;
   /** Optional producer identity for diagnostics and downstream dedup logs. */
-  trigger?:
-    | "opencode-db-reconcile"
-    | "codex-plan-updated"
-    | "zcode-db-reconcile";
+  trigger?: "codex-plan-updated" | "zcode-db-reconcile";
   /** New title (derived from first user message) */
   title?: string | null;
   /** New message count */

@@ -2,11 +2,11 @@ import {
   ALL_CODEX_MCP_MODES,
   ALL_PERMISSION_MODES,
   type CodexMcpMode,
-  type OpenCodeJsonObject,
-  type OpenCodeModelCapabilities,
-  type OpenCodeModelLimits,
-  type OpenCodeRequestProtocol,
-  type OpenCodeSessionConfig,
+  type LlmGatewayJsonObject,
+  type LlmGatewayModelCapabilities,
+  type LlmGatewayModelLimits,
+  type LlmGatewayRequestProtocol,
+  type LlmGatewaySessionConfig,
   type PermissionRules,
   type ProviderName,
   type SessionCreatedBy,
@@ -50,6 +50,10 @@ import {
   CodexModelSourceError,
   getCodexModelSourceRegistry,
 } from "../sdk/providers/codex-model-sources.js";
+import {
+  isProviderEnabled,
+  isRetiredProviderName,
+} from "../sdk/providers/policy.js";
 import type {
   CodexStructuredUserInput,
   PermissionMode,
@@ -59,7 +63,6 @@ import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
-import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import type { PiSessionReader } from "../sessions/pi-reader.js";
 import {
   type ProviderResolutionDeps,
@@ -98,14 +101,13 @@ export interface SessionCommandServiceDeps {
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
-  opencodeDbPath?: string;
   zcodeDbPath?: string;
-  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
+  enabledProviders?: readonly string[];
 }
 
 export interface StartSessionCommandInput {
@@ -165,15 +167,15 @@ export interface StartSessionBody {
   mode?: PermissionMode;
   model?: string;
   thinking?: ThinkingOption;
-  /** Exact provider reasoning effort / OpenCode model variant. */
+  /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only used for Codex. */
   codexModelProvider?: string;
-  /** OpenCode/Pi managed gateway provider/model configuration. */
-  opencodeConfig?: OpenCodeSessionConfig;
+  /** Managed gateway provider/model configuration. */
+  llmGatewayConfig?: LlmGatewaySessionConfig;
   /** Client-generated temp ID for optimistic UI tracking. */
   tempId?: string;
   /** SSH host alias for remote execution (undefined = local). */
@@ -196,7 +198,7 @@ export interface CreateSessionBody {
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
   codexModelProvider?: string;
-  opencodeConfig?: OpenCodeSessionConfig;
+  llmGatewayConfig?: LlmGatewaySessionConfig;
   executor?: string;
   permissions?: PermissionRules;
 }
@@ -328,12 +330,7 @@ function resolveCodexModelProviderForStart(
 function supportsResumeSessionAt(
   provider: ProviderName | string | undefined,
 ): boolean {
-  return (
-    provider === "claude" ||
-    provider === "opencode" ||
-    provider === "pi" ||
-    provider === "zcode"
-  );
+  return provider === "claude" || provider === "pi" || provider === "zcode";
 }
 
 function resolveCodexResumeSource(
@@ -399,8 +396,8 @@ function validateOptionalCodexInputs(value: unknown): string | undefined {
   return undefined;
 }
 
-function parseOpenCodeModelLimits(rawLimits: unknown): {
-  limits: OpenCodeModelLimits | undefined;
+function parseGatewayModelLimits(rawLimits: unknown): {
+  limits: LlmGatewayModelLimits | undefined;
   error?: string;
 } {
   if (rawLimits === undefined || rawLimits === null || rawLimits === "") {
@@ -409,7 +406,7 @@ function parseOpenCodeModelLimits(rawLimits: unknown): {
   if (!isPlainObject(rawLimits)) {
     return {
       limits: undefined,
-      error: "opencodeConfig.limits must be an object",
+      error: "llmGatewayConfig.limits must be an object",
     };
   }
 
@@ -420,29 +417,29 @@ function parseOpenCodeModelLimits(rawLimits: unknown): {
   if (!hasContext || !hasOutput) {
     return {
       limits: undefined,
-      error: "opencodeConfig.limits requires both context and output",
+      error: "llmGatewayConfig.limits requires both context and output",
     };
   }
 
   const context = parseOptionalPositiveInteger(
     rawLimits.context,
-    "opencodeConfig.limits.context",
+    "llmGatewayConfig.limits.context",
   );
   if (context.error) return { limits: undefined, error: context.error };
   const output = parseOptionalPositiveInteger(
     rawLimits.output,
-    "opencodeConfig.limits.output",
+    "llmGatewayConfig.limits.output",
   );
   if (output.error) return { limits: undefined, error: output.error };
   if (context.value === undefined || output.value === undefined) {
     return {
       limits: undefined,
-      error: "opencodeConfig.limits requires both context and output",
+      error: "llmGatewayConfig.limits requires both context and output",
     };
   }
   const input = parseOptionalPositiveInteger(
     rawLimits.input,
-    "opencodeConfig.limits.input",
+    "llmGatewayConfig.limits.input",
   );
   if (input.error) return { limits: undefined, error: input.error };
   return {
@@ -454,7 +451,7 @@ function parseOpenCodeModelLimits(rawLimits: unknown): {
   };
 }
 
-function validateOpenCodeJson(
+function validateGatewayJson(
   value: unknown,
   fieldName: string,
   depth = 0,
@@ -472,7 +469,7 @@ function validateOpenCodeJson(
   }
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index += 1) {
-      const error = validateOpenCodeJson(
+      const error = validateGatewayJson(
         value[index],
         `${fieldName}[${index}]`,
         depth + 1,
@@ -486,37 +483,37 @@ function validateOpenCodeJson(
     if (key === "__proto__" || key === "prototype" || key === "constructor") {
       return `${fieldName} contains a reserved key`;
     }
-    const error = validateOpenCodeJson(item, `${fieldName}.${key}`, depth + 1);
+    const error = validateGatewayJson(item, `${fieldName}.${key}`, depth + 1);
     if (error) return error;
   }
   return undefined;
 }
 
-function parseOpenCodeAdvancedObject(
+function parseGatewayAdvancedObject(
   value: unknown,
   fieldName: string,
-): { value?: OpenCodeJsonObject; error?: string } {
+): { value?: LlmGatewayJsonObject; error?: string } {
   if (value === undefined || value === null) return {};
   if (!isPlainObject(value)) return { error: `${fieldName} must be an object` };
-  const error = validateOpenCodeJson(value, fieldName);
+  const error = validateGatewayJson(value, fieldName);
   if (error) return { error };
   if (JSON.stringify(value).length > 65_536) {
     return { error: `${fieldName} is too large` };
   }
-  return { value: value as OpenCodeJsonObject };
+  return { value: value as LlmGatewayJsonObject };
 }
 
-export function parseOptionalOpenCodeConfig(raw: unknown): {
-  opencodeConfig: OpenCodeSessionConfig | undefined;
+export function parseOptionalLlmGatewayConfig(raw: unknown): {
+  llmGatewayConfig: LlmGatewaySessionConfig | undefined;
   error?: string;
 } {
   if (raw === undefined || raw === null || raw === "") {
-    return { opencodeConfig: undefined };
+    return { llmGatewayConfig: undefined };
   }
   if (!isPlainObject(raw)) {
     return {
-      opencodeConfig: undefined,
-      error: "opencodeConfig must be an object",
+      llmGatewayConfig: undefined,
+      error: "llmGatewayConfig must be an object",
     };
   }
   const model = typeof raw.model === "string" ? raw.model.trim() : "";
@@ -529,8 +526,8 @@ export function parseOptionalOpenCodeConfig(raw: unknown): {
     Array.from(model).some((character) => character.charCodeAt(0) < 32)
   ) {
     return {
-      opencodeConfig: undefined,
-      error: "opencodeConfig.model must be a valid model ID",
+      llmGatewayConfig: undefined,
+      error: "llmGatewayConfig.model must be a valid model ID",
     };
   }
   const requestProtocol = raw.requestProtocol;
@@ -539,21 +536,21 @@ export function parseOptionalOpenCodeConfig(raw: unknown): {
     requestProtocol !== "anthropic"
   ) {
     return {
-      opencodeConfig: undefined,
-      error: "opencodeConfig.requestProtocol is invalid",
+      llmGatewayConfig: undefined,
+      error: "llmGatewayConfig.requestProtocol is invalid",
     };
   }
-  const parsedLimits = parseOpenCodeModelLimits(raw.limits);
+  const parsedLimits = parseGatewayModelLimits(raw.limits);
   if (parsedLimits.error) {
-    return { opencodeConfig: undefined, error: parsedLimits.error };
+    return { llmGatewayConfig: undefined, error: parsedLimits.error };
   }
 
-  let capabilities: OpenCodeModelCapabilities | undefined;
+  let capabilities: LlmGatewayModelCapabilities | undefined;
   if (raw.capabilities !== undefined && raw.capabilities !== null) {
     if (!isPlainObject(raw.capabilities)) {
       return {
-        opencodeConfig: undefined,
-        error: "opencodeConfig.capabilities must be an object",
+        llmGatewayConfig: undefined,
+        error: "llmGatewayConfig.capabilities must be an object",
       };
     }
     capabilities = {};
@@ -567,35 +564,35 @@ export function parseOptionalOpenCodeConfig(raw: unknown): {
       if (value === undefined) continue;
       if (typeof value !== "boolean") {
         return {
-          opencodeConfig: undefined,
-          error: `opencodeConfig.capabilities.${key} must be a boolean`,
+          llmGatewayConfig: undefined,
+          error: `llmGatewayConfig.capabilities.${key} must be a boolean`,
         };
       }
       capabilities[key] = value;
     }
   }
 
-  let advanced: OpenCodeSessionConfig["advanced"];
+  let advanced: LlmGatewaySessionConfig["advanced"];
   if (raw.advanced !== undefined && raw.advanced !== null) {
     if (!isPlainObject(raw.advanced)) {
       return {
-        opencodeConfig: undefined,
-        error: "opencodeConfig.advanced must be an object",
+        llmGatewayConfig: undefined,
+        error: "llmGatewayConfig.advanced must be an object",
       };
     }
-    const provider = parseOpenCodeAdvancedObject(
+    const provider = parseGatewayAdvancedObject(
       raw.advanced.provider,
-      "opencodeConfig.advanced.provider",
+      "llmGatewayConfig.advanced.provider",
     );
     if (provider.error) {
-      return { opencodeConfig: undefined, error: provider.error };
+      return { llmGatewayConfig: undefined, error: provider.error };
     }
-    const modelPatch = parseOpenCodeAdvancedObject(
+    const modelPatch = parseGatewayAdvancedObject(
       raw.advanced.model,
-      "opencodeConfig.advanced.model",
+      "llmGatewayConfig.advanced.model",
     );
     if (modelPatch.error) {
-      return { opencodeConfig: undefined, error: modelPatch.error };
+      return { llmGatewayConfig: undefined, error: modelPatch.error };
     }
     if (provider.value || modelPatch.value) {
       advanced = { provider: provider.value, model: modelPatch.value };
@@ -606,16 +603,16 @@ export function parseOptionalOpenCodeConfig(raw: unknown): {
   if (raw.name !== undefined && raw.name !== null && raw.name !== "") {
     if (typeof raw.name !== "string" || raw.name.trim().length > 200) {
       return {
-        opencodeConfig: undefined,
-        error: "opencodeConfig.name must be a string up to 200 characters",
+        llmGatewayConfig: undefined,
+        error: "llmGatewayConfig.name must be a string up to 200 characters",
       };
     }
     name = raw.name.trim();
   }
   return {
-    opencodeConfig: {
+    llmGatewayConfig: {
       model,
-      requestProtocol: requestProtocol as OpenCodeRequestProtocol,
+      requestProtocol: requestProtocol as LlmGatewayRequestProtocol,
       ...(name ? { name } : {}),
       ...(parsedLimits.limits ? { limits: parsedLimits.limits } : {}),
       ...(capabilities && Object.keys(capabilities).length > 0
@@ -654,8 +651,7 @@ export function normalizeReasoningEffortForProvider(
   provider: ProviderName | undefined,
   reasoningEffort: string | undefined,
 ): string | undefined {
-  return (provider === "opencode" || provider === "pi") &&
-    reasoningEffort === "default"
+  return provider === "pi" && reasoningEffort === "default"
     ? undefined
     : reasoningEffort;
 }
@@ -673,6 +669,8 @@ export class SessionCommandService {
     input: StartSessionCommandInput,
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { projectId, body } = input;
+    const providerFailure = this.validateRequestedProvider(body.provider);
+    if (providerFailure) return providerFailure;
     if (!isUrlProjectId(projectId)) {
       return commandFailure("Invalid project ID format", 400);
     }
@@ -716,11 +714,11 @@ export class SessionCommandService {
       provider: body.provider,
       executor: prepared.executor,
       model: body.model,
-      opencodeConfig: prepared.opencodeConfig
+      llmGatewayConfig: prepared.llmGatewayConfig
         ? {
-            model: prepared.opencodeConfig.model,
-            requestProtocol: prepared.opencodeConfig.requestProtocol,
-            limits: prepared.opencodeConfig.limits,
+            model: prepared.llmGatewayConfig.model,
+            requestProtocol: prepared.llmGatewayConfig.requestProtocol,
+            limits: prepared.llmGatewayConfig.limits,
           }
         : undefined,
     });
@@ -744,11 +742,11 @@ export class SessionCommandService {
       return commandFailure("Session could not start", 503);
     }
 
-    this.recordOpenCodeContextWindowOverride({
+    this.recordGatewayContextWindowOverride({
       provider: result.provider,
-      model: prepared.opencodeConfig?.model ?? prepared.model,
+      model: prepared.llmGatewayConfig?.model ?? prepared.model,
       sessionId: result.sessionId,
-      limits: prepared.opencodeConfig?.limits,
+      limits: prepared.llmGatewayConfig?.limits,
     });
     await this.persistNewSessionMetadata(result, prepared, body.provider);
     await this.recordSessionOrigin(result.sessionId, project, input.origin);
@@ -766,6 +764,8 @@ export class SessionCommandService {
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { projectId } = input;
     const body = input.body ?? {};
+    const providerFailure = this.validateRequestedProvider(body.provider);
+    if (providerFailure) return providerFailure;
     if (!isUrlProjectId(projectId)) {
       return commandFailure("Invalid project ID format", 400);
     }
@@ -796,11 +796,11 @@ export class SessionCommandService {
       return commandFailure("Session could not start", 503);
     }
 
-    this.recordOpenCodeContextWindowOverride({
+    this.recordGatewayContextWindowOverride({
       provider: result.provider,
-      model: prepared.opencodeConfig?.model ?? prepared.model,
+      model: prepared.llmGatewayConfig?.model ?? prepared.model,
       sessionId: result.sessionId,
-      limits: prepared.opencodeConfig?.limits,
+      limits: prepared.llmGatewayConfig?.limits,
     });
     await this.persistNewSessionMetadata(result, prepared, body.provider, true);
     await this.recordSessionOrigin(result.sessionId, project, input.origin);
@@ -817,6 +817,13 @@ export class SessionCommandService {
     input: ResumeSessionCommandInput,
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { projectId, sessionId, body } = input;
+    const persistedProvider =
+      this.deps.sessionMetadataService?.getPersistedProvider?.(sessionId) ??
+      this.deps.sessionMetadataService?.getProvider(sessionId);
+    const providerFailure = this.validateRequestedProvider(
+      persistedProvider ?? body.provider,
+    );
+    if (providerFailure) return providerFailure;
     if (!isUrlProjectId(projectId)) {
       return commandFailure("Invalid project ID format", 400);
     }
@@ -876,11 +883,11 @@ export class SessionCommandService {
     if (parsedCodexMcpMode.error) {
       return commandFailure(parsedCodexMcpMode.error, 400);
     }
-    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
-      body.opencodeConfig,
+    const parsedGatewayConfig = parseOptionalLlmGatewayConfig(
+      body.llmGatewayConfig,
     );
-    if (parsedOpenCodeConfig.error) {
-      return commandFailure(parsedOpenCodeConfig.error, 400);
+    if (parsedGatewayConfig.error) {
+      return commandFailure(parsedGatewayConfig.error, 400);
     }
     const parsedReasoningEffort = parseOptionalReasoningEffort(
       body.reasoningEffort,
@@ -906,12 +913,10 @@ export class SessionCommandService {
       await this.deps.sessionMetadataService?.setExecutor(sessionId, executor);
     }
 
-    const metadataProvider = this.deps.sessionMetadataService?.getProvider(
-      sessionId,
-    ) as ProviderName | undefined;
-    const opencodeConfig =
-      parsedOpenCodeConfig.opencodeConfig ??
-      this.deps.sessionMetadataService?.getOpenCodeConfig?.(sessionId);
+    const metadataProvider = persistedProvider as ProviderName | undefined;
+    const llmGatewayConfig =
+      parsedGatewayConfig.llmGatewayConfig ??
+      this.deps.sessionMetadataService?.getLlmGatewayConfig?.(sessionId);
 
     let sessionSummary: SessionSummary | null = null;
     let providerName = metadataProvider ?? body.provider;
@@ -1007,11 +1012,11 @@ export class SessionCommandService {
             : null,
         tempId: body.tempId ?? null,
         messageLength: body.message.length,
-        opencodeConfig: opencodeConfig
+        llmGatewayConfig: llmGatewayConfig
           ? {
-              model: opencodeConfig.model,
-              requestProtocol: opencodeConfig.requestProtocol,
-              limits: opencodeConfig.limits,
+              model: llmGatewayConfig.model,
+              requestProtocol: llmGatewayConfig.requestProtocol,
+              limits: llmGatewayConfig.limits,
             }
           : undefined,
       },
@@ -1020,7 +1025,6 @@ export class SessionCommandService {
 
     const providerRestoresReasoningEffort =
       providerName === "codex" ||
-      providerName === "opencode" ||
       providerName === "pi" ||
       providerName === "kimi";
     const resumeReasoningEffort =
@@ -1058,9 +1062,7 @@ export class SessionCommandService {
     const isSourcePreservingFork =
       (providerName === "codex" &&
         effectiveCodexForkExcludedTurns !== undefined) ||
-      ((providerName === "opencode" ||
-        providerName === "pi" ||
-        providerName === "zcode") &&
+      ((providerName === "pi" || providerName === "zcode") &&
         Boolean(body.resumeSessionAt));
     const result = await this.deps.runtimeController.resumeSession({
       sessionId,
@@ -1084,7 +1086,7 @@ export class SessionCommandService {
             : undefined,
         codexModelProvider: resumeCodexModelProvider,
         codexEventAccountId: input.origin?.codexEventAccountId,
-        opencodeConfig,
+        llmGatewayConfig,
         executor,
         globalInstructions:
           this.deps.serverSettingsService?.getSetting("globalInstructions") ||
@@ -1112,10 +1114,10 @@ export class SessionCommandService {
         resumeCodexModelProvider,
       );
     }
-    if (parsedOpenCodeConfig.opencodeConfig) {
-      await this.deps.sessionMetadataService?.setOpenCodeConfig(
+    if (parsedGatewayConfig.llmGatewayConfig) {
+      await this.deps.sessionMetadataService?.setLlmGatewayConfig(
         sessionId,
-        parsedOpenCodeConfig.opencodeConfig,
+        parsedGatewayConfig.llmGatewayConfig,
       );
     }
 
@@ -1158,10 +1160,10 @@ export class SessionCommandService {
           executor,
         );
       }
-      if (opencodeConfig) {
-        await this.deps.sessionMetadataService?.setOpenCodeConfig(
+      if (llmGatewayConfig) {
+        await this.deps.sessionMetadataService?.setLlmGatewayConfig(
           actualSessionId,
-          opencodeConfig,
+          llmGatewayConfig,
         );
       }
       if (
@@ -1201,11 +1203,11 @@ export class SessionCommandService {
       await this.recordSessionOrigin(actualSessionId, project, input.origin);
     }
 
-    this.recordOpenCodeContextWindowOverride({
+    this.recordGatewayContextWindowOverride({
       provider: providerName,
-      model: opencodeConfig?.model ?? model,
+      model: llmGatewayConfig?.model ?? model,
       sessionId: actualSessionId,
-      limits: opencodeConfig?.limits,
+      limits: llmGatewayConfig?.limits,
     });
     getLogger().info(
       {
@@ -1269,11 +1271,11 @@ export class SessionCommandService {
     if (parsedCodexMcpMode.error) {
       return commandFailure(parsedCodexMcpMode.error, 400);
     }
-    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
-      body.opencodeConfig,
+    const parsedGatewayConfig = parseOptionalLlmGatewayConfig(
+      body.llmGatewayConfig,
     );
-    if (parsedOpenCodeConfig.error) {
-      return commandFailure(parsedOpenCodeConfig.error, 400);
+    if (parsedGatewayConfig.error) {
+      return commandFailure(parsedGatewayConfig.error, 400);
     }
     const parsedReasoningEffort = parseOptionalReasoningEffort(
       body.reasoningEffort,
@@ -1320,9 +1322,9 @@ export class SessionCommandService {
       body.model === undefined
         ? process.model
         : resolveSessionModel(body.model, providerName);
-    const opencodeConfig =
-      parsedOpenCodeConfig.opencodeConfig ??
-      this.deps.sessionMetadataService?.getOpenCodeConfig?.(sessionId);
+    const llmGatewayConfig =
+      parsedGatewayConfig.llmGatewayConfig ??
+      this.deps.sessionMetadataService?.getLlmGatewayConfig?.(sessionId);
     const result = await this.deps.runtimeController.queueMessage({
       sessionId,
       projectPath: process.projectPath,
@@ -1353,7 +1355,7 @@ export class SessionCommandService {
                 sessionId,
               )
             : undefined,
-        opencodeConfig,
+        llmGatewayConfig,
         executor:
           parsedBodyExecutor.executor ??
           metadataExecutor.executor ??
@@ -1377,11 +1379,11 @@ export class SessionCommandService {
     }
 
     await this.persistPermissionMode(sessionId, effectivePermissionMode);
-    this.recordOpenCodeContextWindowOverride({
+    this.recordGatewayContextWindowOverride({
       provider: providerName,
-      model: opencodeConfig?.model ?? model,
+      model: llmGatewayConfig?.model ?? model,
       sessionId,
-      limits: opencodeConfig?.limits,
+      limits: llmGatewayConfig?.limits,
     });
     return commandSuccess({
       queued: true,
@@ -1627,6 +1629,25 @@ export class SessionCommandService {
     );
   }
 
+  private validateRequestedProvider(
+    provider: unknown,
+  ): SessionCommandResult<never> | null {
+    if (isRetiredProviderName(provider)) {
+      return commandFailure("OpenCode provider has been retired", 410, {
+        code: "provider_retired",
+      });
+    }
+    if (
+      typeof provider === "string" &&
+      !isProviderEnabled(provider, this.deps.enabledProviders)
+    ) {
+      return commandFailure("Provider is not enabled", 404, {
+        code: "provider_disabled",
+      });
+    }
+    return null;
+  }
+
   private prepareNewSession(
     project: Project,
     body: CreateSessionBody | StartSessionBody,
@@ -1635,7 +1656,7 @@ export class SessionCommandService {
         ok: true;
         executor?: string;
         model?: string;
-        opencodeConfig?: OpenCodeSessionConfig;
+        llmGatewayConfig?: LlmGatewaySessionConfig;
         codexMcpMode?: CodexMcpMode;
         codexModelProvider?: string;
         modelSettings: Parameters<
@@ -1660,13 +1681,13 @@ export class SessionCommandService {
         result: commandFailure(parsedCodexMcpMode.error, 400),
       };
     }
-    const parsedOpenCodeConfig = parseOptionalOpenCodeConfig(
-      body.opencodeConfig,
+    const parsedGatewayConfig = parseOptionalLlmGatewayConfig(
+      body.llmGatewayConfig,
     );
-    if (parsedOpenCodeConfig.error) {
+    if (parsedGatewayConfig.error) {
       return {
         ok: false,
-        result: commandFailure(parsedOpenCodeConfig.error, 400),
+        result: commandFailure(parsedGatewayConfig.error, 400),
       };
     }
     const parsedReasoningEffort = parseOptionalReasoningEffort(
@@ -1683,6 +1704,8 @@ export class SessionCommandService {
       ? thinkingOptionToConfig(body.thinking)
       : { thinking: undefined, effort: undefined };
     const provider = body.provider ?? project.provider;
+    const providerFailure = this.validateRequestedProvider(provider);
+    if (providerFailure) return { ok: false, result: providerFailure };
     const model = resolveSessionModel(body.model, provider);
     const parsedCodexModelProvider = resolveCodexModelProviderForStart(
       provider,
@@ -1702,7 +1725,7 @@ export class SessionCommandService {
       ok: true,
       executor: parsedExecutor.executor,
       model,
-      opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
+      llmGatewayConfig: parsedGatewayConfig.llmGatewayConfig,
       codexMcpMode: parsedCodexMcpMode.codexMcpMode,
       codexModelProvider: parsedCodexModelProvider.value,
       modelSettings: {
@@ -1713,10 +1736,10 @@ export class SessionCommandService {
           provider,
           parsedReasoningEffort.reasoningEffort,
         ),
-        providerName: body.provider,
+        providerName: provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
         codexModelProvider: parsedCodexModelProvider.value,
-        opencodeConfig: parsedOpenCodeConfig.opencodeConfig,
+        llmGatewayConfig: parsedGatewayConfig.llmGatewayConfig,
         executor: parsedExecutor.executor,
         globalInstructions:
           this.deps.serverSettingsService?.getSetting("globalInstructions") ||
@@ -1761,8 +1784,6 @@ export class SessionCommandService {
       geminiSessionsDir: this.deps.geminiSessionsDir,
       geminiReaderFactory: this.deps.geminiReaderFactory,
       geminiHashToCwd: this.deps.geminiScanner?.getHashToCwd(),
-      opencodeDbPath: this.deps.opencodeDbPath,
-      opencodeReaderFactory: this.deps.opencodeReaderFactory,
       piSessionsDir: this.deps.piSessionsDir,
       piReaderFactory: this.deps.piReaderFactory,
       kimiSessionsDir: this.deps.kimiSessionsDir,
@@ -1811,7 +1832,7 @@ export class SessionCommandService {
     result: RuntimeStartedProcess,
     prepared: {
       executor?: string;
-      opencodeConfig?: OpenCodeSessionConfig;
+      llmGatewayConfig?: LlmGatewaySessionConfig;
       codexMcpMode?: CodexMcpMode;
       codexModelProvider?: string;
     },
@@ -1826,10 +1847,10 @@ export class SessionCommandService {
     if (prepared.executor) {
       await metadata.setExecutor(result.sessionId, prepared.executor);
     }
-    if (prepared.opencodeConfig) {
-      await metadata.setOpenCodeConfig(
+    if (prepared.llmGatewayConfig) {
+      await metadata.setLlmGatewayConfig(
         result.sessionId,
-        prepared.opencodeConfig,
+        prepared.llmGatewayConfig,
       );
     }
     if (result.provider === "codex" && prepared.codexMcpMode) {
@@ -1878,17 +1899,13 @@ export class SessionCommandService {
     });
   }
 
-  private recordOpenCodeContextWindowOverride(input: {
+  private recordGatewayContextWindowOverride(input: {
     provider?: ProviderName;
     model?: string;
     sessionId?: string;
-    limits?: OpenCodeModelLimits;
+    limits?: LlmGatewayModelLimits;
   }): void {
-    if (
-      (input.provider !== "opencode" && input.provider !== "pi") ||
-      !input.limits ||
-      input.limits.context <= 0
-    ) {
+    if (input.provider !== "pi" || !input.limits || input.limits.context <= 0) {
       return;
     }
     if (input.model) {

@@ -416,7 +416,7 @@ describe("createSessionSubscription", () => {
   });
 
   it("preserves provider emission order across uneven augmentation work", async () => {
-    // OpenCode returns `[message_stop, assistant(text), assistant(tool_use)]`
+    // Some providers return `[message_stop, assistant(text), assistant(tool_use)]`
     // from a single upstream event. The text message carries string content, so
     // it goes through final-markdown rendering and the streaming coordinator,
     // while the tool_use message needs no augmentation. Handling events

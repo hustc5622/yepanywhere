@@ -8,6 +8,7 @@ import {
   type UrlProjectId,
 } from "@yep-anywhere/shared";
 import type { ProjectMetadataService } from "../metadata/index.js";
+import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import {
   isLocalPathWithin,
   tryMapLocalPathToRemote,
@@ -20,10 +21,6 @@ import type { EventBus, FileChangeEvent } from "../watcher/index.js";
 import { CODEX_SESSIONS_DIR, CodexSessionScanner } from "./codex-scanner.js";
 import { GEMINI_TMP_DIR, GeminiSessionScanner } from "./gemini-scanner.js";
 import { KIMI_SESSIONS_DIR, KimiSessionScanner } from "./kimi-scanner.js";
-import {
-  OPENCODE_DB_PATH,
-  OpenCodeSessionScanner,
-} from "./opencode-scanner.js";
 import {
   CLAUDE_PROJECTS_DIR,
   canonicalizeProjectPath,
@@ -44,13 +41,11 @@ export interface ScannerOptions {
   piSessionsDir?: string; // override for testing
   codexScanner?: CodexSessionScanner | null; // shared provider scanner
   geminiScanner?: GeminiSessionScanner | null; // shared provider scanner
-  opencodeScanner?: OpenCodeSessionScanner | null; // shared provider scanner
   kimiScanner?: KimiSessionScanner | null; // shared provider scanner
   piScanner?: PiSessionScanner | null; // shared provider scanner
   zcodeScanner?: ZCodeSessionScanner | null; // shared provider scanner
   enableCodex?: boolean; // whether to include Codex projects (default: true)
   enableGemini?: boolean; // whether to include Gemini projects (default: true)
-  enableOpenCode?: boolean; // whether to include OpenCode projects (default: true)
   enableKimi?: boolean; // whether to include Kimi projects (default: true)
   enablePi?: boolean; // whether to include Pi projects (default: true)
   enableZCode?: boolean; // whether to include ZCode projects (default: true)
@@ -80,13 +75,11 @@ export class ProjectScanner {
   private remoteExecutors: RemoteExecutorConfig[];
   private codexScanner: CodexSessionScanner | null;
   private geminiScanner: GeminiSessionScanner | null;
-  private opencodeScanner: OpenCodeSessionScanner | null;
   private kimiScanner: KimiSessionScanner | null;
   private piScanner: PiSessionScanner | null;
   private zcodeScanner: ZCodeSessionScanner | null;
   private enableCodex: boolean;
   private enableGemini: boolean;
-  private enableOpenCode: boolean;
   private enableKimi: boolean;
   private enablePi: boolean;
   private enableZCode: boolean;
@@ -104,7 +97,6 @@ export class ProjectScanner {
     this.remoteExecutors = [...(options.remoteExecutors ?? [])];
     this.enableCodex = options.enableCodex ?? true;
     this.enableGemini = options.enableGemini ?? true;
-    this.enableOpenCode = options.enableOpenCode ?? true;
     this.enableKimi = options.enableKimi ?? true;
     this.enablePi = options.enablePi ?? true;
     this.enableZCode = options.enableZCode ?? true;
@@ -119,9 +111,6 @@ export class ProjectScanner {
         new GeminiSessionScanner({
           sessionsDir: options.geminiSessionsDir ?? GEMINI_TMP_DIR,
         }))
-      : null;
-    this.opencodeScanner = this.enableOpenCode
-      ? (options.opencodeScanner ?? new OpenCodeSessionScanner())
       : null;
     this.kimiScanner = this.enableKimi
       ? (options.kimiScanner ??
@@ -149,19 +138,13 @@ export class ProjectScanner {
         }
         if (
           event.type === "session-updated" &&
-          (event.trigger === "opencode-db-reconcile" ||
-            event.trigger === "zcode-db-reconcile")
+          event.trigger === "zcode-db-reconcile"
         ) {
-          // OpenCode and ZCode store all projects in one SQLite database. A
-          // reconcile event may be the first evidence of a project created by
-          // an external CLI, so invalidate both cache layers before
+          // A reconcile event may be the first evidence of a project created
+          // by an external CLI, so invalidate both cache layers before
           // title/event consumers resolve the encoded project ID.
           this.invalidateCache();
-          if (event.trigger === "opencode-db-reconcile") {
-            this.opencodeScanner?.invalidateCache();
-          } else {
-            this.zcodeScanner?.invalidateCache();
-          }
+          this.zcodeScanner?.invalidateCache();
         }
       });
     }
@@ -366,7 +349,6 @@ export class ProjectScanner {
         : undefined,
       hasCodexSessions: project.hasCodexSessions,
       hasGeminiSessions: project.hasGeminiSessions,
-      hasOpenCodeSessions: project.hasOpenCodeSessions,
       hasPiSessions: project.hasPiSessions,
     };
   }
@@ -393,8 +375,6 @@ export class ProjectScanner {
       this.codexScanner?.invalidateCache();
     } else if (event.provider === "gemini") {
       this.geminiScanner?.invalidateCache();
-    } else if (event.provider === "opencode") {
-      this.opencodeScanner?.invalidateCache();
     } else if (event.provider === "kimi") {
       this.kimiScanner?.invalidateCache();
     } else if (event.provider === "pi") {
@@ -468,7 +448,6 @@ export class ProjectScanner {
           sessionDir,
           hasCodexSessions: false,
           hasGeminiSessions: false,
-          hasOpenCodeSessions: false,
           hasPiSessions: false,
           activeOwnedCount: 0, // populated by route
           activeExternalCount: 0, // populated by route
@@ -564,7 +543,6 @@ export class ProjectScanner {
           name: basename(projectPath),
           hasCodexSessions: true,
           hasGeminiSessions: false,
-          hasOpenCodeSessions: false,
           hasPiSessions: false,
         });
       }
@@ -601,41 +579,6 @@ export class ProjectScanner {
           name: basename(projectPath),
           hasCodexSessions: false,
           hasGeminiSessions: true,
-          hasOpenCodeSessions: false,
-          hasPiSessions: false,
-        });
-      }
-    }
-
-    // Merge OpenCode projects if enabled
-    if (this.opencodeScanner) {
-      const openCodeProjects = await this.opencodeScanner.listProjects();
-      for (const openCodeProject of openCodeProjects) {
-        const projectPath = canonicalizeProjectPath(openCodeProject.path);
-        const existing = projects.find(
-          (project) => canonicalizeProjectPath(project.path) === projectPath,
-        );
-        if (existing) {
-          existing.hasOpenCodeSessions = true;
-          existing.sessionCount += openCodeProject.sessionCount;
-          if (
-            openCodeProject.lastActivity &&
-            (!existing.lastActivity ||
-              openCodeProject.lastActivity > existing.lastActivity)
-          ) {
-            existing.lastActivity = openCodeProject.lastActivity;
-          }
-          continue;
-        }
-        seenPaths.add(projectPath);
-        projects.push({
-          ...openCodeProject,
-          id: encodeProjectId(projectPath),
-          path: projectPath,
-          name: basename(projectPath),
-          hasCodexSessions: false,
-          hasGeminiSessions: false,
-          hasOpenCodeSessions: true,
           hasPiSessions: false,
         });
       }
@@ -670,7 +613,6 @@ export class ProjectScanner {
           name: basename(projectPath),
           hasCodexSessions: false,
           hasGeminiSessions: false,
-          hasOpenCodeSessions: false,
           hasPiSessions: true,
         });
       }
@@ -704,7 +646,6 @@ export class ProjectScanner {
           name: basename(projectPath),
           hasCodexSessions: false,
           hasGeminiSessions: false,
-          hasOpenCodeSessions: false,
           hasPiSessions: false,
           hasKimiSessions: true,
         });
@@ -739,7 +680,6 @@ export class ProjectScanner {
           name: basename(projectPath),
           hasCodexSessions: false,
           hasGeminiSessions: false,
-          hasOpenCodeSessions: false,
           hasPiSessions: false,
           hasKimiSessions: false,
           hasZCodeSessions: true,
@@ -773,7 +713,6 @@ export class ProjectScanner {
           sessionDir: this.getClaudeSessionDirForProject(projectPath),
           hasCodexSessions: false,
           hasGeminiSessions: false,
-          hasOpenCodeSessions: false,
           hasPiSessions: false,
           activeOwnedCount: 0,
           activeExternalCount: 0,
@@ -795,7 +734,6 @@ export class ProjectScanner {
         sessionDir: this.getClaudeSessionDirForProject(home),
         hasCodexSessions: false,
         hasGeminiSessions: false,
-        hasOpenCodeSessions: false,
         hasPiSessions: false,
         activeOwnedCount: 0,
         activeExternalCount: 0,
@@ -821,7 +759,7 @@ export class ProjectScanner {
    */
   async getOrCreateProject(
     projectId: string,
-    preferredProvider?: ProviderName,
+    preferredProvider?: ProviderName | string,
   ): Promise<Project | null> {
     let resolvedProjectId = projectId;
 
@@ -864,8 +802,11 @@ export class ProjectScanner {
     }
 
     // Determine provider from the caller preference or discovered session trees.
-    let provider: ProviderName = preferredProvider ?? DEFAULT_PROVIDER;
-    if (!preferredProvider) {
+    const livePreferredProvider = isRetiredProviderName(preferredProvider)
+      ? undefined
+      : (preferredProvider as ProviderName | undefined);
+    let provider: ProviderName = livePreferredProvider ?? DEFAULT_PROVIDER;
+    if (!livePreferredProvider) {
       // Check if Codex sessions exist for this path
       if (this.codexScanner) {
         const codexSessions =
@@ -881,15 +822,6 @@ export class ProjectScanner {
           await this.geminiScanner.getSessionsForProject(projectPath);
         if (geminiSessions.length > 0) {
           provider = "gemini";
-        }
-      }
-
-      // Check if OpenCode sessions exist for this path (only if no Codex/Gemini sessions)
-      if (provider === "claude" && this.opencodeScanner) {
-        const openCodeSessions =
-          await this.opencodeScanner.getSessionsForProject(projectPath);
-        if (openCodeSessions.length > 0) {
-          provider = "opencode";
         }
       }
 
@@ -929,8 +861,6 @@ export class ProjectScanner {
       sessionDir = CODEX_SESSIONS_DIR;
     } else if (provider === "gemini") {
       sessionDir = GEMINI_TMP_DIR;
-    } else if (provider === "opencode") {
-      sessionDir = OPENCODE_DB_PATH;
     } else if (provider === "pi") {
       sessionDir = PI_SESSIONS_DIR;
     } else if (provider === "kimi") {
@@ -949,7 +879,6 @@ export class ProjectScanner {
       sessionDir,
       hasCodexSessions: provider === "codex",
       hasGeminiSessions: provider === "gemini",
-      hasOpenCodeSessions: provider === "opencode",
       hasPiSessions: provider === "pi",
       hasKimiSessions: provider === "kimi",
       hasZCodeSessions: provider === "zcode",
@@ -1041,6 +970,3 @@ export class ProjectScanner {
     }
   }
 }
-
-// Singleton for convenience
-export const projectScanner = new ProjectScanner();

@@ -67,6 +67,29 @@ describe("SessionMetadataService", () => {
       });
     });
 
+    it("retains but does not reactivate a retired persisted provider", async () => {
+      await writeFile(
+        join(testDir, "session-metadata.json"),
+        JSON.stringify({
+          version: 2,
+          sessions: {
+            legacy: { provider: "opencode", customTitle: "Keep this" },
+            current: { provider: "codex" },
+          },
+        }),
+      );
+
+      await service.initialize();
+
+      expect(service.getMetadata("legacy")).toMatchObject({
+        provider: "opencode",
+        customTitle: "Keep this",
+      });
+      expect(service.getPersistedProvider("legacy")).toBe("opencode");
+      expect(service.getProvider("legacy")).toBeUndefined();
+      expect(service.getProvider("current")).toBe("codex");
+    });
+
     it("handles corrupted JSON gracefully", async () => {
       await writeFile(
         join(testDir, "session-metadata.json"),
@@ -359,7 +382,7 @@ describe("SessionMetadataService", () => {
         encodeProjectId("/Users/someone/work/alpha"),
         "/Users/someone/work/alpha",
       );
-      await service.setProvider("session-1", "opencode");
+      await service.setProvider("session-1", "codex");
       await service.setTitle("session-1", "Renamed");
 
       expect(service.getProjectLocation("session-1")).toEqual({
@@ -645,7 +668,7 @@ describe("SessionMetadataService", () => {
     });
   });
 
-  describe("OpenCode session configuration", () => {
+  describe("LLM gateway session configuration", () => {
     it("persists the request protocol and model configuration for resume", async () => {
       await service.initialize();
       const config = {
@@ -658,11 +681,11 @@ describe("SessionMetadataService", () => {
         },
       };
 
-      await service.setOpenCodeConfig("session-1", config);
+      await service.setLlmGatewayConfig("session-1", config);
 
       const reloaded = new SessionMetadataService({ dataDir: testDir });
       await reloaded.initialize();
-      expect(reloaded.getOpenCodeConfig("session-1")).toEqual(config);
+      expect(reloaded.getLlmGatewayConfig("session-1")).toEqual(config);
     });
   });
 

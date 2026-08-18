@@ -3,7 +3,6 @@ import type {
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import { describe, expect, it, vi } from "vitest";
-import type { OpenCodeBridgeController } from "../../src/opencode-bridge/types.js";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import { createProjectsRoutes } from "../../src/routes/projects.js";
 import type { CodexSessionReader } from "../../src/sessions/codex-reader.js";
@@ -114,106 +113,6 @@ describe("Projects Routes", () => {
       id: "sess-1",
       title: "Codex project session",
       provider: "codex",
-    });
-  });
-
-  it("includes active OpenCode bridge sessions in project session lists", async () => {
-    const project = createProject();
-    const claudeReader = {
-      listSessions: vi.fn(async () => []),
-    } as unknown as ISessionReader;
-    const bridgeSession: SessionSummary = {
-      id: "ses_opencode_live",
-      projectId: project.id,
-      title: "OpenCode live session",
-      fullTitle: "OpenCode live session",
-      createdAt: "2026-07-09T09:00:00.000Z",
-      updatedAt: "2026-07-09T09:01:00.000Z",
-      messageCount: 1,
-      ownership: { owner: "external" },
-      provider: "opencode",
-      activity: "in-turn",
-      source: "opencode-bridge",
-      model: "glm-5.2",
-    };
-
-    const routes = createProjectsRoutes({
-      scanner: {
-        getOrCreateProject: vi.fn(async () => project),
-      } as unknown as ProjectScanner,
-      readerFactory: vi.fn(() => claudeReader),
-      opencodeBridgeService: {
-        listSessionViews: vi.fn(async () => [
-          {
-            session: bridgeSession,
-            projectName: project.name,
-            activity: "in-turn",
-          },
-        ]),
-        isSessionActive: vi.fn(async (sessionId: string) => {
-          return sessionId === bridgeSession.id;
-        }),
-      } as unknown as OpenCodeBridgeController,
-    });
-
-    const response = await routes.request("/proj-1/sessions");
-    expect(response.status).toBe(200);
-
-    const json = await response.json();
-    expect(json.sessions).toHaveLength(1);
-    expect(json.sessions[0]).toMatchObject({
-      id: "ses_opencode_live",
-      provider: "opencode",
-      source: "opencode-bridge",
-      model: "glm-5.2",
-      activity: "in-turn",
-      ownership: { owner: "external" },
-    });
-  });
-
-  it("counts active OpenCode bridge sessions as project external activity", async () => {
-    const project = createProject();
-    const bridgeSession: SessionSummary = {
-      id: "ses_opencode_live",
-      projectId: project.id,
-      title: "OpenCode live session",
-      fullTitle: "OpenCode live session",
-      createdAt: "2026-07-09T09:00:00.000Z",
-      updatedAt: "2026-07-09T09:01:00.000Z",
-      messageCount: 1,
-      ownership: { owner: "external" },
-      provider: "opencode",
-      activity: "in-turn",
-      source: "opencode-bridge",
-    };
-
-    const routes = createProjectsRoutes({
-      scanner: {
-        listProjects: vi.fn(async () => [project]),
-      } as unknown as ProjectScanner,
-      readerFactory: vi.fn(() => ({}) as ISessionReader),
-      gitStatusProvider: vi.fn(async () => null),
-      opencodeBridgeService: {
-        listSessionViews: vi.fn(async () => [
-          {
-            session: bridgeSession,
-            projectName: project.name,
-            activity: "in-turn",
-          },
-        ]),
-        isSessionActive: vi.fn(async (sessionId: string) => {
-          return sessionId === bridgeSession.id;
-        }),
-      } as unknown as OpenCodeBridgeController,
-    });
-
-    const response = await routes.request("/");
-    expect(response.status).toBe(200);
-
-    const json = await response.json();
-    expect(json.projects[0]).toMatchObject({
-      id: project.id,
-      activeExternalCount: 1,
     });
   });
 });

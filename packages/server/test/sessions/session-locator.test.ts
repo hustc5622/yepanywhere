@@ -87,54 +87,6 @@ function bridge(
   } as unknown as BridgeController;
 }
 
-interface TestSqliteDatabase {
-  exec(sql: string): void;
-  prepare(sql: string): { run(...params: unknown[]): void };
-  close(): void;
-}
-
-async function createOpenCodeDb(
-  rows: Array<{ id: string; directory: string }>,
-): Promise<string | null> {
-  const specifier: string = "node:sqlite";
-  // Vitest routes a bare dynamic `import("node:sqlite")` through Vite's
-  // resolver, which fails to resolve it and silently disables every test that
-  // depends on a real database. `process.getBuiltinModule` bypasses the
-  // resolver; the dynamic import stays as a fallback for plain Node.
-  const getBuiltinModule = (
-    process as unknown as { getBuiltinModule?: (name: string) => unknown }
-  ).getBuiltinModule;
-  const builtin = getBuiltinModule?.call(process, specifier) as
-    | { DatabaseSync?: new (path: string) => TestSqliteDatabase }
-    | undefined;
-  const sqlite =
-    builtin?.DatabaseSync ??
-    (await import(specifier)
-      .then(
-        (mod) =>
-          (
-            mod as {
-              DatabaseSync?: new (path: string) => TestSqliteDatabase;
-            }
-          ).DatabaseSync ?? null,
-      )
-      .catch(() => null));
-  if (!sqlite) return null;
-
-  const dbPath = join(await tempDir("opencode-db"), "opencode.db");
-  const db = new sqlite(dbPath);
-  try {
-    db.exec("CREATE TABLE session (id text PRIMARY KEY, directory text)");
-    const insert = db.prepare(
-      "INSERT INTO session (id, directory) VALUES (?, ?)",
-    );
-    for (const row of rows) insert.run(row.id, row.directory);
-  } finally {
-    db.close();
-  }
-  return dbPath;
-}
-
 async function createCodexSessionsDir(
   entries: Array<{ id: string; cwd: string }>,
 ): Promise<string> {
@@ -201,37 +153,16 @@ describe("locateSession", () => {
 
   it("resolves via a bridge sidecar and labels the provider by controller", async () => {
     const deps = baseDeps({
-      opencodeBridgeService: bridge([
+      codexBridgeService: bridge([
         { id: "ses_live", projectPath: "/Users/someone/work/live" },
       ]),
     });
 
     await expect(locateSession(deps, "ses_live")).resolves.toMatchObject({
-      provider: "opencode",
+      provider: "codex",
       projectPath: "/Users/someone/work/live",
       source: "bridge",
       archived: false,
-    });
-  });
-
-  it("keeps looking when a bridge sidecar is unreachable", async () => {
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_db", directory: "/Users/someone/work/db" },
-    ]);
-    if (!dbPath) return;
-
-    const deps = baseDeps({
-      codexBridgeService: {
-        listSessions: vi.fn(async () => {
-          throw new Error("ECONNREFUSED");
-        }),
-      } as unknown as BridgeController,
-      opencodeDbPath: dbPath,
-    });
-
-    await expect(locateSession(deps, "ses_db")).resolves.toMatchObject({
-      source: "opencode-db",
-      projectPath: "/Users/someone/work/db",
     });
   });
 
@@ -249,39 +180,6 @@ describe("locateSession", () => {
       projectName: "codex-proj",
       source: "codex-manifest",
     });
-  });
-
-  it("resolves via the global opencode sqlite row", async () => {
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_a", directory: "/Users/someone/work/one" },
-      { id: "ses_b", directory: "/Users/someone/work/two" },
-    ]);
-    if (!dbPath) return;
-
-    const deps = baseDeps({ opencodeDbPath: dbPath });
-
-    await expect(locateSession(deps, "ses_b")).resolves.toMatchObject({
-      provider: "opencode",
-      projectId: encodeProjectId("/Users/someone/work/two"),
-      projectPath: "/Users/someone/work/two",
-      source: "opencode-db",
-    });
-  });
-
-  it("ignores opencode rows with a blank directory", async () => {
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_blank", directory: "  " },
-    ]);
-    if (!dbPath) return;
-
-    await expect(
-      locateSession(baseDeps({ opencodeDbPath: dbPath }), "ses_blank"),
-    ).resolves.toBeNull();
-  });
-
-  it("survives a missing opencode database", async () => {
-    const deps = baseDeps({ opencodeDbPath: "/nonexistent/opencode.db" });
-    await expect(locateSession(deps, "ses_x")).resolves.toBeNull();
   });
 
   it("resolves a claude session by stat-ing the project session dirs", async () => {
@@ -363,38 +261,11 @@ describe("locateSession", () => {
     );
   });
 
-  it("prefers the archive manifest over the live provider sources", async () => {
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_dup", directory: "/Users/someone/work/live" },
-    ]);
-    if (!dbPath) return;
-
-    const deps = baseDeps({
-      opencodeDbPath: dbPath,
-      sessionArchiveService: {
-        getArchivedSession: vi.fn(() => ({
-          sessionId: "ses_dup",
-          provider: "opencode" as const,
-          projectId: encodeProjectId("/Users/someone/work/cold"),
-          projectPath: "/Users/someone/work/cold",
-        })),
-      } as unknown as SessionArchiveService,
-    });
-
-    await expect(locateSession(deps, "ses_dup")).resolves.toMatchObject({
-      source: "archive",
-      projectPath: "/Users/someone/work/cold",
-    });
-  });
-
   it("follows a bootstrap id alias and echoes the requested id", async () => {
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_durable", directory: "/Users/someone/work/aliased" },
-    ]);
-    if (!dbPath) return;
-
     const deps = baseDeps({
-      opencodeDbPath: dbPath,
+      codexSessionsDir: await createCodexSessionsDir([
+        { id: "ses_durable", cwd: "/Users/someone/work/aliased" },
+      ]),
       sessionMetadataService: {
         getCanonicalSessionId: vi.fn((id: string) =>
           id === "ses_bootstrap" ? "ses_durable" : id,
@@ -411,13 +282,15 @@ describe("locateSession", () => {
   });
 
   it("canonicalizes the project path before encoding the id", async () => {
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_win", directory: "c:\\Users\\someone\\work\\win" },
-    ]);
-    if (!dbPath) return;
-
     await expect(
-      locateSession(baseDeps({ opencodeDbPath: dbPath }), "ses_win"),
+      locateSession(
+        baseDeps({
+          codexSessionsDir: await createCodexSessionsDir([
+            { id: "ses_win", cwd: "c:\\Users\\someone\\work\\win" },
+          ]),
+        }),
+        "ses_win",
+      ),
     ).resolves.toMatchObject({
       projectPath: "C:/Users/someone/work/win",
       projectId: encodeProjectId("C:/Users/someone/work/win"),
@@ -426,14 +299,12 @@ describe("locateSession", () => {
 
   it("does not scan projects when a cheap lookup already answered", async () => {
     const listProjects = vi.fn(async () => [] as Project[]);
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_cheap", directory: "/Users/someone/work/cheap" },
-    ]);
-    if (!dbPath) return;
 
     await locateSession(
       baseDeps({
-        opencodeDbPath: dbPath,
+        codexSessionsDir: await createCodexSessionsDir([
+          { id: "ses_cheap", cwd: "/Users/someone/work/cheap" },
+        ]),
         scanner: { listProjects } as unknown as ProjectScanner,
       }),
       "ses_cheap",
@@ -521,34 +392,22 @@ describe("locateSession via recorded metadata", () => {
     ).resolves.toBeNull();
   });
 
-  it("lets an authoritative provider source win over a stale recording", async () => {
-    const recordedPath = await tempDir("recorded-old");
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_moved", directory: "/Users/someone/work/actual" },
-    ]);
-    if (!dbPath) return;
-
+  it("ignores recorded metadata for the retired provider", async () => {
+    const recordedPath = await tempDir("recorded-retired");
     await expect(
-      locateSession(
-        metadataDeps(recordedPath, "opencode", { opencodeDbPath: dbPath }),
-        "ses_moved",
-      ),
-    ).resolves.toMatchObject({
-      source: "opencode-db",
-      projectPath: "/Users/someone/work/actual",
-    });
+      locateSession(metadataDeps(recordedPath, "opencode"), "ses_retired"),
+    ).resolves.toBeNull();
   });
 });
 
 describe("locateSession project id shape", () => {
   it("returns an id that round-trips to the project path", async () => {
-    const dbPath = await createOpenCodeDb([
-      { id: "ses_rt", directory: "/Users/someone/work/round trip" },
-    ]);
-    if (!dbPath) return;
-
     const location = await locateSession(
-      baseDeps({ opencodeDbPath: dbPath }),
+      baseDeps({
+        codexSessionsDir: await createCodexSessionsDir([
+          { id: "ses_rt", cwd: "/Users/someone/work/round trip" },
+        ]),
+      }),
       "ses_rt",
     );
 

@@ -142,7 +142,7 @@ export function createSessionSubscription(
   const streamedMessageIds = new Set<string>();
 
   // Augmentation is async, so handling events concurrently would let cheap
-  // events overtake expensive ones and reorder the outbound stream. OpenCode
+  // events overtake expensive ones and reorder the outbound stream. Provider
   // returns `[message_stop, assistant(text), assistant(tool_use)]` from a single
   // upstream event; without this queue the tool_use rows (no augmentation work)
   // arrive before the text they follow, so the streamed commentary is dropped

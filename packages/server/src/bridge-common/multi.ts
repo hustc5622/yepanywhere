@@ -8,8 +8,8 @@ import type {
 } from "./types.js";
 
 /**
- * Helpers for route handlers that aggregate multiple bridge controllers
- * (codex + opencode). Controllers are tried in order; absent ones are skipped.
+ * Helpers for route handlers that aggregate bridge controllers. Controllers
+ * are tried in order; absent ones are skipped.
  */
 export type BridgeControllers = ReadonlyArray<BridgeController | undefined>;
 
@@ -41,9 +41,8 @@ export async function getAnyBridgeSessionView(
  * (`BridgeSessionView.active`) - the same answer `/sessions/:id/active` would
  * give. Asking the sidecar again per session turned a project listing into
  * `1 + sessions x 2` bridge requests (~300 sockets for ~148 sessions), and
- * every one of those requests made the OpenCode sidecar reconcile its managed
- * directories, multiplying into thousands of upstream connections until the
- * machine ran out of ephemeral ports. Callers that need liveness for a whole
+ * each extra request can trigger expensive upstream reconciliation. Callers
+ * that need liveness for a whole
  * list must therefore filter the snapshot in memory.
  */
 export async function listActiveBridgeSessionViews(
@@ -86,9 +85,8 @@ export async function respondToAnyBridgeInput(
         return true;
       }
     } catch (error) {
-      // One bridge failing (e.g. an external OpenCode decision whose
-      // confirmation timed out but remains queued for retry) must not 500
-      // the route or mask the other bridge. The caller treats false as
+      // One bridge failing must not 500 the route or mask another bridge. The
+      // caller treats false as
       // "not accepted here"; clients re-check pending state.
       console.warn(
         `[bridge] respondToInput failed for session ${sessionId}: ${

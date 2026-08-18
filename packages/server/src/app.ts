@@ -44,7 +44,6 @@ import {
   requireCustomHeader,
 } from "./middleware/security.js";
 import type { NotificationService } from "./notifications/index.js";
-import type { OpenCodeBridgeController } from "./opencode-bridge/types.js";
 import {
   CODEX_SESSIONS_DIR,
   CodexSessionScanner,
@@ -57,15 +56,7 @@ import {
   KIMI_SESSIONS_DIR,
   KimiSessionScanner,
 } from "./projects/kimi-scanner.js";
-import {
-  OPENCODE_DB_PATH,
-  OpenCodeSessionScanner,
-} from "./projects/opencode-scanner.js";
-import {
-  CLAUDE_PROJECTS_DIR,
-  canonicalizeProjectPath,
-  encodeProjectId,
-} from "./projects/paths.js";
+import { CLAUDE_PROJECTS_DIR } from "./projects/paths.js";
 import { PiSessionScanner } from "./projects/pi-scanner.js";
 import { ProjectScanner } from "./projects/scanner.js";
 import { ZCodeSessionScanner } from "./projects/zcode-scanner.js";
@@ -103,7 +94,6 @@ import { createLocalFileRoutes } from "./routes/local-file.js";
 import { createLocalImageRoutes } from "./routes/local-image.js";
 import { createNetworkBindingRoutes } from "./routes/network-binding.js";
 import { createOnboardingRoutes } from "./routes/onboarding.js";
-import { createOpenCodeBridgeRoutes } from "./routes/opencode-bridge.js";
 import { createProcessesRoutes } from "./routes/processes.js";
 import { createProjectsRoutes } from "./routes/projects.js";
 import { buildProviderProjectCatalog } from "./routes/provider-catalog.js";
@@ -126,6 +116,7 @@ import {
   configureClaudeSessionFileObserver,
   getProvider,
 } from "./sdk/providers/index.js";
+import { isProviderEnabled } from "./sdk/providers/policy.js";
 import type { ClaudeSDK, PermissionMode } from "./sdk/types.js";
 import type { BrowserProfileService } from "./services/BrowserProfileService.js";
 import type { ConnectedBrowsersService } from "./services/ConnectedBrowsersService.js";
@@ -140,7 +131,6 @@ import { CodexSessionReader } from "./sessions/codex-reader.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
 import { KimiSessionReader } from "./sessions/kimi-reader.js";
 import { normalizeSession } from "./sessions/normalization.js";
-import { OpenCodeSessionReader } from "./sessions/opencode-reader.js";
 import { PI_SESSIONS_DIR } from "./sessions/pi-files.js";
 import { PiSessionReader } from "./sessions/pi-reader.js";
 import { normalizeProviderGroup } from "./sessions/provider-groups.js";
@@ -250,8 +240,6 @@ export interface AppOptions {
   codexBridgeService?: CodexBridgeController;
   /** Canonical Codex transcript sources. Primarily injectable for tests/embedders. */
   codexTranscriptStoreSources?: readonly CodexTranscriptStoreSource[];
-  /** OpenCode bridge for OpenCode CLI sessions. */
-  opencodeBridgeService?: OpenCodeBridgeController;
   /** Self-hosted Feishu/Lark channel configuration and lifecycle. */
   feishuChannelService?: FeishuChannelService;
   /** Protected Feishu scope-to-session bindings exposed to authenticated admins. */
@@ -449,22 +437,36 @@ export function createApp(options: AppOptions): AppResult {
   }
 
   // Create dependencies
-  const codexScanner = new CodexSessionScanner();
-  const geminiScanner = new GeminiSessionScanner();
-  const opencodeScanner = new OpenCodeSessionScanner();
-  const kimiScanner = new KimiSessionScanner();
-  const piScanner = new PiSessionScanner({ sessionsDir: PI_SESSIONS_DIR });
-  const zcodeScanner = new ZCodeSessionScanner();
+  const providerEnabled = (name: string): boolean =>
+    isProviderEnabled(name, options.enabledProviders);
+  const codexEnabled = providerEnabled("codex") || providerEnabled("codex-oss");
+  const geminiEnabled =
+    providerEnabled("gemini") || providerEnabled("gemini-acp");
+  const codexScanner = codexEnabled ? new CodexSessionScanner() : undefined;
+  const geminiScanner = geminiEnabled ? new GeminiSessionScanner() : undefined;
+  const kimiScanner = providerEnabled("kimi")
+    ? new KimiSessionScanner()
+    : undefined;
+  const piScanner = providerEnabled("pi")
+    ? new PiSessionScanner({ sessionsDir: PI_SESSIONS_DIR })
+    : undefined;
+  const zcodeScanner = providerEnabled("zcode")
+    ? new ZCodeSessionScanner()
+    : undefined;
   const scanner = new ProjectScanner({
     projectsDir: options.projectsDir,
     remoteExecutors:
       options.serverSettingsService?.getSetting("remoteExecutors") ?? [],
     codexScanner,
     geminiScanner,
-    opencodeScanner,
     kimiScanner,
     piScanner,
     zcodeScanner,
+    enableCodex: codexEnabled,
+    enableGemini: geminiEnabled,
+    enableKimi: Boolean(kimiScanner),
+    enablePi: Boolean(piScanner),
+    enableZCode: Boolean(zcodeScanner),
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
     cacheTtlMs: options.projectScanCacheTtlMs,
@@ -552,7 +554,7 @@ export function createApp(options: AppOptions): AppResult {
             new GeminiSessionReader({
               sessionsDir: GEMINI_TMP_DIR,
               projectPath: project.path,
-              hashToCwd: geminiScanner.getHashToCwd(),
+              hashToCwd: geminiScanner?.getHashToCwd(),
             }),
         );
       case "claude":
@@ -567,20 +569,6 @@ export function createApp(options: AppOptions): AppResult {
               getContextWindow: mis
                 ? (model, provider, sessionId) =>
                     mis.getContextWindow(model, provider, sessionId)
-                : undefined,
-            }),
-        );
-      }
-      case "opencode": {
-        const mis = options.modelInfoService;
-        return getOrCreateReader(
-          `opencode::${project.path}`,
-          () =>
-            new OpenCodeSessionReader({
-              projectPath: project.path,
-              getContextWindow: mis
-                ? (model, provider, sessionId) =>
-                    mis.getCachedContextWindow(model, provider, sessionId)
                 : undefined,
             }),
         );
@@ -662,23 +650,8 @@ export function createApp(options: AppOptions): AppResult {
         new GeminiSessionReader({
           sessionsDir: GEMINI_TMP_DIR,
           projectPath,
-          hashToCwd: geminiScanner.getHashToCwd(),
+          hashToCwd: geminiScanner?.getHashToCwd(),
         }),
-    );
-  const opencodeReaderFactory = (projectPath: string): OpenCodeSessionReader =>
-    getOrCreateReader(
-      `opencode-extra::${OPENCODE_DB_PATH}::${projectPath}`,
-      () => {
-        const mis = options.modelInfoService;
-        return new OpenCodeSessionReader({
-          dbPath: OPENCODE_DB_PATH,
-          projectPath,
-          getContextWindow: mis
-            ? (model, provider, sessionId) =>
-                mis.getCachedContextWindow(model, provider, sessionId)
-            : undefined,
-        });
-      },
     );
   const piReaderFactory = (projectPath: string): PiSessionReader =>
     getOrCreateReader(`pi-extra::${PI_SESSIONS_DIR}::${projectPath}`, () => {
@@ -729,11 +702,9 @@ export function createApp(options: AppOptions): AppResult {
         codexReaderFactory,
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
-        geminiHashToCwd: geminiScanner.getHashToCwd(),
-        opencodeDbPath: OPENCODE_DB_PATH,
+        geminiHashToCwd: geminiScanner?.getHashToCwd(),
         piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
-        opencodeReaderFactory,
         piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
@@ -754,6 +725,7 @@ export function createApp(options: AppOptions): AppResult {
     maxWorkers: options.maxWorkers,
     idlePreemptThresholdMs: options.idlePreemptThresholdMs,
     maxQueueSize: options.maxQueueSize,
+    enabledProviders: options.enabledProviders,
     // Save executor for remote sessions to support resume
     onSessionExecutor: options.sessionMetadataService
       ? (sessionId, executor) =>
@@ -782,7 +754,6 @@ export function createApp(options: AppOptions): AppResult {
   const sessionInteractionService = new SessionInteractionService({
     runtimeController,
     codexBridgeService: options.codexBridgeService,
-    opencodeBridgeService: options.opencodeBridgeService,
     sessionMetadataService: options.sessionMetadataService,
     eventBus: options.eventBus,
     interactionBroker: options.interactionBroker,
@@ -803,26 +774,22 @@ export function createApp(options: AppOptions): AppResult {
     geminiScanner,
     geminiSessionsDir: GEMINI_TMP_DIR,
     geminiReaderFactory,
-    opencodeDbPath: OPENCODE_DB_PATH,
     zcodeDbPath: ZCODE_DB_PATH,
-    opencodeReaderFactory,
     piSessionsDir: PI_SESSIONS_DIR,
     piReaderFactory,
     zcodeReaderFactory,
     kimiSessionsDir: KIMI_SESSIONS_DIR,
     kimiReaderFactory,
+    enabledProviders: options.enabledProviders,
   });
 
-  // Bridge HTTP clients observe the shared upstream server (OpenCode/Codex) and
+  // Bridge clients observe the shared Codex upstream and
   // replay lifecycle changes onto the EventBus. Teach them which sessions the
   // Supervisor owns so they stay silent about ownership for owned sessions;
   // otherwise a bridge poll racing the Supervisor's own ownership event flips
   // the client into a transient "external session" banner during resume.
   const bridgeOwnershipResolver = (sessionId: string): boolean =>
     Boolean(supervisor.getProcessForSession(sessionId));
-  options.opencodeBridgeService?.setOwnershipResolver?.(
-    bridgeOwnershipResolver,
-  );
   options.codexBridgeService?.setOwnershipResolver?.(bridgeOwnershipResolver);
 
   // Create external session tracker if eventBus is available
@@ -850,37 +817,6 @@ export function createApp(options: AppOptions): AppResult {
       metadataService: options.sessionMetadataService,
       ...options.sessionTitleGeneration,
       scanRecentSessions: async ({ updatedAfterMs, limit, maxProjects }) => {
-        const excludedInvalidTitleSessionIds = new Set(
-          Object.entries(options.sessionMetadataService?.getAllMetadata() ?? {})
-            .filter(([, metadata]) => metadata.customTitle || metadata.aiTitle)
-            .map(([sessionId]) => sessionId),
-        );
-        let invalidProviderTitleSessionIds = new Set<string>();
-        let invalidProviderTitleProjectIds = new Set<string>();
-        try {
-          const invalidProviderTitles =
-            await opencodeScanner.listRecentInvalidTitleSessions(
-              updatedAfterMs,
-              limit,
-              excludedInvalidTitleSessionIds,
-            );
-          invalidProviderTitleSessionIds = new Set(
-            invalidProviderTitles.map((session) => session.sessionId),
-          );
-          invalidProviderTitleProjectIds = new Set(
-            invalidProviderTitles.map((session) =>
-              encodeProjectId(canonicalizeProjectPath(session.directory)),
-            ),
-          );
-        } catch (error) {
-          // Invalid-title prioritization is best effort. The regular bounded
-          // startup backfill must still run when OpenCode SQLite is busy.
-          getLogger().warn(
-            { err: error, limit },
-            "[SessionTitleService] Unable to prioritize invalid OpenCode titles during startup backfill",
-          );
-        }
-
         const projects = (await scanner.listProjects())
           .filter((project) => {
             const lastActivityMs = new Date(
@@ -891,22 +827,16 @@ export function createApp(options: AppOptions): AppResult {
               lastActivityMs >= updatedAfterMs
             );
           })
-          .sort((a, b) => {
-            const invalidPriority =
-              Number(invalidProviderTitleProjectIds.has(b.id)) -
-              Number(invalidProviderTitleProjectIds.has(a.id));
-            if (invalidPriority !== 0) return invalidPriority;
-            return (
+          .sort(
+            (a, b) =>
               new Date(b.lastActivity ?? "").getTime() -
-              new Date(a.lastActivity ?? "").getTime()
-            );
-          })
+              new Date(a.lastActivity ?? "").getTime(),
+          )
           .slice(0, maxProjects);
         const providerCatalog = await buildProviderProjectCatalog({
           projects,
           codexScanner,
           geminiScanner,
-          opencodeScanner,
           piScanner,
           kimiScanner,
         });
@@ -915,7 +845,6 @@ export function createApp(options: AppOptions): AppResult {
           projectId: SessionSummary["projectId"];
           updatedAt: string;
           messageCount: number;
-          providerTitleInvalid?: boolean;
         }> = [];
         let scannedProjects = 0;
         let scannedSessions = 0;
@@ -935,10 +864,8 @@ export function createApp(options: AppOptions): AppResult {
                 geminiSessionsDir: GEMINI_TMP_DIR,
                 geminiReaderFactory,
                 geminiHashToCwd: providerCatalog.geminiHashToCwd,
-                opencodeDbPath: OPENCODE_DB_PATH,
                 piSessionsDir: PI_SESSIONS_DIR,
                 zcodeDbPath: ZCODE_DB_PATH,
-                opencodeReaderFactory,
                 piReaderFactory,
                 zcodeReaderFactory,
                 kimiSessionsDir: KIMI_SESSIONS_DIR,
@@ -986,20 +913,12 @@ export function createApp(options: AppOptions): AppResult {
               projectId: session.projectId,
               updatedAt: session.updatedAt,
               messageCount: session.messageCount,
-              providerTitleInvalid: invalidProviderTitleSessionIds.has(
-                session.id,
-              ),
             });
-            candidates.sort((a, b) => {
-              const invalidPriority =
-                Number(Boolean(b.providerTitleInvalid)) -
-                Number(Boolean(a.providerTitleInvalid));
-              if (invalidPriority !== 0) return invalidPriority;
-              return (
+            candidates.sort(
+              (a, b) =>
                 new Date(b.updatedAt).getTime() -
-                new Date(a.updatedAt).getTime()
-              );
-            });
+                new Date(a.updatedAt).getTime(),
+            );
             if (candidates.length > limit) candidates.pop();
           }
         }
@@ -1020,11 +939,9 @@ export function createApp(options: AppOptions): AppResult {
             codexReaderFactory,
             geminiSessionsDir: GEMINI_TMP_DIR,
             geminiReaderFactory,
-            geminiHashToCwd: geminiScanner.getHashToCwd(),
-            opencodeDbPath: OPENCODE_DB_PATH,
+            geminiHashToCwd: geminiScanner?.getHashToCwd(),
             piSessionsDir: PI_SESSIONS_DIR,
             zcodeDbPath: ZCODE_DB_PATH,
-            opencodeReaderFactory,
             piReaderFactory,
             zcodeReaderFactory,
             kimiSessionsDir: KIMI_SESSIONS_DIR,
@@ -1078,7 +995,6 @@ export function createApp(options: AppOptions): AppResult {
         projects,
         codexScanner,
         geminiScanner,
-        opencodeScanner,
         piScanner,
         kimiScanner,
       });
@@ -1092,11 +1008,9 @@ export function createApp(options: AppOptions): AppResult {
         codexReaderFactory,
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
-        geminiHashToCwd: geminiScanner.getHashToCwd(),
-        opencodeDbPath: OPENCODE_DB_PATH,
+        geminiHashToCwd: geminiScanner?.getHashToCwd(),
         piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
-        opencodeReaderFactory,
         piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
@@ -1223,7 +1137,7 @@ export function createApp(options: AppOptions): AppResult {
 
       if (archivedCount > 0) {
         scanner.invalidateCache();
-        codexScanner.invalidateCache();
+        codexScanner?.invalidateCache();
       }
       getLogger().info(
         `[SessionArchiveService] Auto-archive scan finished archived=${archivedCount} skipped=${skippedCount} failed=${failedCount}`,
@@ -1242,10 +1156,7 @@ export function createApp(options: AppOptions): AppResult {
       sessionMetadataService: options.sessionMetadataService,
       runtimeController,
       supervisor,
-      bridgeControllers: [
-        options.codexBridgeService,
-        options.opencodeBridgeService,
-      ],
+      bridgeControllers: [options.codexBridgeService],
       connectedBrowsers: options.connectedBrowsers,
     });
   }
@@ -1376,15 +1287,6 @@ export function createApp(options: AppOptions): AppResult {
     );
   }
 
-  if (options.opencodeBridgeService) {
-    app.route(
-      "/api/opencode-bridge",
-      createOpenCodeBridgeRoutes({
-        opencodeBridgeService: options.opencodeBridgeService,
-      }),
-    );
-  }
-
   const codexTranscriptStoreSources =
     options.codexTranscriptStoreSources ??
     (options.dataDir
@@ -1414,19 +1316,15 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
-      opencodeScanner,
       piScanner,
       kimiScanner,
-      opencodeDbPath: OPENCODE_DB_PATH,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
-      opencodeReaderFactory,
       piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       codexBridgeService: options.codexBridgeService,
-      opencodeBridgeService: options.opencodeBridgeService,
     }),
   );
   app.route(
@@ -1447,13 +1345,10 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
-      opencodeScanner,
       piScanner,
       kimiScanner,
-      opencodeDbPath: OPENCODE_DB_PATH,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
-      opencodeReaderFactory,
       piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
@@ -1463,7 +1358,6 @@ export function createApp(options: AppOptions): AppResult {
       recentsService: options.recentsService,
       codexBridgeService: options.codexBridgeService,
       codexEventStoreSources: codexTranscriptStoreSources,
-      opencodeBridgeService: options.opencodeBridgeService,
       sessionInteractionService,
       sessionCommandService,
       sessionArchiveService: options.sessionArchiveService,
@@ -1495,11 +1389,6 @@ export function createApp(options: AppOptions): AppResult {
             return {
               reader: geminiReaderFactory(project.path),
               sessionDir: GEMINI_TMP_DIR,
-            };
-          case "opencode":
-            return {
-              reader: opencodeReaderFactory(project.path),
-              sessionDir: OPENCODE_DB_PATH,
             };
           case "pi":
             return {
@@ -1545,19 +1434,15 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
-      opencodeScanner,
       piScanner,
       kimiScanner,
-      opencodeDbPath: OPENCODE_DB_PATH,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
-      opencodeReaderFactory,
       piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       codexBridgeService: options.codexBridgeService,
-      opencodeBridgeService: options.opencodeBridgeService,
     }),
   );
 
@@ -1579,20 +1464,16 @@ export function createApp(options: AppOptions): AppResult {
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
-      opencodeScanner,
       piScanner,
       kimiScanner,
-      opencodeDbPath: OPENCODE_DB_PATH,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
-      opencodeReaderFactory,
       piReaderFactory,
       zcodeReaderFactory,
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       eventBus: options.eventBus,
       codexBridgeService: options.codexBridgeService,
-      opencodeBridgeService: options.opencodeBridgeService,
     }),
   );
 
@@ -1616,13 +1497,10 @@ export function createApp(options: AppOptions): AppResult {
         geminiScanner,
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
-        opencodeScanner,
         piScanner,
         kimiScanner,
-        opencodeDbPath: OPENCODE_DB_PATH,
         piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
-        opencodeReaderFactory,
         piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,
@@ -1654,13 +1532,10 @@ export function createApp(options: AppOptions): AppResult {
         geminiScanner,
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
-        opencodeScanner,
         piScanner,
         kimiScanner,
-        opencodeDbPath: OPENCODE_DB_PATH,
         piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
-        opencodeReaderFactory,
         piReaderFactory,
         zcodeReaderFactory,
         kimiSessionsDir: KIMI_SESSIONS_DIR,

@@ -4,7 +4,6 @@ import type { BridgeInputResponse } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/index.js";
-import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type {
   RuntimeController,
   RuntimeProcessSnapshot,
@@ -21,7 +20,6 @@ import {
 export interface SessionInteractionServiceDeps {
   runtimeController: RuntimeController;
   codexBridgeService?: CodexBridgeController;
-  opencodeBridgeService?: OpenCodeBridgeController;
   sessionMetadataService?: SessionMetadataService;
   eventBus?: EventBus;
   interactionBroker?: InteractionBroker;
@@ -170,7 +168,6 @@ function normalizeInteractionActor(
 
 function providerFromPendingRequest(request: InputRequest): string {
   if (request.source === "codex-bridge") return "codex";
-  if (request.source === "opencode-bridge") return "opencode";
   return "unknown";
 }
 
@@ -513,7 +510,7 @@ export class SessionInteractionService {
   }
 
   private bridgeControllers(): ReadonlyArray<BridgeController | undefined> {
-    return [this.deps.codexBridgeService, this.deps.opencodeBridgeService];
+    return [this.deps.codexBridgeService];
   }
 
   private async resolvePendingInputRequest(
@@ -583,9 +580,7 @@ export class SessionInteractionService {
         provider:
           controller === this.deps.codexBridgeService
             ? "codex"
-            : controller === this.deps.opencodeBridgeService
-              ? "opencode"
-              : providerFromPendingRequest(request),
+            : providerFromPendingRequest(request),
         request,
       };
     }

@@ -376,20 +376,20 @@ describe("PushNotifier", () => {
 
     it("skips absent bridge controllers and reads the next one", async () => {
       const request: InputRequest = {
-        id: "req-oc",
-        sessionId: "ses_oc",
+        id: "req-next",
+        sessionId: "ses_next",
         type: "question",
         prompt: "Pick one",
         toolName: "AskUserQuestion",
         toolInput: {},
         timestamp: new Date().toISOString(),
-        source: "opencode-bridge",
+        source: "codex-bridge",
       };
       vi.mocked(mockSupervisor.getProcessForSession).mockReturnValue(undefined);
       const emptyController = {
         getPendingInputRequest: vi.fn(async () => null),
       };
-      const opencodeController = {
+      const nextController = {
         getPendingInputRequest: vi.fn(async () => request),
       };
 
@@ -400,13 +400,13 @@ describe("PushNotifier", () => {
         bridgeControllers: [
           undefined,
           emptyController as never,
-          opencodeController as never,
+          nextController as never,
         ],
       });
 
       eventHandler?.({
         type: "process-state-changed",
-        sessionId: "ses_oc",
+        sessionId: "ses_next",
         projectId: testProjectId,
         activity: "waiting-input",
         pendingInputType: "user-question",
@@ -417,7 +417,7 @@ describe("PushNotifier", () => {
         expect(mockPushService.sendToAll).toHaveBeenCalledWith(
           expect.objectContaining({
             type: "pending-input",
-            sessionId: "ses_oc",
+            sessionId: "ses_next",
             requestId: undefined,
             inputType: "user-question",
             summary: "Question waiting — open Yep to answer",
@@ -752,10 +752,8 @@ describe("PushNotifier", () => {
 
     describe("bridge fallback on owned process", () => {
       it("queries the bridge when the owned process is in-turn with no pending request", async () => {
-        // Reproduces the scenario where Yep still owns an OpenCode process
-        // whose per-turn SSE missed permission.asked, but the bridge's long
-        // connection still holds a pending tool approval. Without the
-        // fallback, the push was never sent.
+        // The process stream may miss an approval while the bridge still holds
+        // it. The fallback must still send the push.
         const bridgeRequest: InputRequest = {
           id: "req-bridge-owned",
           sessionId: "session-owned",
@@ -764,7 +762,7 @@ describe("PushNotifier", () => {
           toolName: "Bash",
           toolInput: { command: "ls" },
           timestamp: new Date().toISOString(),
-          source: "opencode-bridge",
+          source: "codex-bridge",
         };
 
         const runtimeController = {
@@ -908,7 +906,7 @@ describe("PushNotifier", () => {
       expect(payload.summary).toBe("Run: Bash");
     });
 
-    it("names the subagent for a permission routed up from a child session", async () => {
+    it("names the subagent for a file permission routed from a child session", async () => {
       const mockProcess = {
         state: {
           type: "waiting-input",
@@ -916,11 +914,10 @@ describe("PushNotifier", () => {
             id: "per_child",
             sessionId: "session-parent",
             type: "tool-approval",
-            prompt: "Allow external_directory?",
-            toolName: "external_directory",
+            prompt: "Allow file edit?",
+            toolName: "Edit",
             toolInput: {
-              permission: "external_directory",
-              patterns: ["/tmp/outside"],
+              file_path: "/tmp/outside/file.txt",
               originSessionId: "ses_child",
               parentSessionId: "session-parent",
               originSessionTitle: "Explore open_platform_api_case project",
@@ -960,7 +957,7 @@ describe("PushNotifier", () => {
       // Push targets the parent session but names the requesting subagent.
       expect(payload.sessionId).toBe("session-parent");
       expect(payload.summary).toBe(
-        "Subagent Explore open_platform_api_case project — external_directory: /tmp/outside",
+        "Subagent Explore open_platform_api_case project — Edit: file.txt",
       );
     });
 

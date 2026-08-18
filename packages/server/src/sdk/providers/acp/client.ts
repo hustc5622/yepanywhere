@@ -2,7 +2,7 @@
  * ACP Client wrapper for Agent Client Protocol connections.
  *
  * Provides a reusable client for spawning and communicating with ACP agents
- * (Gemini, Codex, OpenCode, etc.) over JSON-RPC/stdio.
+ * (Gemini and other ACP-compatible agents) over JSON-RPC/stdio.
  *
  * Gemini uses a hybrid model where it executes its own tools internally,
  * but asks for permission on sensitive operations (file writes, shell commands).
@@ -81,7 +81,7 @@ export class ACPClient {
   /**
    * Whether the spawned ACP agent child process is still running.
    *
-   * Mirrors the liveness signal used by the codex/claude/opencode providers
+   * Mirrors the liveness signal used by long-lived providers
    * (the Node ChildProcess exit state). The supervisor's stale-process
    * watchdog uses this to distinguish "process died silently" from "process
    * is busy with a long-running turn" — e.g. Kimi orchestrating AgentSwarm /

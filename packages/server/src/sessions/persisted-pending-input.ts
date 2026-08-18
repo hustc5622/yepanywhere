@@ -76,11 +76,9 @@ export function getPersistedAskUserQuestionInputRequest(
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex--) {
       const block = blocks[blockIndex];
       if (!block) continue;
-      const isClaudeQuestion = block.name === "AskUserQuestion";
-      const isOpenCodeQuestion = block.name === "question";
       if (
         block?.type !== "tool_use" ||
-        (!isClaudeQuestion && !isOpenCodeQuestion) ||
+        block.name !== "AskUserQuestion" ||
         typeof block.id !== "string" ||
         answeredToolUseIds.has(block.id) ||
         !isQuestionInput(block.input)

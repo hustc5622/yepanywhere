@@ -8,7 +8,7 @@ interface SidecarBridge<TStatus extends BridgeStatusBase> {
 }
 
 /**
- * Shared entrypoint skeleton for `--codex-bridge-only` / `--opencode-bridge-only`
+ * Shared entrypoint skeleton for standalone bridge processes.
  * sidecar processes: load config, wire signal handlers, start the bridge and
  * verify it is listening.
  */

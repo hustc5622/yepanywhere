@@ -480,7 +480,7 @@ const CLAUDE_SESSION_2E582BFB_FIXTURE: ClaudeSessionEntry[] = [
   },
   {
     type: "assistant",
-    uuid: "8a1ddf40-3ab7-4520-b1ab-3c0bc3447028",
+    uuid: "8a1ddf40-3ab7-4620-b1ab-3c0bc3447028",
     parentUuid: "e416e5ea-2d96-46eb-836a-e7e0f8c79f00",
     message: {
       role: "assistant",

@@ -53,13 +53,6 @@ export {
 } from "./SessionTitleService.js";
 
 export {
-  OpenCodeSessionChangeMonitor,
-  type OpenCodeSessionChangeMonitorOptions,
-  type OpenCodeSessionChangeScanner,
-  type OpenCodeSessionChangeSource,
-} from "./OpenCodeSessionChangeMonitor.js";
-
-export {
   ZCodeSessionChangeMonitor,
   type ZCodeSessionChangeMonitorOptions,
   type ZCodeSessionChangeScanner,

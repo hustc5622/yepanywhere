@@ -51,7 +51,7 @@ export function hasProviderTitleBoilerplatePrefix(
  * preamble, rather than a topic a user could use to find the session later.
  *
  * Patterns intentionally match the whole value. This keeps real topics such
- * as "修复 OpenCode 标题生成漂移" from being rejected merely because they
+ * as "修复 provider 标题生成漂移" from being rejected merely because they
  * mention titles.
  */
 export function isGenericProviderTitle(

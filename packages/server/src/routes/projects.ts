@@ -20,11 +20,9 @@ import type {
   SessionMetadataService,
 } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
-import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
-import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { canonicalizeProjectPath, isAbsolutePath } from "../projects/paths.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
@@ -32,7 +30,6 @@ import type { RuntimeController } from "../runtime/types.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
-import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import type { PiSessionReader } from "../sessions/pi-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
@@ -74,15 +71,9 @@ export interface ProjectsDeps {
   geminiSessionsDir?: string;
   /** Optional shared Gemini reader factory for cross-provider session lookups */
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
-  /** OpenCode scanner for checking if a project has OpenCode sessions */
-  opencodeScanner?: OpenCodeSessionScanner;
   /** Pi scanner for checking if a project has Pi sessions */
   piScanner?: PiSessionScanner;
-  /** OpenCode sqlite database path (defaults to ~/.local/share/opencode/opencode.db) */
-  opencodeDbPath?: string;
   zcodeDbPath?: string;
-  /** Optional shared OpenCode reader factory for cross-provider session lookups */
-  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
@@ -94,8 +85,6 @@ export interface ProjectsDeps {
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   /** Codex bridge for externally launched `codex --remote` sessions. */
   codexBridgeService?: CodexBridgeController;
-  /** OpenCode bridge for OpenCode CLI sessions. */
-  opencodeBridgeService?: OpenCodeBridgeController;
 }
 
 interface ProjectActivityCounts {
@@ -201,17 +190,12 @@ type BridgeSessionView = CommonBridgeSessionView;
  * bulk `/session-views` snapshot already answers per entry. This deliberately
  * stays a single bulk request per bridge: probing `/sessions/:id/active` per
  * session made `GET /api/projects` cost `1 + sessions x 2` sidecar requests,
- * and every one of those fanned out inside the OpenCode sidecar into a
- * per-directory reconciliation - enough short-lived sockets to exhaust the
- * host's ephemeral ports (EADDRNOTAVAIL).
+ * and every one of those fanned out into upstream work.
  */
 async function getActiveBridgeSessionViews(
-  deps: Pick<ProjectsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  deps: Pick<ProjectsDeps, "codexBridgeService">,
 ): Promise<BridgeSessionView[]> {
-  return listActiveBridgeSessionViews([
-    deps.codexBridgeService,
-    deps.opencodeBridgeService,
-  ]);
+  return listActiveBridgeSessionViews([deps.codexBridgeService]);
 }
 
 function mergeBridgeSessions(
@@ -682,7 +666,6 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       projects: [project],
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
-      opencodeScanner: deps.opencodeScanner,
       piScanner: deps.piScanner,
       kimiScanner: deps.kimiScanner,
     });
@@ -697,8 +680,6 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
         geminiSessionsDir: deps.geminiSessionsDir,
         geminiReaderFactory: deps.geminiReaderFactory,
         geminiHashToCwd: providerCatalog.geminiHashToCwd,
-        opencodeDbPath: deps.opencodeDbPath,
-        opencodeReaderFactory: deps.opencodeReaderFactory,
         piSessionsDir: deps.piSessionsDir,
         piReaderFactory: deps.piReaderFactory,
         kimiSessionsDir: deps.kimiSessionsDir,

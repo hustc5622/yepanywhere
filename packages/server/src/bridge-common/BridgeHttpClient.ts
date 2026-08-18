@@ -436,7 +436,7 @@ export abstract class BridgeHttpClient<
       // Ownership of Supervisor-owned sessions is governed solely by the
       // Supervisor (owner: "self"). Emitting external/none here would race the
       // Supervisor's ownership events and flip the client into a transient
-      // "external session" banner while an owned OpenCode/Codex turn drives the
+      // "external session" banner while an owned bridge turn drives the
       // shared upstream server. Only report ownership for sessions we do not
       // own; this mirrors the REST arbitration in deriveSessionRuntime.
       if (!this.isOwnedBySupervisor(entry.id)) {

@@ -52,10 +52,7 @@ export interface PushNotifierOptions {
   runtimeController?: Pick<RuntimeController, "getProcessSnapshotForSession">;
   /** Backwards-compatible embedded/test process source. */
   supervisor?: Supervisor;
-  /**
-   * Bridge controllers (codex/opencode sidecars). Bridge sessions have no
-   * managed process, so their pending input is fetched from here instead.
-   */
+  /** Bridge sessions have no managed process, so pending input comes from here. */
   bridgeControllers?: BridgeControllers;
   /** Optional: skip push for connected browser profiles */
   connectedBrowsers?: ConnectedBrowsersService;
@@ -586,22 +583,6 @@ export class PushNotifier {
 
       if (request.toolInput && typeof request.toolInput === "object") {
         const input = request.toolInput as Record<string, unknown>;
-
-        // OpenCode permission requests: the useful pair is the permission
-        // name (bash, external_directory, ...) plus its target resource.
-        // Falling through to the generic path would render "Run: OpenCode".
-        if (typeof input.permission === "string" && input.permission) {
-          const patterns = Array.isArray(input.patterns)
-            ? input.patterns.filter(
-                (item): item is string => typeof item === "string",
-              )
-            : [];
-          const detail =
-            patterns.length > 0
-              ? `${input.permission}: ${patterns.join(", ")}`
-              : input.permission;
-          return `${subagentPrefix}${detail}`;
-        }
 
         // For file operations, try to extract the file path
         const filePath = input.file_path ?? input.filePath ?? input.path;

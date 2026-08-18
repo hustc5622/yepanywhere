@@ -1,4 +1,5 @@
 import {
+  type LiveProviderName,
   type ProviderInfo,
   type ProviderName,
   isUrlProjectId,
@@ -8,6 +9,10 @@ import { decodeProjectId } from "../projects/paths.js";
 import type { ClaudeUsageResponse } from "../sdk/providers/claude-control.js";
 import { getCodexModelSourceRegistry } from "../sdk/providers/codex-model-sources.js";
 import { claudeProvider, getAllProviders } from "../sdk/providers/index.js";
+import {
+  isProviderEnabled,
+  isRetiredProviderName,
+} from "../sdk/providers/policy.js";
 import type { AgentProvider } from "../sdk/providers/types.js";
 import { ZCodeProtocolError } from "../sdk/providers/zcode-protocol/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
@@ -36,7 +41,7 @@ async function buildProviderInfo(
   modelInfoService?.ingestModels(provider.name as ProviderName, models);
 
   return {
-    name: provider.name,
+    name: provider.name as LiveProviderName,
     displayName: provider.displayName,
     installed: authStatus.installed,
     authenticated: authStatus.authenticated,
@@ -76,6 +81,9 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
   // server status snapshot for a project's workspace. ZCode is the only
   // provider that can report MCP statuses today.
   routes.get("/zcode/mcp-servers", async (c) => {
+    if (!isProviderEnabled("zcode", deps.enabledProviders)) {
+      return c.json({ error: "Provider not found" }, 404);
+    }
     const projectId = c.req.query("projectId");
     if (!projectId || !isUrlProjectId(projectId)) {
       return c.json({ error: "projectId query parameter is required" }, 400);
@@ -115,11 +123,9 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
 
   // GET /api/providers - Get all available providers with auth status and models
   routes.get("/", async (c) => {
-    let providers = deps.providers ?? getAllProviders();
-    if (deps.enabledProviders && deps.enabledProviders.length > 0) {
-      const enabled = new Set(deps.enabledProviders);
-      providers = providers.filter((p) => enabled.has(p.name));
-    }
+    const providers = (deps.providers ?? getAllProviders()).filter((provider) =>
+      isProviderEnabled(provider.name, deps.enabledProviders),
+    );
     const waitForModelRefresh = c.req.query("fresh") === "1";
     const providerInfos = await Promise.all(
       providers.map((provider) =>
@@ -133,7 +139,19 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
   // GET /api/providers/:name - Get specific provider status with models
   routes.get("/:name", async (c) => {
     const name = c.req.param("name");
-    const providers = getAllProviders();
+    if (isRetiredProviderName(name)) {
+      return c.json(
+        {
+          error: "OpenCode provider has been retired",
+          code: "provider_retired",
+        },
+        410,
+      );
+    }
+    if (!isProviderEnabled(name, deps.enabledProviders)) {
+      return c.json({ error: "Provider not found" }, 404);
+    }
+    const providers = deps.providers ?? getAllProviders();
     const provider = providers.find((p) => p.name === name);
 
     if (!provider) {

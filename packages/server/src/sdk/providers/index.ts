@@ -58,14 +58,6 @@ export {
   type CodexOSSProviderConfig,
 } from "./codex-oss.js";
 
-// OpenCode provider (uses opencode serve for multi-provider agent)
-import { opencodeProvider } from "./opencode.js";
-export {
-  OpenCodeProvider,
-  opencodeProvider,
-  type OpenCodeProviderConfig,
-} from "./opencode.js";
-
 // Pi provider (uses `pi --mode rpc` with a process-local Yep extension)
 import { piProvider } from "./pi.js";
 export { PiProvider, piProvider, type PiProviderConfig } from "./pi.js";
@@ -99,7 +91,6 @@ export function getAllProviders(): AgentProvider[] {
     codexOSSProvider,
     geminiProvider,
     geminiACPProvider,
-    opencodeProvider,
     piProvider,
     kimiProvider,
     zcodeProvider,
@@ -113,7 +104,7 @@ export function getAllProviders(): AgentProvider[] {
  * implementation with proper permission handling. The non-ACP stream-json
  * provider is deprecated and will be removed.
  */
-export function getProvider(name: ProviderName): AgentProvider | null {
+export function getProvider(name: ProviderName | string): AgentProvider | null {
   switch (name) {
     case "claude":
       return claudeProvider;
@@ -125,8 +116,6 @@ export function getProvider(name: ProviderName): AgentProvider | null {
     case "gemini-acp":
       // Both map to ACP provider - "gemini" is legacy name for backward compatibility
       return geminiACPProvider;
-    case "opencode":
-      return opencodeProvider;
     case "pi":
       return piProvider;
     case "kimi":

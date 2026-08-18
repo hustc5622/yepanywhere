@@ -24,8 +24,6 @@ import type {
   KimiToolCallEvent,
   KimiToolResultEvent,
   KimiTurnEndedRecord,
-  OpenCodeSessionEntry,
-  OpenCodeStoredPart,
   PiAgentMessage,
   PiAssistantMessage,
   PiSessionContent,
@@ -77,14 +75,6 @@ import {
   parseCodexToolArguments,
 } from "../codex/normalization.js";
 import { normalizeKimiToolInput } from "../kimi/tool-input.js";
-import {
-  getOpenCodeAttachmentLabel,
-  hasYepUploadMetadataForFile,
-} from "../opencode/attachments.js";
-import {
-  formatOpenCodeError,
-  isOpenCodeAbortError,
-} from "../opencode/error.js";
 import type { ContentBlock, Message, Session } from "../supervisor/types.js";
 import { collectVisibleClaudeEntries } from "./claude-messages.js";
 import { codexEntryAnchor } from "./codex-entry-anchor.js";
@@ -456,16 +446,6 @@ export function normalizeSession(loaded: LoadedSession): Session {
         ...summary,
         messages: convertGeminiMessages(data.session.messages),
       });
-    case "opencode": {
-      const messages = convertOpenCodeEntries(data.session.messages);
-      return sanitizePublicNormalizedSession({
-        ...summary,
-        branchState: loaded.branchState,
-        messages: loaded.branchState
-          ? annotateBranchMessages(messages, loaded.branchState)
-          : messages,
-      });
-    }
     case "pi": {
       const messages = convertPiMessages(data.session);
       return sanitizePublicNormalizedSession({
@@ -1164,8 +1144,7 @@ function annotateBranchMessages(
     const parentKey = branch.parentId ?? "<root>";
     const alternatives = branchesByParent.get(parentKey) ?? [branch];
     const branchMetadata = {
-      // OpenCode edit alternatives span native sessions. Claude and Codex
-      // options still carry the same session id as branchState.sessionId.
+      // Cross-session edit alternatives carry the branch's native session id.
       sessionId: branch.sessionId,
       branchId: branch.id,
       activeBranchId: branchState.activeBranchId,
@@ -2878,338 +2857,6 @@ function mergeKimiGoalSnapshots(
   return result;
 }
 
-// --- OpenCode Conversion Logic ---
-
-function convertOpenCodeEntries(entries: OpenCodeSessionEntry[]): Message[] {
-  const messages: Message[] = [];
-
-  for (const entry of entries) {
-    const { message, parts } = entry;
-    const uuid = message.id;
-    const timestamp = message.time?.created
-      ? new Date(message.time.created).toISOString()
-      : undefined;
-
-    const content = convertOpenCodeParts(parts, message.role);
-    const usage = createOpenCodeUsage(message.tokens, message.cost, parts);
-    const openCodeHasToolPart =
-      message.role === "assistant" &&
-      parts.some((part) => part.type === "tool");
-    const openCodeHasError =
-      message.role === "assistant" && message.error !== undefined;
-    const openCodeError =
-      openCodeHasError && !isOpenCodeAbortError(message.error)
-        ? formatOpenCodeError(message.error)
-        : null;
-
-    messages.push({
-      uuid,
-      type: message.role,
-      message: {
-        role: message.role,
-        content,
-        model: message.modelID,
-        usage,
-      },
-      timestamp,
-      // Include OpenCode-specific fields
-      ...(message.parentID && {
-        parentUuid: message.parentID,
-        parentId: message.parentID,
-      }),
-      ...(message.providerID && { providerId: message.providerID }),
-      ...(message.cost !== undefined && { cost: message.cost }),
-      ...(message.mode && { mode: message.mode }),
-      ...(message.agent && { agent: message.agent }),
-      ...(message.finish && { finish: message.finish }),
-      ...(openCodeHasToolPart && { openCodeHasToolPart: true }),
-      ...(message.role === "assistant" &&
-        !openCodeHasError &&
-        !message.finish &&
-        typeof message.time?.completed === "number" && {
-          // Legacy OpenCode messages may omit `finish`. A completed message
-          // that contains a tool part is still an intermediate tool stage,
-          // not the assistant's final response.
-          openCodeCompleted: !openCodeHasToolPart,
-        }),
-      ...(message.path && { path: message.path }),
-    });
-
-    if (openCodeError) {
-      messages.push({
-        uuid: `${uuid}:error`,
-        type: "error",
-        error: openCodeError,
-        content: openCodeError,
-        timestamp: message.time?.completed
-          ? new Date(message.time.completed).toISOString()
-          : timestamp,
-        parentUuid: uuid,
-      });
-    }
-  }
-
-  return messages;
-}
-
-function createOpenCodeUsage(
-  messageTokens: OpenCodeStoredPart["tokens"],
-  messageCost: number | undefined,
-  parts: OpenCodeStoredPart[],
-): Record<string, unknown> | undefined {
-  const stepFinish = [...parts]
-    .reverse()
-    .find((part) => part.type === "step-finish" && (part.tokens || part.cost));
-  const tokens = messageTokens ?? stepFinish?.tokens;
-  const cost = messageCost ?? stepFinish?.cost;
-  if (!tokens && cost === undefined) return undefined;
-
-  const usage: Record<string, unknown> = {};
-  if (tokens?.input !== undefined) usage.input_tokens = tokens.input;
-  if (tokens?.output !== undefined) usage.output_tokens = tokens.output;
-  if (tokens?.reasoning !== undefined)
-    usage.reasoning_tokens = tokens.reasoning;
-  if (tokens?.cache?.read !== undefined) {
-    usage.cache_read_input_tokens = tokens.cache.read;
-  }
-  if (tokens?.cache?.write !== undefined) {
-    usage.cache_creation_input_tokens = tokens.cache.write;
-  }
-  if (cost !== undefined) usage.cost_usd = cost;
-  return Object.keys(usage).length > 0 ? usage : undefined;
-}
-
-function convertOpenCodeParts(
-  parts: OpenCodeStoredPart[],
-  role?: "user" | "assistant",
-): ContentBlock[] {
-  const blocks: ContentBlock[] = [];
-  const userText =
-    role === "user"
-      ? parts
-          .filter(
-            (part) => part.type === "text" && !part.synthetic && part.text,
-          )
-          .map((part) => part.text)
-          .join("\n")
-      : undefined;
-
-  for (const part of parts) {
-    switch (part.type) {
-      case "text":
-        // OpenCode inserts synthetic user text while resolving attachments
-        // (for example, "Called the Read tool..."). It is model context, not
-        // user-authored transcript content, and OpenCode's own UI hides it.
-        if (!part.synthetic && part.text) {
-          blocks.push({
-            type: "text",
-            text: part.text,
-          });
-        }
-        break;
-
-      case "reasoning":
-        if (part.text?.trim()) {
-          blocks.push({
-            type: "thinking",
-            thinking: part.text,
-          });
-        }
-        break;
-
-      case "tool":
-        if (part.tool && part.callID) {
-          const toolName = canonicalizeOpenCodeToolName(part.tool);
-          // Tool use block
-          blocks.push({
-            type: "tool_use",
-            id: part.callID,
-            name: toolName,
-            input: normalizeOpenCodeToolInput(
-              toolName,
-              part.state?.input,
-              part.state?.metadata,
-            ),
-            opencodeStatus: part.state?.status,
-            opencodeTitle: part.state?.title,
-            opencodeMetadata: part.state?.metadata,
-            opencodeTime: part.state?.time ?? part.time,
-          });
-
-          // If tool has completed, add tool result block
-          if (
-            part.state?.status === "completed" ||
-            part.state?.status === "error"
-          ) {
-            const resultContent = part.state.error
-              ? part.state.error
-              : typeof part.state.output === "string"
-                ? part.state.output
-                : JSON.stringify(part.state.output ?? "");
-
-            blocks.push({
-              type: "tool_result",
-              tool_use_id: part.callID,
-              content: resultContent,
-              is_error: part.state.status === "error" || !!part.state.error,
-              opencodeStatus: part.state.status,
-              opencodeTitle: part.state.title,
-              opencodeMetadata: part.state.metadata,
-              opencodeTime: part.state.time ?? part.time,
-            });
-          }
-        }
-        break;
-
-      // Skip step-start (metadata, not content)
-      case "step-start":
-      case "step-finish":
-        break;
-
-      case "subtask": {
-        // Subagent launch marker: keep subagent work visible in transcripts.
-        const subtask = part as unknown as {
-          prompt?: string;
-          description?: string;
-          agent?: string;
-        };
-        const description =
-          subtask.description?.trim() || subtask.prompt?.trim() || "";
-        const agentName = subtask.agent?.trim() || "subagent";
-        blocks.push({
-          type: "text",
-          text: `**Subagent (${agentName})**: ${description}`,
-        });
-        break;
-      }
-
-      case "file": {
-        // Attachment marker (user uploads / tool-produced files).
-        const file = part as unknown as {
-          filename?: string;
-          mime?: string;
-          url?: string;
-        };
-        if (hasYepUploadMetadataForFile(userText, file.filename)) break;
-        const label = getOpenCodeAttachmentLabel(file);
-        blocks.push({
-          type: "text",
-          text: `📎 ${label}${file.mime ? ` (${file.mime})` : ""}`,
-        });
-        break;
-      }
-
-      // retry: transient backoff bookkeeping; patch/snapshot: internal VCS
-      // state; agent: @-mention reference duplicated in the text part.
-      // compaction is emitted as a session-level system marker elsewhere.
-      case "retry":
-      case "patch":
-      case "snapshot":
-      case "agent":
-      case "compaction":
-        break;
-
-      default:
-        // Unknown part type - skip
-        break;
-    }
-  }
-
-  return blocks;
-}
-
-function canonicalizeOpenCodeToolName(toolName: string): string {
-  switch (toolName.toLowerCase()) {
-    case "bash":
-    case "shell":
-      return "Bash";
-    case "read":
-      return "Read";
-    case "write":
-      return "Write";
-    case "edit":
-    case "apply_patch":
-      return "Edit";
-    case "glob":
-      return "Glob";
-    case "grep":
-      return "Grep";
-    case "todowrite":
-    case "todo":
-      return "TodoWrite";
-    default:
-      return toolName;
-  }
-}
-
-function normalizeOpenCodeToolInput(
-  toolName: string,
-  input: unknown,
-  metadata?: unknown,
-): unknown {
-  const baseInput =
-    input && typeof input === "object" && !Array.isArray(input) ? input : {};
-  const normalized = { ...(baseInput as Record<string, unknown>) };
-  const lowerToolName = toolName.toLowerCase();
-  const metadataRecord =
-    metadata && typeof metadata === "object" && !Array.isArray(metadata)
-      ? (metadata as Record<string, unknown>)
-      : undefined;
-
-  if (
-    (lowerToolName === "read" ||
-      lowerToolName === "write" ||
-      lowerToolName === "edit") &&
-    typeof normalized.filePath === "string" &&
-    typeof normalized.file_path !== "string"
-  ) {
-    normalized.file_path = normalized.filePath;
-  }
-
-  if (
-    lowerToolName === "edit" &&
-    typeof normalized.oldString === "string" &&
-    typeof normalized.old_string !== "string"
-  ) {
-    normalized.old_string = normalized.oldString;
-  }
-
-  if (
-    lowerToolName === "edit" &&
-    typeof normalized.newString === "string" &&
-    typeof normalized.new_string !== "string"
-  ) {
-    normalized.new_string = normalized.newString;
-  }
-
-  if (
-    lowerToolName === "edit" &&
-    typeof normalized.replaceAll === "boolean" &&
-    typeof normalized.replace_all !== "boolean"
-  ) {
-    normalized.replace_all = normalized.replaceAll;
-  }
-
-  if (
-    lowerToolName === "edit" &&
-    typeof metadataRecord?.diff === "string" &&
-    metadataRecord.diff.trim() &&
-    typeof normalized._rawPatch !== "string"
-  ) {
-    normalized._rawPatch = metadataRecord.diff;
-  }
-
-  if (
-    lowerToolName === "grep" &&
-    typeof normalized.include === "string" &&
-    typeof normalized.glob !== "string"
-  ) {
-    normalized.glob = normalized.include;
-  }
-
-  return normalized;
-}
-
 // --- ZCode Conversion Logic ---
 
 /**
@@ -3319,7 +2966,7 @@ export function convertZCodeMessages(session: ZCodeSessionContent): Message[] {
       });
     }
 
-    // Emit tool results as separate user messages (matching Codex/OpenCode pattern).
+    // Emit tool results as separate user messages.
     for (const tr of toolResults) {
       messages.push({
         type: "user",

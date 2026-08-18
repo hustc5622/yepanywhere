@@ -853,6 +853,40 @@ describe("SessionIndexService", () => {
   });
 
   describe("persistence", () => {
+    it("ignores a retired provider entry without rewriting the persisted index", async () => {
+      const filePath = join(sessionDir, "legacy.jsonl");
+      await writeFile(filePath, "{}\n");
+      const stats = await stat(filePath);
+      const indexPath = service.getIndexPath(sessionDir, reader);
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          version: 11,
+          projectId,
+          sessions: {
+            legacy: {
+              title: "Legacy",
+              fullTitle: "Legacy",
+              createdAt: "2026-08-18T00:00:00.000Z",
+              updatedAt: "2026-08-18T00:00:00.000Z",
+              messageCount: 1,
+              indexedBytes: stats.size,
+              fileMtime: stats.mtimeMs,
+              provider: "opencode",
+            },
+          },
+        }),
+      );
+
+      const reloaded = new SessionIndexService({ dataDir, projectsDir });
+      await reloaded.initialize();
+      await expect(
+        reloaded.getSessionsWithCache(sessionDir, projectId, reader),
+      ).resolves.toEqual([]);
+      const persisted = JSON.parse(await readFile(indexPath, "utf-8"));
+      expect(persisted.sessions.legacy.provider).toBe("opencode");
+    });
+
     it("persists index to disk and reloads", async () => {
       await createSession("session-1", "Persistent session");
 
@@ -1091,7 +1125,7 @@ describe("SessionIndexService full-validation throttling", () => {
     testDir = join(tmpdir(), `index-throttle-${randomUUID()}`);
     dataDir = join(testDir, "indexes");
     projectsDir = join(testDir, "projects");
-    sessionDir = join(testDir, "opencode-sessions");
+    sessionDir = join(testDir, "zcode-sessions");
     await mkdir(dataDir, { recursive: true });
     await mkdir(sessionDir, { recursive: true });
     projectId = toUrlProjectId("/test/project");
@@ -1108,7 +1142,7 @@ describe("SessionIndexService full-validation throttling", () => {
   function countingReader(scope: string, onList?: () => Promise<void>) {
     let listCalls = 0;
     const reader: ISessionReader = {
-      getIndexScopeKey: (dir) => `opencode::${dir}::${scope}`,
+      getIndexScopeKey: (dir) => `zcode::${dir}::${scope}`,
       listSessionFiles: async (dir) => {
         listCalls += 1;
         await onList?.();
@@ -1128,7 +1162,7 @@ describe("SessionIndexService full-validation throttling", () => {
         updatedAt: "2026-08-17T00:00:00.000Z",
         messageCount: 1,
         ownership: { owner: "none" },
-        provider: "opencode",
+        provider: "zcode",
       }),
       getAgentMappings: async () => [],
       getAgentSession: async () => null,
@@ -1141,10 +1175,10 @@ describe("SessionIndexService full-validation throttling", () => {
     };
   }
 
-  function emitOpencodeChange(bus: EventBus): void {
+  function emitZCodeChange(bus: EventBus): void {
     bus.emit({
       type: "file-change",
-      provider: "opencode",
+      provider: "zcode",
       path: join(sessionDir, "session-1.jsonl"),
       relativePath: "session-1.jsonl",
       changeType: "modify",
@@ -1174,7 +1208,7 @@ describe("SessionIndexService full-validation throttling", () => {
 
     // A watcher storm: every event marks the scope dirty.
     for (let i = 0; i < 20; i++) {
-      emitOpencodeChange(eventBus);
+      emitZCodeChange(eventBus);
       await service.getSessionsWithCache(sessionDir, projectId, reader);
     }
 
@@ -1198,7 +1232,7 @@ describe("SessionIndexService full-validation throttling", () => {
     await service.getSessionsWithCache(sessionDir, projectId, reader);
     const primed = probe.listCalls();
 
-    emitOpencodeChange(eventBus);
+    emitZCodeChange(eventBus);
     await new Promise((resolve) => setTimeout(resolve, 40));
     await service.getSessionsWithCache(sessionDir, projectId, reader);
 
@@ -1222,7 +1256,7 @@ describe("SessionIndexService full-validation throttling", () => {
     await service.getSessionsWithCache(sessionDir, projectId, reader);
     const primed = probe.listCalls();
 
-    emitOpencodeChange(eventBus);
+    emitZCodeChange(eventBus);
     await service.getSessionsWithCache(sessionDir, projectId, reader);
 
     expect(probe.listCalls()).toBeGreaterThan(primed);
@@ -1246,7 +1280,7 @@ describe("SessionIndexService full-validation throttling", () => {
       concurrent -= 1;
     };
 
-    // Distinct scopes sharing one store, exactly the OpenCode shape.
+    // Distinct project scopes sharing one provider store.
     const readers = ["/a", "/b", "/c", "/d"].map(
       (scope) => countingReader(scope, hold).reader,
     );
@@ -1294,7 +1328,7 @@ describe("SessionIndexService full-validation accounting", () => {
 
   function slowReader(scope: string, workMs: number): ISessionReader {
     return {
-      getIndexScopeKey: (dir) => `opencode::${dir}::${scope}`,
+      getIndexScopeKey: (dir) => `zcode::${dir}::${scope}`,
       listSessionFiles: async (dir) => {
         await new Promise((resolve) => setTimeout(resolve, workMs));
         return [
@@ -1313,7 +1347,7 @@ describe("SessionIndexService full-validation accounting", () => {
         updatedAt: "2026-08-17T00:00:00.000Z",
         messageCount: 1,
         ownership: { owner: "none" },
-        provider: "opencode",
+        provider: "zcode",
       }),
       getAgentMappings: async () => [],
       getAgentSession: async () => null,
@@ -1405,7 +1439,7 @@ describe("SessionIndexService full-validation admission", () => {
 
   function reader(scope: string, workMs: number): ISessionReader {
     return {
-      getIndexScopeKey: (dir) => `opencode::${dir}::${scope}`,
+      getIndexScopeKey: (dir) => `zcode::${dir}::${scope}`,
       listSessionFiles: async (dir) => {
         if (workMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, workMs));
@@ -1426,7 +1460,7 @@ describe("SessionIndexService full-validation admission", () => {
         updatedAt: "2026-08-17T00:00:00.000Z",
         messageCount: 1,
         ownership: { owner: "none" },
-        provider: "opencode",
+        provider: "zcode",
       }),
       getAgentMappings: async () => [],
       getAgentSession: async () => null,

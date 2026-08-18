@@ -23,6 +23,7 @@ import {
   type UrlProjectId,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
+import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import type { ISessionReader, SessionFileEntry } from "../sessions/types.js";
 import type { Message } from "../supervisor/types.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
@@ -591,6 +592,7 @@ export class SessionContentIndexService {
 
     for (const [sessionId, session] of Object.entries(index.sessions)) {
       if (filterSessionId && sessionId !== filterSessionId) continue;
+      if (isRetiredProviderName(session.provider)) continue;
 
       if (session.isEmpty) {
         // Still allow title-only matches for empty sessions.

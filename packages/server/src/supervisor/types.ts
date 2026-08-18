@@ -49,7 +49,6 @@ export interface Project {
   mergedSessionDirs?: string[]; // additional session dirs from cross-machine duplicates
   hasCodexSessions?: boolean; // whether this project also has Codex sessions
   hasGeminiSessions?: boolean; // whether this project also has Gemini sessions
-  hasOpenCodeSessions?: boolean; // whether this project also has OpenCode sessions
   hasPiSessions?: boolean; // whether this project also has Pi sessions
   hasKimiSessions?: boolean; // whether this project also has Kimi sessions
   hasZCodeSessions?: boolean; // whether this project also has ZCode sessions
@@ -125,15 +124,15 @@ export interface SessionSummary {
   /** AI provider used for this session */
   provider: ProviderName;
   /**
-   * For provider-native subagent sessions (e.g. OpenCode task/subagent
-   * children), the id of the session that spawned this one. Populated on the
+   * For provider-native subagent sessions, the id of the session that spawned
+   * this one. Populated on the
    * session detail but not on list summaries — subagent children are excluded
    * from session lists and surfaced inline under their parent instead.
    */
   parentSessionId?: string;
   /**
    * Source session for a provider-native edit fork. Codex persists this as
-   * `forked_from_id`; its first-prompt fallback and OpenCode use Yep metadata.
+   * `forked_from_id`; other providers may use Yep metadata.
    */
   forkParentSessionId?: string;
   /** Model used for this session (extracted from JSONL, e.g. "claude-opus-4-5-20251101") */
@@ -173,7 +172,7 @@ export interface SessionSummary {
   lastTurnStatus?: SessionLastTurnStatus;
   /** Most recent provider error message, if the last turn failed. */
   lastErrorMessage?: string;
-  /** Present while the provider is retrying a failed request (OpenCode). */
+  /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
 }
 

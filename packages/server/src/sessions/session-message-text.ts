@@ -59,13 +59,7 @@ export function extractFirstAssistantResponseText(
   return null;
 }
 
-function hasOpenCodeToolPart(message: Message): boolean {
-  if (
-    (message as { openCodeHasToolPart?: unknown }).openCodeHasToolPart === true
-  ) {
-    return true;
-  }
-
+function hasToolPart(message: Message): boolean {
   const content = message.message?.content ?? message.content;
   if (!Array.isArray(content)) return false;
   return content.some((block) => {
@@ -97,33 +91,11 @@ function isFinalAssistantResponseMessage(
   if (codexMessagePhase === "commentary") return false;
   if (codexMessagePhase === "final_answer") return true;
 
-  if (session.provider === "opencode") {
-    // OpenCode writes assistant text before executing tools, then marks that
-    // intermediate message as `tool-calls`. Some providers can report `stop`
-    // while also returning tool parts, and OpenCode continues the loop in that
-    // case. A final response must therefore contain no tool part. Error,
-    // cancellation, filtering and truncation must not trigger title generation
-    // from partial text. Older persisted OpenCode messages can lack `finish`;
-    // accept those only when the reader observed OpenCode's real
-    // `time.completed` field.
-    if (hasOpenCodeToolPart(message)) return false;
-    const finish = (message as { finish?: unknown }).finish;
-    if (finish === "stop") return true;
-    if (finish !== undefined) return false;
-    return (
-      (
-        message as {
-          openCodeCompleted?: unknown;
-        }
-      ).openCodeCompleted === true
-    );
-  }
-
   if (session.provider === "pi") {
     // Pi persists one assistant message before each tool execution. Only the
     // later tool-free stop response is the completed answer suitable for a
     // generated session title.
-    if (hasOpenCodeToolPart(message)) return false;
+    if (hasToolPart(message)) return false;
     return (message as { stopReason?: unknown }).stopReason === "stop";
   }
 

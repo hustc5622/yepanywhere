@@ -147,7 +147,7 @@ describe("Settings Routes", () => {
       });
     });
 
-    it("preserves Codex defaults when OpenCode becomes the default provider", async () => {
+    it("rejects the retired provider as a new-session default", async () => {
       settings = {
         ...settings,
         newSessionDefaults: {
@@ -167,11 +167,6 @@ describe("Settings Routes", () => {
       const routes = createSettingsRoutes({
         serverSettingsService: mockServerSettingsService,
       });
-      const opencodeConfig = {
-        model: "claude-opus-4-8",
-        requestProtocol: "anthropic",
-      };
-
       const response = await routes.request("/", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -179,43 +174,19 @@ describe("Settings Routes", () => {
           newSessionDefaults: {
             provider: "opencode",
             permissionMode: "acceptEdits",
-            opencodeConfig,
-            byProvider: {
-              opencode: {
-                permissionMode: "acceptEdits",
-                opencodeConfig,
-              },
-            },
           },
         }),
       });
 
-      expect(response.status).toBe(200);
-      expect(mockServerSettingsService.updateSettings).toHaveBeenCalledWith({
-        newSessionDefaults: {
-          provider: "opencode",
-          permissionMode: "acceptEdits",
-          opencodeConfig,
-          byProvider: {
-            codex: {
-              model: "gpt-5.6-sol",
-              permissionMode: "bypassPermissions",
-              codexMcpMode: "clear",
-            },
-            opencode: {
-              permissionMode: "acceptEdits",
-              opencodeConfig,
-            },
-          },
-        },
-      });
+      expect(response.status).toBe(400);
+      expect(mockServerSettingsService.updateSettings).not.toHaveBeenCalled();
     });
 
     it("accepts the shared gateway model configuration for Pi defaults", async () => {
       const routes = createSettingsRoutes({
         serverSettingsService: mockServerSettingsService,
       });
-      const opencodeConfig = {
+      const llmGatewayConfig = {
         model: "claude-opus-4-8",
         requestProtocol: "anthropic" as const,
       };
@@ -227,9 +198,9 @@ describe("Settings Routes", () => {
           newSessionDefaults: {
             provider: "pi",
             permissionMode: "acceptEdits",
-            opencodeConfig,
+            llmGatewayConfig,
             byProvider: {
-              pi: { permissionMode: "acceptEdits", opencodeConfig },
+              pi: { permissionMode: "acceptEdits", llmGatewayConfig },
             },
           },
         }),
@@ -240,9 +211,9 @@ describe("Settings Routes", () => {
         newSessionDefaults: {
           provider: "pi",
           permissionMode: "acceptEdits",
-          opencodeConfig,
+          llmGatewayConfig,
           byProvider: {
-            pi: { permissionMode: "acceptEdits", opencodeConfig },
+            pi: { permissionMode: "acceptEdits", llmGatewayConfig },
           },
         },
       });
@@ -258,9 +229,9 @@ describe("Settings Routes", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           newSessionDefaults: {
-            provider: "opencode",
+            provider: "claude",
             byProvider: {
-              opencode: {
+              claude: {
                 codexMcpMode: "full",
               },
             },

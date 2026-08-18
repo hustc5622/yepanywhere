@@ -2,7 +2,6 @@ import { toUrlProjectId } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import type { BridgeSessionView } from "../../src/bridge-common/types.js";
 import type { CodexBridgeController } from "../../src/codex-bridge/types.js";
-import type { OpenCodeBridgeController } from "../../src/opencode-bridge/types.js";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import { createProjectsRoutes } from "../../src/routes/projects.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
@@ -25,11 +24,7 @@ function project(): Project {
   };
 }
 
-function view(
-  id: string,
-  live: boolean,
-  provider: "codex" | "opencode",
-): BridgeSessionView {
+function view(id: string, live: boolean): BridgeSessionView {
   return {
     session: {
       id,
@@ -40,8 +35,8 @@ function view(
       updatedAt: "2026-07-20T09:30:00.000Z",
       messageCount: 4,
       ownership: live ? { owner: "external" } : { owner: "none" },
-      provider,
-      source: `${provider}-bridge`,
+      provider: "codex",
+      source: "codex-bridge",
     },
     projectName: "bridge-bulk",
     ...(live ? { activity: "in-turn" as const } : {}),
@@ -57,7 +52,7 @@ function view(
  */
 function staleView(id: string): BridgeSessionView {
   return {
-    ...view(id, false, "codex"),
+    ...view(id, false),
     activity: "in-turn",
     active: false,
   };
@@ -70,7 +65,7 @@ interface BridgeCallCounts {
 }
 
 function stubBridge(views: BridgeSessionView[]): {
-  controller: CodexBridgeController & OpenCodeBridgeController;
+  controller: CodexBridgeController;
   calls: BridgeCallCounts;
 } {
   const calls: BridgeCallCounts = {
@@ -100,16 +95,12 @@ function stubBridge(views: BridgeSessionView[]): {
     },
     getPendingInputRequest: () => null,
     respondToInput: () => false,
-  } as unknown as CodexBridgeController & OpenCodeBridgeController;
+  } as unknown as CodexBridgeController;
   return { controller, calls };
 }
 
-function routesFor(
-  codexViews: BridgeSessionView[],
-  opencodeViews: BridgeSessionView[],
-) {
+function routesFor(codexViews: BridgeSessionView[]) {
   const codex = stubBridge(codexViews);
-  const opencode = stubBridge(opencodeViews);
   const scanner = {
     listProjects: async () => [project()],
     getOrCreateProject: async (projectId: string) =>
@@ -123,31 +114,22 @@ function routesFor(
       ({ listSessions: async () => [] }) as unknown as ISessionReader,
     gitStatusProvider: async () => null,
     codexBridgeService: codex.controller,
-    opencodeBridgeService: opencode.controller,
   });
 
-  return { routes, codex, opencode };
+  return { routes, codex };
 }
 
 describe("project routes bridge fan-out", () => {
-  // ~148 bridge sessions is the real-world scale that turned one project list
-  // request into ~300 sidecar requests (and, behind the OpenCode sidecar,
-  // thousands of upstream connections until the host ran out of ephemeral
-  // ports).
-  const codexViews = Array.from({ length: 42 }, (_, index) =>
-    view(`codex-${index}`, index % 3 === 0, "codex"),
+  // A large bridge snapshot must still result in constant route fan-out.
+  const codexViews = Array.from({ length: 148 }, (_, index) =>
+    view(`codex-${index}`, index % 3 === 0),
   );
-  const opencodeViews = Array.from({ length: 106 }, (_, index) =>
-    view(`opencode-${index}`, index % 4 === 0, "opencode"),
-  );
-  const liveCount =
-    codexViews.filter((item) => item.session.ownership.owner === "external")
-      .length +
-    opencodeViews.filter((item) => item.session.ownership.owner === "external")
-      .length;
+  const liveCount = codexViews.filter(
+    (item) => item.session.ownership.owner === "external",
+  ).length;
 
-  it("lists projects with one bulk snapshot per bridge and no per-session probes", async () => {
-    const { routes, codex, opencode } = routesFor(codexViews, opencodeViews);
+  it("lists projects with one bulk snapshot and no per-session probes", async () => {
+    const { routes, codex } = routesFor(codexViews);
 
     const res = await routes.request("/");
     expect(res.status).toBe(200);
@@ -156,40 +138,34 @@ describe("project routes bridge fan-out", () => {
     };
 
     expect(codex.calls.listSessionViews).toBe(1);
-    expect(opencode.calls.listSessionViews).toBe(1);
     expect(codex.calls.isSessionActive).toBe(0);
-    expect(opencode.calls.isSessionActive).toBe(0);
     expect(codex.calls.getSessionView).toBe(0);
-    expect(opencode.calls.getSessionView).toBe(0);
 
     // Liveness is still derived correctly, just from the snapshot.
     const listed = json.projects.find((item) => item.id === PROJECT_ID);
     expect(listed?.activeExternalCount).toBe(liveCount);
   });
 
-  it("lists project sessions with one bulk snapshot per bridge", async () => {
-    const { routes, codex, opencode } = routesFor(codexViews, opencodeViews);
+  it("lists project sessions with one bulk snapshot", async () => {
+    const { routes, codex } = routesFor(codexViews);
 
     const res = await routes.request(`/${PROJECT_ID}/sessions`);
     expect(res.status).toBe(200);
     const json = (await res.json()) as { sessions: Array<{ id: string }> };
 
     expect(codex.calls.listSessionViews).toBe(1);
-    expect(opencode.calls.listSessionViews).toBe(1);
     expect(codex.calls.isSessionActive).toBe(0);
-    expect(opencode.calls.isSessionActive).toBe(0);
     expect(codex.calls.getSessionView).toBe(0);
-    expect(opencode.calls.getSessionView).toBe(0);
 
     // Only live bridge sessions are merged into the project session list.
     expect(json.sessions).toHaveLength(liveCount);
   });
 
   it("does not count stale in-turn views the sidecar reports inactive", async () => {
-    const { routes, codex, opencode } = routesFor(
-      [staleView("codex-stale"), view("codex-live", true, "codex")],
-      [],
-    );
+    const { routes, codex } = routesFor([
+      staleView("codex-stale"),
+      view("codex-live", true),
+    ]);
 
     const res = await routes.request("/");
     const json = (await res.json()) as {
@@ -200,19 +176,17 @@ describe("project routes bridge fan-out", () => {
       json.projects.find((item) => item.id === PROJECT_ID)?.activeExternalCount,
     ).toBe(1);
     expect(codex.calls.isSessionActive).toBe(0);
-    expect(opencode.calls.isSessionActive).toBe(0);
   });
 
   it("keeps bridge fan-out constant as the session count grows", async () => {
     const many = Array.from({ length: 600 }, (_, index) =>
-      view(`opencode-many-${index}`, index % 2 === 0, "opencode"),
+      view(`codex-many-${index}`, index % 2 === 0),
     );
-    const { routes, codex, opencode } = routesFor([], many);
+    const { routes, codex } = routesFor(many);
 
     await routes.request("/");
 
     expect(codex.calls.listSessionViews).toBe(1);
-    expect(opencode.calls.listSessionViews).toBe(1);
-    expect(opencode.calls.isSessionActive).toBe(0);
+    expect(codex.calls.isSessionActive).toBe(0);
   });
 });

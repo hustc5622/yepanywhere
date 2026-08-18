@@ -18,9 +18,6 @@ type InputResponse = "approve" | "approve_accept_edits" | "deny";
 interface ClaudeWrapperOptions {
   serverUrl: string;
   desktopToken?: string;
-  bridgeUrl?: string;
-  bridgeRequired: boolean;
-  useBridge: boolean;
   cwd: string;
   prompt?: string;
   resumeSessionId?: string;
@@ -115,7 +112,6 @@ interface ParsedArgs {
 }
 
 const DEFAULT_SERVER_URL = "http://127.0.0.1:3400";
-const DEFAULT_BRIDGE_URL = "http://127.0.0.1:4520";
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 
 export function parseClaudeWrapperArgs(args: string[]): ParsedArgs {
@@ -125,9 +121,6 @@ export function parseClaudeWrapperArgs(args: string[]): ParsedArgs {
     DEFAULT_SERVER_URL;
   let desktopToken =
     process.env.YEP_DESKTOP_AUTH_TOKEN ?? process.env.DESKTOP_AUTH_TOKEN;
-  let bridgeUrl = process.env.YEP_OPENCODE_BRIDGE_URL ?? DEFAULT_BRIDGE_URL;
-  let bridgeRequired = process.env.YEP_OPENCODE_BRIDGE_URL !== undefined;
-  let useBridge = process.env.YEP_OPENCODE_BRIDGE !== "false";
   let cwd = process.cwd();
   let resumeSessionId: string | undefined;
   let mode: PermissionMode | undefined;
@@ -148,17 +141,6 @@ export function parseClaudeWrapperArgs(args: string[]): ParsedArgs {
     }
     if (arg === "--token") {
       desktopToken = readOptionValue(args, ++i, "--token");
-      continue;
-    }
-    if (arg === "--bridge") {
-      bridgeUrl = readOptionValue(args, ++i, "--bridge");
-      bridgeRequired = true;
-      useBridge = true;
-      continue;
-    }
-    if (arg === "--no-bridge") {
-      useBridge = false;
-      bridgeRequired = false;
       continue;
     }
     if (arg === "--cwd") {
@@ -203,9 +185,6 @@ export function parseClaudeWrapperArgs(args: string[]): ParsedArgs {
     options: {
       serverUrl: normalizeServerUrl(serverUrl),
       desktopToken,
-      bridgeUrl: bridgeUrl ? normalizeServerUrl(bridgeUrl) : undefined,
-      bridgeRequired,
-      useBridge,
       cwd,
       prompt: promptParts.length > 0 ? promptParts.join(" ") : undefined,
       resumeSessionId,
@@ -228,9 +207,6 @@ OPTIONS:
                        Can include a base path, e.g. http://host:8022/yep
   --token <token>      Desktop auth token for X-Desktop-Token
                        Env: YEP_DESKTOP_AUTH_TOKEN or DESKTOP_AUTH_TOKEN
-  --bridge <url>       OpenCode CLI bridge URL (default probe: ${DEFAULT_BRIDGE_URL})
-                       Env: YEP_OPENCODE_BRIDGE_URL
-  --no-bridge          Skip OpenCode CLI bridge probing and use Yep REST directly
   --cwd <path>         Project directory (default: current directory)
   --resume, -r <id>    Resume an existing Claude session
   --mode <mode>        Permission mode: default, acceptEdits,
@@ -248,7 +224,7 @@ EXAMPLES:
 
 export async function runClaudeWrapper(args: string[]): Promise<void> {
   const { options } = parseClaudeWrapperArgs(args);
-  const client = await createSessionClient(options);
+  const client = new YepApiClient(options.serverUrl, options.desktopToken);
   const rl = createInterface({ input, output });
   const seenMessageIds = new Set<string>();
   let sessionId = options.resumeSessionId;
@@ -257,9 +233,6 @@ export async function runClaudeWrapper(args: string[]): Promise<void> {
 
   try {
     console.log(`Yep server: ${options.serverUrl}`);
-    if (client.kind === "bridge") {
-      console.log(`OpenCode bridge: ${client.url}`);
-    }
     console.log(`Project: ${options.cwd}`);
 
     let initialPrompt = options.prompt;
@@ -402,161 +375,6 @@ interface ClaudeSessionClient {
     answers?: UserQuestionAnswers,
     feedback?: string,
   ): Promise<{ accepted: boolean }>;
-}
-
-async function createSessionClient(
-  options: ClaudeWrapperOptions,
-): Promise<ClaudeSessionClient> {
-  const direct = new YepApiClient(options.serverUrl, options.desktopToken);
-  if (!options.useBridge || !options.bridgeUrl) {
-    return direct;
-  }
-
-  const bridge = new OpenCodeBridgeApiClient(options);
-  if (await bridge.isAvailable()) {
-    return bridge;
-  }
-  if (options.bridgeRequired) {
-    throw new Error(`OpenCode bridge is not available at ${options.bridgeUrl}`);
-  }
-  return direct;
-}
-
-class OpenCodeBridgeApiClient implements ClaudeSessionClient {
-  readonly kind = "bridge" as const;
-  readonly url: string;
-  private readonly serverUrl: string;
-  private readonly desktopToken: string | undefined;
-  private readonly cwd: string;
-
-  constructor(options: ClaudeWrapperOptions) {
-    if (!options.bridgeUrl) {
-      throw new Error("OpenCode bridge URL is required");
-    }
-    this.url = options.bridgeUrl;
-    this.serverUrl = options.serverUrl;
-    this.desktopToken = options.desktopToken;
-    this.cwd = options.cwd;
-  }
-
-  async isAvailable(): Promise<boolean> {
-    try {
-      const status = await this.request<{ listening?: boolean }>("/readyz");
-      return status.listening !== false;
-    } catch {
-      return false;
-    }
-  }
-
-  startSession(
-    _projectId: string,
-    message: string,
-    options: { mode?: PermissionMode; model?: string },
-  ): Promise<StartSessionResponse> {
-    return this.request("/sessions", {
-      method: "POST",
-      body: this.sessionBody(message, options),
-    });
-  }
-
-  resumeSession(
-    _projectId: string,
-    sessionId: string,
-    message: string,
-    options: { mode?: PermissionMode; model?: string },
-  ): Promise<StartSessionResponse> {
-    return this.request(`/sessions/${sessionId}/resume`, {
-      method: "POST",
-      body: this.sessionBody(message, options),
-    });
-  }
-
-  getSession(
-    projectId: string,
-    sessionId: string,
-  ): Promise<SessionDetailResponse> {
-    const query = new URLSearchParams({
-      projectId,
-      cwd: this.cwd,
-    });
-    return this.request(`/sessions/${sessionId}?${query.toString()}`);
-  }
-
-  getProcessInfo(sessionId: string): Promise<ProcessInfoResponse> {
-    return this.request(`/sessions/${sessionId}/process`);
-  }
-
-  queueMessage(
-    sessionId: string,
-    message: string,
-    options: { mode?: PermissionMode; model?: string },
-  ): Promise<QueueMessageResponse> {
-    return this.request(`/sessions/${sessionId}/messages`, {
-      method: "POST",
-      body: this.sessionBody(message, options),
-    });
-  }
-
-  respondToInput(
-    sessionId: string,
-    requestId: string,
-    response: InputResponse,
-    answers?: UserQuestionAnswers,
-    feedback?: string,
-  ): Promise<{ accepted: boolean }> {
-    return this.request(`/sessions/${sessionId}/input`, {
-      method: "POST",
-      body: {
-        requestId,
-        response,
-        answers,
-        feedback,
-        serverUrl: this.serverUrl,
-        desktopToken: this.desktopToken,
-      },
-    });
-  }
-
-  private sessionBody(
-    message: string,
-    options: { mode?: PermissionMode; model?: string },
-  ): Record<string, unknown> {
-    return {
-      serverUrl: this.serverUrl,
-      desktopToken: this.desktopToken,
-      cwd: this.cwd,
-      message,
-      mode: options.mode,
-      model: options.model,
-    };
-  }
-
-  private async request<T>(
-    pathname: string,
-    init?: { method?: string; body?: unknown },
-  ): Promise<T> {
-    const response = await fetch(`${this.url}${pathname}`, {
-      method: init?.method ?? "GET",
-      headers: {
-        "content-type": "application/json",
-        "x-yep-server-url": this.serverUrl,
-        ...(this.desktopToken ? { "x-desktop-token": this.desktopToken } : {}),
-      },
-      body: init?.body === undefined ? undefined : JSON.stringify(init.body),
-    });
-
-    if (!response.ok) {
-      const body = await readResponseBody(response);
-      const error = new Error(
-        formatApiError(response.status, body),
-      ) as ApiError;
-      error.status = response.status;
-      error.body = body;
-      throw error;
-    }
-
-    return (await response.json()) as T;
-  }
 }
 
 class YepApiClient implements ClaudeSessionClient {

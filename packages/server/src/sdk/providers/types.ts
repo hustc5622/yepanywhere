@@ -2,29 +2,17 @@
 import type {
   CodexMcpMode,
   ContextStatusSdkPayload,
+  LlmGatewaySessionConfig,
   ModelInfo,
-  OpenCodeSessionConfig,
   PermissionMode,
+  ProviderName,
   SlashCommand,
 } from "@yep-anywhere/shared";
 import type { MessageQueue } from "../messageQueue.js";
 import type { CanUseTool, SDKMessage, UserMessage } from "../types.js";
 import type { CodexSessionControls } from "./codex-controls.js";
 
-/**
- * Provider names - extensible for future providers.
- */
-export type ProviderName =
-  | "claude"
-  | "claude-ollama"
-  | "codex"
-  | "codex-oss"
-  | "gemini"
-  | "gemini-acp"
-  | "opencode"
-  | "pi"
-  | "kimi"
-  | "zcode";
+export type { ProviderName } from "@yep-anywhere/shared";
 
 /**
  * Authentication status for a provider.
@@ -62,8 +50,8 @@ export interface StartSessionOptions {
   allowMissingRolloutReplacement?: boolean;
   /**
    * Provider-native edit boundary used with resumeSessionId. Claude resumes
-   * through the supplied ancestor UUID; OpenCode and Pi fork before the
-   * supplied native user message ID. Maps to the provider's
+   * through the supplied ancestor UUID; Pi forks before the supplied native
+   * user message ID. Maps to the provider's
    * `resumeSessionAt` option.
    */
   resumeSessionAt?: string;
@@ -82,7 +70,7 @@ export interface StartSessionOptions {
   thinking?: import("@yep-anywhere/shared").ThinkingConfig;
   /** Effort level for response quality (undefined = SDK default) */
   effort?: import("@yep-anywhere/shared").EffortLevel;
-  /** Exact provider reasoning effort / OpenCode model variant. */
+  /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
@@ -92,8 +80,8 @@ export interface StartSessionOptions {
   codexEventAccountId?: string;
   /** Optional stable project key recorded on canonical Codex event envelopes. */
   codexEventProjectId?: string;
-  /** Managed provider/model configuration consumed by OpenCode and Pi. */
-  opencodeConfig?: OpenCodeSessionConfig;
+  /** Provider-neutral managed gateway settings. */
+  llmGatewayConfig?: LlmGatewaySessionConfig;
   /** Tool approval callback */
   onToolApproval?: CanUseTool;
   /** Configured SSH host for Claude remote execution. */

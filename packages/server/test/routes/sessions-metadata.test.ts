@@ -13,12 +13,12 @@ import {
 } from "../../src/routes/sessions.js";
 import type { RuntimeProcessSnapshot } from "../../src/runtime/types.js";
 import type { CodexSessionReader } from "../../src/sessions/codex-reader.js";
-import { OpenCodeSessionReader } from "../../src/sessions/opencode-reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
 import type { Project, SessionSummary } from "../../src/supervisor/types.js";
 
 interface TestSqliteStatement {
   run(...params: unknown[]): void;
+  get(...params: unknown[]): Record<string, unknown> | undefined;
 }
 
 interface TestSqliteDatabase {
@@ -168,6 +168,22 @@ async function createOpenCodeDb(
   }
 
   return true;
+}
+
+async function readArchivedAt(
+  dbPath: string,
+  sessionId: string,
+): Promise<unknown> {
+  const sqlite = await loadSqliteModule();
+  if (!sqlite) return undefined;
+  const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT time_archived FROM session WHERE id = ?")
+      .get(sessionId)?.time_archived;
+  } finally {
+    db.close();
+  }
 }
 
 function createProject(): Project {
@@ -506,7 +522,7 @@ describe("Sessions metadata route", () => {
     const project = createProject();
     const persistedSummary: SessionSummary = {
       ...createSummary(),
-      provider: "opencode",
+      provider: "codex",
       parentSessionId: "ses_parent",
       lastTurnStatus: "failed",
       lastErrorMessage: "stale persisted error",
@@ -515,7 +531,7 @@ describe("Sessions metadata route", () => {
       ...persistedSummary,
       ownership: { owner: "external" },
       activity: "in-turn",
-      source: "opencode-bridge",
+      source: "codex-bridge",
       lastTurnStatus: undefined,
       lastErrorMessage: undefined,
       retryStatus: {
@@ -529,8 +545,8 @@ describe("Sessions metadata route", () => {
       getSession: vi.fn(async () => ({
         summary: persistedSummary,
         data: {
-          provider: "opencode" as const,
-          session: { messages: [] },
+          provider: "codex" as const,
+          session: { entries: [] },
         },
         messagesAlreadyProjected: true,
       })),
@@ -550,11 +566,11 @@ describe("Sessions metadata route", () => {
         getOrCreateProject: vi.fn(async () => project),
       } as unknown as SessionsDeps["scanner"],
       readerFactory: vi.fn(() => reader),
-      opencodeBridgeService: {
+      codexBridgeService: {
         getSessionView: vi.fn(async () => bridgeView),
         isSessionActive: vi.fn(async () => true),
         getPendingInputRequest: vi.fn(async () => null),
-      } as unknown as NonNullable<SessionsDeps["opencodeBridgeService"]>,
+      } as unknown as NonNullable<SessionsDeps["codexBridgeService"]>,
     });
 
     for (const suffix of ["/metadata", ""] as const) {
@@ -581,28 +597,28 @@ describe("Sessions metadata route", () => {
     const summary: SessionSummary = {
       id: "ses_detail",
       projectId: project.id,
-      title: "OpenCode detail session",
-      fullTitle: "OpenCode detail session",
+      title: "Codex detail session",
+      fullTitle: "Codex detail session",
       createdAt: "2026-07-20T09:00:00.000Z",
       updatedAt: "2026-07-20T09:05:00.000Z",
       messageCount: 2,
       ownership: { owner: "none" },
-      provider: "opencode",
-      source: "opencode-bridge",
+      provider: "codex",
+      source: "codex-bridge",
     };
     const reader = {
       getSessionSummary: vi.fn(async () => summary),
       getSession: vi.fn(async () => ({
         summary,
         data: {
-          provider: "opencode" as const,
-          session: { messages: [] },
+          provider: "codex" as const,
+          session: { entries: [] },
         },
         messagesAlreadyProjected: true,
       })),
     } as unknown as ISessionReader;
     const isSessionActive = vi.fn(async () => true);
-    const opencodeBridgeService = {
+    const codexBridgeService = {
       getSessionView: vi.fn(async () => ({
         session: { ...summary, ownership: { owner: "external" as const } },
         projectName: project.name,
@@ -611,7 +627,7 @@ describe("Sessions metadata route", () => {
       })),
       isSessionActive,
       getPendingInputRequest: vi.fn(async () => null),
-    } as unknown as NonNullable<SessionsDeps["opencodeBridgeService"]>;
+    } as unknown as NonNullable<SessionsDeps["codexBridgeService"]>;
 
     const routes = createSessionsRoutes({
       supervisor: {} as SessionsDeps["supervisor"],
@@ -623,7 +639,7 @@ describe("Sessions metadata route", () => {
         getOrCreateProject: vi.fn(async () => project),
       } as unknown as SessionsDeps["scanner"],
       readerFactory: vi.fn(() => reader),
-      opencodeBridgeService,
+      codexBridgeService,
     });
 
     const response = await routes.request(
@@ -923,7 +939,7 @@ describe("Sessions metadata route", () => {
     }
   });
 
-  it("archives and restores OpenCode sqlite sessions through metadata updates", async () => {
+  it("refuses legacy OpenCode archive requests without modifying its database", async () => {
     const testDir = join(
       tmpdir(),
       `yep-route-opencode-archive-${randomUUID()}`,
@@ -954,9 +970,6 @@ describe("Sessions metadata route", () => {
       await archiveService.initialize();
       const updateMetadata = vi.fn(async () => undefined);
       const invalidateCache = vi.fn();
-      const invalidateOpenCodeCache = vi.fn();
-      const makeReader = () =>
-        new OpenCodeSessionReader({ dbPath, projectPath });
 
       const routes = createSessionsRoutes({
         supervisor: {
@@ -966,22 +979,16 @@ describe("Sessions metadata route", () => {
           listProjects: vi.fn(async () => [project]),
           invalidateCache,
         } as unknown as SessionsDeps["scanner"],
-        readerFactory: vi.fn(() => makeReader()),
-        opencodeDbPath: dbPath,
-        opencodeReaderFactory: vi.fn(() => makeReader()),
-        opencodeScanner: {
-          invalidateCache: invalidateOpenCodeCache,
-        } as unknown as SessionsDeps["opencodeScanner"],
+        readerFactory: vi.fn(() => ({}) as ISessionReader),
         sessionMetadataService: {
-          getProvider: vi.fn(() => "opencode"),
+          getPersistedProvider: vi.fn(() => "opencode"),
+          getProvider: vi.fn(() => undefined),
           updateMetadata,
         } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
         sessionArchiveService: archiveService,
       });
 
-      expect(
-        await makeReader().getSessionSummary(sessionId, project.id),
-      ).not.toBeNull();
+      expect(await readArchivedAt(dbPath, sessionId)).toBeNull();
 
       const archiveResponse = await routes.request(
         `/sessions/${sessionId}/metadata`,
@@ -992,54 +999,11 @@ describe("Sessions metadata route", () => {
         },
       );
 
-      expect(archiveResponse.status).toBe(200);
-      const archiveJson = await archiveResponse.json();
-      expect(archiveJson.archive).toMatchObject({
-        physical: true,
-        action: "archive",
-        record: {
-          sessionId,
-          provider: "opencode",
-          storagePath: dbPath,
-        },
-      });
-      expect(archiveService.getArchivedSession(sessionId)).toMatchObject({
-        sessionId,
-        provider: "opencode",
-        storagePath: dbPath,
-        files: [],
-      });
-      expect(await makeReader().getSessionSummary(sessionId, project.id)).toBe(
-        null,
-      );
-      expect(invalidateCache).toHaveBeenCalledTimes(1);
-      expect(invalidateOpenCodeCache).toHaveBeenCalledTimes(1);
-
-      const restoreResponse = await routes.request(
-        `/sessions/${sessionId}/metadata`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ archived: false }),
-        },
-      );
-
-      expect(restoreResponse.status).toBe(200);
-      expect(
-        await makeReader().getSessionSummary(sessionId, project.id),
-      ).toMatchObject({
-        id: sessionId,
-        provider: "opencode",
-        title: "OpenCode archive target",
-      });
+      expect(archiveResponse.status).toBe(404);
+      expect(await readArchivedAt(dbPath, sessionId)).toBeNull();
       expect(archiveService.getArchivedSession(sessionId)).toBeUndefined();
-      expect(invalidateCache).toHaveBeenCalledTimes(2);
-      expect(invalidateOpenCodeCache).toHaveBeenCalledTimes(2);
-      expect(updateMetadata).toHaveBeenLastCalledWith(sessionId, {
-        title: undefined,
-        archived: false,
-        starred: undefined,
-      });
+      expect(invalidateCache).not.toHaveBeenCalled();
+      expect(updateMetadata).not.toHaveBeenCalled();
     } finally {
       await rm(testDir, { recursive: true, force: true });
     }

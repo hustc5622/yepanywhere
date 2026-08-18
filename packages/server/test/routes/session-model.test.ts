@@ -14,7 +14,6 @@ describe("resolveSessionModel", () => {
 
   it("preserves native defaults for other providers", () => {
     expect(resolveSessionModel("default", "codex")).toBeUndefined();
-    expect(resolveSessionModel("default", "opencode")).toBeUndefined();
   });
 
   it("does not invent a model when none was requested", () => {

@@ -7,7 +7,6 @@ import {
   type ContextStatusResponse,
   type ContextUsage,
   type GeneratedArtifactManifest,
-  type OpenCodeModelLimits,
   type ProviderName,
   type UrlProjectId,
   escalateContextWindow,
@@ -50,11 +49,9 @@ import {
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
-import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
-import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import { encodeProjectId } from "../projects/paths.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
@@ -79,7 +76,6 @@ import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import { normalizeSession } from "../sessions/normalization.js";
-import { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import {
   type PaginationInfo,
   sliceAfterMessage,
@@ -142,12 +138,8 @@ export interface SessionsDeps {
   geminiSessionsDir?: string;
   /** Optional shared Gemini reader factory for cross-provider session lookups */
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
-  opencodeScanner?: OpenCodeSessionScanner;
   piScanner?: PiSessionScanner;
-  opencodeDbPath?: string;
   zcodeDbPath?: string;
-  /** Optional shared OpenCode reader factory for cross-provider session lookups */
-  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
@@ -180,8 +172,6 @@ export interface SessionsDeps {
     UploadManager,
     "listReplayableGeneratedArtifacts"
   >;
-  /** OpenCode bridge for OpenCode CLI sessions. */
-  opencodeBridgeService?: OpenCodeBridgeController;
   /** Physical cold-archive service for moving old provider JSONL files away from hot scan paths. */
   sessionArchiveService?: SessionArchiveService;
   /** Claude projects directory, used to synthesize file-change invalidation events after moves. */
@@ -222,13 +212,13 @@ type BridgeSessionView = Awaited<
 >;
 
 function bridgeControllers(
-  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  deps: Pick<SessionsDeps, "codexBridgeService">,
 ): BridgeControllers {
-  return [deps.codexBridgeService, deps.opencodeBridgeService];
+  return [deps.codexBridgeService];
 }
 
 async function getBridgeSessionView(
-  deps: Pick<SessionsDeps, "codexBridgeService" | "opencodeBridgeService">,
+  deps: Pick<SessionsDeps, "codexBridgeService">,
   sessionId: string,
 ): Promise<NonNullable<BridgeSessionView> | null> {
   return getAnyBridgeSessionView(bridgeControllers(deps), sessionId);
@@ -451,7 +441,7 @@ function extractContextUsageFromSDKMessages(
       };
 
       // Codex context meter is based on fresh input tokens from the latest turn.
-      // Claude/OpenCode/Gemini paths continue to include cached+creation tokens.
+      // Legacy non-Codex paths continue to include cached+creation tokens.
       const rawInputTokens = isCodexProvider
         ? (usage.input_tokens ?? 0)
         : (usage.input_tokens ?? 0) +
@@ -556,8 +546,6 @@ function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
     geminiSessionsDir: deps.geminiSessionsDir,
     geminiReaderFactory: deps.geminiReaderFactory,
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
-    opencodeDbPath: deps.opencodeDbPath,
-    opencodeReaderFactory: deps.opencodeReaderFactory,
     piSessionsDir: deps.piSessionsDir,
     piReaderFactory: deps.piReaderFactory,
     kimiSessionsDir: deps.kimiSessionsDir,
@@ -711,39 +699,6 @@ async function recordYepSessionOrigin(
   });
 }
 
-function recordOpenCodeContextWindowOverride(
-  deps: SessionsDeps,
-  input: {
-    provider?: ProviderName;
-    model?: string;
-    sessionId?: string;
-    limits?: OpenCodeModelLimits;
-  },
-): void {
-  if (
-    input.provider !== "opencode" ||
-    !input.limits ||
-    input.limits.context <= 0
-  ) {
-    return;
-  }
-
-  if (input.model) {
-    deps.modelInfoService?.recordContextWindow(
-      input.model,
-      input.limits.context,
-      "opencode",
-    );
-  }
-  if (input.sessionId) {
-    deps.modelInfoService?.recordSessionContextWindow(
-      input.sessionId,
-      input.limits.context,
-      "opencode",
-    );
-  }
-}
-
 export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const routes = new Hono();
   const codexEventStoreSources = normalizeCodexEventStoreSources(
@@ -770,7 +725,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     new SessionInteractionService({
       runtimeController,
       codexBridgeService: deps.codexBridgeService,
-      opencodeBridgeService: deps.opencodeBridgeService,
       sessionMetadataService: deps.sessionMetadataService,
       eventBus: deps.eventBus,
     });
@@ -791,8 +745,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       geminiScanner: deps.geminiScanner,
       geminiSessionsDir: deps.geminiSessionsDir,
       geminiReaderFactory: deps.geminiReaderFactory,
-      opencodeDbPath: deps.opencodeDbPath,
-      opencodeReaderFactory: deps.opencodeReaderFactory,
       piSessionsDir: deps.piSessionsDir,
       piReaderFactory: deps.piReaderFactory,
       kimiSessionsDir: deps.kimiSessionsDir,
@@ -806,21 +758,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           projectPath,
         })
       : null);
-  const getOpenCodeReader = (projectPath: string): OpenCodeSessionReader => {
-    const mis = deps.modelInfoService;
-    return (
-      deps.opencodeReaderFactory?.(projectPath) ??
-      new OpenCodeSessionReader({
-        dbPath: deps.opencodeDbPath,
-        projectPath,
-        getContextWindow: mis
-          ? (model, provider, sessionId) =>
-              mis.getCachedContextWindow(model, provider, sessionId)
-          : undefined,
-      })
-    );
-  };
-
   // GET /api/archive/sessions - List physically archived sessions.
   routes.get("/archive/sessions", (c) => {
     if (!deps.sessionArchiveService) {
@@ -1367,13 +1304,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         toProviderResolutionDeps(deps),
       )) {
         if (normalizeProviderGroup(source.provider) === projectGroup) continue;
-        // The opencode fallback keeps the route-level reader so cached
-        // context-window lookups stay attached.
-        const sourceReader =
-          source.kind === "opencode"
-            ? getOpenCodeReader(project.path)
-            : source.reader;
-        loadedSession = await sourceReader.getSession(
+        loadedSession = await source.reader.getSession(
           sessionId,
           project.id,
           readerAfterMessageId,
@@ -1794,9 +1725,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     const persistedPendingInputRequest =
       activePendingInputRequest === null &&
-      (session.provider === "claude" ||
-        session.provider === "claude-ollama" ||
-        session.provider === "opencode")
+      (session.provider === "claude" || session.provider === "claude-ollama")
         ? getPersistedAskUserQuestionInputRequest(session.messages, sessionId)
         : null;
     const pendingInputRequest =
@@ -2237,7 +2166,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         });
         deps.scanner.invalidateCache();
         deps.codexScanner?.invalidateCache();
-        deps.opencodeScanner?.invalidateCache();
         emitArchiveFileEvents(deps, record, "delete");
         archiveResult = { physical: true, action: "archive", record };
       } catch (error) {
@@ -2267,7 +2195,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           await deps.sessionArchiveService.restoreSession(sessionId);
         deps.scanner.invalidateCache();
         deps.codexScanner?.invalidateCache();
-        deps.opencodeScanner?.invalidateCache();
         emitArchiveFileEvents(deps, record, "create");
         archiveResult = { physical: true, action: "restore", record };
       } catch (error) {

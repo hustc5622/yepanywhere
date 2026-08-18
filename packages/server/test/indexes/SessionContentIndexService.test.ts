@@ -138,6 +138,36 @@ describe("SessionContentIndexService", () => {
     expect(service.searchScope(index, "nonexistent", 3)).toHaveLength(0);
   });
 
+  it("ignores persisted search entries from a retired provider", () => {
+    const results = service.searchScope(
+      {
+        version: 1,
+        projectId,
+        sessions: {
+          legacy: {
+            fileMtime: 1,
+            indexedBytes: 1,
+            title: "Legacy result",
+            updatedAt: "2026-08-18T00:00:00.000Z",
+            provider: "opencode",
+            messages: [
+              {
+                id: "message-1",
+                role: "user",
+                text: "legacy searchable text",
+                originalText: "legacy searchable text",
+              },
+            ],
+          },
+        },
+      },
+      "legacy",
+      3,
+    );
+
+    expect(results).toEqual([]);
+  });
+
   it("can restrict content matches to one session", async () => {
     await createSession("s1", "shared search term", "first answer");
     await createSession("s2", "shared search term", "second answer");

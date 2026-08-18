@@ -7,7 +7,6 @@ import {
   configureClaudeRemoteExecutors,
   configureClaudeSessionFileObserver,
   getProvider,
-  opencodeProvider,
 } from "../sdk/providers/index.js";
 import { ServerSettingsService } from "../services/ServerSettingsService.js";
 import { Supervisor } from "../supervisor/Supervisor.js";
@@ -55,7 +54,6 @@ export async function runAgentRuntimeOnly(
     authToken: config.desktopAuthToken,
     authTokenFile: config.runtimeTokenFile,
   });
-  opencodeProvider.configureBridgeControlUrl(config.opencodeBridgeControlUrl);
   const host = options.host ?? "127.0.0.1";
   if (!isLoopbackHost(host)) {
     throw new Error(`Agent runtime must bind to loopback, received: ${host}`);
@@ -105,6 +103,7 @@ export async function runAgentRuntimeOnly(
       maxWorkers: config.maxWorkers,
       idlePreemptThresholdMs: config.idlePreemptThresholdMs,
       maxQueueSize: config.maxQueueSize,
+      enabledProviders: config.enabledProviders,
     });
     const eventStore =
       process.env.YEP_RUNTIME_EVENT_JOURNAL === "0"

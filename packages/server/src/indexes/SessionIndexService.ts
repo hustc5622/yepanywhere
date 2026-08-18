@@ -21,6 +21,7 @@ import {
   type UrlProjectId,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
+import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import type { ISessionReader, SessionFileEntry } from "../sessions/types.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
@@ -65,8 +66,8 @@ export interface CachedSessionSummary {
   /** Explicit creation owner recorded in summary metadata when available. */
   createdBy?: SessionSummary["createdBy"];
   /**
-   * For OpenCode edit-fork children, the id of the session this one was forked
-   * from. Cached so the session list can collapse an edit-fork family into a
+   * For edit-fork children, the id of the source session. Cached so the list
+   * can collapse an edit-fork family into a
    * single entry without re-reading provider metadata.
    */
   forkParentSessionId?: string;
@@ -113,8 +114,7 @@ export interface SessionIndexServiceOptions {
    *
    * Watcher events for every provider except Claude cannot say which project
    * scope owns the changed file, so they mark *all* of that provider's scopes
-   * dirty (see `handleFileChange`). With a shared backing store — OpenCode's
-   * single sqlite file across 43 projects, for example — one write therefore
+   * dirty (see `handleFileChange`). With a shared backing store, one write can
    * queued one full validation per scope, each a full store scan. Measured on a
    * live server that reached 29 full validations per second at 250–800 ms each,
    * which saturated the event loop and pushed unrelated 15 ms session reads to
@@ -586,7 +586,7 @@ export class SessionIndexService implements ISessionIndexService {
     const summaries: SessionSummary[] = [];
 
     for (const [sessionId, cached] of Object.entries(index.sessions)) {
-      if (cached.isEmpty) continue;
+      if (cached.isEmpty || isRetiredProviderName(cached.provider)) continue;
       summaries.push(this.cachedToSummary(sessionId, cached, projectId));
     }
 
@@ -774,9 +774,8 @@ export class SessionIndexService implements ISessionIndexService {
       return;
     }
 
-    if (event.provider === "opencode") {
-      // OpenCode sqlite indexes are also project-scoped over one shared DB.
-      this.markMatchingScopesDirty("opencode::");
+    if (event.provider === "zcode") {
+      this.markMatchingScopesDirty("zcode::");
     }
   }
 
@@ -930,7 +929,8 @@ export class SessionIndexService implements ISessionIndexService {
           cached.fileMtime === mtime &&
           cached.indexedBytes === size
         ) {
-          if (cached.isEmpty) continue;
+          if (cached.isEmpty || isRetiredProviderName(cached.provider))
+            continue;
           summaries.push({
             id: sessionId,
             projectId,
@@ -1469,7 +1469,9 @@ export class SessionIndexService implements ISessionIndexService {
         cached.fileMtime === mtime &&
         cached.indexedBytes === size
       ) {
-        if (cached.isEmpty) return null;
+        if (cached.isEmpty || isRetiredProviderName(cached.provider)) {
+          return null;
+        }
         return cached.title;
       }
 
@@ -1556,7 +1558,7 @@ export class SessionIndexService implements ISessionIndexService {
     const size = stats.size;
 
     if (cached && cached.fileMtime === mtime && cached.indexedBytes === size) {
-      if (cached.isEmpty) return null;
+      if (cached.isEmpty || isRetiredProviderName(cached.provider)) return null;
       return this.cachedToSummary(sessionId, cached, projectId);
     }
 

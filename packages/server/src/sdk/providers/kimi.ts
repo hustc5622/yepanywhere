@@ -9,7 +9,7 @@
  * permission on sensitive operations. This provider routes those ACP
  * `session/request_permission` requests through yepanywhere's approval flow
  * (the same in-process path Gemini uses) — no standalone bridge process is
- * required, unlike the Codex (4510) / OpenCode (4520) bridges.
+ * required, unlike the Codex remote bridge.
  *
  * Session content modification (fork / branch / rollback) is intentionally
  * not implemented in this phase: Kimi only exposes fork/undo through its

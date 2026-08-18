@@ -102,8 +102,7 @@ function cursorEquals(
  * Reconciles changes from ZCode's shared SQLite database into Yep's
  * provider-agnostic session event stream.
  *
- * Mirrors `OpenCodeSessionChangeMonitor`. The ZCode SQLite schema (session /
- * message / part tables with identical column names) allows the same hybrid
+ * The ZCode SQLite schema (session / message / part tables) supports a hybrid
  * fs.watch + poll change-detection model.
  *
  * This monitor deliberately does not read messages or call a title model.

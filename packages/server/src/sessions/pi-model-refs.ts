@@ -1,4 +1,4 @@
-import type { OpenCodeRequestProtocol } from "@yep-anywhere/shared";
+import type { LlmGatewayRequestProtocol } from "@yep-anywhere/shared";
 
 /**
  * Naming rules shared by the Pi provider and the Pi session reader.
@@ -19,7 +19,7 @@ export const PI_PROVIDER_OPENAI = "yep-openai-compatible";
 /** Yep-generated Pi provider id for Anthropic-messages traffic. */
 export const PI_PROVIDER_ANTHROPIC = "yep-anthropic";
 
-const PI_PROVIDER_BASE_IDS: Record<OpenCodeRequestProtocol, string> = {
+const PI_PROVIDER_BASE_IDS: Record<LlmGatewayRequestProtocol, string> = {
   "openai-compatible": PI_PROVIDER_OPENAI,
   anthropic: PI_PROVIDER_ANTHROPIC,
 };
@@ -29,7 +29,7 @@ const PI_PROVIDER_BASE_IDS: Record<OpenCodeRequestProtocol, string> = {
  * keeps the historic unsuffixed id.
  */
 export function piProviderId(
-  protocol: OpenCodeRequestProtocol,
+  protocol: LlmGatewayRequestProtocol,
   channel: { id: string; isDefault: boolean },
 ): string {
   const base = PI_PROVIDER_BASE_IDS[protocol];
@@ -42,7 +42,7 @@ export function piProviderId(
  * not generate (a user-configured Pi provider, for example).
  */
 export function parsePiProviderId(providerId: string | undefined): {
-  protocol?: OpenCodeRequestProtocol;
+  protocol?: LlmGatewayRequestProtocol;
   channelId?: string;
 } {
   if (!providerId) return {};

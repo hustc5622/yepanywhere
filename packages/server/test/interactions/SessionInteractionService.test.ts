@@ -4,7 +4,6 @@ import type { CodexBridgeController } from "../../src/codex-bridge/types.js";
 import { InteractionBroker } from "../../src/interactions/InteractionBroker.js";
 import { SessionInteractionService } from "../../src/interactions/SessionInteractionService.js";
 import type { SessionMetadataService } from "../../src/metadata/index.js";
-import type { OpenCodeBridgeController } from "../../src/opencode-bridge/types.js";
 import type {
   RuntimeController,
   RuntimeProcessSnapshot,
@@ -277,26 +276,18 @@ describe("SessionInteractionService", () => {
     ]);
   });
 
-  it("invokes only the bridge controller that supplied the request", async () => {
+  it("invokes the bridge controller that supplied the request", async () => {
     const request = makeRequest({ source: "codex-bridge" });
     const codexResponse = vi.fn(async () => false);
-    const opencodeResponse = vi.fn(async () => true);
     const codex = {
       getPendingInputRequest: vi.fn(async () => request),
       respondToInput: codexResponse,
     } as unknown as CodexBridgeController;
-    const opencode = {
-      getPendingInputRequest: vi.fn(async () => ({
-        ...request,
-        source: "opencode-bridge" as const,
-      })),
-      respondToInput: opencodeResponse,
-    } as unknown as OpenCodeBridgeController;
     const service = createService(
       services,
       brokers,
       { getProcessSnapshotForSession: vi.fn(async () => null) },
-      { codexBridgeService: codex, opencodeBridgeService: opencode },
+      { codexBridgeService: codex },
     );
     const pending = await service.getPendingInput(request.sessionId);
 
@@ -314,7 +305,6 @@ describe("SessionInteractionService", () => {
       body: { code: "interaction_provider_rejected" },
     });
     expect(codexResponse).toHaveBeenCalledTimes(1);
-    expect(opencodeResponse).not.toHaveBeenCalled();
   });
 
   it("terminates operations with the lifecycle's exact reason", async () => {
@@ -542,7 +532,6 @@ function createService(
   runtime: Partial<RuntimeController>,
   options: {
     codexBridgeService?: CodexBridgeController;
-    opencodeBridgeService?: OpenCodeBridgeController;
     sessionMetadataService?: SessionMetadataService;
     eventBus?: EventBus;
   } = {},

@@ -21,6 +21,25 @@ describe("provider routes", () => {
     expect(getProvider("claude")?.name).toBe("claude");
   });
 
+  it("does not expose the retired OpenCode provider", () => {
+    expect(getAllProviders().map((provider) => provider.name)).not.toContain(
+      "opencode",
+    );
+    expect(getProvider("opencode")).toBeNull();
+  });
+
+  it("returns a stable retired response for legacy provider detail requests", async () => {
+    const response = await createProvidersRoutes({ providers: [] }).request(
+      "/opencode",
+    );
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toEqual({
+      error: "OpenCode provider has been retired",
+      code: "provider_retired",
+    });
+  });
+
   it("loads provider metadata concurrently without waiting for remote refreshes", async () => {
     const gate = deferred();
     const started: string[] = [];

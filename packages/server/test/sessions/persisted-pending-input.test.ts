@@ -36,39 +36,6 @@ function askUserQuestionMessage(id = "toolu-question"): Message {
   };
 }
 
-function openCodeQuestionMessage(id = "toolu-opencode-question"): Message {
-  return {
-    type: "assistant",
-    uuid: "assistant-opencode-question",
-    timestamp: "2026-07-09T01:02:03.000Z",
-    message: {
-      role: "assistant",
-      content: [
-        {
-          type: "tool_use",
-          id,
-          name: "question",
-          input: {
-            questions: [
-              {
-                question: "你想怎么修?",
-                header: "修复方式",
-                multiple: false,
-                options: [
-                  {
-                    label: "加 packages 到白名单",
-                    description: "允许 packages/ 下的 md 文件被列出",
-                  },
-                ],
-              },
-            ],
-          },
-        },
-      ],
-    },
-  };
-}
-
 describe("getPersistedAskUserQuestionInputRequest", () => {
   it("reconstructs an unanswered AskUserQuestion as a persisted input request", () => {
     const request = getPersistedAskUserQuestionInputRequest(
@@ -111,36 +78,5 @@ describe("getPersistedAskUserQuestionInputRequest", () => {
     );
 
     expect(request).toBeNull();
-  });
-
-  it("reconstructs an unanswered OpenCode question tool as AskUserQuestion input", () => {
-    const request = getPersistedAskUserQuestionInputRequest(
-      [openCodeQuestionMessage()],
-      "session-1",
-    );
-
-    expect(request).toMatchObject({
-      id: "toolu-opencode-question",
-      sessionId: "session-1",
-      type: "question",
-      prompt: "你想怎么修?",
-      toolName: "AskUserQuestion",
-      source: "persisted",
-    });
-    expect(request?.toolInput).toMatchObject({
-      questions: [
-        {
-          question: "你想怎么修?",
-          header: "修复方式",
-          multiSelect: false,
-          options: [
-            {
-              label: "加 packages 到白名单",
-              description: "允许 packages/ 下的 md 文件被列出",
-            },
-          ],
-        },
-      ],
-    });
   });
 });

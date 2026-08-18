@@ -29,18 +29,15 @@ import type { SessionIndexService } from "../indexes/index.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/index.js";
-import type { OpenCodeBridgeController } from "../opencode-bridge/types.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
-import type { OpenCodeSessionScanner } from "../projects/opencode-scanner.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RuntimeController } from "../runtime/types.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
-import type { OpenCodeSessionReader } from "../sessions/opencode-reader.js";
 import type { PiSessionReader } from "../sessions/pi-reader.js";
 import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
 import {
@@ -74,11 +71,8 @@ export interface InboxDeps {
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
-  opencodeScanner?: OpenCodeSessionScanner;
   piScanner?: PiSessionScanner;
-  opencodeDbPath?: string;
   zcodeDbPath?: string;
-  opencodeReaderFactory?: (projectPath: string) => OpenCodeSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
@@ -86,16 +80,12 @@ export interface InboxDeps {
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   codexBridgeService?: CodexBridgeController;
-  opencodeBridgeService?: OpenCodeBridgeController;
 }
 
 async function listBridgeSessionViews(
-  deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
+  deps: Pick<InboxDeps, "codexBridgeService">,
 ): Promise<BridgeSessionView[]> {
-  return listAllBridgeSessionViews([
-    deps.codexBridgeService,
-    deps.opencodeBridgeService,
-  ]);
+  return listAllBridgeSessionViews([deps.codexBridgeService]);
 }
 
 /**
@@ -104,12 +94,12 @@ async function listBridgeSessionViews(
  * bounded by the number of sessions actually waiting on the user.
  */
 async function getBridgePendingRequestId(
-  deps: Pick<InboxDeps, "codexBridgeService" | "opencodeBridgeService">,
+  deps: Pick<InboxDeps, "codexBridgeService">,
   sessionId: string,
 ): Promise<string | undefined> {
   try {
     const request = await getAnyBridgePendingInputRequest(
-      [deps.codexBridgeService, deps.opencodeBridgeService],
+      [deps.codexBridgeService],
       sessionId,
     );
     return request?.id;
@@ -233,7 +223,6 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
     const providerCatalog = await buildProviderProjectCatalog({
       codexScanner: deps.codexScanner,
       geminiScanner: deps.geminiScanner,
-      opencodeScanner: deps.opencodeScanner,
       piScanner: deps.piScanner,
       kimiScanner: deps.kimiScanner,
     });
@@ -266,8 +255,6 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
               geminiSessionsDir: deps.geminiSessionsDir,
               geminiReaderFactory: deps.geminiReaderFactory,
               geminiHashToCwd: providerCatalog.geminiHashToCwd,
-              opencodeDbPath: deps.opencodeDbPath,
-              opencodeReaderFactory: deps.opencodeReaderFactory,
               piSessionsDir: deps.piSessionsDir,
               piReaderFactory: deps.piReaderFactory,
               kimiSessionsDir: deps.kimiSessionsDir,

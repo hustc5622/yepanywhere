@@ -23,7 +23,7 @@ export {
 } from "./paths.js";
 
 // Project scanning
-export { ProjectScanner, projectScanner } from "./scanner.js";
+export { ProjectScanner } from "./scanner.js";
 export type { ScannerOptions } from "./scanner.js";
 
 // Codex session scanning
