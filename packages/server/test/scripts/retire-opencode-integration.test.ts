@@ -55,6 +55,7 @@ describe("retired integration helper", () => {
       env: {
         ...process.env,
         HOME: home,
+        XDG_CONFIG_HOME: join(home, ".config"),
         PATH: `${bin}:${process.env.PATH}`,
         YEP_RETIRED_OPENCODE_REFERENCE_PATH: join(home, "missing-reference"),
       },
@@ -82,6 +83,7 @@ describe("retired integration helper", () => {
       env: {
         ...process.env,
         HOME: home,
+        XDG_CONFIG_HOME: join(home, ".config"),
         PATH: `${bin}:${process.env.PATH}`,
         YEP_RETIRED_OPENCODE_REFERENCE_PATH: join(home, "missing-reference"),
       },
