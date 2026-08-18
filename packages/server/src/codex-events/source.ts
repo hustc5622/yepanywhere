@@ -4,6 +4,15 @@ import type { CodexEventEnvelope } from "./types.js";
 
 const MAX_STORE_SOURCES = 8;
 const SAFE_SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const CODEX_EVENT_STORE_ADMISSION_BYTES = (() => {
+  const configured = Number.parseInt(
+    process.env.YEP_CODEX_EVENT_STORE_ADMISSION_BYTES ?? "",
+    10,
+  );
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : 512 * 1024 * 1024;
+})();
 
 /**
  * One independently sequenced canonical Codex journal.
@@ -81,6 +90,17 @@ async function selectFreshestSourceStore(
   } | null = null;
   for (const source of sources) {
     const store = source.createStore();
+    const storageBytes = await store.getStorageBytes?.();
+    if (
+      storageBytes !== undefined &&
+      storageBytes > CODEX_EVENT_STORE_ADMISSION_BYTES
+    ) {
+      // A cold JSONL hydration retains several indexes and can exceed the
+      // rollout budget by hundreds of MiB. The rollout remains the canonical
+      // history source, so fail closed to the legacy view instead of loading a
+      // journal that cannot fit the process admission budget.
+      continue;
+    }
     const freshnessMs = await store.latestEventAtMs(sessionId);
     if (freshnessMs <= 0 && (await store.latestSequence(sessionId)) < 1) {
       // No events for this session in this journal at all.

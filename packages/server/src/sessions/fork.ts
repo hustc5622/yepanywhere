@@ -8,11 +8,12 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
+  CodexRolloutScanError,
+  iterateCodexRolloutLines,
   plainCodexRolloutPath,
-  readCodexRolloutText,
 } from "./codex-rollout-file.js";
 
 /**
@@ -109,34 +110,7 @@ export async function cloneCodexSession(
   sourceFilePath: string,
   newSessionId?: string,
 ): Promise<CloneResult> {
-  const content = await readCodexRolloutText(sourceFilePath);
-  const trimmed = content.trim();
-
-  if (!trimmed) {
-    throw new Error("Source session is empty");
-  }
-
-  const lines = trimmed.split("\n");
-  assertDecodedRolloutLine(lines[0], sourceFilePath);
   const targetId = newSessionId ?? randomUUID();
-
-  // Update session_meta (first line) with new session ID
-  const transformedLines = lines.map((line, index) => {
-    if (index !== 0) return line;
-    try {
-      const entry = JSON.parse(line) as Record<string, unknown>;
-      if (
-        entry.type === "session_meta" &&
-        typeof entry.payload === "object" &&
-        entry.payload !== null
-      ) {
-        (entry.payload as Record<string, unknown>).id = targetId;
-      }
-      return JSON.stringify(entry);
-    } catch {
-      return line;
-    }
-  });
 
   // Write clone next to the source file (same date directory) using
   // Codex's standard rollout-* naming for consistency with native files. The
@@ -145,12 +119,67 @@ export async function cloneCodexSession(
     dirname(plainCodexRolloutPath(sourceFilePath)),
     `rollout-${targetId}.jsonl`,
   );
-  await writeFile(targetPath, `${transformedLines.join("\n")}\n`, "utf-8");
+  const tempPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  const configuredMaxBytes = Number.parseInt(
+    process.env.YEP_CODEX_CLONE_MAX_BYTES ?? "",
+    10,
+  );
+  const maxBytes =
+    Number.isSafeInteger(configuredMaxBytes) && configuredMaxBytes > 0
+      ? configuredMaxBytes
+      : 512 * 1024 * 1024;
 
-  return {
-    newSessionId: targetId,
-    entries: lines.length,
-  };
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let entries = 0;
+  try {
+    handle = await open(tempPath, "w", 0o600);
+    for await (const line of iterateCodexRolloutLines(sourceFilePath, {
+      maxLineBytes: 8 * 1024 * 1024,
+      maxBytes,
+    })) {
+      if (!line.line) continue;
+      let output = line.line;
+      if (entries === 0) {
+        assertDecodedRolloutLine(output, sourceFilePath);
+        try {
+          const entry = JSON.parse(output) as Record<string, unknown>;
+          if (
+            entry.type === "session_meta" &&
+            typeof entry.payload === "object" &&
+            entry.payload !== null
+          ) {
+            (entry.payload as Record<string, unknown>).id = targetId;
+            output = JSON.stringify(entry);
+          }
+        } catch {
+          // assertDecodedRolloutLine already accepted the line; preserve it if
+          // it is a forward-compatible object that cannot be transformed.
+        }
+      }
+      await handle.write(Buffer.from(`${output}\n`, "utf8"));
+      entries += 1;
+    }
+    if (entries === 0) {
+      throw new Error("Source session is empty");
+    }
+    await handle.close();
+    handle = undefined;
+    await rename(tempPath, targetPath);
+  } catch (error) {
+    await handle?.close();
+    await rm(tempPath, { force: true });
+    if (
+      error instanceof CodexRolloutScanError &&
+      error.code === "invalid_utf8"
+    ) {
+      throw new Error(
+        `Source session is not decodable JSONL: ${sourceFilePath}. Refusing to write a clone from content that could not be decoded.`,
+      );
+    }
+    throw error;
+  }
+
+  return { newSessionId: targetId, entries };
 }
 
 /**

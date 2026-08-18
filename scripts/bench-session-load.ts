@@ -1,31 +1,26 @@
 #!/usr/bin/env npx tsx
 
 /**
- * Phase-level load benchmark for one real Codex session rollout file.
+ * Read-only benchmark for the bounded Codex rollout reader.
  *
- * Answers "where does the wall time go when opening a very large session?" by
- * timing the exact stages the HTTP read path runs on every request:
- *
- *   1. readFile + split          raw I/O
- *   2. parseCodexSessionEntry    schema parse per line
- *   3. buildCodexBranchView      branch projection over all entries
- *   4. convertCodexEntries       provider entries -> canonical Message[]
- *   5. JSON.stringify            response serialization (full + windowed)
- *
- * Read-only: never writes session files, never contacts a running server.
+ * It exercises the same summary and paginated detail paths used by Yep rather
+ * than the old `readFile -> split -> entries[]` reference path. The benchmark
+ * intentionally reports a path hash instead of a local path and never contacts
+ * or restarts a running service.
  *
  * Usage:
  *   npx tsx scripts/bench-session-load.ts <sessionId> [--runs N] [--window N]
  */
 
 import { execFileSync } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { buildCodexBranchView } from "../packages/server/src/sessions/codex-rollback.js";
-import { convertCodexEntries } from "../packages/server/src/sessions/normalization.js";
-import { parseCodexSessionEntry } from "../packages/shared/src/codex-schema/session.js";
+import type { UrlProjectId } from "@yep-anywhere/shared";
+import { CodexSessionReader } from "../packages/server/src/sessions/codex-reader.js";
+import { normalizeSession } from "../packages/server/src/sessions/normalization.js";
 
 interface Phase {
   label: string;
@@ -38,7 +33,7 @@ function parseArgs(argv: string[]): {
   runs: number;
   window: number;
 } {
-  const positional = argv.filter((a) => !a.startsWith("--"));
+  const positional = argv.filter((argument) => !argument.startsWith("--"));
   const sessionId = positional[0];
   if (!sessionId) {
     console.error(
@@ -46,6 +41,7 @@ function parseArgs(argv: string[]): {
     );
     process.exit(1);
   }
+
   const readNumber = (flag: string, fallback: number): number => {
     const index = argv.indexOf(flag);
     if (index < 0) return fallback;
@@ -55,6 +51,7 @@ function parseArgs(argv: string[]): {
     }
     return value;
   };
+
   return {
     sessionId,
     runs: readNumber("--runs", 3),
@@ -66,7 +63,7 @@ function findRolloutFile(sessionId: string): string {
   const root = join(homedir(), ".codex", "sessions");
   const matches = execFileSync(
     "find",
-    [root, "-name", `*${sessionId}*.jsonl`, "-type", "f"],
+    [root, "-name", `*${sessionId}*.jsonl*`, "-type", "f"],
     { encoding: "utf8" },
   )
     .split("\n")
@@ -74,6 +71,20 @@ function findRolloutFile(sessionId: string): string {
   const file = matches[0];
   if (!file) throw new Error(`No rollout file found for session ${sessionId}`);
   return file;
+}
+
+function pathHash(filePath: string): string {
+  return createHash("sha256").update(filePath).digest("hex").slice(0, 16);
+}
+
+function memoryDetail(): string {
+  const memory = process.memoryUsage();
+  return [
+    `rss=${Math.round(memory.rss / 1024 / 1024)}MiB`,
+    `heap=${Math.round(memory.heapUsed / 1024 / 1024)}MiB`,
+    `external=${Math.round(memory.external / 1024 / 1024)}MiB`,
+    `arrayBuffers=${Math.round(memory.arrayBuffers / 1024 / 1024)}MiB`,
+  ].join(" ");
 }
 
 function report(run: number, phases: Phase[]): void {
@@ -87,6 +98,7 @@ function report(run: number, phases: Phase[]): void {
     );
   }
   console.log(`  ${total.toFixed(0).padStart(6)} ms  TOTAL`);
+  console.log(`  memory: ${memoryDetail()}`);
   console.log("");
 }
 
@@ -94,75 +106,52 @@ async function main(): Promise<void> {
   const { sessionId, runs, window } = parseArgs(process.argv.slice(2));
   const filePath = findRolloutFile(sessionId);
   const stats = await stat(filePath);
+  const reader = new CodexSessionReader({
+    sessionsDir: join(homedir(), ".codex", "sessions"),
+  });
+  const projectId = "bench" as UrlProjectId;
 
-  console.log(`session: ${sessionId}`);
-  console.log(`file:    ${filePath}`);
-  console.log(`size:    ${(stats.size / 1e6).toFixed(1)} MB`);
-  console.log(`window:  last ${window} messages`);
+  console.log(`session:  ${sessionId}`);
+  console.log(`pathHash: ${pathHash(filePath)}`);
+  console.log(`size:     ${(stats.size / 1e6).toFixed(1)} MB`);
+  console.log(`window:   ${window} messages`);
   console.log("");
 
-  for (let run = 1; run <= runs; run++) {
+  for (let run = 1; run <= runs; run += 1) {
     const phases: Phase[] = [];
 
-    let t = performance.now();
-    const raw = await readFile(filePath, "utf8");
-    const lines = raw.split("\n");
+    let started = performance.now();
+    const summary = await reader.getSessionSummary(sessionId, projectId);
     phases.push({
-      label: "readFile + split",
-      ms: performance.now() - t,
-      detail: `${lines.length} lines`,
+      label: "streaming summary",
+      ms: performance.now() - started,
+      detail: summary
+        ? `messages=${summary.messageCount} compactions=${summary.compactCount ?? 0}`
+        : "unavailable",
     });
 
-    t = performance.now();
-    const entries = [];
-    for (const line of lines) {
-      if (!line) continue;
-      const entry = parseCodexSessionEntry(line);
-      if (entry) entries.push(entry);
-    }
+    started = performance.now();
+    const loaded = await reader.getSession(sessionId, projectId, undefined, {
+      maxMessages: window,
+      tailCompactions: 2,
+    });
     phases.push({
-      label: "parseCodexSessionEntry",
-      ms: performance.now() - t,
-      detail: `${entries.length} entries`,
+      label: "bounded detail reader",
+      ms: performance.now() - started,
+      detail: loaded
+        ? `entries=${loaded.data.session.entries.length} returned=${loaded.pagination?.returnedMessageCount ?? 0} total=${loaded.pagination?.totalMessageCount ?? 0}`
+        : "unavailable",
     });
 
-    // The read path builds the branch view twice today: once inside
-    // buildSummaryFromEntries and once for the requested branch. Time a single
-    // call so the doubled cost is explicit in the totals below.
-    t = performance.now();
-    const branchView = buildCodexBranchView(entries, sessionId);
+    started = performance.now();
+    const normalized = loaded ? normalizeSession(loaded) : null;
+    const serializedBytes = normalized
+      ? Buffer.byteLength(JSON.stringify(normalized.messages), "utf8")
+      : 0;
     phases.push({
-      label: "buildCodexBranchView x1",
-      ms: performance.now() - t,
-      detail: `${branchView.entries.length} visible entries`,
-    });
-
-    t = performance.now();
-    const messages = convertCodexEntries(
-      branchView.entries,
-      sessionId,
-      branchView.branchState,
-    );
-    phases.push({
-      label: "convertCodexEntries",
-      ms: performance.now() - t,
-      detail: `${messages.length} messages`,
-    });
-
-    t = performance.now();
-    const fullJson = JSON.stringify(messages);
-    phases.push({
-      label: "JSON.stringify (all messages)",
-      ms: performance.now() - t,
-      detail: `${(fullJson.length / 1e6).toFixed(1)} MB`,
-    });
-
-    t = performance.now();
-    const windowJson = JSON.stringify(messages.slice(-window));
-    phases.push({
-      label: `JSON.stringify (window ${window})`,
-      ms: performance.now() - t,
-      detail: `${(windowJson.length / 1e6).toFixed(3)} MB`,
+      label: "normalize bounded page",
+      ms: performance.now() - started,
+      detail: `messages=${normalized?.messages.length ?? 0} json=${Math.round(serializedBytes / 1024)}KiB`,
     });
 
     report(run, phases);

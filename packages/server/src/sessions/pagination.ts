@@ -28,6 +28,8 @@ export interface PaginationInfo {
   targetMessageId?: string;
   /** Whether the target message was found in the normalized session */
   targetMessageFound?: boolean;
+  /** Rollout revision used to build this page, when supplied by Codex. */
+  rolloutRevision?: string;
 }
 
 /** Result of slicing messages at compact boundaries */

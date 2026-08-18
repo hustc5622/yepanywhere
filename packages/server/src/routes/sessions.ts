@@ -115,6 +115,16 @@ function isCodexProviderName(
   return provider === "codex" || provider === "codex-oss";
 }
 
+const CODEX_CANONICAL_MAX_ROLLOUT_BYTES = (() => {
+  const configured = Number.parseInt(
+    process.env.YEP_CODEX_CANONICAL_MAX_ROLLOUT_BYTES ?? "",
+    10,
+  );
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : 64 * 1024 * 1024;
+})();
+
 export interface SessionsDeps {
   runtimeController?: RuntimeController;
   /** Shared pending-input authority used by HTTP and channel adapters. */
@@ -230,9 +240,44 @@ function isLiveAnyBridgeSessionView(
   return isLiveBridgeSessionView(view);
 }
 
+function deferPiProcessContent(
+  content: string | ContentBlock[],
+  options: { deferMedia?: boolean; deferThinking?: boolean },
+): string | ContentBlock[] {
+  if (
+    typeof content === "string" ||
+    (!options.deferMedia && !options.deferThinking)
+  ) {
+    return content;
+  }
+
+  return content.flatMap((block) => {
+    if (!block || typeof block !== "object") return [block];
+    if (options.deferThinking && block.type === "thinking") return [];
+    if (
+      options.deferMedia &&
+      (block.type === "image" || block.type === "input_image")
+    ) {
+      const {
+        data: _data,
+        image_url: _imageUrl,
+        imageUrl: _imageUrlCamel,
+        ...withoutInlineMedia
+      } = block;
+      return [{ ...withoutInlineMedia, deferred: true }];
+    }
+    return [block];
+  });
+}
+
 function sdkMessagesToClientMessages(
   sdkMessages: SDKMessage[],
-  options: { model?: string; provider?: ProviderName } = {},
+  options: {
+    model?: string;
+    provider?: ProviderName;
+    deferMedia?: boolean;
+    deferThinking?: boolean;
+  } = {},
 ): Message[] {
   const messages: Message[] = [];
   let pendingUserMessage: Message | null = null;
@@ -257,6 +302,9 @@ function sdkMessagesToClientMessages(
       } else if (Array.isArray(rawContent)) {
         // Array content: pass through as ContentBlock[] for both user and assistant
         content = rawContent as ContentBlock[];
+        if (options.provider === "pi") {
+          content = deferPiProcessContent(content, options);
+        }
       } else {
         // Unknown content type - skip this message
         continue;
@@ -1210,7 +1258,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   //   ?beforeMessageId=<id> - cursor for loading older chunks (used with tailCompactions)
   //   ?aroundMessageId=<id> - return a bounded window centered on a target message
   //   ?afterWindowMessageId=<id> - return the next bounded window after a cursor
+  //   ?rolloutRevision=<revision> - reject a cursor from a different file snapshot
   //   ?branchId=<id> - derived branch id to render
+  //   ?deferMedia=1 - omit inline Pi image payloads from the first response
+  //   ?deferThinking=1 - omit Pi thinking blocks from the first response
   //   ?view=canonical - explicitly request canonical overlay; default is legacy
   routes.get("/projects/:projectId/sessions/:sessionId", async (c) => {
     const projectId = c.req.param("projectId");
@@ -1220,7 +1271,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const beforeMessageId = c.req.query("beforeMessageId");
     const aroundMessageId = c.req.query("aroundMessageId");
     const afterWindowMessageId = c.req.query("afterWindowMessageId");
+    const rolloutRevision = c.req.query("rolloutRevision");
     const branchId = c.req.query("branchId");
+    const deferMedia = ["1", "true"].includes(
+      c.req.query("deferMedia")?.toLowerCase() ?? "",
+    );
+    const deferThinking = ["1", "true"].includes(
+      c.req.query("deferThinking")?.toLowerCase() ?? "",
+    );
     const maxMessagesParam = c.req.query("maxMessages");
     const viewParam = c.req.query("view");
     const canonicalViewRequested = viewParam === "canonical";
@@ -1275,57 +1333,150 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Always try to read from disk first (even for owned sessions)
     const reader = deps.readerFactory(project);
+    const boundedMaxMessages =
+      maxMessages !== undefined && !Number.isNaN(maxMessages) && maxMessages > 0
+        ? maxMessages
+        : undefined;
+    const boundedTailCompactions =
+      tailCompactions !== undefined &&
+      !Number.isNaN(tailCompactions) &&
+      tailCompactions > 0
+        ? tailCompactions
+        : undefined;
     const usesWindowPagination =
       !afterMessageId && Boolean(aroundMessageId || afterWindowMessageId);
     const readerAfterMessageId = usesWindowPagination
       ? undefined
       : afterMessageId;
-    let loadedSession = await reader.getSession(
-      sessionId,
-      project.id,
-      readerAfterMessageId,
-      {
-        // Only include orphaned tool info if:
-        // 1. We previously owned this session (not external)
-        // 2. No active process (tools aren't potentially in progress)
-        // When we own the session, tools without results might be pending approval
-        includeOrphans: wasEverOwned && !process,
-        branchId,
-      },
-    );
+    const readerOptions = {
+      // Only include orphaned tool info if:
+      // 1. We previously owned the session (not external)
+      // 2. No active process (tools aren't potentially in progress)
+      // When we own the session, tools without results might be pending approval
+      includeOrphans: wasEverOwned && !process,
+      branchId,
+      deferMedia,
+      deferThinking,
+      maxMessages: boundedMaxMessages,
+      tailCompactions: boundedTailCompactions,
+      beforeMessageId,
+      aroundMessageId,
+      afterWindowMessageId,
+      rolloutRevision: rolloutRevision ?? undefined,
+    };
+    let loadedSession: Awaited<ReturnType<ISessionReader["getSession"]>>;
+    try {
+      loadedSession = await reader.getSession(
+        sessionId,
+        project.id,
+        readerAfterMessageId,
+        readerOptions,
+      );
 
-    // For mixed projects, fall back to the other providers' session stores if
-    // the primary reader didn't find the session. Candidate ordering and
-    // reader construction are shared with findSessionSummaryAcrossProviders.
-    if (!loadedSession) {
-      const projectGroup = normalizeProviderGroup(project.provider);
-      for (const source of resolveSessionSources(
-        project,
-        toProviderResolutionDeps(deps),
-      )) {
-        if (normalizeProviderGroup(source.provider) === projectGroup) continue;
-        loadedSession = await source.reader.getSession(
-          sessionId,
-          project.id,
-          readerAfterMessageId,
-          { includeOrphans: wasEverOwned && !process, branchId },
-        );
-        if (loadedSession) break;
+      // For mixed projects, fall back to the other providers' session stores if
+      // the primary reader didn't find the session. Candidate ordering and
+      // reader construction are shared with findSessionSummaryAcrossProviders.
+      if (!loadedSession) {
+        const projectGroup = normalizeProviderGroup(project.provider);
+        for (const source of resolveSessionSources(
+          project,
+          toProviderResolutionDeps(deps),
+        )) {
+          if (normalizeProviderGroup(source.provider) === projectGroup)
+            continue;
+          loadedSession = await source.reader.getSession(
+            sessionId,
+            project.id,
+            readerAfterMessageId,
+            readerOptions,
+          );
+          if (loadedSession) break;
+        }
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "ROLLOUT_CURSOR_STALE") {
+        return c.json(
+          {
+            error: "Codex session cursor belongs to an older file revision",
+            code: "SESSION_HISTORY_CURSOR_STALE",
+          },
+          409,
+        );
+      }
+      if (message === "ROLLOUT_CHANGED_DURING_SCAN") {
+        return c.json(
+          {
+            error: "Codex session changed while it was being loaded",
+            code: "SESSION_HISTORY_CHANGED",
+          },
+          409,
+        );
+      }
+      if (
+        message.includes("SESSION_HISTORY_UNAVAILABLE") ||
+        (error instanceof Error &&
+          error.name === "CodexHistoryUnavailableError")
+      ) {
+        return c.json(
+          {
+            error:
+              "Codex rollback history is unavailable within the safe load budget",
+            code: "SESSION_HISTORY_UNAVAILABLE",
+          },
+          503,
+        );
+      }
+      if (
+        message.includes("admission budget") ||
+        message.includes("scan exceeds") ||
+        (error instanceof Error && error.name === "CodexRolloutScanError")
+      ) {
+        return c.json(
+          {
+            error: "Codex session history exceeds the configured load budget",
+            code: "SESSION_HISTORY_BUDGET_EXCEEDED",
+          },
+          413,
+        );
+      }
+      throw error;
     }
 
-    let session = loadedSession ? normalizeSession(loadedSession) : null;
+    const readerPagination = loadedSession?.pagination;
+    const readerPaginationApplied = loadedSession?.paginationApplied === true;
+    const codexRolloutBytes = loadedSession?.codexRolloutBytes;
+    const codexCanonicalAdmissionAllowed =
+      codexRolloutBytes === undefined ||
+      codexRolloutBytes <= CODEX_CANONICAL_MAX_ROLLOUT_BYTES;
+    let session = loadedSession
+      ? normalizeSession(loadedSession, { deferMedia, deferThinking })
+      : null;
 
-    // Compute maxMessages early so the canonical overlay can window its
-    // candidate construction.
-    const boundedMaxMessages =
-      maxMessages !== undefined && !Number.isNaN(maxMessages) && maxMessages > 0
-        ? maxMessages
-        : undefined;
+    // The Codex reader applies bounded windows before normalization. Keep the
+    // parsed bound for canonical overlay admission, but do not slice the page
+    // a second time below.
+    if (
+      session &&
+      canonicalViewRequested &&
+      isCodexProviderName(session.provider) &&
+      !codexCanonicalAdmissionAllowed
+    ) {
+      getLogger().debug(
+        {
+          sessionId,
+          rolloutBytes: codexRolloutBytes,
+          maxRolloutBytes: CODEX_CANONICAL_MAX_ROLLOUT_BYTES,
+          reason: "rollout_budget_exceeded",
+        },
+        "Canonical Codex overlay skipped for large rollout",
+      );
+    }
 
     if (
       session &&
       canonicalViewRequested &&
+      codexCanonicalAdmissionAllowed &&
       isCodexProviderName(session.provider) &&
       codexEventStoreSources.length > 0
     ) {
@@ -1480,6 +1631,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       session &&
       !canonicalViewRequested &&
       afterMessageId === undefined &&
+      codexCanonicalAdmissionAllowed &&
       isCodexProviderName(session.provider) &&
       codexEventStoreSources.length > 0
     ) {
@@ -1563,6 +1715,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         const processMessages = sdkMessagesToClientMessages(sdkMessages, {
           model: process.model,
           provider: process.provider,
+          deferMedia,
+          deferThinking,
         });
         // Extract context usage from raw SDK messages (has usage field)
         // Use process.contextWindow (captured from result messages) as primary source
@@ -1684,11 +1838,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       ? deps.notificationService.hasUnread(sessionId, session.updatedAt)
       : undefined;
 
-    // Apply compact-boundary pagination if requested (BEFORE expensive augmentation)
-    // tailCompactions slices to last N compact boundaries; skip when afterMessageId is
-    // present since that's a different use case (incremental forward-fetch)
-    let paginationInfo: PaginationInfo | undefined;
-    if (aroundMessageId && !afterMessageId) {
+    // Codex applies bounded windows in the reader, before normalization. Legacy
+    // providers (and small rollback rollouts) keep the route-level slicer.
+    let paginationInfo: PaginationInfo | undefined = readerPagination;
+    if (!readerPaginationApplied && aroundMessageId && !afterMessageId) {
       const sliced = sliceAroundMessage(
         session.messages,
         aroundMessageId,
@@ -1696,7 +1849,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       );
       session = { ...session, messages: sliced.messages };
       paginationInfo = sliced.pagination;
-    } else if (afterWindowMessageId && !afterMessageId) {
+    } else if (
+      !readerPaginationApplied &&
+      afterWindowMessageId &&
+      !afterMessageId
+    ) {
       const sliced = sliceAfterMessage(
         session.messages,
         afterWindowMessageId,
@@ -1705,6 +1862,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       session = { ...session, messages: sliced.messages };
       paginationInfo = sliced.pagination;
     } else if (
+      !readerPaginationApplied &&
       tailCompactions !== undefined &&
       !Number.isNaN(tailCompactions) &&
       tailCompactions > 0 &&

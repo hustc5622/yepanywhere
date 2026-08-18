@@ -6,9 +6,11 @@ import { zstdCompress } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { readSharedCodexEntries } from "../../src/sessions/codex-entries-reader.js";
+import type { CodexRolloutScanError } from "../../src/sessions/codex-rollout-file.js";
 import {
   compressedCodexRolloutPath,
   isCompressedCodexRolloutPath,
+  iterateCodexRolloutLines,
   plainCodexRolloutPath,
   readCodexRolloutFirstLine,
   readCodexRolloutLines,
@@ -150,6 +152,46 @@ describe("reading compressed rollouts", () => {
 
     expect(loaded.entries).toHaveLength(2);
     expect(loaded.entries[0]?.type).toBe("session_meta");
+  });
+
+  it("iterates bounded UTF-8 lines with stable logical byte offsets", async () => {
+    const body = `\uFEFF${JSON.stringify({ text: "你好" })}\r\n${JSON.stringify({ text: "tail" })}`;
+    const filePath = await writePlain("rollout-k.jsonl", body);
+
+    const lines = [];
+    for await (const line of iterateCodexRolloutLines(filePath, {
+      maxLineBytes: 1024,
+    })) {
+      lines.push(line);
+    }
+
+    expect(lines.map((line) => line.line)).toEqual([
+      JSON.stringify({ text: "你好" }),
+      JSON.stringify({ text: "tail" }),
+    ]);
+    expect(lines.map((line) => line.offset)).toEqual([
+      0,
+      Buffer.byteLength(JSON.stringify({ text: "你好" }), "utf8") + 2,
+    ]);
+  });
+
+  it("rejects an oversized line before JSON parsing", async () => {
+    const filePath = await writePlain(
+      "rollout-l.jsonl",
+      `${"x".repeat(128)}\n`,
+    );
+
+    await expect(
+      (async () => {
+        for await (const _line of iterateCodexRolloutLines(filePath, {
+          maxLineBytes: 64,
+        })) {
+          // The first line must fail before this body runs.
+        }
+      })(),
+    ).rejects.toMatchObject<CodexRolloutScanError>({
+      code: "entry_too_large",
+    });
   });
 });
 

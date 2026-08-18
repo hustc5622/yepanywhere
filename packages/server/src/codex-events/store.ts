@@ -52,6 +52,8 @@ export interface CodexEventStore {
    * which keeps the comparison on a single clock.
    */
   latestEventAtMs(sessionId: string): Promise<number>;
+  /** Estimated on-disk bytes that a cold load would hydrate, when available. */
+  getStorageBytes?(): Promise<number>;
 }
 
 /** Newest-event timestamp for one already-sorted session event list. */
@@ -166,6 +168,10 @@ export class InMemoryCodexEventStore implements CodexEventStore {
 
   async latestEventAtMs(sessionId: string): Promise<number> {
     return latestEventTimestamp(this.eventsBySession.get(sessionId));
+  }
+
+  async getStorageBytes(): Promise<number> {
+    return 0;
   }
 
   private identityKey(sessionId: string, identity: string): string {
@@ -430,6 +436,20 @@ export class JsonlCodexEventStore implements CodexEventStore {
       await this.refreshFromDisk();
       return latestEventTimestamp(this.eventsBySession.get(sessionId));
     });
+  }
+
+  async getStorageBytes(): Promise<number> {
+    const files = await this.listJournalFiles();
+    const sizes = await Promise.all(
+      files.map(async (file) => {
+        try {
+          return (await stat(file)).size;
+        } catch {
+          return 0;
+        }
+      }),
+    );
+    return sizes.reduce((total, size) => total + size, 0);
   }
 
   private async ensureLoaded(): Promise<void> {

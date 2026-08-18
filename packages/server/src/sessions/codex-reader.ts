@@ -16,6 +16,8 @@ import { stat } from "node:fs/promises";
 import {
   type AgentMapping,
   type AgentStatus,
+  type CodexBranchOption,
+  type CodexBranchState,
   type CodexEventMsgEntry,
   type CodexFunctionCallOutputPayload,
   type CodexFunctionCallPayload,
@@ -34,7 +36,10 @@ import {
   type UnifiedSession,
   type UrlProjectId,
   getModelContextWindow,
+  parseCodexSessionEntry,
 } from "@yep-anywhere/shared";
+import { isCodexImageGenerationRecord } from "../codex/image-generation.js";
+import { canonicalizeCodexToolName } from "../codex/normalization.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type {
   ContentBlock,
@@ -44,15 +49,27 @@ import type {
   SessionSummary,
 } from "../supervisor/types.js";
 import { readSharedCodexEntries } from "./codex-entries-reader.js";
-import { codexEntryAnchor } from "./codex-entry-anchor.js";
+import {
+  attachCodexEntryByteOffset,
+  codexEntryAnchor,
+  getCodexEntryByteOffset,
+} from "./codex-entry-anchor.js";
 import { buildCodexBranchView } from "./codex-rollback.js";
+import {
+  CodexRolloutScanError,
+  codexRolloutRevision,
+  iterateCodexRolloutLines,
+  sameCodexRolloutRevision,
+} from "./codex-rollout-file.js";
 import {
   type CodexSessionManifest,
   type CodexSessionManifestEntry,
   getCodexSessionManifest,
   invalidateCodexSessionManifest,
 } from "./codex-session-manifest.js";
+import { isCodexTurnAbortedNoticeText } from "./codex-turn-aborted.js";
 import { convertCodexEntries } from "./normalization.js";
+import type { PaginationInfo } from "./pagination.js";
 import {
   sanitizeCodexPublicUserPrompt,
   sanitizeCodexUserContentBlockText,
@@ -63,7 +80,10 @@ import type {
   LoadedSession,
   SessionFileEntry,
 } from "./types.js";
-import { isSyntheticUserPromptText } from "./user-prompt-classification.js";
+import {
+  isSessionSetupText,
+  isSyntheticUserPromptText,
+} from "./user-prompt-classification.js";
 import { createSessionQuestion } from "./user-questions.js";
 
 export interface CodexSessionReaderOptions {
@@ -90,6 +110,297 @@ const CODEX_COMPACTION_EVENT_DEDUPE_WINDOW_MS = 5_000;
  * Codex source and stays under `codex`.
  */
 const LOCAL_CODEX_MODEL_PROVIDERS = new Set(["ollama", "lmstudio", "local"]);
+
+const CODEX_DEFAULT_PAGE_MESSAGES = 100;
+const CODEX_MAX_ROLLOUT_LINE_BYTES = positiveEnvInt(
+  "YEP_CODEX_MAX_ROLLOUT_LINE_BYTES",
+  8 * 1024 * 1024,
+);
+const CODEX_MAX_ROLLOUT_SCAN_BYTES = positiveEnvInt(
+  "YEP_CODEX_MAX_ROLLOUT_SCAN_BYTES",
+  512 * 1024 * 1024,
+);
+const CODEX_MAX_PAGE_BYTES = positiveEnvInt(
+  "YEP_CODEX_MAX_PAGE_BYTES",
+  64 * 1024 * 1024,
+);
+const CODEX_MAX_SUMMARY_ITEMS = positiveEnvInt(
+  "YEP_CODEX_MAX_SUMMARY_ITEMS",
+  2048,
+);
+const CODEX_MAX_SUMMARY_TEXT_CHARS = positiveEnvInt(
+  "YEP_CODEX_MAX_SUMMARY_TEXT_CHARS",
+  16 * 1024,
+);
+const CODEX_MAX_BRANCH_ITEMS = positiveEnvInt(
+  "YEP_CODEX_MAX_BRANCH_ITEMS",
+  20_000,
+);
+const CODEX_ROLLBACK_FULL_READ_MAX_BYTES = positiveEnvInt(
+  "YEP_CODEX_ROLLBACK_FULL_READ_MAX_BYTES",
+  32 * 1024 * 1024,
+);
+
+function positiveEnvInt(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function boundCodexSummaryText(value: string): string {
+  return value.length <= CODEX_MAX_SUMMARY_TEXT_CHARS
+    ? value
+    : `${value.slice(0, CODEX_MAX_SUMMARY_TEXT_CHARS - 1)}…`;
+}
+
+interface CodexUserTurnScan {
+  offset: number;
+  prompt: string;
+  timestamp?: string;
+}
+
+interface CodexSummaryScan {
+  stats: Stats;
+  revisionKey: string;
+  logicalBytes: number;
+  metaEntry?: CodexSessionMetaEntry;
+  hasResponseItemUser: boolean;
+  hasRollbackMarker: boolean;
+  messageCount: number;
+  eventUserMessageCount: number;
+  responseMessageCount: number;
+  responseQuestions: SessionQuestion[];
+  eventQuestions: SessionQuestion[];
+  responseTitle: { title: string; fullTitle: string } | null;
+  eventTitle: { title: string; fullTitle: string } | null;
+  model?: string;
+  firstTurnContext?: CodexTurnContextEntry;
+  latestTurnContext?: CodexTurnContextEntry;
+  latestVisibleEntryTimestamp: string | null;
+  contextUsage?: ContextUsage;
+  cumulativeUsage?: ContextCumulativeUsage;
+  compactCount: number;
+  compactEvents?: ContextCompactEvent[];
+  compactionOffsets: number[];
+  responseUserTurns: CodexUserTurnScan[];
+  eventUserTurns: CodexUserTurnScan[];
+  /** Bounded semantic hints used to keep page counts/conversion parity. */
+  patchApplyCallIds: Set<string>;
+  directEditCallIds: Set<string>;
+  responseImageGenerationIds: Set<string>;
+  imageGenerationEndIds: Set<string>;
+}
+
+interface CodexPageScan {
+  entries: CodexSessionEntry[];
+  totalMessageCount: number;
+  totalCompactions: number;
+  hasOlderMessages: boolean;
+  hasNewerMessages: boolean;
+  targetMessageFound: boolean;
+  revisionKey: string;
+}
+
+export class CodexHistoryUnavailableError extends Error {
+  readonly code = "SESSION_HISTORY_UNAVAILABLE";
+
+  constructor(message = "Codex rollback history exceeds the safe load budget") {
+    super(message);
+    this.name = "CodexHistoryUnavailableError";
+  }
+}
+
+interface CodexEntryRecord {
+  entry: CodexSessionEntry;
+  offset: number;
+  byteLength: number;
+  outputCount: number;
+}
+
+const inFlightCodexSummaryScans = new Map<string, Promise<CodexSummaryScan>>();
+const CODEX_MAX_ADMISSION_BYTES = positiveEnvInt(
+  "YEP_CODEX_ROLLOUT_ADMISSION_BYTES",
+  512 * 1024 * 1024,
+);
+let codexReservedAdmissionBytes = 0;
+const codexAdmissionWaiters: Array<{
+  bytes: number;
+  resolve: () => void;
+}> = [];
+
+async function reserveCodexRolloutAdmission(
+  filePath: string,
+): Promise<() => void> {
+  const fileStats = await stat(filePath);
+  const bytes = Math.max(1, fileStats.size);
+  if (bytes > CODEX_MAX_ADMISSION_BYTES) {
+    throw new CodexRolloutScanError(
+      "scan_budget_exceeded",
+      `Codex rollout exceeds the ${CODEX_MAX_ADMISSION_BYTES}-byte admission budget`,
+      0,
+    );
+  }
+
+  while (codexReservedAdmissionBytes + bytes > CODEX_MAX_ADMISSION_BYTES) {
+    await new Promise<void>((resolve) => {
+      codexAdmissionWaiters.push({ bytes, resolve });
+    });
+  }
+  codexReservedAdmissionBytes += bytes;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    codexReservedAdmissionBytes -= bytes;
+    for (let index = 0; index < codexAdmissionWaiters.length; index += 1) {
+      const waiter = codexAdmissionWaiters[index];
+      if (!waiter) continue;
+      if (
+        codexReservedAdmissionBytes + waiter.bytes >
+        CODEX_MAX_ADMISSION_BYTES
+      ) {
+        continue;
+      }
+      codexAdmissionWaiters.splice(index, 1);
+      waiter.resolve();
+      break;
+    }
+  };
+}
+
+async function withCodexRolloutAdmission<T>(
+  filePath: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const release = await reserveCodexRolloutAdmission(filePath);
+  try {
+    return await run();
+  } finally {
+    release();
+  }
+}
+
+function codexCursorOffset(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const match = /@([0-9]+)/.exec(value);
+  if (!match) return undefined;
+  const offset = Number.parseInt(match[1] ?? "", 10);
+  return Number.isSafeInteger(offset) && offset >= 0 ? offset : undefined;
+}
+
+function getNormalizedMessageId(
+  message: Message | undefined,
+): string | undefined {
+  return (
+    message?.uuid ?? (typeof message?.id === "string" ? message.id : undefined)
+  );
+}
+
+function hasLegacyCodexCursor(value: string | undefined): boolean {
+  return value !== undefined && codexCursorOffset(value) === undefined;
+}
+
+function codexTailStartOffset(
+  offsets: readonly number[],
+  tailCompactions: number | undefined,
+  beforeOffset: number | undefined,
+): number {
+  if (!tailCompactions || tailCompactions <= 0) return 0;
+  const eligible = offsets.filter(
+    (offset) => beforeOffset === undefined || offset < beforeOffset,
+  );
+  if (eligible.length <= tailCompactions) return 0;
+  return eligible[eligible.length - tailCompactions] ?? 0;
+}
+
+interface CodexPageSemanticHints {
+  patchApplyCallIds: ReadonlySet<string>;
+  directEditCallIds: ReadonlySet<string>;
+  responseImageGenerationIds: ReadonlySet<string>;
+  imageGenerationEndIds: ReadonlySet<string>;
+}
+
+function codexEntryOutputCount(
+  entry: CodexSessionEntry,
+  hasResponseItemUser: boolean,
+  compactedTimestamps: readonly number[],
+  semantic?: CodexPageSemanticHints,
+): number {
+  if (entry.type === "response_item") {
+    switch (entry.payload.type) {
+      case "message":
+        return entry.payload.role === "developer" ? 0 : 1;
+      case "reasoning":
+      case "function_call":
+      case "web_search_call":
+        return 1;
+      case "function_call_output":
+      case "custom_tool_call_output":
+        return semantic?.patchApplyCallIds.has(entry.payload.call_id ?? "")
+          ? 0
+          : 1;
+      case "custom_tool_call":
+        return 1;
+      case "image_generation":
+      case "imageGeneration":
+      case "image_generation_call": {
+        const imageId = (entry.payload as { id?: unknown }).id;
+        if (
+          entry.payload.type === "image_generation_call" &&
+          typeof imageId === "string" &&
+          semantic?.imageGenerationEndIds.has(imageId)
+        ) {
+          return 0;
+        }
+        return 2;
+      }
+      default:
+        return 0;
+    }
+  }
+  if (entry.type === "compacted") return 1;
+  if (entry.type !== "event_msg") return 0;
+
+  switch (entry.payload.type) {
+    case "token_count":
+    case "agent_message":
+    case "agent_reasoning":
+    case "task_complete":
+      return 0;
+    case "user_message":
+      return hasResponseItemUser ? 0 : 1;
+    case "turn_aborted":
+      return 1;
+    case "context_compacted":
+      return hasNearbyCodexCompactedEntry(
+        compactedTimestamps as number[],
+        entry.timestamp,
+      )
+        ? 0
+        : 1;
+    case "patch_apply_end": {
+      const callId = (entry.payload as { call_id?: unknown }).call_id;
+      return typeof callId === "string" &&
+        semantic?.directEditCallIds.has(callId)
+        ? 1
+        : 2;
+    }
+    case "image_generation_end":
+      return 2;
+    case "item_completed": {
+      const item = entry.payload.item;
+      const itemId =
+        isRecord(item) && typeof item.id === "string" ? item.id : undefined;
+      if (!isRecord(item) || !isCodexImageGenerationRecord(item)) return 0;
+      return itemId && semantic?.responseImageGenerationIds.has(itemId) ? 0 : 2;
+    }
+    default:
+      return 0;
+  }
+}
 
 /**
  * Derive a sub-agent lifecycle status from its rollout entries.
@@ -122,46 +433,58 @@ function deriveCodexSubagentStatus(entries: readonly CodexSessionEntry[]): {
   return { status: "running", descriptorStatus: "running" };
 }
 
-function getCodexSpawnMapping(
-  entries: readonly CodexSessionEntry[],
-): Map<string, string> {
-  const callIdByChildThread = new Map<string, string>();
-  for (const entry of entries) {
-    if (entry.type !== "event_msg") continue;
-    const payload = entry.payload as Record<string, unknown>;
-    let childThreadId: unknown;
-    let callId: unknown;
-    if (payload.type === "item_completed") {
-      const item =
-        payload.item && typeof payload.item === "object"
-          ? (payload.item as Record<string, unknown>)
-          : undefined;
-      const tool = item?.tool;
-      if (
-        item?.type !== "CollabAgentToolCall" ||
-        (tool !== "spawn_agent" &&
-          tool !== "spawnAgent" &&
-          tool !== "SpawnAgent")
-      ) {
-        continue;
-      }
-      childThreadId = Array.isArray(item.receiver_thread_ids)
-        ? item.receiver_thread_ids[0]
+function addCodexSpawnMapping(
+  callIdByChildThread: Map<string, string>,
+  entry: CodexSessionEntry,
+): void {
+  if (entry.type !== "event_msg") return;
+  const payload = entry.payload as Record<string, unknown>;
+  let childThreadId: unknown;
+  let callId: unknown;
+  if (payload.type === "item_completed") {
+    const item =
+      payload.item && typeof payload.item === "object"
+        ? (payload.item as Record<string, unknown>)
         : undefined;
-      callId = item.id;
-    } else if (payload.type === "collab_agent_spawn_end") {
-      // Compatibility for older rollout fixtures that persisted the legacy
-      // terminal event directly.
-      childThreadId = payload.new_thread_id;
-      callId = payload.call_id;
-    } else {
-      continue;
+    const tool = item?.tool;
+    if (
+      item?.type !== "CollabAgentToolCall" ||
+      (tool !== "spawn_agent" && tool !== "spawnAgent" && tool !== "SpawnAgent")
+    ) {
+      return;
     }
-    if (typeof childThreadId === "string" && typeof callId === "string") {
-      callIdByChildThread.set(childThreadId, callId);
-    }
+    childThreadId = Array.isArray(item.receiver_thread_ids)
+      ? item.receiver_thread_ids[0]
+      : undefined;
+    callId = item.id;
+  } else if (payload.type === "collab_agent_spawn_end") {
+    // Compatibility for older rollout fixtures that persisted the legacy
+    // terminal event directly.
+    childThreadId = payload.new_thread_id;
+    callId = payload.call_id;
+  } else {
+    return;
   }
-  return callIdByChildThread;
+  if (typeof childThreadId === "string" && typeof callId === "string") {
+    callIdByChildThread.set(childThreadId, callId);
+  }
+}
+
+async function scanCodexSpawnMapping(
+  filePath: string,
+): Promise<Map<string, string>> {
+  return withCodexRolloutAdmission(filePath, async () => {
+    const mapping = new Map<string, string>();
+    for await (const line of iterateCodexRolloutLines(filePath, {
+      maxLineBytes: CODEX_MAX_ROLLOUT_LINE_BYTES,
+      maxBytes: CODEX_MAX_ROLLOUT_SCAN_BYTES,
+    })) {
+      if (!line.line) continue;
+      const entry = parseCodexSessionEntry(line.line);
+      if (entry) addCodexSpawnMapping(mapping, entry);
+    }
+    return mapping;
+  });
 }
 
 async function readCodexEntries(
@@ -262,14 +585,1078 @@ export class CodexSessionReader implements ISessionReader {
     sessionId: string,
     projectId: UrlProjectId,
   ): Promise<SessionSummary | null> {
-    const loaded = await this.loadSessionEntries(sessionId);
-    if (!loaded) return null;
-    return this.buildSummaryFromEntries(
-      loaded.entries,
-      loaded.stats,
-      sessionId,
-      projectId,
+    const sessionFile = await this.findSessionFile(sessionId);
+    if (!sessionFile) return null;
+
+    try {
+      const scan = await this.scanCodexRolloutSummary(sessionFile.filePath);
+      if (!scan.metaEntry) return null;
+
+      // Rollback markers change the meaning of every preceding turn. Keep the
+      // battle-tested branch reducer for small historical files until the
+      // rollback semantic index lands; never put a large rollback rollout back
+      // through the unbounded reader.
+      if (scan.hasRollbackMarker) {
+        if (scan.stats.size > CODEX_ROLLBACK_FULL_READ_MAX_BYTES) return null;
+        const loaded = await this.loadSessionEntries(sessionId);
+        return loaded
+          ? this.buildSummaryFromEntries(
+              loaded.entries,
+              loaded.stats,
+              sessionId,
+              projectId,
+            )
+          : null;
+      }
+
+      return this.buildSummaryFromScan(scan, sessionId, projectId);
+    } catch (error) {
+      if (error instanceof CodexRolloutScanError) {
+        return null;
+      }
+      return null;
+    }
+  }
+
+  private async scanCodexRolloutSummary(
+    filePath: string,
+  ): Promise<CodexSummaryScan> {
+    const existing = inFlightCodexSummaryScans.get(filePath);
+    if (existing) return existing;
+
+    const tracked = this.scanCodexRolloutSummaryUnshared(filePath).finally(
+      () => {
+        if (inFlightCodexSummaryScans.get(filePath) === tracked) {
+          inFlightCodexSummaryScans.delete(filePath);
+        }
+      },
     );
+    inFlightCodexSummaryScans.set(filePath, tracked);
+    return tracked;
+  }
+
+  private async scanCodexRolloutSummaryUnshared(
+    filePath: string,
+  ): Promise<CodexSummaryScan> {
+    return withCodexRolloutAdmission(filePath, async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const before = await stat(filePath);
+        const revision = codexRolloutRevision(before);
+        const scan = await this.scanCodexRolloutSummaryOnce(
+          filePath,
+          before,
+          revision.key,
+        );
+        const after = await stat(filePath);
+        const afterRevision = codexRolloutRevision(after);
+        if (sameCodexRolloutRevision(revision, afterRevision)) {
+          return { ...scan, stats: after, revisionKey: afterRevision.key };
+        }
+      }
+
+      throw new Error("ROLLOUT_CHANGED_DURING_SCAN");
+    });
+  }
+
+  private async scanCodexRolloutSummaryOnce(
+    filePath: string,
+    stats: Stats,
+    revisionKey: string,
+  ): Promise<CodexSummaryScan> {
+    const responseQuestions: SessionQuestion[] = [];
+    const eventQuestions: SessionQuestion[] = [];
+    const responseUserTurns: CodexUserTurnScan[] = [];
+    const eventUserTurns: CodexUserTurnScan[] = [];
+    const patchApplyCallIds = new Set<string>();
+    const directEditCallIds = new Set<string>();
+    const responseImageGenerationIds = new Set<string>();
+    const imageGenerationEndIds = new Set<string>();
+    const compactedTimestamps: number[] = [];
+    const compactionOffsets: number[] = [];
+    const compactEvents: ContextCompactEvent[] = [];
+    const pendingCompactEvents: ContextCompactEvent[] = [];
+
+    let metaEntry: CodexSessionMetaEntry | undefined;
+    let hasResponseItemUser = false;
+    let hasRollbackMarker = false;
+    let responseMessageCount = 0;
+    let eventUserMessageCount = 0;
+    let responseQuestionIndex = 0;
+    let eventQuestionIndex = 0;
+    let responseTitle: { title: string; fullTitle: string } | null = null;
+    let eventTitle: { title: string; fullTitle: string } | null = null;
+    let model: string | undefined;
+    let firstTurnContext: CodexTurnContextEntry | undefined;
+    let latestTurnContext: CodexTurnContextEntry | undefined;
+    let latestVisibleMs = Number.NEGATIVE_INFINITY;
+    let latestVisibleEntryTimestamp: string | null = null;
+    let logicalBytes = 0;
+    let contextUsage: ContextUsage | undefined;
+    let compactCount = 0;
+    let lastContextTokens: number | undefined;
+    let tokenCountAfterCompaction = false;
+    let tokenCountTurns = 0;
+    let currentSegment: {
+      total_tokens: number;
+      input_tokens: number;
+      output_tokens: number;
+      cached_input_tokens?: number;
+    } | null = null;
+    const cumulativeSegments: Array<{
+      total_tokens: number;
+      input_tokens: number;
+      output_tokens: number;
+      cached_input_tokens?: number;
+    }> = [];
+    let cumulativeTruncated = false;
+
+    const finishSegment = (): void => {
+      if (currentSegment) {
+        cumulativeSegments.push(currentSegment);
+        if (cumulativeSegments.length > CODEX_MAX_SUMMARY_ITEMS) {
+          cumulativeSegments.shift();
+          cumulativeTruncated = true;
+        }
+      }
+      currentSegment = null;
+    };
+
+    const addCompactionEvent = (
+      entry: CodexSessionEntry,
+      trigger: "compacted" | "context_compacted",
+    ): void => {
+      const event: ContextCompactEvent = {
+        trigger,
+        ...(entry.timestamp ? { timestamp: entry.timestamp } : {}),
+        ...(lastContextTokens !== undefined
+          ? { beforeTokens: lastContextTokens }
+          : {}),
+      };
+      pendingCompactEvents.push(event);
+      if (pendingCompactEvents.length > CODEX_MAX_SUMMARY_ITEMS) {
+        pendingCompactEvents.shift();
+      }
+    };
+
+    const resolveCompactionAfterTokens = (afterTokens: number): void => {
+      if (pendingCompactEvents.length === 0) return;
+      for (const event of pendingCompactEvents) {
+        event.afterTokens = afterTokens;
+        if (
+          event.beforeTokens !== undefined &&
+          event.beforeTokens > afterTokens
+        ) {
+          event.reclaimedTokens = event.beforeTokens - afterTokens;
+        }
+        if (compactEvents.length < CODEX_MAX_SUMMARY_ITEMS) {
+          compactEvents.push(event);
+        }
+      }
+      pendingCompactEvents.length = 0;
+    };
+
+    const addRecentCompactionTimestamp = (timestamp: string | undefined) => {
+      const ms = timestampToMs(timestamp);
+      if (ms === null) return;
+      compactedTimestamps.push(ms);
+      const cutoff = ms - CODEX_COMPACTION_EVENT_DEDUPE_WINDOW_MS;
+      while (compactedTimestamps.length > 0) {
+        const first = compactedTimestamps[0];
+        if (first === undefined || first >= cutoff) break;
+        compactedTimestamps.shift();
+      }
+    };
+
+    const addQuestion = (
+      target: SessionQuestion[],
+      question: SessionQuestion | null,
+    ): void => {
+      if (question && target.length < CODEX_MAX_SUMMARY_ITEMS) {
+        target.push(question);
+      }
+    };
+
+    const addBranchTurn = (
+      target: CodexUserTurnScan[],
+      entry: CodexSessionEntry,
+      prompt: string,
+    ): void => {
+      if (target.length >= CODEX_MAX_BRANCH_ITEMS) return;
+      const publicPrompt = boundCodexSummaryText(prompt.trim());
+      if (
+        !publicPrompt ||
+        isCodexTurnAbortedNoticeText(publicPrompt) ||
+        isSessionSetupText(publicPrompt) ||
+        isSyntheticUserPromptText(publicPrompt)
+      ) {
+        return;
+      }
+      target.push({
+        offset: getCodexEntryByteOffset(entry) ?? 0,
+        prompt: publicPrompt,
+        ...(entry.timestamp ? { timestamp: entry.timestamp } : {}),
+      });
+    };
+
+    for await (const line of iterateCodexRolloutLines(filePath, {
+      maxLineBytes: CODEX_MAX_ROLLOUT_LINE_BYTES,
+      maxBytes: CODEX_MAX_ROLLOUT_SCAN_BYTES,
+    })) {
+      logicalBytes = Math.max(logicalBytes, line.offset + line.byteLength + 1);
+      if (!line.line) continue;
+      const entry = parseCodexSessionEntry(line.line);
+      if (!entry) continue;
+      attachCodexEntryByteOffset(entry, line.offset);
+
+      if (entry.type === "session_meta") {
+        metaEntry ??= entry;
+        continue;
+      }
+
+      if (entry.type === "turn_context") {
+        firstTurnContext ??= entry;
+        latestTurnContext = entry;
+        if (!model && entry.payload.model) model = entry.payload.model;
+        continue;
+      }
+
+      const visibleMs = timestampToMs(entry.timestamp);
+      if (
+        visibleMs !== null &&
+        visibleMs > latestVisibleMs &&
+        (entry.type === "response_item" || entry.type === "event_msg")
+      ) {
+        latestVisibleMs = visibleMs;
+        latestVisibleEntryTimestamp = new Date(visibleMs).toISOString();
+      }
+
+      if (entry.type === "response_item") {
+        if (entry.payload.type === "message") {
+          if (entry.payload.role === "user") {
+            hasResponseItemUser = true;
+            const text = boundCodexSummaryText(
+              this.extractCodexUserMessageText(entry.payload.content),
+            );
+            const title = this.buildTitleFromText(text);
+            if (
+              title &&
+              responseTitle === null &&
+              !isCodexTurnAbortedNoticeText(text) &&
+              !isSessionSetupText(text) &&
+              !isSyntheticUserPromptText(text)
+            ) {
+              responseTitle = title;
+            }
+            addBranchTurn(responseUserTurns, entry, text);
+
+            const anchor = codexEntryAnchor(
+              entry,
+              `${responseQuestionIndex}-${entry.timestamp}`,
+            );
+            addQuestion(
+              responseQuestions,
+              createSessionQuestion(
+                {
+                  id: `codex-${anchor}`,
+                  text,
+                  timestamp: entry.timestamp,
+                },
+                `codex-user-${anchor}`,
+              ),
+            );
+            responseQuestionIndex += 1;
+          }
+          if (
+            entry.payload.role === "user" ||
+            entry.payload.role === "assistant"
+          ) {
+            responseMessageCount += 1;
+          }
+        }
+
+        const payload = entry.payload as Record<string, unknown>;
+        if (
+          (payload.type === "function_call" ||
+            payload.type === "custom_tool_call") &&
+          typeof payload.name === "string"
+        ) {
+          const callId =
+            typeof payload.call_id === "string"
+              ? payload.call_id
+              : typeof payload.id === "string"
+                ? payload.id
+                : undefined;
+          if (
+            callId &&
+            canonicalizeCodexToolName(
+              payload.name,
+              typeof payload.namespace === "string"
+                ? payload.namespace
+                : undefined,
+            ) === "Edit" &&
+            directEditCallIds.size < CODEX_MAX_BRANCH_ITEMS
+          ) {
+            directEditCallIds.add(callId);
+          }
+        }
+        if (
+          (payload.type === "image_generation" ||
+            payload.type === "imageGeneration" ||
+            payload.type === "image_generation_call") &&
+          typeof payload.id === "string" &&
+          responseImageGenerationIds.size < CODEX_MAX_BRANCH_ITEMS
+        ) {
+          responseImageGenerationIds.add(payload.id);
+        }
+        continue;
+      }
+
+      if (entry.type === "compacted") {
+        compactCount += 1;
+        compactionOffsets.push(getCodexEntryByteOffset(entry) ?? 0);
+        if (compactionOffsets.length > CODEX_MAX_BRANCH_ITEMS) {
+          compactionOffsets.shift();
+        }
+        finishSegment();
+        addRecentCompactionTimestamp(entry.timestamp);
+        addCompactionEvent(entry, "compacted");
+        tokenCountAfterCompaction = true;
+        continue;
+      }
+
+      if (entry.type !== "event_msg") continue;
+      const payload = entry.payload;
+      const payloadType = (payload as { type?: unknown }).type;
+
+      if (payloadType === "thread_rolled_back") {
+        hasRollbackMarker = true;
+      }
+
+      if (payloadType === "patch_apply_end") {
+        const callId = (payload as { call_id?: unknown }).call_id;
+        if (
+          typeof callId === "string" &&
+          patchApplyCallIds.size < CODEX_MAX_BRANCH_ITEMS
+        ) {
+          patchApplyCallIds.add(callId);
+        }
+      }
+
+      if (payloadType === "image_generation_end") {
+        const imageId = (payload as { id?: unknown }).id;
+        if (
+          typeof imageId === "string" &&
+          imageGenerationEndIds.size < CODEX_MAX_BRANCH_ITEMS
+        ) {
+          imageGenerationEndIds.add(imageId);
+        }
+      }
+
+      if (payloadType === "user_message") {
+        const message = (payload as { message?: unknown }).message;
+        if (typeof message !== "string") continue;
+        eventUserMessageCount += 1;
+        const publicPrompt = boundCodexSummaryText(
+          sanitizeCodexPublicUserPrompt(message).trim(),
+        );
+        const title = this.buildTitleFromText(publicPrompt);
+        if (
+          title &&
+          eventTitle === null &&
+          !isCodexTurnAbortedNoticeText(publicPrompt) &&
+          !isSessionSetupText(publicPrompt) &&
+          !isSyntheticUserPromptText(publicPrompt)
+        ) {
+          eventTitle = title;
+        }
+        addBranchTurn(eventUserTurns, entry, publicPrompt);
+
+        const anchor = codexEntryAnchor(
+          entry,
+          `${eventQuestionIndex}-${entry.timestamp}`,
+        );
+        addQuestion(
+          eventQuestions,
+          createSessionQuestion(
+            {
+              id: `codex-event-${anchor}`,
+              text: [
+                publicPrompt,
+                ...((payload as { images?: unknown[] }).images?.length
+                  ? ["[image]"]
+                  : []),
+              ].join("\n"),
+              timestamp: entry.timestamp,
+            },
+            `codex-event-user-${anchor}`,
+          ),
+        );
+        eventQuestionIndex += 1;
+        continue;
+      }
+
+      if (payloadType === "token_count") {
+        tokenCountTurns += 1;
+        const info = (payload as { info?: unknown }).info as
+          | {
+              last_token_usage?: {
+                total_tokens: number;
+                input_tokens: number;
+                output_tokens: number;
+                cached_input_tokens?: number;
+              };
+              total_token_usage?: {
+                total_tokens: number;
+                input_tokens: number;
+                output_tokens: number;
+                cached_input_tokens?: number;
+              };
+              model_context_window?: number;
+            }
+          | null
+          | undefined;
+        const usage = info?.last_token_usage ?? info?.total_token_usage;
+        const cumulativeUsage =
+          info?.total_token_usage ?? info?.last_token_usage;
+        if (!usage || !cumulativeUsage) continue;
+
+        let inputTokens = usage.input_tokens;
+        if (
+          inputTokens === 0 &&
+          usage.total_tokens > 0 &&
+          tokenCountAfterCompaction
+        ) {
+          inputTokens = usage.total_tokens;
+        }
+        if (inputTokens > 0) {
+          const contextWindow =
+            info?.model_context_window && info.model_context_window > 0
+              ? info.model_context_window
+              : getModelContextWindow(
+                  model,
+                  this.determineProvider(
+                    metaEntry ?? ({} as CodexSessionMetaEntry),
+                    model,
+                  ),
+                );
+          contextUsage = {
+            inputTokens,
+            percentage: Math.min(
+              100,
+              Math.round((inputTokens / contextWindow) * 100),
+            ),
+            contextWindow,
+            ...(usage.output_tokens > 0
+              ? { outputTokens: usage.output_tokens }
+              : {}),
+            ...((usage.cached_input_tokens ?? 0) > 0
+              ? { cacheReadTokens: usage.cached_input_tokens }
+              : {}),
+          };
+          lastContextTokens = inputTokens;
+          resolveCompactionAfterTokens(inputTokens);
+        }
+
+        currentSegment = cumulativeUsage;
+        tokenCountAfterCompaction = false;
+        continue;
+      }
+
+      if (payloadType === "context_compacted") {
+        const pairedWithCompacted = hasNearbyCodexCompactedEntry(
+          compactedTimestamps,
+          entry.timestamp,
+        );
+        if (!pairedWithCompacted) {
+          compactCount += 1;
+          compactionOffsets.push(getCodexEntryByteOffset(entry) ?? 0);
+          if (compactionOffsets.length > CODEX_MAX_BRANCH_ITEMS) {
+            compactionOffsets.shift();
+          }
+          finishSegment();
+          addCompactionEvent(entry, "context_compacted");
+          tokenCountAfterCompaction = false;
+        }
+        // A context_compacted event immediately following a persisted
+        // `compacted` marker is a duplicate notification. Keep the marker's
+        // post-compaction token rule alive for the following token_count.
+      }
+    }
+
+    finishSegment();
+    for (const event of pendingCompactEvents) {
+      if (compactEvents.length < CODEX_MAX_SUMMARY_ITEMS) {
+        compactEvents.push(event);
+      }
+    }
+
+    const cumulativeTotals =
+      this.sumCodexCumulativeSegments(cumulativeSegments);
+    const cumulativeUsage =
+      cumulativeTruncated ||
+      (cumulativeTotals.totalTokens === 0 &&
+        cumulativeTotals.inputTokens === 0 &&
+        cumulativeTotals.outputTokens === 0 &&
+        cumulativeTotals.cacheReadTokens === 0)
+        ? undefined
+        : {
+            ...cumulativeTotals,
+            cacheCreationTokens: 0,
+            turnCount: tokenCountTurns,
+          };
+
+    return {
+      stats,
+      revisionKey,
+      logicalBytes,
+      metaEntry,
+      hasResponseItemUser,
+      hasRollbackMarker,
+      messageCount:
+        responseMessageCount +
+        (hasResponseItemUser ? 0 : eventUserMessageCount),
+      eventUserMessageCount,
+      responseMessageCount,
+      responseQuestions,
+      eventQuestions,
+      responseTitle,
+      eventTitle,
+      model,
+      firstTurnContext,
+      latestTurnContext,
+      latestVisibleEntryTimestamp,
+      contextUsage,
+      cumulativeUsage,
+      compactCount,
+      compactEvents: compactEvents.length > 0 ? compactEvents : undefined,
+      compactionOffsets,
+      responseUserTurns,
+      eventUserTurns,
+      patchApplyCallIds,
+      directEditCallIds,
+      responseImageGenerationIds,
+      imageGenerationEndIds,
+    };
+  }
+
+  private buildCodexBranchState(
+    scan: CodexSummaryScan,
+    sessionId: string,
+    selectedBranchId?: string,
+  ): CodexBranchState {
+    const turns = scan.hasResponseItemUser
+      ? scan.responseUserTurns
+      : scan.eventUserTurns;
+    const branches: CodexBranchOption[] = turns.map((turn, index) => ({
+      id: `codex-branch-@${turn.offset}`,
+      sessionId,
+      parentId:
+        index > 0 ? `codex-branch-@${turns[index - 1]?.offset ?? 0}` : null,
+      prompt: turn.prompt,
+      title: this.buildCodexBranchTitle(turn.prompt),
+      depth: index + 1,
+      index: index + 1,
+      siblingIndex: 1,
+      siblingCount: 1,
+      isActive: true,
+      createdAt: turn.timestamp,
+    }));
+    const activeBranchId = branches.at(-1)?.id ?? null;
+    const selected =
+      selectedBranchId &&
+      branches.some((branch) => branch.id === selectedBranchId)
+        ? selectedBranchId
+        : activeBranchId;
+    return {
+      sessionId,
+      activeBranchId,
+      selectedBranchId: selected,
+      branches,
+    };
+  }
+
+  private buildCodexBranchTitle(prompt: string): string {
+    const firstLine = prompt
+      .split("\\n")
+      .map((line) => line.trim())
+      .find(Boolean);
+    const text = firstLine ?? prompt.trim();
+    return text.length <= 28 ? text : `${text.slice(0, 25)}...`;
+  }
+
+  private async scanCodexRolloutPage(
+    filePath: string,
+    summaryScan: CodexSummaryScan,
+    options: GetSessionOptions,
+    afterMessageId?: string,
+  ): Promise<CodexPageScan> {
+    return withCodexRolloutAdmission(filePath, async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const before = await stat(filePath);
+        const revision = codexRolloutRevision(before);
+        const result = await this.scanCodexRolloutPageOnce(
+          filePath,
+          summaryScan,
+          options,
+          afterMessageId,
+          revision.key,
+        );
+        const after = await stat(filePath);
+        const afterRevision = codexRolloutRevision(after);
+        if (sameCodexRolloutRevision(revision, afterRevision)) {
+          return { ...result, revisionKey: afterRevision.key };
+        }
+      }
+      throw new Error("ROLLOUT_CHANGED_DURING_SCAN");
+    });
+  }
+
+  private async scanCodexRolloutPageOnce(
+    filePath: string,
+    summaryScan: CodexSummaryScan,
+    options: GetSessionOptions,
+    afterMessageId: string | undefined,
+    revisionKey: string,
+  ): Promise<CodexPageScan> {
+    const beforeOffset = codexCursorOffset(options.beforeMessageId);
+    const aroundOffset = codexCursorOffset(options.aroundMessageId);
+    const afterWindowOffset = codexCursorOffset(options.afterWindowMessageId);
+    const incrementalOffset = codexCursorOffset(afterMessageId);
+    const isAround = aroundOffset !== undefined;
+    const isBefore = options.beforeMessageId !== undefined;
+    const isAfterWindow = options.afterWindowMessageId !== undefined;
+    const isIncremental = afterMessageId !== undefined;
+    const maxMessages = Math.max(
+      1,
+      options.maxMessages ??
+        (isIncremental ? 10_000 : CODEX_DEFAULT_PAGE_MESSAGES),
+    );
+    const aroundBeforeLimit = Math.floor((maxMessages - 1) / 2);
+    const aroundAfterLimit = maxMessages - aroundBeforeLimit - 1;
+    const tailStartOffset = codexTailStartOffset(
+      summaryScan.compactionOffsets,
+      options.tailCompactions,
+      beforeOffset,
+    );
+
+    const branchState = this.buildCodexBranchState(
+      summaryScan,
+      "codex-session",
+      options.branchId,
+    );
+    const turns = summaryScan.hasResponseItemUser
+      ? summaryScan.responseUserTurns
+      : summaryScan.eventUserTurns;
+    const selectedBranch = branchState.selectedBranchId;
+    const selectedBranchIndex = selectedBranch
+      ? turns.findIndex(
+          (turn) => `codex-branch-@${turn.offset}` === selectedBranch,
+        )
+      : -1;
+    const visibleEndOffset =
+      selectedBranchIndex >= 0
+        ? (turns[selectedBranchIndex + 1]?.offset ?? Number.POSITIVE_INFINITY)
+        : Number.POSITIVE_INFINITY;
+
+    const compactedTimestamps: number[] = [];
+    const prefixEntries: CodexSessionEntry[] = [];
+    const selected: CodexEntryRecord[] = [];
+    const beforeWindow: CodexEntryRecord[] = [];
+    const afterWindow: CodexEntryRecord[] = [];
+    const afterCursorWindow: CodexEntryRecord[] = [];
+    let targetRecord: CodexEntryRecord | undefined;
+    let selectedHead = 0;
+    let selectedOutputCount = 0;
+    let selectedBytes = 0;
+    let beforeHead = 0;
+    let beforeOutputCount = 0;
+    let beforeBytes = 0;
+    let afterOutputCount = 0;
+    let afterBytes = 0;
+    let afterCursorOutputCount = 0;
+    let afterCursorBytes = 0;
+    let droppedAfterCursor = false;
+    let totalMessageCount = 0;
+    let totalCompactions = 0;
+    let droppedOlder = false;
+    let droppedAroundOlder = false;
+    let droppedNewer = false;
+    let targetMessageFound = false;
+    let hasMessagesBeforeTail = false;
+    let targetEntrySeen = false;
+    let outputAtOrAfterTarget = false;
+
+    const dropSelectedHead = (): void => {
+      while (
+        selectedHead < selected.length &&
+        selectedOutputCount > maxMessages
+      ) {
+        const record = selected[selectedHead];
+        if (!record) break;
+        selectedOutputCount -= record.outputCount;
+        selectedBytes -= record.byteLength;
+        selectedHead += 1;
+        droppedOlder = true;
+      }
+      while (
+        selectedHead < selected.length &&
+        selected[selectedHead]?.outputCount === 0 &&
+        selectedOutputCount === 0
+      ) {
+        const record = selected[selectedHead];
+        if (!record) break;
+        selectedBytes -= record.byteLength;
+        selectedHead += 1;
+      }
+      if (selectedHead > 1024 && selectedHead * 2 > selected.length) {
+        selected.splice(0, selectedHead);
+        selectedHead = 0;
+      }
+    };
+
+    const appendSelected = (record: CodexEntryRecord): void => {
+      if (record.outputCount === 0 && selectedOutputCount === 0) return;
+      selected.push(record);
+      selectedOutputCount += record.outputCount;
+      selectedBytes += record.byteLength;
+      dropSelectedHead();
+      if (selectedBytes > CODEX_MAX_PAGE_BYTES) {
+        throw new CodexRolloutScanError(
+          "scan_budget_exceeded",
+          `Codex page exceeds ${CODEX_MAX_PAGE_BYTES} bytes`,
+          record.offset,
+        );
+      }
+    };
+
+    const dropBeforeHead = (): void => {
+      while (
+        beforeHead < beforeWindow.length &&
+        beforeOutputCount > aroundBeforeLimit
+      ) {
+        const record = beforeWindow[beforeHead];
+        if (!record) break;
+        beforeOutputCount -= record.outputCount;
+        beforeBytes -= record.byteLength;
+        beforeHead += 1;
+        droppedAroundOlder = true;
+      }
+      while (
+        beforeHead < beforeWindow.length &&
+        beforeWindow[beforeHead]?.outputCount === 0 &&
+        beforeOutputCount === 0
+      ) {
+        const record = beforeWindow[beforeHead];
+        if (!record) break;
+        beforeBytes -= record.byteLength;
+        beforeHead += 1;
+      }
+      if (beforeHead > 1024 && beforeHead * 2 > beforeWindow.length) {
+        beforeWindow.splice(0, beforeHead);
+        beforeHead = 0;
+      }
+    };
+
+    const appendBefore = (record: CodexEntryRecord): void => {
+      if (record.outputCount === 0 && beforeOutputCount === 0) return;
+      beforeWindow.push(record);
+      beforeOutputCount += record.outputCount;
+      beforeBytes += record.byteLength;
+      dropBeforeHead();
+      if (beforeBytes > CODEX_MAX_PAGE_BYTES) {
+        throw new CodexRolloutScanError(
+          "scan_budget_exceeded",
+          `Codex page exceeds ${CODEX_MAX_PAGE_BYTES} bytes`,
+          record.offset,
+        );
+      }
+    };
+
+    const appendAfter = (record: CodexEntryRecord): void => {
+      if (record.outputCount === 0 && afterOutputCount === 0) return;
+      afterWindow.push(record);
+      afterOutputCount += record.outputCount;
+      afterBytes += record.byteLength;
+      while (afterOutputCount > aroundAfterLimit) {
+        const dropped = afterWindow.pop();
+        if (!dropped) break;
+        afterOutputCount -= dropped.outputCount;
+        afterBytes -= dropped.byteLength;
+        droppedNewer = true;
+      }
+      if (afterBytes > CODEX_MAX_PAGE_BYTES) {
+        throw new CodexRolloutScanError(
+          "scan_budget_exceeded",
+          `Codex page exceeds ${CODEX_MAX_PAGE_BYTES} bytes`,
+          record.offset,
+        );
+      }
+    };
+
+    const appendAfterCursor = (record: CodexEntryRecord): void => {
+      if (record.outputCount === 0 && afterCursorOutputCount === 0) return;
+      afterCursorWindow.push(record);
+      afterCursorOutputCount += record.outputCount;
+      afterCursorBytes += record.byteLength;
+      while (afterCursorOutputCount > maxMessages) {
+        const dropped = afterCursorWindow.pop();
+        if (!dropped) break;
+        afterCursorOutputCount -= dropped.outputCount;
+        afterCursorBytes -= dropped.byteLength;
+        if (dropped.outputCount > 0) droppedAfterCursor = true;
+      }
+      if (afterCursorBytes > CODEX_MAX_PAGE_BYTES) {
+        throw new CodexRolloutScanError(
+          "scan_budget_exceeded",
+          `Codex page exceeds ${CODEX_MAX_PAGE_BYTES} bytes`,
+          record.offset,
+        );
+      }
+    };
+
+    for await (const line of iterateCodexRolloutLines(filePath, {
+      maxLineBytes: CODEX_MAX_ROLLOUT_LINE_BYTES,
+      maxBytes: CODEX_MAX_ROLLOUT_SCAN_BYTES,
+    })) {
+      if (!line.line) continue;
+      const entry = parseCodexSessionEntry(line.line);
+      if (!entry) continue;
+      attachCodexEntryByteOffset(entry, line.offset);
+      if (line.offset >= visibleEndOffset) break;
+      if (
+        (entry.type === "session_meta" || entry.type === "turn_context") &&
+        prefixEntries.length < 2
+      ) {
+        prefixEntries.push(entry);
+      }
+
+      if (entry.type === "compacted") {
+        const compactedMs = timestampToMs(entry.timestamp);
+        if (compactedMs !== null) {
+          compactedTimestamps.push(compactedMs);
+          const cutoff = compactedMs - CODEX_COMPACTION_EVENT_DEDUPE_WINDOW_MS;
+          while (
+            compactedTimestamps.length > 0 &&
+            (compactedTimestamps[0] ?? Number.POSITIVE_INFINITY) < cutoff
+          ) {
+            compactedTimestamps.shift();
+          }
+        }
+        totalCompactions += 1;
+      }
+      const outputCount = codexEntryOutputCount(
+        entry,
+        summaryScan.hasResponseItemUser,
+        compactedTimestamps,
+        summaryScan,
+      );
+      if (
+        entry.type === "event_msg" &&
+        entry.payload.type === "context_compacted"
+      ) {
+        if (
+          !hasNearbyCodexCompactedEntry(compactedTimestamps, entry.timestamp)
+        ) {
+          totalCompactions += 1;
+        }
+      }
+      const record: CodexEntryRecord = {
+        entry,
+        offset: line.offset,
+        byteLength: line.byteLength,
+        outputCount,
+      };
+      totalMessageCount += outputCount;
+      if (line.offset < tailStartOffset && outputCount > 0) {
+        hasMessagesBeforeTail = true;
+      }
+      const eligibleForTail = line.offset >= tailStartOffset;
+
+      if (
+        (beforeOffset !== undefined && line.offset === beforeOffset) ||
+        (aroundOffset !== undefined && line.offset === aroundOffset) ||
+        (afterWindowOffset !== undefined &&
+          line.offset === afterWindowOffset) ||
+        (incrementalOffset !== undefined && line.offset === incrementalOffset)
+      ) {
+        targetEntrySeen = true;
+        targetMessageFound = outputCount > 0;
+        if (isAround && outputCount > 0) targetRecord = record;
+      }
+
+      if (isAround && aroundOffset !== undefined) {
+        if (line.offset < aroundOffset) {
+          if (eligibleForTail) appendBefore(record);
+        } else if (line.offset === aroundOffset) {
+          // Keep the cursor entry itself in the centered window.
+          if (!targetRecord) targetRecord = record;
+        } else if (targetEntrySeen) {
+          appendAfter(record);
+        }
+        continue;
+      }
+
+      if (isBefore && beforeOffset !== undefined) {
+        if (line.offset < beforeOffset) {
+          if (eligibleForTail) appendSelected(record);
+        } else if (line.offset === beforeOffset && outputCount > 0) {
+          outputAtOrAfterTarget = true;
+        } else if (line.offset > beforeOffset && outputCount > 0) {
+          outputAtOrAfterTarget = true;
+        }
+        continue;
+      }
+
+      if (isAfterWindow && afterWindowOffset !== undefined) {
+        if (line.offset > afterWindowOffset && targetEntrySeen) {
+          appendAfterCursor(record);
+        }
+        continue;
+      }
+
+      if (isIncremental && incrementalOffset !== undefined) {
+        if (line.offset > incrementalOffset && targetEntrySeen) {
+          appendAfterCursor(record);
+        }
+        continue;
+      }
+
+      if (eligibleForTail) appendSelected(record);
+    }
+
+    const materialize = (records: CodexEntryRecord[], head: number) =>
+      records.slice(head).map((record) => record.entry);
+
+    let entries: CodexSessionEntry[];
+    let hasOlderMessages = false;
+    let hasNewerMessages = false;
+    if (isAround) {
+      const beforeEntries = materialize(beforeWindow, beforeHead);
+      entries = [
+        ...prefixEntries,
+        ...beforeEntries,
+        ...(targetRecord ? [targetRecord.entry] : []),
+        ...afterWindow.map((record) => record.entry),
+      ];
+      hasOlderMessages = droppedAroundOlder;
+      hasNewerMessages = droppedNewer;
+    } else if (isAfterWindow || isIncremental) {
+      entries = [
+        ...prefixEntries,
+        ...afterCursorWindow.map((record) => record.entry),
+      ];
+      hasOlderMessages = targetEntrySeen;
+      hasNewerMessages = droppedAfterCursor;
+    } else {
+      entries = [...prefixEntries, ...materialize(selected, selectedHead)];
+      hasOlderMessages = droppedOlder || hasMessagesBeforeTail;
+      hasNewerMessages = isBefore
+        ? targetEntrySeen && outputAtOrAfterTarget
+        : droppedNewer;
+    }
+
+    if (
+      (isBefore || isAround || isAfterWindow || isIncremental) &&
+      !targetEntrySeen
+    ) {
+      targetMessageFound = false;
+    }
+
+    return {
+      entries,
+      totalMessageCount,
+      totalCompactions:
+        totalCompactions > 0 ? totalCompactions : summaryScan.compactCount,
+      hasOlderMessages,
+      hasNewerMessages,
+      targetMessageFound,
+      revisionKey,
+    };
+  }
+
+  private buildSummaryFromScan(
+    scan: CodexSummaryScan,
+    sessionId: string,
+    projectId: UrlProjectId,
+  ): SessionSummary | null {
+    const metaEntry = scan.metaEntry;
+    if (!metaEntry) return null;
+    if (scan.messageCount === 0) return null;
+
+    const provider = this.determineProvider(metaEntry, scan.model);
+    const runtimeConfig = scan.latestTurnContext
+      ? {
+          reasoningEffort:
+            scan.latestTurnContext.payload.effort ??
+            scan.latestTurnContext.payload.collaboration_mode?.settings
+              ?.reasoning_effort ??
+            undefined,
+          serviceTier:
+            scan.latestTurnContext.payload.service_tier ??
+            scan.latestTurnContext.payload.serviceTier ??
+            undefined,
+        }
+      : {};
+    const turnContext = scan.firstTurnContext;
+    const title = scan.responseTitle ?? scan.eventTitle;
+    const cumulativeUsage = scan.cumulativeUsage
+      ? {
+          ...scan.cumulativeUsage,
+          // Summary scans deliberately do not retain every token_count entry;
+          // the count remains bounded and is still useful for the status card.
+          turnCount: scan.cumulativeUsage.turnCount,
+        }
+      : undefined;
+
+    return {
+      id: sessionId,
+      projectId,
+      title: title?.title ?? null,
+      fullTitle: title?.fullTitle ?? null,
+      createdAt: metaEntry.payload.timestamp,
+      updatedAt:
+        scan.latestVisibleEntryTimestamp ?? scan.stats.mtime.toISOString(),
+      messageCount: scan.messageCount,
+      userQuestions:
+        (scan.hasResponseItemUser
+          ? scan.responseQuestions
+          : scan.eventQuestions
+        ).length > 0
+          ? scan.hasResponseItemUser
+            ? scan.responseQuestions
+            : scan.eventQuestions
+          : undefined,
+      ownership: { owner: "none" },
+      contextUsage: scan.contextUsage,
+      cumulativeUsage,
+      compactCount: scan.compactCount,
+      compactEvents: scan.compactEvents,
+      provider,
+      ...(metaEntry.payload.forked_from_id
+        ? { forkParentSessionId: metaEntry.payload.forked_from_id }
+        : {}),
+      model: scan.model,
+      codexModelProvider: metaEntry.payload.model_provider ?? undefined,
+      reasoningEffort: runtimeConfig.reasoningEffort,
+      serviceTier: runtimeConfig.serviceTier,
+      originator: metaEntry.payload.originator,
+      cliVersion: metaEntry.payload.cli_version,
+      source:
+        typeof metaEntry.payload.source === "string"
+          ? metaEntry.payload.source
+          : undefined,
+      approvalPolicy: turnContext?.payload.approval_policy,
+      sandboxPolicy: turnContext?.payload.sandbox_policy
+        ? {
+            type: turnContext.payload.sandbox_policy.type,
+            networkAccess: turnContext.payload.sandbox_policy.network_access,
+            excludeTmpdirEnvVar:
+              turnContext.payload.sandbox_policy.exclude_tmpdir_env_var,
+            excludeSlashTmp:
+              turnContext.payload.sandbox_policy.exclude_slash_tmp,
+          }
+        : undefined,
+    };
   }
 
   /**
@@ -397,50 +1784,161 @@ export class CodexSessionReader implements ISessionReader {
     sessionId: string,
     projectId: UrlProjectId,
     afterMessageId?: string,
-    options?: GetSessionOptions,
+    options: GetSessionOptions = {},
   ): Promise<LoadedSession | null> {
-    // Read + parse the rollout file exactly once, then derive both the summary
-    // and the branch projection from the same entries. Previously this called
-    // getSessionSummary() (which read + parsed via readJsonlLines) and then
-    // re-read + re-parsed the whole file for buildCodexBranchView, doubling the
-    // I/O and parse cost on every open / page / branch switch.
-    const loaded = await this.loadSessionEntries(sessionId);
-    if (!loaded) return null;
+    const sessionFile = await this.findSessionFile(sessionId);
+    if (!sessionFile) return null;
 
-    const summary = this.buildSummaryFromEntries(
-      loaded.entries,
-      loaded.stats,
-      sessionId,
-      projectId,
-    );
-    if (!summary) return null;
+    const scan = await this.scanCodexRolloutSummary(sessionFile.filePath);
+    if (!scan.metaEntry) return null;
 
-    const entries = loaded.entries;
-
-    // Filter entries if needed (for incremental fetching)
-    // Note: Codex entries are not 1:1 with messages, so standard ID filtering is tricky
-    // with raw format. We return all entries for now.
-    // Ideally the client handles diffing/appending.
-    const branchView = buildCodexBranchView(
-      entries,
-      sessionId,
-      options?.branchId,
-    );
-    const finalEntries = branchView.entries;
-    if (afterMessageId) {
-      // Logic to filter entries would go here if strict incremental loading is needed
+    if (
+      options.rolloutRevision &&
+      options.rolloutRevision !== scan.revisionKey
+    ) {
+      throw new Error("ROLLOUT_CURSOR_STALE");
     }
+
+    // Rollback markers need a complete turn tree. Until the bounded rollback
+    // index is available, keep the reference implementation for small files
+    // and fail closed for large ones rather than returning a plausible but
+    // wrong branch transcript.
+    if (
+      scan.hasRollbackMarker ||
+      hasLegacyCodexCursor(afterMessageId) ||
+      hasLegacyCodexCursor(options.beforeMessageId) ||
+      hasLegacyCodexCursor(options.aroundMessageId) ||
+      hasLegacyCodexCursor(options.afterWindowMessageId) ||
+      hasLegacyCodexCursor(options.branchId)
+    ) {
+      if (scan.logicalBytes > CODEX_ROLLBACK_FULL_READ_MAX_BYTES) {
+        throw new CodexHistoryUnavailableError();
+      }
+      const loaded = await this.loadSessionEntries(sessionId);
+      if (
+        options.rolloutRevision &&
+        codexRolloutRevision(loaded?.stats ?? scan.stats).key !==
+          options.rolloutRevision
+      ) {
+        throw new Error("ROLLOUT_CURSOR_STALE");
+      }
+      if (!loaded) return null;
+      const summary = this.buildSummaryFromEntries(
+        loaded.entries,
+        loaded.stats,
+        sessionId,
+        projectId,
+      );
+      if (!summary) return null;
+      const branchView = buildCodexBranchView(
+        loaded.entries,
+        sessionId,
+        options.branchId,
+      );
+      return {
+        summary,
+        data: {
+          provider: this.determineProviderFromEntries(loaded.entries),
+          session: { entries: branchView.entries },
+        },
+        branchState: branchView.branchState,
+        codexBranchState: branchView.branchState,
+        codexRolloutBytes: scan.stats.size,
+      };
+    }
+
+    const summary = this.buildSummaryFromScan(scan, sessionId, projectId);
+    if (!summary) return null;
+    const codexProvider = this.determineProvider(scan.metaEntry, scan.model);
+
+    const page = await this.scanCodexRolloutPage(
+      sessionFile.filePath,
+      scan,
+      options,
+      afterMessageId,
+    );
+    if (page.revisionKey !== scan.revisionKey) {
+      throw new Error("ROLLOUT_CHANGED_DURING_SCAN");
+    }
+    if (
+      options.rolloutRevision &&
+      options.rolloutRevision !== page.revisionKey
+    ) {
+      throw new Error("ROLLOUT_CURSOR_STALE");
+    }
+
+    const branchState = this.buildCodexBranchState(
+      scan,
+      sessionId,
+      options.branchId,
+    );
+    const projectedMessages = convertCodexEntries(
+      page.entries,
+      sessionId,
+      branchState,
+      {
+        model: summary.model,
+        provider: codexProvider,
+        hasResponseItemUser: scan.hasResponseItemUser,
+        patchApplyCallIds: scan.patchApplyCallIds,
+        directEditCallIds: scan.directEditCallIds,
+        responseImageGenerationIds: scan.responseImageGenerationIds,
+        imageGenerationEndIds: scan.imageGenerationEndIds,
+      },
+    );
+    const pagination = this.buildCodexPagination(
+      page,
+      projectedMessages,
+      options,
+      afterMessageId,
+    );
 
     return {
       summary,
       data: {
-        provider: this.determineProviderFromEntries(entries),
-        session: {
-          entries: finalEntries,
-        },
+        provider: codexProvider,
+        session: { entries: page.entries },
       },
-      branchState: branchView.branchState,
-      codexBranchState: branchView.branchState,
+      branchState,
+      codexBranchState: branchState,
+      projectedMessages,
+      pagination,
+      paginationApplied: true,
+      codexRolloutBytes: scan.stats.size,
+    };
+  }
+
+  private buildCodexPagination(
+    page: CodexPageScan,
+    messages: Message[],
+    options: GetSessionOptions,
+    afterMessageId?: string,
+  ): PaginationInfo {
+    const firstId = getNormalizedMessageId(messages[0]);
+    const lastId = getNormalizedMessageId(messages.at(-1));
+    const around = options.aroundMessageId;
+    const targetFound = around
+      ? messages.some((message) => getNormalizedMessageId(message) === around)
+      : undefined;
+
+    return {
+      hasOlderMessages: page.hasOlderMessages,
+      ...(page.hasNewerMessages
+        ? { hasNewerMessages: true }
+        : { hasNewerMessages: false }),
+      totalMessageCount: page.totalMessageCount,
+      returnedMessageCount: messages.length,
+      ...(page.hasOlderMessages && firstId
+        ? { truncatedBeforeMessageId: firstId }
+        : {}),
+      ...(page.hasNewerMessages && lastId
+        ? { truncatedAfterMessageId: lastId }
+        : {}),
+      totalCompactions: page.totalCompactions,
+      ...(around
+        ? { targetMessageId: around, targetMessageFound: targetFound }
+        : {}),
+      ...(page.revisionKey ? { rolloutRevision: page.revisionKey } : {}),
     };
   }
 
@@ -499,9 +1997,7 @@ export class CodexSessionReader implements ISessionReader {
     if (children.length === 0) return [];
 
     try {
-      const spawnMappings = getCodexSpawnMapping(
-        await readCodexEntries(parent.filePath),
-      );
+      const spawnMappings = await scanCodexSpawnMapping(parent.filePath);
       return children.flatMap((child) => {
         const toolUseId = spawnMappings.get(child.id);
         if (!toolUseId) return [];
@@ -552,6 +2048,10 @@ export class CodexSessionReader implements ISessionReader {
     if (!entry) return null;
 
     try {
+      const childScan = await this.scanCodexRolloutSummary(entry.filePath);
+      if (childScan.logicalBytes > CODEX_ROLLBACK_FULL_READ_MAX_BYTES) {
+        return null;
+      }
       const entries = await readCodexEntries(entry.filePath);
       const messages = convertCodexEntries(entries, agentId);
       const lifecycle = deriveCodexSubagentStatus(entries);

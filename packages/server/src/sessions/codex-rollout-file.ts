@@ -29,6 +29,7 @@
  */
 
 import { createReadStream } from "node:fs";
+import type { Stats } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
@@ -180,4 +181,231 @@ export async function readCodexRolloutFirstLine(
   const newline = stripped.indexOf("\n");
   const line = (newline > 0 ? stripped.slice(0, newline) : stripped).trim();
   return line || null;
+}
+
+/** A stable identity for one opened rollout snapshot. */
+export interface CodexRolloutRevision {
+  /** Device/inode identity when the filesystem provides it. */
+  readonly dev: number;
+  readonly ino: number;
+  /** File size and mtime captured at the same boundary. */
+  readonly size: number;
+  readonly mtimeMs: number;
+  /** Compact value suitable for logs and pagination cursors. */
+  readonly key: string;
+}
+
+export function codexRolloutRevision(stats: Stats): CodexRolloutRevision {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    key: `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}`,
+  };
+}
+
+export function sameCodexRolloutRevision(
+  left: CodexRolloutRevision,
+  right: CodexRolloutRevision,
+): boolean {
+  return left.key === right.key;
+}
+
+/** Stable error codes emitted by the bounded rollout scanner. */
+export type CodexRolloutScanErrorCode =
+  | "entry_too_large"
+  | "scan_budget_exceeded"
+  | "invalid_utf8";
+
+export class CodexRolloutScanError extends Error {
+  readonly code: CodexRolloutScanErrorCode;
+  readonly offset: number;
+
+  constructor(
+    code: CodexRolloutScanErrorCode,
+    message: string,
+    offset: number,
+  ) {
+    super(message);
+    this.name = "CodexRolloutScanError";
+    this.code = code;
+    this.offset = offset;
+  }
+}
+
+export interface CodexRolloutLine {
+  /** Logical UTF-8 byte offset in the decompressed, BOM-stripped JSONL. */
+  readonly offset: number;
+  /** The line without its LF/CRLF terminator or BOM. */
+  readonly line: string;
+  /** Number of logical bytes occupied by the line, excluding LF. */
+  readonly byteLength: number;
+}
+
+export interface CodexRolloutLineIteratorOptions {
+  /** Refuse a line before constructing a string or calling JSON.parse. */
+  readonly maxLineBytes?: number;
+  /** Refuse after this many logical bytes have been consumed. */
+  readonly maxBytes?: number;
+}
+
+async function* decodedCodexRolloutChunks(
+  filePath: string,
+): AsyncGenerator<Buffer> {
+  const source = createReadStream(filePath);
+  let decoded: AsyncIterable<Buffer | string> = source;
+  let decompressor: zlib.ZstdDecompress | undefined;
+
+  try {
+    if (isCompressedCodexRolloutPath(filePath)) {
+      decompressor = requireZstd().createDecompressStream();
+      source.pipe(decompressor);
+      decoded = decompressor;
+    }
+
+    for await (const chunk of decoded) {
+      yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    }
+  } finally {
+    source.destroy();
+    decompressor?.destroy();
+  }
+}
+
+/** Open a decoded rollout byte stream without materializing the file. */
+export function openCodexRolloutStream(
+  filePath: string,
+): AsyncIterable<Buffer> {
+  return decodedCodexRolloutChunks(filePath);
+}
+
+function decodeCodexLine(bytes: Buffer, offset: number): string {
+  try {
+    // TextDecoder with fatal=true keeps a malformed line from being silently
+    // turned into replacement characters and then accepted by JSON.parse.
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new CodexRolloutScanError(
+      "invalid_utf8",
+      `Invalid UTF-8 in Codex rollout at byte offset ${offset}`,
+      offset,
+    );
+  }
+}
+
+/**
+ * Iterate a rollout one UTF-8 JSONL line at a time.
+ *
+ * The iterator is intentionally byte-oriented: message ids and cursors use the
+ * decompressed JSONL byte offset, and a large line is rejected while it is
+ * still a bounded byte buffer rather than after a whole-file string/split.
+ */
+export async function* iterateCodexRolloutLines(
+  filePath: string,
+  options: CodexRolloutLineIteratorOptions = {},
+): AsyncGenerator<CodexRolloutLine> {
+  const maxLineBytes = options.maxLineBytes ?? 8 * 1024 * 1024;
+  const maxBytes = options.maxBytes ?? Number.POSITIVE_INFINITY;
+  const chunks: Buffer[] = [];
+  let pendingBytes = 0;
+  let logicalOffset = 0;
+  let consumedBytes = 0;
+  let firstLine = true;
+
+  const emitLine = (rawLine: Buffer): CodexRolloutLine => {
+    let lineBytes = rawLine;
+    let bomBytes = 0;
+    if (
+      firstLine &&
+      rawLine[0] === 0xef &&
+      rawLine[1] === 0xbb &&
+      rawLine[2] === 0xbf
+    ) {
+      lineBytes = rawLine.subarray(3);
+      bomBytes = 3;
+    }
+
+    let contentBytes = lineBytes;
+    if (contentBytes[contentBytes.length - 1] === 0x0d) {
+      contentBytes = contentBytes.subarray(0, contentBytes.length - 1);
+    }
+
+    const line = decodeCodexLine(contentBytes, logicalOffset);
+    // Preserve CR in the byte accounting even though it is removed from the
+    // decoded JSON text. This keeps revision/scan budgets conservative for
+    // CRLF files.
+    const byteLength = lineBytes.length;
+    const result = { offset: logicalOffset, line, byteLength };
+    // The iterator emits a line that ended at LF; keep that delimiter in the
+    // next line's absolute offset, matching the historical split("\\n") reader.
+    logicalOffset += rawLine.length - bomBytes + 1;
+    firstLine = false;
+    return result;
+  };
+
+  const flush = async function* (
+    bytes: Buffer,
+  ): AsyncGenerator<CodexRolloutLine> {
+    let start = 0;
+    for (let index = 0; index < bytes.length; index += 1) {
+      if (bytes[index] !== 0x0a) continue;
+      const piece = bytes.subarray(start, index);
+      if (piece.length > 0) {
+        chunks.push(piece);
+        pendingBytes += piece.length;
+      }
+      if (pendingBytes > maxLineBytes) {
+        throw new CodexRolloutScanError(
+          "entry_too_large",
+          `Codex rollout line exceeds ${maxLineBytes} bytes at offset ${logicalOffset}`,
+          logicalOffset,
+        );
+      }
+      const rawLine = Buffer.concat(chunks, pendingBytes);
+      chunks.length = 0;
+      pendingBytes = 0;
+      consumedBytes += rawLine.length + 1;
+      if (consumedBytes > maxBytes) {
+        throw new CodexRolloutScanError(
+          "scan_budget_exceeded",
+          `Codex rollout scan exceeds ${maxBytes} bytes`,
+          logicalOffset,
+        );
+      }
+      yield emitLine(rawLine);
+      start = index + 1;
+    }
+
+    const tail = bytes.subarray(start);
+    if (tail.length > 0) {
+      chunks.push(tail);
+      pendingBytes += tail.length;
+      if (pendingBytes > maxLineBytes) {
+        throw new CodexRolloutScanError(
+          "entry_too_large",
+          `Codex rollout line exceeds ${maxLineBytes} bytes at offset ${logicalOffset}`,
+          logicalOffset,
+        );
+      }
+    }
+  };
+
+  for await (const chunk of openCodexRolloutStream(filePath)) {
+    for await (const line of flush(chunk)) {
+      yield line;
+    }
+  }
+
+  if (pendingBytes > 0) {
+    const rawLine = Buffer.concat(chunks, pendingBytes);
+    if (consumedBytes + rawLine.length > maxBytes) {
+      throw new CodexRolloutScanError(
+        "scan_budget_exceeded",
+        `Codex rollout scan exceeds ${maxBytes} bytes`,
+        logicalOffset,
+      );
+    }
+    yield emitLine(rawLine);
+  }
 }
