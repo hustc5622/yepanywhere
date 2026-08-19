@@ -120,6 +120,11 @@ Environment overrides:
                                JSON also accepts a literal apiKey when unavoidable.
   YEP_LLM_GATEWAY_MODELS       Comma-separated Pi picker model prefixes. Set to an
                                empty value to show every gateway model.
+  YEP_LLM_GATEWAYS_FILE        Path override for the credentials overlay file
+                               (default: <data dir>/llm-gateways.json). The overlay
+                               is re-read while the server runs, so rotating a
+                               gateway key there needs no plist edit or restart:
+                               {"channels":[{"id":"aitl","apiKey":"sk-..."}]}
   SESSION_TITLE_MODEL          Model for AI session titles (default: deepseek-v4-pro)
   SESSION_TITLE_GENERATION     Set false to disable AI session titles
   SESSION_TITLE_TIMEOUT_MS     Request timeout for AI session title generation

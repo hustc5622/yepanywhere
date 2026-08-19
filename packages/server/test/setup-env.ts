@@ -39,3 +39,10 @@ for (const key of Object.keys(process.env)) {
     delete process.env[key];
   }
 }
+
+// The LLM gateway credentials overlay is discovered in the data directory, so
+// scrubbing variables is not enough to isolate a machine that actually has one.
+// Point it at a path that cannot exist; tests that exercise the overlay set
+// YEP_LLM_GATEWAYS_FILE to their own temp file.
+process.env.YEP_LLM_GATEWAYS_FILE =
+  "/nonexistent/yep-anywhere-test/llm-gateways.json";

@@ -12,6 +12,9 @@
  * from the bridge sidecars, which do not boot the full server config.
  */
 
+import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   LlmGatewayRequestProtocol,
   ModelInfo,
@@ -57,6 +60,15 @@ const OHMYROUTER_SUB_MODULE = "claude-code-internal";
 
 /** Extra channels, as JSON array or compact `id=base|keyEnv|subModule` list. */
 export const LLM_GATEWAYS_ENV = "YEP_LLM_GATEWAYS";
+
+/** Path override for the credentials overlay file. */
+export const LLM_GATEWAYS_FILE_ENV = "YEP_LLM_GATEWAYS_FILE";
+
+/** Overlay file name looked up inside the data directory. */
+export const LLM_GATEWAYS_FILE_NAME = "llm-gateways.json";
+
+/** How long a parsed overlay file is trusted before its mtime is checked again. */
+const OVERLAY_REVALIDATE_MS = 1_000;
 
 /** Comma-separated model-id prefixes a gateway picker should offer. */
 export const LLM_GATEWAY_MODELS_ENV = "YEP_LLM_GATEWAY_MODELS";
@@ -240,6 +252,10 @@ interface RawChannelSpec {
  *
  * Invalid entries are skipped rather than failing startup: a typo in one extra
  * gateway must not take the working default gateway down with it.
+ *
+ * Finally the credentials overlay file (see {@link readLlmGatewayOverlay}) is
+ * applied on top, so a rotated key takes effect without editing the service
+ * environment and restarting the server.
  */
 export function resolveLlmGatewayChannelsDetailed(
   env: Env,
@@ -251,29 +267,233 @@ export function resolveLlmGatewayChannelsDetailed(
   if (defaultChannel) channels.push(defaultChannel);
 
   const raw = clean(env[LLM_GATEWAYS_ENV]);
-  if (!raw) return { channels, problems };
-
-  const specs = parseChannelSpecs(raw, problems);
-  const seen = new Set(channels.map((channel) => channel.id));
-  for (const { entry, spec } of specs) {
-    const resolved = resolveChannelSpec(spec, env, entry, problems);
-    if (!resolved) continue;
-    if (seen.has(resolved.id)) {
-      problems.push({
-        entry,
-        reason: `duplicate channel id "${resolved.id}"`,
-      });
-      continue;
+  if (raw) {
+    const specs = parseChannelSpecs(raw, problems);
+    const seen = new Set(channels.map((channel) => channel.id));
+    for (const { entry, spec } of specs) {
+      const resolved = resolveChannelSpec(spec, env, entry, problems);
+      if (!resolved) continue;
+      if (seen.has(resolved.id)) {
+        problems.push({
+          entry,
+          reason: `duplicate channel id "${resolved.id}"`,
+        });
+        continue;
+      }
+      seen.add(resolved.id);
+      channels.push(resolved);
     }
-    seen.add(resolved.id);
-    channels.push(resolved);
   }
+
+  applyLlmGatewayOverlay(channels, env, problems);
   return { channels, problems };
 }
 
 /** Convenience wrapper for callers that do not report configuration problems. */
 export function resolveLlmGatewayChannels(env: Env): LlmGatewayChannel[] {
   return resolveLlmGatewayChannelsDetailed(env).channels;
+}
+
+/**
+ * Resolve the credentials overlay file path, or `null` when this environment
+ * has no overlay.
+ *
+ * `YEP_LLM_GATEWAYS_FILE` always wins. Otherwise the overlay is only looked up
+ * in the data directory for the real process environment: callers that pass a
+ * fabricated env (tests, the benchmark script, bridge sidecars building an
+ * explicit credential set) must stay independent of whatever the operator
+ * happens to have on disk.
+ *
+ * The data directory is derived from the same variables `config.ts` uses,
+ * duplicated here on purpose so this module keeps depending on node builtins
+ * only.
+ */
+export function resolveLlmGatewayOverlayPath(env: Env): string | null {
+  const explicit = clean(env[LLM_GATEWAYS_FILE_ENV]);
+  if (explicit) return explicit;
+  if (env !== process.env) return null;
+  const profile = clean(env.YEP_ANYWHERE_PROFILE);
+  const dataDir =
+    clean(env.YEP_ANYWHERE_DATA_DIR) ??
+    join(homedir(), profile ? `.yep-anywhere-${profile}` : ".yep-anywhere");
+  return join(dataDir, LLM_GATEWAYS_FILE_NAME);
+}
+
+interface OverlayCacheEntry {
+  /** `null` records "file is absent", which is the common case. */
+  specs: RawChannelSpec[] | null;
+  problems: LlmGatewayChannelProblem[];
+  mtimeMs: number;
+  size: number;
+  checkedAt: number;
+}
+
+const overlayCache = new Map<string, OverlayCacheEntry>();
+
+/** Drop the memoized overlay file. Exported for tests and explicit reloads. */
+export function invalidateLlmGatewayOverlayCache(): void {
+  overlayCache.clear();
+}
+
+/**
+ * Read the credentials overlay file.
+ *
+ * Gateway credentials otherwise only come from the process environment, which
+ * on a service-managed deployment is frozen at launch: rotating a key means
+ * editing the service definition and restarting the server, and until then Yep
+ * keeps authenticating with the retired key. The overlay file is re-read while
+ * the server runs, so rotation is a file write.
+ *
+ * Accepted shape:
+ *
+ * ```json
+ * { "channels": [{ "id": "aitl", "apiKey": "sk-..." }] }
+ * ```
+ *
+ * An entry whose id matches a channel from the environment overrides only the
+ * fields it sets; any other entry declares a new channel and therefore needs at
+ * least `apiBase` plus `apiKey`/`apiKeyEnv`.
+ */
+function readLlmGatewayOverlay(env: Env): {
+  specs: RawChannelSpec[];
+  problems: LlmGatewayChannelProblem[];
+} {
+  const path = resolveLlmGatewayOverlayPath(env);
+  if (!path) return { specs: [], problems: [] };
+  const now = Date.now();
+  const cached = overlayCache.get(path);
+  if (cached && now - cached.checkedAt < OVERLAY_REVALIDATE_MS) {
+    return { specs: cached.specs ?? [], problems: cached.problems };
+  }
+
+  let mtimeMs: number;
+  let size: number;
+  try {
+    const stats = statSync(path);
+    mtimeMs = stats.mtimeMs;
+    size = stats.size;
+  } catch {
+    overlayCache.set(path, {
+      specs: null,
+      problems: [],
+      mtimeMs: 0,
+      size: 0,
+      checkedAt: now,
+    });
+    return { specs: [], problems: [] };
+  }
+
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+    overlayCache.set(path, { ...cached, checkedAt: now });
+    return { specs: cached.specs ?? [], problems: cached.problems };
+  }
+
+  const problems: LlmGatewayChannelProblem[] = [];
+  const specs = parseOverlayFile(path, problems);
+  overlayCache.set(path, { specs, problems, mtimeMs, size, checkedAt: now });
+  return { specs, problems };
+}
+
+function parseOverlayFile(
+  path: string,
+  problems: LlmGatewayChannelProblem[],
+): RawChannelSpec[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    problems.push({
+      entry: path,
+      reason: `overlay file is not readable JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    });
+    return [];
+  }
+
+  const list = Array.isArray(parsed)
+    ? parsed
+    : isRecord(parsed) && Array.isArray(parsed.channels)
+      ? parsed.channels
+      : null;
+  if (!list) {
+    problems.push({
+      entry: path,
+      reason: 'expected {"channels": [...]} or a channel array',
+    });
+    return [];
+  }
+  return list.filter(isRecord) as RawChannelSpec[];
+}
+
+/** Merge overlay entries into the environment-derived channel list, in place. */
+function applyLlmGatewayOverlay(
+  channels: LlmGatewayChannel[],
+  env: Env,
+  problems: LlmGatewayChannelProblem[],
+): void {
+  const overlay = readLlmGatewayOverlay(env);
+  problems.push(...overlay.problems);
+  if (overlay.specs.length === 0) return;
+
+  const path = resolveLlmGatewayOverlayPath(env) ?? LLM_GATEWAYS_FILE_NAME;
+  for (const [index, spec] of overlay.specs.entries()) {
+    const entry = `${path}[${index}]`;
+    const id = clean(stringOrUndefined(spec.id))?.toLowerCase();
+    if (!id) {
+      problems.push({ entry, reason: "id is required" });
+      continue;
+    }
+
+    const existingIndex = channels.findIndex((channel) => channel.id === id);
+    if (existingIndex < 0) {
+      const resolved = resolveChannelSpec(spec, env, entry, problems, {
+        allowDefaultId: true,
+      });
+      if (resolved) channels.push(resolved);
+      continue;
+    }
+
+    const existing = channels[existingIndex];
+    if (!existing) continue;
+    const apiKeyEnv = clean(stringOrUndefined(spec.apiKeyEnv));
+    const apiKey = apiKeyEnv
+      ? clean(env[apiKeyEnv])
+      : clean(stringOrUndefined(spec.apiKey));
+    if ((spec.apiKey !== undefined || apiKeyEnv) && !apiKey) {
+      problems.push({
+        entry,
+        reason: apiKeyEnv
+          ? `environment variable ${apiKeyEnv} is empty`
+          : "apiKey is empty",
+      });
+      continue;
+    }
+
+    const rawApiBase = clean(stringOrUndefined(spec.apiBase));
+    const apiBase = rawApiBase ? withV1Path(rawApiBase) : existing.apiBase;
+    const explicitSubModule = stringOrUndefined(spec.subModule);
+    const subModule =
+      explicitSubModule === undefined
+        ? rawApiBase
+          ? defaultSubModuleForApiBase(apiBase)
+          : existing.subModule
+        : clean(explicitSubModule);
+
+    // `subModule` is rebuilt rather than spread through, so an overlay entry
+    // can also switch the routing header off with an explicit empty value.
+    const { subModule: _replacedSubModule, ...retained } = existing;
+    channels[existingIndex] = {
+      ...retained,
+      // `apiKeyEnv` is deliberately preserved even when the key now comes from
+      // the overlay: provider processes use it to scrub the (now retired)
+      // credential from the child environment.
+      apiBase,
+      apiKey: apiKey ?? existing.apiKey,
+      label: clean(stringOrUndefined(spec.label)) ?? existing.label,
+      ...(subModule ? { subModule } : {}),
+    };
+  }
 }
 
 /** Look up one channel by id. */
@@ -342,6 +562,7 @@ function resolveChannelSpec(
   env: Env,
   entry: string,
   problems: LlmGatewayChannelProblem[],
+  options: { allowDefaultId?: boolean } = {},
 ): LlmGatewayChannel | null {
   const id = clean(stringOrUndefined(spec.id))?.toLowerCase();
   if (!id || !CHANNEL_ID_PATTERN.test(id)) {
@@ -351,7 +572,7 @@ function resolveChannelSpec(
     });
     return null;
   }
-  if (id === DEFAULT_LLM_GATEWAY_CHANNEL_ID) {
+  if (id === DEFAULT_LLM_GATEWAY_CHANNEL_ID && !options.allowDefaultId) {
     problems.push({
       entry,
       reason: `"${DEFAULT_LLM_GATEWAY_CHANNEL_ID}" is reserved for the LLM_API_* channel`,
@@ -399,7 +620,7 @@ function resolveChannelSpec(
     id,
     label:
       clean(stringOrUndefined(spec.label)) ?? defaultLabelForApiBase(apiBase),
-    isDefault: false,
+    isDefault: id === DEFAULT_LLM_GATEWAY_CHANNEL_ID,
     apiKey,
     ...(apiKeyEnv ? { apiKeyEnv } : {}),
     apiBase,
