@@ -16,6 +16,8 @@ interface MessageActionsProps {
   contextBefore?: ContextUsage;
   /** Plain-text payload to copy. When omitted, the copy button is hidden. */
   copyText?: string;
+  /** Place a copy-only action inside a message bubble and keep it visible. */
+  placement?: "row" | "bubble";
   /**
    * When provided, show an "edit" button. Used on user messages to rewind the
    * conversation: forks the session up to this message and prefills the input.
@@ -39,6 +41,7 @@ export function MessageActions({
   timestampIsLastUpdate = false,
   contextBefore,
   copyText,
+  placement = "row",
   onEdit,
 }: MessageActionsProps) {
   const { t } = useI18n();
@@ -92,7 +95,7 @@ export function MessageActions({
   return (
     <span
       ref={actionsRef}
-      className={`message-actions${copyFeedback ? " is-active" : ""}`}
+      className={`message-actions${placement === "bubble" ? " message-actions-bubble" : ""}${copyFeedback ? " is-active" : ""}`}
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => e.stopPropagation()}
     >

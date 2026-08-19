@@ -766,10 +766,10 @@ export const UserPromptBlock = memo(function UserPromptBlock({
         <MessageActions
           timestamp={timestamp}
           contextBefore={contextBefore}
-          copyText={copyText}
           onEdit={onEdit && text ? () => onEdit(text) : undefined}
         />
-        <div className="message message-user-prompt">
+        <div className="message message-user-prompt message-user-prompt-copyable">
+          <MessageActions copyText={copyText} placement="bubble" />
           <div className="message-content">
             <FeishuPromptSource info={feishu} />
             {text && <CollapsibleText text={text} />}
@@ -840,10 +840,10 @@ export const UserPromptBlock = memo(function UserPromptBlock({
       <MessageActions
         timestamp={timestamp}
         contextBefore={contextBefore}
-        copyText={copyText}
         onEdit={onEdit && text ? () => onEdit(text) : undefined}
       />
-      <div className="message message-user-prompt">
+      <div className="message message-user-prompt message-user-prompt-copyable">
+        <MessageActions copyText={copyText} placement="bubble" />
         <div className="message-content">
           <FeishuPromptSource info={feishu} />
           {text && <CollapsibleText text={text} />}

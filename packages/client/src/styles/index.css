@@ -3424,8 +3424,13 @@ a.sidebar-nav-item {
   padding: 0.5rem 0.75rem;
   font-size: var(--font-size-base);
   line-height: 1.5;
+  position: relative;
   /* Round the trailing corner slightly less for that "from me" tail look. */
   border-bottom-right-radius: 6px;
+}
+
+.message-user-prompt-copyable {
+  padding-right: 2.25rem;
 }
 
 .message-user-prompt .text-block {
@@ -4151,6 +4156,32 @@ a.sidebar-nav-item {
   flex-direction: row-reverse;
   margin-top: 0;
   margin-bottom: var(--space-1);
+}
+
+/* Copying a user prompt is a primary action: keep its button discoverable in
+   the bubble instead of requiring hover or a manual text selection. */
+.user-prompt-container .message-actions-bubble {
+  position: absolute;
+  z-index: 1;
+  top: 0.35rem;
+  right: 0.4rem;
+  align-self: auto;
+  flex-direction: row;
+  margin: 0;
+  opacity: 0.6;
+  pointer-events: auto;
+}
+
+.user-prompt-container:hover .message-actions-bubble,
+.user-prompt-container:focus-within .message-actions-bubble,
+.message-actions-bubble.is-active {
+  opacity: 1;
+}
+
+.message-actions-bubble .message-actions-copy {
+  width: 26px;
+  height: 26px;
+  padding: 0;
 }
 
 /* Assistant actions sit under the assistant turn, aligned to its content

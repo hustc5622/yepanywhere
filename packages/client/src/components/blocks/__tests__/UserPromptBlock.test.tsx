@@ -17,6 +17,22 @@ describe("UserPromptBlock", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps a one-click copy action inside the user prompt bubble", () => {
+    const text = "授权 G-M-TARGET-ROLLOUT-001 执行真实 live gate。";
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={text} />
+      </I18nProvider>,
+    );
+
+    const bubble = screen.getByText(text).closest(".message-user-prompt");
+    const copyButton = screen.getByRole("button", { name: "Copy message" });
+
+    expect(bubble?.contains(copyButton)).toBe(true);
+    expect(copyButton.closest(".message-actions-bubble")).not.toBeNull();
+  });
+
   it("renders Codex input_image blocks as uploaded file metadata", () => {
     const content: ContentBlock[] = [
       {
