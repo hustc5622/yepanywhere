@@ -86,8 +86,9 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
           return false;
         }
 
-        // Validate project exists
-        const project = await deps.scanner.getProject(projectId);
+        // Match SessionCommandService/sessions routes: accept projects not yet
+        // in the scan cache (e.g. a brand-new Codex session with no session file).
+        const project = await deps.scanner.getOrCreateProject(projectId);
         if (!project) {
           return false;
         }

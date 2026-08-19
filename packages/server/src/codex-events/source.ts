@@ -14,6 +14,19 @@ const CODEX_EVENT_STORE_ADMISSION_BYTES = (() => {
     : 512 * 1024 * 1024;
 })();
 
+export class CodexEventSourceAdmissionError extends Error {
+  readonly code = "CODEX_EVENT_SOURCE_ADMISSION_EXCEEDED";
+  readonly fallback = "rollout" as const;
+
+  constructor(
+    readonly maxBytes: number,
+    readonly rejectedSourceIds: readonly string[],
+  ) {
+    super("Canonical Codex event source exceeds the safe read budget");
+    this.name = "CodexEventSourceAdmissionError";
+  }
+}
+
 /**
  * One independently sequenced canonical Codex journal.
  *
@@ -23,10 +36,24 @@ const CODEX_EVENT_STORE_ADMISSION_BYTES = (() => {
 export interface CodexEventStoreSource {
   id: string;
   createStore: () => CodexEventStore;
+  /** Old 4510 canonical capture; explicit compatibility reads only. */
+  legacyBridgeFull?: boolean;
+}
+
+export interface CodexEventSourceCoverage {
+  scope: "retained-journal";
+  completePrefix: boolean;
+  firstAvailableSequence: number;
+  lastSequence: number;
+  leadingGap: number;
+  /** Native rollout remains the authority outside this retained event view. */
+  fallback: "rollout";
 }
 
 export interface SelectedCodexEventSource {
   sourceId: string;
+  sourceKind: "provider" | "legacy-bridge-full" | "custom";
+  coverage: CodexEventSourceCoverage;
   /** Read-only: shared references into the store's indexes, never copies. */
   events: readonly CodexEventEnvelope[];
 }
@@ -83,6 +110,7 @@ async function selectFreshestSourceStore(
   sources: readonly CodexEventStoreSource[],
   sessionId: string,
 ): Promise<{ source: CodexEventStoreSource; store: CodexEventStore } | null> {
+  const rejectedSourceIds: string[] = [];
   let best: {
     source: CodexEventStoreSource;
     store: CodexEventStore;
@@ -99,6 +127,7 @@ async function selectFreshestSourceStore(
       // rollout budget by hundreds of MiB. The rollout remains the canonical
       // history source, so fail closed to the legacy view instead of loading a
       // journal that cannot fit the process admission budget.
+      rejectedSourceIds.push(source.id);
       continue;
     }
     const freshnessMs = await store.latestEventAtMs(sessionId);
@@ -110,6 +139,12 @@ async function selectFreshestSourceStore(
     if (!best || freshnessMs > best.freshnessMs) {
       best = { source, store, freshnessMs };
     }
+  }
+  if (!best && rejectedSourceIds.length > 0) {
+    throw new CodexEventSourceAdmissionError(
+      CODEX_EVENT_STORE_ADMISSION_BYTES,
+      rejectedSourceIds,
+    );
   }
   return best ? { source: best.source, store: best.store } : null;
 }
@@ -129,7 +164,7 @@ export async function selectCodexEventSource(
   if (!selected) return null;
   const events = await selected.store.replay({ sessionId });
   if (events.length === 0) return null;
-  return { sourceId: selected.source.id, events };
+  return selectedSource(selected.source, events);
 }
 
 /**
@@ -140,17 +175,22 @@ export async function selectCodexProviderErrorEventSource(
   sources: readonly CodexEventStoreSource[],
   sessionId: string,
 ): Promise<SelectedCodexEventSource | null> {
-  const selected = await selectFreshestSourceStore(sources, sessionId);
+  const selected = await selectFreshestSourceStore(
+    sources.filter((source) => !source.legacyBridgeFull),
+    sessionId,
+  );
   if (!selected) return null;
   const events = await selected.store.replay({
     sessionId,
     methods: ["error", "turn/completed"],
   });
-  return { sourceId: selected.source.id, events };
+  return selectedSource(selected.source, events);
 }
 
 export interface SelectedCodexEventSourceWithCache {
   sourceId: string;
+  sourceKind: "provider" | "legacy-bridge-full" | "custom";
+  coverage: CodexEventSourceCoverage;
   /** Read-only: shared references into the store's indexes, never copies. */
   events: readonly CodexEventEnvelope[];
   /** True when an existing compatible projection can consume this replay. */
@@ -182,5 +222,31 @@ export async function selectCodexEventSourceWithCache(
     cache.invalidate(sourceId, sessionId);
     warm = false;
   }
-  return { sourceId, events, warm };
+  const result = selectedSource(selected.source, events);
+  return { ...result, warm };
+}
+
+function selectedSource(
+  source: CodexEventStoreSource,
+  events: readonly CodexEventEnvelope[],
+): SelectedCodexEventSource {
+  const firstAvailableSequence = events[0]?.sequence ?? 0;
+  const lastSequence = events.at(-1)?.sequence ?? 0;
+  return {
+    sourceId: source.id,
+    sourceKind: source.legacyBridgeFull
+      ? "legacy-bridge-full"
+      : source.id === "provider"
+        ? "provider"
+        : "custom",
+    coverage: {
+      scope: "retained-journal",
+      completePrefix: firstAvailableSequence === 1,
+      firstAvailableSequence,
+      lastSequence,
+      leadingGap: Math.max(0, firstAvailableSequence - 1),
+      fallback: "rollout",
+    },
+    events,
+  };
 }

@@ -402,6 +402,7 @@ const codexBridgeService: CodexBridgeController | undefined =
           lightUpstreamArgs: config.codexBridgeLightUpstreamArgs,
           clearUpstreamArgs: config.codexBridgeClearUpstreamArgs,
           fullUpstreamArgs: config.codexBridgeFullUpstreamArgs,
+          journalMode: config.codexBridgeJournalMode,
           eventBus,
           authToken: config.desktopAuthToken,
           authTokenFile: config.runtimeTokenFile,
@@ -412,7 +413,7 @@ console.log(
     config.codexBridgeMode === "external"
       ? ` control=${config.codexBridgeControlUrl}`
       : ""
-  }`,
+  } journal=${config.codexBridgeJournalMode}`,
 );
 // Helper to create watcher if directory exists
 function createWatcherIfExists(

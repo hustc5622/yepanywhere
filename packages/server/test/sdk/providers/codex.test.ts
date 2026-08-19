@@ -2700,6 +2700,43 @@ describe("CodexProvider Event Normalization", () => {
     );
   });
 
+  it("projects agent-message deltas into the shared lossless text stream", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertNotificationToSDKMessages(
+      {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "agent-1",
+          delta: "live text",
+        },
+      },
+      "thread-1",
+      new Map(),
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: "stream_event",
+        turnId: "turn-1",
+        codexTurnId: "turn-1",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "live text" },
+        },
+      }),
+    ]);
+  });
+
   it("normalizes command execution tool_use and tool_result to Read shape", () => {
     const provider = createTestProvider() as unknown as {
       convertItemToSDKMessages: (

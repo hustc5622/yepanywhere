@@ -49,6 +49,15 @@ describe("canonical Codex transcript route", () => {
     expect(first.headers.get("cache-control")).toBe("private, no-store");
     expect(first.headers.get("x-content-type-options")).toBe("nosniff");
     expect(first.headers.get("x-yep-codex-transcript-source")).toBe("provider");
+    expect(first.headers.get("x-yep-codex-transcript-source-kind")).toBe(
+      "provider",
+    );
+    expect(first.headers.get("x-yep-codex-transcript-coverage")).toBe(
+      "retained-complete-prefix",
+    );
+    expect(first.headers.get("x-yep-codex-transcript-fallback")).toBe(
+      "rollout",
+    );
     expect(first.headers.get("x-yep-codex-transcript-truncated")).toBe("false");
     const firstBody = await first.text();
     expect(firstBody).toContain("canonical answer");
@@ -169,6 +178,27 @@ describe("canonical Codex transcript route", () => {
     const failedBody = await failed.text();
     expect(failedBody).toContain("CODEX_TRANSCRIPT_READ_FAILED");
     expect(failedBody).not.toContain("/test/private");
+
+    const oversizedStore = {
+      getStorageBytes: vi.fn(async () => 513 * 1024 * 1024),
+      latestEventAtMs: vi.fn(),
+      replay: vi.fn(),
+    } as unknown as CodexEventStore;
+    const oversizedRoutes = createCodexTranscriptRoutes({
+      sources: [fixedSource("provider", oversizedStore)],
+    });
+    const oversized = await oversizedRoutes.request(
+      "/session-1/codex-transcript",
+    );
+    expect(oversized.status).toBe(413);
+    await expect(oversized.json()).resolves.toMatchObject({
+      code: "CODEX_EVENT_SOURCE_ADMISSION_EXCEEDED",
+      source: "unavailable",
+      coverage: "unavailable",
+      fallback: "rollout",
+    });
+    expect(oversizedStore.latestEventAtMs).not.toHaveBeenCalled();
+    expect(oversizedStore.replay).not.toHaveBeenCalled();
 
     const boundedStore = await seededStore("bounded-session", "answer");
     const boundedRoutes = createCodexTranscriptRoutes({

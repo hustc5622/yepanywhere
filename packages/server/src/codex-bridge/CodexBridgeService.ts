@@ -1,9 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   type ContextUsage,
   type UrlProjectId,
@@ -45,6 +45,12 @@ import {
   createCodexBridgeEventIdentity,
   createCodexBridgeEventStore,
 } from "./CodexBridgeEventSpine.js";
+import {
+  AsyncCodexBridgeJournal,
+  type CodexBridgeJournalRecordKind,
+  type CodexBridgeJournalWriter,
+  createCodexBridgeJournalRecord,
+} from "./CodexBridgeJournal.js";
 import { readCodexUsage } from "./CodexUsageService.js";
 import {
   type CodexInteractiveMethod,
@@ -54,6 +60,16 @@ import {
   isCodexInteractiveMethod,
   toCodexInteractiveRequestView,
 } from "./interactions.js";
+import {
+  CODEX_BRIDGE_TERMINAL_METHODS,
+  type CodexBridgeJournalMode,
+  classifyCodexBridgeNotification,
+  resolveCodexBridgeJournalMode,
+  safeCodexBridgeMethod,
+  shouldJournalClientMethod,
+  shouldJournalServerNotification,
+} from "./journal-policy.js";
+import { CodexBridgeMetrics } from "./metrics.js";
 import { bridgeOwnership, isLiveBridgeSession } from "./session-state.js";
 import type {
   CodexBridgeController,
@@ -70,7 +86,7 @@ import type {
   JsonRpcMessage,
 } from "./types.js";
 
-interface CodexBridgeServiceOptions {
+export interface CodexBridgeServiceOptions {
   enabled: boolean;
   host: string;
   port: number;
@@ -91,6 +107,19 @@ interface CodexBridgeServiceOptions {
   /** Test/custom adapter override. Production derives JSONL from statePath. */
   eventStore?: CodexEventStore;
   eventStorePath?: string;
+  /** Defaults to lifecycle even when the environment variable is absent. */
+  journalMode?: CodexBridgeJournalMode;
+  /** Compact lifecycle/full diagnostic path override. */
+  journalPath?: string;
+  /** Test/custom async writer. Never used by legacy-blocking mode. */
+  journalWriter?: CodexBridgeJournalWriter;
+  /** Test/benchmark-only delay injected inside the background writer. */
+  journalFlushDelayMs?: number;
+  journalMaxQueueBytes?: number;
+  journalMaxConnectionQueueBytes?: number;
+  journalMaxSegmentBytes?: number;
+  journalKeepSegments?: number;
+  journalTerminalDatasync?: boolean;
   /** Bearer accepted when the bridge is exposed beyond loopback. */
   authToken?: string;
   /** Shared runtime control token used by the main-server sidecar client. */
@@ -99,8 +128,8 @@ interface CodexBridgeServiceOptions {
 
 interface ClientRequestRecord {
   method: string;
-  params?: unknown;
-  eventScope: CodexBridgeClientRequestScope;
+  sessionId: string;
+  eventScope?: CodexBridgeClientRequestScope;
   mcpStartupCompatibilityServerIds?: string[];
 }
 
@@ -122,7 +151,8 @@ interface BridgeConnection {
   threadIds: Set<string>;
   downstreamAttached: boolean;
   closed: boolean;
-  eventSpine: CodexBridgeEventSpine;
+  connectionSessionId: string;
+  legacyEventSpine: CodexBridgeEventSpine | null;
   upstreamReady: Promise<void> | null;
   clientFrameChain: Promise<void>;
   serverFrameChain: Promise<void>;
@@ -235,8 +265,10 @@ interface PendingInputBinding extends BridgePendingInputBinding {
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const MAX_MCP_STARTUP_EVENTS = 50;
 const MAX_RESOLVED_SERVER_REQUEST_IDS = 1_000;
+const MAX_COMPLETED_TURN_IDS = 256;
 const CODEX_USAGE_CACHE_TTL_MS = 30_000;
 const INTERNAL_REQUEST_TIMEOUT_MS = 10_000;
+const JOURNAL_SHUTDOWN_FLUSH_TIMEOUT_MS = 2_000;
 
 function isMcpThreadLifecycleMethod(
   method: string | undefined,
@@ -290,7 +322,11 @@ export class CodexBridgeService implements CodexBridgeController {
   } | null = null;
   private usageRequest: Promise<CodexUsageResponse> | null = null;
   private readonly statePath?: string;
-  private readonly eventStore: CodexEventStore;
+  private readonly journalMode: CodexBridgeJournalMode;
+  private readonly legacyEventStore: CodexEventStore | null;
+  private readonly journalWriter: CodexBridgeJournalWriter | null;
+  private readonly journalInstanceId: string;
+  private readonly metrics = new CodexBridgeMetrics();
   private readonly remoteAuthToken?: string;
   private controlToken?: string;
   private readonly authTokenFile?: string;
@@ -321,11 +357,66 @@ export class CodexBridgeService implements CodexBridgeController {
     this.startupTimeoutMs =
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.statePath = options.statePath;
-    this.eventStore = createCodexBridgeEventStore({
-      store: options.eventStore,
-      eventStorePath: options.eventStorePath,
-      statePath: options.statePath,
-    });
+    this.journalMode = resolveCodexBridgeJournalMode(
+      options.journalMode ?? process.env.YEP_CODEX_BRIDGE_JOURNAL_MODE,
+    );
+    this.journalInstanceId = randomUUID();
+    this.legacyEventStore =
+      this.journalMode === "legacy-blocking"
+        ? createCodexBridgeEventStore({
+            store: options.eventStore,
+            eventStorePath: options.eventStorePath,
+            statePath: options.statePath,
+          })
+        : null;
+    const journalPath =
+      options.journalPath ??
+      (options.statePath
+        ? deriveLightweightJournalPath(options.statePath, this.journalMode)
+        : undefined);
+    this.journalWriter =
+      this.journalMode === "lifecycle" || this.journalMode === "full"
+        ? (options.journalWriter ??
+          (journalPath
+            ? new AsyncCodexBridgeJournal({
+                mode: this.journalMode,
+                filePath: journalPath,
+                instanceId: this.journalInstanceId,
+                writeDelayMs: options.journalFlushDelayMs,
+                maxQueueBytes:
+                  options.journalMaxQueueBytes ??
+                  readPositiveIntegerEnv(
+                    "YEP_CODEX_BRIDGE_JOURNAL_MAX_QUEUE_BYTES",
+                  ),
+                maxConnectionQueueBytes:
+                  options.journalMaxConnectionQueueBytes ??
+                  readPositiveIntegerEnv(
+                    "YEP_CODEX_BRIDGE_JOURNAL_MAX_CONNECTION_QUEUE_BYTES",
+                  ),
+                maxSegmentBytes:
+                  options.journalMaxSegmentBytes ??
+                  readPositiveIntegerEnv(
+                    "YEP_CODEX_BRIDGE_JOURNAL_MAX_SEGMENT_BYTES",
+                  ),
+                keepSegments:
+                  options.journalKeepSegments ??
+                  readNonNegativeIntegerEnv(
+                    "YEP_CODEX_BRIDGE_JOURNAL_KEEP_SEGMENTS",
+                  ),
+                terminalDatasync:
+                  options.journalTerminalDatasync ??
+                  process.env.YEP_CODEX_BRIDGE_JOURNAL_TERMINAL_DATASYNC ===
+                    "true",
+                onFlush: (durationMs) => this.metrics.observeFlush(durationMs),
+                onFailure: (code) => {
+                  this.lastError = `Codex bridge journal degraded (${code})`;
+                  console.warn(
+                    `[CodexBridge] Optional journal circuit opened code=${code}`,
+                  );
+                },
+              })
+            : null))
+        : null;
     this.remoteAuthToken = options.authToken?.trim() || undefined;
     this.authTokenFile = options.authTokenFile;
     this.requiresAuthentication = !isLocalAddress(this.host);
@@ -399,7 +490,7 @@ export class CodexBridgeService implements CodexBridgeController {
         this.listening = true;
         this.lastError = null;
         console.log(
-          `[CodexBridge] Listening on ws://${this.host}:${this.port}`,
+          `[CodexBridge] Listening on ws://${this.host}:${this.port} journal=${this.journalMode}`,
         );
         cleanup();
         resolve();
@@ -435,6 +526,8 @@ export class CodexBridgeService implements CodexBridgeController {
     }
     this.eventNotifier.close();
     await this.persistSessions();
+    await this.journalWriter?.close(JOURNAL_SHUTDOWN_FLUSH_TIMEOUT_MS);
+    this.metrics.close();
 
     if (this.wss) {
       await new Promise<void>((resolve) => this.wss?.close(() => resolve()));
@@ -449,12 +542,18 @@ export class CodexBridgeService implements CodexBridgeController {
   }
 
   getStatus(): CodexBridgeStatus {
+    const canonicalIngressCount = Array.from(this.connections.values()).reduce(
+      (total, connection) =>
+        total + (connection.legacyEventSpine?.getIngressCount() ?? 0),
+      0,
+    );
     return {
       enabled: this.enabled,
       listening: this.listening,
       host: this.host,
       port: this.port,
       url: `ws://${this.host}:${this.port}`,
+      journalMode: this.journalMode,
       upstreamUrl: sanitizeBridgePublicUrl(
         this.upstreamUrlOverride ?? this.getManagedUpstreamUrl(),
       ),
@@ -479,6 +578,10 @@ export class CodexBridgeService implements CodexBridgeController {
       recentMcpStartupEvents: this.recentMcpStartupEvents.map((event) => ({
         ...event,
       })),
+      metrics: this.metrics.snapshot(
+        this.journalWriter?.getStats() ?? null,
+        canonicalIngressCount,
+      ),
       lastError: this.lastError,
     };
   }
@@ -677,25 +780,43 @@ export class CodexBridgeService implements CodexBridgeController {
     };
     const upstream = pending.connection.upstream;
     this.markLogicalRequestResolved(pending);
-    this.enqueueFrameTask(pending.connection, "client", async () => {
-      try {
-        await pending.connection.eventSpine.observeServerRequestResolution(
-          message,
-          {
-            method: pending.method,
-            sessionId: pending.eventSessionId,
-          },
-        );
-        if (
-          !pending.connection.closed &&
-          upstream.readyState === WebSocket.OPEN
-        ) {
-          upstream.send(JSON.stringify(message));
+    if (pending.connection.legacyEventSpine) {
+      this.enqueueFrameTask(pending.connection, "client", async () => {
+        try {
+          await pending.connection.legacyEventSpine?.observeServerRequestResolution(
+            message,
+            {
+              method: pending.method,
+              sessionId: pending.eventSessionId,
+            },
+          );
+          if (
+            !pending.connection.closed &&
+            upstream.readyState === WebSocket.OPEN
+          ) {
+            upstream.send(JSON.stringify(message));
+          }
+        } finally {
+          this.resolveLogicalRequest(pending, "yep");
         }
-      } finally {
-        this.resolveLogicalRequest(pending, "yep");
-      }
-    });
+      });
+      return true;
+    }
+
+    this.enqueueLightweightJournal(
+      pending.connection,
+      "server-request-resolution",
+      message,
+      Buffer.byteLength(JSON.stringify(message)),
+      pending.threadId,
+      pending.method,
+    );
+    if (!pending.connection.closed && upstream.readyState === WebSocket.OPEN) {
+      const startedAt = performance.now();
+      upstream.send(JSON.stringify(message));
+      this.metrics.observeForward(performance.now() - startedAt);
+    }
+    this.resolveLogicalRequest(pending, "yep");
     return true;
   }
 
@@ -984,6 +1105,7 @@ export class CodexBridgeService implements CodexBridgeController {
     );
     const connectionId = this.nextConnectionId++;
     const eventIdentity = createCodexBridgeEventIdentity({
+      serviceInstanceId: this.journalInstanceId,
       connectionId,
       profile,
     });
@@ -1000,13 +1122,16 @@ export class CodexBridgeService implements CodexBridgeController {
       threadIds: new Set(),
       downstreamAttached: true,
       closed: false,
-      eventSpine: new CodexBridgeEventSpine({
-        store: this.eventStore,
-        ...eventIdentity,
-        onPersistenceError: (stage) => {
-          this.lastError = `Codex event spine ${stage} persistence failed`;
-        },
-      }),
+      connectionSessionId: eventIdentity.connectionSessionId,
+      legacyEventSpine: this.legacyEventStore
+        ? new CodexBridgeEventSpine({
+            store: this.legacyEventStore,
+            ...eventIdentity,
+            onPersistenceError: (stage) => {
+              this.lastError = `Codex event spine ${stage} persistence failed`;
+            },
+          })
+        : null,
       upstreamReady: null,
       clientFrameChain: Promise.resolve(),
       serverFrameChain: Promise.resolve(),
@@ -1066,9 +1191,32 @@ export class CodexBridgeService implements CodexBridgeController {
   ): void {
     if (connection.closed) return;
     if (connection.upstream?.readyState === WebSocket.OPEN) {
+      const startedAt = performance.now();
       sendFrame(connection.upstream, frame.data, frame.isBinary);
+      this.metrics.observeForward(performance.now() - startedAt);
     } else {
       connection.downstreamQueue.push(frame);
+    }
+  }
+
+  private sendServerFramesToDownstream(
+    connection: BridgeConnection,
+    forwardedFrames: readonly ForwardedFrame[],
+  ): void {
+    for (const forwardedFrame of forwardedFrames) {
+      if (
+        connection.closed ||
+        connection.downstream.readyState !== WebSocket.OPEN
+      ) {
+        break;
+      }
+      const startedAt = performance.now();
+      sendFrame(
+        connection.downstream,
+        forwardedFrame.data,
+        forwardedFrame.isBinary,
+      );
+      this.metrics.observeForward(performance.now() - startedAt);
     }
   }
 
@@ -1098,28 +1246,31 @@ export class CodexBridgeService implements CodexBridgeController {
       });
 
       upstream.on("message", (data, isBinary) => {
-        this.enqueueFrameTask(connection, "server", async () => {
-          if (connection.closed) return;
-          const forwardedFrames = await this.observeServerData(
+        if (connection.closed) return;
+        if (this.journalMode === "legacy-blocking") {
+          this.enqueueFrameTask(connection, "server", async () => {
+            if (connection.closed) return;
+            const forwardedFrames = await this.observeServerDataLegacy(
+              connection,
+              data,
+              isBinary,
+            );
+            this.sendServerFramesToDownstream(connection, forwardedFrames);
+            this.maybeCloseDetachedConnection(connection, "server-frame");
+          });
+          return;
+        }
+        try {
+          const forwardedFrames = this.observeServerDataLightweight(
             connection,
             data,
             isBinary,
           );
-          for (const forwardedFrame of forwardedFrames) {
-            if (
-              connection.closed ||
-              connection.downstream.readyState !== WebSocket.OPEN
-            ) {
-              break;
-            }
-            sendFrame(
-              connection.downstream,
-              forwardedFrame.data,
-              forwardedFrame.isBinary,
-            );
-          }
+          this.sendServerFramesToDownstream(connection, forwardedFrames);
           this.maybeCloseDetachedConnection(connection, "server-frame");
-        });
+        } catch (error) {
+          this.handleFrameProcessingError(connection, "server", error);
+        }
       });
 
       upstream.on("close", () => this.closeConnection(connection, "upstream"));
@@ -1251,12 +1402,7 @@ export class CodexBridgeService implements CodexBridgeController {
         this.closeConnection(connection, "event-spine-persistence-error");
         return;
       }
-      const diagnostic = classifyCodexError(error);
-      this.lastError = diagnostic.publicMessage;
-      console.warn(
-        `[CodexBridge] ${direction} frame processing failed connection=${connection.id} code=${diagnostic.code} category=${diagnostic.category} retryable=${String(diagnostic.retryable)}`,
-      );
-      this.closeConnection(connection, `${direction}-frame-error`);
+      this.handleFrameProcessingError(connection, direction, error);
     });
     if (direction === "client") {
       connection.clientFrameChain = task;
@@ -1267,13 +1413,29 @@ export class CodexBridgeService implements CodexBridgeController {
     void task.then(() => this.eventTasks.delete(task));
   }
 
+  private handleFrameProcessingError(
+    connection: BridgeConnection,
+    direction: "client" | "server",
+    error: unknown,
+  ): void {
+    const diagnostic = classifyCodexError(error);
+    this.lastError = diagnostic.publicMessage;
+    console.warn(
+      `[CodexBridge] ${direction} frame processing failed connection=${connection.id} code=${diagnostic.code} category=${diagnostic.category} retryable=${String(diagnostic.retryable)}`,
+    );
+    this.closeConnection(connection, `${direction}-frame-error`);
+  }
+
   private async observeClientData(
     connection: BridgeConnection,
     data: RawData,
     isBinary: boolean,
   ): Promise<ForwardedFrame | null> {
+    const parseStartedAt = performance.now();
     const envelope = parseJsonRpcEnvelope(data);
+    this.metrics.observeParse(performance.now() - parseStartedAt);
     if (!envelope) return { data, isBinary };
+    const wireBytes = rawDataByteLength(data);
 
     const messagesToForward: JsonRpcMessage[] = [];
     let modified = false;
@@ -1296,23 +1458,26 @@ export class CodexBridgeService implements CodexBridgeController {
         messagesToForward.length = 0;
         flushedPrefix = true;
       }
+      const profileStartedAt = performance.now();
       const profiledMessage = await this.applyMcpProfileToClientMessage(
         connection,
         originalMessage,
       );
+      this.metrics.observeProfile(performance.now() - profileStartedAt);
       const message = profiledMessage.message;
       if (message !== originalMessage) modified = true;
       if (message.method && message.id !== undefined) {
-        const eventScope =
-          await connection.eventSpine.observeClientRequest(message);
-        if (!eventScope) {
-          messagesToForward.push(message);
-          continue;
-        }
+        const sessionId = this.resolveLightweightSessionId(
+          connection,
+          message.params,
+        );
+        const eventScope = connection.legacyEventSpine
+          ? await connection.legacyEventSpine.observeClientRequest(message)
+          : undefined;
         connection.pendingClientRequests.set(idKey(message.id), {
           method: message.method,
-          params: message.params,
-          eventScope,
+          sessionId: eventScope?.sessionId ?? sessionId,
+          ...(eventScope ? { eventScope } : {}),
           ...(profiledMessage.mcpStartupCompatibilityServerIds?.length
             ? {
                 mcpStartupCompatibilityServerIds:
@@ -1320,6 +1485,13 @@ export class CodexBridgeService implements CodexBridgeController {
               }
             : {}),
         });
+        this.enqueueLightweightJournal(
+          connection,
+          "client-request",
+          message,
+          wireBytes,
+          eventScope?.sessionId ?? sessionId,
+        );
         messagesToForward.push(message);
         continue;
       }
@@ -1334,8 +1506,20 @@ export class CodexBridgeService implements CodexBridgeController {
         if (alreadyResolved) {
           continue;
         }
-        await connection.eventSpine.observeServerRequestResolution(message);
+        if (connection.legacyEventSpine) {
+          await connection.legacyEventSpine.observeServerRequestResolution(
+            message,
+          );
+        }
         if (pending) {
+          this.enqueueLightweightJournal(
+            connection,
+            "server-request-resolution",
+            message,
+            wireBytes,
+            pending.threadId,
+            pending.method,
+          );
           this.markLogicalRequestResolved(pending, connection);
           this.resolveLogicalRequest(pending, "tui");
         }
@@ -1482,7 +1666,7 @@ export class CodexBridgeService implements CodexBridgeController {
     });
   }
 
-  private async observeServerData(
+  private async observeServerDataLegacy(
     connection: BridgeConnection,
     data: RawData,
     isBinary: boolean,
@@ -1522,7 +1706,7 @@ export class CodexBridgeService implements CodexBridgeController {
       messagesToForward.push(message);
       if (message.method && message.id !== undefined) {
         const eventSessionId =
-          await connection.eventSpine.observeServerRequest(message);
+          await connection.legacyEventSpine?.observeServerRequest(message);
         if (!connection.closed) {
           this.recordServerRequest(
             connection,
@@ -1534,7 +1718,7 @@ export class CodexBridgeService implements CodexBridgeController {
       }
 
       if (message.method) {
-        await connection.eventSpine.observeServerNotification(message);
+        await connection.legacyEventSpine?.observeServerNotification(message);
         if (!connection.closed) {
           this.handleServerNotification(
             connection,
@@ -1548,7 +1732,7 @@ export class CodexBridgeService implements CodexBridgeController {
       if (message.id !== undefined) {
         const request = connection.pendingClientRequests.get(idKey(message.id));
         if (request) {
-          await connection.eventSpine.observeClientResponse(
+          await connection.legacyEventSpine?.observeClientResponse(
             message,
             request.eventScope,
           );
@@ -1570,6 +1754,236 @@ export class CodexBridgeService implements CodexBridgeController {
       if (frame) frames.push(frame);
     }
     return frames;
+  }
+
+  /**
+   * Production data path. It performs only connection-local correlation and
+   * bounded session projection before synchronously returning the original
+   * frame. Optional journal work is enqueue-only and cannot extend this call.
+   */
+  private observeServerDataLightweight(
+    connection: BridgeConnection,
+    data: RawData,
+    isBinary: boolean,
+  ): ForwardedFrame[] {
+    const parseStartedAt = performance.now();
+    const envelope = parseJsonRpcEnvelope(data);
+    this.metrics.observeParse(performance.now() - parseStartedAt);
+    const messages = envelope?.messages;
+    if (!messages) return [{ data, isBinary }];
+
+    const wireBytes = rawDataByteLength(data);
+    const messagesToForward: JsonRpcMessage[] = [];
+    const compatibilityMessages: JsonRpcMessage[] = [];
+    let modified = false;
+    const projectionStartedAt = performance.now();
+
+    for (const message of messages) {
+      if (!message.method && message.id !== undefined) {
+        const key = idKey(message.id);
+        const internal = connection.pendingInternalRequests.get(key);
+        if (internal) {
+          modified = true;
+          clearTimeout(internal.timeout);
+          connection.pendingInternalRequests.delete(key);
+          const error = asRecord(message.error);
+          if (error) {
+            internal.reject(
+              new Error(
+                getString(error.message) ??
+                  `Codex app-server ${internal.method} failed`,
+              ),
+            );
+          } else {
+            internal.resolve(message.result);
+          }
+          continue;
+        }
+      }
+
+      messagesToForward.push(message);
+      if (message.method && message.id !== undefined) {
+        const sessionId = this.resolveLightweightSessionId(
+          connection,
+          message.params,
+        );
+        // Critical ordering invariant: publish pending identity before the
+        // request can be observed by TUI/Yep/Feishu downstream consumers.
+        this.recordServerRequest(connection, message, sessionId);
+        this.enqueueLightweightJournal(
+          connection,
+          "server-request",
+          message,
+          wireBytes,
+          sessionId,
+        );
+        continue;
+      }
+
+      if (message.method) {
+        const classification = classifyCodexBridgeNotification(message.method);
+        if (classification === "delta") {
+          this.metrics.observeDeltaFrame();
+        } else {
+          if (classification === "diagnostic") {
+            this.metrics.observeDiagnosticFrame();
+          }
+          this.handleServerNotification(
+            connection,
+            message.method,
+            message.params,
+          );
+        }
+        this.enqueueLightweightJournal(
+          connection,
+          "server-notification",
+          message,
+          wireBytes,
+          this.resolveLightweightSessionId(connection, message.params),
+        );
+        continue;
+      }
+
+      if (message.id !== undefined) {
+        const key = idKey(message.id);
+        const request = connection.pendingClientRequests.get(key);
+        if (request) {
+          connection.pendingClientRequests.delete(key);
+          this.enqueueLightweightJournal(
+            connection,
+            "client-response",
+            message,
+            wireBytes,
+            request.sessionId,
+            request.method,
+          );
+          compatibilityMessages.push(
+            ...this.handleClientRequestResponse(connection, request, message),
+          );
+        }
+      }
+    }
+
+    this.metrics.observeProjection(performance.now() - projectionStartedAt);
+    const primaryFrame = modified
+      ? serializeJsonRpcEnvelope(envelope.isBatch, messagesToForward)
+      : { data, isBinary };
+    const frames = primaryFrame ? [primaryFrame] : [];
+    for (const message of compatibilityMessages) {
+      const frame = serializeJsonRpcEnvelope(false, [message]);
+      if (frame) frames.push(frame);
+    }
+    return frames;
+  }
+
+  private resolveLightweightSessionId(
+    connection: BridgeConnection,
+    value: unknown,
+  ): string {
+    return readBridgeThreadId(value) ?? connection.connectionSessionId;
+  }
+
+  private enqueueLightweightJournal(
+    connection: BridgeConnection,
+    kind: CodexBridgeJournalRecordKind,
+    message: JsonRpcMessage,
+    wireBytes: number,
+    suppliedSessionId: string,
+    suppliedMethod?: string,
+  ): void {
+    const writer = this.journalWriter;
+    if (!writer) return;
+    const rawMethod = suppliedMethod ?? message.method ?? "response";
+    if (
+      (kind === "client-request" || kind === "client-response") &&
+      !shouldJournalClientMethod(this.journalMode, rawMethod)
+    ) {
+      return;
+    }
+    if (
+      kind === "server-notification" &&
+      !shouldJournalServerNotification(this.journalMode, rawMethod)
+    ) {
+      return;
+    }
+
+    const params = asRecord(message.params);
+    const result = asRecord(message.result);
+    const nestedTurn = asRecord(params?.turn);
+    const nestedItem = asRecord(params?.item);
+    const nestedThread = asRecord(params?.thread) ?? asRecord(result?.thread);
+    const sessionId = sanitizeBridgeDiagnosticIdentifier(
+      readBridgeThreadId(message.params) ??
+        readBridgeThreadId(message.result) ??
+        suppliedSessionId,
+    );
+    const turnId = sanitizeBridgeDiagnosticIdentifier(
+      getString(params?.turnId) ?? getString(nestedTurn?.id),
+    );
+    const itemId = sanitizeBridgeDiagnosticIdentifier(
+      getString(params?.itemId) ??
+        getString(params?.callId) ??
+        getString(nestedItem?.id),
+    );
+    const status = sanitizeBridgeDiagnosticIdentifier(
+      getString(params?.status) ??
+        getString(nestedTurn?.status) ??
+        getString(asRecord(nestedThread?.status)?.type),
+    );
+    const classification =
+      kind === "server-notification"
+        ? classifyCodexBridgeNotification(rawMethod)
+        : kind === "client-response"
+          ? "response"
+          : "request";
+    const terminal =
+      kind === "server-request" ||
+      kind === "server-request-resolution" ||
+      CODEX_BRIDGE_TERMINAL_METHODS.has(rawMethod);
+    const coalesceKey = terminal
+      ? undefined
+      : classification === "delta" ||
+          rawMethod === "thread/status/changed" ||
+          rawMethod === "thread/tokenUsage/updated" ||
+          rawMethod === "thread/name/updated" ||
+          rawMethod === "thread/goal/updated"
+        ? [
+            connection.id,
+            sessionId ?? "connection",
+            safeCodexBridgeMethod(rawMethod),
+            itemId ?? "",
+          ].join(":")
+        : undefined;
+    const startedAt = performance.now();
+    writer.enqueue(
+      createCodexBridgeJournalRecord({
+        instanceId: this.journalInstanceId,
+        mode: this.journalMode as "lifecycle" | "full",
+        kind,
+        classification,
+        direction:
+          kind === "client-request" || kind === "server-request-resolution"
+            ? "client"
+            : "server",
+        connectionId: connection.id,
+        profile: connection.profile,
+        method: safeCodexBridgeMethod(rawMethod),
+        ...(sessionId ? { sessionId } : {}),
+        ...(turnId ? { turnId } : {}),
+        ...(itemId ? { itemId } : {}),
+        ...(status ? { status } : {}),
+        ...(message.id === undefined
+          ? {}
+          : { requestIdFingerprint: fingerprintJsonRpcId(message.id) }),
+        wireBytes,
+      }),
+      {
+        connectionId: connection.id,
+        ...(coalesceKey ? { coalesceKey } : {}),
+        priority: terminal ? "terminal" : "normal",
+      },
+    );
+    this.metrics.observeEnqueue(performance.now() - startedAt);
   }
 
   private handleClientRequestResponse(
@@ -1760,7 +2174,13 @@ export class CodexBridgeService implements CodexBridgeController {
         const turnId = getString(turn?.id);
         if (!turnId || !record.completedTurnIds.has(turnId)) {
           record.messageCount += 1;
-          if (turnId) record.completedTurnIds.add(turnId);
+          if (turnId) {
+            record.completedTurnIds.add(turnId);
+            trimOldestSetValues(
+              record.completedTurnIds,
+              MAX_COMPLETED_TURN_IDS,
+            );
+          }
         }
         // turn/completed is the terminal notification for every turn; the
         // turn.status field distinguishes completed/interrupted/failed.
@@ -2262,7 +2682,7 @@ export class CodexBridgeService implements CodexBridgeController {
         : undefined,
     });
     if (Array.isArray(thread.turns)) {
-      for (const rawTurn of thread.turns) {
+      for (const rawTurn of thread.turns.slice(-MAX_COMPLETED_TURN_IDS)) {
         const turnId = getString(asRecord(rawTurn)?.id);
         if (turnId) record.completedTurnIds.add(turnId);
       }
@@ -2429,9 +2849,9 @@ export class CodexBridgeService implements CodexBridgeController {
     const payload = JSON.stringify({ version: 1, sessions: records });
     const writeSnapshot = async (): Promise<void> => {
       try {
-        await mkdir(dirname(statePath), { recursive: true });
+        await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
         const tmpPath = `${statePath}.tmp`;
-        await writeFile(tmpPath, payload, "utf8");
+        await writeFile(tmpPath, payload, { encoding: "utf8", mode: 0o600 });
         await rename(tmpPath, statePath);
       } catch (error) {
         const diagnostic = projectBridgePublicDiagnostic(error);
@@ -2499,7 +2919,9 @@ export class CodexBridgeService implements CodexBridgeController {
         lastErrorMessage: restoredLastError,
         connectionIds: new Set(),
         completedTurnIds: new Set(
-          Array.isArray(stored.completedTurnIds) ? stored.completedTurnIds : [],
+          Array.isArray(stored.completedTurnIds)
+            ? stored.completedTurnIds.slice(-MAX_COMPLETED_TURN_IDS)
+            : [],
         ),
       };
       this.sessions.set(record.id, record);
@@ -2944,6 +3366,15 @@ function rawDataToString(data: RawData): string {
   return Buffer.from(data).toString("utf8");
 }
 
+function rawDataByteLength(data: RawData): number {
+  if (typeof data === "string") return Buffer.byteLength(data);
+  if (Buffer.isBuffer(data)) return data.byteLength;
+  if (Array.isArray(data)) {
+    return data.reduce((total, chunk) => total + chunk.byteLength, 0);
+  }
+  return data.byteLength;
+}
+
 async function readJsonBody(
   req: IncomingMessage,
 ): Promise<Record<string, unknown> | null> {
@@ -3139,6 +3570,47 @@ function sanitizeBridgeDiagnosticIdentifier(
   return value && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
     ? value
     : undefined;
+}
+
+function readBridgeThreadId(value: unknown): string | undefined {
+  const record = asRecord(value);
+  return (
+    getString(record?.threadId) ??
+    getString(record?.conversationId) ??
+    getString(asRecord(record?.thread)?.id)
+  );
+}
+
+function fingerprintJsonRpcId(id: JsonRpcId): string {
+  return createHash("sha256").update(idKey(id)).digest("hex").slice(0, 16);
+}
+
+function deriveLightweightJournalPath(
+  statePath: string,
+  mode: CodexBridgeJournalMode,
+): string {
+  return join(
+    dirname(statePath),
+    mode === "full" ? "full-diagnostic.jsonl" : "lifecycle.jsonl",
+  );
+}
+
+function trimOldestSetValues<T>(values: Set<T>, maximum: number): void {
+  while (values.size > maximum) {
+    const oldest = values.values().next().value as T | undefined;
+    if (oldest === undefined) break;
+    values.delete(oldest);
+  }
+}
+
+function readPositiveIntegerEnv(name: string): number | undefined {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function readNonNegativeIntegerEnv(name: string): number | undefined {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function timestampFromThreadValue(value: unknown): string | undefined {

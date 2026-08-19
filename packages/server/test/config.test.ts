@@ -133,6 +133,29 @@ describe("loadConfig codex paths", () => {
     );
   });
 
+  it("defaults the Codex bridge journal to lifecycle and accepts explicit fallbacks", async () => {
+    vi.stubEnv("YEP_CODEX_BRIDGE_JOURNAL_MODE", undefined);
+    let { loadConfig } = await import("../src/config.js");
+    expect(loadConfig().codexBridgeJournalMode).toBe("lifecycle");
+
+    for (const mode of [
+      "off",
+      "lifecycle",
+      "full",
+      "legacy-blocking",
+    ] as const) {
+      vi.stubEnv("YEP_CODEX_BRIDGE_JOURNAL_MODE", mode);
+      vi.resetModules();
+      ({ loadConfig } = await import("../src/config.js"));
+      expect(loadConfig().codexBridgeJournalMode).toBe(mode);
+    }
+
+    vi.stubEnv("YEP_CODEX_BRIDGE_JOURNAL_MODE", "not-a-mode");
+    vi.resetModules();
+    ({ loadConfig } = await import("../src/config.js"));
+    expect(loadConfig().codexBridgeJournalMode).toBe("lifecycle");
+  });
+
   it("applies MCP enablement only to discovered servers", () => {
     const configuredServerIds = [
       "node_repl",

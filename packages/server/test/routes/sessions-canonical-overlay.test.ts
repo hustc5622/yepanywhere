@@ -70,6 +70,14 @@ describe("sessions route canonical Codex refresh overlay", () => {
         text: "provider answer",
       },
     });
+    expect(body.codexCanonicalView).toMatchObject({
+      requested: true,
+      source: "provider",
+      sourceKind: "provider",
+      coverage: "retained-complete-prefix",
+      fallback: "rollout",
+      firstAvailableSequence: 1,
+    });
     expect(JSON.stringify(body)).not.toContain("bridge answer");
     expect(bridgeReplay).not.toHaveBeenCalled();
 
@@ -245,6 +253,32 @@ describe("sessions route canonical Codex refresh overlay", () => {
     });
   });
 
+  it("does not consult an old bridge full journal for the normal lightweight view", async () => {
+    const bridgeStore = await seededStore(
+      "thread-bridge",
+      "turn-bridge",
+      "agent-bridge",
+      "bridge-only answer",
+    );
+    const createStore = vi.fn(() => bridgeStore);
+    const routes = createTestRoutes("rollout answer", [
+      {
+        id: "bridge",
+        legacyBridgeFull: true,
+        createStore,
+      },
+    ]);
+
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/${sessionId}`,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(JSON.stringify(body)).toContain("rollout answer");
+    expect(JSON.stringify(body)).not.toContain("bridge-only answer");
+    expect(createStore).not.toHaveBeenCalled();
+  });
+
   it("falls back to normalized rollout when the canonical journal is unreadable", async () => {
     // An unreadable journal now fails at the freshness probe rather than at
     // replay, because source selection has to compare journals before choosing
@@ -271,6 +305,14 @@ describe("sessions route canonical Codex refresh overlay", () => {
       { type: "text", text: "legacy fallback" },
     ]);
     expect(body.messages[0]?.codexCanonicalRefresh).toBeUndefined();
+    expect(body.codexCanonicalView).toMatchObject({
+      requested: true,
+      source: "rollout",
+      sourceKind: "rollout",
+      coverage: "rollout-only",
+      fallback: "rollout",
+      fallbackReason: "canonical_read_failed",
+    });
     expect(failingStore.latestEventAtMs).toHaveBeenCalledOnce();
   });
 
@@ -451,8 +493,13 @@ describe("sessions route canonical Codex refresh overlay", () => {
 function fixedSource(
   id: string,
   store: CodexEventStore,
+  options: { legacyBridgeFull?: boolean } = {},
 ): CodexEventStoreSource {
-  return { id, createStore: () => store };
+  return {
+    id,
+    ...(options.legacyBridgeFull ? { legacyBridgeFull: true } : {}),
+    createStore: () => store,
+  };
 }
 
 async function seededStore(

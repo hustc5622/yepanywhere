@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import {
   type CodexEventEnvelope,
+  CodexEventSourceAdmissionError,
   type CodexEventStoreSource,
   CodexTranscriptExportLimitError,
   JsonlCodexEventStore,
@@ -56,7 +57,9 @@ export function createDefaultCodexTranscriptStoreSources(
   );
   return [
     jsonlSource("provider", providerEventStorePath),
-    jsonlSource("bridge", bridgeEventStorePath),
+    jsonlSource("bridge", bridgeEventStorePath, {
+      legacyBridgeFull: true,
+    }),
   ];
 }
 
@@ -110,11 +113,33 @@ export function createCodexTranscriptRoutes(
 
     let selected: {
       sourceId: string;
+      sourceKind: "provider" | "legacy-bridge-full" | "custom";
+      coverage: {
+        scope: "retained-journal";
+        completePrefix: boolean;
+        firstAvailableSequence: number;
+        lastSequence: number;
+        leadingGap: number;
+        fallback: "rollout";
+      };
       events: readonly CodexEventEnvelope[];
     } | null;
     try {
       selected = await selectCodexEventSource(sources, sessionId);
-    } catch {
+    } catch (error) {
+      if (error instanceof CodexEventSourceAdmissionError) {
+        return c.json(
+          {
+            error: "Canonical Codex events exceed the safe read budget",
+            code: error.code,
+            source: "unavailable",
+            coverage: "unavailable",
+            fallback: error.fallback,
+            maxBytes: error.maxBytes,
+          },
+          413,
+        );
+      }
       return c.json(
         {
           error: "Failed to read canonical Codex events",
@@ -167,6 +192,18 @@ export function createCodexTranscriptRoutes(
       c.header("X-Content-Type-Options", "nosniff");
       c.header("Content-Security-Policy", "default-src 'none'");
       c.header("X-Yep-Codex-Transcript-Source", selected.sourceId);
+      c.header("X-Yep-Codex-Transcript-Source-Kind", selected.sourceKind);
+      c.header(
+        "X-Yep-Codex-Transcript-Coverage",
+        selected.coverage.completePrefix
+          ? "retained-complete-prefix"
+          : "retained-partial-leading-gap",
+      );
+      c.header(
+        "X-Yep-Codex-Transcript-First-Sequence",
+        String(selected.coverage.firstAvailableSequence),
+      );
+      c.header("X-Yep-Codex-Transcript-Fallback", "rollout");
       c.header(
         "X-Yep-Codex-Transcript-Truncated",
         String(exported.metadata.truncated),
@@ -195,7 +232,11 @@ export function createCodexTranscriptRoutes(
   return routes;
 }
 
-function jsonlSource(id: string, filePath: string): CodexTranscriptStoreSource {
+function jsonlSource(
+  id: string,
+  filePath: string,
+  options: { legacyBridgeFull?: boolean } = {},
+): CodexTranscriptStoreSource {
   // Share a single long-lived store instance per file path so that the
   // incremental file refresh (stat + tail read) works across requests.
   // The store hydrates once and then only reads new appended bytes on each
@@ -203,6 +244,7 @@ function jsonlSource(id: string, filePath: string): CodexTranscriptStoreSource {
   let store: JsonlCodexEventStore | null = null;
   return {
     id,
+    ...(options.legacyBridgeFull ? { legacyBridgeFull: true } : {}),
     createStore: () => {
       if (!store) {
         store = new JsonlCodexEventStore({ filePath });

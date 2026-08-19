@@ -7,10 +7,15 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Added
+- Keep a one-click copy button visible inside every user-message bubble, so prompt text can be copied without dragging to select it first.
+
 ### Changed
+- Make the 4510 Codex Bridge a lightweight lifecycle proxy by default. High-frequency deltas now forward immediately without entering the bridge durable journal or connection-local canonical reducer; `off`, bounded asynchronous `full`, and explicit `legacy-blocking` modes remain available. Compact lifecycle persistence uses a bounded/coalescing background writer with terminal priority and circuit breaking, while retained legacy bridge journals are loaded only for explicit canonical/export requests with source, coverage, and rollout fallback metadata.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- Preserve Codex agent-message deltas as the shared lossless SDK stream so bridge-owned turns continue updating Feishu/Lark cards in real time, while provider canonical ingress, native item attribution, generated-artifact provenance, and broker-owned approval resolution remain authoritative.
 - Bound Codex rollout session loading before normalization. Summary, agent-mapping, and paginated detail reads now stream one UTF-8 JSONL line at a time with byte/line budgets, weighted admission, stable byte-offset cursors and file revisions, bounded page projection, and explicit fallback for rollback histories that still require the legacy branch reducer. Large rollouts no longer materialize the full file, `split("\\n")`, and complete parsed-entry array on the normal summary/detail path; canonical journal overlay is conservatively skipped for rollouts above the 64 MiB safety threshold (configurable via `YEP_CODEX_CANONICAL_MAX_ROLLOUT_BYTES`), and cold journals above the 512 MiB admission budget (configurable via `YEP_CODEX_EVENT_STORE_ADMISSION_BYTES`) are rejected before hydration. Codex clone/fork copies use the same bounded decoder instead of materializing the source text.
 
 ## [2026.8.5] - 2026-08-18

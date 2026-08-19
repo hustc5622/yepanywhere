@@ -31,6 +31,7 @@ import {
 import type { FeishuDurableInbox } from "../channels/feishu/inbox.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
 import {
+  CodexEventSourceAdmissionError,
   type CodexEventStoreSource,
   CodexOverlayBudgetExceededError,
   CodexOverlayNotViableError,
@@ -1452,6 +1453,30 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     let session = loadedSession
       ? normalizeSession(loadedSession, { deferMedia, deferThinking })
       : null;
+    let codexCanonicalView:
+      | {
+          requested: true;
+          source: string;
+          sourceKind: "provider" | "legacy-bridge-full" | "custom" | "rollout";
+          coverage:
+            | "retained-complete-prefix"
+            | "retained-partial-leading-gap"
+            | "rollout-only";
+          fallback: "rollout";
+          fallbackReason?: string;
+          firstAvailableSequence?: number;
+          lastSequence?: number;
+        }
+      | undefined = canonicalViewRequested
+      ? {
+          requested: true,
+          source: "rollout",
+          sourceKind: "rollout",
+          coverage: "rollout-only",
+          fallback: "rollout",
+          fallbackReason: "canonical_source_not_selected",
+        }
+      : undefined;
 
     // The Codex reader applies bounded windows before normalization. Keep the
     // parsed bound for canonical overlay admission, but do not slice the page
@@ -1462,6 +1487,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       isCodexProviderName(session.provider) &&
       !codexCanonicalAdmissionAllowed
     ) {
+      codexCanonicalView = {
+        requested: true,
+        source: "rollout",
+        sourceKind: "rollout",
+        coverage: "rollout-only",
+        fallback: "rollout",
+        fallbackReason: "rollout_budget_exceeded",
+      };
       getLogger().debug(
         {
           sessionId,
@@ -1501,6 +1534,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         // this budget can actually bound.
         const budgetStartedMs = Date.now();
         if (selected) {
+          codexCanonicalView = {
+            requested: true,
+            source: selected.sourceId,
+            sourceKind: selected.sourceKind,
+            coverage: selected.coverage.completePrefix
+              ? "retained-complete-prefix"
+              : "retained-partial-leading-gap",
+            fallback: "rollout",
+            ...(!selected.coverage.completePrefix
+              ? { fallbackReason: "journal_leading_gap" }
+              : {}),
+            firstAvailableSequence: selected.coverage.firstAvailableSequence,
+            lastSequence: selected.coverage.lastSequence,
+          };
           // A windowed request only builds and matches the recent candidate
           // tail, which is what makes long sessions affordable, so viability
           // depends on it. Computed here rather than just before the overlay
@@ -1610,6 +1657,21 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           errorMessage: error instanceof Error ? error.message : String(error),
           journalReplayMs,
           totalMs: Date.now() - canonicalStartedMs,
+        };
+        codexCanonicalView = {
+          requested: true,
+          source: "rollout",
+          sourceKind: "rollout",
+          coverage: "rollout-only",
+          fallback: "rollout",
+          fallbackReason:
+            error instanceof CodexEventSourceAdmissionError
+              ? "canonical_source_budget_exceeded"
+              : notViable
+                ? `canonical_${error.reason}`
+                : budgetExceeded
+                  ? "canonical_budget_exceeded"
+                  : "canonical_read_failed",
         };
         if (notViable) {
           // A known bound, not a fault: every request for this session takes
@@ -1787,6 +1849,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           runtime,
           pendingInputRequest: activePendingInputRequest,
           slashCommands,
+          ...(codexCanonicalView && { codexCanonicalView }),
           ...getSessionPermissionModeState(deps, sessionId, process),
         });
       }
@@ -1822,6 +1885,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           runtime,
           pendingInputRequest: activePendingInputRequest,
           slashCommands,
+          ...(codexCanonicalView && { codexCanonicalView }),
           ...getSessionPermissionModeState(deps, sessionId, process),
         });
       }
@@ -1957,6 +2021,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       slashCommands,
       ...getSessionPermissionModeState(deps, sessionId, process),
       ...(paginationInfo && { pagination: paginationInfo }),
+      ...(codexCanonicalView && { codexCanonicalView }),
     });
   });
 

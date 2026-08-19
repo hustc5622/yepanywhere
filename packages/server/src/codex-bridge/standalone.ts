@@ -15,6 +15,7 @@ export async function runCodexBridgeOnly(): Promise<void> {
         lightUpstreamArgs: config.codexBridgeLightUpstreamArgs,
         clearUpstreamArgs: config.codexBridgeClearUpstreamArgs,
         fullUpstreamArgs: config.codexBridgeFullUpstreamArgs,
+        journalMode: config.codexBridgeJournalMode,
         authToken: config.desktopAuthToken,
         authTokenFile: config.runtimeTokenFile,
         statePath: join(config.dataDir, "codex-bridge", "sessions.json"),

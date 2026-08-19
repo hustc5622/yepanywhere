@@ -6,6 +6,8 @@ import {
   type BridgePollState,
 } from "../bridge-common/BridgeHttpClient.js";
 import type { BridgePendingInputBinding } from "../bridge-common/types.js";
+import { resolveCodexBridgeJournalMode } from "./journal-policy.js";
+import { emptyCodexBridgeMetricsSnapshot } from "./metrics.js";
 import { isLiveBridgeSession } from "./session-state.js";
 import type {
   CodexBridgeController,
@@ -35,6 +37,15 @@ export class CodexBridgeHttpClient
   >
   implements CodexBridgeController
 {
+  override async getStatus(): Promise<CodexBridgeStatus> {
+    const status = await super.getStatus();
+    return {
+      ...status,
+      journalMode: resolveCodexBridgeJournalMode(status.journalMode),
+      metrics: status.metrics ?? emptyCodexBridgeMetricsSnapshot(),
+    };
+  }
+
   async bindPendingInputInteraction(
     sessionId: string,
     requestId: string,
@@ -79,6 +90,7 @@ export class CodexBridgeHttpClient
       host: "127.0.0.1",
       port: 0,
       url: this.baseUrl.replace(/^http:/, "ws:"),
+      journalMode: "lifecycle",
       upstreamUrl: null,
       upstreamRunning: false,
       upstreamMode: "managed",
@@ -93,6 +105,7 @@ export class CodexBridgeHttpClient
       sessionCount: 0,
       pendingInputCount: 0,
       recentMcpStartupEvents: [],
+      metrics: emptyCodexBridgeMetricsSnapshot(),
       lastError: "Codex bridge sidecar is unavailable",
     };
   }

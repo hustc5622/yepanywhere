@@ -8,6 +8,10 @@ import {
 } from "@yep-anywhere/shared";
 import type { Level as LogLevel } from "pino";
 import {
+  type CodexBridgeJournalMode,
+  resolveCodexBridgeJournalMode,
+} from "./codex-bridge/journal-policy.js";
+import {
   CODEX_CLEAR_MCP_APP_SERVER_ARGS,
   CODEX_FULL_MCP_APP_SERVER_ARGS,
   CODEX_STANDARD_MCP_APP_SERVER_ARGS,
@@ -63,6 +67,8 @@ export interface Config {
   codexBridgeEnabled: boolean;
   /** How the Codex CLI bridge is hosted. */
   codexBridgeMode: "embedded" | "external" | "disabled";
+  /** Bridge-local persistence policy. Defaults to compact lifecycle mode. */
+  codexBridgeJournalMode: CodexBridgeJournalMode;
   /** Host/interface for the Codex bridge. Defaults to localhost for safety. */
   codexBridgeHost: string;
   /** Port for the Codex bridge WebSocket listener. */
@@ -263,6 +269,9 @@ export function loadConfig(): Config {
       process.env.YEP_CODEX_BRIDGE ??
       process.env.CODEX_BRIDGE,
   );
+  const codexBridgeJournalMode = resolveCodexBridgeJournalMode(
+    process.env.YEP_CODEX_BRIDGE_JOURNAL_MODE,
+  );
   const legacyCodexBridgeUpstreamArgs =
     process.env.YEP_CODEX_BRIDGE_UPSTREAM_ARGS ??
     process.env.CODEX_BRIDGE_UPSTREAM_ARGS;
@@ -391,6 +400,7 @@ export function loadConfig(): Config {
     sessionTitleGeneration,
     codexBridgeEnabled: codexBridgeMode !== "disabled",
     codexBridgeMode,
+    codexBridgeJournalMode,
     codexBridgeHost:
       process.env.YEP_CODEX_BRIDGE_HOST ??
       process.env.CODEX_BRIDGE_HOST ??

@@ -655,6 +655,15 @@ describe("canonical Codex persisted session projection", () => {
 
     expect(selected).toEqual({
       sourceId: "provider",
+      sourceKind: "provider",
+      coverage: {
+        scope: "retained-journal",
+        completePrefix: true,
+        firstAvailableSequence: 1,
+        lastSequence: 1,
+        leadingGap: 0,
+        fallback: "rollout",
+      },
       events: providerEvents,
     });
     expect(provider.replay).toHaveBeenCalledOnce();
@@ -1236,21 +1245,48 @@ describe("canonical Codex journal precedence", () => {
     expect(selected?.events).toEqual([fresh]);
   });
 
-  it("applies the same precedence to the provider-error selector", async () => {
-    // Provider failures reconstructed from a 13-hour-stale journal would show
-    // errors the user already moved past.
+  it("keeps legacy bridge full journals out of the normal provider-error overlay", async () => {
     const stale = eventAt(1_000, "provider-old");
     const fresh = eventAt(9_000, "bridge-new");
 
     const selected = await selectCodexProviderErrorEventSource(
       [
         { id: "provider", createStore: () => storeFor([stale]) },
-        { id: "bridge", createStore: () => storeFor([fresh]) },
+        {
+          id: "bridge",
+          legacyBridgeFull: true,
+          createStore: () => storeFor([fresh]),
+        },
       ],
       "session-1",
     );
 
-    expect(selected?.sourceId).toBe("bridge");
+    expect(selected?.sourceId).toBe("provider");
+  });
+
+  it("reports a retained leading gap instead of claiming full coverage", async () => {
+    const partial = { ...eventAt(9_000, "partial"), sequence: 7 };
+    const selected = await selectCodexEventSource(
+      [
+        {
+          id: "bridge",
+          legacyBridgeFull: true,
+          createStore: () => storeFor([partial]),
+        },
+      ],
+      "session-1",
+    );
+
+    expect(selected).toMatchObject({
+      sourceKind: "legacy-bridge-full",
+      coverage: {
+        completePrefix: false,
+        firstAvailableSequence: 7,
+        lastSequence: 7,
+        leadingGap: 6,
+        fallback: "rollout",
+      },
+    });
   });
 
   it("still selects a journal whose events carry no usable timestamp", async () => {

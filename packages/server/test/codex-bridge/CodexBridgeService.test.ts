@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { type Server, createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -87,6 +93,7 @@ describe("CodexBridgeService", () => {
       upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
       eventBus,
       eventStore,
+      journalMode: "legacy-blocking",
       authToken: BRIDGE_CONTROL_TOKEN,
     });
     await bridge.start();
@@ -96,6 +103,286 @@ describe("CodexBridgeService", () => {
     await bridge.shutdown();
     await closeWebSocketServer(upstreamWss);
     await closeServer(upstreamServer);
+  });
+
+  it("defaults to lifecycle without constructing canonical ingress or touching the legacy store", async () => {
+    const port = await findAvailablePort();
+    const lightweight = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      // Supplying the old adapter must not opt an unconfigured bridge back in.
+      eventStore,
+    });
+    let client: WebSocket | null = null;
+    try {
+      await lightweight.start();
+      const socketCount = upstreamSockets.length;
+      client = await connect(`ws://127.0.0.1:${port}`);
+      await waitFor(() => upstreamSockets.length > socketCount);
+      const forwarded = waitForJson(client);
+      upstreamSockets.at(-1)?.send(
+        JSON.stringify({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thread-lifecycle-default",
+            turnId: "turn-1",
+            itemId: "item-1",
+            delta: "wire-only delta",
+          },
+        }),
+      );
+      await expect(forwarded).resolves.toMatchObject({
+        method: "item/agentMessage/delta",
+        params: { delta: "wire-only delta" },
+      });
+
+      expect(eventStore.events).toEqual([]);
+      expect(lightweight.getStatus()).toMatchObject({
+        journalMode: "lifecycle",
+        metrics: {
+          codex_bridge_delta_frames_total: 1,
+          codex_bridge_canonical_ingress_count: 0,
+          codex_bridge_journal_bytes: 0,
+        },
+      });
+      const internals = lightweight as unknown as {
+        eventTasks: Set<Promise<void>>;
+      };
+      expect(internals.eventTasks.size).toBe(0);
+    } finally {
+      client?.close();
+      await lightweight.shutdown();
+    }
+  });
+
+  it("keeps delta forwarding independent from a 100ms lifecycle writer and writes zero delta bytes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-bridge-lifecycle-"));
+    const statePath = join(directory, "sessions.json");
+    const journalPath = join(directory, "lifecycle.jsonl");
+    const port = await findAvailablePort();
+    const lightweight = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      statePath,
+      journalMode: "lifecycle",
+      journalFlushDelayMs: 100,
+    });
+    let client: WebSocket | null = null;
+    try {
+      await lightweight.start();
+      const socketCount = upstreamSockets.length;
+      client = await connect(`ws://127.0.0.1:${port}`);
+      await waitFor(() => upstreamSockets.length > socketCount);
+
+      const lifecycleForward = waitForJson(client);
+      upstreamSockets.at(-1)?.send(
+        JSON.stringify({
+          method: "turn/started",
+          params: {
+            threadId: "thread-slow-journal",
+            turn: { id: "turn-1", status: "inProgress", items: [] },
+          },
+        }),
+      );
+      await lifecycleForward;
+      await delay(40);
+
+      const deltaForward = waitForJson(client);
+      const startedAt = performance.now();
+      upstreamSockets.at(-1)?.send(
+        JSON.stringify({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thread-slow-journal",
+            turnId: "turn-1",
+            itemId: "item-1",
+            delta: "must-not-enter-journal",
+          },
+        }),
+      );
+      await deltaForward;
+      expect(performance.now() - startedAt).toBeLessThan(75);
+    } finally {
+      client?.close();
+      await lightweight.shutdown();
+    }
+
+    expect(existsSync(journalPath)).toBe(true);
+    const journal = readFileSync(journalPath, "utf8");
+    expect(journal).toContain('"method":"turn/started"');
+    expect(journal).not.toContain("item/agentMessage/delta");
+    expect(journal).not.toContain("must-not-enter-journal");
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("captures bounded full diagnostic metadata asynchronously without payload content", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-bridge-full-"));
+    const statePath = join(directory, "sessions.json");
+    const journalPath = join(directory, "full-diagnostic.jsonl");
+    const port = await findAvailablePort();
+    const diagnostic = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      statePath,
+      journalMode: "full",
+    });
+    let client: WebSocket | null = null;
+    try {
+      await diagnostic.start();
+      const socketCount = upstreamSockets.length;
+      client = await connect(`ws://127.0.0.1:${port}`);
+      await waitFor(() => upstreamSockets.length > socketCount);
+      for (const sequence of [1, 2]) {
+        const forwarded = waitForJson(client);
+        upstreamSockets.at(-1)?.send(
+          JSON.stringify({
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: "thread-full-diagnostic",
+              turnId: "turn-1",
+              itemId: "item-1",
+              sequence,
+              delta: "full-wire-secret must stay on wire only",
+            },
+          }),
+        );
+        await expect(forwarded).resolves.toMatchObject({
+          params: { delta: "full-wire-secret must stay on wire only" },
+        });
+      }
+      expect(diagnostic.getStatus()).toMatchObject({
+        journalMode: "full",
+        metrics: { codex_bridge_canonical_ingress_count: 0 },
+      });
+    } finally {
+      client?.close();
+      await diagnostic.shutdown();
+    }
+    const contents = readFileSync(journalPath, "utf8");
+    expect(contents).toContain('"method":"item/agentMessage/delta"');
+    expect(contents).toContain('"count":2');
+    expect(contents).not.toContain("full-wire-secret");
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("opens the optional journal circuit without closing either websocket", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-bridge-journal-fail-"));
+    const port = await findAvailablePort();
+    const lightweight = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      journalMode: "lifecycle",
+      // Opening a directory as the append file fails inside the background writer.
+      journalPath: directory,
+    });
+    let client: WebSocket | null = null;
+    try {
+      await lightweight.start();
+      const socketCount = upstreamSockets.length;
+      client = await connect(`ws://127.0.0.1:${port}`);
+      await waitFor(() => upstreamSockets.length > socketCount);
+      const terminalForward = waitForJson(client);
+      upstreamSockets.at(-1)?.send(
+        JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-writer-failure",
+            turn: { id: "turn-1", status: "completed", items: [] },
+          },
+        }),
+      );
+      await terminalForward;
+      await waitFor(
+        () =>
+          lightweight.getStatus().metrics
+            .codex_bridge_journal_failures_total === 1,
+      );
+      expect(client.readyState).toBe(WebSocket.OPEN);
+      expect(upstreamSockets.at(-1)?.readyState).toBe(WebSocket.OPEN);
+
+      const deltaForward = waitForJson(client);
+      upstreamSockets.at(-1)?.send(
+        JSON.stringify({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thread-writer-failure",
+            turnId: "turn-2",
+            itemId: "item-2",
+            delta: "still forwarded",
+          },
+        }),
+      );
+      await expect(deltaForward).resolves.toMatchObject({
+        params: { delta: "still forwarded" },
+      });
+    } finally {
+      client?.close();
+      await lightweight.shutdown();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("projects a pending server request before forwarding and resolves it exactly once in off mode", async () => {
+    const port = await findAvailablePort();
+    const lightweight = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port,
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      journalMode: "off",
+    });
+    let client: WebSocket | null = null;
+    try {
+      await lightweight.start();
+      const socketCount = upstreamSockets.length;
+      client = await connect(`ws://127.0.0.1:${port}`);
+      await waitFor(() => upstreamSockets.length > socketCount);
+      const forwarded = waitForJson(client);
+      upstreamSockets.at(-1)?.send(
+        JSON.stringify({
+          id: 77,
+          method: "item/tool/requestUserInput",
+          params: {
+            threadId: "thread-off-pending",
+            turnId: "turn-1",
+            itemId: "question-1",
+            questions: [],
+          },
+        }),
+      );
+      await forwarded;
+      const pending = lightweight.getPendingInputRequest("thread-off-pending");
+      expect(pending).toMatchObject({ sessionId: "thread-off-pending" });
+      expect(pending?.id).toBeTruthy();
+      expect(
+        lightweight.respondToInput(
+          "thread-off-pending",
+          pending?.id ?? "missing",
+          "approve",
+          {},
+        ),
+      ).toBe(true);
+      expect(
+        lightweight.respondToInput(
+          "thread-off-pending",
+          pending?.id ?? "missing",
+          "approve",
+          {},
+        ),
+      ).toBe(false);
+      expect(lightweight.getStatus().journalMode).toBe("off");
+    } finally {
+      client?.close();
+      await lightweight.shutdown();
+    }
   });
 
   it("refuses a non-loopback bind without bearer authentication", async () => {
@@ -2897,6 +3184,7 @@ describe("CodexBridgeService", () => {
         port: firstPort,
         upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
         statePath,
+        journalMode: "legacy-blocking",
       });
       await first.start();
       firstClient = await connect(`ws://127.0.0.1:${firstPort}`);
@@ -2929,6 +3217,7 @@ describe("CodexBridgeService", () => {
         port: secondPort,
         upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
         statePath,
+        journalMode: "legacy-blocking",
       });
       await second.start();
       secondClient = await connect(`ws://127.0.0.1:${secondPort}`);

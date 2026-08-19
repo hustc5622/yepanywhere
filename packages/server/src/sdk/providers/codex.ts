@@ -4201,6 +4201,38 @@ export class CodexProvider implements AgentProvider {
         ];
       }
 
+      case "item/agentMessage/delta": {
+        const params = notification.params as
+          | {
+              threadId?: string;
+              turnId?: string;
+              itemId?: string;
+              delta?: string;
+            }
+          | undefined;
+        const itemId = this.getOptionalString(params?.itemId);
+        const turnId = this.getOptionalString(params?.turnId);
+        const delta =
+          typeof params?.delta === "string" ? params.delta : undefined;
+        if (!itemId || !turnId || !delta) return [];
+        // Keep the shared SDK stream shape used by live clients and Feishu.
+        // The authoritative final text still arrives on item/completed.
+        return [
+          withCodexTimestamp({
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: `${itemId}-${turnId}`,
+            turnId,
+            codexTurnId: turnId,
+            event: {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: delta },
+            },
+          } as unknown as SDKMessage),
+        ];
+      }
+
       case "item/commandExecution/outputDelta": {
         // Live command output streaming - mirror the Codex TUI's scrolling
         // exec cell. The delta merges into the pending tool_use block via the

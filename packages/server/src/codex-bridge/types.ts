@@ -7,6 +7,8 @@ import type {
   BridgeStatusBase,
   MaybePromise,
 } from "../bridge-common/types.js";
+import type { CodexBridgeJournalMode } from "./journal-policy.js";
+import type { CodexBridgeMetricsSnapshot } from "./metrics.js";
 
 export type { MaybePromise };
 
@@ -31,6 +33,7 @@ export interface JsonRpcMessage {
 }
 
 export interface CodexBridgeStatus extends BridgeStatusBase {
+  journalMode: CodexBridgeJournalMode;
   upstreamUrl: string | null;
   upstreamRunning: boolean;
   upstreamMode: "managed" | "external";
@@ -39,6 +42,7 @@ export interface CodexBridgeStatus extends BridgeStatusBase {
   attachedClientCount: number;
   detachedConnectionCount: number;
   recentMcpStartupEvents: CodexBridgeMcpStartupEvent[];
+  metrics: CodexBridgeMetricsSnapshot;
 }
 
 export interface CodexBridgeUpstreamStatus {

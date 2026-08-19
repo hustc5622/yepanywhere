@@ -82,6 +82,10 @@ export class CodexBridgeEventSpine {
     this.onPersistenceError = options.onPersistenceError;
   }
 
+  getIngressCount(): number {
+    return this.ingresses.size;
+  }
+
   async observeClientRequest(
     message: JsonRpcMessage,
   ): Promise<CodexBridgeClientRequestScope | null> {
