@@ -144,7 +144,7 @@ export function createWsRoutes(
     // Ping interval for dead connection detection (set in onOpen, cleared in onClose)
     let pingInterval: ReturnType<typeof setInterval> | null = null;
     const connectionId = randomUUID();
-    let connectedAt = 0;
+    let connectedAt: number | undefined;
     // Send function (created on open, captures connState)
     let send: ReturnType<typeof createSendFn>;
     // WSAdapter wrapper
@@ -242,7 +242,10 @@ export function createWsRoutes(
           {
             event: "ws_client_disconnected",
             connectionId,
-            durationMs: Math.max(0, Date.now() - connectedAt),
+            durationMs:
+              connectedAt === undefined
+                ? 0
+                : Math.max(0, Date.now() - connectedAt),
             closeCode: closeEvent.code,
             closeReason: closeEvent.reason || undefined,
           },

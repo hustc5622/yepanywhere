@@ -4,6 +4,31 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getLogger } from "../../src/logging/logger.js";
 import { createWsRoutes } from "../../src/routes/ws.js";
 
+function createLifecycleEvents(): WSEvents {
+  let createEvents: ((context: Context) => WSEvents) | undefined;
+  const upgradeWebSocket = vi.fn((factory: (context: Context) => WSEvents) => {
+    createEvents = factory;
+    return {};
+  });
+
+  createWsRoutes({
+    upgradeWebSocket,
+    app: {},
+    baseUrl: "http://localhost:3400",
+    supervisor: {},
+    eventBus: {},
+    uploadManager: { cleanupConnection: vi.fn() },
+  } as unknown as Parameters<typeof createWsRoutes>[0]);
+
+  if (!createEvents) throw new Error("Expected WebSocket event factory");
+  return createEvents({
+    req: {
+      header: () => undefined,
+      query: () => undefined,
+    },
+  } as unknown as Context);
+}
+
 describe("WebSocket route lifecycle diagnostics", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -14,30 +39,7 @@ describe("WebSocket route lifecycle diagnostics", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-17T00:00:00.000Z"));
     const info = vi.spyOn(getLogger(), "info").mockImplementation(() => {});
-    let createEvents: ((context: Context) => WSEvents) | undefined;
-    const upgradeWebSocket = vi.fn(
-      (factory: (context: Context) => WSEvents) => {
-        createEvents = factory;
-        return {};
-      },
-    );
-
-    createWsRoutes({
-      upgradeWebSocket,
-      app: {},
-      baseUrl: "http://localhost:3400",
-      supervisor: {},
-      eventBus: {},
-      uploadManager: { cleanupConnection: vi.fn() },
-    } as unknown as Parameters<typeof createWsRoutes>[0]);
-
-    if (!createEvents) throw new Error("Expected WebSocket event factory");
-    const events = createEvents({
-      req: {
-        header: () => undefined,
-        query: () => undefined,
-      },
-    } as unknown as Context);
+    const events = createLifecycleEvents();
     const raw = {
       OPEN: 1,
       readyState: 1,
@@ -75,5 +77,25 @@ describe("WebSocket route lifecycle diagnostics", () => {
       closeCode: 1006,
       closeReason: "proxy reset",
     });
+  });
+
+  it("reports zero duration when close occurs before open", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-17T00:00:00.000Z"));
+    const info = vi.spyOn(getLogger(), "info").mockImplementation(() => {});
+    const events = createLifecycleEvents();
+
+    events.onClose?.({ code: 1006 } as CloseEvent, {} as never);
+
+    const disconnected = info.mock.calls.find(
+      ([payload]) => payload.event === "ws_client_disconnected",
+    )?.[0];
+    expect(disconnected).toEqual(
+      expect.objectContaining({
+        event: "ws_client_disconnected",
+        durationMs: 0,
+        closeCode: 1006,
+      }),
+    );
   });
 });
