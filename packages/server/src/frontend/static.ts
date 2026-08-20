@@ -17,6 +17,34 @@ export interface StaticServeOptions {
 
 const IMMUTABLE_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATED_ASSET_CACHE_CONTROL = "public, max-age=0, must-revalidate";
+const STATIC_EXTENSIONS = new Set([
+  ".js",
+  ".mjs",
+  ".css",
+  ".map",
+  ".json",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".svg",
+  ".ico",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".eot",
+]);
+
+function isExplicitStaticRequest(reqPath: string): boolean {
+  return (
+    reqPath.startsWith("/assets/") ||
+    STATIC_EXTENSIONS.has(path.extname(reqPath).toLowerCase())
+  );
+}
+
+function acceptsHtml(accept: string | undefined): boolean {
+  return accept?.toLowerCase().includes("text/html") ?? false;
+}
 
 /**
  * Create Hono routes for serving static files.
@@ -99,6 +127,15 @@ export function createStaticRoutes(options: StaticServeOptions): Hono {
       if (!isNotFound) {
         console.error(`[Static] Error serving ${filePath}:`, err);
       }
+    }
+
+    if (
+      reqPath === "/api" ||
+      reqPath.startsWith("/api/") ||
+      isExplicitStaticRequest(reqPath) ||
+      !acceptsHtml(c.req.header("accept"))
+    ) {
+      return c.text("Not found", 404, { "Cache-Control": "no-store" });
     }
 
     // SPA fallback: serve index.html for all other routes
