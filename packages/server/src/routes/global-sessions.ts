@@ -733,9 +733,11 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
             lastErrorMessage: bridgedSession
               ? bridgedSession.session.lastErrorMessage
               : session.lastErrorMessage,
-            retryStatus: bridgedSession
-              ? bridgedSession.session.retryStatus
-              : session.retryStatus,
+            retryStatus: process
+              ? process.retryStatus
+              : bridgedSession
+                ? bridgedSession.session.retryStatus
+                : session.retryStatus,
           },
           maxCandidates,
         );

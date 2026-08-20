@@ -276,6 +276,8 @@ export interface ProcessInfo {
   requestedReasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;
+  /** Present while the provider is retrying a failed request. */
+  retryStatus?: SessionRetryStatus;
   /** Context window usage from the last assistant message */
   contextUsage?: ContextUsage;
   /** SSH host for remote execution (undefined = local) */
@@ -293,6 +295,7 @@ export type ProcessEvent =
   | { type: "error"; error: Error }
   | { type: "complete" }
   | { type: "terminated"; reason: string; error?: Error }
+  | { type: "retry-status"; retryStatus?: SessionRetryStatus }
   | {
       type: "deferred-queue";
       messages: { tempId?: string; content: string; timestamp: string }[];

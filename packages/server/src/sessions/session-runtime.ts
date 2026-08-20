@@ -1,6 +1,7 @@
 import type {
   AgentActivity,
   SessionArchiveBlockCode,
+  SessionRetryStatus,
   SessionRuntime,
 } from "@yep-anywhere/shared";
 import type { PermissionMode } from "../sdk/types.js";
@@ -11,6 +12,7 @@ export interface SessionRuntimeProcess {
   state: AgentActivity | { type: AgentActivity };
   permissionMode?: PermissionMode;
   modeVersion?: number;
+  retryStatus?: SessionRetryStatus;
   pendingInputRequest?: { type: string; id?: string } | null;
   getPendingInputRequest?: () => { type: string; id?: string } | null;
 }

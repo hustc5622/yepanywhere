@@ -1153,6 +1153,71 @@ describe("Supervisor", () => {
   });
 
   describe("eventBus integration", () => {
+    it("includes a pre-registration retry in the initial activity snapshot", async () => {
+      const eventBus = new EventBus();
+      const events: BusEvent[] = [];
+      eventBus.subscribe((event) => events.push(event));
+      let aborted = false;
+      let wake: (() => void) | undefined;
+      const retryStatus = {
+        attempt: 2,
+        message: "rate limited",
+        next: 1_789_000_000_000,
+      };
+      const provider = createPiTestProvider(async (options) => {
+        async function* iterator() {
+          // Yield once so Process exists, then report retry before the init
+          // message lets Supervisor register its process listener.
+          await Promise.resolve();
+          options.onRetryStatus?.(retryStatus);
+          yield {
+            type: "system" as const,
+            subtype: "init" as const,
+            session_id: "pi-retry-session",
+          };
+          while (!aborted) {
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+            });
+          }
+        }
+
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {
+            aborted = true;
+            wake?.();
+          },
+        };
+      });
+      const supervisorWithBus = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+        eventBus,
+      });
+
+      const process = await supervisorWithBus.startSession("/tmp/pi-retry", {
+        text: "hi",
+      });
+
+      expect(process.getInfo().retryStatus).toEqual(retryStatus);
+      expect(
+        events.find(
+          (event) =>
+            event.type === "process-state-changed" &&
+            event.sessionId === "pi-retry-session" &&
+            event.retryStatus,
+        ),
+      ).toMatchObject({
+        type: "process-state-changed",
+        activity: "in-turn",
+        retryStatus,
+      });
+
+      await supervisorWithBus.shutdown();
+    });
+
     it("emits process-state-changed event when session starts", async () => {
       const eventBus = new EventBus();
       const events: BusEvent[] = [];

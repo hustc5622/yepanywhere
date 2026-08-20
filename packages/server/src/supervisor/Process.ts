@@ -42,6 +42,7 @@ import type {
   ProcessInfo,
   ProcessOptions,
   ProcessState,
+  SessionRetryStatus,
 } from "./types.js";
 import { DEFAULT_IDLE_TIMEOUT_MS } from "./types.js";
 
@@ -75,6 +76,22 @@ export function shouldEmitMessage(_message: SDKMessage): boolean {
   // Always emit. DO NOT add filtering here!
   // See docstring above for why this is critical.
   return true;
+}
+
+/** Structural comparison so an unchanged retry state does not re-broadcast. */
+function retryStatusEquals(
+  a: SessionRetryStatus | undefined,
+  b: SessionRetryStatus | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.attempt === b.attempt &&
+    a.message === b.message &&
+    a.next === b.next &&
+    a.actionLabel === b.actionLabel &&
+    a.actionLink === b.actionLink
+  );
 }
 
 function normalizeSteerResult(result: AgentSteerResult): {
@@ -183,6 +200,7 @@ export class Process {
   private messageQueue: MessageQueue | null;
   private abortFn: (() => void) | null;
   private _state: ProcessState = { type: "in-turn" };
+  private _retryStatus: SessionRetryStatus | undefined;
   private listeners: Set<Listener> = new Set();
   private idleTimer: NodeJS.Timeout | null = null;
   private idleTimeoutMs: number;
@@ -428,6 +446,24 @@ export class Process {
 
   get state(): ProcessState {
     return this._state;
+  }
+
+  /** Provider retry/backoff state while the current turn is being retried. */
+  get retryStatus(): SessionRetryStatus | undefined {
+    return this._retryStatus;
+  }
+
+  /**
+   * Record provider retry/backoff state reported through
+   * `StartSessionOptions.onRetryStatus`.
+   *
+   * Kept off the message stream: the stream is replayed into the transcript,
+   * and a retry is transient status rather than conversation.
+   */
+  setRetryStatus(retryStatus: SessionRetryStatus | undefined): void {
+    if (retryStatusEquals(this._retryStatus, retryStatus)) return;
+    this._retryStatus = retryStatus;
+    this.emit({ type: "retry-status", retryStatus });
   }
 
   /** When the last SDK message was received (for staleness detection) */
@@ -1073,6 +1109,7 @@ export class Process {
       reasoningEffort: this.resolvedReasoningEffort,
       requestedReasoningEffort: this.requestedReasoningEffort,
       serviceTier: this._serviceTier,
+      retryStatus: this._retryStatus,
       thinking: this._thinking,
       effort: this._effort,
       executor: this.executor,

@@ -700,6 +700,11 @@ export class EmbeddedRuntimeController implements RuntimeController {
           type: "error",
           data: { message: event.error?.message ?? event.reason },
         };
+      case "retry-status":
+        // Transient backoff state, broadcast to clients through the event bus
+        // instead. Journaled records are replayed to late joiners, and a stale
+        // "retrying" replayed after the turn finished would be misleading.
+        return null;
     }
   }
 

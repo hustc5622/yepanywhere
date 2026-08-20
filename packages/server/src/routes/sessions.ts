@@ -1050,9 +1050,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         lastErrorMessage: bridgedSession
           ? bridgedSession.session.lastErrorMessage
           : sessionSummary?.lastErrorMessage,
-        retryStatus: bridgedSession
-          ? bridgedSession.session.retryStatus
-          : sessionSummary?.retryStatus,
+        retryStatus: process
+          ? process.retryStatus
+          : bridgedSession
+            ? bridgedSession.session.retryStatus
+            : sessionSummary?.retryStatus,
         customTitle: metadata?.customTitle,
         aiTitle: metadata?.aiTitle ?? sessionSummary?.aiTitle,
         isArchived: metadata?.isArchived,
@@ -1842,6 +1844,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             model: process.model,
             reasoningEffort: process.reasoningEffort,
             serviceTier: process.serviceTier,
+            retryStatus: process.retryStatus,
             contextUsage,
           },
           messages: processMessages,
@@ -2008,9 +2011,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         lastErrorMessage: bridgedSession
           ? bridgedSession.session.lastErrorMessage
           : session.lastErrorMessage,
-        retryStatus: bridgedSession
-          ? bridgedSession.session.retryStatus
-          : session.retryStatus,
+        retryStatus: process
+          ? process.retryStatus
+          : bridgedSession
+            ? bridgedSession.session.retryStatus
+            : session.retryStatus,
         lastSeenAt,
         hasUnread,
       },

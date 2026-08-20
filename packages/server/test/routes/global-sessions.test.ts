@@ -1,6 +1,7 @@
 import type {
   SessionCreatedBy,
   SessionOriginChannel,
+  SessionRetryStatus,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -83,6 +84,7 @@ describe("Global Sessions Routes", () => {
       state: { type: string };
       permissionMode: string;
       modeVersion: number;
+      retryStatus?: SessionRetryStatus;
     }
   >;
   let unreadMap: Map<string, boolean>;
@@ -1023,6 +1025,31 @@ describe("Global Sessions Routes", () => {
       const result = await makeRequest();
 
       expect(result.sessions[0].pendingInputType).toBe("tool-approval");
+    });
+
+    it("overlays live process retry status on the session list", async () => {
+      const project = createProject("proj1", "project", "/sessions/proj1");
+      const session = createSession("sess1", "proj1", minutesAgo(5));
+      const retryStatus = {
+        attempt: 3,
+        message: "provider rate limited",
+        next: 1_789_000_000_000,
+      };
+
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
+      sessionsByDir.set("/sessions/proj1", [session]);
+      processMap.set("sess1", {
+        id: "proc-1",
+        getPendingInputRequest: () => null,
+        state: { type: "in-turn" },
+        permissionMode: "default",
+        modeVersion: 1,
+        retryStatus,
+      });
+
+      const result = await makeRequest();
+
+      expect(result.sessions[0].retryStatus).toEqual(retryStatus);
     });
 
     it("enriches with hasUnread from notification service", async () => {

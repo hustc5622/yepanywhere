@@ -12,7 +12,11 @@ import {
   stripBridgeMetadata,
   stripIdeMetadata,
 } from "@yep-anywhere/shared";
-import type { AgentActivity, PendingInputType } from "@yep-anywhere/shared";
+import type {
+  AgentActivity,
+  PendingInputType,
+  SessionRetryStatus,
+} from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { getProvider } from "../sdk/providers/index.js";
 import { isProviderEnabled } from "../sdk/providers/policy.js";
@@ -479,6 +483,9 @@ export class Supervisor {
         }
         return processHolder.process.handleToolApproval(toolName, input, opts);
       },
+      onRetryStatus: (retryStatus) => {
+        processHolder.process?.setRetryStatus(retryStatus);
+      },
     });
     if (startupId) {
       getLogger().info(
@@ -646,6 +653,9 @@ export class Supervisor {
           return { behavior: "deny", message: "Process not ready" };
         }
         return processHolder.process.handleToolApproval(toolName, input, opts);
+      },
+      onRetryStatus: (retryStatus) => {
+        processHolder.process?.setRetryStatus(retryStatus);
       },
     });
     if (startupId) {
@@ -1309,6 +1319,7 @@ export class Supervisor {
         process.projectId,
         initialState.type,
         pendingInputType,
+        process.retryStatus,
       );
     }
 
@@ -1454,10 +1465,22 @@ export class Supervisor {
             process.projectId,
             event.state.type,
             pendingInputType,
+            process.retryStatus,
           );
         }
         // Emit worker activity on any state change (affects hasActiveWork)
         this.emitWorkerActivity();
+      } else if (event.type === "retry-status") {
+        // A retry keeps the turn open, so the activity does not change; this
+        // re-broadcasts the same activity carrying the new backoff state.
+        const activity = process.getInfo().state;
+        this.emitAgentActivityChange(
+          process.sessionId,
+          process.projectId,
+          activity,
+          undefined,
+          event.retryStatus,
+        );
       } else if (event.type === "terminated") {
         this.emitProcessTerminated(
           process.sessionId,
@@ -1681,6 +1704,7 @@ export class Supervisor {
     projectId: UrlProjectId,
     activity: AgentActivity,
     pendingInputType?: PendingInputType,
+    retryStatus?: SessionRetryStatus,
   ): void {
     if (!this.eventBus) return;
 
@@ -1690,6 +1714,7 @@ export class Supervisor {
       projectId,
       activity,
       pendingInputType,
+      ...(retryStatus ? { retryStatus } : {}),
       timestamp: new Date().toISOString(),
     };
     this.eventBus.emit(event);

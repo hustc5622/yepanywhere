@@ -12,6 +12,7 @@ import type {
   LlmGatewayRequestProtocol,
   LlmGatewaySessionConfig,
   ModelInfo,
+  SessionRetryStatus,
   SlashCommand,
   ThinkingConfig,
 } from "@yep-anywhere/shared";
@@ -198,6 +199,28 @@ function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
     : undefined;
+}
+
+/**
+ * Map Pi's `auto_retry_start` payload onto Yep's provider-neutral retry status.
+ *
+ * `delayMs` is a duration; the UI renders a wall-clock deadline, so it is
+ * resolved against the moment the event arrived.
+ */
+function piRetryStatus(event: JsonRecord): SessionRetryStatus {
+  const attempt = numberValue(event.attempt);
+  const maxAttempts = numberValue(event.maxAttempts);
+  const delayMs = numberValue(event.delayMs);
+  const errorMessage = stringValue(event.errorMessage);
+  const message =
+    errorMessage && maxAttempts
+      ? `${errorMessage} (attempt ${attempt ?? 1}/${maxAttempts})`
+      : errorMessage;
+  return {
+    ...(attempt !== undefined ? { attempt } : {}),
+    ...(message ? { message } : {}),
+    ...(delayMs !== undefined ? { next: Date.now() + delayMs } : {}),
+  };
 }
 
 function toIsoTimestamp(value: unknown): string {
@@ -1196,6 +1219,9 @@ export class PiProvider implements AgentProvider {
           }
           if (event.type === "agent_settled") {
             settled = true;
+            // A settled turn cannot still be backing off. Clear defensively in
+            // case the provider skipped `auto_retry_end` (an aborted turn does).
+            options.onRetryStatus?.(undefined);
             yield {
               type: "result",
               session_id: runtime.sessionId ?? sessionId,
@@ -1248,6 +1274,17 @@ export class PiProvider implements AgentProvider {
           error: stringValue(event.error) ?? "Pi extension failed",
         },
       ];
+    }
+    // Pi retries a failed request inside the turn, so without these the UI
+    // shows an ordinary thinking pulse for the whole backoff and the user
+    // cannot tell a slow model from a rate-limited one.
+    if (event.type === "auto_retry_start") {
+      options.onRetryStatus?.(piRetryStatus(event));
+      return [];
+    }
+    if (event.type === "auto_retry_end") {
+      options.onRetryStatus?.(undefined);
+      return [];
     }
     if (event.type === "message_start") {
       const message = isRecord(event.message) ? event.message : {};

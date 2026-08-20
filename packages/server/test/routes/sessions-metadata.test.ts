@@ -216,7 +216,7 @@ function createSummary(): SessionSummary {
 }
 
 describe("Sessions metadata route", () => {
-  it("returns the latest live Codex usage before the session file exists", async () => {
+  it("returns live usage and retry status before the session file exists", async () => {
     const project = createProject();
     const process = {
       id: "proc-codex-live",
@@ -230,6 +230,11 @@ describe("Sessions metadata route", () => {
       queueDepth: 0,
       provider: "codex",
       model: "gpt-5.3-codex",
+      retryStatus: {
+        attempt: 2,
+        message: "rate limited",
+        next: 1_789_000_000_000,
+      },
       permissionMode: "default",
       modeVersion: 0,
       pendingInputRequest: null,
@@ -277,6 +282,7 @@ describe("Sessions metadata route", () => {
         () =>
           ({
             getSession: vi.fn(async () => null),
+            getSessionSummary: vi.fn(async () => null),
           }) as unknown as ISessionReader,
       ),
     });
@@ -300,6 +306,15 @@ describe("Sessions metadata route", () => {
       percentage: 65,
       contextWindow: 258_400,
     });
+    expect(json.session.retryStatus).toEqual(process.retryStatus);
+
+    const metadataResponse = await routes.request(
+      `/projects/${project.id}/sessions/${process.sessionId}/metadata`,
+    );
+    expect(metadataResponse.status).toBe(200);
+    expect((await metadataResponse.json()).session.retryStatus).toEqual(
+      process.retryStatus,
+    );
   });
 
   it("persists live and idle permission-mode changes", async () => {

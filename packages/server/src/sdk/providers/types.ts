@@ -6,6 +6,7 @@ import type {
   ModelInfo,
   PermissionMode,
   ProviderName,
+  SessionRetryStatus,
   SlashCommand,
 } from "@yep-anywhere/shared";
 import type { MessageQueue } from "../messageQueue.js";
@@ -84,6 +85,17 @@ export interface StartSessionOptions {
   llmGatewayConfig?: LlmGatewaySessionConfig;
   /** Tool approval callback */
   onToolApproval?: CanUseTool;
+  /**
+   * Provider retry/backoff notification.
+   *
+   * A provider that retries a failed request internally keeps the turn open,
+   * so nothing in the message stream distinguishes "thinking" from "waiting to
+   * retry after a 429". Providers that expose retry events report them here;
+   * `undefined` clears the state. This is a side channel on purpose: the
+   * message stream is replayed into the transcript, and backoff state is
+   * transient status, not conversation.
+   */
+  onRetryStatus?: (status: SessionRetryStatus | undefined) => void;
   /** Configured SSH host for Claude remote execution. */
   executor?: string;
   /** Global instructions to append to system prompt (from server settings) */
