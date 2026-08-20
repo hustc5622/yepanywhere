@@ -9,7 +9,7 @@ type MakeDepsOptions = Partial<BuildRecoveryDeps> & {
   serverBuildId?: string;
 };
 
-function buildInfoResponse(buildId: string): Response {
+function buildInfoResponse(buildId: unknown): Response {
   return new Response(JSON.stringify({ buildId }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
@@ -134,6 +134,26 @@ describe("checkForBuildRecovery", () => {
     ).resolves.toBe("unavailable");
     expect(deps.reload).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["a numeric build ID", 123],
+    ["an object build ID", { stale: true }],
+    ["an empty build ID", ""],
+  ])(
+    "rejects %s without storing a marker or reloading",
+    async (_name, buildId) => {
+      const deps = makeDeps({
+        fetchImpl: vi.fn(async () => buildInfoResponse(buildId)),
+      });
+
+      await expect(
+        checkForBuildRecovery("vite-preload-error", deps),
+      ).resolves.toBe("unavailable");
+      expect(deps.storage.getItem).not.toHaveBeenCalled();
+      expect(deps.storage.setItem).not.toHaveBeenCalled();
+      expect(deps.reload).not.toHaveBeenCalled();
+    },
+  );
 
   it("is disabled for the dev profile", async () => {
     const deps = makeDeps({ buildProfile: "dev" });

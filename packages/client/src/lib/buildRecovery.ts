@@ -21,7 +21,7 @@ export interface BuildRecoveryDeps {
 }
 
 interface BuildInfo {
-  buildId?: string;
+  buildId?: unknown;
 }
 
 export const CLIENT_BUILD_ID =
@@ -83,7 +83,12 @@ export async function checkForBuildRecovery(
     if (!response.ok) return "unavailable";
 
     const buildInfo = (await response.json()) as BuildInfo;
-    if (!buildInfo.buildId) return "unavailable";
+    if (
+      typeof buildInfo.buildId !== "string" ||
+      buildInfo.buildId.length === 0
+    ) {
+      return "unavailable";
+    }
     serverBuildId = buildInfo.buildId;
   } catch {
     return "unavailable";
