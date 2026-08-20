@@ -265,6 +265,8 @@ pnpm yep setup-admin-password # 设置或重置当前系统用户的全局管理
 
 `status` 分别报告定义是否安装、当前是否加载、开发/生产是否运行、登录自启动是否启用，并显示 PID、Profile、端口、日志与“配置异常”诊断。开发后台控制台日志位于 `~/.yep-anywhere/logs/`；macOS 生产日志是 `server-launchd.out.log` / `server-launchd.err.log`，Windows 生产监督器日志是 `server.out.log` / `server.err.log`。
 
+Windows 计划任务的顶层动作是常驻 `watch-yepanywhere.ps1`；直接结束内层生产监督器属于意外失败，watchdog 会在 5 秒后重新启动监督器并接管仍健康的已验证子进程。`pnpm yep stop-prod` 会先使用 `Stop-ScheduledTask` 停止 watchdog，再清理已验证进程；登录触发器没有周期重复，因此任务不会自行复活。PID 本身从来不是终止进程的授权，任何清理都必须先核验进程身份。
+
 **`pnpm yep rebuild` 会自动执行**：
 1. `pnpm lint` - Biome linter 检查
 2. `pnpm typecheck` - TypeScript 类型检查

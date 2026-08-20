@@ -259,6 +259,10 @@ function Get-YepLegacyManifestPaths {
   try {
     $repoRoot = [IO.Path]::GetFullPath([string]$Manifest.RepoRoot)
     $bundlePath = [IO.Path]::GetFullPath([string]$Manifest.BundlePath)
+    $repoPathRoot = [IO.Path]::GetPathRoot($repoRoot)
+    $bundlePathRoot = [IO.Path]::GetPathRoot($bundlePath)
+    if ($repoRoot.Length -gt $repoPathRoot.Length) { $repoRoot = $repoRoot.TrimEnd([char[]]@('\', '/')) }
+    if ($bundlePath.Length -gt $bundlePathRoot.Length) { $bundlePath = $bundlePath.TrimEnd([char[]]@('\', '/')) }
     $expectedBundlePath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'dist/npm-package'))
   } catch { return $null }
   if (-not [string]::Equals($bundlePath, $expectedBundlePath, [StringComparison]::OrdinalIgnoreCase)) { return $null }
@@ -407,7 +411,7 @@ function Get-YepProductionInspection {
     $legacyPaths = Get-YepLegacyManifestPaths -Manifest $manifest
     if (-not $legacyPaths) {
       $legacyInvalid = $true
-      $reasons += 'legacy-path-mismatch'
+      $reasons += 'process-identity-mismatch'
     } else {
       $legacyExpectation = [pscustomobject]@{
         RunScriptPath = $legacyPaths.RunScriptPath
@@ -528,6 +532,67 @@ function Get-YepProductionInspection {
   }
 }
 
+function Get-YepTrustedLegacyStopInspection {
+  param([Parameter(Mandatory = $true)]$Inspection,
+    [Parameter(Mandatory = $true)]$Expectation)
+  if ([string]$Inspection.State -cne 'verified-stale' -or
+      (-not $Inspection.Manifest) -or ([int]$Inspection.Manifest.Version -ne 1) -or
+      @($Inspection.UnknownPortOwners).Count -gt 0) { return $null }
+  $legacyPaths = Get-YepLegacyManifestPaths -Manifest $Inspection.Manifest
+  if (-not $legacyPaths) { return $null }
+  $legacyExpectation = [pscustomobject]@{
+    RunScriptPath = $legacyPaths.RunScriptPath
+    CliPath = $legacyPaths.CliPath
+    ServerPort = [int]$Expectation.ServerPort
+  }
+  $verifiedSupervisor = $null
+  $verifiedProcesses = @()
+  $liveIdentityMismatch = $false
+  $trustedEntries = @()
+  if ($Inspection.VerifiedSupervisor) { $trustedEntries += $Inspection.VerifiedSupervisor }
+  $trustedEntries += @($Inspection.VerifiedProcesses)
+  foreach ($entry in $trustedEntries) {
+    $identityCheckFailed = $false
+    try { $identityMatches = Test-YepLegacyProcessIdentity -Entry $entry -Expectation $legacyExpectation }
+    catch { $identityMatches = $false; $identityCheckFailed = $true }
+    if ($identityMatches) {
+      if ([string]$entry.Role -ceq 'supervisor') { $verifiedSupervisor = $entry }
+      else { $verifiedProcesses += $entry }
+    } else {
+      try { $stillPresent = $null -ne (Get-Process -Id ([int]$entry.Pid) -ErrorAction SilentlyContinue) }
+      catch { $stillPresent = $true }
+      if ($identityCheckFailed -or $stillPresent) { $liveIdentityMismatch = $true }
+    }
+  }
+
+  $unknownPortOwners = @()
+  $legacyStopSnapshot = @()
+  if (-not $liveIdentityMismatch) {
+    $snapshotResult = Get-YepTrustedLegacyProcessSnapshot `
+      -Entries $trustedEntries -LegacyExpectation $legacyExpectation -Expectation $Expectation
+    if (-not $snapshotResult.Complete) { return $null }
+    if ($snapshotResult.IdentityMismatch) { $liveIdentityMismatch = $true }
+    $unknownPortOwners = @($snapshotResult.UnknownPortOwners)
+    $legacyStopSnapshot = @($snapshotResult.Processes)
+  }
+  $hasVerified = ($null -ne $verifiedSupervisor) -or ($verifiedProcesses.Count -gt 0)
+  $reasons = @('legacy-v1')
+  if ($liveIdentityMismatch) { $reasons += 'process-identity-mismatch' }
+  if ($unknownPortOwners.Count -gt 0) { $reasons += 'unknown-port-owner' }
+  return [pscustomobject]@{
+    State = if ($liveIdentityMismatch -or $unknownPortOwners.Count -gt 0) { 'unknown-conflict' } elseif ($hasVerified) { 'verified-stale' } else { 'stopped' }
+    Manifest = $Inspection.Manifest
+    VerifiedSupervisor = $verifiedSupervisor
+    VerifiedProcesses = @($verifiedProcesses)
+    LegacyStopSnapshot = @($legacyStopSnapshot)
+    UnknownPortOwners = @($unknownPortOwners)
+    MainHealthy = $false
+    MaintenanceHealthy = $false
+    RunningBuildId = $null
+    Reasons = @($reasons)
+  }
+}
+
 function Test-YepSnapshotDescendsFrom {
   param([Parameter(Mandatory = $true)][int]$ProcessId,
     [Parameter(Mandatory = $true)][int]$AncestorId,
@@ -540,6 +605,146 @@ function Test-YepSnapshotDescendsFrom {
     $current = [int]$currentInfo.ParentProcessId
   }
   return $false
+}
+
+function Close-YepBoundProcessSnapshot {
+  param($Snapshot)
+  foreach ($entry in @($Snapshot)) {
+    if (-not $entry.Process) { continue }
+    try { $null = $entry.Process.Dispose() } catch { }
+  }
+}
+
+function New-YepBoundProcessSnapshotEntry {
+  param([Parameter(Mandatory = $true)]$ProcessInfo,
+    [Parameter(Mandatory = $true)][string]$Role)
+  if (-not (Test-YepProperty $ProcessInfo 'CreationDate')) {
+    return [pscustomobject]@{ Status = 'unknown'; Entry = $null }
+  }
+  try { $creationTime = ([DateTime]$ProcessInfo.CreationDate).ToUniversalTime() }
+  catch { return [pscustomobject]@{ Status = 'unknown'; Entry = $null } }
+
+  $live = $null
+  try {
+    $live = Get-Process -Id ([int]$ProcessInfo.ProcessId) -ErrorAction SilentlyContinue
+    if (-not $live) { return [pscustomobject]@{ Status = 'missing'; Entry = $null } }
+    $rawHandle = $live.Handle
+    $safeHandle = $live.SafeHandle
+    if (($rawHandle -eq [IntPtr]::Zero) -or (-not $safeHandle) -or
+        $safeHandle.IsInvalid -or $safeHandle.IsClosed) { throw 'process-handle-unavailable' }
+    $startTime = $live.StartTime.ToUniversalTime()
+    if ([Math]::Abs([long]($startTime.Ticks - $creationTime.Ticks)) -gt 9) {
+      $null = $live.Dispose()
+      return [pscustomobject]@{ Status = 'mismatch'; Entry = $null }
+    }
+    return [pscustomobject]@{
+      Status = 'bound'
+      Entry = [pscustomobject]@{
+        Pid = [int]$ProcessInfo.ProcessId
+        StartTimeUtc = $startTime.ToString('o')
+        Role = $Role
+        Process = $live
+        Handle = $safeHandle
+      }
+    }
+  } catch {
+    if ($live) { try { $null = $live.Dispose() } catch { } }
+    return [pscustomobject]@{ Status = 'unknown'; Entry = $null }
+  }
+}
+
+function Get-YepTrustedLegacyProcessSnapshot {
+  param([Parameter(Mandatory = $true)]$Entries,
+    [Parameter(Mandatory = $true)]$LegacyExpectation,
+    [Parameter(Mandatory = $true)]$Expectation)
+  try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) }
+  catch { return [pscustomobject]@{ Complete = $false; IdentityMismatch = $false; Processes = @(); UnknownPortOwners = @() } }
+
+  $snapshot = @()
+  $retainSnapshot = $false
+  try {
+  $trustedPids = @()
+  $serverPids = @()
+  foreach ($entry in @($Entries)) {
+    $processInfo = @($processes | Where-Object { [int]$_.ProcessId -eq [int]$entry.Pid }) | Select-Object -First 1
+    if (-not $processInfo) { continue }
+    $bound = New-YepBoundProcessSnapshotEntry -ProcessInfo $processInfo -Role ([string]$entry.Role)
+    if ($bound.Status -eq 'missing') { continue }
+    if ($bound.Status -ne 'bound') {
+      return [pscustomobject]@{ Complete = ($bound.Status -eq 'mismatch'); IdentityMismatch = ($bound.Status -eq 'mismatch'); Processes = @(); UnknownPortOwners = @() }
+    }
+    $snapshot += $bound.Entry
+    try { $expectedStart = [DateTimeOffset]::Parse([string]$entry.StartTimeUtc).UtcDateTime }
+    catch { $expectedStart = $null }
+    $startMatches = $expectedStart -and
+      ([DateTimeOffset]::Parse([string]$bound.Entry.StartTimeUtc).UtcDateTime.Ticks -eq $expectedStart.Ticks)
+    if ((-not $startMatches) -or
+        (-not (Test-YepRoleCommand -Role ([string]$entry.Role) -CommandLine ([string]$processInfo.CommandLine) -Expectation $LegacyExpectation))) {
+      return [pscustomobject]@{ Complete = $true; IdentityMismatch = $true; Processes = @(); UnknownPortOwners = @() }
+    }
+    $trustedPids += [int]$entry.Pid
+    if ([string]$entry.Role -ceq 'server') { $serverPids += [int]$entry.Pid }
+  }
+
+  $candidatePids = @($trustedPids)
+  foreach ($processInfo in $processes) {
+    foreach ($trustedPid in $trustedPids) {
+      if (Test-YepSnapshotDescendsFrom -ProcessId ([int]$processInfo.ProcessId) -AncestorId $trustedPid -Processes $processes) {
+        $candidatePids += [int]$processInfo.ProcessId
+        break
+      }
+    }
+  }
+  foreach ($processId in @($candidatePids | Sort-Object -Unique)) {
+    if (@($snapshot | Where-Object { [int]$_.Pid -eq $processId }).Count -gt 0) { continue }
+    $processInfo = @($processes | Where-Object { [int]$_.ProcessId -eq $processId }) | Select-Object -First 1
+    if (-not $processInfo) { continue }
+    $bound = New-YepBoundProcessSnapshotEntry -ProcessInfo $processInfo -Role 'descendant'
+    if ($bound.Status -eq 'missing') { continue }
+    if ($bound.Status -ne 'bound') {
+      return [pscustomobject]@{ Complete = ($bound.Status -eq 'mismatch'); IdentityMismatch = ($bound.Status -eq 'mismatch'); Processes = @(); UnknownPortOwners = @() }
+    }
+    $snapshot += $bound.Entry
+  }
+
+  $snapshotPids = @($snapshot | ForEach-Object { [int]$_.Pid })
+  $unknownPortOwners = @()
+  foreach ($portInfo in @(
+      [pscustomobject]@{ Port = [int]$Expectation.ServerPort; Pids = @(Get-YepListeningPids -Port ([int]$Expectation.ServerPort)) },
+      [pscustomobject]@{ Port = [int]$Expectation.MaintenancePort; Pids = @(Get-YepListeningPids -Port ([int]$Expectation.MaintenancePort)) }
+    )) {
+    foreach ($ownerPid in @($portInfo.Pids)) {
+      $ownerMatches = $snapshotPids -contains [int]$ownerPid
+      if ($ownerMatches) {
+        $ownerMatches = $false
+        foreach ($serverPid in $serverPids) {
+          if (([int]$ownerPid -eq $serverPid) -or
+              (Test-YepSnapshotDescendsFrom -ProcessId ([int]$ownerPid) -AncestorId $serverPid -Processes $processes)) {
+            $ownerMatches = $true
+            break
+          }
+        }
+      }
+      if (-not $ownerMatches) {
+        $unknownPortOwners += [pscustomobject]@{ Port = [int]$portInfo.Port; Pid = [int]$ownerPid }
+      }
+    }
+  }
+  $processesForResult = if ($unknownPortOwners.Count -gt 0) { @() } else {
+    $retainSnapshot = $true
+    @($snapshot)
+  }
+  return [pscustomobject]@{
+    Complete = $true
+    IdentityMismatch = $false
+    Processes = @($processesForResult)
+    UnknownPortOwners = @($unknownPortOwners)
+  }
+  } catch {
+    return [pscustomobject]@{ Complete = $false; IdentityMismatch = $false; Processes = @(); UnknownPortOwners = @() }
+  } finally {
+    if (-not $retainSnapshot) { Close-YepBoundProcessSnapshot -Snapshot $snapshot }
+  }
 }
 
 function Get-YepVerifiedProcessSnapshot {
@@ -610,6 +815,15 @@ function Test-YepSnapshotProcessAlive {
   } catch { return $true }
 }
 
+function Get-YepBoundProcessState {
+  param([Parameter(Mandatory = $true)]$Entry)
+  if (-not $Entry.Process) { return 'unknown' }
+  try {
+    if ($Entry.Process.HasExited) { return 'exited' }
+    return 'running'
+  } catch { return 'unknown' }
+}
+
 function Get-YepRemainingSnapshotPids {
   param([Parameter(Mandatory = $true)]$Snapshot)
   return @($Snapshot | Where-Object { Test-YepSnapshotProcessAlive $_ } |
@@ -628,6 +842,44 @@ function Invoke-YepTaskkillTree {
   }
   foreach ($line in $output) { Write-Host $line }
   return [pscustomobject]@{ ExitCode = [int]$exitCode }
+}
+
+function Stop-YepTrustedLegacyProcessGroup {
+  param([Parameter(Mandatory = $true)]$Inspection,
+    [Parameter(Mandatory = $true)]$Expectation)
+  $snapshot = if (Test-YepProperty $Inspection 'LegacyStopSnapshot') {
+    @($Inspection.LegacyStopSnapshot)
+  } else { @() }
+  try {
+    if ((-not (Test-YepProperty $Inspection 'LegacyStopSnapshot')) -or
+        @($Inspection.UnknownPortOwners).Count -gt 0) { return $false }
+    foreach ($entry in $snapshot) {
+      if ((Get-YepBoundProcessState -Entry $entry) -eq 'unknown') { return $false }
+    }
+    foreach ($entry in $snapshot) {
+      $state = Get-YepBoundProcessState -Entry $entry
+      if ($state -eq 'exited') { continue }
+      if ($state -ne 'running') { return $false }
+      try { $null = $entry.Process.Kill() }
+      catch {
+        if ((Get-YepBoundProcessState -Entry $entry) -eq 'exited') { continue }
+        return $false
+      }
+      try {
+        if (-not $entry.Process.WaitForExit(5000)) { return $false }
+      } catch {
+        if ((Get-YepBoundProcessState -Entry $entry) -ne 'exited') { return $false }
+      }
+    }
+    foreach ($entry in $snapshot) {
+      if ((Get-YepBoundProcessState -Entry $entry) -ne 'exited') { return $false }
+    }
+    if (@(Get-YepListeningPids -Port ([int]$Expectation.ServerPort)).Count -gt 0 -or
+        @(Get-YepListeningPids -Port ([int]$Expectation.MaintenancePort)).Count -gt 0) { return $false }
+    return $true
+  } finally {
+    Close-YepBoundProcessSnapshot -Snapshot $snapshot
+  }
 }
 
 function Stop-YepVerifiedProcessGroup {

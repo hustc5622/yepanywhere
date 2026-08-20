@@ -275,9 +275,9 @@ PID 不能单独作为身份依据，因为 Windows 会复用 PID。验证必须
 - 若确认是 Yep Anywhere 进程，但版本、配置或健康不匹配，则只终止清单中验证通过的旧进程，再启动新组；
 - 若存在未知端口占用，不尝试 kill，启动失败并给出诊断信息。
 
-任何关键子进程意外退出时，supervisor 清理同一受管组内其余经过验证的进程并以失败码退出，由计划任务的失败重启策略拉起整个组。`start-prod`、`stop-prod` 和部署脚本共享同一身份验证逻辑；即使 supervisor 已消失，stop/deploy 也能清理经过验证的残留进程。
+任何关键子进程意外退出时，supervisor 清理同一受管组内其余经过验证的进程并以失败码退出。计划任务的常驻 watchdog 随后重新启动内层 supervisor，由它拉起整个组或接管仍健康的已验证子进程。`start-prod`、`stop-prod` 和部署脚本共享同一身份验证逻辑；即使 supervisor 已消失，stop/deploy 也能清理经过验证的残留进程。
 
-验收必须区分两种语义：非人工的 supervisor 异常退出后，计划任务应在配置的间隔内重新启动 supervisor，并完成身份验证和接管；显式执行 `Stop-ScheduledTask` 或受控停机时可以不自动重启，但该行为必须在 status 输出和运维文档中说明。仅验证“新 supervisor 启动后能够接管”不足以证明计划任务会主动拉起它。
+验收必须区分两种语义：非人工的 inner supervisor 异常退出后，仍在运行的 watchdog 应在配置的间隔内重新启动 supervisor，并完成身份验证和接管；显式执行 `Stop-ScheduledTask` 或受控停机时先终止 watchdog，因此不能再自动重启 inner supervisor。仅验证“新 supervisor 启动后能够接管”不足以证明 watchdog 会主动拉起它。
 
 ### 9.4 维护服务
 

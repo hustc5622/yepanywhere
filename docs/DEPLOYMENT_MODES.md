@@ -37,7 +37,7 @@ pnpm yep enable-autostart
 pnpm yep disable-autostart
 ```
 
-Windows 由当前用户的 `YepAnywhereServer` 计划任务管理生产服务，macOS 由 LaunchAgent 管理生产服务。
+Windows 由当前用户的 `YepAnywhereServer` 计划任务管理生产服务；任务动作是常驻的 `watch-yepanywhere.ps1`，它启动内层 `run-yepanywhere.ps1` supervisor。macOS 由 LaunchAgent 管理生产服务。
 
 ## 开发模式
 
@@ -54,6 +54,8 @@ Windows 由当前用户的 `YepAnywhereServer` 计划任务管理生产服务，
 可用 `YEP_DEPLOY_PORT`、`YEP_ANYWHERE_PROFILE` 或 `YEP_ANYWHERE_DATA_DIR` 在安装或启动生产服务时指定端口和数据目录。
 
 `pnpm yep stop-prod` 只停止当前生产实例而保留登录自启动，`pnpm yep disable-autostart` 只关闭后续登录自启动而不停止当前实例。
+
+Windows 下直接结束内层 supervisor 属于意外失败，常驻 watchdog 会在短暂延迟后重新启动 supervisor，并接管仍健康的已验证子进程。`pnpm yep stop-prod` 会先通过 `Stop-ScheduledTask` 停止 watchdog；登录触发器没有周期重复，因此任务不会自行复活，随后只清理身份验证通过的内层 supervisor 和子进程。PID 本身从来不是终止进程的授权，停止前必须核验进程身份。
 
 ## 重构建与更新
 

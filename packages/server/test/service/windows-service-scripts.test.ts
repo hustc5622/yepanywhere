@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,6 +15,12 @@ const installTaskScript = path.join(
   "install-task-scheduler.ps1",
 );
 const runProdScript = path.join(repoRoot, "scripts", "run-yepanywhere.ps1");
+const watchdogScript = path.join(repoRoot, "scripts", "watch-yepanywhere.ps1");
+const productionRuntimeScript = path.join(
+  repoRoot,
+  "scripts",
+  "production-runtime.ps1",
+);
 const deployScript = path.join(repoRoot, "scripts", "deploy.ps1");
 const tempDirs: string[] = [];
 
@@ -84,6 +90,9 @@ $global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
     TriggerUser = $null
     PrincipalUserId = $null
   RegisteredTriggerCount = -1
+  TriggerClass = $null
+  TriggerRepetitionInterval = $null
+  TriggerRepetitionDuration = $null
   RestartCount = 0
   MultipleInstances = $null
   ExecutionTimeLimit = $null
@@ -106,10 +115,25 @@ function New-ScheduledTaskAction {
   return [pscustomobject]@{ Execute = $Execute; Argument = $Argument; WorkingDirectory = $WorkingDirectory }
 }
 function New-ScheduledTaskTrigger {
-  param([switch]$AtLogOn, [string]$User)
-  $global:record['TriggerCreated'] = [bool]$AtLogOn
-  $global:record['TriggerUser'] = $User
-  return [pscustomobject]@{ AtLogOn = [bool]$AtLogOn; User = $User; Enabled = $true }
+  param([switch]$AtLogOn, [string]$User, [switch]$Once, $At, $RepetitionInterval)
+  if ($AtLogOn) {
+    $global:record['TriggerCreated'] = $true
+    $global:record['TriggerUser'] = $User
+    return [pscustomobject]@{
+      AtLogOn = $true
+      User = $User
+      Enabled = $true
+      Repetition = $null
+      CimClass = [pscustomobject]@{ CimClassName = 'MSFT_TaskLogonTrigger' }
+    }
+  }
+  return [pscustomobject]@{
+    Repetition = [pscustomobject]@{
+      Interval = $RepetitionInterval
+      Duration = ''
+      StopAtDurationEnd = $false
+    }
+  }
 }
 function New-ScheduledTaskSettingsSet {
   param(
@@ -133,6 +157,12 @@ function New-ScheduledTaskPrincipal {
 function Register-ScheduledTask {
   param($TaskName, $Action, $Trigger, $Settings, $Principal, [switch]$Force)
   $global:record['RegisteredTriggerCount'] = if ($PSBoundParameters.ContainsKey('Trigger')) { @($Trigger).Count } else { 0 }
+  if ($PSBoundParameters.ContainsKey('Trigger')) {
+    $registeredTrigger = @($Trigger) | Select-Object -First 1
+    $global:record['TriggerClass'] = [string]$registeredTrigger.CimClass.CimClassName
+    $global:record['TriggerRepetitionInterval'] = $registeredTrigger.Repetition.Interval
+    $global:record['TriggerRepetitionDuration'] = [string]$registeredTrigger.Repetition.Duration
+  }
   return [pscustomobject]@{ TaskName = $TaskName }
 }
 function Start-ScheduledTask { param($TaskName) $global:record['Started'] = $true }
@@ -150,6 +180,13 @@ Write-Output ('${recordMarker}' + ($global:record | ConvertTo-Json -Compress -De
     TriggerUser: string | null;
     PrincipalUserId: string | null;
     RegisteredTriggerCount: number;
+    TriggerClass: string | null;
+    TriggerRepetitionInterval: {
+      Minutes: number;
+      Hours: number;
+      Seconds: number;
+    } | null;
+    TriggerRepetitionDuration: string | null;
     RestartCount: number;
     MultipleInstances: string | null;
     Started: boolean;
@@ -188,6 +225,52 @@ describe.skipIf(process.platform !== "win32")("Windows 服务脚本", () => {
     }
     expect(result.stdout).not.toContain("Show service");
   });
+
+  it.each([
+    { name: "failed", childExit: 23, expectedExit: 1 },
+    { name: "successful", childExit: 0, expectedExit: 0 },
+  ])(
+    "rebuild exposes $name deploy output and exit status",
+    async ({ name, childExit, expectedExit }) => {
+      const fixtureRoot = await mkdtemp(
+        path.join(tmpdir(), "yep-rebuild-cli-"),
+      );
+      tempDirs.push(fixtureRoot);
+      const scriptsDir = await mkdtemp(path.join(fixtureRoot, "scripts-"));
+      const fixtureYep = path.join(scriptsDir, "yep.ps1");
+      const marker = `__REBUILD_CHILD_${name.toUpperCase()}__`;
+      await Promise.all([
+        copyFile(yepScript, fixtureYep),
+        copyFile(
+          productionRuntimeScript,
+          path.join(scriptsDir, "production-runtime.ps1"),
+        ),
+        copyFile(
+          path.join(repoRoot, "scripts", "service-config.ps1"),
+          path.join(scriptsDir, "service-config.ps1"),
+        ),
+        writeFile(
+          path.join(scriptsDir, "deploy.ps1"),
+          `Write-Output ${psLiteral(marker)}\nexit ${childExit}\n`,
+          "utf8",
+        ),
+      ]);
+
+      const result = await runPowerShellCommand(
+        `& ${psLiteral(fixtureYep)} rebuild`,
+        {
+          YEP_LAUNCHD_LOG_DIR: fixtureRoot,
+          YEP_SERVICE_CONFIG_PATH: path.join(
+            fixtureRoot,
+            "missing-service-config.json",
+          ),
+        },
+      );
+
+      expect.soft(result.stdout).toContain(marker);
+      expect.soft(result.code).toBe(expectedExit);
+    },
+  );
 
   it("setup-admin-password 通过 PowerShell 隐藏输入设置管理员密码", async () => {
     const stateDir = await mkdtemp(path.join(tmpdir(), "yep-admin-command-"));
@@ -363,9 +446,17 @@ Add-MenuMarker 'returned'
       throw new Error("缺少测试端口");
     const harness = `
 function Test-Path {
-  param($Path)
-  return ([string]$Path -like '*dist\\npm-package\\dist\\cli.js')
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  return ([string]$candidate -like '*dist\\npm-package\\dist\\cli.js')
 }
+function Get-Content { return '{"buildId":"build-1"}' }
+function Get-NetTCPConnection {
+  param($LocalPort, $State, $ErrorAction)
+  if ([int]$LocalPort -eq ${address.port}) { return [pscustomobject]@{ OwningProcess = ${process.pid} } }
+  return @()
+}
+function Invoke-WebRequest { throw 'not healthy' }
 function Get-ScheduledTask {
   return [pscustomobject]@{
     State = 'Running'
@@ -414,12 +505,24 @@ function Get-ScheduledTask {
     const harness = `
 $global:taskState = 'Ready'
 $global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
+$global:realGetContent = Get-Command Get-Content -CommandType Cmdlet
 function Test-Path {
-  param($Path)
-  if ([string]$Path -like '*dist\\npm-package\\dist\\cli.js') { return $true }
-  return & $global:realTestPath -LiteralPath $Path
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\dist\\cli.js') { return $true }
+  return & $global:realTestPath -LiteralPath $candidate
+}
+function Get-Content {
+  param($Path, $LiteralPath, [switch]$Raw, $Encoding)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\build-info.json') { return '{"buildId":"build-1"}' }
+  $arguments = @{ LiteralPath = $candidate }
+  if ($Raw) { $arguments.Raw = $true }
+  if ($Encoding) { $arguments.Encoding = $Encoding }
+  return & $global:realGetContent @arguments
 }
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Start-Sleep { }
 function Get-ScheduledTask {
   return [pscustomobject]@{
@@ -427,7 +530,7 @@ function Get-ScheduledTask {
     Principal = [pscustomobject]@{ UserId = "$env:USERDOMAIN\\$env:USERNAME" }
     Actions = @([pscustomobject]@{
       Execute = (Get-Command powershell.exe).Source
-      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${watchdogScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
       WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
     })
     Settings = [pscustomobject]@{
@@ -450,7 +553,7 @@ function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
     });
 
     expect(result.code).toBe(1);
-    expect(result.stdout).toContain("PID");
+    expect(result.stdout).toContain("PID 元数据");
   });
 
   it("start-prod 和 status 在受管端口健康检查失败时都报告异常", async () => {
@@ -477,6 +580,8 @@ function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
       JSON.stringify({
         Version: 1,
         Mode: "prod",
+        RepoRoot: repoRoot,
+        BundlePath: path.join(repoRoot, "dist", "npm-package"),
         Processes: [{ Role: "server", Pid: 424242, StartTimeUtc: fixedStart }],
       }),
       "utf8",
@@ -484,18 +589,35 @@ function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
     const cliJs = path.join(repoRoot, "dist", "npm-package", "dist", "cli.js");
     const commonHarness = `
 $global:fixedStart = [DateTime]::Parse('${fixedStart}')
+$global:realGetContent = Get-Command Get-Content -CommandType Cmdlet
 function Test-Path {
-  param($Path)
-  return ([string]$Path -like '*dist\\npm-package\\dist\\cli.js') -or ([string]$Path -like '*service-config.json') -or ([string]$Path -like '*prod-process.json')
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  return ([string]$candidate -like '*dist\\npm-package\\dist\\cli.js') -or ([string]$candidate -like '*service-config.json') -or ([string]$candidate -like '*prod-process.json')
+}
+function Get-Content {
+  param($Path, $LiteralPath, [switch]$Raw, $Encoding)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\build-info.json') { return '{"buildId":"build-1"}' }
+  $arguments = @{ LiteralPath = $candidate }
+  if ($Raw) { $arguments.Raw = $true }
+  if ($Encoding) { $arguments.Encoding = $Encoding }
+  return & $global:realGetContent @arguments
 }
 function netstat { Write-Output 'TCP 127.0.0.1:61990 0.0.0.0:0 LISTENING 424242' }
+function Get-NetTCPConnection {
+  param($LocalPort, $State, $ErrorAction)
+  if ([int]$LocalPort -in @(61990, 61991)) { return [pscustomobject]@{ OwningProcess = 424242 } }
+  return @()
+}
 function Get-Process {
   param($Id, $ErrorAction)
   if ($Id -eq 424242) { return [pscustomobject]@{ Id = 424242; StartTime = $global:fixedStart; ProcessName = 'node' } }
   return $null
 }
 function Get-CimInstance {
-  return [pscustomobject]@{ ProcessId = 424242; ParentProcessId = 0; CommandLine = '${cliJs.replaceAll("'", "''")} --port 61990' }
+  param($ClassName, $Filter, $ErrorAction)
+  return [pscustomobject]@{ ProcessId = 424242; ParentProcessId = 0; ExecutablePath = 'C:\\Program Files\\nodejs\\node.exe'; CommandLine = '${cliJs.replaceAll("'", "''")} --port 61990' }
 }
 function Get-ScheduledTask {
   return [pscustomobject]@{
@@ -503,7 +625,7 @@ function Get-ScheduledTask {
     Principal = [pscustomobject]@{ UserId = "$env:USERDOMAIN\\$env:USERNAME" }
     Actions = @([pscustomobject]@{
       Execute = (Get-Command powershell.exe).Source
-      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${watchdogScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
       WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
     })
     Settings = [pscustomobject]@{ MultipleInstances = 'IgnoreNew'; RestartCount = 999; RestartInterval = 'PT1M'; ExecutionTimeLimit = 'PT0S' }
@@ -512,6 +634,8 @@ function Get-ScheduledTask {
 }
 function Get-ScheduledTaskInfo { return [pscustomobject]@{ LastTaskResult = 0 } }
 function Invoke-WebRequest { throw 'unhealthy' }
+function taskkill.exe { Write-Output '__TASKKILL_FAILED__'; & cmd.exe /c exit 5 }
+function Start-Sleep { }
 `;
 
     const start = await runPowerShellCommand(
@@ -530,9 +654,9 @@ function Invoke-WebRequest { throw 'unhealthy' }
     );
 
     expect(start.code).toBe(1);
-    expect(start.stdout).toContain("异常");
+    expect(start.stdout).toContain("verified-stale");
     expect(status.code).toBe(0);
-    expect(status.stdout).toContain("生产模式：配置异常");
+    expect(status.stdout).toContain("verified-stale");
   });
 
   it("开发服务健康检查超时时清理启动器和 PID 元数据", async () => {
@@ -621,6 +745,7 @@ function Start-Process { throw '__UNEXPECTED_START__' }
     tempDirs.push(stateDir);
     const harness = `
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask {
   return [pscustomobject]@{
     State = 'Running'
@@ -650,13 +775,14 @@ function Stop-ScheduledTask { Write-Host '__STOPPED_INVALID_TASK__' }
     const configPath = path.join(stateDir, "service-config.json");
     const harness = `
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask {
   return [pscustomobject]@{
     State = 'Running'
     Principal = [pscustomobject]@{ UserId = "$env:USERDOMAIN\\$env:USERNAME" }
     Actions = @([pscustomobject]@{
       Execute = (Get-Command powershell.exe).Source
-      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${watchdogScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
       WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
     })
     Settings = [pscustomobject]@{ MultipleInstances = 'IgnoreNew'; RestartCount = 999; RestartInterval = 'PT1M'; ExecutionTimeLimit = 'PT0S' }
@@ -685,6 +811,7 @@ function taskkill.exe { Write-Output '__UNEXPECTED_TASKKILL__' }
     const configPath = path.join(stateDir, "service-config.json");
     const harness = `
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Start-Sleep { }
 function Get-ScheduledTask {
   return [pscustomobject]@{
@@ -692,7 +819,7 @@ function Get-ScheduledTask {
     Principal = [pscustomobject]@{ UserId = "$env:USERDOMAIN\\$env:USERNAME" }
     Actions = @([pscustomobject]@{
       Execute = (Get-Command powershell.exe).Source
-      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${watchdogScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
       WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
     })
     Settings = [pscustomobject]@{ MultipleInstances = 'IgnoreNew'; RestartCount = 999; RestartInterval = 'PT1M'; ExecutionTimeLimit = 'PT0S' }
@@ -714,7 +841,7 @@ function taskkill.exe { Write-Output '__UNEXPECTED_TASKKILL__' }
     expect(result.stdout).not.toContain("__UNEXPECTED_TASKKILL__");
   });
 
-  it("stop-prod 在请求停止计划任务前快照进程树以发现重挂父进程的子进程", async () => {
+  it("stop-prod 为严格 v2 一次迁移接受同 repo direct action 并清理已验证子进程", async () => {
     const stateDir = await mkdtemp(
       path.join(tmpdir(), "yep-task-reparented-child-"),
     );
@@ -722,17 +849,105 @@ function taskkill.exe { Write-Output '__UNEXPECTED_TASKKILL__' }
     const fixedStart = "2026-08-11T00:00:00Z";
     const configPath = path.join(stateDir, "service-config.json");
     const stateFile = path.join(stateDir, "prod-process.json");
+    const bundleDir = path.join(repoRoot, "dist", "npm-package");
+    const cliJs = path.join(bundleDir, "dist", "cli.js");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        Version: 1,
+        ServerPort: "8022",
+        BasePath: "/",
+        Profile: null,
+        DataDir: null,
+        AllowedImagePaths: null,
+        CodexPort: "4510",
+        ClaudePort: "4520",
+      }),
+      "utf8",
+    );
+    const fingerprint = await runPowerShellCommand(
+      `. ${psLiteral(productionRuntimeScript)}
+$expectation = New-YepProductionExpectation -RepoRoot ${psLiteral(repoRoot)} -BundlePath ${psLiteral(bundleDir)} -BuildId 'build-1' -BasePath '/' -Profile $null -DataDir $null -AllowedImagePaths "$env:TEMP,$env:USERPROFILE\\Downloads" -ServerPort 8022 -MaintenancePort 8023 -CodexPort 4510 -ClaudePort 4520 -CodexControlUrl 'http://127.0.0.1:4510' -ClaudeControlUrl 'http://127.0.0.1:4520' -StartBridges $true -RunScriptPath ${psLiteral(runProdScript)}
+Write-Output $expectation.ConfigFingerprint`,
+    );
+    if (fingerprint.code !== 0)
+      throw new Error(fingerprint.stderr || fingerprint.stdout);
+    const supervisorCommand = `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript}" -ConfigPath "${configPath}"`;
+    const serverCommand = `node.exe "${cliJs}" --port 8022`;
     await writeFile(
       stateFile,
       JSON.stringify({
-        Processes: [{ Pid: 100, Role: "supervisor", StartTimeUtc: fixedStart }],
+        Version: 2,
+        Mode: "prod",
+        SupervisorInstanceId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+        Supervisor: {
+          Role: "supervisor",
+          Pid: 100,
+          StartTimeUtc: fixedStart,
+          ExecutablePath:
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          CommandLine: supervisorCommand,
+        },
+        BuildId: "build-1",
+        ConfigFingerprint: fingerprint.stdout.trim(),
+        RepoRoot: repoRoot,
+        BundlePath: bundleDir,
+        Profile: null,
+        DataDir: null,
+        BasePath: "",
+        Ports: {
+          Server: 8022,
+          Maintenance: 8023,
+          Codex: 4510,
+          Claude: 4520,
+        },
+        Bridges: { Codex: "disabled", Claude: "disabled" },
+        Processes: [
+          {
+            Role: "server",
+            Pid: 101,
+            StartTimeUtc: "2026-08-11T00:00:01Z",
+            ExecutablePath: "C:\\Program Files\\nodejs\\node.exe",
+            CommandLine: serverCommand,
+          },
+        ],
       }),
       "utf8",
     );
     const harness = `
 $global:fixedStart = [DateTime]::Parse('${fixedStart}')
 $global:taskStopped = $false
+$global:childKilled = $false
+$global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
+$global:realGetContent = Get-Command Get-Content -CommandType Cmdlet
+function Test-Path {
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\dist\\cli.js') { return $true }
+  return & $global:realTestPath -LiteralPath $candidate
+}
+function Get-Content {
+  param($Path, $LiteralPath, [switch]$Raw, $Encoding)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\build-info.json') { return '{"buildId":"build-1"}' }
+  $arguments = @{ LiteralPath = $candidate }
+  if ($Raw) { $arguments.Raw = $true }
+  if ($Encoding) { $arguments.Encoding = $Encoding }
+  return & $global:realGetContent @arguments
+}
 function netstat { }
+function Get-NetTCPConnection {
+  param($LocalPort, $State, $ErrorAction)
+  if (-not $global:childKilled -and [int]$LocalPort -in @(8022, 8023)) {
+    return [pscustomobject]@{ OwningProcess = 101 }
+  }
+  return @()
+}
+function Invoke-WebRequest {
+  param([switch]$UseBasicParsing, $Uri, $TimeoutSec, $ErrorAction)
+  if ([string]$Uri -like '*/api/version') { return [pscustomobject]@{ StatusCode = 200; Content = '{"build":{"buildId":"build-1"}}' } }
+  return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+}
 function Start-Sleep { }
 function Get-ScheduledTask {
   return [pscustomobject]@{
@@ -747,18 +962,24 @@ function Get-ScheduledTask {
     Triggers = @()
   }
 }
-function Stop-ScheduledTask { $global:taskStopped = $true }
+function Stop-ScheduledTask {
+  $global:taskStopped = $true
+  Write-Host '__TASK_STOPPED__'
+}
 function Get-Process {
   param($Id, $ErrorAction)
   if ($Id -eq 100 -and -not $global:taskStopped) { return [pscustomobject]@{ Id = 100; StartTime = $global:fixedStart; ProcessName = 'powershell' } }
-  if ($Id -eq 101) { return [pscustomobject]@{ Id = 101; StartTime = $global:fixedStart.AddSeconds(1); ProcessName = 'node' } }
+  if ($Id -eq 101 -and -not $global:childKilled) { return [pscustomobject]@{ Id = 101; StartTime = $global:fixedStart.AddSeconds(1); ProcessName = 'node' } }
   return $null
 }
 function Get-CimInstance {
   param($ClassName, $Filter, $ErrorAction)
-  $items = @([pscustomobject]@{ ProcessId = 101; ParentProcessId = $(if ($global:taskStopped) { 0 } else { 100 }); CommandLine = 'node child-worker.js' })
+  $items = @()
+  if (-not $global:childKilled) {
+    $items += [pscustomobject]@{ ProcessId = 101; ParentProcessId = $(if ($global:taskStopped) { 0 } else { 100 }); ExecutablePath = 'C:\\Program Files\\nodejs\\node.exe'; CommandLine = '${serverCommand.replaceAll("'", "''")}' }
+  }
   if (-not $global:taskStopped) {
-    $items = @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; CommandLine = '${runProdScript.replaceAll("'", "''")}' }) + $items
+    $items = @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'; CommandLine = '${supervisorCommand.replaceAll("'", "''")}' }) + $items
   }
   if ($Filter -match '([0-9]+)') {
     $wanted = [int]$matches[1]
@@ -766,17 +987,29 @@ function Get-CimInstance {
   }
   return $items
 }
-function taskkill.exe { & cmd.exe /c exit 0 }
+function taskkill.exe {
+  param($PidFlag, $TargetPid, $TreeFlag, $ForceFlag)
+  if (Test-Path -LiteralPath ${psLiteral(stateFile)}) { Write-Output '__STATE_PRESENT_AT_KILL__' }
+  Write-Output "__KILL__$TargetPid"
+  if ([int]$TargetPid -eq 101) { $global:childKilled = $true }
+  & cmd.exe /c exit 0
+}
 & ${psLiteral(yepScript)} stop-prod
 `;
     const result = await runPowerShellCommand(harness, {
       YEP_LAUNCHD_LOG_DIR: stateDir,
       YEP_SERVICE_CONFIG_PATH: configPath,
+      YEP_START_BRIDGES: "true",
     });
 
-    expect(result.code).toBe(1);
-    expect(result.stdout).toContain("101");
-    expect(existsSync(stateFile)).toBe(true);
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain("__TASK_STOPPED__");
+    expect(result.stdout).toContain("__STATE_PRESENT_AT_KILL__");
+    expect(result.stdout).toContain("__KILL__101");
+    expect(result.stdout.indexOf("__TASK_STOPPED__")).toBeLessThan(
+      result.stdout.indexOf("__KILL__101"),
+    );
+    expect(existsSync(stateFile)).toBe(false);
   });
 
   it("进程树批量枚举失败时 stop-prod 安全失败且不调用 taskkill", async () => {
@@ -788,6 +1021,10 @@ function taskkill.exe { & cmd.exe /c exit 0 }
     await writeFile(
       stateFile,
       JSON.stringify({
+        Version: 1,
+        Mode: "prod",
+        RepoRoot: repoRoot,
+        BundlePath: path.join(repoRoot, "dist", "npm-package"),
         Processes: [{ Pid: 100, Role: "supervisor", StartTimeUtc: fixedStart }],
       }),
       "utf8",
@@ -795,6 +1032,7 @@ function taskkill.exe { & cmd.exe /c exit 0 }
     const harness = `
 $global:fixedStart = [DateTime]::Parse('${fixedStart}')
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask { return $null }
 function Get-Process {
   return [pscustomobject]@{ Id = 100; StartTime = $global:fixedStart; ProcessName = 'powershell' }
@@ -802,7 +1040,7 @@ function Get-Process {
 function Get-CimInstance {
   param($ClassName, $Filter, $ErrorAction)
   if ($Filter) {
-    return [pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; CommandLine = '${runProdScript.replaceAll("'", "''")}' }
+    return [pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'; CommandLine = '${runProdScript.replaceAll("'", "''")} -ConfigPath test.json' }
   }
   throw 'tree enumeration failed'
 }
@@ -816,7 +1054,7 @@ function taskkill.exe { [IO.File]::WriteAllText($env:YEP_TEST_KILL_MARKER, 'call
     });
 
     expect(result.code).toBe(1);
-    expect(result.stdout).toContain("无法枚举");
+    expect(result.stdout).toContain("无法完整枚举");
     expect(existsSync(killMarker)).toBe(false);
     expect(existsSync(stateFile)).toBe(true);
   });
@@ -852,6 +1090,8 @@ function Start-Process {
 
     const statusHarness = `
 function netstat { }
+function Get-NetTCPConnection { return @() }
+function Invoke-WebRequest { throw 'not running' }
 function Get-ScheduledTask {
   return [pscustomobject]@{
     State = 'Ready'
@@ -961,7 +1201,7 @@ function Start-Process { [IO.File]::WriteAllText($env:YEP_TEST_START_MARKER, 'st
     expect(existsSync(startMarker)).toBe(false);
   });
 
-  it("taskkill 失败且进程仍存活时 stop-prod 保留元数据并返回失败", async () => {
+  it("保留句柄终止失败且进程仍存活时 stop-prod 保留元数据并返回失败", async () => {
     const stateDir = await mkdtemp(path.join(tmpdir(), "yep-stop-residual-"));
     tempDirs.push(stateDir);
     const fixedStart = "2026-08-11T00:00:00Z";
@@ -969,6 +1209,10 @@ function Start-Process { [IO.File]::WriteAllText($env:YEP_TEST_START_MARKER, 'st
     await writeFile(
       stateFile,
       JSON.stringify({
+        Version: 1,
+        Mode: "prod",
+        RepoRoot: repoRoot,
+        BundlePath: path.join(repoRoot, "dist", "npm-package"),
         Processes: [
           {
             Pid: 424242,
@@ -982,10 +1226,19 @@ function Start-Process { [IO.File]::WriteAllText($env:YEP_TEST_START_MARKER, 'st
     const harness = `
 $global:fixedStart = [DateTime]::Parse('${fixedStart}')
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask { return $null }
 function Get-Process {
   param($Id, $ErrorAction)
-  if ($Id -eq 424242) { return [pscustomobject]@{ Id = 424242; StartTime = $global:fixedStart; ProcessName = 'powershell' } }
+  if ($Id -eq 424242) {
+    $process = [pscustomobject]@{ Id = 424242; StartTime = $global:fixedStart; ProcessName = 'powershell'; SafeHandle = [pscustomobject]@{ IsInvalid = $false; IsClosed = $false } }
+    $process | Add-Member ScriptProperty Handle { return [IntPtr]424243 }
+    $process | Add-Member ScriptProperty HasExited { return $false }
+    $process | Add-Member ScriptMethod Kill { Write-Host '__HANDLE_KILL_FAILED__'; throw 'kill failed' }
+    $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return $false }
+    $process | Add-Member ScriptMethod Dispose { }
+    return $process
+  }
   return $null
 }
 function Get-CimInstance {
@@ -993,10 +1246,12 @@ function Get-CimInstance {
   return [pscustomobject]@{
     ProcessId = 424242
     ParentProcessId = 0
-    CommandLine = '${runProdScript.replaceAll("'", "''")}'
+    CreationDate = $global:fixedStart
+    ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    CommandLine = '${runProdScript.replaceAll("'", "''")} -ConfigPath test.json'
   }
 }
-function taskkill.exe { Write-Output '__TASKKILL_FAILED__'; & cmd.exe /c exit 5 }
+function taskkill.exe { Write-Output '__UNEXPECTED_TASKKILL__'; & cmd.exe /c exit 5 }
 function Start-Sleep { }
 & ${psLiteral(yepScript)} stop-prod
 `;
@@ -1007,12 +1262,13 @@ function Start-Sleep { }
     });
 
     expect(result.code).toBe(1);
-    expect(result.stdout).toContain("__TASKKILL_FAILED__");
+    expect(result.stdout).toContain("__HANDLE_KILL_FAILED__");
+    expect(result.stdout).not.toContain("__UNEXPECTED_TASKKILL__");
     expect(result.stdout).toContain("仍在运行");
     expect(existsSync(stateFile)).toBe(true);
   });
 
-  it("taskkill 报 PID 不存在且同一进程已退出时 stop-prod 成功", async () => {
+  it("保留句柄确认同一进程已退出时 stop-prod 成功", async () => {
     const stateDir = await mkdtemp(path.join(tmpdir(), "yep-stop-vanished-"));
     tempDirs.push(stateDir);
     const fixedStart = "2026-08-11T00:00:00Z";
@@ -1021,6 +1277,10 @@ function Start-Sleep { }
     await writeFile(
       stateFile,
       JSON.stringify({
+        Version: 1,
+        Mode: "prod",
+        RepoRoot: repoRoot,
+        BundlePath: path.join(repoRoot, "dist", "npm-package"),
         Processes: [
           {
             Pid: vanishedPid,
@@ -1035,13 +1295,20 @@ function Start-Sleep { }
 $global:fixedStart = [DateTime]::Parse('${fixedStart}')
 $global:getProcessCalls = 0
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask { return $null }
 function Get-Process {
   param($Id, $ErrorAction)
   if ($Id -eq ${vanishedPid}) {
     $global:getProcessCalls++
-    if ($global:getProcessCalls -le 2) {
-      return [pscustomobject]@{ Id = ${vanishedPid}; StartTime = $global:fixedStart; ProcessName = 'powershell' }
+    if ($global:getProcessCalls -le 3) {
+      $process = [pscustomobject]@{ Id = ${vanishedPid}; StartTime = $global:fixedStart; ProcessName = 'powershell'; SafeHandle = [pscustomobject]@{ IsInvalid = $false; IsClosed = $false } }
+      $process | Add-Member ScriptProperty Handle { return [IntPtr]${vanishedPid} }
+      $process | Add-Member ScriptProperty HasExited { return $true }
+      $process | Add-Member ScriptMethod Kill { Write-Host '__UNEXPECTED_HANDLE_KILL__' }
+      $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return $true }
+      $process | Add-Member ScriptMethod Dispose { }
+      return $process
     }
   }
   return $null
@@ -1051,7 +1318,9 @@ function Get-CimInstance {
   return [pscustomobject]@{
     ProcessId = ${vanishedPid}
     ParentProcessId = 0
-    CommandLine = '${runProdScript.replaceAll("'", "''")}'
+    CreationDate = $global:fixedStart
+    ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    CommandLine = '${runProdScript.replaceAll("'", "''")} -ConfigPath test.json'
   }
 }
 function Start-Sleep { }
@@ -1065,11 +1334,12 @@ function Start-Sleep { }
 
     expect(result.code, result.stderr || result.stdout).toBe(0);
     expect(result.stderr).not.toContain("NativeCommandError");
-    expect(result.stdout).toContain("已在停止期间退出");
+    expect(result.stdout).toContain("生产模式已停止");
+    expect(result.stdout).not.toContain("__UNEXPECTED_HANDLE_KILL__");
     expect(existsSync(stateFile)).toBe(false);
   });
 
-  it("stop-prod 只终止已核实的生产根进程而不重复 taskkill 子进程", async () => {
+  it("stop-prod 通过保留句柄逐一终止已核实的 legacy 进程", async () => {
     const stateDir = await mkdtemp(path.join(tmpdir(), "yep-stop-tree-"));
     tempDirs.push(stateDir);
     const fixedStart = "2026-08-11T00:00:00Z";
@@ -1078,6 +1348,10 @@ function Start-Sleep { }
     await writeFile(
       stateFile,
       JSON.stringify({
+        Version: 1,
+        Mode: "prod",
+        RepoRoot: repoRoot,
+        BundlePath: path.join(repoRoot, "dist", "npm-package"),
         Processes: [
           { Pid: 100, Role: "supervisor", StartTimeUtc: fixedStart },
           { Pid: 101, Role: "server", StartTimeUtc: fixedStart },
@@ -1089,35 +1363,38 @@ function Start-Sleep { }
     const cliJs = path.join(repoRoot, "dist", "npm-package", "dist", "cli.js");
     const harness = `
 $global:fixedStart = [DateTime]::Parse('${fixedStart}')
-$global:killed = $false
+$global:alive = @{ 100 = $true; 101 = $true; 102 = $true }
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask { return $null }
 function Get-Process {
   param($Id, $ErrorAction)
-  if (-not $global:killed -and $Id -in @(100, 101, 102)) {
-    return [pscustomobject]@{ Id = $Id; StartTime = $global:fixedStart; ProcessName = 'node' }
+  if (-not $global:alive[[int]$Id]) { return $null }
+  $process = [pscustomobject]@{ Id = [int]$Id; StartTime = $global:fixedStart; ProcessName = 'node'; SafeHandle = [pscustomobject]@{ IsInvalid = $false; IsClosed = $false } }
+  $process | Add-Member ScriptProperty Handle { return [IntPtr]([int]$this.Id + 1) }
+  $process | Add-Member ScriptProperty HasExited { return -not [bool]$global:alive[[int]$this.Id] }
+  $process | Add-Member ScriptMethod Kill {
+    [IO.File]::AppendAllText($env:YEP_TEST_KILL_LOG, "__KILL__$($this.Id);")
+    $global:alive[[int]$this.Id] = $false
   }
-  return $null
+  $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return [bool]$this.HasExited }
+  $process | Add-Member ScriptMethod Dispose { }
+  return $process
 }
 function Get-CimInstance {
   param($ClassName, $Filter, $ErrorAction)
-  if ($global:killed) { return @() }
   $items = @(
-    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; CommandLine = '${runProdScript.replaceAll("'", "''")}' },
-    [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100; CommandLine = '${cliJs.replaceAll("'", "''")} --port 8022' },
-    [pscustomobject]@{ ProcessId = 102; ParentProcessId = 100; CommandLine = '${cliJs.replaceAll("'", "''")} --codex-bridge-only' }
-  )
+    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; CreationDate = $global:fixedStart; ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'; CommandLine = '${runProdScript.replaceAll("'", "''")} -ConfigPath test.json' },
+    [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100; CreationDate = $global:fixedStart; ExecutablePath = 'C:\\Program Files\\nodejs\\node.exe'; CommandLine = '${cliJs.replaceAll("'", "''")} --port 8022' },
+    [pscustomobject]@{ ProcessId = 102; ParentProcessId = 100; CreationDate = $global:fixedStart; ExecutablePath = 'C:\\Program Files\\nodejs\\node.exe'; CommandLine = '${cliJs.replaceAll("'", "''")} --codex-bridge-only' }
+  ) | Where-Object { $global:alive[[int]$_.ProcessId] }
   if ($Filter -match '([0-9]+)') {
     $wanted = [int]$matches[1]
     return @($items | Where-Object { $_.ProcessId -eq $wanted }) | Select-Object -First 1
   }
   return $items
 }
-function taskkill.exe {
-  param($PidFlag, $TargetPid, $TreeFlag, $ForceFlag)
-  [IO.File]::AppendAllText($env:YEP_TEST_KILL_LOG, "__KILL__$TargetPid;")
-  if ([int]$TargetPid -eq 100) { $global:killed = $true; & cmd.exe /c exit 0 } else { & cmd.exe /c exit 5 }
-}
+function taskkill.exe { [IO.File]::AppendAllText($env:YEP_TEST_KILL_LOG, '__UNEXPECTED_TASKKILL__;') }
 function Start-Sleep { }
 & ${psLiteral(yepScript)} stop-prod
 `;
@@ -1131,8 +1408,9 @@ function Start-Sleep { }
 
     expect(result.code, result.stderr || result.stdout).toBe(0);
     expect(killLog).toContain("__KILL__100");
-    expect(killLog).not.toContain("__KILL__101");
-    expect(killLog).not.toContain("__KILL__102");
+    expect(killLog).toContain("__KILL__101");
+    expect(killLog).toContain("__KILL__102");
+    expect(killLog).not.toContain("__UNEXPECTED_TASKKILL__");
     expect(existsSync(stateFile)).toBe(false);
   });
 
@@ -1146,6 +1424,10 @@ function Start-Sleep { }
     await writeFile(
       stateFile,
       JSON.stringify({
+        Version: 1,
+        Mode: "prod",
+        RepoRoot: repoRoot,
+        BundlePath: path.join(repoRoot, "dist", "npm-package"),
         Processes: [{ Pid: 100, Role: "supervisor", StartTimeUtc: fixedStart }],
       }),
       "utf8",
@@ -1155,21 +1437,35 @@ $global:fixedStart = [DateTime]::Parse('${fixedStart}')
 $global:rootKilled = $false
 $global:childKilled = $false
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask { return $null }
 function Get-Process {
   param($Id, $ErrorAction)
-  if ($Id -eq 100 -and -not $global:rootKilled) { return [pscustomobject]@{ Id = 100; StartTime = $global:fixedStart; ProcessName = 'powershell' } }
-  if ($Id -eq 101 -and -not $global:childKilled) { return [pscustomobject]@{ Id = 101; StartTime = $global:fixedStart.AddSeconds(1); ProcessName = 'node' } }
-  return $null
+  if (($Id -eq 100 -and $global:rootKilled) -or ($Id -eq 101 -and $global:childKilled)) { return $null }
+  if ($Id -notin @(100, 101)) { return $null }
+  $process = [pscustomobject]@{ Id = [int]$Id; StartTime = $global:fixedStart.AddSeconds([int]$Id - 100); ProcessName = 'node'; SafeHandle = [pscustomobject]@{ IsInvalid = $false; IsClosed = $false } }
+  $process | Add-Member ScriptProperty Handle { return [IntPtr]([int]$this.Id + 1) }
+  $process | Add-Member ScriptProperty HasExited {
+    if ([int]$this.Id -eq 100) { return [bool]$global:rootKilled }
+    return [bool]$global:childKilled
+  }
+  $process | Add-Member ScriptMethod Kill {
+    if ([int]$this.Id -eq 100) { $global:rootKilled = $true }
+    if ([int]$this.Id -eq 101) { $global:childKilled = $true }
+    Write-Host "__KILL__$($this.Id)"
+  }
+  $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return [bool]$this.HasExited }
+  $process | Add-Member ScriptMethod Dispose { }
+  return $process
 }
 function Get-CimInstance {
   param($ClassName, $Filter, $ErrorAction)
   $items = @()
   if (-not $global:childKilled) {
-    $items += [pscustomobject]@{ ProcessId = 101; ParentProcessId = $(if ($global:rootKilled) { 0 } else { 100 }); CommandLine = 'node child-worker.js' }
+    $items += [pscustomobject]@{ ProcessId = 101; ParentProcessId = $(if ($global:rootKilled) { 0 } else { 100 }); CreationDate = $global:fixedStart.AddSeconds(1); CommandLine = 'node child-worker.js' }
   }
   if (-not $global:rootKilled) {
-    $items = @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; CommandLine = '${runProdScript.replaceAll("'", "''")}' }) + $items
+    $items = @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 0; CreationDate = $global:fixedStart; ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'; CommandLine = '${runProdScript.replaceAll("'", "''")} -ConfigPath test.json' }) + $items
   }
   if ($Filter -match '([0-9]+)') {
     $wanted = [int]$matches[1]
@@ -1177,13 +1473,7 @@ function Get-CimInstance {
   }
   return $items
 }
-function taskkill.exe {
-  param($PidFlag, $TargetPid, $TreeFlag, $ForceFlag)
-  if ([int]$TargetPid -eq 100) { $global:rootKilled = $true }
-  if ([int]$TargetPid -eq 101) { $global:childKilled = $true }
-  Write-Output "__KILL__$TargetPid"
-  & cmd.exe /c exit 0
-}
+function taskkill.exe { Write-Output '__UNEXPECTED_TASKKILL__' }
 function Start-Sleep { }
 & ${psLiteral(yepScript)} stop-prod
 `;
@@ -1193,7 +1483,8 @@ function Start-Sleep { }
     });
 
     expect(result.code, result.stderr || result.stdout).toBe(0);
-    expect(result.stdout).toContain("已停止 prod 残留进程 PID 101");
+    expect(result.stdout).toContain("__KILL__101");
+    expect(result.stdout).not.toContain("__UNEXPECTED_TASKKILL__");
     expect(existsSync(stateFile)).toBe(false);
   });
 
@@ -1206,11 +1497,14 @@ function Start-Sleep { }
     const installArgsPath = path.join(stateDir, "install-args.txt");
     const harness = `
 function Test-Path {
-  param($Path)
-  return ([string]$Path -like '*dist\\npm-package\\dist\\cli.js')
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  return ([string]$candidate -like '*dist\\npm-package\\dist\\cli.js')
 }
+function Get-Content { return '{"buildId":"build-1"}' }
 function Get-Command { param($Name) return [pscustomobject]@{ Source = 'powershell.exe' } }
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask {
   return [pscustomobject]@{
     State = 'Ready'
@@ -1254,7 +1548,7 @@ function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
     expect(definition.Started).toBe(false);
     expect(definition.RestartCount).toBe(999);
     expect(definition.MultipleInstances).toBe("IgnoreNew");
-    expect(definition.ActionArgument).toContain("run-yepanywhere.ps1");
+    expect(definition.ActionArgument).toContain("watch-yepanywhere.ps1");
     expect(definition.ActionArgument).toContain("-WindowStyle Hidden");
   });
 
@@ -1264,10 +1558,182 @@ function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
     expect(definition.TriggerCreated).toBe(true);
     expect(definition.TriggerUser).toBe(definition.PrincipalUserId);
     expect(definition.RegisteredTriggerCount).toBe(1);
+    expect(definition.TriggerClass).toBe("MSFT_TaskLogonTrigger");
+    expect(definition.TriggerRepetitionInterval).toBeNull();
+    expect(definition.TriggerRepetitionDuration).toBe("");
     expect(definition.Started).toBe(false);
     expect(definition.RestartCount).toBe(999);
     expect(definition.MultipleInstances).toBe("IgnoreNew");
+    expect(definition.ActionArgument).toContain(watchdogScript);
+    expect(definition.ActionArgument).not.toContain(runProdScript);
   });
+
+  it("用真实 Windows provider 构造不会在 stop 后复活的登录触发器", async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), "yep-real-trigger-"));
+    tempDirs.push(stateDir);
+    const configPath = path.join(stateDir, "service-config.json");
+    const marker = "__REAL_TRIGGER__";
+    const harness = `
+Import-Module ScheduledTasks -Force -ErrorAction Stop
+$global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
+$global:registeredTrigger = $null
+$global:mockRegisterCalled = $false
+function Test-Path {
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\dist\\cli.js') { return $true }
+  return & $global:realTestPath -LiteralPath $candidate
+}
+function Register-ScheduledTask {
+  param($TaskName, $Action, $Trigger, $Settings, $Principal, [switch]$Force)
+  if ([string]$TaskName -ne 'YepAnywhereServer') { throw '__UNEXPECTED_TASK_NAME__' }
+  $global:mockRegisterCalled = $true
+  $global:registeredTrigger = @($Trigger) | Select-Object -First 1
+}
+$registerCommand = Get-Command Register-ScheduledTask -ErrorAction Stop
+if ([string]$registerCommand.ModuleName -eq 'ScheduledTasks') { throw '__UNSAFE_REAL_REGISTER__' }
+& ${psLiteral(installTaskScript)} --enable-autostart
+if (-not $global:mockRegisterCalled) { throw '__MOCK_REGISTER_NOT_CALLED__' }
+$record = [ordered]@{
+  Class = [string]$global:registeredTrigger.CimClass.CimClassName
+  Interval = [string]$global:registeredTrigger.Repetition.Interval
+  Duration = [string]$global:registeredTrigger.Repetition.Duration
+}
+Write-Output ('${marker}' + ($record | ConvertTo-Json -Compress))
+`;
+
+    const result = await runPowerShellCommand(harness, {
+      YEP_SERVICE_CONFIG_PATH: configPath,
+    });
+    const markerLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(marker));
+    const definition = JSON.parse(markerLine?.slice(marker.length) ?? "{}") as {
+      Class?: string;
+      Interval?: string;
+      Duration?: string;
+    };
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(definition).toEqual({
+      Class: "MSFT_TaskLogonTrigger",
+      Interval: "",
+      Duration: "",
+    });
+  });
+
+  it("watchdog 在 inner supervisor 退出后重启并保留接管入口", async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), "yep-watchdog-"));
+    tempDirs.push(stateDir);
+    const isolatedWatchdog = path.join(stateDir, "watch-yepanywhere.ps1");
+    const isolatedSupervisor = path.join(stateDir, "run-yepanywhere.ps1");
+    const configPath = path.join(stateDir, "service-config.json");
+    const launchLog = path.join(stateDir, "launches.log");
+    const adoptionMarker = path.join(stateDir, "managed-child.marker");
+    await copyFile(watchdogScript, isolatedWatchdog);
+    await writeFile(configPath, "{}", "utf8");
+    await writeFile(
+      isolatedSupervisor,
+      `param([string]$ConfigPath)
+$mode = if (Test-Path -LiteralPath $env:YEP_TEST_ADOPTION_MARKER) { 'adopt' } else {
+  [IO.File]::WriteAllText($env:YEP_TEST_ADOPTION_MARKER, 'managed-child-survived')
+  'start'
+}
+[IO.File]::AppendAllText($env:YEP_TEST_WATCHDOG_LOG, (([string]$PID) + '|' + $ConfigPath + '|' + $mode + [Environment]::NewLine))
+Start-Sleep -Seconds 300
+`,
+      "utf8",
+    );
+    const marker = "__WATCHDOG_RESULT__";
+    const harness = `
+$watchdog = $null
+$ownedInnerPids = New-Object 'System.Collections.Generic.HashSet[int]'
+try {
+  $watchdog = Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '"${isolatedWatchdog.replaceAll("'", "''")}"',
+    '-ConfigPath', '"${configPath.replaceAll("'", "''")}"'
+  ) -PassThru
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  while ((-not (Test-Path -LiteralPath $env:YEP_TEST_WATCHDOG_LOG)) -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 100
+  }
+  if (-not (Test-Path -LiteralPath $env:YEP_TEST_WATCHDOG_LOG)) { throw 'first inner launch missing' }
+  Start-Sleep -Seconds 2
+  $beforeKill = @(Get-Content -LiteralPath $env:YEP_TEST_WATCHDOG_LOG)
+  $firstPid = [int](([string]$beforeKill[0] -split '\\|')[0])
+  [void]$ownedInnerPids.Add($firstPid)
+  $firstInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $firstPid" -ErrorAction Stop
+  if ([string]$firstInfo.CommandLine -notlike '*${isolatedSupervisor.replaceAll("'", "''")}*') {
+    throw 'refusing to terminate unbound inner process'
+  }
+  $first = Get-Process -Id $firstPid -ErrorAction Stop
+  [void]$first.Handle
+  $first.Kill()
+  if (-not $first.WaitForExit(10000)) { throw 'first inner did not exit' }
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  do {
+    Start-Sleep -Milliseconds 100
+    $afterRestart = @(Get-Content -LiteralPath $env:YEP_TEST_WATCHDOG_LOG)
+  } while ($afterRestart.Count -lt 2 -and [DateTime]::UtcNow -lt $deadline)
+  if ($afterRestart.Count -lt 2) { throw 'watchdog did not restart inner' }
+  $secondPid = [int](([string]$afterRestart[1] -split '\\|')[0])
+  [void]$ownedInnerPids.Add($secondPid)
+  $record = [ordered]@{
+    BeforeKill = $beforeKill.Count
+    AfterRestart = $afterRestart.Count
+    FirstPid = $firstPid
+    SecondPid = $secondPid
+    WatchdogAlive = -not $watchdog.HasExited
+    Modes = @($afterRestart | ForEach-Object { ([string]$_ -split '\\|')[2] })
+    Configs = @($afterRestart | ForEach-Object { ([string]$_ -split '\\|')[1] })
+  }
+  Write-Output ('${marker}' + ($record | ConvertTo-Json -Compress -Depth 4))
+} finally {
+  if ($watchdog -and -not $watchdog.HasExited) {
+    [void]$watchdog.Handle
+    $watchdog.Kill()
+    [void]$watchdog.WaitForExit(10000)
+  }
+  foreach ($ownedPid in @($ownedInnerPids)) {
+    $ownedInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $ownedPid" -ErrorAction SilentlyContinue
+    if ($ownedInfo -and [string]$ownedInfo.CommandLine -like '*${isolatedSupervisor.replaceAll("'", "''")}*') {
+      $owned = Get-Process -Id $ownedPid -ErrorAction SilentlyContinue
+      if ($owned) {
+        [void]$owned.Handle
+        $owned.Kill()
+        [void]$owned.WaitForExit(10000)
+        $owned.Dispose()
+      }
+    }
+  }
+}
+`;
+
+    const result = await runPowerShellCommand(harness, {
+      YEP_TEST_WATCHDOG_LOG: launchLog,
+      YEP_TEST_ADOPTION_MARKER: adoptionMarker,
+    });
+    const markerLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(marker));
+    const record = JSON.parse(markerLine?.slice(marker.length) ?? "{}") as {
+      BeforeKill?: number;
+      AfterRestart?: number;
+      FirstPid?: number;
+      SecondPid?: number;
+      WatchdogAlive?: boolean;
+      Modes?: string[];
+      Configs?: string[];
+    };
+
+    expect(result.code, result.stderr || result.stdout).toBe(0);
+    expect(record.BeforeKill).toBe(1);
+    expect(record.AfterRestart).toBe(2);
+    expect(record.FirstPid).not.toBe(record.SecondPid);
+    expect(record.WatchdogAlive).toBe(true);
+    expect(record.Modes).toEqual(["start", "adopt"]);
+    expect(record.Configs).toEqual([configPath, configPath]);
+  }, 45_000);
 
   it("既有任意用户登录触发器会被 status 判异常并按当前用户自启动意图修复", async () => {
     const stateDir = await mkdtemp(
@@ -1292,13 +1758,26 @@ function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
     );
     const commonHarness = `
 $global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
+$global:realGetContent = Get-Command Get-Content -CommandType Cmdlet
 function Test-Path {
-  param($Path)
-  if ([string]$Path -like '*dist\\npm-package\\dist\\cli.js') { return $true }
-  return & $global:realTestPath -LiteralPath $Path
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\dist\\cli.js') { return $true }
+  return & $global:realTestPath -LiteralPath $candidate
+}
+function Get-Content {
+  param($Path, $LiteralPath, [switch]$Raw, $Encoding)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\build-info.json') { return '{"buildId":"build-1"}' }
+  $arguments = @{ LiteralPath = $candidate }
+  if ($Raw) { $arguments.Raw = $true }
+  if ($Encoding) { $arguments.Encoding = $Encoding }
+  return & $global:realGetContent @arguments
 }
 function Get-Command { param($Name) return [pscustomobject]@{ Source = 'powershell.exe' } }
 function netstat { }
+function Get-NetTCPConnection { return @() }
+function Invoke-WebRequest { throw 'not running' }
 function Start-Sleep { }
 function Get-ScheduledTask {
   return [pscustomobject]@{
@@ -1372,13 +1851,14 @@ function Start-ScheduledTask { Write-Output '__UNEXPECTED_START__' }
     );
     const harness = `
 function netstat { }
+function Get-NetTCPConnection { return @() }
 function Get-ScheduledTask {
   return [pscustomobject]@{
     State = 'Ready'
     Principal = [pscustomobject]@{ UserId = $env:USERNAME }
     Actions = @([pscustomobject]@{
       Execute = (Get-Command powershell.exe).Source
-      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+      Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${watchdogScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
       WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
     })
     Settings = [pscustomobject]@{ MultipleInstances = 'IgnoreNew'; RestartCount = 999; RestartInterval = 'PT1M'; ExecutionTimeLimit = 'PT0S' }
@@ -1398,8 +1878,15 @@ function Get-ScheduledTaskInfo { return [pscustomobject]@{ LastTaskResult = 0 } 
     expect(result.stdout).not.toContain("生产自启动：配置异常");
   });
 
-  it("近似任务动作、错误工作目录或 Parallel 设置会被判异常且拒绝停止", async () => {
-    const variants = ["fake-exe", "backup-script", "wrong-cwd", "parallel"];
+  it("近似任务动作、错误工作目录、Parallel 或周期触发器会被判异常且拒绝停止", async () => {
+    const variants = [
+      "fake-exe",
+      "backup-script",
+      "wrong-cwd",
+      "parallel",
+      "direct-supervisor",
+      "repeating-trigger",
+    ];
     for (const variant of variants) {
       const stateDir = await mkdtemp(
         path.join(tmpdir(), "yep-invalid-definition-"),
@@ -1425,7 +1912,7 @@ function Get-ScheduledTaskInfo { return [pscustomobject]@{ LastTaskResult = 0 } 
 $global:taskState = 'Running'
 $action = [pscustomobject]@{
   Execute = (Get-Command powershell.exe).Source
-  Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+  Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${watchdogScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
   WorkingDirectory = '${repoRoot.replaceAll("'", "''")}'
 }
 $settings = [pscustomobject]@{
@@ -1434,13 +1921,25 @@ $settings = [pscustomobject]@{
   RestartInterval = 'PT1M'
   ExecutionTimeLimit = 'PT0S'
 }
+$triggers = @()
 switch ($env:YEP_TEST_TASK_VARIANT) {
   'fake-exe' { $action.Execute = 'C:\\fake\\notpowershell-helper.exe' }
-  'backup-script' { $action.Arguments = $action.Arguments.Replace('run-yepanywhere.ps1', 'run-yepanywhere.ps1.bak') }
+  'backup-script' { $action.Arguments = $action.Arguments.Replace('watch-yepanywhere.ps1', 'watch-yepanywhere.ps1.bak') }
   'wrong-cwd' { $action.WorkingDirectory = 'C:\\unrelated' }
   'parallel' { $settings.MultipleInstances = 'Parallel' }
+  'direct-supervisor' { $action.Arguments = $action.Arguments.Replace('watch-yepanywhere.ps1', 'run-yepanywhere.ps1') }
+  'repeating-trigger' {
+    $triggers = @([pscustomobject]@{
+      Enabled = $true
+      UserId = "$env:USERDOMAIN\\$env:USERNAME"
+      Repetition = [pscustomobject]@{ Interval = 'PT1M'; Duration = ''; StopAtDurationEnd = $false }
+      CimClass = [pscustomobject]@{ CimClassName = 'MSFT_TaskLogonTrigger' }
+    })
+  }
 }
 function netstat { }
+function Get-NetTCPConnection { return @() }
+function Invoke-WebRequest { throw 'not running' }
 function Start-Sleep { }
 function Get-ScheduledTask {
   return [pscustomobject]@{
@@ -1448,7 +1947,7 @@ function Get-ScheduledTask {
     Principal = [pscustomobject]@{ UserId = "$env:USERDOMAIN\\$env:USERNAME" }
     Actions = @($action)
     Settings = $settings
-    Triggers = @()
+    Triggers = @($triggers)
   }
 }
 function Get-ScheduledTaskInfo { return [pscustomobject]@{ LastTaskResult = 0 } }
@@ -1483,7 +1982,7 @@ function Stop-ScheduledTask {
       expect(stop.code).toBe(1);
       expect(existsSync(stopMarker)).toBe(false);
     }
-  }, 20_000);
+  }, 30_000);
 
   it("计划任务持久化生产端口、Profile 和数据目录", async () => {
     const stateDir = await mkdtemp(path.join(tmpdir(), "yep-task-config-"));

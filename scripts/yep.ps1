@@ -6,11 +6,13 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot = [string](Resolve-Path (Join-Path $ScriptDir ".."))
 $ThisScript = Join-Path $ScriptDir "yep.ps1"
 $RunProdScript = Join-Path $ScriptDir "run-yepanywhere.ps1"
+$WatchdogScript = Join-Path $ScriptDir "watch-yepanywhere.ps1"
 $InstallTaskScript = Join-Path $ScriptDir "install-task-scheduler.ps1"
 $DisableTaskScript = Join-Path $ScriptDir "uninstall-task-scheduler.ps1"
 $DeployScript = Join-Path $ScriptDir "deploy.ps1"
 $PowerShellExe = (Get-Command powershell.exe).Source
 . (Join-Path $ScriptDir "service-config.ps1")
+. (Join-Path $ScriptDir "production-runtime.ps1")
 $ServiceConfigPath = if ($env:YEP_SERVICE_CONFIG_PATH) {
   $env:YEP_SERVICE_CONFIG_PATH
 } else {
@@ -18,8 +20,6 @@ $ServiceConfigPath = if ($env:YEP_SERVICE_CONFIG_PATH) {
 }
 $CurrentUserId = "$env:USERDOMAIN\$env:USERNAME"
 $CurrentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$ExpectedTaskArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunProdScript`" -ConfigPath `"$ServiceConfigPath`""
-
 $ServiceConfig = $null
 $ServiceConfigError = $null
 function Update-ServiceConfigState {
@@ -55,8 +55,20 @@ $ServerPort = if ($env:YEP_DEPLOY_PORT) {
 } else {
   "8022"
 }
-$CodexPort = if ($env:YEP_CODEX_BRIDGE_PORT) { $env:YEP_CODEX_BRIDGE_PORT } else { "4510" }
-$ClaudePort = if ($env:YEP_CLAUDE_BRIDGE_PORT) { $env:YEP_CLAUDE_BRIDGE_PORT } else { "4520" }
+$CodexPort = if ($env:YEP_CODEX_BRIDGE_PORT) {
+  $env:YEP_CODEX_BRIDGE_PORT
+} elseif ($ServiceConfig -and $ServiceConfig.CodexPort) {
+  [string]$ServiceConfig.CodexPort
+} else {
+  "4510"
+}
+$ClaudePort = if ($env:YEP_CLAUDE_BRIDGE_PORT) {
+  $env:YEP_CLAUDE_BRIDGE_PORT
+} elseif ($ServiceConfig -and $ServiceConfig.ClaudePort) {
+  [string]$ServiceConfig.ClaudePort
+} else {
+  "4520"
+}
 
 $TaskName = "YepAnywhereServer"
 $LogDir = if ($env:YEP_LAUNCHD_LOG_DIR) {
@@ -77,8 +89,65 @@ $ProdLogDir = if ($env:YEP_LAUNCHD_LOG_DIR) {
 }
 $DevStateFile = Join-Path $LogDir "dev-process.json"
 $ProdStateFile = Join-Path $ProdLogDir "prod-process.json"
-$CliJs = Join-Path $RepoRoot "dist/npm-package/dist/cli.js"
+$BundleDir = Join-Path $RepoRoot "dist/npm-package"
+$CliJs = Join-Path $BundleDir "dist/cli.js"
 $TsxCommand = Join-Path $RepoRoot "node_modules/.bin/tsx.cmd"
+$MaintenancePort = ([int]$ServerPort) + 1
+$ProductionBuildId = if (Test-Path $CliJs) { Get-YepBundleBuildId $BundleDir } else { $null }
+$ProductionBasePath = if ($env:YEP_DEPLOY_BASE_PATH) {
+  $env:YEP_DEPLOY_BASE_PATH
+} elseif ($ServiceConfig -and $ServiceConfig.BasePath) {
+  [string]$ServiceConfig.BasePath
+} else {
+  "/"
+}
+$ProductionProfile = if ($env:YEP_ANYWHERE_PROFILE) {
+  $env:YEP_ANYWHERE_PROFILE
+} elseif ($ServiceConfig -and $ServiceConfig.Profile) {
+  [string]$ServiceConfig.Profile
+} else {
+  $null
+}
+$ProductionDataDir = if ($env:YEP_ANYWHERE_DATA_DIR) {
+  $env:YEP_ANYWHERE_DATA_DIR
+} elseif ($ServiceConfig -and $ServiceConfig.DataDir) {
+  [string]$ServiceConfig.DataDir
+} else {
+  $null
+}
+$ProductionAllowedImagePaths = if ($env:ALLOWED_IMAGE_PATHS) {
+  $env:ALLOWED_IMAGE_PATHS
+} elseif ($ServiceConfig -and $ServiceConfig.AllowedImagePaths) {
+  [string]$ServiceConfig.AllowedImagePaths
+} else {
+  "$env:TEMP,$env:USERPROFILE\Downloads"
+}
+$ProductionCodexControlUrl = if ($env:YEP_CODEX_BRIDGE_CONTROL_URL) {
+  $env:YEP_CODEX_BRIDGE_CONTROL_URL
+} else {
+  "http://127.0.0.1:$CodexPort"
+}
+$ProductionClaudeControlUrl = if ($env:YEP_CLAUDE_BRIDGE_CONTROL_URL) {
+  $env:YEP_CLAUDE_BRIDGE_CONTROL_URL
+} else {
+  "http://127.0.0.1:$ClaudePort"
+}
+$ProductionExpectation = New-YepProductionExpectation `
+  -RepoRoot $RepoRoot `
+  -BundlePath $BundleDir `
+  -BuildId $(if ($ProductionBuildId) { $ProductionBuildId } else { "bundle-missing" }) `
+  -BasePath $ProductionBasePath `
+  -Profile $ProductionProfile `
+  -DataDir $ProductionDataDir `
+  -AllowedImagePaths $ProductionAllowedImagePaths `
+  -ServerPort ([int]$ServerPort) `
+  -MaintenancePort $MaintenancePort `
+  -CodexPort ([int]$CodexPort) `
+  -ClaudePort ([int]$ClaudePort) `
+  -CodexControlUrl $ProductionCodexControlUrl `
+  -ClaudeControlUrl $ProductionClaudeControlUrl `
+  -StartBridges ($env:YEP_START_BRIDGES -ne "false") `
+  -RunScriptPath $RunProdScript
 
 function Write-Info($message) { Write-Host "==> $message" -ForegroundColor Green }
 function Write-WarningMessage($message) { Write-Host "警告：$message" -ForegroundColor Yellow }
@@ -129,6 +198,10 @@ function Remove-ProcessState($mode) {
   if (Test-Path $stateFile) {
     Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
   }
+}
+
+function Get-ProductionRuntimeInspection {
+  return Get-YepProductionInspection -ManifestPath $ProdStateFile -Expectation $ProductionExpectation
 }
 
 function Get-ProcessCommand($processId) {
@@ -468,14 +541,15 @@ function Test-TaskPathEquals($actual, $expected) {
     [string]::Equals($normalizedActual, $normalizedExpected, [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Test-TaskAction($task) {
+function Test-TaskAction($task, $expectedRepoRoot = $RepoRoot, $expectedActionScript = $WatchdogScript) {
   if (-not $task) { return $false }
   $actions = @($task.Actions)
   if ($actions.Count -ne 1) { return $false }
   $action = $actions[0]
+  $expectedArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$expectedActionScript`" -ConfigPath `"$ServiceConfigPath`""
   return (Test-TaskPathEquals $action.Execute $PowerShellExe) -and
-    [string]::Equals([string]$action.Arguments, $ExpectedTaskArguments, [StringComparison]::OrdinalIgnoreCase) -and
-    (Test-TaskPathEquals $action.WorkingDirectory $RepoRoot)
+    [string]::Equals([string]$action.Arguments, $expectedArguments, [StringComparison]::OrdinalIgnoreCase) -and
+    (Test-TaskPathEquals $action.WorkingDirectory $expectedRepoRoot)
 }
 
 function ConvertTo-TaskTimeSpan($value) {
@@ -530,8 +604,8 @@ function Test-TaskHasAnyEnabledLogonTrigger($task) {
   return $false
 }
 
-function Test-TaskDefinition($task) {
-  if (-not (Test-TaskAction $task) -or
+function Test-TaskDefinition($task, $expectedRepoRoot = $RepoRoot, $expectedActionScript = $WatchdogScript) {
+  if (-not (Test-TaskAction $task $expectedRepoRoot $expectedActionScript) -or
       -not (Test-TaskPrincipal $task) -or
       -not (Test-TaskSettings $task)) { return $false }
   $logonTriggerCount = 0
@@ -542,9 +616,21 @@ function Test-TaskDefinition($task) {
         -not (Test-CurrentTaskUser $trigger.UserId)) {
       return $false
     }
+    if (-not [string]::IsNullOrWhiteSpace([string]$trigger.Repetition.Interval) -or
+        -not [string]::IsNullOrWhiteSpace([string]$trigger.Repetition.Duration)) {
+      return $false
+    }
     $logonTriggerCount++
   }
   return $logonTriggerCount -le 1
+}
+
+function Test-V2DirectTaskMigration($task, $inspection) {
+  return $inspection -and $inspection.Manifest -and
+    [int]$inspection.Manifest.Version -eq 2 -and
+    $inspection.VerifiedSupervisor -and
+    @($inspection.VerifiedProcesses).Count -eq @($inspection.Manifest.Processes).Count -and
+    (Test-TaskDefinition $task $RepoRoot $RunProdScript)
 }
 
 function Get-AutostartState($task) {
@@ -574,10 +660,7 @@ function Test-ProductionInstanceReady {
   if (-not $task -or $task.State -ne "Running" -or -not (Test-TaskDefinition $task)) {
     return $false
   }
-  $entries = @(Get-VerifiedEntries "prod")
-  $serverEntries = @($entries | Where-Object { $_.Role -eq "server" })
-  if (-not (Test-PortsOwnedByEntries @($ServerPort) $serverEntries)) { return $false }
-  return Test-HealthEndpoint "http://127.0.0.1:$ServerPort/api/version"
+  return (Get-ProductionRuntimeInspection).State -eq "healthy"
 }
 
 function Wait-ProductionInstanceReady {
@@ -729,30 +812,51 @@ function Cmd-StartProd {
     Write-Detail "请先执行 rebuild。"
     return $false
   }
-  if (Test-ProductionInstanceReady) {
-    Write-WarningMessage "生产模式已由计划任务运行（端口 $ServerPort）。"
-    return $true
-  }
-
-  $task = Get-Task
-  $verified = @(Get-VerifiedEntries "prod")
-  $serverPids = @($verified | Where-Object { $_.Role -eq "server" } | ForEach-Object { [int]$_.Pid })
-  $portPids = @(Get-ListeningPids $ServerPort)
-  $managedPort = @($portPids | Where-Object { $serverPids -contains [int]$_ }).Count -gt 0
-
-  if ($portPids.Count -gt 0) {
-    if ($managedPort) {
-      Write-ErrorMessage "生产端口 $ServerPort 的 PID 元数据可核实，但计划任务状态或动作配置异常；拒绝重复启动。"
-    } else {
-      foreach ($processId in $portPids) { Show-UnknownPortOwner $ServerPort $processId }
+  $inspection = Get-ProductionRuntimeInspection
+  switch ($inspection.State) {
+    "healthy" {
+      Write-WarningMessage "生产模式已健康运行（healthy，端口 $ServerPort）。"
+      return $true
     }
-    return $false
+    "degraded-adoptable" {
+      Write-Info "生产模式为 degraded-adoptable；正在请求计划任务重启监督器并接管健康子进程。"
+    }
+    "verified-stale" {
+      Write-Info "正在清理 verified-stale 生产进程组……"
+      if ($inspection.Manifest -and [int]$inspection.Manifest.Version -eq 1) {
+        if ((-not $inspection.VerifiedSupervisor) -or
+            (@($inspection.VerifiedProcesses).Count + 1 -ne @($inspection.Manifest.Processes).Count) -or
+            (-not (Get-YepLegacyManifestPaths -Manifest $inspection.Manifest)) -or
+            (-not (Cmd-StopProd))) {
+          Write-ErrorMessage "无法安全清理 legacy-v1 verified-stale 生产进程组；未启动计划任务。"
+          return $false
+        }
+      } else {
+        if (-not (Stop-YepVerifiedProcessGroup -Inspection $inspection)) {
+          Write-ErrorMessage "清理 verified-stale 生产进程组失败（可能仍在运行或无法完整枚举）；未启动计划任务。"
+          return $false
+        }
+        Remove-ProcessState "prod"
+      }
+      $inspection = Get-ProductionRuntimeInspection
+      if ($inspection.State -ne "stopped") {
+        Write-ErrorMessage "清理后生产状态为 $($inspection.State)，未达到 stopped；拒绝启动。"
+        return $false
+      }
+    }
+    "unknown-conflict" {
+      Write-ErrorMessage "生产模式：unknown-conflict（端口占用身份未知，拒绝启动或清理）"
+      foreach ($owner in @($inspection.UnknownPortOwners)) {
+        Show-UnknownPortOwner ([int]$owner.Port) ([int]$owner.Pid)
+      }
+      return $false
+    }
+    "stopped" { }
+    default {
+      Write-ErrorMessage "无法识别生产状态：$($inspection.State)"
+      return $false
+    }
   }
-  if ($task -and $task.State -eq "Running") {
-    Write-ErrorMessage "计划任务 $TaskName 显示运行中，但没有可核实的生产监听进程；请先检查状态和日志。"
-    return $false
-  }
-  if (-not (Test-PortsAvailableForMode "prod" @($ServerPort))) { return $false }
   if (-not (Ensure-ProductionTask)) { return $false }
 
   Write-Info "正在通过计划任务启动生产模式……"
@@ -767,23 +871,33 @@ function Cmd-StartProd {
 }
 
 function Cmd-StopProd {
-  $task = Get-Task
-  $verified = @(Get-VerifiedEntries "prod")
-  if (-not $task -and $verified.Count -eq 0 -and (Get-ListeningPids $ServerPort).Count -eq 0) {
-    Write-WarningMessage "生产模式当前未运行。"
-    Remove-ProcessState "prod"
-    return $true
+  $inspection = Get-ProductionRuntimeInspection
+  if ($inspection.State -eq "unknown-conflict") {
+    Write-ErrorMessage "生产模式：unknown-conflict（端口占用身份未知，拒绝启动或清理）"
+    return $false
   }
-
-  if ($task -and -not (Test-TaskDefinition $task)) {
+  $legacyPaths = $null
+  if ($inspection.State -eq 'verified-stale' -and $inspection.Manifest -and
+      [int]$inspection.Manifest.Version -eq 1 -and $inspection.VerifiedSupervisor -and
+      (@($inspection.VerifiedProcesses).Count + 1 -eq @($inspection.Manifest.Processes).Count)) {
+    $legacyPaths = Get-YepLegacyManifestPaths -Manifest $inspection.Manifest
+  }
+  $task = Get-Task
+  $taskDefinitionValid = (-not $task) -or (Test-TaskDefinition $task)
+  if ((-not $taskDefinitionValid) -and $legacyPaths) {
+    $taskDefinitionValid = Test-TaskDefinition $task $legacyPaths.RepoRoot $legacyPaths.RunScriptPath
+  }
+  if ((-not $taskDefinitionValid) -and (Test-V2DirectTaskMigration $task $inspection)) {
+    $taskDefinitionValid = $true
+  }
+  if (-not $taskDefinitionValid) {
     Write-ErrorMessage "同名计划任务 $TaskName 的动作配置异常；为避免停止无关任务，已拒绝操作。"
     return $false
   }
-
-  $processSnapshot = Get-ManagedProcessSnapshot $verified
-  if (-not $processSnapshot.Complete) {
-    Write-ErrorMessage "无法枚举完整的 prod 进程树；未发送计划任务停止请求。"
-    return $false
+  if ($inspection.State -eq "stopped" -and (-not $task -or $task.State -ne "Running")) {
+    Write-WarningMessage "生产模式当前未运行（stopped）。"
+    Remove-ProcessState "prod"
+    return $true
   }
 
   Write-Info "正在停止生产计划任务实例……"
@@ -815,7 +929,31 @@ function Cmd-StopProd {
       return $false
     }
   }
-  return Stop-VerifiedMode "prod" @($ServerPort) $verified $processSnapshot
+  $inspection = if ($legacyPaths) {
+    Get-YepTrustedLegacyStopInspection -Inspection $inspection -Expectation $ProductionExpectation
+  } else {
+    Get-ProductionRuntimeInspection
+  }
+  if (-not $inspection) {
+    Write-ErrorMessage "任务停止后无法重新验证 legacy-v1 生产进程或无法完整枚举进程快照；未清理生产进程。"
+    return $false
+  }
+  if ($inspection.State -eq "unknown-conflict") {
+    Write-ErrorMessage "任务停止后检测到 unknown-conflict；未清理生产进程。"
+    return $false
+  }
+  $processesStopped = if ($legacyPaths) {
+    Stop-YepTrustedLegacyProcessGroup -Inspection $inspection -Expectation $ProductionExpectation
+  } else {
+    Stop-YepVerifiedProcessGroup -Inspection $inspection
+  }
+  if (-not $processesStopped) {
+    Write-ErrorMessage "清理已验证生产进程组失败（可能仍在运行或无法完整枚举）。"
+    return $false
+  }
+  Remove-ProcessState "prod"
+  Write-Info "生产模式已停止。"
+  return $true
 }
 
 function Cmd-RestartDev([string[]]$commandArgs = @()) {
@@ -836,8 +974,9 @@ function Cmd-Stop {
 
 function Cmd-Rebuild {
   Write-Info "开始暂存重构建；验证完成前不会停止生产服务。"
-  & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $DeployScript --server-only
-  return $LASTEXITCODE -eq 0
+  & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $DeployScript --server-only | Out-Host
+  $deployExitCode = $LASTEXITCODE
+  return $deployExitCode -eq 0
 }
 
 function Cmd-EnableAutostart {
@@ -871,22 +1010,29 @@ function Cmd-Status {
 
   $task = Get-Task
   $taskInfo = if ($task) { Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue } else { $null }
-  $prodState = Read-ProcessState "prod"
-  $prodProfile = if ($prodState -and $prodState.Profile) { [string]$prodState.Profile } else { "default" }
-  $prodEntries = @(Get-VerifiedEntries "prod")
-  $prodPids = Get-ListeningPids $ServerPort
-  $verifiedServerPids = @($prodEntries | Where-Object { $_.Role -eq "server" } | ForEach-Object { [int]$_.Pid })
-  $prodRunning = Test-ProductionInstanceReady
-  if ($prodRunning) {
-    Write-Info "生产模式：运行中"
-  } elseif ($task -and $task.State -eq "Running") {
-    Write-ErrorMessage "生产模式：配置异常（任务运行状态、动作、PID 元数据或监听端口不一致）"
-  } else {
-    Write-WarningMessage "生产模式：已停止"
+  $inspection = Get-ProductionRuntimeInspection
+  switch ($inspection.State) {
+    "healthy" { Write-Info "生产模式：healthy（运行中）" }
+    "degraded-adoptable" { Write-WarningMessage "生产模式：degraded-adoptable（监督器缺失，服务健康且可接管）" }
+    "verified-stale" { Write-ErrorMessage "生产模式：verified-stale（已验证残留与当前 build、配置或健康不一致）" }
+    "unknown-conflict" { Write-ErrorMessage "生产模式：unknown-conflict（端口占用身份未知，拒绝启动或清理）" }
+    "stopped" { Write-WarningMessage "生产模式：已停止（stopped）" }
   }
+  $prodEntries = @()
+  if ($inspection.VerifiedSupervisor) { $prodEntries += $inspection.VerifiedSupervisor }
+  $prodEntries += @($inspection.VerifiedProcesses)
+  $prodPids = @($prodEntries | ForEach-Object { [int]$_.Pid } | Sort-Object -Unique)
+  $prodProfile = if ($ProductionProfile) { $ProductionProfile } else { "default" }
   $lastResult = if ($taskInfo) { $taskInfo.LastTaskResult } else { "无" }
-  Write-Detail "端口：$ServerPort；PID：$($prodPids -join ',')；Profile：$prodProfile"
-  Write-Detail "计划任务：$(if ($task) { '已安装' } else { '未安装' })；最近结果：$lastResult"
+  $taskState = if ($task) { [string]$task.State } else { "未安装" }
+  $runningBuildId = if ($inspection.RunningBuildId) { $inspection.RunningBuildId } else { "无" }
+  $expectedBuildId = if ($ProductionBuildId) { $ProductionBuildId } else { "无" }
+  $fingerprint = [string]$ProductionExpectation.ConfigFingerprint
+  $fingerprintPrefix = $fingerprint.Substring(0, [Math]::Min(12, $fingerprint.Length))
+  $reasons = if (@($inspection.Reasons).Count -gt 0) { @($inspection.Reasons) -join "," } else { "无" }
+  Write-Detail "端口：server $ServerPort；maintenance $MaintenancePort；bridge $CodexPort/$ClaudePort；PID：$($prodPids -join ',')；Profile：$prodProfile"
+  Write-Detail "Task Scheduler：State=$taskState；LastTaskResult=$lastResult"
+  Write-Detail "BuildId：运行中 $runningBuildId；期望 $expectedBuildId；ConfigFingerprint：$fingerprintPrefix；Reasons：$reasons"
   if ($task -and -not (Test-ServiceConfigReady)) {
     Write-ErrorMessage "生产服务配置异常：$ServiceConfigPath（$ServiceConfigError）"
   }
@@ -934,7 +1080,7 @@ function Show-Help {
   setup-admin-password 设置或重置当前系统用户的全局管理员密码
   help              显示本帮助
 
-端口：开发 $DevMainPort/$DevMaintPort/$DevVitePort；生产 $ServerPort；桥接 $CodexPort/$ClaudePort
+端口：开发 $DevMainPort/$DevMaintPort/$DevVitePort；生产 $ServerPort/$MaintenancePort；桥接 $CodexPort/$ClaudePort
 日志：$LogDir
 "@
 }

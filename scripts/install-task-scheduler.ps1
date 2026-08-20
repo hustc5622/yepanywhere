@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 $TaskName = "YepAnywhereServer"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
-$RunScript = Join-Path $ScriptDir "run-yepanywhere.ps1"
+$WatchdogScript = Join-Path $ScriptDir "watch-yepanywhere.ps1"
 $CliJs = Join-Path $RepoRoot "dist/npm-package/dist/cli.js"
 . (Join-Path $ScriptDir "service-config.ps1")
 $ServiceConfigPath = if ($env:YEP_SERVICE_CONFIG_PATH) {
@@ -39,6 +39,10 @@ foreach ($arg in $args) {
 if (-not (Test-Path $CliJs)) {
   Write-Host "错误：未找到生产 Bundle：$CliJs" -ForegroundColor Red
   Write-Host "请先执行重构建，再配置生产计划任务。" -ForegroundColor Red
+  exit 1
+}
+if (-not (Test-Path $WatchdogScript)) {
+  Write-Host "错误：未找到生产 watchdog：$WatchdogScript" -ForegroundColor Red
   exit 1
 }
 
@@ -95,7 +99,7 @@ if ($ServiceConfigPath.Contains('"')) {
 }
 
 $powershellExe = (Get-Command powershell.exe).Source
-$argument = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunScript`" -ConfigPath `"$ServiceConfigPath`""
+$argument = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$WatchdogScript`" -ConfigPath `"$ServiceConfigPath`""
 $action = New-ScheduledTaskAction `
   -Execute $powershellExe `
   -Argument $argument `
@@ -130,5 +134,5 @@ if ($EnableAutostart) {
 } else {
   Write-Host "已注册生产任务（登录自启动关闭）：$TaskName" -ForegroundColor Green
 }
-Write-Host "任务动作：$RunScript" -ForegroundColor DarkGray
+Write-Host "任务动作：$WatchdogScript" -ForegroundColor DarkGray
 Write-Host "注册操作不会启动或停止当前生产实例。" -ForegroundColor DarkGray
