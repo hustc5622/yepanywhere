@@ -15,7 +15,7 @@ import {
   mergeStreamMessage,
 } from "../lib/mergeMessages";
 import { getProvider } from "../providers/registry";
-import type { Message, Session, SessionStatus } from "../types";
+import type { BrowserSessionMetadata, Message, SessionStatus } from "../types";
 
 /** Content from a subagent (Task tool) */
 export interface AgentContent {
@@ -39,7 +39,7 @@ export interface StreamingMessageUpdate {
 
 /** Result from initial session load */
 export interface SessionLoadResult {
-  session: Session;
+  session: BrowserSessionMetadata;
   status: SessionStatus;
   pendingInputRequest?: unknown;
   slashCommands?: Array<{
@@ -72,9 +72,11 @@ export interface UseSessionMessagesResult {
   /** Whether initial load is in progress */
   loading: boolean;
   /** Session data from initial load */
-  session: Session | null;
+  session: BrowserSessionMetadata | null;
   /** Set session data (for stream connected event) */
-  setSession: React.Dispatch<React.SetStateAction<Session | null>>;
+  setSession: React.Dispatch<
+    React.SetStateAction<BrowserSessionMetadata | null>
+  >;
   /** Handle streaming content updates (for useStreamingContent) */
   handleStreamingUpdate: (message: Message, agentId?: string) => void;
   /** Handle multiple streaming content updates in one React state pass */
@@ -98,7 +100,7 @@ export interface UseSessionMessagesResult {
   /** Reload the authoritative session snapshot from REST */
   refreshSessionMessages: (options?: {
     branchId?: string | null;
-  }) => Promise<Session | null>;
+  }) => Promise<BrowserSessionMetadata | null>;
   /** Fetch session metadata only */
   fetchSessionMetadata: () => Promise<void>;
   /** Pagination info from compact-boundary-based loading */
@@ -246,12 +248,12 @@ export function useSessionMessages(
     () => new Map(),
   );
   const [loading, setLoading] = useState(true);
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<BrowserSessionMetadata | null>(null);
   const [pagination, setPagination] = useState<PaginationInfo | undefined>();
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [loadingTargetMessage, setLoadingTargetMessage] = useState(false);
-  const sessionRef = useRef<Session | null>(null);
+  const sessionRef = useRef<BrowserSessionMetadata | null>(null);
 
   // Buffering: queue stream messages until initial load completes
   const streamBufferRef = useRef<
@@ -403,7 +405,7 @@ export function useSessionMessages(
 
   const applySessionSnapshot = useCallback(
     (data: {
-      session: Session;
+      session: BrowserSessionMetadata;
       messages: Message[];
       pagination?: PaginationInfo;
     }) => {
@@ -631,9 +633,7 @@ export function useSessionMessages(
       // Update session metadata (including title, model, contextUsage) which may have changed
       // For new sessions, prev may be null if JSONL didn't exist on initial load
       setSession((prev) =>
-        prev
-          ? { ...prev, ...data.session, messages: prev.messages }
-          : data.session,
+        prev ? { ...prev, ...data.session } : data.session,
       );
       onLoadComplete?.({
         session: data.session,
@@ -801,9 +801,7 @@ export function useSessionMessages(
       const data = await api.getSessionMetadata(projectId, sessionId);
       // For new sessions, prev may be null if JSONL didn't exist on initial load
       setSession((prev) =>
-        prev
-          ? { ...prev, ...data.session, messages: prev.messages }
-          : { ...data.session, messages: [] },
+        prev ? { ...prev, ...data.session } : data.session,
       );
     } catch {
       // Silent fail for metadata updates

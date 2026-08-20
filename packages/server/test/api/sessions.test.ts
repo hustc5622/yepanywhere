@@ -3,10 +3,17 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { UrlProjectId } from "@yep-anywhere/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/app.js";
+import type {
+  CodexBridgeController,
+  CodexBridgeSessionView,
+} from "../../src/codex-bridge/types.js";
 import type { SessionMetadataService } from "../../src/metadata/index.js";
 import { MockClaudeSDK, createMockScenario } from "../../src/sdk/mock.js";
+import type { SDKMessage } from "../../src/sdk/types.js";
+import type { Process } from "../../src/supervisor/Process.js";
 import { encodeProjectId } from "../../src/supervisor/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,14 +35,18 @@ describe("Sessions API", () => {
     const projectPath = join(testDir, "myproject");
     await mkdir(projectPath, { recursive: true });
     projectId = encodeProjectId(projectPath);
-    const encodedPath = projectPath.replaceAll("/", "-");
+    const encodedPath = projectPath.replace(/[/\\:]/g, "-");
     sessionDir = join(testDir, "localhost", encodedPath);
 
     await mkdir(sessionDir, { recursive: true });
     // Session file must include cwd field for project path discovery
     await writeFile(
       join(sessionDir, "sess-existing.jsonl"),
-      `{"type":"user","cwd":"${projectPath}","message":{"content":"Hello"}}\n`,
+      `${JSON.stringify({
+        type: "user",
+        cwd: projectPath,
+        message: { content: "Hello" },
+      })}\n`,
     );
   });
 
@@ -193,6 +204,184 @@ describe("Sessions API", () => {
   });
 
   describe("GET /api/projects/:projectId/sessions/:sessionId", () => {
+    it("returns one projected message list for a persisted session", async () => {
+      const dataUrl = `data:image/png;base64,${Buffer.from("persisted-image").toString("base64")}`;
+      await writeFile(
+        join(sessionDir, "sess-projected.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          uuid: "persisted-tool-result",
+          parentUuid: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-persisted",
+                content: JSON.stringify({
+                  output: [{ type: "input_image", image_url: dataUrl }],
+                }),
+              },
+            ],
+          },
+          toolUseResult: {
+            output: [{ type: "input_image", image_url: dataUrl }],
+          },
+        })}\n`,
+      );
+      const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
+
+      const response = await app.request(
+        `/api/projects/${projectId}/sessions/sess-projected`,
+      );
+
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.session).not.toHaveProperty("messages");
+      expect(Array.isArray(json.messages)).toBe(true);
+      expect(JSON.stringify(json.messages)).not.toContain(
+        "data:image/png;base64",
+      );
+    });
+
+    it("returns one projected message list for a process-memory session", async () => {
+      const dataUrl = `data:image/png;base64,${Buffer.from("process-image").toString("base64")}`;
+      const sdkMessages: SDKMessage[] = [
+        {
+          type: "user",
+          uuid: "process-tool-result",
+          timestamp: "2026-08-17T01:02:03.000Z",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-process",
+                content: JSON.stringify({
+                  output: [{ type: "input_image", image_url: dataUrl }],
+                }),
+              },
+            ],
+          },
+        },
+      ];
+      const { app, readerFactory, scanner, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const project = await scanner.getOrCreateProject(projectId);
+      if (!project) throw new Error("Expected test project to exist");
+      vi.spyOn(readerFactory(project), "getSession").mockResolvedValue(null);
+      vi.spyOn(supervisor, "getProcessForSession").mockReturnValue({
+        id: "process-memory",
+        sessionId: "sess-process-memory",
+        projectId,
+        state: { type: "idle", since: new Date("2026-08-17T01:02:04.000Z") },
+        permissionMode: "default",
+        modeVersion: 0,
+        provider: "claude",
+        resolvedModel: "claude-test",
+        resolvedReasoningEffort: undefined,
+        serviceTier: undefined,
+        contextWindow: undefined,
+        supportsDynamicCommands: false,
+        getMessageHistory: () => sdkMessages,
+      } as unknown as Process);
+
+      const response = await app.request(
+        `/api/projects/${projectId}/sessions/sess-process-memory`,
+      );
+
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.session).not.toHaveProperty("messages");
+      expect(Array.isArray(json.messages)).toBe(true);
+      expect(JSON.stringify(json.messages)).not.toContain(
+        "data:image/png;base64",
+      );
+    });
+
+    it("returns message-free metadata for a bridge-only session", async () => {
+      const sessionId = "sess-bridge-only";
+      const bridgeView: CodexBridgeSessionView = {
+        session: {
+          id: sessionId,
+          projectId: projectId as UrlProjectId,
+          title: "Bridge-only session",
+          fullTitle: "Bridge-only session",
+          createdAt: "2026-08-17T01:02:03.000Z",
+          updatedAt: "2026-08-17T01:02:04.000Z",
+          messageCount: 0,
+          ownership: { owner: "external" },
+          provider: "codex",
+        },
+        projectName: "myproject",
+        activity: "idle",
+      };
+      const codexBridgeService = {
+        getSessionView: vi.fn(async (requestedSessionId: string) =>
+          requestedSessionId === sessionId ? bridgeView : null,
+        ),
+        isSessionActive: vi.fn(async () => true),
+        getPendingInputRequest: vi.fn(async () => null),
+      } as unknown as CodexBridgeController;
+      const { app, readerFactory, scanner, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+        codexBridgeService,
+      });
+      const project = await scanner.getOrCreateProject(projectId);
+      if (!project) throw new Error("Expected test project to exist");
+      vi.spyOn(readerFactory(project), "getSession").mockResolvedValue(null);
+      vi.spyOn(supervisor, "getProcessForSession").mockReturnValue(undefined);
+
+      const response = await app.request(
+        `/api/projects/${projectId}/sessions/${sessionId}`,
+      );
+
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.session).not.toHaveProperty("messages");
+      expect(Array.isArray(json.messages)).toBe(true);
+      expect(JSON.stringify(json.messages)).not.toContain(
+        "data:image/png;base64",
+      );
+      expect(json.messages).toEqual([]);
+    });
+
+    it("negotiates gzip only when requested for a large JSON response", async () => {
+      await writeFile(
+        join(sessionDir, "sess-compression.jsonl"),
+        `${JSON.stringify({
+          type: "assistant",
+          uuid: "large-visible-message",
+          parentUuid: null,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "visible response ".repeat(200) }],
+          },
+        })}\n`,
+      );
+      const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
+      const sessionUrl = `/api/projects/${projectId}/sessions/sess-compression`;
+
+      const compressed = await app.request(sessionUrl, {
+        headers: {
+          "X-Yep-Anywhere": "true",
+          "Accept-Encoding": "gzip",
+        },
+      });
+      expect(compressed.headers.get("content-encoding")).toBe("gzip");
+
+      const identity = await app.request(sessionUrl, {
+        headers: {
+          "X-Yep-Anywhere": "true",
+          "Accept-Encoding": "identity",
+        },
+      });
+      expect(identity.headers.has("content-encoding")).toBe(false);
+    });
+
     it("returns pendingInputRequest for a persisted Claude AskUserQuestion", async () => {
       await writeFile(
         join(sessionDir, "sess-question.jsonl"),

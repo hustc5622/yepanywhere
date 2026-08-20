@@ -58,7 +58,7 @@ import {
   preprocessMessagesCached,
 } from "../lib/preprocessMessagesCache";
 import { generateUUID } from "../lib/uuid";
-import type { Message, Session } from "../types";
+import type { BrowserSessionMetadata, Message } from "../types";
 import { getSessionDisplayTitle } from "../utils";
 
 export function SessionPage() {
@@ -148,7 +148,9 @@ function calculateCodexRollbackNumTurns(
   return rollbackNumTurns > 0 ? rollbackNumTurns : null;
 }
 
-function hasBranchChoices(session: Session | null | undefined): boolean {
+function hasBranchChoices(
+  session: BrowserSessionMetadata | null | undefined,
+): boolean {
   const branchState = session?.branchState ?? session?.codexBranchState;
   return (
     branchState?.branches.some((branch) => branch.siblingCount > 1) ?? false

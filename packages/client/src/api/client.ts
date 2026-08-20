@@ -50,11 +50,11 @@ export interface ProjectBrowseResponse {
 }
 import type {
   AgentSession,
+  BrowserSessionMetadata,
   InputRequest,
   Message,
   PermissionMode,
   Project,
-  Session,
   SessionStatus,
   SessionSummary,
 } from "../types";
@@ -793,7 +793,7 @@ export const api = {
       params.set("maxMessages", String(options.maxMessages));
     const qs = params.toString();
     return fetchJSON<{
-      session: Session;
+      session: BrowserSessionMetadata;
       messages: Message[];
       ownership: SessionStatus;
       runtime?: SessionRuntime;
@@ -809,7 +809,7 @@ export const api = {
    */
   getSessionMetadata: (projectId: string, sessionId: string) =>
     fetchJSON<{
-      session: Session;
+      session: BrowserSessionMetadata;
       ownership: SessionStatus;
       runtime?: SessionRuntime;
       pendingInputRequest?: InputRequest | null;

@@ -181,6 +181,8 @@ export interface Session extends SessionSummary {
   codexBranchState?: CodexBranchState;
 }
 
+export type BrowserSessionMetadata = Omit<Session, "messages">;
+
 /**
  * Agent session content for Task subagents.
  * Uses Message type (AppMessage with required id).

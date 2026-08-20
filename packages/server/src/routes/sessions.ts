@@ -18,6 +18,7 @@ import {
   thinkingOptionToConfig,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import { compress } from "hono/compress";
 import {
   ArchiveError,
   type ArchivedSessionRecord,
@@ -42,6 +43,7 @@ import { getProjectDirFromCwd, syncSessions } from "../sdk/session-sync.js";
 import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
+import { createBrowserSessionProjection } from "../sessions/browser-session-projection.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import { GeminiSessionReader } from "../sessions/gemini-reader.js";
@@ -643,6 +645,13 @@ async function markSessionCreatedByYep(
 
 export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const routes = new Hono();
+  routes.use(
+    "*",
+    compress({
+      threshold: 1024,
+      contentTypeFilter: /^application\/json\b/i,
+    }),
+  );
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
     deps.codexReaderFactory?.(projectPath) ??
     (deps.codexSessionsDir
@@ -1274,33 +1283,37 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         const hasUnread = deps.notificationService
           ? deps.notificationService.hasUnread(sessionId, newSessionUpdatedAt)
           : undefined;
-        return c.json({
-          session: {
-            id: sessionId,
-            projectId,
-            title: null,
-            createdAt: new Date().toISOString(),
-            updatedAt: newSessionUpdatedAt,
-            messageCount: processMessages.length,
-            ownership,
-            pendingInputType: livePendingInputType,
-            activity: runtime.activity,
-            runtime,
-            messages: processMessages,
-            customTitle: metadata?.customTitle,
-            aiTitle: metadata?.aiTitle,
-            isArchived: metadata?.isArchived,
-            isStarred: metadata?.isStarred,
-            createdBy: metadata?.createdBy,
-            lastSeenAt: lastSeenEntry?.timestamp,
-            hasUnread,
-            provider: process.provider,
-            model: process.resolvedModel,
-            reasoningEffort: process.resolvedReasoningEffort,
-            serviceTier: process.serviceTier,
-            contextUsage,
-          },
+        const sessionMetadata = {
+          id: sessionId,
+          projectId,
+          title: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: newSessionUpdatedAt,
+          messageCount: processMessages.length,
+          ownership,
+          pendingInputType: livePendingInputType,
+          activity: runtime.activity,
+          runtime,
           messages: processMessages,
+          customTitle: metadata?.customTitle,
+          aiTitle: metadata?.aiTitle,
+          isArchived: metadata?.isArchived,
+          isStarred: metadata?.isStarred,
+          createdBy: metadata?.createdBy,
+          lastSeenAt: lastSeenEntry?.timestamp,
+          hasUnread,
+          provider: process.provider,
+          model: process.resolvedModel,
+          reasoningEffort: process.resolvedReasoningEffort,
+          serviceTier: process.serviceTier,
+          contextUsage,
+        };
+        const projection = createBrowserSessionProjection(
+          sessionMetadata,
+          processMessages,
+        );
+        return c.json({
+          ...projection,
           ownership,
           runtime,
           pendingInputRequest: activePendingInputRequest,
@@ -1316,23 +1329,24 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               bridgedSession.session.updatedAt,
             )
           : undefined;
-        return c.json({
-          session: {
-            ...bridgedSession.session,
-            messages: [],
-            customTitle: metadata?.customTitle,
-            aiTitle: metadata?.aiTitle ?? bridgedSession.session.aiTitle,
-            isArchived: metadata?.isArchived,
-            isStarred: metadata?.isStarred,
-            createdBy: metadata?.createdBy ?? bridgedSession.session.createdBy,
-            ownership,
-            pendingInputType: livePendingInputType,
-            activity: runtime.activity,
-            runtime,
-            lastSeenAt: lastSeenEntry?.timestamp,
-            hasUnread,
-          },
+        const sessionMetadata = {
+          ...bridgedSession.session,
           messages: [],
+          customTitle: metadata?.customTitle,
+          aiTitle: metadata?.aiTitle ?? bridgedSession.session.aiTitle,
+          isArchived: metadata?.isArchived,
+          isStarred: metadata?.isStarred,
+          createdBy: metadata?.createdBy ?? bridgedSession.session.createdBy,
+          ownership,
+          pendingInputType: livePendingInputType,
+          activity: runtime.activity,
+          runtime,
+          lastSeenAt: lastSeenEntry?.timestamp,
+          hasUnread,
+        };
+        const projection = createBrowserSessionProjection(sessionMetadata, []);
+        return c.json({
+          ...projection,
           ownership,
           runtime,
           pendingInputRequest: activePendingInputRequest,
@@ -1439,26 +1453,30 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       await deps.recentsService.recordVisit(sessionId, session.projectId);
     }
 
+    const sessionMetadata = {
+      ...session,
+      ownership,
+      pendingInputType,
+      activity: runtime.activity,
+      runtime,
+      contextUsage,
+      customTitle: metadata?.customTitle,
+      aiTitle: metadata?.aiTitle ?? session.aiTitle,
+      isArchived: metadata?.isArchived,
+      isStarred: metadata?.isStarred,
+      createdBy: metadata?.createdBy ?? session.createdBy,
+      // Model: prefer explicit user preset from metadata, fall back to
+      // the model recorded in the session JSONL (from last run).
+      model: metadata?.model ?? session.model,
+      lastSeenAt,
+      hasUnread,
+    };
+    const projection = createBrowserSessionProjection(
+      sessionMetadata,
+      session.messages,
+    );
     return c.json({
-      session: {
-        ...session,
-        ownership,
-        pendingInputType,
-        activity: runtime.activity,
-        runtime,
-        contextUsage,
-        customTitle: metadata?.customTitle,
-        aiTitle: metadata?.aiTitle ?? session.aiTitle,
-        isArchived: metadata?.isArchived,
-        isStarred: metadata?.isStarred,
-        createdBy: metadata?.createdBy ?? session.createdBy,
-        // Model: prefer explicit user preset from metadata, fall back to
-        // the model recorded in the session JSONL (from last run).
-        model: metadata?.model ?? session.model,
-        lastSeenAt,
-        hasUnread,
-      },
-      messages: session.messages,
+      ...projection,
       ownership,
       runtime,
       pendingInputRequest,
