@@ -8,7 +8,9 @@ $DistRoot = Join-Path $RepoRoot "dist"
 $ProductionDir = Join-Path $DistRoot "npm-package"
 $ProductionCli = Join-Path $ProductionDir "dist/cli.js"
 $YepScript = Join-Path $ScriptDir "yep.ps1"
+$RunProdScript = Join-Path $ScriptDir "run-yepanywhere.ps1"
 $VerifyDeployScript = Join-Path $ScriptDir "verify-deploy.mjs"
+. (Join-Path $ScriptDir "production-runtime.ps1")
 $PowerShellExe = (Get-Command powershell.exe).Source
 $ServiceConfigPath = if ($env:YEP_SERVICE_CONFIG_PATH) {
   $env:YEP_SERVICE_CONFIG_PATH
@@ -26,6 +28,21 @@ $ServerPort = if ($env:YEP_DEPLOY_PORT) {
 } else {
   "8022"
 }
+$MaintenancePort = ([int]$ServerPort) + 1
+$CodexPort = if ($env:YEP_CODEX_BRIDGE_PORT) {
+  $env:YEP_CODEX_BRIDGE_PORT
+} elseif ($ServiceConfig -and $ServiceConfig.CodexPort) {
+  [string]$ServiceConfig.CodexPort
+} else {
+  "4510"
+}
+$ClaudePort = if ($env:YEP_CLAUDE_BRIDGE_PORT) {
+  $env:YEP_CLAUDE_BRIDGE_PORT
+} elseif ($ServiceConfig -and $ServiceConfig.ClaudePort) {
+  [string]$ServiceConfig.ClaudePort
+} else {
+  "4520"
+}
 $ServerBasePath = if ($env:YEP_DEPLOY_BASE_PATH) {
   $env:YEP_DEPLOY_BASE_PATH
 } elseif ($ServiceConfig -and $ServiceConfig.BasePath) {
@@ -35,6 +52,45 @@ $ServerBasePath = if ($env:YEP_DEPLOY_BASE_PATH) {
 }
 if ($ServerBasePath -eq "/") { $ServerBasePath = "" } else { $ServerBasePath = "/" + $ServerBasePath.TrimStart("/").TrimEnd("/") }
 $ServerBaseUrl = "http://127.0.0.1:${ServerPort}${ServerBasePath}"
+$ProductionProfile = if ($env:YEP_ANYWHERE_PROFILE) {
+  $env:YEP_ANYWHERE_PROFILE
+} elseif ($ServiceConfig -and $ServiceConfig.Profile) {
+  [string]$ServiceConfig.Profile
+} else {
+  $null
+}
+$ProductionDataDir = if ($env:YEP_ANYWHERE_DATA_DIR) {
+  $env:YEP_ANYWHERE_DATA_DIR
+} elseif ($ServiceConfig -and $ServiceConfig.DataDir) {
+  [string]$ServiceConfig.DataDir
+} else {
+  $null
+}
+$ProductionAllowedImagePaths = if ($env:ALLOWED_IMAGE_PATHS) {
+  $env:ALLOWED_IMAGE_PATHS
+} elseif ($ServiceConfig -and $ServiceConfig.AllowedImagePaths) {
+  [string]$ServiceConfig.AllowedImagePaths
+} else {
+  "$env:TEMP,$env:USERPROFILE\Downloads"
+}
+$ProductionCodexControlUrl = if ($env:YEP_CODEX_BRIDGE_CONTROL_URL) {
+  $env:YEP_CODEX_BRIDGE_CONTROL_URL
+} else {
+  "http://127.0.0.1:$CodexPort"
+}
+$ProductionClaudeControlUrl = if ($env:YEP_CLAUDE_BRIDGE_CONTROL_URL) {
+  $env:YEP_CLAUDE_BRIDGE_CONTROL_URL
+} else {
+  "http://127.0.0.1:$ClaudePort"
+}
+$ProdLogDir = if ($env:YEP_LAUNCHD_LOG_DIR) {
+  $env:YEP_LAUNCHD_LOG_DIR
+} elseif ($ProductionDataDir) {
+  Join-Path $ProductionDataDir "logs"
+} else {
+  Join-Path $env:USERPROFILE ".yep-anywhere/logs"
+}
+$ProdStateFile = Join-Path $ProdLogDir "prod-process.json"
 
 $DoBuild = $true
 $DoRestart = $true
@@ -111,10 +167,86 @@ function Assert-ManagedDistPath($candidate, $requiredPrefix) {
     throw "拒绝操作 dist 目录之外的路径：$full"
   }
   $name = Split-Path -Leaf $full
-  if (-not $name.StartsWith($requiredPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+  $nameAllowed = if ($requiredPrefix -eq "npm-package") {
+    $name.Equals("npm-package", [StringComparison]::OrdinalIgnoreCase)
+  } else {
+    $name.StartsWith($requiredPrefix, [StringComparison]::OrdinalIgnoreCase)
+  }
+  if (-not $nameAllowed) {
     throw "拒绝操作名称异常的目录：$full"
   }
   return $full
+}
+
+function Get-DeploymentInspection($bundlePath) {
+  $safeBundle = Assert-ManagedDistPath $bundlePath "npm-package"
+  $buildInfoPath = Join-Path $safeBundle "build-info.json"
+  $mainPids = @()
+  $maintenancePids = @()
+  if (-not (Test-Path -LiteralPath $buildInfoPath)) {
+    if (-not (Test-Path -LiteralPath $ProdStateFile)) {
+      $mainPids = @(Get-YepListeningPids -Port ([int]$ServerPort))
+      $maintenancePids = @(Get-YepListeningPids -Port $MaintenancePort)
+      if ($mainPids.Count -eq 0 -and $maintenancePids.Count -eq 0) {
+        return [pscustomobject]@{ State = "stopped"; Reasons = @("manifest-missing") }
+      }
+      return [pscustomobject]@{
+        State = "unknown-conflict"
+        Reasons = @("unknown-port-owner")
+        UnknownPortOwners = @($mainPids + $maintenancePids)
+      }
+    }
+    $buildId = "bundle-missing"
+  } else {
+    try {
+      $buildId = Get-YepBundleBuildId -BundlePath $safeBundle
+    } catch {
+      $mainPids = @(Get-YepListeningPids -Port ([int]$ServerPort))
+      $maintenancePids = @(Get-YepListeningPids -Port $MaintenancePort)
+      if ($mainPids.Count -gt 0 -or $maintenancePids.Count -gt 0) {
+        return [pscustomobject]@{
+          State = "unknown-conflict"
+          Reasons = @("build-mismatch", "unknown-port-owner")
+          UnknownPortOwners = @($mainPids + $maintenancePids)
+        }
+      }
+      throw
+    }
+  }
+  $expectation = New-YepProductionExpectation `
+    -RepoRoot $RepoRoot `
+    -BundlePath $safeBundle `
+    -BuildId $buildId `
+    -BasePath $ServerBasePath `
+    -Profile $ProductionProfile `
+    -DataDir $ProductionDataDir `
+    -AllowedImagePaths $ProductionAllowedImagePaths `
+    -ServerPort ([int]$ServerPort) `
+    -MaintenancePort $MaintenancePort `
+    -CodexPort ([int]$CodexPort) `
+    -ClaudePort ([int]$ClaudePort) `
+    -CodexControlUrl $ProductionCodexControlUrl `
+    -ClaudeControlUrl $ProductionClaudeControlUrl `
+    -StartBridges ($env:YEP_START_BRIDGES -ne "false") `
+    -RunScriptPath $RunProdScript
+  return Get-YepProductionInspection -ManifestPath $ProdStateFile -Expectation $expectation
+}
+
+function Assert-ProductionIdle {
+  $workersUrl = "$ServerBaseUrl/api/status/workers"
+  try {
+    $workers = Invoke-RestMethod -Uri $workersUrl -Method Get -TimeoutSec 5 -ErrorAction Stop
+  } catch {
+    throw "无法确认当前生产服务是否有执行中的 AI 回合；拒绝停机：$workersUrl：$_"
+  }
+  if ((-not (Test-YepProperty $workers 'activeWorkers')) -or (-not (Test-YepInteger $workers.activeWorkers)) -or
+      (-not (Test-YepProperty $workers 'queueLength')) -or (-not (Test-YepInteger $workers.queueLength)) -or
+      (-not (Test-YepProperty $workers 'hasActiveWork')) -or ($workers.hasActiveWork -isnot [bool])) {
+    throw "生产 /api/status/workers 返回无效 readiness payload；拒绝停机：$workersUrl"
+  }
+  if ($workers.hasActiveWork -eq $true -or [int]$workers.queueLength -gt 0) {
+    throw "当前仍有 AI 回合或排队消息（hasActiveWork=$($workers.hasActiveWork), queueLength=$($workers.queueLength)）；拒绝部署。"
+  }
 }
 
 function Remove-StagingDirectory($stagingDir) {
@@ -188,29 +320,115 @@ function Build-StagedBundle($stagingDir) {
   return $safeStaging
 }
 
-function Publish-StagedBundle($stagingDir) {
+function Start-BundleTransaction($stagingDir, [bool]$RestartOnExchangeFailure) {
   $safeStaging = Assert-ManagedDistPath $stagingDir "npm-package-staging-"
   $safeProduction = Assert-ManagedDistPath $ProductionDir "npm-package"
-  $backupDir = Assert-ManagedDistPath (Join-Path $DistRoot ("npm-package-swap-" + [guid]::NewGuid().ToString("N"))) "npm-package-swap-"
+  $rollbackDir = Assert-ManagedDistPath (Join-Path $DistRoot ("npm-package-rollback-" + [guid]::NewGuid().ToString("N"))) "npm-package-rollback-"
   $movedOld = $false
+  $rollbackAvailable = $false
+  $previousBuildId = $null
+
+  if (Test-Path -LiteralPath (Join-Path $safeProduction "build-info.json")) {
+    try {
+      $previousBuildId = Get-YepBundleBuildId -BundlePath $safeProduction
+      $rollbackAvailable = $true
+    } catch { }
+  }
 
   try {
     if (Test-Path $safeProduction) {
-      Move-Item -LiteralPath $safeProduction -Destination $backupDir
+      Move-Item -LiteralPath $safeProduction -Destination $rollbackDir
       $movedOld = $true
     }
     Move-Item -LiteralPath $safeStaging -Destination $safeProduction
   } catch {
-    if ($movedOld -and -not (Test-Path $safeProduction) -and (Test-Path $backupDir)) {
-      Move-Item -LiteralPath $backupDir -Destination $safeProduction
+    $exchangeError = $_.Exception.Message
+    $recoveryErrors = @()
+    $restoredOld = $false
+    $productionExists = Test-Path -LiteralPath $safeProduction
+    $rollbackExists = Test-Path -LiteralPath $rollbackDir
+    if ((-not $productionExists) -and $rollbackExists) {
+      try {
+        Move-Item -LiteralPath $rollbackDir -Destination $safeProduction
+        $productionExists = $true
+      } catch {
+        $recoveryErrors += "恢复旧 Bundle 失败：$($_.Exception.Message)"
+      }
+    } elseif ($productionExists -and $rollbackExists) {
+      $recoveryErrors += "生产目录与旧 Bundle 回滚目录同时存在；已保留现场。"
+    } elseif ((-not $productionExists) -and ($movedOld -or $rollbackAvailable)) {
+      $recoveryErrors += "旧 Bundle 与生产目录均不存在；无法恢复。"
     }
-    throw
+    if ($rollbackAvailable -and $productionExists) {
+      try {
+        $restoredOld = [string]::Equals(
+          [string](Get-YepBundleBuildId -BundlePath $safeProduction),
+          [string]$previousBuildId,
+          [StringComparison]::Ordinal
+        )
+      } catch { $restoredOld = $false }
+      if (-not $restoredOld) { $recoveryErrors += "恢复后的生产 Bundle 与原旧 Bundle 不一致。" }
+    }
+    if ($RestartOnExchangeFailure -and $rollbackAvailable -and $restoredOld) {
+      try {
+        Invoke-YepCommand "start-prod"
+        Verify-RunningBuild -BundlePath $safeProduction
+      } catch {
+        $recoveryErrors += "恢复旧服务失败：$($_.Exception.Message)"
+      }
+    }
+    if ($recoveryErrors.Count -gt 0) {
+      throw "Bundle 交换错误：$exchangeError；交换恢复错误：$($recoveryErrors -join '；')"
+    }
+    throw "Bundle 交换错误：$exchangeError"
   }
 
-  if (Test-Path $backupDir) {
-    Remove-Item -LiteralPath $backupDir -Recurse -Force
+  Write-Info "暂存 Bundle 已交换到生产目录；旧 Bundle 保留到运行验证完成。"
+  return [pscustomobject]@{
+    ProductionDir = $safeProduction
+    RollbackDir = $rollbackDir
+    PreviousProductionExisted = $movedOld
+    RollbackAvailable = $rollbackAvailable
+    NewBuildInfo = Join-Path $safeProduction "build-info.json"
   }
-  Write-Info "暂存 Bundle 已交换到生产目录。"
+}
+
+function Complete-BundleTransaction($transaction) {
+  $safeProduction = Assert-ManagedDistPath $transaction.ProductionDir "npm-package"
+  $safeRollback = Assert-ManagedDistPath $transaction.RollbackDir "npm-package-rollback-"
+  if (-not (Test-Path -LiteralPath $safeProduction)) {
+    throw "提交部署事务时生产 Bundle 不存在：$safeProduction"
+  }
+  if (Test-Path -LiteralPath $safeRollback) {
+    Remove-Item -LiteralPath $safeRollback -Recurse -Force
+  }
+}
+
+function Restore-BundleTransaction($transaction, $deploymentError) {
+  $safeProduction = Assert-ManagedDistPath $transaction.ProductionDir "npm-package"
+  $safeRollback = Assert-ManagedDistPath $transaction.RollbackDir "npm-package-rollback-"
+  $failedDir = Assert-ManagedDistPath (Join-Path $DistRoot ("npm-package-failed-" + [guid]::NewGuid().ToString("N"))) "npm-package-failed-"
+  try {
+    Invoke-YepCommand "stop-prod"
+    if (Test-Path -LiteralPath $safeProduction) {
+      Move-Item -LiteralPath $safeProduction -Destination $failedDir
+    }
+    if (-not $transaction.RollbackAvailable) {
+      Write-WarningMessage "原始部署错误：$deploymentError"
+      Write-WarningMessage "没有可回滚的旧 Bundle；失败的新 Bundle 已保留在 $failedDir，生产服务保持停止。"
+      return
+    }
+    if (-not (Test-Path -LiteralPath $safeRollback)) {
+      throw "旧 Bundle 回滚目录不存在：$safeRollback"
+    }
+    Move-Item -LiteralPath $safeRollback -Destination $safeProduction
+    Invoke-YepCommand "start-prod"
+    Verify-RunningBuild -BundlePath $safeProduction
+    Write-WarningMessage "原始部署错误：$deploymentError"
+    Write-WarningMessage "已自动恢复并验证旧 Bundle；失败的新 Bundle 保留在 $failedDir。"
+  } catch {
+    throw "原始部署错误：$deploymentError；回滚错误：$($_.Exception.Message)"
+  }
 }
 
 function Invoke-YepCommand($command) {
@@ -218,11 +436,15 @@ function Invoke-YepCommand($command) {
   Assert-LastExitCode "yep.ps1 $command"
 }
 
-function Verify-RunningBuild {
-  $buildInfo = Join-Path $ProductionDir "build-info.json"
+function Verify-RunningBuild($BundlePath = $ProductionDir) {
+  $safeBundle = Assert-ManagedDistPath $BundlePath "npm-package"
+  $buildInfo = Join-Path $safeBundle "build-info.json"
   if (-not (Test-Path $buildInfo)) { throw "生产 Bundle 缺少 build-info.json" }
-  & node $VerifyDeployScript --base-url $ServerBaseUrl --build-info $buildInfo
-  Assert-LastExitCode "生产 buildId 验证"
+  & node $VerifyDeployScript `
+    --base-url $ServerBaseUrl `
+    --maintenance-url "http://127.0.0.1:$MaintenancePort" `
+    --build-info $buildInfo
+  Assert-LastExitCode "生产 buildId/readiness 冒烟验证"
 }
 
 Write-Info "部署计划"
@@ -231,35 +453,84 @@ Write-Detail "生产重启：$DoRestart"
 Write-Detail "预检：$RunChecks"
 
 $stagingDir = $null
+$cleanupStaging = $false
+$transaction = $null
 try {
   if ($DoBuild) {
     if ($RunChecks) { Invoke-Checks }
     $stagingDir = Join-Path $DistRoot ("npm-package-staging-" + [guid]::NewGuid().ToString("N"))
+    $cleanupStaging = $true
     $stagingDir = Build-StagedBundle $stagingDir
 
+    $inspection = Get-DeploymentInspection $ProductionDir
+    if ($inspection.State -eq "unknown-conflict") {
+      throw "生产状态为 unknown-conflict；拒绝停止服务或移动 Bundle。"
+    }
+
     if ($DoRestart) {
-      Write-Info "暂存构建与验证全部通过；现在停止生产任务实例。"
-      Invoke-YepCommand "stop-prod"
+      $task = Get-ScheduledTask -TaskName "YepAnywhereServer" -ErrorAction SilentlyContinue
+      if ($inspection.State -ne "stopped") {
+        Write-Info "暂存构建与验证全部通过；正在确认生产服务空闲。"
+        Assert-ProductionIdle
+      }
+      if ($inspection.State -ne "stopped" -or
+          ($task -and $task.State -eq "Running") -or
+          (Test-Path -LiteralPath $ProductionDir)) {
+        Invoke-YepCommand "stop-prod"
+      }
     } else {
       $task = Get-ScheduledTask -TaskName "YepAnywhereServer" -ErrorAction SilentlyContinue
-      if ($task -and $task.State -eq "Running") {
+      if ($inspection.State -ne "stopped" -or ($task -and $task.State -eq "Running")) {
         throw "生产任务仍在运行；--server-build-only 不允许在线交换 Bundle。"
       }
     }
 
-    Publish-StagedBundle $stagingDir
+    $transaction = Start-BundleTransaction $stagingDir $DoRestart
+    $cleanupStaging = $false
     $stagingDir = $null
+    if (-not $DoRestart) {
+      Complete-BundleTransaction $transaction
+      $transaction = $null
+    }
   } elseif ($DoRestart) {
-    Invoke-YepCommand "stop-prod"
+    $inspection = Get-DeploymentInspection $ProductionDir
+    if ($inspection.State -eq "unknown-conflict") {
+      throw "生产状态为 unknown-conflict；拒绝停止服务。"
+    }
+    $task = Get-ScheduledTask -TaskName "YepAnywhereServer" -ErrorAction SilentlyContinue
+    if ($inspection.State -ne "stopped") { Assert-ProductionIdle }
+    if ($inspection.State -ne "stopped" -or ($task -and $task.State -eq "Running")) {
+      Invoke-YepCommand "stop-prod"
+    }
   }
 
   if ($DoRestart) {
     Invoke-YepCommand "start-prod"
-    Verify-RunningBuild
+    $inspection = Get-DeploymentInspection $ProductionDir
+    if ($inspection.State -ne "healthy") {
+      throw "生产启动后状态不是 healthy：$($inspection.State)（$(@($inspection.Reasons) -join ',')）"
+    }
+    $task = Get-ScheduledTask -TaskName "YepAnywhereServer" -ErrorAction SilentlyContinue
+    if (-not $task -or $task.State -ne "Running") {
+      throw "生产启动后计划任务不是 Running。"
+    }
+    Verify-RunningBuild -BundlePath $ProductionDir
+    if ($transaction) {
+      Complete-BundleTransaction $transaction
+      $transaction = $null
+    }
   }
 } catch {
-  Write-ErrorMessage "部署失败：$_"
-  if ($stagingDir) {
+  $deploymentError = $_.Exception.Message
+  Write-ErrorMessage "部署失败：$deploymentError"
+  if ($transaction) {
+    try {
+      Restore-BundleTransaction $transaction $deploymentError
+    } catch {
+      Write-ErrorMessage $_.Exception.Message
+    }
+  }
+  if ($cleanupStaging -and $stagingDir) {
     try { Remove-StagingDirectory $stagingDir } catch { Write-WarningMessage "清理暂存目录失败：$_" }
   }
   exit 1

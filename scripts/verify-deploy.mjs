@@ -9,6 +9,8 @@ function usage() {
 Options:
   --base-url <url>     Server base URL, including BASE_PATH if any
                        (default: http://127.0.0.1:8022/yep)
+  --maintenance-url <url>
+                       Optional loopback maintenance server base URL
   --build-info <path>  Expected build metadata JSON
                        (default: dist/npm-package/build-info.json)
   -h, --help           Show this help message
@@ -18,6 +20,7 @@ Options:
 function parseArgs(argv) {
   const args = {
     baseUrl: process.env.YEP_DEPLOY_BASE_URL || "http://127.0.0.1:8022/yep",
+    maintenanceUrl: undefined,
     buildInfo: "dist/npm-package/build-info.json",
   };
 
@@ -29,6 +32,9 @@ function parseArgs(argv) {
         break;
       case "--build-info":
         args.buildInfo = argv[++index];
+        break;
+      case "--maintenance-url":
+        args.maintenanceUrl = argv[++index];
         break;
       case "-h":
         usage();
@@ -49,8 +55,14 @@ function parseArgs(argv) {
   if (!args.buildInfo) {
     throw new Error("--build-info requires a value");
   }
+  if (args.maintenanceUrl === "") {
+    throw new Error("--maintenance-url requires a value");
+  }
 
   args.baseUrl = args.baseUrl.replace(/\/+$/, "");
+  if (args.maintenanceUrl) {
+    args.maintenanceUrl = args.maintenanceUrl.replace(/\/+$/, "");
+  }
   return args;
 }
 
@@ -71,6 +83,10 @@ async function fetchJson(url) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return await response.json();
+  } catch (error) {
+    throw new Error(
+      `${url}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   } finally {
     clearTimeout(timeout);
   }
@@ -100,8 +116,16 @@ async function main() {
     );
   }
 
-  assertEqual("server buildId", serverBuild.buildId, expected.buildId);
-  assertEqual("server gitCommit", serverBuild.gitCommit, expected.gitCommit);
+  assertEqual(
+    "Server /api/version buildId",
+    serverBuild.buildId,
+    expected.buildId,
+  );
+  assertEqual(
+    "Server /api/version gitCommit",
+    serverBuild.gitCommit,
+    expected.gitCommit,
+  );
 
   const clientBuild = await fetchJson(
     `${args.baseUrl}/build-info.json?${cacheBust}`,
@@ -112,11 +136,41 @@ async function main() {
     );
   }
 
-  assertEqual("client buildId", clientBuild.buildId, expected.buildId);
-  assertEqual("client gitCommit", clientBuild.gitCommit, expected.gitCommit);
+  assertEqual(
+    "Client /build-info.json buildId",
+    clientBuild.buildId,
+    expected.buildId,
+  );
+  assertEqual(
+    "Client /build-info.json gitCommit",
+    clientBuild.gitCommit,
+    expected.gitCommit,
+  );
+
+  const workers = await fetchJson(
+    `${args.baseUrl}/api/status/workers?${cacheBust}`,
+  );
+  if (
+    typeof workers?.activeWorkers !== "number" ||
+    typeof workers?.queueLength !== "number" ||
+    typeof workers?.hasActiveWork !== "boolean"
+  ) {
+    throw new Error(
+      "Server /api/status/workers returned an invalid readiness payload.",
+    );
+  }
+
+  if (args.maintenanceUrl) {
+    const health = await fetchJson(
+      `${args.maintenanceUrl}/health?${cacheBust}`,
+    );
+    if (health?.status !== "ok") {
+      throw new Error("Maintenance /health did not return status=ok.");
+    }
+  }
 
   console.log(
-    `[verify-deploy] OK buildId=${expected.buildId} version=${expected.version} baseUrl=${args.baseUrl}`,
+    `[verify-deploy] OK buildId=${expected.buildId} version=${expected.version} baseUrl=${args.baseUrl} activeWorkers=${workers.activeWorkers} queueLength=${workers.queueLength} maintenanceUrl=${args.maintenanceUrl ?? "not-requested"}`,
   );
   console.log(
     `[verify-deploy] server source=${serverBuild.source ?? "unknown"} entrypoint=${serverBuild.entrypoint ?? "unknown"}`,

@@ -61,9 +61,13 @@ Windows 下直接结束内层 supervisor 属于意外失败，常驻 watchdog �
 
 ## 重构建与更新
 
-`pnpm yep rebuild` 依次执行代码检查、在暂存目录构建 Bundle、使用 `npm ci --omit=dev` 安装运行时依赖、校验运行时包、原子交换 Bundle、重启生产服务并核对 `buildId`。
+`pnpm yep rebuild` 依次执行代码检查、在暂存目录构建 Bundle、使用 `npm ci --omit=dev` 安装运行时依赖、校验运行时包、确认当前没有执行中的 AI 回合或排队消息、交换 Bundle、重启生产服务并完成运行验证。Windows 检测到 `unknown-conflict`、活动回合或排队消息时会在停机和目录移动前拒绝部署，且没有强制绕过参数。
 
 暂存构建、依赖安装或校验失败时，当前生产 Bundle 和运行中的生产服务保持不变。
+
+Windows 完整重构建会把旧 Bundle 保留为 `npm-package-rollback-*`，直到计划任务为 `Running`、v2 进程清单与端口/bridge 身份完全匹配、`buildId`、worker readiness 和维护 `/health` 全部通过。新版本启动或验证失败时，新 Bundle 会保存在 `npm-package-failed-*`，旧 Bundle 按固定顺序恢复并重新验证；回滚本身失败时不会继续清理生产目录、失败目录、回滚证据、进程清单或日志。
+
+`--server-build-only` 仍只在生产服务已停止时交换并校验 Bundle，不启动服务；运行时自动回滚只适用于会重启服务的 `rebuild` / `--server-only`。
 
 设置页的“更新到本地最新版本”复用本地工作树执行同一构建流程，“更新到 GitHub 最新版本”会先拉取远程代码再执行构建流程。
 

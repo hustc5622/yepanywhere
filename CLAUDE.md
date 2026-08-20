@@ -267,8 +267,6 @@ pnpm yep setup-admin-password # 设置或重置当前系统用户的全局管理
 
 `status` 分别报告定义是否安装、当前是否加载、开发/生产是否运行、登录自启动是否启用，并显示 PID、Profile、端口、日志与“配置异常”诊断。Windows 生产状态为 `healthy`、`degraded-adoptable`、`verified-stale`、`unknown-conflict` 或 `stopped`，同时显示 Task Scheduler 状态与最近结果。开发后台控制台日志位于 `~/.yep-anywhere/logs/`；macOS 生产日志是 `server-launchd.out.log` / `server-launchd.err.log`，Windows 生产监督器日志是 `server.out.log` / `server.err.log`。
 
-Windows 下直接结束生产监督器属于意外失败，Task Scheduler 应重启监督器并接管仍健康的已验证子进程；`pnpm yep stop-prod` 使用 `Stop-ScheduledTask` 表达有意停止，不应自行重启。PID 本身从来不是终止进程的授权，任何清理都必须先核验进程身份。
-
 Windows 计划任务的顶层动作是常驻 `watch-yepanywhere.ps1`；直接结束内层生产监督器属于意外失败，watchdog 会在 5 秒后重新启动监督器并接管仍健康的已验证子进程。`pnpm yep stop-prod` 会先使用 `Stop-ScheduledTask` 停止 watchdog，再清理已验证进程；登录触发器没有周期重复，因此任务不会自行复活。PID 本身从来不是终止进程的授权，任何清理都必须先核验进程身份。
 
 **`pnpm yep rebuild` 会自动执行**：
@@ -276,10 +274,12 @@ Windows 计划任务的顶层动作是常驻 `watch-yepanywhere.ps1`；直接结
 2. `pnpm typecheck` - TypeScript 类型检查
 3. 在 `dist/npm-package-staging-*` 中运行 `pnpm build:bundle`
 4. 在暂存目录运行 `npm ci --omit=dev` 并校验运行时 Bundle
-5. 所有暂存检查通过后，才停止生产实例并交换到 `dist/npm-package`
-6. 通过同一 Task Scheduler/LaunchAgent 定义启动生产并核对 `buildId`
+5. Windows 所有暂存检查通过后，先确认生产状态可安全管理且没有执行中的 AI 回合或排队消息，再停止生产实例并交换到 `dist/npm-package`
+6. 通过同一 Task Scheduler/LaunchAgent 定义启动生产；Windows 还会核对计划任务、v2 进程清单、端口/bridge 身份、`buildId`、worker readiness 和维护健康检查
 
 **关键**：暂存构建、依赖安装或校验失败时，当前生产服务和生产 Bundle 均保持不变。生产依赖只使用固定的 `npm ci --omit=dev`；服务启动路径不安装依赖。
+
+Windows 完整重构建会保留旧 Bundle 为 `npm-package-rollback-*`，直到全部启动后检查通过。失败的新 Bundle 保存为 `npm-package-failed-*` 并自动恢复旧版本；若回滚停止、重启或验证失败，会保留生产/失败/回滚目录、进程清单和日志供人工处理。`--server-build-only` 保持不启动语义，运行时自动回滚只适用于 `rebuild` / `--server-only`。
 
 ### ⚠️ 重要：依赖安装方法
 
