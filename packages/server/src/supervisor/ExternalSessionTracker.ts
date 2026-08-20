@@ -11,6 +11,7 @@ import {
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { decodeProjectId, encodeProjectId } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import { readPiSessionTailActivity } from "../sessions/pi-files.js";
 import { readFirstLine } from "../utils/jsonl.js";
 import { BatchProcessor } from "../watcher/BatchProcessor.js";
 import type {
@@ -43,8 +44,22 @@ interface ExternalSessionInfo {
   projectId?: UrlProjectId;
   /** Session provider */
   provider: FileChangeEvent["provider"];
+  /**
+   * Session log path, kept for providers whose liveness can be read back out
+   * of the log when the process table has nothing to show (see
+   * {@link ExternalSessionTracker.hasLiveTurnEvidence}).
+   */
+  sessionFilePath?: string;
   timeoutId: ReturnType<typeof setTimeout>;
   validationTimeoutId: ReturnType<typeof setTimeout> | null;
+}
+
+/** Everything needed to decide whether one unowned session is externally active. */
+interface ExternalSessionCandidate {
+  provider: FileChangeEvent["provider"];
+  dirProjectId?: DirProjectId;
+  projectId?: UrlProjectId;
+  sessionFilePath?: string;
 }
 
 interface CodexFileSessionMeta {
@@ -57,6 +72,8 @@ interface CodexFileSessionMeta {
 /** Default grace period after abort before external detection resumes (30 seconds) */
 const DEFAULT_ABORT_GRACE_MS = 30000;
 const MISSING_PROJECT_WARNING_INTERVAL_MS = 60_000;
+/** Match the managed-process stale-turn ceiling for log-only Pi hosts. */
+const DEFAULT_PI_IN_FLIGHT_STALE_MS = 5 * 60 * 1000;
 
 export interface ExternalSessionTrackerOptions {
   eventBus: EventBus;
@@ -68,6 +85,11 @@ export interface ExternalSessionTrackerOptions {
   abortGraceMs?: number;
   /** How often to re-check that an external provider process is still alive (default: 3000) */
   processValidationMs?: number;
+  /**
+   * Maximum time an unfinished Pi log tail can prove liveness without another
+   * file change (default: 5 minutes). Bounds stale ownership after a host dies.
+   */
+  piInFlightStaleMs?: number;
   /** Optional process probe override for tests/platform-specific integrations */
   externalProcessProbe?: ExternalProcessProbe;
   /** Optional callback to get session summary for new external sessions */
@@ -100,6 +122,7 @@ export class ExternalSessionTracker {
   private decayMs: number;
   private abortGraceMs: number;
   private processValidationMs: number;
+  private piInFlightStaleMs: number;
   private externalProcessProbe: ExternalProcessProbe;
   private unsubscribe: (() => void) | null = null;
   private getSessionSummary?: (
@@ -137,6 +160,8 @@ export class ExternalSessionTracker {
     this.decayMs = options.decayMs ?? 30000;
     this.abortGraceMs = options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS;
     this.processValidationMs = options.processValidationMs ?? 3000;
+    this.piInFlightStaleMs =
+      options.piInFlightStaleMs ?? DEFAULT_PI_IN_FLIGHT_STALE_MS;
     this.externalProcessProbe =
       options.externalProcessProbe ?? hasActiveExternalProviderProcess;
     this.getSessionSummary = options.getSessionSummary;
@@ -600,6 +625,7 @@ export class ExternalSessionTracker {
     await this.handleUnownedSessionActivity(sessionId, {
       provider: "pi",
       projectId,
+      sessionFilePath: event.path,
     });
   }
 
@@ -737,15 +763,14 @@ export class ExternalSessionTracker {
 
   private async handleUnownedSessionActivity(
     sessionId: string,
-    info: {
-      provider: FileChangeEvent["provider"];
-      dirProjectId?: DirProjectId;
-      projectId?: UrlProjectId;
-    },
+    info: ExternalSessionCandidate,
   ): Promise<void> {
     const activeExternalProcess = await this.checkExternalProcessForInfo(info);
 
-    if (activeExternalProcess === false) {
+    if (
+      activeExternalProcess === false &&
+      !(await this.hasLiveTurnEvidence(info))
+    ) {
       this.removeExternal(sessionId);
       this.enqueueSessionParse(sessionId, info);
       return;
@@ -756,13 +781,49 @@ export class ExternalSessionTracker {
     this.markExternal(sessionId, info);
   }
 
+  /**
+   * Whether the session log itself shows a turn still in flight.
+   *
+   * The process probe answers "is a provider CLI running in this project", and
+   * a definitive `false` normally retires an external session. That premise
+   * does not hold for a provider hosted in-process by an SDK embedder: Pi Web
+   * runs `AgentSession` inside its own Next.js server, so there is no `pi`
+   * process to find and the host's cwd is its install directory, not the
+   * project. Every session driven that way was therefore reported as inactive
+   * while it was streaming.
+   *
+   * The append-only log is the stronger evidence in that case, and it is
+   * evidence the probe cannot contradict: a log that just grew, ending in an
+   * unfinished turn, means something is driving this session right now.
+   * Periodic validation bounds how long that evidence remains authoritative
+   * without another file change, so a host that dies mid-turn is retired.
+   */
+  private async hasLiveTurnEvidence(
+    info: ExternalSessionCandidate,
+  ): Promise<boolean> {
+    if (info.provider !== "pi" || !info.sessionFilePath) return false;
+    return (
+      (await readPiSessionTailActivity(info.sessionFilePath)) === "in-flight"
+    );
+  }
+
+  /**
+   * Log-only liveness is provisional: a crashed host leaves the same unfinished
+   * tail behind forever. File changes refresh `lastActivity`; once they stop for
+   * the stale window, the tail can no longer keep ownership alive by itself.
+   */
+  private async hasRecentLiveTurnEvidence(
+    info: ExternalSessionInfo,
+  ): Promise<boolean> {
+    if (Date.now() - info.lastActivity.getTime() >= this.piInFlightStaleMs) {
+      return false;
+    }
+    return this.hasLiveTurnEvidence(info);
+  }
+
   private enqueueSessionParse(
     sessionId: string,
-    info: {
-      provider: FileChangeEvent["provider"];
-      dirProjectId?: DirProjectId;
-      projectId?: UrlProjectId;
-    },
+    info: ExternalSessionCandidate,
   ): void {
     if (!this.getSessionSummary) return;
 
@@ -776,11 +837,7 @@ export class ExternalSessionTracker {
 
   private markExternal(
     sessionId: string,
-    info: {
-      provider: FileChangeEvent["provider"];
-      dirProjectId?: DirProjectId;
-      projectId?: UrlProjectId;
-    },
+    info: ExternalSessionCandidate,
   ): void {
     const now = new Date();
     const existing = this.externalSessions.get(sessionId);
@@ -792,6 +849,8 @@ export class ExternalSessionTracker {
         clearTimeout(existing.validationTimeoutId);
       }
       existing.lastActivity = now;
+      existing.sessionFilePath =
+        info.sessionFilePath ?? existing.sessionFilePath;
       existing.timeoutId = this.createDecayTimeout(sessionId);
       existing.validationTimeoutId =
         this.createProcessValidationTimeout(sessionId);
@@ -805,6 +864,7 @@ export class ExternalSessionTracker {
         dirProjectId: info.dirProjectId,
         projectId: info.projectId,
         provider: info.provider,
+        sessionFilePath: info.sessionFilePath,
         timeoutId: this.createDecayTimeout(sessionId),
         validationTimeoutId: null,
       };
@@ -849,7 +909,12 @@ export class ExternalSessionTracker {
     if (!info) return;
 
     const activeExternalProcess = await this.checkExternalProcessForInfo(info);
-    if (activeExternalProcess === true) {
+    // A long thinking phase writes nothing to the log, so decay must also ask
+    // whether the last recorded turn ever finished before retiring a session.
+    if (
+      activeExternalProcess === true ||
+      (await this.hasRecentLiveTurnEvidence(info))
+    ) {
       info.timeoutId = this.createDecayTimeout(sessionId);
       return;
     }
@@ -872,24 +937,24 @@ export class ExternalSessionTracker {
     if (!info) return;
 
     const activeExternalProcess = await this.checkExternalProcessForInfo(info);
-    if (activeExternalProcess === false) {
+    if (
+      activeExternalProcess === false &&
+      !(await this.hasRecentLiveTurnEvidence(info))
+    ) {
       this.removeExternal(sessionId);
       return;
     }
 
-    if (
-      activeExternalProcess === true &&
-      this.externalSessions.has(sessionId)
-    ) {
+    // Re-arm while the session still looks active. A log-evidenced session must
+    // keep validating too, otherwise it would only ever be retired by decay.
+    if (this.externalSessions.has(sessionId)) {
       info.validationTimeoutId = this.createProcessValidationTimeout(sessionId);
     }
   }
 
-  private async checkExternalProcessForInfo(info: {
-    provider: FileChangeEvent["provider"];
-    dirProjectId?: DirProjectId;
-    projectId?: UrlProjectId;
-  }): Promise<boolean | null> {
+  private async checkExternalProcessForInfo(
+    info: ExternalSessionCandidate,
+  ): Promise<boolean | null> {
     const project = await this.resolveProjectForSession(info);
     if (!project?.path) return null;
 

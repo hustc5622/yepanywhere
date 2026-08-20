@@ -659,6 +659,10 @@ function consumePiDerivation(
         (message.usage.totalTokens ?? 0);
       accumulator.cumulative.turnCount += 1;
     }
+  } else if (message.role === "toolResult") {
+    // A trailing tool result means the assistant still owes a reply. Tool
+    // results are not conversation turns, so only the tail marker moves.
+    accumulator.lastConversationRole = "toolResult";
   }
 }
 
@@ -688,16 +692,24 @@ function finishPiDerivation(
         }
       : undefined;
   const stopReason = accumulator.lastAssistant?.stopReason;
+  // Only these stop reasons hand control back to the user. `toolUse` (and the
+  // non-final `pending`/`deferred`) mean the agent was still mid-turn, so a
+  // persisted session ending there was cut short rather than completed — it
+  // used to be reported as "completed" because any last assistant message
+  // counted as one.
+  const settledStopReason =
+    stopReason === "stop" || stopReason === "length" || stopReason === "error";
   const lastTurnStatus =
-    accumulator.lastConversationRole === "user"
+    accumulator.lastConversationRole === "user" ||
+    accumulator.lastConversationRole === "toolResult"
       ? ("interrupted" as const)
       : stopReason === "error"
         ? ("failed" as const)
-        : stopReason === "aborted"
-          ? ("interrupted" as const)
-          : accumulator.lastAssistant
+        : !accumulator.lastAssistant
+          ? undefined
+          : settledStopReason
             ? ("completed" as const)
-            : undefined;
+            : ("interrupted" as const);
 
   return {
     model: accumulator.model,

@@ -58,6 +58,105 @@ export async function readFirstJsonlRecord(path: string): Promise<unknown> {
   }
 }
 
+/**
+ * Whether the newest turn in a Pi session log has finished.
+ *
+ * - `in-flight`: the agent still owes work — the last conversation entry is a
+ *   user prompt, a tool result, or an assistant message that stopped to call a
+ *   tool (or has not settled on a stop reason yet).
+ * - `settled`: the last assistant message reached a terminal stop reason.
+ * - `unknown`: the tail could not be read or holds no conversation entry.
+ */
+export type PiSessionTailActivity = "in-flight" | "settled" | "unknown";
+
+/** Bytes read from the end of a session log when classifying its tail. */
+const PI_TAIL_READ_BYTES = 256 * 1024;
+
+/**
+ * Pi stop reasons that mean the agent handed control back to the user.
+ * `toolUse`, `pending` and `deferred` all leave the turn owing more work.
+ */
+const PI_TERMINAL_STOP_REASONS = new Set([
+  "stop",
+  "length",
+  "error",
+  "aborted",
+]);
+
+/**
+ * Classify the tail of a Pi session log without reading the whole file.
+ *
+ * Pi is also hosted in-process by SDK embedders (Pi Web runs `AgentSession`
+ * inside its own server), where no `pi` process exists to find in the process
+ * table and the host's cwd is its own install directory. For those sessions the
+ * append-only log is the only evidence that a turn is running, so callers use
+ * this to decide liveness when a process probe reports nothing.
+ *
+ * Only the last bytes are read: a session log grows into the megabytes, and the
+ * newest appended entry is all that matters here. Reading backwards also keeps
+ * the answer correct for a log holding several branches, because the physically
+ * last entry is always the most recent write regardless of which branch it is
+ * on.
+ */
+export async function readPiSessionTailActivity(
+  filePath: string,
+): Promise<PiSessionTailActivity> {
+  let tail: string;
+  try {
+    const handle = await open(filePath, "r");
+    try {
+      const { size } = await handle.stat();
+      const start = Math.max(0, size - PI_TAIL_READ_BYTES);
+      const length = Math.min(size, PI_TAIL_READ_BYTES);
+      if (length === 0) return "unknown";
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, start);
+      tail = buffer.subarray(0, bytesRead).toString("utf8");
+      // A non-zero offset almost certainly lands mid-line; that partial first
+      // line is not parseable and must not be mistaken for a record.
+      if (start > 0) {
+        const firstNewline = tail.indexOf("\n");
+        tail = firstNewline >= 0 ? tail.slice(firstNewline + 1) : "";
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return "unknown";
+  }
+
+  const lines = tail.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const activity = classifyPiTailEntry(entry);
+    if (activity) return activity;
+  }
+  return "unknown";
+}
+
+function classifyPiTailEntry(entry: unknown): PiSessionTailActivity | null {
+  if (typeof entry !== "object" || entry === null) return null;
+  const record = entry as Record<string, unknown>;
+  if (record.type !== "message") return null;
+  const message = record.message;
+  if (typeof message !== "object" || message === null) return null;
+  const role = (message as Record<string, unknown>).role;
+  if (role === "user" || role === "toolResult") return "in-flight";
+  if (role !== "assistant") return null;
+  const stopReason = (message as Record<string, unknown>).stopReason;
+  return typeof stopReason === "string" &&
+    PI_TERMINAL_STOP_REASONS.has(stopReason)
+    ? "settled"
+    : "in-flight";
+}
+
 async function collectJsonlFiles(root: string): Promise<string[]> {
   const paths: string[] = [];
   let topLevel: Dirent[];
