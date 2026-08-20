@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import type { HttpBindings } from "@hono/node-server";
 import type { Context, Hono } from "hono";
 import type { WSEvents } from "hono/ws";
 import type { WebSocket as RawWebSocket } from "ws";
 import type { DeviceBridgeService } from "../device/DeviceBridgeService.js";
+import { getLogger } from "../logging/logger.js";
 import { isAllowedOrigin } from "../middleware/allowed-hosts.js";
 import type {
   BrowserProfileService,
@@ -141,6 +143,8 @@ export function createWsRoutes(
     });
     // Ping interval for dead connection detection (set in onOpen, cleared in onClose)
     let pingInterval: ReturnType<typeof setInterval> | null = null;
+    const connectionId = randomUUID();
+    let connectedAt = 0;
     // Send function (created on open, captures connState)
     let send: ReturnType<typeof createSendFn>;
     // WSAdapter wrapper
@@ -148,7 +152,14 @@ export function createWsRoutes(
 
     return {
       onOpen(_evt, ws) {
-        console.log("[WS] Client connected");
+        connectedAt = Date.now();
+        getLogger().info(
+          {
+            event: "ws_client_connected",
+            connectionId,
+          },
+          "WebSocket client connected",
+        );
         // Create WSAdapter wrapper for Hono's WSContext
         wsAdapter = {
           send(data: string | ArrayBuffer | Uint8Array<ArrayBuffer>): void {
@@ -197,12 +208,19 @@ export function createWsRoutes(
             deviceSessions,
             terminalAttachId,
           ).catch((err) => {
-            console.error("[WS] Unexpected error:", err);
+            getLogger().error(
+              {
+                event: "ws_client_error",
+                connectionId,
+                error: err instanceof Error ? err.message : String(err),
+              },
+              "Unexpected WebSocket message error",
+            );
           }),
         );
       },
 
-      onClose(_evt, _ws) {
+      onClose(evt, _ws) {
         if (pingInterval) clearInterval(pingInterval);
         cleanupConnectionState(connState);
 
@@ -219,11 +237,28 @@ export function createWsRoutes(
 
         // Clean up all subscriptions
         cleanupSubscriptions(subscriptions);
-        console.log("[WS] Client disconnected");
+        const closeEvent = evt as { code?: number; reason?: string };
+        getLogger().info(
+          {
+            event: "ws_client_disconnected",
+            connectionId,
+            durationMs: Math.max(0, Date.now() - connectedAt),
+            closeCode: closeEvent.code,
+            closeReason: closeEvent.reason || undefined,
+          },
+          "WebSocket client disconnected",
+        );
       },
 
       onError(evt, _ws) {
-        console.error("[WS] WebSocket error:", evt);
+        getLogger().error(
+          {
+            event: "ws_client_error",
+            connectionId,
+            error: evt instanceof Error ? evt.message : String(evt),
+          },
+          "WebSocket client error",
+        );
       },
     };
   });

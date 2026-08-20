@@ -10,6 +10,7 @@ import type {
   CodexBridgeController,
   CodexBridgeSessionView,
 } from "../../src/codex-bridge/types.js";
+import { getLogger } from "../../src/logging/logger.js";
 import type { SessionMetadataService } from "../../src/metadata/index.js";
 import { MockClaudeSDK, createMockScenario } from "../../src/sdk/mock.js";
 import type { SDKMessage } from "../../src/sdk/types.js";
@@ -791,21 +792,237 @@ describe("Sessions API", () => {
   });
 
   describe("POST /api/sessions/:sessionId/messages", () => {
-    it("returns 404 if no active process", async () => {
+    const requestHeaders = {
+      "Content-Type": "application/json",
+      "X-Yep-Anywhere": "true",
+    };
+
+    function createQueueProcess(
+      overrides: Record<string, unknown> = {},
+    ): Process {
+      return {
+        id: "process-active",
+        sessionId: "sess-active",
+        projectPath: testDir,
+        state: { type: "in-turn" },
+        isTerminated: false,
+        provider: "claude",
+        deferMessage: vi.fn(),
+        ...overrides,
+      } as unknown as Process;
+    }
+
+    function expectPrivateQueueLogs(
+      info: ReturnType<typeof vi.spyOn>,
+      warn: ReturnType<typeof vi.spyOn>,
+    ): void {
+      const payloads = [...info.mock.calls, ...warn.mock.calls].map(
+        ([payload]) => JSON.stringify(payload),
+      );
+      expect(payloads.join("\n")).not.toContain("secret body");
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("logs a rejected outcome when no active process exists", async () => {
+      const warn = vi.spyOn(getLogger(), "warn").mockImplementation(() => {});
       const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
 
       const res = await app.request("/api/sessions/unknown/messages", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Yep-Anywhere": "true",
-        },
-        body: JSON.stringify({ message: "hello" }),
+        headers: requestHeaders,
+        body: JSON.stringify({ message: "secret body" }),
       });
 
       expect(res.status).toBe(404);
       const json = await res.json();
       expect(json.error).toBe("No active process for session");
+      expect(warn).toHaveBeenCalledWith(
+        {
+          event: "session_queue_rejected",
+          sessionId: "unknown",
+          reason: "no_active_process",
+        },
+        expect.any(String),
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("secret body");
+    });
+
+    it("logs requested and rejected outcomes for a terminated process", async () => {
+      const info = vi.spyOn(getLogger(), "info").mockImplementation(() => {});
+      const warn = vi.spyOn(getLogger(), "warn").mockImplementation(() => {});
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const process = createQueueProcess({
+        state: { type: "terminated", reason: "test termination" },
+        isTerminated: true,
+        terminationReason: "test termination",
+      });
+      vi.spyOn(supervisor, "getProcessForSession").mockReturnValue(process);
+
+      const res = await app.request("/api/sessions/sess-active/messages", {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({
+          message: "secret body",
+          tempId: "temp-terminated",
+        }),
+      });
+
+      expect(res.status).toBe(410);
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "session_queue_requested",
+          sessionId: "sess-active",
+          tempId: "temp-terminated",
+          messageLength: 11,
+          processState: "terminated",
+        }),
+        expect.any(String),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "session_queue_rejected",
+          sessionId: "sess-active",
+          reason: "process_terminated",
+        }),
+        expect.any(String),
+      );
+      expectPrivateQueueLogs(info, warn);
+    });
+
+    it("logs requested and accepted outcomes for a deferred message", async () => {
+      const info = vi.spyOn(getLogger(), "info").mockImplementation(() => {});
+      const warn = vi.spyOn(getLogger(), "warn").mockImplementation(() => {});
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const process = createQueueProcess();
+      vi.spyOn(supervisor, "getProcessForSession").mockReturnValue(process);
+
+      const res = await app.request("/api/sessions/sess-active/messages", {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({
+          message: "secret body",
+          tempId: "temp-deferred",
+          deferred: true,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "session_queue_requested",
+          sessionId: "sess-active",
+          tempId: "temp-deferred",
+          messageLength: 11,
+          processState: "in-turn",
+        }),
+        expect.any(String),
+      );
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "session_queue_accepted",
+          sessionId: "sess-active",
+          tempId: "temp-deferred",
+          messageLength: 11,
+          processState: "in-turn",
+        }),
+        expect.any(String),
+      );
+      expectPrivateQueueLogs(info, warn);
+    });
+
+    it("logs requested and rejected outcomes when queueing fails", async () => {
+      const info = vi.spyOn(getLogger(), "info").mockImplementation(() => {});
+      const warn = vi.spyOn(getLogger(), "warn").mockImplementation(() => {});
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const process = createQueueProcess();
+      vi.spyOn(supervisor, "getProcessForSession").mockReturnValue(process);
+      vi.spyOn(supervisor, "queueMessageToSession").mockResolvedValue({
+        success: false,
+        error: "Process transport failed",
+      });
+
+      const res = await app.request("/api/sessions/sess-active/messages", {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({
+          message: "secret body",
+          tempId: "temp-failed",
+        }),
+      });
+
+      expect(res.status).toBe(410);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "session_queue_rejected",
+          sessionId: "sess-active",
+          tempId: "temp-failed",
+          messageLength: 11,
+          processState: "in-turn",
+          reason: "queue_failed",
+        }),
+        expect.any(String),
+      );
+      expectPrivateQueueLogs(info, warn);
+    });
+
+    it("logs requested and accepted outcomes when queueing succeeds", async () => {
+      const info = vi.spyOn(getLogger(), "info").mockImplementation(() => {});
+      const warn = vi.spyOn(getLogger(), "warn").mockImplementation(() => {});
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const process = createQueueProcess();
+      vi.spyOn(supervisor, "getProcessForSession").mockReturnValue(process);
+      vi.spyOn(supervisor, "queueMessageToSession").mockResolvedValue({
+        success: true,
+        process,
+        restarted: false,
+      });
+
+      const res = await app.request("/api/sessions/sess-active/messages", {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({
+          message: "secret body",
+          tempId: "temp-1",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "session_queue_requested",
+          sessionId: "sess-active",
+          tempId: "temp-1",
+          messageLength: 11,
+          processState: "in-turn",
+        }),
+        expect.any(String),
+      );
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "session_queue_accepted",
+          sessionId: "sess-active",
+          tempId: "temp-1",
+          messageLength: 11,
+          processState: "in-turn",
+        }),
+        expect.any(String),
+      );
+      expectPrivateQueueLogs(info, warn);
     });
   });
 

@@ -2048,6 +2048,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     const process = deps.supervisor.getProcessForSession(sessionId);
     if (!process) {
+      getLogger().warn(
+        {
+          event: "session_queue_rejected",
+          sessionId,
+          reason: "no_active_process",
+        },
+        "Session queue rejected",
+      );
       return c.json({ error: "No active process for session" }, 404);
     }
 
@@ -2061,8 +2069,31 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (!body.message) {
       return c.json({ error: "Message is required" }, 400);
     }
+
+    const queueLogContext = {
+      sessionId,
+      tempId: body.tempId,
+      messageLength: body.message.length,
+      processState: process.state.type,
+    };
+    getLogger().info(
+      {
+        event: "session_queue_requested",
+        ...queueLogContext,
+      },
+      "Session queue requested",
+    );
+
     const parsedCodexMcpMode = parseOptionalCodexMcpMode(body.codexMcpMode);
     if (parsedCodexMcpMode.error) {
+      getLogger().warn(
+        {
+          event: "session_queue_rejected",
+          ...queueLogContext,
+          reason: "invalid_codex_mcp_mode",
+        },
+        "Session queue rejected",
+      );
       return c.json({ error: parsedCodexMcpMode.error }, 400);
     }
 
@@ -2077,6 +2108,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Check if process is terminated
     if (process.isTerminated) {
+      getLogger().warn(
+        {
+          event: "session_queue_rejected",
+          ...queueLogContext,
+          reason: "process_terminated",
+        },
+        "Session queue rejected",
+      );
       return c.json(
         {
           error: "Process terminated",
@@ -2089,6 +2128,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // Deferred messages are held server-side and auto-sent when the agent finishes
     if (body.deferred) {
       process.deferMessage(userMessage);
+      getLogger().info(
+        {
+          event: "session_queue_accepted",
+          ...queueLogContext,
+        },
+        "Session queue accepted",
+      );
       return c.json({ queued: true, deferred: true });
     }
 
@@ -2104,12 +2150,28 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       deps.sessionMetadataService?.getExecutor(sessionId),
     );
     if (metadataExecutor.error) {
+      getLogger().warn(
+        {
+          event: "session_queue_rejected",
+          ...queueLogContext,
+          reason: "invalid_metadata_executor",
+        },
+        "Session queue rejected",
+      );
       return c.json({ error: metadataExecutor.error }, 400);
     }
     const { executor, error: executorError } = parseOptionalExecutor(
       body.executor,
     );
     if (executorError) {
+      getLogger().warn(
+        {
+          event: "session_queue_rejected",
+          ...queueLogContext,
+          reason: "invalid_executor",
+        },
+        "Session queue rejected",
+      );
       return c.json({ error: executorError }, 400);
     }
 
@@ -2149,6 +2211,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     );
 
     if (!result.success) {
+      getLogger().warn(
+        {
+          event: "session_queue_rejected",
+          ...queueLogContext,
+          reason: "queue_failed",
+        },
+        "Session queue rejected",
+      );
       return c.json(
         {
           error: "Failed to queue message",
@@ -2158,6 +2228,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       ); // 410 Gone - process is no longer available
     }
 
+    getLogger().info(
+      {
+        event: "session_queue_accepted",
+        ...queueLogContext,
+      },
+      "Session queue accepted",
+    );
     return c.json({
       queued: true,
       restarted: result.restarted,
