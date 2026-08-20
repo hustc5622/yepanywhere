@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { apiPath } from "../lib/apiPath";
+import { CLIENT_BUILD_ID } from "../lib/buildRecovery";
 
 interface Props {
   children: ReactNode;
@@ -9,6 +10,7 @@ interface State {
   hasError: boolean;
   error: Error | null;
   errorInfo: ErrorInfo | null;
+  serverBuildId: string | null;
   serverVersion: string | null;
   versionLoading: boolean;
 }
@@ -24,6 +26,7 @@ export class ErrorBoundary extends Component<Props, State> {
       hasError: false,
       error: null,
       errorInfo: null,
+      serverBuildId: null,
       serverVersion: null,
       versionLoading: false,
     };
@@ -48,8 +51,14 @@ export class ErrorBoundary extends Component<Props, State> {
     try {
       const res = await fetch(apiPath("/version"));
       if (res.ok) {
-        const data = await res.json();
-        this.setState({ serverVersion: data.current });
+        const data = (await res.json()) as {
+          current?: string;
+          build?: { buildId?: string };
+        };
+        this.setState({
+          serverVersion: data.current ?? null,
+          serverBuildId: data.build?.buildId ?? null,
+        });
       }
     } catch {
       // Ignore - version fetch failed (might be why we're in an error state)
@@ -78,7 +87,8 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
-      const { error, serverVersion, versionLoading } = this.state;
+      const { error, serverBuildId, serverVersion, versionLoading } =
+        this.state;
       const isVersionMismatch = this.isLikelyVersionMismatch();
 
       return (
@@ -104,6 +114,18 @@ export class ErrorBoundary extends Component<Props, State> {
             </div>
 
             <div style={styles.versionInfo}>
+              <div style={styles.versionRow}>
+                <span style={styles.versionLabel}>Client build:</span>
+                <span style={styles.versionValue}>
+                  {CLIENT_BUILD_ID || "Unknown"}
+                </span>
+              </div>
+              <div style={styles.versionRow}>
+                <span style={styles.versionLabel}>Server build:</span>
+                <span style={styles.versionValue}>
+                  {versionLoading ? "Loading..." : serverBuildId || "Unknown"}
+                </span>
+              </div>
               <div style={styles.versionRow}>
                 <span style={styles.versionLabel}>Server version:</span>
                 <span style={styles.versionValue}>

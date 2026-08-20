@@ -18,6 +18,7 @@ import { initializeFontSize } from "./hooks/useFontSize";
 import { initializeTabSize } from "./hooks/useTabSize";
 import { initializeTheme } from "./hooks/useTheme";
 import { NavigationLayout } from "./layouts";
+import { installBuildRecoveryListeners } from "./lib/buildRecovery";
 import { armSplashSafety } from "./lib/splash";
 import "./styles/index.css";
 
@@ -133,6 +134,7 @@ if (!rootElement) {
   throw new Error("Root element not found");
 }
 
+installBuildRecoveryListeners();
 createRoot(rootElement).render(
   <Wrapper>
     <ErrorBoundary>
