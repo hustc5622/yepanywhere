@@ -13,8 +13,12 @@ import type {
 import type { SessionMetadataService } from "../../src/metadata/index.js";
 import { MockClaudeSDK, createMockScenario } from "../../src/sdk/mock.js";
 import type { SDKMessage } from "../../src/sdk/types.js";
+import type { LoadedSession } from "../../src/sessions/types.js";
 import type { Process } from "../../src/supervisor/Process.js";
-import { encodeProjectId } from "../../src/supervisor/types.js";
+import {
+  type ProcessInfo,
+  encodeProjectId,
+} from "../../src/supervisor/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(__dirname, "..", "fixtures", "agents");
@@ -380,6 +384,96 @@ describe("Sessions API", () => {
         },
       });
       expect(identity.headers.has("content-encoding")).toBe(false);
+    });
+
+    it("does not compress a below-threshold Session JSON response", async () => {
+      const sessionId = "sess-small";
+      const smallSession: LoadedSession = {
+        summary: {
+          id: sessionId,
+          projectId: projectId as UrlProjectId,
+          title: null,
+          fullTitle: null,
+          createdAt: "2026-08-17T01:02:03.000Z",
+          updatedAt: "2026-08-17T01:02:04.000Z",
+          messageCount: 0,
+          ownership: { owner: "none" },
+          provider: "claude",
+        },
+        data: {
+          provider: "claude",
+          session: { messages: [] },
+        },
+      };
+      const { app, readerFactory, scanner } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const project = await scanner.getOrCreateProject(projectId);
+      if (!project) throw new Error("Expected test project to exist");
+      vi.spyOn(readerFactory(project), "getSession").mockResolvedValue(
+        smallSession,
+      );
+      const sessionUrl = `/api/projects/${projectId}/sessions/${sessionId}`;
+      const identity = await app.request(sessionUrl, {
+        headers: {
+          "X-Yep-Anywhere": "true",
+          "Accept-Encoding": "identity",
+        },
+      });
+
+      expect(identity.status).toBe(200);
+      const body = await identity.text();
+      expect(Buffer.byteLength(body, "utf8")).toBeLessThan(1024);
+
+      const gzip = await app.request(sessionUrl, {
+        headers: {
+          "X-Yep-Anywhere": "true",
+          "Accept-Encoding": "gzip",
+        },
+      });
+      expect(gzip.status).toBe(200);
+      expect(gzip.headers.has("content-encoding")).toBe(false);
+    });
+
+    it("does not compress unrelated JSON routes registered after Session routes", async () => {
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+      });
+      const processInfo: ProcessInfo = {
+        id: "unrelated-process",
+        sessionId: "unrelated-session",
+        projectId: projectId as UrlProjectId,
+        projectPath: testDir,
+        projectName: "myproject",
+        sessionTitle: "unrelated response ".repeat(150),
+        state: "idle",
+        startedAt: "2026-08-17T01:02:03.000Z",
+        queueDepth: 0,
+        provider: "claude",
+      };
+      vi.spyOn(supervisor, "getProcessInfoList").mockReturnValue([processInfo]);
+
+      const identity = await app.request("/api/processes", {
+        headers: {
+          "X-Yep-Anywhere": "true",
+          "Accept-Encoding": "identity",
+        },
+      });
+      expect(identity.status).toBe(200);
+      expect(Buffer.byteLength(await identity.text(), "utf8")).toBeGreaterThan(
+        1024,
+      );
+
+      const gzip = await app.request("/api/processes", {
+        headers: {
+          "X-Yep-Anywhere": "true",
+          "Accept-Encoding": "gzip",
+        },
+      });
+      expect(gzip.status).toBe(200);
+      expect(gzip.headers.has("content-encoding")).toBe(false);
     });
 
     it("returns pendingInputRequest for a persisted Claude AskUserQuestion", async () => {

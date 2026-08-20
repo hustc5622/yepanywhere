@@ -645,13 +645,30 @@ async function markSessionCreatedByYep(
 
 export function createSessionsRoutes(deps: SessionsDeps): Hono {
   const routes = new Hono();
-  routes.use(
-    "*",
-    compress({
-      threshold: 1024,
-      contentTypeFilter: /^application\/json\b/i,
-    }),
-  );
+  const sessionDetailPath = "/projects/:projectId/sessions/:sessionId";
+  const jsonContentType = /^application\/json\b/i;
+  const compressSessionJson = compress({
+    threshold: 1024,
+    contentTypeFilter: jsonContentType,
+  });
+  routes.use(sessionDetailPath, async (c, next) => {
+    if (c.req.method !== "GET") {
+      await next();
+      return;
+    }
+    await compressSessionJson(c, next);
+  });
+  routes.use(sessionDetailPath, async (c, next) => {
+    await next();
+    if (c.req.method !== "GET") return;
+
+    const contentType = c.res.headers.get("Content-Type");
+    if (!contentType || !jsonContentType.test(contentType)) return;
+
+    const body = await c.res.arrayBuffer();
+    c.res = new Response(body, c.res);
+    c.res.headers.set("Content-Length", String(body.byteLength));
+  });
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
     deps.codexReaderFactory?.(projectPath) ??
     (deps.codexSessionsDir
@@ -1080,7 +1097,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   //   ?aroundMessageId=<id> - return a bounded window centered on a target message
   //   ?afterWindowMessageId=<id> - return the next bounded window after a cursor
   //   ?branchId=<id> - derived branch id to render
-  routes.get("/projects/:projectId/sessions/:sessionId", async (c) => {
+  routes.get(sessionDetailPath, async (c) => {
     const projectId = c.req.param("projectId");
     const sessionId = c.req.param("sessionId");
     const afterMessageId = c.req.query("afterMessageId");
