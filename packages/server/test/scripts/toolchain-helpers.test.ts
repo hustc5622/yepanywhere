@@ -42,6 +42,7 @@ function runHelper(
       env: {
         ...process.env,
         HOME: join(repoRoot, "home"),
+        NVM_DIR: join(repoRoot, "home/.nvm"),
         PATH: path,
         REPO_ROOT: repoRoot,
         TEST_HELPER_PATH: helperPath,
@@ -103,6 +104,33 @@ describe("deployment toolchain helpers", () => {
     expect(result.stderr).toContain(
       ".nvmrc requires v22.22.2 but .node-version requires v20",
     );
+  });
+
+  it("moves the pinned NVM runtime ahead of an earlier PATH Node", () => {
+    writeFileSync(join(repoRoot, ".nvmrc"), "22.22.2\n");
+    writeFileSync(join(repoRoot, ".node-version"), "22.22.2\n");
+    executable(
+      join(fakeBin, "node"),
+      '#!/usr/bin/env bash\nprintf "%s\\n" "v25.9.0"\n',
+    );
+    const pinnedBin = join(repoRoot, "home/.nvm/versions/node/v22.22.2/bin");
+    mkdirSync(pinnedBin, { recursive: true });
+    executable(
+      join(pinnedBin, "node"),
+      '#!/usr/bin/env bash\nprintf "%s\\n" "v22.22.2"\n',
+    );
+
+    const result = runHelper(
+      nodeHelper,
+      "ensure_project_node\ncommand -v node\nnode --version",
+      repoRoot,
+      basePath,
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(`${pinnedBin}/node`);
+    expect(result.stdout.trim().endsWith("v22.22.2")).toBe(true);
   });
 
   it("selects the repository Corepack shim and verifies pinned pnpm", () => {
