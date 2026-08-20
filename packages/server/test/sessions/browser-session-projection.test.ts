@@ -53,6 +53,48 @@ describe("projectBrowserMessages", () => {
     });
   });
 
+  it("omits data images inside top-level live-process tool results", () => {
+    const dataUrl = `data:image/png;base64,${Buffer.from("live-image-bytes").toString("base64")}`;
+    const userImage = { type: "input_image", image_url: dataUrl };
+    const toolResult = {
+      type: "tool_result",
+      tool_use_id: "live-tool",
+      content: JSON.stringify({
+        output: [{ type: "input_image", image_url: dataUrl }],
+      }),
+    };
+    const content = [userImage, toolResult];
+    const message: Message = {
+      id: "live-tool-result",
+      type: "user",
+      role: "user",
+      content,
+      timestamp: "2026-08-20T00:00:00.000Z",
+    };
+
+    const [projected] = projectBrowserMessages([message]);
+    const projectedContent = projected?.content;
+    if (!Array.isArray(projectedContent)) {
+      throw new Error("Expected projected top-level content array");
+    }
+    const projectedToolResult = projectedContent[1] as Record<string, unknown>;
+
+    expect(projectedToolResult.content).not.toContain("data:image/png;base64");
+    expect(JSON.parse(projectedToolResult.content as string)).toMatchObject({
+      output: [
+        {
+          type: "input_image",
+          omitted_image: { mimeType: "image/png", byteLength: 16 },
+        },
+      ],
+    });
+    expect(projected).not.toBe(message);
+    expect(projectedContent).not.toBe(content);
+    expect(projectedContent[0]).toBe(userImage);
+    expect(JSON.stringify(projectedContent[0])).toContain(dataUrl);
+    expect(toolResult.content).toContain(dataUrl);
+  });
+
   it("leaves invalid tool-result JSON byte-for-byte unchanged", () => {
     const invalidJson = ' {"output": [} \r\n';
     const message: Message = {

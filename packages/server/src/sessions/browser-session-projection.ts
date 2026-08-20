@@ -84,14 +84,40 @@ export function projectBrowserMessages(
       });
     }
 
+    const topLevelContent = message.content;
+    let projectedTopLevelContent = topLevelContent;
+    let topLevelContentChanged = false;
+
+    if (Array.isArray(topLevelContent)) {
+      projectedTopLevelContent = topLevelContent.map((block) => {
+        if (!block || typeof block !== "object") return block;
+
+        const record = block as Record<string, unknown>;
+        if (record.type !== "tool_result") return block;
+
+        const projected = projectToolResultContent(record.content);
+        if (!projected.changed) return block;
+
+        topLevelContentChanged = true;
+        return { ...record, content: projected.value };
+      });
+    }
+
     const projectedToolUseResult = projectUnknown(message.toolUseResult);
-    if (!contentChanged && !projectedToolUseResult.changed) return message;
+    if (
+      !contentChanged &&
+      !topLevelContentChanged &&
+      !projectedToolUseResult.changed
+    ) {
+      return message;
+    }
 
     return {
       ...message,
       ...(contentChanged
         ? { message: { ...message.message, content: projectedContent } }
         : {}),
+      ...(topLevelContentChanged ? { content: projectedTopLevelContent } : {}),
       ...(projectedToolUseResult.changed
         ? { toolUseResult: projectedToolUseResult.value }
         : {}),
