@@ -9,6 +9,13 @@ const runtimeScript = path.join(repoRoot, "scripts", "production-runtime.ps1");
 const yepScript = path.join(repoRoot, "scripts", "yep.ps1");
 const runProdScript = path.join(repoRoot, "scripts", "run-yepanywhere.ps1");
 const watchdogScript = path.join(repoRoot, "scripts", "watch-yepanywhere.ps1");
+const serverIndex = path.join(
+  repoRoot,
+  "packages",
+  "server",
+  "src",
+  "index.ts",
+);
 const bundleDir = path.join(repoRoot, "dist", "npm-package");
 const cliJs = path.join(bundleDir, "dist", "cli.js");
 const tempDirs: string[] = [];
@@ -491,6 +498,226 @@ function requireResult<T>(results: Map<string, T>, scenario: string) {
   const result = results.get(scenario);
   if (!result) throw new Error(`Missing result for ${scenario}`);
   return result;
+}
+
+function supervisorProviderHarness(scenario: string, configPath: string) {
+  return `
+$global:scenario = '${scenario}'
+$global:fixedStart = [DateTime]::Parse('2026-08-17T08:00:00Z')
+$global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
+$global:realGetContent = Get-Command Get-Content -CommandType Cmdlet
+$global:processes = @{}
+$global:processGetCalls = @{}
+$global:nextPid = 1301
+$global:capturedMaintenancePort = $null
+foreach ($processId in @(1200, 1201, 1202, 1203)) {
+  $present = switch ($global:scenario) {
+    { $_ -in @('degraded-adoptable', 'adoption-pid-reused') } { $processId -ne 1200 }
+    'stopped' { $false }
+    'readiness-build-mismatch' { $false }
+    'partial-identity' { $false }
+    'partial-second-start' { $false }
+    'partial-first-manifest' { $false }
+    'external-bridge' { $false }
+    'bridge-conflict' { $false }
+    default { $true }
+  }
+  if ($present) {
+    $process = [pscustomobject]@{
+      Id = $processId
+      StartTime = $global:fixedStart.AddSeconds($processId - 1200)
+      HasExited = $false
+      SafeHandle = [pscustomobject]@{ IsInvalid = $false; IsClosed = $false }
+    }
+    $process | Add-Member -MemberType ScriptProperty -Name Handle -Value { return [IntPtr]([int]$this.Id + 1) }
+    $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    $global:processes[$processId] = $process
+  }
+}
+function Test-Path {
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package*') { return $true }
+  return & $global:realTestPath -LiteralPath $candidate
+}
+function Get-Content {
+  param($Path, $LiteralPath, [switch]$Raw, $Encoding)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\build-info.json') { return '{"buildId":"build-1"}' }
+  $arguments = @{ LiteralPath = $candidate }
+  if ($Raw) { $arguments.Raw = $true }
+  if ($Encoding) { $arguments.Encoding = $Encoding }
+  return & $global:realGetContent @arguments
+}
+function Get-Command { param($Name) return [pscustomobject]@{ Source = 'C:\\Program Files\\nodejs\\node.exe' } }
+function Get-TestRole([int]$ProcessId) {
+  switch ($ProcessId) {
+    { $_ -in @(1201, 1301) } { return 'server' }
+    { $_ -in @(1202, 1302) } { return 'codex-bridge' }
+    { $_ -in @(1203, 1303) } { return 'claude-bridge' }
+    default { return 'supervisor' }
+  }
+}
+function Get-TestCommand([int]$ProcessId) {
+  if ($ProcessId -eq 1200) {
+    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"'
+  }
+  switch (Get-TestRole $ProcessId) {
+    'server' { return 'node.exe "${cliJs.replaceAll("'", "''")}" --port 8022' }
+    'codex-bridge' { return 'node.exe "${cliJs.replaceAll("'", "''")}" --codex-bridge-only' }
+    'claude-bridge' { return 'node.exe "${cliJs.replaceAll("'", "''")}" --claude-bridge-only' }
+    default { return 'powershell.exe -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"' }
+  }
+}
+function Get-Process {
+  param($Id, $ErrorAction)
+  $processId = [int]$Id
+  if ($processId -eq $PID) {
+    return [pscustomobject]@{ Id = $PID; StartTime = $global:fixedStart.AddMinutes(1); HasExited = $false }
+  }
+  if ($processId -eq 9999) {
+    return [pscustomobject]@{ Id = 9999; StartTime = $global:fixedStart; HasExited = $false }
+  }
+  $global:processGetCalls[$processId] = [int]$global:processGetCalls[$processId] + 1
+  if ($global:scenario -eq 'adoption-pid-reused' -and $processId -eq 1201 -and
+      [int]$global:processGetCalls[$processId] -eq 2) {
+    $replacement = [pscustomobject]@{
+      Id = $processId
+      StartTime = $global:fixedStart.AddSeconds(31)
+      HasExited = $false
+      SafeHandle = [pscustomobject]@{ IsInvalid = $false; IsClosed = $false }
+    }
+    $replacement | Add-Member -MemberType ScriptProperty -Name Handle -Value { return [IntPtr]([int]$this.Id + 1) }
+    $replacement | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    $global:processes[$processId] = $replacement
+    Write-Host '__ADOPTION_PID_REUSED__1201'
+  }
+  return $global:processes[$processId]
+}
+function Get-CimInstance {
+  param($ClassName, $Filter, $ErrorAction)
+  $items = @([pscustomobject]@{
+    ProcessId = $PID
+    ParentProcessId = 0
+    ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    CommandLine = Get-TestCommand $PID
+  })
+  foreach ($process in @($global:processes.Values)) {
+    $role = Get-TestRole ([int]$process.Id)
+    $parentId = if ($role -eq 'supervisor') { 0 } elseif ([int]$process.Id -lt 1300) { 1200 } else { $PID }
+    $items += [pscustomobject]@{
+      ProcessId = [int]$process.Id
+      ParentProcessId = $parentId
+      CreationDate = $process.StartTime
+      ExecutablePath = if ($role -eq 'supervisor') { 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' } else { 'C:\\Program Files\\nodejs\\node.exe' }
+      CommandLine = Get-TestCommand ([int]$process.Id)
+    }
+  }
+  if ($Filter -match '([0-9]+)') {
+    $wanted = [int]$matches[1]
+    if ($global:scenario -eq 'partial-identity' -and $wanted -eq 1301) { return $null }
+    return @($items | Where-Object { [int]$_.ProcessId -eq $wanted }) | Select-Object -First 1
+  }
+  return @($items)
+}
+function Get-NetTCPConnection {
+  param($LocalPort, $State, $ErrorAction)
+  $port = [int]$LocalPort
+  if ($global:scenario -eq 'unknown-conflict' -and $port -eq 8022) {
+    return [pscustomobject]@{ OwningProcess = 9999 }
+  }
+  if ($global:scenario -in @('external-bridge', 'bridge-conflict') -and $port -eq 4510) {
+    return [pscustomobject]@{ OwningProcess = 9999 }
+  }
+  $role = switch ($port) { 8022 { 'server' } 8023 { 'server' } 4510 { 'codex-bridge' } 4520 { 'claude-bridge' } default { '' } }
+  $owner = @($global:processes.Values | Where-Object { (Get-TestRole ([int]$_.Id)) -eq $role }) | Select-Object -First 1
+  if (-not $owner) { return @() }
+  return [pscustomobject]@{ OwningProcess = [int]$owner.Id }
+}
+function Invoke-WebRequest {
+  param([switch]$UseBasicParsing, $Uri, $TimeoutSec, $ErrorAction)
+  Write-Host "__HEALTH__$Uri"
+  if ($global:scenario -eq 'bridge-conflict' -and [string]$Uri -like '*:4510/status') { throw 'unhealthy bridge' }
+  if ([string]$Uri -like '*/api/version') {
+    $buildId = if ($global:scenario -eq 'readiness-build-mismatch' -and $global:processes.ContainsKey(1301)) { 'old-build' } else { 'build-1' }
+    return [pscustomobject]@{ StatusCode = 200; Content = '{"build":{"buildId":"' + $buildId + '"}}' }
+  }
+  return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+}
+function Start-Process {
+  param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
+  $role = if ($ArgumentList -contains '--codex-bridge-only') { 'codex-bridge' } elseif ($ArgumentList -contains '--claude-bridge-only') { 'claude-bridge' } else { 'server' }
+  if ($global:scenario -eq 'partial-second-start' -and $role -eq 'codex-bridge') { throw 'mock second Start-Process failure' }
+  $processId = switch ($role) { 'server' { 1301 } 'codex-bridge' { 1302 } default { 1303 } }
+  $process = [pscustomobject]@{ Id = $processId; StartTime = $global:fixedStart.AddMinutes(2).AddSeconds($processId - 1300); HasExited = $false }
+  $process | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+    $this.HasExited = $true
+    Write-Host "__KILL_EXACT__$($this.Id)"
+  }
+  $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { }
+  $global:processes[$processId] = $process
+  if ($global:scenario -eq 'partial-first-manifest' -and $role -eq 'claude-bridge') {
+    Remove-Item -LiteralPath $env:YEP_LAUNCHD_LOG_DIR -Force
+    [IO.File]::WriteAllText($env:YEP_LAUNCHD_LOG_DIR, 'block manifest parent')
+  }
+  if ($role -eq 'server') { Write-Host "__MAINTENANCE_ENV__$env:MAINTENANCE_PORT" }
+  Write-Host "__START_CHILD__$role"
+  return $process
+}
+function taskkill.exe {
+  param($PidFlag, $TargetPid, $TreeFlag, $ForceFlag)
+  $target = [int]$TargetPid
+  Write-Output "__KILL_VERIFIED__$target"
+  if ($target -eq 1200) {
+    foreach ($processId in @(1200, 1201, 1202, 1203)) { $global:processes.Remove($processId) }
+  } else {
+    $global:processes.Remove($target)
+  }
+  & cmd.exe /c exit 0
+}
+function Start-Sleep {
+  param($Milliseconds, $Seconds)
+  if ($PSBoundParameters.ContainsKey('Seconds')) { exit 0 }
+}
+& ${psLiteral(runProdScript)} -ConfigPath ${psLiteral(configPath)}
+`;
+}
+
+async function runSupervisorScenario(
+  scenario:
+    | "healthy"
+    | "degraded-adoptable"
+    | "adoption-pid-reused"
+    | "verified-stale"
+    | "unknown-conflict"
+    | "stopped"
+    | "readiness-build-mismatch"
+    | "partial-identity"
+    | "partial-second-start"
+    | "partial-first-manifest"
+    | "external-bridge"
+    | "bridge-conflict",
+) {
+  const fixture = await createCliFixture(
+    scenario === "adoption-pid-reused"
+      ? "degraded-adoptable"
+      : scenario === "external-bridge" ||
+          scenario === "bridge-conflict" ||
+          scenario === "readiness-build-mismatch" ||
+          scenario.startsWith("partial-")
+        ? "stopped"
+        : scenario,
+  );
+  const result = await runPowerShell(
+    supervisorProviderHarness(scenario, fixture.configPath),
+    {
+      YEP_LAUNCHD_LOG_DIR: scenario.startsWith("partial-")
+        ? path.join(fixture.stateDir, "logs")
+        : fixture.stateDir,
+      YEP_SERVICE_CONFIG_PATH: fixture.configPath,
+    },
+  );
+  return { ...fixture, result };
 }
 
 afterEach(async () => {
@@ -1175,6 +1402,153 @@ if (-not (Stop-YepVerifiedProcessGroup -Inspection $inspection)) { exit 1 }
 
       expect(result.code).not.toBe(0);
       expect(result.stdout).toContain("__KILL__still-running");
+    });
+  },
+);
+
+describe.skipIf(process.platform !== "win32")(
+  "Windows production supervisor adoption",
+  () => {
+    it("adopts a verified orphan process group without starting or killing children", async () => {
+      const { result, manifestPath, manifest } =
+        await runSupervisorScenario("degraded-adoptable");
+
+      expect(result.code, result.stderr || result.stdout).toBe(0);
+      expect(result.stdout).toContain("已接管现有生产进程组");
+      expect(result.stdout).not.toContain("__START_CHILD__");
+      expect(result.stdout).not.toContain("__KILL_");
+      const adopted = JSON.parse(await readFile(manifestPath, "utf8"));
+      expect(adopted.SupervisorInstanceId).not.toBe(
+        manifest.SupervisorInstanceId,
+      );
+      expect(
+        adopted.Processes.find(
+          (process: { Role: string }) => process.Role === "server",
+        )?.Pid,
+      ).toBe(1201);
+    });
+
+    it("refuses to adopt a reused PID after inspecting the original generation", async () => {
+      const { result, manifestPath, manifest } = await runSupervisorScenario(
+        "adoption-pid-reused",
+      );
+
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toContain("__ADOPTION_PID_REUSED__1201");
+      expect(result.stdout).not.toContain("已接管现有生产进程组");
+      expect(result.stdout).not.toContain("__KILL_");
+      expect(JSON.parse(await readFile(manifestPath, "utf8"))).toMatchObject({
+        SupervisorInstanceId: manifest.SupervisorInstanceId,
+      });
+    });
+
+    it("handles healthy, stale, conflicting, and stopped initial states exactly", async () => {
+      const [healthy, stale, conflict, stopped] = await Promise.all([
+        runSupervisorScenario("healthy"),
+        runSupervisorScenario("verified-stale"),
+        runSupervisorScenario("unknown-conflict"),
+        runSupervisorScenario("stopped"),
+      ]);
+
+      expect(
+        healthy.result.code,
+        healthy.result.stderr || healthy.result.stdout,
+      ).not.toBe(0);
+      expect(healthy.result.stdout).toContain("healthy");
+      expect(healthy.result.stdout).not.toContain("__START_CHILD__");
+      expect(healthy.result.stdout).not.toContain("__KILL_");
+      expect(stale.result.code, stale.result.stderr).toBe(0);
+      expect(stale.result.stdout).toContain("verified-stale");
+      expect(stale.result.stdout).toContain("__KILL_VERIFIED__");
+      expect(stale.result.stdout).toContain("__START_CHILD__server");
+      expect(conflict.result.code).not.toBe(0);
+      expect(conflict.result.stdout).toContain("unknown-conflict");
+      expect(conflict.result.stdout).not.toContain("__KILL_");
+      expect(conflict.result.stdout).not.toContain("__START_CHILD__");
+      expect(stopped.result.code, stopped.result.stderr).toBe(0);
+      expect(stopped.result.stdout).toContain("__START_CHILD__server");
+      expect(stopped.result.stdout).not.toContain("__KILL_");
+    });
+
+    it("sets and verifies loopback maintenance readiness in the v2 manifest", async () => {
+      const { result, manifestPath } = await runSupervisorScenario("stopped");
+
+      expect(result.code, result.stderr || result.stdout).toBe(0);
+      expect(result.stdout).toContain("__MAINTENANCE_ENV__8023");
+      expect(result.stdout).toContain(
+        "__HEALTH__http://127.0.0.1:8022/api/version",
+      );
+      expect(result.stdout).toContain("__HEALTH__http://127.0.0.1:8023/health");
+      expect(JSON.parse(await readFile(manifestPath, "utf8"))).toMatchObject({
+        Version: 2,
+        Ports: { Server: 8022, Maintenance: 8023 },
+      });
+      expect(await readFile(serverIndex, "utf8")).toMatch(
+        /startMaintenanceServer\(\{[\s\S]*?host:\s*"127\.0\.0\.1"/,
+      );
+    });
+
+    it("rejects a healthy main endpoint serving the wrong build", async () => {
+      const { result } = await runSupervisorScenario(
+        "readiness-build-mismatch",
+      );
+
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toContain("buildId build-1");
+      expect(result.stdout).toContain("__KILL_VERIFIED__");
+    });
+
+    it("rolls back exact launched process objects when startup fails before a manifest exists", async () => {
+      const cases = [
+        {
+          scenario: "partial-identity" as const,
+          killed: ["__KILL_EXACT__1301"],
+        },
+        {
+          scenario: "partial-second-start" as const,
+          killed: ["__KILL_EXACT__1301"],
+        },
+        {
+          scenario: "partial-first-manifest" as const,
+          killed: [
+            "__KILL_EXACT__1301",
+            "__KILL_EXACT__1302",
+            "__KILL_EXACT__1303",
+          ],
+        },
+      ];
+
+      for (const testCase of cases) {
+        const { result } = await runSupervisorScenario(testCase.scenario);
+        expect(
+          result.code,
+          `${testCase.scenario}: ${result.stderr || result.stdout}`,
+        ).not.toBe(0);
+        for (const marker of testCase.killed) {
+          expect(result.stdout, testCase.scenario).toContain(marker);
+        }
+        expect(result.stdout).not.toContain("__KILL_VERIFIED__");
+      }
+    }, 15_000);
+
+    it("keeps healthy external bridges unmanaged and rejects unknown occupied bridges", async () => {
+      const external = await runSupervisorScenario("external-bridge");
+      const conflict = await runSupervisorScenario("bridge-conflict");
+
+      expect(external.result.code, external.result.stderr).toBe(0);
+      expect(external.result.stdout).toContain(
+        "__HEALTH__http://127.0.0.1:4510/status",
+      );
+      expect(external.result.stdout).not.toContain(
+        "__START_CHILD__codex-bridge",
+      );
+      expect(
+        JSON.parse(await readFile(external.manifestPath, "utf8")),
+      ).toMatchObject({ Bridges: { Codex: "external" } });
+      expect(conflict.result.code).not.toBe(0);
+      expect(conflict.result.stdout).toContain("unknown-conflict");
+      expect(conflict.result.stdout).not.toContain("__START_CHILD__");
+      expect(conflict.result.stdout).not.toContain("__KILL_");
     });
   },
 );

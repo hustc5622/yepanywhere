@@ -80,6 +80,8 @@ PORT=4000 pnpm dev  # 使用 4000、4001、4002
 
 生产模式运行打包后的独立 Bundle，并始终通过平台服务管理器启动：Windows 使用当前用户的计划任务 `YepAnywhereServer`，macOS 使用 LaunchAgent。
 
+Windows 纳管生产实例使用 8022 主端口和 `ServerPort+1` 维护端口（当前为 8023）。8023 只监听 `127.0.0.1`，绝不能通过 FRP 发布。
+
 ```bash
 # 使用当前平台的生产服务定义
 pnpm yep start-prod
@@ -263,7 +265,9 @@ pnpm yep setup-admin-password # 设置或重置当前系统用户的全局管理
 
 开发运行、生产运行和登录自启动是独立状态。Windows 的生产定义是当前用户计划任务 `YepAnywhereServer`；macOS 的生产定义是同一 label 的 LaunchAgent，持久 plist 位于 `~/Library/LaunchAgents`，关闭自启动时人工生产运行使用数据目录中的会话 plist。`stop-prod` 不关闭自启动，`disable-autostart` 不停止当前实例，`stop` 也不修改自启动开关。
 
-`status` 分别报告定义是否安装、当前是否加载、开发/生产是否运行、登录自启动是否启用，并显示 PID、Profile、端口、日志与“配置异常”诊断。开发后台控制台日志位于 `~/.yep-anywhere/logs/`；macOS 生产日志是 `server-launchd.out.log` / `server-launchd.err.log`，Windows 生产监督器日志是 `server.out.log` / `server.err.log`。
+`status` 分别报告定义是否安装、当前是否加载、开发/生产是否运行、登录自启动是否启用，并显示 PID、Profile、端口、日志与“配置异常”诊断。Windows 生产状态为 `healthy`、`degraded-adoptable`、`verified-stale`、`unknown-conflict` 或 `stopped`，同时显示 Task Scheduler 状态与最近结果。开发后台控制台日志位于 `~/.yep-anywhere/logs/`；macOS 生产日志是 `server-launchd.out.log` / `server-launchd.err.log`，Windows 生产监督器日志是 `server.out.log` / `server.err.log`。
+
+Windows 下直接结束生产监督器属于意外失败，Task Scheduler 应重启监督器并接管仍健康的已验证子进程；`pnpm yep stop-prod` 使用 `Stop-ScheduledTask` 表达有意停止，不应自行重启。PID 本身从来不是终止进程的授权，任何清理都必须先核验进程身份。
 
 Windows 计划任务的顶层动作是常驻 `watch-yepanywhere.ps1`；直接结束内层生产监督器属于意外失败，watchdog 会在 5 秒后重新启动监督器并接管仍健康的已验证子进程。`pnpm yep stop-prod` 会先使用 `Stop-ScheduledTask` 停止 watchdog，再清理已验证进程；登录触发器没有周期重复，因此任务不会自行复活。PID 本身从来不是终止进程的授权，任何清理都必须先核验进程身份。
 
@@ -388,6 +392,8 @@ tail -f ~/.yep-anywhere/logs/dev-console.log
 ## 维护服务端
 
 一个单独的轻量 HTTP 服务运行在 PORT + 1（默认 3401），用于带外诊断。当主服务无响应时很有用。
+
+Windows 纳管生产模式固定使用 `ServerPort+1`（默认 8023）并只绑定 `127.0.0.1`；该端口只供本机维护健康检查，绝不能加入 FRP 或其他公网转发配置。
 
 ```bash
 # 检查服务状态

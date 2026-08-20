@@ -94,6 +94,7 @@ $global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
   TriggerRepetitionInterval = $null
   TriggerRepetitionDuration = $null
   RestartCount = 0
+  RestartInterval = $null
   MultipleInstances = $null
   ExecutionTimeLimit = $null
   Started = $false
@@ -145,6 +146,7 @@ function New-ScheduledTaskSettingsSet {
     [string]$MultipleInstances
   )
   $global:record['RestartCount'] = $RestartCount
+  $global:record['RestartInterval'] = $RestartInterval
   $global:record['MultipleInstances'] = $MultipleInstances
   $global:record['ExecutionTimeLimit'] = $ExecutionTimeLimit
   return [pscustomobject]@{}
@@ -188,7 +190,13 @@ Write-Output ('${recordMarker}' + ($global:record | ConvertTo-Json -Compress -De
     } | null;
     TriggerRepetitionDuration: string | null;
     RestartCount: number;
+    RestartInterval: { Minutes: number; Hours: number; Seconds: number } | null;
     MultipleInstances: string | null;
+    ExecutionTimeLimit: {
+      Minutes: number;
+      Hours: number;
+      Seconds: number;
+    } | null;
     Started: boolean;
     ActionArgument: string;
   };
@@ -1547,7 +1555,17 @@ function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
     expect(definition.RegisteredTriggerCount).toBe(0);
     expect(definition.Started).toBe(false);
     expect(definition.RestartCount).toBe(999);
+    expect(definition.RestartInterval).toEqual({
+      Minutes: 1,
+      Hours: 0,
+      Seconds: 0,
+    });
     expect(definition.MultipleInstances).toBe("IgnoreNew");
+    expect(definition.ExecutionTimeLimit).toEqual({
+      Minutes: 0,
+      Hours: 0,
+      Seconds: 0,
+    });
     expect(definition.ActionArgument).toContain("watch-yepanywhere.ps1");
     expect(definition.ActionArgument).toContain("-WindowStyle Hidden");
   });
@@ -2031,22 +2049,89 @@ function Stop-ScheduledTask {
     );
     const harness = `
 $global:started = @()
-$global:failed = $false
-function Test-Path { param($Path) return $true }
-function Get-Command { param($Name) return [pscustomobject]@{ Source = 'node.exe' } }
-function Get-NetTCPConnection { return @() }
-function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }
+$global:fixedStart = [DateTime]::Parse('2026-08-17T08:00:00Z')
+$global:realTestPath = Get-Command Test-Path -CommandType Cmdlet
+$global:realGetContent = Get-Command Get-Content -CommandType Cmdlet
+function Test-Path {
+  param($Path, $LiteralPath)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package*') { return $true }
+  return & $global:realTestPath -LiteralPath $candidate
+}
+function Get-Content {
+  param($Path, $LiteralPath, [switch]$Raw, $Encoding)
+  $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+  if ([string]$candidate -like '*dist\\npm-package\\build-info.json') { return '{"buildId":"build-1"}' }
+  $arguments = @{ LiteralPath = $candidate }
+  if ($Raw) { $arguments.Raw = $true }
+  if ($Encoding) { $arguments.Encoding = $Encoding }
+  return & $global:realGetContent @arguments
+}
+function Get-Command { param($Name) return [pscustomobject]@{ Source = 'C:\\Program Files\\nodejs\\node.exe' } }
+function Get-TestRole([int]$ProcessId) {
+  switch ($ProcessId) { 100 { 'server' } 101 { 'failed-bridge' } 102 { 'remaining-bridge' } default { 'supervisor' } }
+}
+function Get-TestCommand([int]$ProcessId) {
+  switch ($ProcessId) {
+    100 { return 'node.exe "${path.join(repoRoot, "dist", "npm-package", "dist", "cli.js").replaceAll("'", "''")}" --port 8022' }
+    101 { return 'node.exe "${path.join(repoRoot, "dist", "npm-package", "dist", "cli.js").replaceAll("'", "''")}" --codex-bridge-only' }
+    102 { return 'node.exe "${path.join(repoRoot, "dist", "npm-package", "dist", "cli.js").replaceAll("'", "''")}" --claude-bridge-only' }
+    default { return 'powershell.exe -File "${runProdScript.replaceAll("'", "''")}" -ConfigPath "${configPath.replaceAll("'", "''")}"' }
+  }
+}
+function Get-Process {
+  param($Id, $ErrorAction)
+  if ([int]$Id -eq $PID) { return [pscustomobject]@{ Id = $PID; StartTime = $global:fixedStart; HasExited = $false } }
+  return @($global:started | Where-Object { [int]$_.Id -eq [int]$Id -and -not $_.HasExited }) | Select-Object -First 1
+}
+function Get-CimInstance {
+  param($ClassName, $Filter, $ErrorAction)
+  $items = @([pscustomobject]@{ ProcessId = $PID; ParentProcessId = 0; ExecutablePath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'; CommandLine = Get-TestCommand $PID })
+  foreach ($process in @($global:started | Where-Object { -not $_.HasExited })) {
+    $items += [pscustomobject]@{ ProcessId = [int]$process.Id; ParentProcessId = $PID; ExecutablePath = 'C:\\Program Files\\nodejs\\node.exe'; CommandLine = Get-TestCommand ([int]$process.Id) }
+  }
+  if ($Filter -match '([0-9]+)') {
+    $wanted = [int]$matches[1]
+    return @($items | Where-Object { [int]$_.ProcessId -eq $wanted }) | Select-Object -First 1
+  }
+  return @($items)
+}
+function Get-NetTCPConnection {
+  param($LocalPort, $State, $ErrorAction)
+  $owner = switch ([int]$LocalPort) {
+    8022 { 100 }
+    8023 { 100 }
+    4510 { 101 }
+    4520 { 102 }
+    default { 0 }
+  }
+  $process = @($global:started | Where-Object { [int]$_.Id -eq $owner -and -not $_.HasExited }) | Select-Object -First 1
+  if (-not $process) { return @() }
+  return [pscustomobject]@{ OwningProcess = $owner }
+}
+function Invoke-WebRequest {
+  param([switch]$UseBasicParsing, $Uri, $TimeoutSec, $ErrorAction)
+  if ([string]$Uri -like '*/api/version') { return [pscustomobject]@{ StatusCode = 200; Content = '{"build":{"buildId":"build-1"}}' } }
+  return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+}
 function node { & cmd.exe /c exit 0 }
 function npm { throw '监督器不应安装运行依赖' }
 function Start-Process {
   param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
-  $process = [pscustomobject]@{ Id = 100 + $global:started.Count; StartTime = [DateTime]::UtcNow; HasExited = $false }
+  $process = [pscustomobject]@{ Id = 100 + $global:started.Count; StartTime = $global:fixedStart.AddSeconds(1 + $global:started.Count); HasExited = $false }
   $global:started += $process
   return $process
 }
-function Start-Sleep { $global:failed = $true; if ($global:started.Count -gt 1) { $global:started[1].HasExited = $true } }
-function Stop-Process { param($Id, [switch]$Force, $ErrorAction) Write-Output "__STOPPED__$Id" }
-& ${psLiteral(runProdScript)}
+function Start-Sleep { if ($global:started.Count -gt 1) { $global:started[1].HasExited = $true } }
+function Stop-Process { Write-Output '__UNEXPECTED_STOP_PROCESS__' }
+function taskkill.exe {
+  param($PidFlag, $TargetPid, $TreeFlag, $ForceFlag)
+  $process = @($global:started | Where-Object { [int]$_.Id -eq [int]$TargetPid }) | Select-Object -First 1
+  if ($process) { $process.HasExited = $true }
+  Write-Output "__STOPPED__$(Get-TestRole ([int]$TargetPid))"
+  & cmd.exe /c exit 0
+}
+& ${psLiteral(runProdScript)} -ConfigPath ${psLiteral(configPath)}
 `;
 
     const result = await runPowerShellCommand(harness, {
@@ -2056,8 +2141,9 @@ function Stop-Process { param($Id, [switch]$Force, $ErrorAction) Write-Output "_
 
     expect(result.code).toBe(1);
     expect(result.stdout).toContain("关键进程");
-    expect(result.stdout).toContain("__STOPPED__100");
-    expect(result.stdout).toContain("__STOPPED__102");
+    expect(result.stdout).toContain("__STOPPED__server");
+    expect(result.stdout).toContain("__STOPPED__remaining-bridge");
+    expect(result.stdout).not.toContain("__UNEXPECTED_STOP_PROCESS__");
   });
 
   it("暂存构建失败时不停止生产进程或触碰生产 Bundle", async () => {

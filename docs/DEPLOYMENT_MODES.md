@@ -51,6 +51,8 @@ Windows 由当前用户的 `YepAnywhereServer` 计划任务管理生产服务；
 
 `pnpm yep start-prod` 运行已构建的独立 Bundle，默认端口为 8022，并由计划任务或 LaunchAgent 与启动终端隔离。
 
+Windows 纳管生产实例同时使用 8022 主端口和 `ServerPort+1` 维护端口（当前为 8023）。维护端口只监听 `127.0.0.1`，绝不能通过 FRP 发布。
+
 可用 `YEP_DEPLOY_PORT`、`YEP_ANYWHERE_PROFILE` 或 `YEP_ANYWHERE_DATA_DIR` 在安装或启动生产服务时指定端口和数据目录。
 
 `pnpm yep stop-prod` 只停止当前生产实例而保留登录自启动，`pnpm yep disable-autostart` 只关闭后续登录自启动而不停止当前实例。
@@ -67,7 +69,7 @@ Windows 下直接结束内层 supervisor 属于意外失败，常驻 watchdog �
 
 ## 日志与状态
 
-所有运行状态可通过 `pnpm yep status` 查看，其中包括服务定义、运行状态、自启动、PID、Profile、端口、日志路径和配置异常。
+所有运行状态可通过 `pnpm yep status` 查看，其中包括服务定义、运行状态、自启动、PID、Profile、端口、日志路径和配置异常。Windows 生产状态明确报告 `healthy`、`degraded-adoptable`、`verified-stale`、`unknown-conflict` 或 `stopped`，并显示 Task Scheduler 状态与最近结果。
 
 日志默认位于 `~/.yep-anywhere/logs/`，macOS 开发日志为 `dev-console.log`、生产日志为 `server-launchd.out.log` 和 `server-launchd.err.log`。
 
