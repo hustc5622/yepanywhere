@@ -2074,7 +2074,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       sessionId,
       tempId: body.tempId,
       messageLength: body.message.length,
-      processState: process.state.type,
+      processState: process.state?.type,
     };
     getLogger().info(
       {
