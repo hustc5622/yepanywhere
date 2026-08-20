@@ -221,6 +221,7 @@
   "sessionLinkCopied": "Enlace copiado al portapapeles",
   "sessionShareFailed": "Error al compartir",
   "sessionErrorPrefix": "Error:",
+  "sessionRetry": "Reintentar",
   "sessionToggleSidebar": "Alternar barra lateral",
   "sessionOpenSidebar": "Abrir barra lateral",
   "sessionStarredLabel": "Destacada",

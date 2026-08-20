@@ -71,6 +71,8 @@ export interface UseSessionMessagesResult {
   toolUseToAgent: Map<string, string>;
   /** Whether initial load is in progress */
   loading: boolean;
+  /** Retry a failed initial session load */
+  retryInitialLoad: () => void;
   /** Session data from initial load */
   session: BrowserSessionMetadata | null;
   /** Set session data (for stream connected event) */
@@ -248,6 +250,7 @@ export function useSessionMessages(
     () => new Map(),
   );
   const [loading, setLoading] = useState(true);
+  const [initialLoadAttempt, setInitialLoadAttempt] = useState(0);
   const [session, setSession] = useState<BrowserSessionMetadata | null>(null);
   const [pagination, setPagination] = useState<PaginationInfo | undefined>();
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -277,6 +280,12 @@ export function useSessionMessages(
   // Branch changes reuse the page shell and should keep showing the
   // previous message list until the selected branch content arrives.
   const loadedSessionKeyRef = useRef<string | null>(null);
+
+  const retryInitialLoad = useCallback(() => {
+    initialLoadCompleteRef.current = false;
+    setLoading(true);
+    setInitialLoadAttempt((attempt) => attempt + 1);
+  }, []);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -444,6 +453,7 @@ export function useSessionMessages(
 
   // Initial load. Branch switches reload message content for the same
   // session without returning the page to its full-screen loading state.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: retry attempts intentionally rerun the initial-load effect
   useEffect(() => {
     const sessionLoadKey = `${projectId}\u0000${sessionId}`;
     const isBranchReloadWithinSession =
@@ -488,7 +498,7 @@ export function useSessionMessages(
         initialLoadCompleteRef.current = true;
         flushBuffer();
         setLoading(false);
-        onLoadError?.(err);
+        onLoadError?.(err instanceof Error ? err : new Error(String(err)));
       });
 
     return () => {
@@ -502,6 +512,7 @@ export function useSessionMessages(
     onLoadError,
     flushBuffer,
     applySessionSnapshot,
+    initialLoadAttempt,
   ]);
 
   // Handle streaming content updates (from useStreamingContent)
@@ -829,6 +840,7 @@ export function useSessionMessages(
     agentContent,
     toolUseToAgent,
     loading,
+    retryInitialLoad,
     session,
     setSession,
     handleStreamingUpdate,

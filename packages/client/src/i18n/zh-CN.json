@@ -239,6 +239,7 @@
   "sessionLinkCopied": "链接已复制到剪贴板",
   "sessionShareFailed": "分享失败",
   "sessionErrorPrefix": "错误：",
+  "sessionRetry": "重试",
   "sessionToggleSidebar": "切换侧边栏",
   "sessionOpenSidebar": "打开侧边栏",
   "sessionStarredLabel": "已收藏",

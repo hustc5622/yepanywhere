@@ -157,7 +157,7 @@ function hasBranchChoices(
   );
 }
 
-function SessionPageContent({
+export function SessionPageContent({
   projectId,
   sessionId,
 }: {
@@ -220,6 +220,7 @@ function SessionPageContent({
     permissionMode,
     loading,
     error,
+    retryInitialLoad,
     connected,
     sessionUpdatesConnected,
     lastStreamActivityAt,
@@ -257,31 +258,12 @@ function SessionPageContent({
   );
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const isSessionReady = !loading && error === null && session !== null;
 
   // Dismiss cold-start splash once the session has loaded (covers deep-link
   // launches that land directly on a session URL).
   useHideSplashOnReady(!loading || error !== null);
   const preprocessCacheRef = useRef<PreprocessMessagesCache | null>(null);
-
-  // Early return on error to prevent rendering with undefined data
-  // This must come before any code that accesses session data
-  if (error) {
-    return (
-      <div className="error">
-        {t("sessionErrorPrefix")} {error.message}
-      </div>
-    );
-  }
-
-  // Additional safety check: if loading is done but session is null, show error
-  // This prevents crashes when session data is missing or corrupted
-  if (!loading && !session) {
-    return (
-      <div className="error">
-        {t("sessionErrorPrefix")} Session data could not be loaded
-      </div>
-    );
-  }
 
   // Developer mode settings
   const { holdModeEnabled, showConnectionBars } = useDeveloperMode();
@@ -713,6 +695,8 @@ function SessionPageContent({
   });
 
   const handleSend = async (text: string) => {
+    if (!isSessionReady) return;
+
     // Add to pending queue and get tempId to pass to server
     const tempId = addPendingMessage(text);
     setProcessState("in-turn"); // Optimistic: show processing indicator immediately
@@ -904,6 +888,8 @@ function SessionPageContent({
   };
 
   const handleQueue = async (text: string) => {
+    if (!isSessionReady) return;
+
     const tempId = addPendingMessage(text);
     setScrollTrigger((prev) => prev + 1);
 
@@ -1544,6 +1530,25 @@ function SessionPageContent({
     </svg>
   );
 
+  const loadFailure =
+    error ??
+    (!loading && !session
+      ? new Error("Session data could not be loaded")
+      : null);
+
+  if (loadFailure) {
+    return (
+      <div className="error session-load-error">
+        <div>
+          {t("sessionErrorPrefix")} {loadFailure.message}
+        </div>
+        <button type="button" onClick={retryInitialLoad}>
+          {t("sessionRetry")}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <FileTabOpenerContext.Provider value={{ openFileTab: openOrFocusFileTab }}>
       <div
@@ -1978,10 +1983,13 @@ function SessionPageContent({
                     <MessageInput
                       onSend={handleSend}
                       onQueue={
-                        status.owner !== "none" && processState !== "idle"
+                        isSessionReady &&
+                        status.owner !== "none" &&
+                        processState !== "idle"
                           ? handleQueue
                           : undefined
                       }
+                      disabled={!isSessionReady}
                       placeholder={
                         status.owner === "external"
                           ? t("sessionPlaceholderExternal")

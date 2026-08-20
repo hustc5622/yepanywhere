@@ -221,6 +221,7 @@
   "sessionLinkCopied": "Link in die Zwischenablage kopiert",
   "sessionShareFailed": "Teilen fehlgeschlagen",
   "sessionErrorPrefix": "Fehler:",
+  "sessionRetry": "Erneut versuchen",
   "sessionToggleSidebar": "Seitenleiste umschalten",
   "sessionOpenSidebar": "Seitenleiste öffnen",
   "sessionStarredLabel": "Markiert",

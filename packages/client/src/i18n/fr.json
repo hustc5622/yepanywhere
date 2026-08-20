@@ -222,6 +222,7 @@
   "sessionLinkCopied": "Lien copié dans le presse-papiers",
   "sessionShareFailed": "Échec du partage",
   "sessionErrorPrefix": "Erreur :",
+  "sessionRetry": "Réessayer",
   "sessionToggleSidebar": "Basculer la barre latérale",
   "sessionOpenSidebar": "Ouvrir la barre latérale",
   "sessionStarredLabel": "Favori",

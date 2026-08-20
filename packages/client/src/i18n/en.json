@@ -239,6 +239,7 @@
   "sessionLinkCopied": "Link copied to clipboard",
   "sessionShareFailed": "Share failed",
   "sessionErrorPrefix": "Error:",
+  "sessionRetry": "Retry",
   "sessionToggleSidebar": "Toggle sidebar",
   "sessionOpenSidebar": "Open sidebar",
   "sessionStarredLabel": "Starred",

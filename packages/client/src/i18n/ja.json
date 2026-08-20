@@ -221,6 +221,7 @@
   "sessionLinkCopied": "リンクをクリップボードにコピーしました",
   "sessionShareFailed": "共有に失敗しました",
   "sessionErrorPrefix": "エラー:",
+  "sessionRetry": "再試行",
   "sessionToggleSidebar": "サイドバーを切り替え",
   "sessionOpenSidebar": "サイドバーを開く",
   "sessionStarredLabel": "スター付き",

@@ -200,6 +200,7 @@ export function useSession(
   // Handle initial load completion from useSessionMessages
   const handleLoadComplete = useCallback(
     (result: SessionLoadResult) => {
+      setError(null);
       // Only update status from REST if we don't already have an owned status from navigation.
       // This prevents a race condition where:
       // 1. Session created with initialStatus = {owner: "self"}
@@ -282,6 +283,7 @@ export function useSession(
     loadOlderMessages,
     loadNewerMessages,
     loadTargetMessageWindow,
+    retryInitialLoad: retryMessagesInitialLoad,
   } = useSessionMessages({
     projectId,
     sessionId,
@@ -289,6 +291,16 @@ export function useSession(
     onLoadComplete: handleLoadComplete,
     onLoadError: handleLoadError,
   });
+
+  const retryInitialLoad = useCallback(() => {
+    setError(null);
+    retryMessagesInitialLoad();
+  }, [retryMessagesInitialLoad]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: clear stale load errors whenever the session key changes
+  useEffect(() => {
+    setError(null);
+  }, [projectId, sessionId]);
 
   // Update local mode (UI selection) and sync to server if process is active
   const setPermissionMode = useCallback(
@@ -1247,6 +1259,7 @@ export function useSession(
     modeVersion,
     loading,
     error,
+    retryInitialLoad,
     connected,
     sessionWatchConnected,
     sessionUpdatesConnected,
