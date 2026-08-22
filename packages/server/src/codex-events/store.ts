@@ -784,10 +784,24 @@ export class JsonlCodexEventStore implements CodexEventStore {
     });
   }
 
-  /** Segment names carry a fixed-width UTC timestamp so name order is time order. */
+  /** Choose a monotonic timestamp/attempt pair so file order stays chronological. */
   private async nextSegmentPath(): Promise<string> {
-    const stamp = new Date(this.now()).toISOString().replace(/\D/g, "");
-    for (let attempt = 1; ; attempt += 1) {
+    let stamp = new Date(this.now()).toISOString().replace(/\D/g, "");
+    const pattern = this.segmentFilePattern();
+    let nextAttempt = 1;
+    for (const segmentPath of await this.listSegmentFiles()) {
+      const match = basename(segmentPath).match(pattern);
+      if (!match?.[1]) continue;
+      const segmentAttempt = Number.parseInt(match[2] ?? "1", 10);
+      if (match[1] > stamp) {
+        stamp = match[1];
+        nextAttempt = segmentAttempt + 1;
+        continue;
+      }
+      if (match[1] !== stamp) continue;
+      nextAttempt = Math.max(nextAttempt, segmentAttempt + 1);
+    }
+    for (let attempt = nextAttempt; ; attempt += 1) {
       const suffix = attempt === 1 ? "" : `-${attempt}`;
       const candidate = join(
         dirname(this.filePath),
@@ -865,17 +879,36 @@ export class JsonlCodexEventStore implements CodexEventStore {
       }
       throw error;
     }
-    const pattern = new RegExp(
-      `^${escapeRegExp(this.segmentBaseName())}\\.\\d{17}(-\\d+)?\\.jsonl$`,
-    );
+    const pattern = this.segmentFilePattern();
     return entries
-      .filter((entry) => pattern.test(entry))
-      .sort()
-      .map((entry) => join(dirname(this.filePath), entry));
+      .flatMap((entry) => {
+        const match = entry.match(pattern);
+        if (!match?.[1]) return [];
+        return [
+          {
+            entry,
+            timestamp: match[1],
+            attempt: Number.parseInt(match[2] ?? "1", 10),
+          },
+        ];
+      })
+      .sort(
+        (a, b) =>
+          a.timestamp.localeCompare(b.timestamp) ||
+          a.attempt - b.attempt ||
+          a.entry.localeCompare(b.entry),
+      )
+      .map(({ entry }) => join(dirname(this.filePath), entry));
   }
 
   private segmentBaseName(): string {
     return basename(this.filePath, ".jsonl");
+  }
+
+  private segmentFilePattern(): RegExp {
+    return new RegExp(
+      `^${escapeRegExp(this.segmentBaseName())}\\.(\\d{17})(?:-(\\d+))?\\.jsonl$`,
+    );
   }
 
   /** Index one loaded line; returns its sessionId when the line was indexed. */

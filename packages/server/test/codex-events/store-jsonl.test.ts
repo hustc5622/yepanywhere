@@ -178,7 +178,8 @@ describe("JsonlCodexEventStore rotation", () => {
     const rotations: Array<{ from: string; to: string; pruned: string[] }> = [];
     const store = new JsonlCodexEventStore({
       filePath,
-      rotation: { maxBytes: 400, keepSegments: 1 },
+      now: () => 1_700_000_000_000,
+      rotation: { maxBytes: 1, keepSegments: 1 },
       onRotate: (details) => rotations.push(details),
     });
 
@@ -202,9 +203,10 @@ describe("JsonlCodexEventStore rotation", () => {
     // A fresh instance only sees events from the retained segment + active file.
     const reopened = new JsonlCodexEventStore({ filePath });
     const replayed = await reopened.replay({ sessionId: "session-1" });
-    expect(replayed.length).toBeLessThan(8);
-    expect(replayed.length).toBeGreaterThan(0);
-    expect(replayed.at(-1)?.eventId).toBe("event-8");
+    expect(replayed.map((event) => event.eventId)).toEqual([
+      "event-7",
+      "event-8",
+    ]);
   });
 
   it("does not rotate below the waterline or when disabled", async () => {
@@ -312,7 +314,8 @@ describe("JsonlCodexEventStore journal loss reporting", () => {
     }> = [];
     const store = new JsonlCodexEventStore({
       filePath,
-      rotation: { maxBytes: 400, keepSegments: 1 },
+      now: () => 1_700_000_000_000,
+      rotation: { maxBytes: 1, keepSegments: 1 },
       onRotate: (details) => rotations.push(details),
     });
     for (let index = 1; index <= 8; index += 1) {
