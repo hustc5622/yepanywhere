@@ -9,6 +9,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * every HTTP request multi-second slow was a spawn storm, not a wrong answer.
  */
 const calls: Array<{ command: string; args: string[] }> = [];
+const procReadlinkCalls: string[] = [];
+const procCwds = new Map<number, string>();
 let psStdout = "";
 let lsofStdout = "";
 let psDelayMs = 0;
@@ -39,6 +41,19 @@ vi.mock("node:child_process", async () => {
   return { execFile };
 });
 
+vi.mock("node:fs/promises", () => ({
+  readlink: (target: string) => {
+    procReadlinkCalls.push(target);
+    const match = target.match(/^\/proc\/(\d+)\/cwd$/);
+    const cwd = match?.[1]
+      ? procCwds.get(Number.parseInt(match[1], 10))
+      : undefined;
+    return cwd
+      ? Promise.resolve(cwd)
+      : Promise.reject(new Error(`unreadable proc cwd: ${target}`));
+  },
+}));
+
 const { hasActiveExternalProviderProcess, resetExternalProcessProbeCache } =
   await import("../../src/supervisor/externalProcessProbe.js");
 
@@ -46,9 +61,33 @@ function lsofFieldOutput(entries: Array<[number, string]>): string {
   return entries.map(([pid, cwd]) => `p${pid}\nfcwd\nn${cwd}`).join("\n");
 }
 
+function expectSingleCwdSweep(): void {
+  const lsofCalls = calls.filter((call) => call.command === "lsof");
+  if (process.platform === "linux") {
+    expect(procReadlinkCalls).toEqual(["/proc/101/cwd", "/proc/102/cwd"]);
+    expect(lsofCalls).toHaveLength(0);
+    return;
+  }
+
+  expect(procReadlinkCalls).toHaveLength(0);
+  expect(lsofCalls).toHaveLength(1);
+  expect(lsofCalls[0]?.args).toEqual([
+    "-a",
+    "-p",
+    "101,102",
+    "-d",
+    "cwd",
+    "-Fpn",
+  ]);
+}
+
 describe("externalProcessProbe", () => {
   beforeEach(() => {
     calls.length = 0;
+    procReadlinkCalls.length = 0;
+    procCwds.clear();
+    procCwds.set(101, "/tmp/project");
+    procCwds.set(102, "/tmp/other");
     psDelayMs = 0;
     resetExternalProcessProbeCache();
     psStdout = ["  101 claude", "  102 codex", "  103 unrelated-tool"].join(
@@ -60,22 +99,14 @@ describe("externalProcessProbe", () => {
     ]);
   });
 
-  it("resolves every candidate cwd with a single batched lsof call", async () => {
+  it("resolves every candidate cwd with one platform-specific sweep", async () => {
     const active = await hasActiveExternalProviderProcess({
       provider: "claude",
       projectPath: "/tmp/project",
     });
 
     expect(active).toBe(true);
-    expect(calls.filter((call) => call.command === "lsof")).toHaveLength(1);
-    expect(calls.at(-1)?.args).toEqual([
-      "-a",
-      "-p",
-      "101,102",
-      "-d",
-      "cwd",
-      "-Fpn",
-    ]);
+    expectSingleCwdSweep();
   });
 
   it("distinguishes a matching provider in another project", async () => {
@@ -101,7 +132,7 @@ describe("externalProcessProbe", () => {
 
     expect(results).toEqual(Array.from({ length: 8 }, () => true));
     expect(calls.filter((call) => call.command === "ps")).toHaveLength(1);
-    expect(calls.filter((call) => call.command === "lsof")).toHaveLength(1);
+    expectSingleCwdSweep();
   });
 
   it("reuses memoized cwds when the snapshot is refreshed", async () => {
@@ -121,8 +152,8 @@ describe("externalProcessProbe", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(calls.filter((call) => call.command === "ps")).toHaveLength(2);
-      // The known pids stay memoized, so no second lsof is spawned.
-      expect(calls.filter((call) => call.command === "lsof")).toHaveLength(1);
+      // The known pids stay memoized, so no second platform cwd sweep runs.
+      expectSingleCwdSweep();
     } finally {
       vi.useRealTimers();
     }
