@@ -62,6 +62,12 @@ describe("CodexModelSourceRegistry", () => {
     expect(() =>
       registry.assertModelSelectable("deepseek", "deepseek-v4-pro"),
     ).not.toThrow();
+    expect(() =>
+      registry.assertModelSelectable(
+        "deepseek",
+        "deepseek-v4-flash-vision-exp",
+      ),
+    ).not.toThrow();
   });
 
   it("blocks selecting a source that is unavailable", () => {
@@ -109,7 +115,7 @@ describe("CodexModelSourceRegistry", () => {
     ).toBe(true);
   });
 
-  it("materializes both DeepSeek models with their current limits", () => {
+  it("materializes all DeepSeek models with their current limits and modalities", () => {
     const registry = withKey();
     const catalogPath = registry.materializeCatalog(
       registry.require("deepseek"),
@@ -120,7 +126,9 @@ describe("CodexModelSourceRegistry", () => {
     expect(parsed.models).toEqual([
       expect.objectContaining({
         slug: "deepseek-v4-flash",
-        context_window: 1_000_000,
+        context_window: 1_048_576,
+        input_modalities: ["text"],
+        supports_image_detail_original: false,
         default_reasoning_level: "high",
         supported_reasoning_levels: [
           { effort: "low", description: "Fast responses" },
@@ -130,7 +138,21 @@ describe("CodexModelSourceRegistry", () => {
       }),
       expect.objectContaining({
         slug: "deepseek-v4-pro",
-        context_window: 1_000_000,
+        context_window: 1_048_576,
+        input_modalities: ["text"],
+        supports_image_detail_original: false,
+        default_reasoning_level: "high",
+        supported_reasoning_levels: [
+          { effort: "low", description: "Fast responses" },
+          { effort: "high", description: "Deeper reasoning" },
+          { effort: "max", description: "Maximum reasoning" },
+        ],
+      }),
+      expect.objectContaining({
+        slug: "deepseek-v4-flash-vision-exp",
+        context_window: 1_048_576,
+        input_modalities: ["text", "image"],
+        supports_image_detail_original: true,
         default_reasoning_level: "high",
         supported_reasoning_levels: [
           { effort: "low", description: "Fast responses" },
@@ -145,6 +167,9 @@ describe("CodexModelSourceRegistry", () => {
     const registry = withKey();
     expect(registry.findModelSource("deepseek-v4-flash")).toBe("deepseek");
     expect(registry.findModelSource("deepseek-v4-pro")).toBe("deepseek");
+    expect(registry.findModelSource("deepseek-v4-flash-vision-exp")).toBe(
+      "deepseek",
+    );
     // OpenAI live models have no catalog owner.
     expect(registry.findModelSource("gpt-5.6-sol")).toBeUndefined();
     expect(registry.findModelSource(undefined)).toBeUndefined();
@@ -158,13 +183,21 @@ describe("CodexModelSourceRegistry", () => {
         id: "deepseek/deepseek-v4-flash",
         modelProvider: "deepseek",
         providerModelId: "deepseek-v4-flash",
-        contextWindow: 1_000_000,
+        contextWindow: 1_048_576,
       }),
       expect.objectContaining({
         id: "deepseek/deepseek-v4-pro",
         modelProvider: "deepseek",
         providerModelId: "deepseek-v4-pro",
-        contextWindow: 1_000_000,
+        contextWindow: 1_048_576,
+        maxOutputTokens: 384_000,
+        defaultReasoningEffort: "high",
+      }),
+      expect.objectContaining({
+        id: "deepseek/deepseek-v4-flash-vision-exp",
+        modelProvider: "deepseek",
+        providerModelId: "deepseek-v4-flash-vision-exp",
+        contextWindow: 1_048_576,
         maxOutputTokens: 384_000,
         defaultReasoningEffort: "high",
       }),
@@ -182,6 +215,13 @@ describe("CodexModelSourceRegistry", () => {
     ).toBe("high");
     expect(
       registry.resolveReasoningEffort("deepseek", "deepseek-v4-pro", "max"),
+    ).toBe("max");
+    expect(
+      registry.resolveReasoningEffort(
+        "deepseek",
+        "deepseek-v4-flash-vision-exp",
+        "max",
+      ),
     ).toBe("max");
     // The official compatibility table maps medium/xhigh to high.
     expect(

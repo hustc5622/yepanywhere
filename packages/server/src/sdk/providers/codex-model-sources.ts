@@ -44,6 +44,10 @@ export interface CodexModelSourceCatalogModel {
   contextWindow: number;
   /** Max output tokens per response, when known. */
   maxOutputTokens?: number;
+  /** Input modalities advertised to Codex for prompt/history normalization. */
+  inputModalities: readonly ("text" | "image")[];
+  /** Whether Codex may send Responses API images with `detail: "original"`. */
+  supportsImageDetailOriginal: boolean;
   defaultReasoningEffort?: string;
   supportedReasoningEfforts?: Array<{
     reasoningEffort: string;
@@ -123,24 +127,31 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
     catalog: {
       // Bumped when the managed catalog contents change so the materialized
       // `<dataDir>/codex-model-catalogs/<managedId>.json` file is refreshed.
-      managedId: "deepseek-codex-2026-08-13",
+      managedId: "deepseek-codex-2026-08-21",
       provenance: {
         upstreamUrl:
           "https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex",
-        fetchedOn: "2026-08-13",
+        fetchedOn: "2026-08-21",
         minimalClientVersion: "0.144.0",
       },
-      // DeepSeek V4 Flash + V4 Pro over the Codex Responses API. The official
-      // 2026-08-13 capability table advertises low/high/max; legacy medium and
-      // xhigh requests map to high (see design §10.3).
-      allowedModelIds: ["deepseek-v4-flash", "deepseek-v4-pro"],
+      // DeepSeek V4 Flash, V4 Pro, and the experimental V4 Flash Vision model
+      // over the Codex Responses API. Only the Vision model accepts images.
+      // The official catalog advertises low/high/max; legacy medium and xhigh
+      // requests map to high (see design §10.3).
+      allowedModelIds: [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-vision-exp",
+      ],
       models: [
         {
           slug: "deepseek-v4-flash",
           displayName: "DeepSeek V4 Flash",
           description: "DeepSeek V4 Flash via the Codex Responses API.",
-          contextWindow: 1_000_000,
+          contextWindow: 1_048_576,
           maxOutputTokens: 384_000,
+          inputModalities: ["text"],
+          supportsImageDetailOriginal: false,
           defaultReasoningEffort: "high",
           supportedReasoningEfforts: [
             { reasoningEffort: "low", description: "Fast responses" },
@@ -157,8 +168,31 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
           slug: "deepseek-v4-pro",
           displayName: "DeepSeek V4 Pro",
           description: "DeepSeek V4 Pro via the Codex Responses API.",
-          contextWindow: 1_000_000,
+          contextWindow: 1_048_576,
           maxOutputTokens: 384_000,
+          inputModalities: ["text"],
+          supportsImageDetailOriginal: false,
+          defaultReasoningEffort: "high",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low", description: "Fast responses" },
+            { reasoningEffort: "high", description: "Deeper reasoning" },
+            { reasoningEffort: "max", description: "Maximum reasoning" },
+          ],
+          reasoningEffortAliases: {
+            minimal: "low",
+            medium: "high",
+            xhigh: "high",
+          },
+        },
+        {
+          slug: "deepseek-v4-flash-vision-exp",
+          displayName: "DeepSeek V4 Flash Vision (Experimental)",
+          description:
+            "Experimental DeepSeek V4 Flash with image input via the Codex Responses API.",
+          contextWindow: 1_048_576,
+          maxOutputTokens: 384_000,
+          inputModalities: ["text", "image"],
+          supportsImageDetailOriginal: true,
           defaultReasoningEffort: "high",
           supportedReasoningEfforts: [
             { reasoningEffort: "low", description: "Fast responses" },
@@ -518,6 +552,7 @@ interface CodexCatalogModelJson {
   apply_patch_tool_type: string | null;
   truncation_policy: { mode: string; limit: number };
   supports_parallel_tool_calls: boolean;
+  supports_image_detail_original: boolean;
   context_window: number;
   max_context_window: number;
   experimental_supported_tools: string[];
@@ -553,10 +588,11 @@ function buildCodexCatalogJson(catalog: CodexModelSourceCatalog): {
       apply_patch_tool_type: null,
       truncation_policy: { mode: "tokens", limit: model.contextWindow },
       supports_parallel_tool_calls: true,
+      supports_image_detail_original: model.supportsImageDetailOriginal,
       context_window: model.contextWindow,
       max_context_window: model.contextWindow,
       experimental_supported_tools: [],
-      input_modalities: ["text", "image"],
+      input_modalities: [...model.inputModalities],
     }));
   return { models };
 }

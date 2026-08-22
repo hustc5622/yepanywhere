@@ -6,14 +6,14 @@
 
 调研日期：2026-07-31
 
-最近更新：2026-08-13
+最近更新：2026-08-21
 
 适用范围：Yep Anywhere 的 `codex` provider、新会话模型选择、Codex app-server 启动与恢复、Codex session 元数据读取
 
 首期目标源：
 
 - OpenAI 官方源，继续使用现有 ChatGPT / Codex 登录状态
-- DeepSeek API，当前开放 `deepseek-v4-flash` 与 `deepseek-v4-pro`
+- DeepSeek API，当前开放 `deepseek-v4-flash`、`deepseek-v4-pro` 与 `deepseek-v4-flash-vision-exp`
 
 相关文档：
 
@@ -42,7 +42,7 @@ Codex CLI 和 Codex app-server 已经具备自定义模型提供方能力，但 
 | provider 配置 | 由服务端受控注册表生成 app-server `-c` 覆盖 | 不允许浏览器传入任意 URL、密钥或 catalog 路径 |
 | 模型目录 | 每个模型源使用自己的 app-server 启动配置与缓存 | Codex `model/list` 没有 provider 过滤参数，模型管理器在进程启动时绑定 provider/catalog |
 | 会话恢复 | 始终恢复到会话原有模型源 | 不允许普通 resume/edit 请求把既有 Codex thread 静默迁移到另一个 provider |
-| DeepSeek 开放模型 | 展示 `deepseek-v4-flash` 与 `deepseek-v4-pro` | 2026-08-13 起两者都通过 Codex Responses API 开放，共用同一 Base URL 与 Key，原生思考档位为 `low/high/max` |
+| DeepSeek 开放模型 | 展示 `deepseek-v4-flash`、`deepseek-v4-pro` 与 `deepseek-v4-flash-vision-exp` | 三者都通过 Codex Responses API 开放，共用同一 Base URL 与 Key，原生思考档位为 `low/high/max`；只有 Vision 实验模型声明图像输入 |
 
 这不是单纯的 UI 下拉框改动。要形成可靠能力，需要同时扩展模型发现、共享类型、API、Supervisor、Codex app-server 启动、session metadata、恢复逻辑和 Codex reader。
 
@@ -133,6 +133,8 @@ supports_websockets = false
 | `model_providers.<id>.supports_websockets` | DeepSeek 使用 HTTP Responses/SSE，固定为 `false` |
 | `model_providers.<id>.experimental_bearer_token` | 直接写 token；官方参考中不推荐，Yep 不采用 |
 | `model_catalog_json` | 指定模型元数据目录，启动时加载 |
+| catalog `input_modalities` | V4 Flash/Pro 为 `text`；V4 Flash Vision Exp 为 `text` + `image` |
+| catalog `supports_image_detail_original` | 仅 V4 Flash Vision Exp 为 `true` |
 
 Codex 不允许项目级 `.codex/config.toml` 覆盖 `model_provider` 和 `model_providers`。这些键必须来自用户级配置、受管配置或 CLI/session 覆盖。因此，Yep 不能通过给项目仓库写入 `.codex/config.toml` 来实现第三方源。
 
@@ -192,7 +194,8 @@ DeepSeek 官方资料与当前实测包含：
 - provider ID 为 `deepseek`。
 - Base URL 为 `https://api.deepseek.com/`。
 - 需要独立的 `models.json` 向 Codex 声明模型能力。
-- 2026-07-31 页面提示只有 `deepseek-v4-flash` 已支持 Codex；2026-08-13 模型表加入 `deepseek-v4-pro`，并确认两个稳定别名共用 Base URL 与 Key、具备 1M 上下文和最大 384K 输出。
+- 2026-07-31 页面提示只有 `deepseek-v4-flash` 已支持 Codex；2026-08-13 模型表加入 `deepseek-v4-pro`；2026-08-21 官方 Codex catalog 再加入 `deepseek-v4-flash-vision-exp`。三者共用 Base URL 与 Key，具备 1,048,576 上下文和最大 384K 输出。
+- 普通 V4 Flash/Pro 是纯文本模型；只有 V4 Flash Vision Exp 接受图片，支持 Responses API `input_image`（base64 data URL、外部 URL 或 Files API `file_id`）以及 `original` 图片 detail。
 - 官方 catalog 中模型的 `minimal_client_version` 为 `0.144.0`。
 - 503 表示上游暂时过载，应短暂等待并重试；Yep 因此为该受管 provider 使用独立于 OpenAI 默认值的重试窗口。
 
@@ -677,7 +680,7 @@ catalog 更新需要代码审查，至少记录：
 - UI allowlist
 - 内容 hash 或版本 ID
 
-catalog 与 UI allowlist（`allowedModelIds`）解耦：即使 catalog 含有更多模型，也只有 allowlist 内的模型会出现在 picker。当前 allowlist 为 `deepseek-v4-flash` + `deepseek-v4-pro`。
+catalog 与 UI allowlist（`allowedModelIds`）解耦：即使 catalog 含有更多模型，也只有 allowlist 内的模型会出现在 picker。当前 allowlist 为 `deepseek-v4-flash` + `deepseek-v4-pro` + `deepseek-v4-flash-vision-exp`。
 
 ### 8.4 按 source 查询模型
 
@@ -966,21 +969,24 @@ DEEPSEEK_API_KEY=<your-key>
 
 ### 10.3 模型开放策略
 
-当前开放（2026-08-13 更新，`deepseek-codex-2026-08-13` catalog）：
+当前开放（2026-08-21 更新，`deepseek-codex-2026-08-21` catalog）：
 
 ```text
 deepseek-v4-flash
 deepseek-v4-pro
+deepseek-v4-flash-vision-exp
 ```
 
 > 首期（2026-07-31）只开放 `deepseek-v4-flash`；`deepseek-v4-pro` 在 DeepSeek 官方确认 Codex 支持并完成 tool-call / reasoning / resume 回归后于 2026-08-13 放开。
+
+> 2026-08-21 再加入实验性 `deepseek-v4-flash-vision-exp`；官方 catalog 明确将普通 Flash/Pro 标为纯文本，并仅为 Vision 模型声明 `text` + `image` 与 original-detail 图片能力。
 
 2026-08-13 更新：DeepSeek 官方模型表已确认 `deepseek-v4-pro` 的稳定版本为
 `DeepSeek-V4-Pro-0813`，支持 Responses API、1M 上下文和最大 384K 输出；
 `deepseek-v4-flash` 当前对应 `DeepSeek-V4-Flash-0731`。
 
-两者继续归属同一个 `deepseek` model source，并复用 `DEEPSEEK_API_KEY`；不新增
-单独的 Pro provider 或密钥配置。两个模型都对外声明官方 Responses API 支持的
+三个模型继续归属同一个 `deepseek` model source，并复用 `DEEPSEEK_API_KEY`；不新增
+单独的 Pro/Vision provider 或密钥配置。三个模型都对外声明官方 Responses API 支持的
 `low/high/max` 思考档位，默认 `high`。Codex 会话的 reasoning effort 在发送给
 app-server 前按模型源解析：兼容请求 `medium` / `xhigh` 依照 DeepSeek 官方映射收敛到
 `high`，`minimal` 收敛到 `low`，未知的更高档位收敛到 `max`，其他未知值回退到模型
@@ -1200,8 +1206,8 @@ pnpm test
 在不影响现有服务的独立端口/profile 上验证：
 
 1. 不配置 DeepSeek Key：OpenAI 正常，DeepSeek 显示未配置。
-2. 配置 Key：新会话列表出现 DeepSeek V4 Flash 和 V4 Pro。
-3. 创建 DeepSeek 会话并执行文本、读文件、shell 审批、工具结果。
+2. 配置 Key：新会话列表出现 DeepSeek V4 Flash、V4 Pro 和 V4 Flash Vision (Experimental)。
+3. 创建 DeepSeek 会话并执行文本、读文件、shell 审批、工具结果；选择 Vision 模型时再验证图片输入。
 4. 刷新页面后继续对话。
 5. 重启测试实例后 resume。
 6. 编辑历史 prompt / rollback，确认仍走 DeepSeek。
@@ -1271,7 +1277,7 @@ pnpm test
 
 - [ ] Codex 新会话模型列表按 OpenAI / DeepSeek 分组。
 - [ ] 选择 OpenAI 时继续使用现有官方登录。
-- [ ] 选择 DeepSeek 时使用 `modelProvider=deepseek`，并可选择 `deepseek-v4-flash` 或 `deepseek-v4-pro`。
+- [ ] 选择 DeepSeek 时使用 `modelProvider=deepseek`，并可选择 `deepseek-v4-flash`、`deepseek-v4-pro` 或 `deepseek-v4-flash-vision-exp`。
 - [ ] DeepSeek catalog 不替换 OpenAI 模型目录。
 - [ ] DeepSeek Key 缺失不会影响 OpenAI。
 - [ ] 页面刷新、服务重启和 resume 后仍使用原 source。
