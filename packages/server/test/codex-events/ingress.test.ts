@@ -134,6 +134,104 @@ describe("Codex event ingress", () => {
     expect(JSON.stringify(error.data)).not.toContain("api_key=secret");
   });
 
+  it("preserves paths in user-visible agent text while redacting other path-bearing fields", () => {
+    const delta = redactCodexPayload("item/agentMessage/delta", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "agent-1",
+      delta: "See [app.ts](/Users/developer/project/src/app.ts:12)",
+    });
+    expect(delta.data).toMatchObject({
+      delta: "See [app.ts](/Users/developer/project/src/app.ts:12)",
+    });
+
+    const completed = redactCodexPayload("item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "agent-1",
+        type: "agentMessage",
+        text: "Config: ~/.codex/config.toml; Windows: C:\\work\\app.ts",
+      },
+      diagnostic: "Host path: /Users/developer/private/diagnostic.log",
+      cwd: "/Users/developer/project",
+    });
+    expect(completed.data).toMatchObject({
+      item: {
+        text: "Config: ~/.codex/config.toml; Windows: C:\\work\\app.ts",
+      },
+      diagnostic: expect.stringContaining("[REDACTED:absolute-path:"),
+      cwdFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+    });
+
+    const secret = redactCodexPayload("item/completed", {
+      item: {
+        id: "agent-secret",
+        type: "agentMessage",
+        text: "api_key=agent-reply-secret-value",
+      },
+    });
+    expect(secret.data).toMatchObject({
+      item: { text: "[REDACTED:secret-value]" },
+    });
+
+    const snapshotPath = "/Users/developer/project/snapshot.ts";
+    for (const [method, payload] of [
+      [
+        "turn/completed",
+        { turn: { items: [{ type: "agentMessage", text: snapshotPath }] } },
+      ],
+      [
+        "thread/read",
+        {
+          thread: {
+            turns: [{ items: [{ type: "agentMessage", text: snapshotPath }] }],
+          },
+        },
+      ],
+      [
+        "thread/turns/list",
+        { data: [{ items: [{ type: "agentMessage", text: snapshotPath }] }] },
+      ],
+      [
+        "thread/items/list",
+        { data: [{ item: { type: "agentMessage", text: snapshotPath } }] },
+      ],
+    ] as const) {
+      expect(
+        JSON.stringify(redactCodexPayload(method, payload).data),
+      ).toContain(snapshotPath);
+    }
+
+    const toolPath = "/Users/developer/private/tool-result.log";
+    const toolResult = redactCodexPayload("item/completed", {
+      item: {
+        id: "mcp-1",
+        type: "mcpToolCall",
+        result: {
+          content: [],
+          structuredContent: {
+            type: "agentMessage",
+            text: `Internal output: ${toolPath}`,
+          },
+          _meta: null,
+        },
+      },
+    });
+    expect(JSON.stringify(toolResult.data)).not.toContain(toolPath);
+    expect(JSON.stringify(toolResult.data)).toContain(
+      "[REDACTED:absolute-path:",
+    );
+
+    const malformedAgentText = redactCodexPayload("item/completed", {
+      item: {
+        type: "agentMessage",
+        text: { nested: toolPath },
+      },
+    });
+    expect(JSON.stringify(malformedAgentText.data)).not.toContain(toolPath);
+  });
+
   it("persists before reducing and correlates a client request with its turn", async () => {
     let now = 1_000;
     const store = new InMemoryCodexEventStore({ now: () => now++ });

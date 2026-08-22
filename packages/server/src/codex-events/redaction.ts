@@ -41,9 +41,26 @@ const PATH_FIELD_KEYS = new Set([
 const ABSOLUTE_WINDOWS_PATH_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 const FILE_URL_PATTERN = /^file:\/\//i;
 
+type CodexPayloadLocation =
+  | "root"
+  | "thread"
+  | "turn"
+  | "threadItem"
+  | "turnArray"
+  | "threadItemArray"
+  | "threadItemEntry"
+  | "threadItemEntryArray"
+  | "other";
+
 export interface CodexPayloadRedactionOptions {
   /** Raw chain-of-thought is never needed by the compatibility projection. */
   allowRawReasoning?: boolean;
+  /**
+   * Keep absolute filesystem references embedded in ordinary text. Structured
+   * path fields are still fingerprinted. This is intended for already-public
+   * assistant replies and their outbound delivery records.
+   */
+  preserveAbsolutePathsInText?: boolean;
   maxDepth?: number;
   maxArrayItems?: number;
   maxObjectEntries?: number;
@@ -170,6 +187,8 @@ export function redactCodexPayload(
     input: unknown,
     depth: number,
     key?: string,
+    preserveAbsolutePathsInText = options.preserveAbsolutePathsInText === true,
+    location: CodexPayloadLocation = "other",
   ): SafeJsonValue => {
     if (
       key?.toLowerCase() === "error" &&
@@ -206,7 +225,9 @@ export function redactCodexPayload(
         redactionCount += 1;
         return "[REDACTED:secret-value]";
       }
-      const filesystemRedaction = redactAbsoluteFilesystemReferences(input);
+      const filesystemRedaction = preserveAbsolutePathsInText
+        ? { value: input, redactionCount: 0 }
+        : redactAbsoluteFilesystemReferences(input);
       if (filesystemRedaction.redactionCount > 0) {
         redactionCount += filesystemRedaction.redactionCount;
       }
@@ -233,7 +254,15 @@ export function redactCodexPayload(
       if (input.length > limits.maxArrayItems) truncated = true;
       return input
         .slice(0, limits.maxArrayItems)
-        .map((entry) => visit(entry, depth + 1));
+        .map((entry) =>
+          visit(
+            entry,
+            depth + 1,
+            undefined,
+            preserveAbsolutePathsInText,
+            codexArrayEntryLocation(location),
+          ),
+        );
     }
 
     const source = input as Record<string, unknown>;
@@ -278,12 +307,26 @@ export function redactCodexPayload(
           continue;
         }
       }
-      output[entryKey] = visit(entryValue, depth + 1, entryKey);
+      output[entryKey] = visit(
+        entryValue,
+        depth + 1,
+        entryKey,
+        preserveAbsolutePathsInText ||
+          (typeof entryValue === "string" &&
+            isUserVisibleAgentText(method, location, taggedType, entryKey)),
+        childCodexPayloadLocation(method, location, entryKey),
+      );
     }
     return output;
   };
 
-  let data = visit(value ?? null, 0);
+  let data = visit(
+    value ?? null,
+    0,
+    undefined,
+    options.preserveAbsolutePathsInText === true,
+    "root",
+  );
   const reasoningSnapshotResult = redactReasoningSnapshots(data);
   data = reasoningSnapshotResult.data;
   redactionCount += reasoningSnapshotResult.redactionCount;
@@ -299,6 +342,75 @@ export function redactCodexPayload(
   }
 
   return { data, redactionCount, truncated };
+}
+
+function isUserVisibleAgentText(
+  method: string,
+  location: CodexPayloadLocation,
+  taggedType: string | undefined,
+  key: string,
+): boolean {
+  return (
+    (location === "threadItem" &&
+      taggedType === "agentMessage" &&
+      key === "text") ||
+    (location === "root" &&
+      method === "item/agentMessage/delta" &&
+      key === "delta")
+  );
+}
+
+function childCodexPayloadLocation(
+  method: string,
+  parent: CodexPayloadLocation,
+  key: string,
+): CodexPayloadLocation {
+  if (parent === "root") {
+    if (
+      key === "item" &&
+      (method === "item/started" || method === "item/completed")
+    ) {
+      return "threadItem";
+    }
+    if (
+      key === "turn" &&
+      (method === "turn/start" ||
+        method === "turn/started" ||
+        method === "turn/completed")
+    ) {
+      return "turn";
+    }
+    if (
+      key === "thread" &&
+      (method === "thread/start" ||
+        method === "thread/resume" ||
+        method === "thread/fork" ||
+        method === "thread/rollback" ||
+        method === "thread/read" ||
+        method === "thread/started")
+    ) {
+      return "thread";
+    }
+    if (key === "data" && method === "thread/turns/list") {
+      return "turnArray";
+    }
+    if (key === "data" && method === "thread/items/list") {
+      return "threadItemEntryArray";
+    }
+  }
+  if (parent === "thread" && key === "turns") return "turnArray";
+  if (parent === "turn" && key === "items") return "threadItemArray";
+  if (parent === "threadItemEntry" && key === "item") return "threadItem";
+  return "other";
+}
+
+function codexArrayEntryLocation(
+  location: CodexPayloadLocation,
+): CodexPayloadLocation {
+  if (location === "turnArray") return "turn";
+  if (location === "threadItemArray") return "threadItem";
+  if (location === "threadItemEntryArray") return "threadItemEntry";
+  return "other";
 }
 
 function isImageGenerationPayloadType(type: string | undefined): boolean {

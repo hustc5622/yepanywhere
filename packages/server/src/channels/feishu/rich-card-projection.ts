@@ -1200,16 +1200,28 @@ function safeVisibleText(value: string, limit: number): string {
       "[REDACTED:data-url]",
     );
 
-  output = output.replace(
-    /(^|[\s([{"'`=])(?:file:\/\/)?(?:~\/|\/(?!\/))[^\s)\]}>,"'`]+/g,
-    (_match, prefix: string) => `${prefix}[已隐藏本地路径]`,
-  );
-  output = output.replace(
-    /(^|[\s([{"'`])[A-Za-z]:[\\/][^\s)\]}>,"'`]*/g,
-    (_match, prefix: string) => `${prefix}[已隐藏本地路径]`,
-  );
+  output = renderLocalMarkdownLinksAsText(output);
   if (inputTruncated) output += "…";
   return clip(output, limit);
+}
+
+/**
+ * CardKit cannot open a path on the Yep host. Keep both the assistant's label
+ * and its original path as readable text instead of sending an unusable link
+ * destination that the client may replace with an "address hidden" marker.
+ */
+function renderLocalMarkdownLinksAsText(value: string): string {
+  return value.replace(
+    /\[([^\]\r\n]+)\]\(\s*(<(?:(?:file:\/\/\/|~\/|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)[^>\r\n]+)>|(?:(?:file:\/\/\/|~\/|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)[^)\r\n]+))\s*\)/g,
+    (_match, label: string, rawTarget: string) => {
+      const target = rawTarget.startsWith("<")
+        ? rawTarget.slice(1, -1).trim()
+        : rawTarget.trim();
+      const visibleLabel = label.trim();
+      if (!visibleLabel || visibleLabel === target) return target;
+      return `${visibleLabel}（\`${target.replaceAll("`", "\\`")}\`）`;
+    },
+  );
 }
 
 function stripControlCharacters(value: string): string {

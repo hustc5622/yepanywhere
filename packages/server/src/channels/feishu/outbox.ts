@@ -463,7 +463,12 @@ function projectOutboxPayload(
   } catch {
     throw new Error("Invalid Feishu outbox payload");
   }
-  const redactedPayload = redactCodexPayload("feishu/outbox", jsonPayload).data;
+  const redactedPayload = redactCodexPayload("feishu/outbox", jsonPayload, {
+    // Card/text content is already a user-visible projection. Preserve local
+    // paths mentioned in that text so a recovered delivery matches the first
+    // attempt; structured path fields remain fingerprinted by the redactor.
+    preserveAbsolutePathsInText: true,
+  }).data;
   if (
     !redactedPayload ||
     typeof redactedPayload !== "object" ||

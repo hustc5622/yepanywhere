@@ -23,7 +23,7 @@ Feishu event
        └── legacy SDKMessage projection
 ```
 
-“体验对齐”指对齐上游正式提供给客户端的 user-visible item、notification、reasoning summary、commentary、工具活动和交互请求；不表示发送隐藏 chain-of-thought、credential、环境变量、私人路径或未经策略允许的 tool input。
+“体验对齐”指对齐上游正式提供给客户端的 user-visible item、notification、reasoning summary、commentary、工具活动和交互请求；不表示发送隐藏 chain-of-thought、credential、环境变量、未被 agent 明确写入回复正文的私人路径或未经策略允许的 tool input。
 
 ## 2. 协议基线
 
@@ -164,7 +164,7 @@ authorize -> bounded download -> size/hash -> MIME/container validation
 
 Generated artifact 只接受 live、exact、completed canonical `fileChange`/`imageGeneration`，并绑定 event/thread/turn/task/workspace grant。materialization 使用 no-follow 和 inode/device/size/hash 二次校验，拒绝路径逃逸、link、敏感文件、archive、类型/大小/数量超限和读取竞态。download route 重新核验 registry、journal、expiry 和 digest；普通 upload 不能冒充 generated artifact。
 
-公开 event、history 和 card 只含 opaque managed reference、安全 diff/metadata 或图片占位，不含源绝对路径、data URI 或 secret-shaped content。
+公开 event、history 和 card 的结构化 artifact/tool/runtime 字段只含 opaque managed reference、安全 diff/metadata 或图片占位，不含源绝对路径、data URI 或 secret-shaped content。agent 明确写入 user-visible `agentMessage` 正文的本地路径按文本保留；Feishu 将这类 Markdown 本地链接投影为可读的非跳转路径，避免产生“地址已隐藏”占位。
 
 ## 10. Feishu 输出与可靠性
 

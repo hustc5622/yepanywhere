@@ -223,6 +223,34 @@ describe("FeishuRichCardProjection", () => {
     },
   );
 
+  it.each(["rich", "compact", "plain"] as const)(
+    "keeps local paths readable without emitting unusable Markdown links in %s mode",
+    (mode) => {
+      const projection = new FeishuRichCardProjection();
+      const rendered = projection.render(
+        "Working",
+        [
+          "See [app.ts](/Users/developer/project/src/app.ts:12)",
+          "Config: ~/.codex/config.toml",
+          "Windows: C:\\work\\project\\app.ts",
+          "URI: file:///Users/developer/project/README.md",
+        ].join("\n"),
+        mode,
+      );
+
+      expect(rendered).toContain(
+        "app.ts（`/Users/developer/project/src/app.ts:12`）",
+      );
+      expect(rendered).toContain("~/.codex/config.toml");
+      expect(rendered).toContain("C:\\work\\project\\app.ts");
+      expect(rendered).toContain("file:///Users/developer/project/README.md");
+      expect(rendered).not.toContain("[已隐藏本地路径]");
+      expect(rendered).not.toContain(
+        "[app.ts](/Users/developer/project/src/app.ts:12)",
+      );
+    },
+  );
+
   it("settles every running activity when the turn reaches a terminal state", () => {
     const projection = new FeishuRichCardProjection();
     projection.observe({
@@ -457,7 +485,12 @@ describe("FeishuRichCardProjection", () => {
     expect(rendered).toContain("退出 Review 模式 · 已完成");
     expect(rendered).toContain("上下文压缩 · 已完成");
     expect(rendered).toContain("### 回复");
-    expect(rendered).toContain("最终答复 token=[REDACTED]");
+    expect(rendered).toContain(
+      "正在检查 token=[REDACTED] /private/work/src/app.ts",
+    );
+    expect(rendered).toContain(
+      "最终答复 token=[REDACTED] /private/work/result.txt",
+    );
 
     for (const secret of [
       "USER_SECRET_CONTENT",
@@ -479,7 +512,6 @@ describe("FeishuRichCardProjection", () => {
       "REVIEW_ENTER_SECRET",
       "REVIEW_EXIT_SECRET",
       "final-secret",
-      "/private/",
       "data:image",
     ]) {
       expect(rendered).not.toContain(secret);

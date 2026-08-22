@@ -123,6 +123,34 @@ describe("FeishuDurableOutbox", () => {
     expect(outbox.get(record.id)?.lastErrorCode).toBe("REDACTED_ERROR");
   });
 
+  it("keeps local paths in delivered reply text while fingerprinting path fields", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-outbox-"));
+    dirs.push(dataDir);
+    const outbox = new FeishuDurableOutbox({ dataDir });
+    await outbox.initialize(new Date("2026-08-08T00:00:00.000Z"));
+    const localPath = "/Users/developer/project/src/app.ts";
+    const record = await outbox.enqueue({
+      owner: "account-a",
+      idempotencyKey: "visible-reply-path",
+      kind: "card_content_update",
+      payload: {
+        cardId: "card-1",
+        content: `Changed ${localPath}`,
+        localPath,
+        sequence: 1,
+      },
+      now: new Date("2026-08-08T00:00:00.000Z"),
+    });
+
+    expect(record.payload).toMatchObject({
+      content: `Changed ${localPath}`,
+      localPathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+    });
+    expect(record.payload).not.toHaveProperty("localPath");
+    const persisted = await readFile(outbox.filePath, "utf8");
+    expect(persisted).toContain(localPath);
+  });
+
   it("re-projects legacy durable payloads and drops secret-bearing identities on load", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-outbox-"));
     dirs.push(dataDir);

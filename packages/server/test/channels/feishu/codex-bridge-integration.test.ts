@@ -131,8 +131,12 @@ describe("CodexBridgeService × Feishu integration", () => {
       ...api.updateStreamingReply.mock.calls,
       ...api.finishStreamingReply.mock.calls,
     ]);
-    expect(cardWrites).toContain("Hello from bridge delta");
-    expect(cardWrites).toContain("Final bridge answer");
+    expect(cardWrites).toContain(
+      "Hello from bridge delta at /Users/developer/project/app.ts",
+    );
+    expect(cardWrites).toContain(
+      "Final bridge answer: app.ts（`/Users/developer/project/app.ts:12`）",
+    );
     expect(runtimeMessages).toContainEqual(
       expect.objectContaining({
         type: "assistant",
@@ -142,7 +146,7 @@ describe("CodexBridgeService × Feishu integration", () => {
         codexThreadItem: expect.objectContaining({
           id: "agent-bridge",
           type: "agentMessage",
-          text: "Final bridge answer",
+          text: "Final bridge answer: [app.ts](/Users/developer/project/app.ts:12)",
         }),
       }),
     );
@@ -167,6 +171,9 @@ describe("CodexBridgeService × Feishu integration", () => {
     );
     expect(canonical.some((event) => event.accountId === "team-bot")).toBe(
       true,
+    );
+    expect(JSON.stringify(canonical)).toContain(
+      "/Users/developer/project/app.ts",
     );
     expect(harness.bridge.getStatus()).toMatchObject({
       journalMode: "lifecycle",
@@ -444,7 +451,7 @@ function streamCompletedTurn(socket: WebSocket): void {
     threadId: THREAD_ID,
     turnId: TURN_ID,
     itemId: "agent-bridge",
-    delta: "Hello from bridge delta",
+    delta: "Hello from bridge delta at /Users/developer/project/app.ts",
   });
   setTimeout(() => {
     send("item/completed", {
@@ -453,7 +460,7 @@ function streamCompletedTurn(socket: WebSocket): void {
       item: {
         id: "agent-bridge",
         type: "agentMessage",
-        text: "Final bridge answer",
+        text: "Final bridge answer: [app.ts](/Users/developer/project/app.ts:12)",
         phase: "final_answer",
       },
     });

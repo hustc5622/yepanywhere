@@ -182,4 +182,4 @@ corepack pnpm feishu:migration:preflight \
 - CardKit 降级：检查 outbox、频控和 fixed error code；不得创建第二个 turn。
 - interaction 卡失效：对比 broker 中的 request/version/terminal 状态，不人工重放 callback。
 
-若普通日志、诊断或卡片中出现正文、显示名、附件内容、secret、access token、完整 tool input 或私人绝对路径，应按安全缺陷处理并停止扩大流量。
+若普通日志、诊断中出现正文、显示名、附件内容、secret、access token、完整 tool input 或私人绝对路径，应按安全缺陷处理并停止扩大流量。卡片仍不得从结构化 tool/runtime 字段泄露路径；唯一例外是 agent 明确写入 user-visible 回复正文的本地路径，这类文本按原回复保留，并将本地 Markdown 链接降为可读的非跳转路径。
