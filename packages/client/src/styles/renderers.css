@@ -4444,6 +4444,10 @@ details[open] .collapsible__icon {
   color: var(--success-color);
 }
 
+.file-viewer-action.copy-failed {
+  color: var(--error-color);
+}
+
 .file-viewer-close {
   margin-left: 0.5rem;
 }

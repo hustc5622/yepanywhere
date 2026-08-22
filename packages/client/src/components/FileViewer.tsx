@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useState } from "react";
 import { type ApiError, api } from "../api/client";
 import { useI18n } from "../i18n";
 import { appPath } from "../lib/apiPath";
+import { writeClipboardText } from "../lib/clipboard";
 
 interface FileViewerProps {
   projectId: string;
@@ -15,6 +16,8 @@ interface FileViewerProps {
   /** End line for range highlighting (1-indexed). If not provided, only lineNumber is highlighted. */
   lineEnd?: number;
 }
+
+type CopyFeedback = { status: "copied" | "failed" } | null;
 
 /**
  * Format file size for display.
@@ -115,7 +118,7 @@ export const FileViewer = memo(function FileViewer({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [errorFilePath, setErrorFilePath] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<CopyFeedback>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [highlightedLineRef, setHighlightedLineRef] =
@@ -174,14 +177,20 @@ export const FileViewer = memo(function FileViewer({
     }
   }, [highlightedLineRef]);
 
+  useEffect(() => {
+    if (!copyFeedback) return;
+    const handle = setTimeout(() => setCopyFeedback(null), 2000);
+    return () => clearTimeout(handle);
+  }, [copyFeedback]);
+
   const handleCopy = useCallback(async () => {
     if (!fileData?.content) return;
     try {
-      await navigator.clipboard.writeText(fileData.content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      await writeClipboardText(fileData.content);
+      setCopyFeedback({ status: "copied" });
     } catch (err) {
       console.error("Failed to copy:", err);
+      setCopyFeedback({ status: "failed" });
     }
   }, [fileData?.content]);
 
@@ -233,6 +242,13 @@ export const FileViewer = memo(function FileViewer({
   const { metadata, content, rawUrl } = fileData;
   const displayPath = metadata.absolutePath ?? filePath;
   const isImage = isImageFile(metadata.mimeType);
+  const copyStatus = copyFeedback?.status;
+  const copyLabel =
+    copyStatus === "copied"
+      ? t("fileViewerCopied" as never)
+      : copyStatus === "failed"
+        ? t("fileViewerCopyFailed" as never)
+        : t("fileViewerCopyContent" as never);
 
   // Render content based on file type
   const renderContent = () => {
@@ -412,15 +428,25 @@ export const FileViewer = memo(function FileViewer({
         {content && (
           <button
             type="button"
-            className={`file-viewer-action ${copied ? "copied" : ""}`}
+            className={`file-viewer-action${
+              copyStatus === "copied"
+                ? " copied"
+                : copyStatus === "failed"
+                  ? " copy-failed"
+                  : ""
+            }`}
             onClick={handleCopy}
-            title={
-              copied
-                ? t("fileViewerCopied" as never)
-                : t("fileViewerCopyContent" as never)
-            }
+            aria-label={copyLabel}
+            aria-live="polite"
+            title={copyLabel}
           >
-            {copied ? <CheckIcon /> : <CopyIcon />}
+            {copyStatus === "copied" ? (
+              <CheckIcon />
+            ) : copyStatus === "failed" ? (
+              <CopyFailedIcon />
+            ) : (
+              <CopyIcon />
+            )}
           </button>
         )}
         {!standalone && (
@@ -517,6 +543,23 @@ function CheckIcon() {
       aria-hidden="true"
     >
       <path d="M3 8.5L6.5 12L13 4" />
+    </svg>
+  );
+}
+
+function CopyFailedIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M4 4l8 8M12 4l-8 8" />
     </svg>
   );
 }

@@ -1179,6 +1179,7 @@
   "fileViewerDownloadFile": "下载文件",
   "fileViewerLines": "{count} 行",
   "fileViewerCopied": "已复制！",
+  "fileViewerCopyFailed": "复制失败",
   "fileViewerCopyContent": "复制内容",
   "fileViewerOpenNewTab": "在新标签页打开",
   "fileViewerDownload": "下载",
