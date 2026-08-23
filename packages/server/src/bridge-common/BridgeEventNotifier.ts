@@ -18,6 +18,13 @@ export class BridgeEventNotifier {
   private subscribers = new Set<ServerResponse>();
   private notifyTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  private revision = 0;
+  private readonly changedSessionIds = new Set<string>();
+  private pendingBaseRevision: number | null = null;
+
+  getRevision(): number {
+    return this.revision;
+  }
 
   attach(res: ServerResponse): void {
     res.writeHead(200, {
@@ -35,11 +42,25 @@ export class BridgeEventNotifier {
   }
 
   /** Debounced change signal to all subscribers. */
-  notify(): void {
-    if (this.subscribers.size === 0 || this.notifyTimer) return;
+  notify(changedSessionId?: string): void {
+    const baseRevision = this.revision;
+    this.revision += 1;
+    if (changedSessionId) this.changedSessionIds.add(changedSessionId);
+    if (this.subscribers.size === 0) {
+      this.changedSessionIds.clear();
+      return;
+    }
+    if (this.notifyTimer) return;
+    this.pendingBaseRevision = baseRevision;
     this.notifyTimer = setTimeout(() => {
       this.notifyTimer = null;
-      const frame = `event: changed\ndata: ${Date.now()}\n\n`;
+      const frame = `event: changed\ndata: ${JSON.stringify({
+        revision: this.revision,
+        baseRevision: this.pendingBaseRevision ?? this.revision,
+        changedSessionIds: Array.from(this.changedSessionIds),
+      })}\n\n`;
+      this.pendingBaseRevision = null;
+      this.changedSessionIds.clear();
       for (const res of this.subscribers) {
         try {
           res.write(frame);

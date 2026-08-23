@@ -1,14 +1,17 @@
 import type { ContextUsage } from "@yep-anywhere/shared";
 import {
+  type BridgeChangeSignal,
   BridgeHttpClient,
   type BridgeHttpClientOptions,
   type BridgePollEntry,
+  type BridgePollReason,
   type BridgePollState,
 } from "../bridge-common/BridgeHttpClient.js";
+import { isActiveBridgeSessionView } from "../bridge-common/session-state.js";
 import type { BridgePendingInputBinding } from "../bridge-common/types.js";
+import { getLogger } from "../logging/logger.js";
 import { resolveCodexBridgeJournalMode } from "./journal-policy.js";
 import { emptyCodexBridgeMetricsSnapshot } from "./metrics.js";
-import { isLiveBridgeSession } from "./session-state.js";
 import type {
   CodexBridgeController,
   CodexBridgeSession,
@@ -29,6 +32,20 @@ interface CodexSessionPollState extends BridgePollState {
   contextUsage?: ContextUsage;
 }
 
+export interface CodexBridgePollDebugStats {
+  polls: number;
+  snapshotBytes: number;
+  lastSnapshotBytes: number;
+  unchangedPolls: number;
+  fullPolls: number;
+  targetedPolls: number;
+  parsedSessionViews: number;
+  reasons: Record<BridgePollReason, number>;
+}
+
+const LOG_POLL_PERF = process.env.CODEX_BRIDGE_LOG_POLL_PERF === "true";
+const logger = getLogger();
+
 export class CodexBridgeHttpClient
   extends BridgeHttpClient<
     CodexBridgeStatus,
@@ -37,6 +54,31 @@ export class CodexBridgeHttpClient
   >
   implements CodexBridgeController
 {
+  private lastSessionViewsEtag: string | undefined;
+  private lastRevision: number | undefined;
+  private readonly pollDebugStats: CodexBridgePollDebugStats = {
+    polls: 0,
+    snapshotBytes: 0,
+    lastSnapshotBytes: 0,
+    unchangedPolls: 0,
+    fullPolls: 0,
+    targetedPolls: 0,
+    parsedSessionViews: 0,
+    reasons: {
+      startup: 0,
+      interval: 0,
+      "change-signal": 0,
+      queued: 0,
+    },
+  };
+
+  getPollDebugStats(): CodexBridgePollDebugStats {
+    return {
+      ...this.pollDebugStats,
+      reasons: { ...this.pollDebugStats.reasons },
+    };
+  }
+
   override async getStatus(): Promise<CodexBridgeStatus> {
     const status = await super.getStatus();
     return {
@@ -110,22 +152,130 @@ export class CodexBridgeHttpClient
     };
   }
 
-  protected async collectPollEntries(): Promise<
-    BridgePollEntry<CodexSessionPollState>[]
-  > {
-    const [sessionsData, viewsData] = await Promise.all([
-      this.fetchJson<{ sessions?: CodexBridgeSession[] }>("/sessions"),
-      this.fetchJson<{ sessions?: CodexBridgeSessionView[] }>("/session-views"),
-    ]);
-    if (!sessionsData || !viewsData) {
-      return Array.from(this.knownSessions.entries()).map(([id, state]) => ({
-        id,
-        view: state.view,
-        state,
-      }));
+  protected async collectPollEntries(
+    reason: BridgePollReason,
+    changeSignal?: BridgeChangeSignal,
+  ): Promise<BridgePollEntry<CodexSessionPollState>[]> {
+    if (
+      changeSignal?.changedSessionIds.length &&
+      changeSignal.revision !== undefined &&
+      changeSignal.baseRevision !== undefined &&
+      changeSignal.baseRevision === this.lastRevision
+    ) {
+      const targeted = await this.collectTargetedEntries(
+        changeSignal.changedSessionIds,
+      );
+      if (!targeted) return this.knownPollEntries();
+      for (const sessionId of targeted.tombstones) {
+        this.removeKnownSession(sessionId);
+      }
+      this.lastRevision = changeSignal.revision;
+      // The sidecar snapshot ETag is defined by this same monotonically
+      // increasing revision. Advancing both prevents the next interval from
+      // re-downloading the full catalog after a successful targeted refresh.
+      this.lastSessionViewsEtag = `W/"${changeSignal.revision}"`;
+      this.recordPollSnapshot(
+        reason,
+        targeted.responseBytes,
+        false,
+        targeted.entries.length,
+        "targeted",
+      );
+      return targeted.entries;
     }
-    const sessions = sessionsData.sessions ?? [];
-    const views = (viewsData.sessions ?? [])
+    if (changeSignal) {
+      // A revision gap means at least one SSE frame was missed. Keep stale
+      // rows intact; the next interval performs the authoritative ETag
+      // snapshot recovery instead of accepting a partial refresh as complete.
+      return this.knownPollEntries();
+    }
+
+    const response = await this.fetchJsonResponse<{
+      revision?: number;
+      sessions?: CodexBridgeSessionView[];
+    }>("/session-views", {
+      headers: this.lastSessionViewsEtag
+        ? { "if-none-match": this.lastSessionViewsEtag }
+        : undefined,
+    });
+    if (!response) {
+      this.recordPollSnapshot(reason, 0, true, 0, "full");
+      return this.knownPollEntries();
+    }
+    if (response.etag) this.lastSessionViewsEtag = response.etag;
+    if (response.status === 304) {
+      this.recordPollSnapshot(reason, 0, true, 0, "full");
+      return this.knownPollEntries();
+    }
+    const viewsData = response.data;
+    if (!viewsData) {
+      return this.knownPollEntries();
+    }
+    this.lastRevision = viewsData.revision;
+    const views = this.normalizePollViews(viewsData.sessions ?? []);
+    const entries = this.pollEntriesFromViews(views);
+    this.recordPollSnapshot(
+      reason,
+      response.responseBytes,
+      false,
+      views.length,
+      "full",
+    );
+    return entries;
+  }
+
+  private async collectTargetedEntries(sessionIds: string[]): Promise<{
+    entries: BridgePollEntry<CodexSessionPollState>[];
+    tombstones: string[];
+    responseBytes: number;
+  } | null> {
+    const ids = Array.from(new Set(sessionIds));
+    const views: CodexBridgeSessionView[] = [];
+    const tombstones: string[] = [];
+    let responseBytes = 0;
+    let failed = false;
+    let nextIndex = 0;
+    const workerCount = Math.min(16, ids.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (!failed) {
+          const id = ids[nextIndex++];
+          if (!id) return;
+          const response = await this.fetchJsonResponse<{
+            sessionView?: CodexBridgeSessionView | null;
+          }>(`/sessions/${encodeURIComponent(id)}/view`);
+          if (!response?.data || !("sessionView" in response.data)) {
+            failed = true;
+            return;
+          }
+          responseBytes += response.responseBytes;
+          const view = response.data.sessionView ?? null;
+          if (
+            !view ||
+            !this.isDisplayableBridgeSession(view.session, {
+              activity: view.activity,
+              pendingInputType: view.pendingInputType,
+            })
+          ) {
+            tombstones.push(id);
+          } else {
+            views.push(this.normalizeSessionView(view));
+          }
+        }
+      }),
+    );
+    if (failed) return null;
+    return {
+      entries: this.pollEntriesFromViews(views),
+      tombstones,
+      responseBytes,
+    };
+  }
+
+  private normalizePollViews(
+    input: CodexBridgeSessionView[],
+  ): CodexBridgeSessionView[] {
+    return input
       .filter((view) =>
         this.isDisplayableBridgeSession(view.session, {
           activity: view.activity,
@@ -133,12 +283,14 @@ export class CodexBridgeHttpClient
         }),
       )
       .map((view) => this.normalizeSessionView(view));
-    const viewsById = new Map(views.map((view) => [view.session.id, view]));
+  }
 
+  private pollEntriesFromViews(
+    views: CodexBridgeSessionView[],
+  ): BridgePollEntry<CodexSessionPollState>[] {
     const entries: BridgePollEntry<CodexSessionPollState>[] = [];
-    for (const session of sessions) {
-      const view = viewsById.get(session.id);
-      if (!view) continue;
+    for (const view of views) {
+      const session = view.session;
       entries.push({
         id: session.id,
         view,
@@ -152,16 +304,57 @@ export class CodexBridgeHttpClient
           reasoningEffort: session.reasoningEffort,
           serviceTier: session.serviceTier,
           contextUsage: session.contextUsage,
-          activity: session.activity,
-          pendingInputType: session.pendingInputType,
+          activity: view.activity ?? session.activity,
+          pendingInputType: view.pendingInputType ?? session.pendingInputType,
           pendingInputRequestId: view.pendingInputRequestId,
-          active: isLiveBridgeSession(session),
+          active: isActiveBridgeSessionView(view),
           lastTurnStatus: session.lastTurnStatus,
           lastErrorMessage: session.lastErrorMessage,
+          retryStatus: session.retryStatus,
         },
       });
     }
     return entries;
+  }
+
+  private knownPollEntries(): BridgePollEntry<CodexSessionPollState>[] {
+    return Array.from(this.knownSessions.entries()).map(([id, state]) => ({
+      id,
+      view: state.view,
+      state,
+    }));
+  }
+
+  private recordPollSnapshot(
+    reason: BridgePollReason,
+    snapshotBytes: number,
+    unchanged: boolean,
+    parsedSessionViews: number,
+    mode: "full" | "targeted",
+  ): void {
+    this.pollDebugStats.polls += 1;
+    this.pollDebugStats.snapshotBytes += snapshotBytes;
+    this.pollDebugStats.lastSnapshotBytes = snapshotBytes;
+    this.pollDebugStats.reasons[reason] += 1;
+    if (unchanged) this.pollDebugStats.unchangedPolls += 1;
+    this.pollDebugStats.parsedSessionViews += parsedSessionViews;
+    if (mode === "full") this.pollDebugStats.fullPolls += 1;
+    else this.pollDebugStats.targetedPolls += 1;
+
+    if (LOG_POLL_PERF) {
+      logger.debug(
+        {
+          reason,
+          snapshotBytes,
+          unchanged,
+          unchangedPolls: this.pollDebugStats.unchangedPolls,
+          parsedSessionViews,
+          mode,
+          pollCount: this.pollDebugStats.polls,
+        },
+        "Codex bridge poll snapshot collected",
+      );
+    }
   }
 
   protected override emitExtraChanges(

@@ -908,7 +908,16 @@ export class CodexBridgeService implements CodexBridgeController {
       return;
     }
     if (req.method === "GET" && url.pathname === "/session-views") {
-      writeJson(res, 200, { sessions: this.listSessionViews() });
+      const revision = this.eventNotifier.getRevision();
+      const etag = `W/"${revision}"`;
+      res.setHeader("etag", etag);
+      res.setHeader("cache-control", "no-cache");
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304);
+        res.end();
+        return;
+      }
+      writeJson(res, 200, { revision, sessions: this.listSessionViews() });
       return;
     }
 
@@ -2098,6 +2107,16 @@ export class CodexBridgeService implements CodexBridgeController {
         }
         break;
       }
+      case "thread/goal/updated":
+      case "thread/goal/cleared": {
+        const threadId = getString(p?.threadId);
+        if (!threadId) break;
+        const record = this.sessions.get(threadId);
+        if (!record) break;
+        record.updatedAt = new Date().toISOString();
+        this.emitSessionUpdated(record);
+        break;
+      }
       case "turn/started": {
         const threadId = getString(p?.threadId);
         if (!threadId) break;
@@ -2971,7 +2990,7 @@ export class CodexBridgeService implements CodexBridgeController {
     if (!this.isDisplayableBridgeSession(session)) {
       return;
     }
-    this.eventNotifier.notify();
+    this.eventNotifier.notify(record.id);
     if (this.emittedSessionIds.has(record.id)) {
       return;
     }
@@ -2988,7 +3007,7 @@ export class CodexBridgeService implements CodexBridgeController {
     ownership: SessionSummary["ownership"],
   ): void {
     if (!this.isTopLevelSessionRecord(record)) return;
-    this.eventNotifier.notify();
+    this.eventNotifier.notify(record.id);
     this.eventBus?.emit({
       type: "session-status-changed",
       sessionId: record.id,
@@ -3004,7 +3023,7 @@ export class CodexBridgeService implements CodexBridgeController {
     pendingInputType?: "tool-approval" | "user-question",
   ): void {
     if (!this.isTopLevelSessionRecord(record)) return;
-    this.eventNotifier.notify();
+    this.eventNotifier.notify(record.id);
     this.eventBus?.emit({
       type: "process-state-changed",
       sessionId: record.id,
@@ -3022,7 +3041,7 @@ export class CodexBridgeService implements CodexBridgeController {
     trigger?: "codex-plan-updated",
   ): void {
     if (!this.isTopLevelSessionRecord(record)) return;
-    this.eventNotifier.notify();
+    this.eventNotifier.notify(record.id);
     this.eventBus?.emit({
       type: "session-updated",
       sessionId: record.id,

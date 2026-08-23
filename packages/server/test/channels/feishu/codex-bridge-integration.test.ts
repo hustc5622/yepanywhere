@@ -143,13 +143,18 @@ describe("CodexBridgeService × Feishu integration", () => {
         codexThreadItemLifecycle: "completed",
         codexThreadId: THREAD_ID,
         codexTurnId: TURN_ID,
-        codexThreadItem: expect.objectContaining({
-          id: "agent-bridge",
-          type: "agentMessage",
-          text: "Final bridge answer: [app.ts](/Users/developer/project/app.ts:12)",
+        codexThreadItemId: "agent-bridge",
+        message: expect.objectContaining({
+          content:
+            "Final bridge answer: [app.ts](/Users/developer/project/app.ts:12)",
         }),
       }),
     );
+    expect(
+      runtimeMessages.find(
+        (message) => message.codexThreadItemId === "agent-bridge",
+      ),
+    ).not.toHaveProperty("codexThreadItem");
     expect(
       harness.upstreamMessages.some(
         (message) => message.method === "turn/steer",

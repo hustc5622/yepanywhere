@@ -56,6 +56,18 @@ export interface BridgePollEntry<TState extends BridgePollState> {
   state: TState;
 }
 
+export interface BridgeChangeSignal {
+  revision?: number;
+  baseRevision?: number;
+  changedSessionIds: string[];
+}
+
+export type BridgePollReason =
+  | "startup"
+  | "interval"
+  | "change-signal"
+  | "queued";
+
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const EVENT_STREAM_RETRY_MS = 5_000;
 /**
@@ -115,6 +127,7 @@ export abstract class BridgeHttpClient<
   private pollGapTimer: NodeJS.Timeout | null = null;
   private lastPollStartedAt = 0;
   private eventStreamAbort: AbortController | null = null;
+  private pendingChangeSignal: BridgeChangeSignal | null = null;
   protected knownSessions = new Map<string, TState>();
   /**
    * Reports whether a session is currently owned by the local Supervisor.
@@ -148,7 +161,10 @@ export abstract class BridgeHttpClient<
   protected abstract unavailableStatus(): TStatus;
 
   /** Collect the poll snapshot (implementations differ per provider). */
-  protected abstract collectPollEntries(): Promise<BridgePollEntry<TState>[]>;
+  protected abstract collectPollEntries(
+    reason: BridgePollReason,
+    changeSignal?: BridgeChangeSignal,
+  ): Promise<BridgePollEntry<TState>[]>;
 
   /**
    * Hook for provider-specific events beyond the shared lifecycle diff
@@ -163,9 +179,9 @@ export abstract class BridgeHttpClient<
   start(): void {
     if (!this.eventBus || this.pollTimer) return;
     this.pollTimer = setInterval(() => {
-      void this.pollSessions();
+      void this.pollSessions("interval");
     }, this.pollIntervalMs);
-    void this.pollSessions();
+    void this.pollSessions("startup");
     this.startEventStream();
   }
 
@@ -210,15 +226,16 @@ export abstract class BridgeHttpClient<
             while (!abort.signal.aborted) {
               const { done, value } = await reader.read();
               if (done) break;
-              buffer += decoder.decode(value, { stream: true });
-              let newlineIndex = buffer.indexOf("\n");
-              while (newlineIndex >= 0) {
-                const line = buffer.slice(0, newlineIndex).trim();
-                buffer = buffer.slice(newlineIndex + 1);
-                if (line === "event: changed") {
-                  this.requestPoll();
-                }
-                newlineIndex = buffer.indexOf("\n");
+              buffer += decoder
+                .decode(value, { stream: true })
+                .replaceAll("\r\n", "\n");
+              let frameEnd = buffer.indexOf("\n\n");
+              while (frameEnd >= 0) {
+                const frame = buffer.slice(0, frameEnd);
+                buffer = buffer.slice(frameEnd + 2);
+                const parsed = parseBridgeSseFrame(frame);
+                if (parsed) this.queueChangeSignal(parsed);
+                frameEnd = buffer.indexOf("\n\n");
               }
             }
           }
@@ -324,6 +341,19 @@ export abstract class BridgeHttpClient<
     path: string,
     init?: RequestInit,
   ): Promise<T | null> {
+    const response = await this.fetchJsonResponse<T>(path, init);
+    return response?.data ?? null;
+  }
+
+  protected async fetchJsonResponse<T>(
+    path: string,
+    init?: RequestInit,
+  ): Promise<{
+    status: number;
+    data: T | null;
+    etag?: string;
+    responseBytes: number;
+  } | null> {
     try {
       const authorization = await this.authorizationHeader();
       const response = await fetch(`${this.baseUrl}${path}`, {
@@ -338,8 +368,26 @@ export abstract class BridgeHttpClient<
           ...init?.headers,
         },
       });
+      if (response.status === 304) {
+        return {
+          status: 304,
+          data: null,
+          responseBytes: 0,
+          ...(response.headers.get("etag")
+            ? { etag: response.headers.get("etag") ?? undefined }
+            : {}),
+        };
+      }
       if (!response.ok) return null;
-      return (await response.json()) as T;
+      const body = await response.text();
+      return {
+        status: response.status,
+        data: JSON.parse(body) as T,
+        responseBytes: Buffer.byteLength(body, "utf8"),
+        ...(response.headers.get("etag")
+          ? { etag: response.headers.get("etag") ?? undefined }
+          : {}),
+      };
     } catch {
       return null;
     }
@@ -358,21 +406,43 @@ export abstract class BridgeHttpClient<
    * started less than `MIN_POLL_GAP_MS` ago. Bursty push signals therefore
    * collapse into one poll per window instead of one poll per signal.
    */
-  private requestPoll(): void {
+  private requestPoll(reason: BridgePollReason): void {
     if (this.pollGapTimer) return;
     const elapsed = Date.now() - this.lastPollStartedAt;
     if (elapsed >= MIN_POLL_GAP_MS) {
-      void this.pollSessions();
+      void this.pollSessions(reason);
       return;
     }
     this.pollGapTimer = setTimeout(() => {
       this.pollGapTimer = null;
-      void this.pollSessions();
+      void this.pollSessions(reason);
     }, MIN_POLL_GAP_MS - elapsed);
     this.pollGapTimer.unref?.();
   }
 
-  private async pollSessions(): Promise<void> {
+  private queueChangeSignal(signal: BridgeChangeSignal): void {
+    const pending = this.pendingChangeSignal;
+    if (!pending) {
+      this.pendingChangeSignal = signal;
+    } else {
+      const contiguous =
+        pending.revision !== undefined &&
+        signal.baseRevision !== undefined &&
+        pending.revision === signal.baseRevision;
+      this.pendingChangeSignal = {
+        revision: signal.revision,
+        ...(contiguous && pending.baseRevision !== undefined
+          ? { baseRevision: pending.baseRevision }
+          : {}),
+        changedSessionIds: Array.from(
+          new Set([...pending.changedSessionIds, ...signal.changedSessionIds]),
+        ),
+      };
+    }
+    this.requestPoll("change-signal");
+  }
+
+  private async pollSessions(reason: BridgePollReason): Promise<void> {
     if (!this.eventBus) return;
     if (this.polling) {
       // Coalesce push-triggered polls that race an in-flight poll so the
@@ -383,7 +453,12 @@ export abstract class BridgeHttpClient<
     this.polling = true;
     this.lastPollStartedAt = Date.now();
     try {
-      const entries = await this.collectPollEntries();
+      const isRecoveryPoll = reason === "startup" || reason === "interval";
+      const changeSignal = isRecoveryPoll
+        ? undefined
+        : (this.pendingChangeSignal ?? undefined);
+      this.pendingChangeSignal = null;
+      const entries = await this.collectPollEntries(reason, changeSignal);
       const nextIds = new Set<string>();
 
       for (const entry of entries) {
@@ -391,27 +466,18 @@ export abstract class BridgeHttpClient<
         this.emitChanges(entry);
       }
 
-      for (const [sessionId, previous] of this.knownSessions) {
-        if (!nextIds.has(sessionId) && previous.active) {
-          // Same guard as emitChanges: never clear ownership for a session the
-          // Supervisor owns; it will emit its own ownership change on exit.
-          if (!this.isOwnedBySupervisor(sessionId)) {
-            this.eventBus.emit({
-              type: "session-status-changed",
-              sessionId,
-              projectId: previous.projectId,
-              ownership: { owner: "none" },
-              timestamp: new Date().toISOString(),
-            });
-          }
-          this.knownSessions.delete(sessionId);
+      // Only a startup/interval request is a complete snapshot. Targeted SSE
+      // refreshes intentionally omit the other known rows.
+      if (!changeSignal) {
+        for (const sessionId of Array.from(this.knownSessions.keys())) {
+          if (!nextIds.has(sessionId)) this.removeKnownSession(sessionId);
         }
       }
     } finally {
       this.polling = false;
       if (this.pollQueued) {
         this.pollQueued = false;
-        this.requestPoll();
+        this.requestPoll("queued");
       }
     }
   }
@@ -498,5 +564,55 @@ export abstract class BridgeHttpClient<
         ownership: bridgeOwnership(isLiveBridgeSessionView(view)),
       },
     };
+  }
+
+  /** Remove one targeted row without treating omitted known rows as deleted. */
+  protected removeKnownSession(sessionId: string): void {
+    const previous = this.knownSessions.get(sessionId);
+    if (!previous) return;
+    if (
+      previous.active &&
+      !this.isOwnedBySupervisor(sessionId) &&
+      this.eventBus
+    ) {
+      this.eventBus.emit({
+        type: "session-status-changed",
+        sessionId,
+        projectId: previous.projectId,
+        ownership: { owner: "none" },
+        timestamp: new Date().toISOString(),
+      });
+    }
+    this.knownSessions.delete(sessionId);
+  }
+}
+
+function parseBridgeSseFrame(frame: string): BridgeChangeSignal | null {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith(":")) continue;
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  if (event !== "changed" || data.length === 0) return null;
+  try {
+    const value = JSON.parse(data.join("\n")) as Record<string, unknown>;
+    const changedSessionIds = Array.isArray(value.changedSessionIds)
+      ? value.changedSessionIds.filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        )
+      : [];
+    return {
+      changedSessionIds,
+      ...(typeof value.revision === "number"
+        ? { revision: value.revision }
+        : {}),
+      ...(typeof value.baseRevision === "number"
+        ? { baseRevision: value.baseRevision }
+        : {}),
+    };
+  } catch {
+    return null;
   }
 }

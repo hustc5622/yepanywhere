@@ -2142,10 +2142,32 @@ describe("CodexBridgeService", () => {
       );
       expect(sessions.sessions).toHaveLength(1);
 
-      const sessionViews = await fetchJson<{ sessions: unknown[] }>(
-        `${baseUrl}/session-views`,
-      );
+      const sessionViews = await fetchJson<{
+        revision: number;
+        sessions: unknown[];
+      }>(`${baseUrl}/session-views`);
       expect(sessionViews.sessions).toHaveLength(1);
+      const targeted = await fetchJson<{ sessionView: unknown }>(
+        `${baseUrl}/sessions/thread-http/view`,
+      );
+      expect(targeted).toMatchObject({
+        sessionView: {
+          session: { id: "thread-http" },
+          pendingInputType: "tool-approval",
+        },
+      });
+      await expect(
+        fetchJson<{ sessionView: unknown }>(
+          `${baseUrl}/sessions/missing-thread/view`,
+        ),
+      ).resolves.toEqual({ sessionView: null });
+      const firstViewsResponse = await fetch(`${baseUrl}/session-views`);
+      const etag = firstViewsResponse.headers.get("etag");
+      expect(etag).toBeTruthy();
+      const unchangedViewsResponse = await fetch(`${baseUrl}/session-views`, {
+        headers: { "if-none-match": etag ?? "" },
+      });
+      expect(unchangedViewsResponse.status).toBe(304);
 
       const pending = await fetchJson<{
         request: { id: string; sessionId: string; toolName: string } | null;
@@ -3004,6 +3026,10 @@ describe("CodexBridgeService", () => {
   it("pushes a changed signal over /events on session state changes", async () => {
     const abort = new AbortController();
     const received: string[] = [];
+    const changePayloads: Array<{
+      revision?: number;
+      changedSessionIds?: string[];
+    }> = [];
     const streamReady = (async () => {
       const response = await fetch(`http://127.0.0.1:${bridgePort}/events`, {
         headers: { accept: "text/event-stream" },
@@ -3021,6 +3047,9 @@ describe("CodexBridgeService", () => {
         for (const line of buffer.split("\n")) {
           if (line.startsWith("event: ")) {
             received.push(line.slice("event: ".length).trim());
+          }
+          if (line.startsWith("data: ")) {
+            changePayloads.push(JSON.parse(line.slice("data: ".length)));
           }
         }
         if (received.includes("changed")) return;
@@ -3056,8 +3085,51 @@ describe("CodexBridgeService", () => {
         }),
       ]);
       expect(received).toContain("changed");
+      expect(changePayloads.at(-1)).toMatchObject({
+        revision: expect.any(Number),
+        baseRevision: expect.any(Number),
+        changedSessionIds: ["thread-sse"],
+      });
     } finally {
       abort.abort();
+      client.close();
+    }
+  });
+
+  it("publishes goal changes as a generic targeted session refresh", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const started = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: { id: "thread-goal", cwd: "/tmp/project-goal" },
+          },
+        }),
+      );
+      await started;
+      const goalUpdated = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/goal/updated",
+          params: {
+            threadId: "thread-goal",
+            goal: { objective: "private objective", status: "active" },
+          },
+        }),
+      );
+      await goalUpdated;
+      await waitFor(() =>
+        emittedEvents.some(
+          (event) =>
+            (event as { type?: string }).type === "session-updated" &&
+            (event as { sessionId?: string }).sessionId === "thread-goal" &&
+            (event as { trigger?: string }).trigger === undefined,
+        ),
+      );
+    } finally {
       client.close();
     }
   });
