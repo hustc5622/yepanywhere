@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { classifyCodexError } from "../codex/error-taxonomy.js";
+import {
+  CODEX_HIDDEN_PATH,
+  publicCodexFilePath,
+} from "../codex/path-projection.js";
 import type { SafeJsonValue } from "./types.js";
 
 export const SECRET_KEY_PATTERN =
@@ -61,6 +65,8 @@ export interface CodexPayloadRedactionOptions {
    * assistant replies and their outbound delivery records.
    */
   preserveAbsolutePathsInText?: boolean;
+  /** Trusted root used to retain only workspace-relative structured paths. */
+  workspaceRoot?: string;
   maxDepth?: number;
   maxArrayItems?: number;
   maxObjectEntries?: number;
@@ -300,7 +306,11 @@ export function redactCodexPayload(
         continue;
       }
       if (isPathFieldKey(entryKey)) {
-        const projectedPath = projectPathField(entryKey, entryValue);
+        const projectedPath = projectPathField(
+          entryKey,
+          entryValue,
+          options.workspaceRoot,
+        );
         if (projectedPath) {
           output[projectedPath.key] = projectedPath.value;
           redactionCount += projectedPath.redactionCount;
@@ -483,8 +493,20 @@ function isPathFieldKey(key: string): boolean {
 function projectPathField(
   key: string,
   value: unknown,
+  workspaceRoot?: string,
 ): { key: string; value: SafeJsonValue; redactionCount: number } | null {
   if (typeof value === "string") {
+    const normalizedKey = key.toLowerCase().replaceAll("_", "");
+    if (normalizedKey === "path" || normalizedKey === "movepath") {
+      const publicPath = publicCodexFilePath(value, { workspaceRoot });
+      if (publicPath !== CODEX_HIDDEN_PATH) {
+        return {
+          key,
+          value: publicPath,
+          redactionCount: publicPath === value ? 0 : 1,
+        };
+      }
+    }
     return {
       key: pathFingerprintKey(key, false),
       value: pathFingerprint(value),

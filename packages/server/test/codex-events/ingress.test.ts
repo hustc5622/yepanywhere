@@ -444,6 +444,56 @@ describe("Codex event ingress", () => {
     });
   });
 
+  it("retains only workspace-relative file-change paths in the canonical journal", async () => {
+    const store = new InMemoryCodexEventStore();
+    const ingress = await CodexEventIngress.create({
+      store,
+      runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+      sessionId: "thread-relative-path",
+      workspaceRoot: "/workspace/project",
+      connectionId: "connection-relative-path",
+    });
+
+    await ingress.ingestNotification({
+      method: "item/completed",
+      params: {
+        threadId: "thread-relative-path",
+        turnId: "turn-1",
+        item: {
+          id: "file-1",
+          type: "fileChange",
+          status: "completed",
+          changes: [
+            {
+              path: "/workspace/project/src/a.ts",
+              kind: { type: "update", move_path: null },
+              diff: "+safe",
+            },
+            {
+              path: "/private/outside.txt",
+              kind: { type: "add" },
+              diff: "+safe",
+            },
+          ],
+        },
+      },
+    });
+
+    const replayed = await store.replay({ sessionId: "thread-relative-path" });
+    expect(replayed[0]?.payload.data).toMatchObject({
+      item: {
+        changes: [
+          { path: "src/a.ts" },
+          {
+            pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(replayed)).not.toContain("/workspace/project");
+    expect(JSON.stringify(replayed)).not.toContain("/private/outside.txt");
+  });
+
   it("summarizes TS-only raw image-generation response items before JSONL persistence", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-events-raw-image-"));
     tempDirs.push(directory);

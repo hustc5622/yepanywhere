@@ -8,6 +8,7 @@ import {
 } from "./diagnostics.js";
 import { createCodexEventDraft } from "./envelope.js";
 import {
+  type CodexPayloadRedactionOptions,
   type CodexServerRequestSecretContext,
   type RedactedCodexPayload,
   redactCodexPayload,
@@ -40,6 +41,8 @@ export interface CodexEventIngressOptions {
   runtime: CodexRuntimeIdentity;
   sessionId: string;
   projectId?: string;
+  /** Trusted provider cwd used only to retain safe workspace-relative paths. */
+  workspaceRoot?: string;
   accountId?: string;
   connectionId?: string;
   now?: () => number;
@@ -67,6 +70,7 @@ export class CodexEventIngress {
   private readonly runtime: CodexRuntimeIdentity;
   private readonly sessionId: string;
   private readonly projectId?: string;
+  private readonly workspaceRoot?: string;
   private readonly accountId?: string;
   private readonly now: () => number;
   private state: CanonicalCodexSessionState;
@@ -92,6 +96,7 @@ export class CodexEventIngress {
     this.runtime = structuredClone(options.runtime);
     this.sessionId = options.sessionId;
     this.projectId = options.projectId;
+    this.workspaceRoot = options.workspaceRoot;
     this.accountId = options.accountId;
     this.connectionId = options.connectionId ?? randomUUID();
     this.now = options.now ?? Date.now;
@@ -133,7 +138,9 @@ export class CodexEventIngress {
   async ingestNotification(
     notification: CodexNativeNotification,
   ): Promise<CodexEventEnvelope> {
-    const payload = safePayload(notification.method, notification.params);
+    const payload = safePayload(notification.method, notification.params, {
+      workspaceRoot: this.workspaceRoot,
+    });
     const payloadObject = asObject(payload.data);
     const requestId = readCallId(payloadObject, "requestId");
     const correlatedTurnId =
@@ -176,7 +183,9 @@ export class CodexEventIngress {
     params?: unknown;
     clientMessageId?: string;
   }): Promise<CodexEventEnvelope> {
-    const requestPayload = safePayload(input.method, input.params);
+    const requestPayload = safePayload(input.method, input.params, {
+      workspaceRoot: this.workspaceRoot,
+    });
     const requestObject = asObject(requestPayload.data);
     const turnId = readString(requestObject, "turnId");
     const correlationId = `client-request:${callIdKey(input.requestId)}`;
@@ -205,6 +214,7 @@ export class CodexEventIngress {
       input.error === undefined
         ? (input.result ?? null)
         : { error: input.error },
+      { workspaceRoot: this.workspaceRoot },
     );
     const responseObject = asObject(responsePayload.data);
     const turnId =
@@ -243,9 +253,13 @@ export class CodexEventIngress {
       method: input.method,
       direction: "client_response",
       phase: "observed",
-      payload: safePayload(input.method, {
-        retryStatus: input.retryStatus,
-      }),
+      payload: safePayload(
+        input.method,
+        {
+          retryStatus: input.retryStatus,
+        },
+        { workspaceRoot: this.workspaceRoot },
+      ),
       requestId: input.requestId,
       correlationId: `client-retry:${callIdKey(input.requestId)}:${input.retryStatus.attempt}`,
       ...(input.clientMessageId === undefined
@@ -263,6 +277,7 @@ export class CodexEventIngress {
     const redacted = redactCodexServerRequestPayload(
       input.method,
       input.params,
+      { workspaceRoot: this.workspaceRoot },
     );
     const payload = safePayloadFromRedaction(redacted);
     const payloadObject = asObject(payload.data);
@@ -300,6 +315,7 @@ export class CodexEventIngress {
         ? { result: input.result ?? null }
         : { error: input.error },
       this.secretsByServerRequestId.get(requestKey),
+      { workspaceRoot: this.workspaceRoot },
     );
     const event = await this.persist({
       method: input.method,
@@ -464,8 +480,12 @@ export class CodexEventIngress {
   }
 }
 
-function safePayload(method: string, value: unknown): SafeCodexPayload {
-  return safePayloadFromRedaction(redactCodexPayload(method, value));
+function safePayload(
+  method: string,
+  value: unknown,
+  options: CodexPayloadRedactionOptions = {},
+): SafeCodexPayload {
+  return safePayloadFromRedaction(redactCodexPayload(method, value, options));
 }
 
 function safePayloadFromRedaction(

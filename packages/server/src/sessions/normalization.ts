@@ -61,7 +61,7 @@ import {
   formatCodexFileChangeResult,
   isCodexFileChangeError,
   normalizeCodexFileChangeStatus,
-  normalizeCodexFileChanges,
+  publicCodexFileChanges,
 } from "../codex/file-change.js";
 import {
   buildCodexImageGenerationResultText,
@@ -78,6 +78,7 @@ import {
   normalizeCodexToolOutputWithContext,
   parseCodexToolArguments,
 } from "../codex/normalization.js";
+import { publicCodexTextPaths } from "../codex/path-projection.js";
 import { normalizeKimiToolInput } from "../kimi/tool-input.js";
 import type {
   ContentBlock,
@@ -1131,6 +1132,8 @@ function hasNearbyCodexCompactedEntry(
 interface CodexContextSnapshotOptions {
   model?: string;
   provider: "codex" | "codex-oss";
+  /** Trusted session cwd used to publish workspace-relative file changes. */
+  workspaceRoot?: string;
   /** Global rollout fact used when the supplied page starts mid-file. */
   hasResponseItemUser?: boolean;
   /** Global semantic facts collected by the bounded Codex page scanner. */
@@ -1211,6 +1214,19 @@ function extractCodexTokenCountContextUsage(
   return result;
 }
 
+function findCodexWorkspaceRoot(
+  entries: readonly CodexSessionEntry[],
+): string | undefined {
+  const sessionMeta = entries.find((entry) => entry.type === "session_meta");
+  if (sessionMeta?.type === "session_meta") return sessionMeta.payload.cwd;
+
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type === "turn_context") return entry.payload.cwd;
+  }
+  return undefined;
+}
+
 export function convertCodexEntries(
   entries: readonly CodexSessionEntry[],
   sessionId: string,
@@ -1220,6 +1236,8 @@ export function convertCodexEntries(
   const messages: Message[] = [];
   let messageIndex = 0;
   let pendingContextMessage: Message | null = null;
+  const workspaceRoot =
+    contextOptions.workspaceRoot ?? findCodexWorkspaceRoot(entries);
   const hasResponseItemUser =
     contextOptions.hasResponseItemUser ??
     hasCodexResponseItemUserMessages(entries);
@@ -1263,6 +1281,7 @@ export function convertCodexEntries(
           skippedImageGenerationCallKeys: imageGenerationEndKeys,
           patchApplyEndByCallId,
           skippedPatchApplyCallIds: patchApplySkipCallIds,
+          workspaceRoot,
         },
       );
       const convertedMessages = Array.isArray(converted)
@@ -1354,6 +1373,7 @@ export function convertCodexEntries(
             entry,
             anchor,
             !directEditCallIds.has(patchApplyPayload.call_id),
+            workspaceRoot,
           )
         : null;
       // Skip agent_message and agent_reasoning events when response_item exists;
@@ -1778,20 +1798,25 @@ function convertCodexPatchApplyEndEvent(
   entry: CodexEventMsgEntry,
   anchor: string,
   includeToolUse = true,
+  workspaceRoot?: string,
 ): Message[] | null {
   if (entry.payload.type !== "patch_apply_end") {
     return null;
   }
 
   const payload = entry.payload;
-  const changes = normalizeCodexFileChanges(payload.changes);
+  const changes = publicCodexFileChanges(payload.changes, { workspaceRoot });
   const status = normalizeCodexFileChangeStatus(
     payload.status,
     payload.success,
   );
   const isError = isCodexFileChangeError(status);
-  const stdout = payload.stdout?.trim() ?? "";
-  const stderr = payload.stderr?.trim() ?? "";
+  const stdout = publicCodexTextPaths(payload.stdout?.trim() ?? "", {
+    workspaceRoot,
+  });
+  const stderr = publicCodexTextPaths(payload.stderr?.trim() ?? "", {
+    workspaceRoot,
+  });
   const fallbackResult = formatCodexFileChangeResult(changes, status);
   const resultText = isError
     ? [stderr, stdout].filter(Boolean).join("\n") || fallbackResult
@@ -1847,6 +1872,7 @@ function convertCodexResponseItem(
     skippedImageGenerationCallKeys?: ReadonlySet<string>;
     patchApplyEndByCallId?: ReadonlyMap<string, CodexPatchApplyEndEvent>;
     skippedPatchApplyCallIds?: ReadonlySet<string>;
+    workspaceRoot?: string;
   } = {},
 ): Message | Message[] | null {
   const payload = entry.payload;
@@ -1876,6 +1902,7 @@ function convertCodexResponseItem(
       enrichCodexEditConversionWithPatchEvent(
         converted,
         options.patchApplyEndByCallId?.get(converted.callId),
+        options.workspaceRoot,
       );
       toolCallContexts.set(converted.callId, converted.context);
       return converted.message;
@@ -1905,6 +1932,7 @@ function convertCodexResponseItem(
       enrichCodexEditConversionWithPatchEvent(
         converted,
         options.patchApplyEndByCallId?.get(converted.callId),
+        options.workspaceRoot,
       );
       toolCallContexts.set(converted.callId, converted.context);
       return converted.message;
@@ -1955,10 +1983,11 @@ function convertCodexResponseItem(
 function enrichCodexEditConversionWithPatchEvent(
   conversion: CodexToolUseConversion,
   event: CodexPatchApplyEndEvent | undefined,
+  workspaceRoot?: string,
 ): void {
   if (!event || conversion.context.toolName !== "Edit") return;
 
-  const changes = normalizeCodexFileChanges(event.changes);
+  const changes = publicCodexFileChanges(event.changes, { workspaceRoot });
   if (changes.length === 0) return;
 
   const editInput = buildCodexEditInput(changes);

@@ -1064,12 +1064,12 @@ describe("Codex Normalization", () => {
     expect(editItem.toolInput).toMatchObject({
       changes: [
         {
-          path: "/repo/src/a.ts",
+          path: "src/a.ts",
           kind: "add",
           diff: "export const value = 1;\n",
         },
         {
-          path: "/repo/src/z.ts",
+          path: "src/z.ts",
           kind: "update",
           diff: "@@ -1 +1 @@\n-old\n+new\n",
         },

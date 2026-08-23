@@ -1,4 +1,8 @@
 import { containsSensitiveText } from "../codex-events/redaction.js";
+import {
+  type CodexPublicPathOptions,
+  publicCodexFilePath as projectPublicCodexFilePath,
+} from "./path-projection.js";
 
 export type CodexFileChangeKind = "add" | "delete" | "update";
 
@@ -128,6 +132,7 @@ export function normalizeCodexFileChanges(
  */
 export function publicCodexFileChanges(
   value: unknown,
+  options: CodexPublicPathOptions = {},
 ): NormalizedCodexFileChange[] {
   const pathSafeValue = Array.isArray(value)
     ? value.map((entry) => {
@@ -143,7 +148,7 @@ export function publicCodexFileChanges(
   return normalizeCodexFileChanges(pathSafeValue)
     .slice(0, 200)
     .map((change) => ({
-      path: publicCodexFilePath(change.path),
+      path: projectPublicCodexFilePath(change.path, options),
       kind: change.kind,
       ...(change.diff
         ? {

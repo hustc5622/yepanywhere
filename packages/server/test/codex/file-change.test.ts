@@ -5,7 +5,12 @@ import {
   isCodexFileChangeError,
   normalizeCodexFileChangeStatus,
   normalizeCodexFileChanges,
+  publicCodexFileChanges,
 } from "../../src/codex/file-change.js";
+import {
+  publicCodexFilePath,
+  publicCodexTextPaths,
+} from "../../src/codex/path-projection.js";
 
 describe("Codex file change normalization", () => {
   it("projects rollout and app-server changes into one canonical shape", () => {
@@ -65,5 +70,60 @@ describe("Codex file change normalization", () => {
         "failed",
       ),
     ).toBe("File changes failed:\nupdate: src/a.ts");
+  });
+
+  it("publishes workspace files as relative paths and hides escaped paths", () => {
+    const changes = publicCodexFileChanges(
+      [
+        {
+          path: "/repo/src/a.ts",
+          kind: "update",
+          diff: "@@ -1 +1 @@\n-old\n+new\n",
+        },
+        {
+          path: "/private/outside.txt",
+          kind: "add",
+          diff: "+safe\n",
+        },
+      ],
+      { workspaceRoot: "/repo" },
+    );
+
+    expect(changes).toEqual([
+      {
+        path: "[path hidden]",
+        kind: "add",
+        diff: "+safe\n",
+      },
+      {
+        path: "src/a.ts",
+        kind: "update",
+        diff: "@@ -1 +1 @@\n-old\n+new\n",
+      },
+    ]);
+    const projectChange = changes.find((change) => change.path === "src/a.ts");
+    if (!projectChange) throw new Error("expected workspace-relative change");
+    expect(buildCodexEditInput([projectChange])).toMatchObject({
+      file_path: "src/a.ts",
+    });
+  });
+
+  it("projects POSIX and Windows paths in public tool text", () => {
+    expect(
+      publicCodexTextPaths(
+        "M /repo/src/a.ts\nM /private/outside.ts\nM C:\\repo\\src\\b.ts",
+        { workspaceRoot: "/repo" },
+      ),
+    ).toBe("M src/a.ts\nM [path hidden]\nM [path hidden]");
+    expect(
+      publicCodexFilePath("C:\\repo\\src\\b.ts", {
+        workspaceRoot: "C:\\repo",
+      }),
+    ).toBe("src/b.ts");
+    expect(
+      publicCodexFilePath("C:\\other\\secret.txt", {
+        workspaceRoot: "C:\\repo",
+      }),
+    ).toBe("[path hidden]");
   });
 });

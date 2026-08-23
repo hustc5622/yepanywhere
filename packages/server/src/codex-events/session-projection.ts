@@ -10,6 +10,10 @@ import {
   classifyCodexError,
   formatCodexRetryWarning,
 } from "../codex/error-taxonomy.js";
+import {
+  CODEX_HIDDEN_PATH,
+  publicCodexFilePath,
+} from "../codex/path-projection.js";
 import type { Message } from "../supervisor/types.js";
 import type { CodexProjectionCache } from "./projection-cache.js";
 import { reduceCodexEvents } from "./reducer.js";
@@ -1367,7 +1371,13 @@ function safeFileChanges(value: SafeJsonValue | undefined): unknown[] {
     const change = asObject(entry);
     if (!change) return [];
     const kind = readString(change, "kind");
-    return [{ path: "[path hidden]", ...(kind ? { kind } : {}) }];
+    const path = readString(change, "path");
+    return [
+      {
+        path: path ? publicCodexFilePath(path) : CODEX_HIDDEN_PATH,
+        ...(kind ? { kind } : {}),
+      },
+    ];
   });
 }
 
