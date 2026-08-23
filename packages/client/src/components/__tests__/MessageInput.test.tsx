@@ -92,32 +92,49 @@ describe("MessageInput command completion", () => {
     ).toBeNull();
   });
 
-  it("shows and inserts Codex dollar commands only for '$' tokens", () => {
+  it("completes Codex slash commands and skills in separate namespaces", () => {
     const { textarea } = renderMessageInput({
-      commandPrefix: "$",
+      commandPrefix: "/",
       commandLabel: "Codex commands",
-      commands: ["model", "review"],
+      commands: ["compact", "model"],
+      commandButtons: [
+        {
+          prefix: "/",
+          label: "Codex commands",
+          showButton: true,
+          commands: ["compact", "model"],
+        },
+        {
+          prefix: "$",
+          label: "Skills",
+          showButton: true,
+          commands: ["openai-docs"],
+        },
+      ],
     });
 
-    typeInTextarea(textarea, "$mo");
+    typeInTextarea(textarea, "$op");
 
-    const listbox = screen.getByRole("listbox", { name: "Codex commands" });
+    const listbox = screen.getByRole("listbox", { name: "Skills" });
     expect(
-      within(listbox).getByRole("option", { name: "$model" }),
+      within(listbox).getByRole("option", { name: "$openai-docs" }),
     ).toBeDefined();
 
     fireEvent.keyDown(textarea, { key: "Tab" });
-    expect(textarea.value).toBe("$model ");
+    expect(textarea.value).toBe("$openai-docs ");
 
-    typeInTextarea(textarea, "/mo");
+    typeInTextarea(textarea, "/co");
     expect(
-      screen.queryByRole("listbox", { name: "Codex commands" }),
-    ).toBeNull();
+      within(screen.getByRole("listbox", { name: "Codex commands" })).getByRole(
+        "option",
+        { name: "/compact" },
+      ),
+    ).toBeDefined();
   });
 
   it("uses the active provider prefix in the toolbar command menu", () => {
     const { textarea } = renderMessageInput({
-      commandPrefix: "$",
+      commandPrefix: "/",
       commandLabel: "Codex commands",
       commands: ["model", "review"],
     });
@@ -127,43 +144,41 @@ describe("MessageInput command completion", () => {
     );
 
     const menu = screen.getByRole("menu", { name: "Codex commands" });
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "$model" }));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "/model" }));
 
-    expect(textarea.value).toBe("$model ");
+    expect(textarea.value).toBe("/model ");
   });
 
-  it("renders static dollar and slash command toolbar buttons", () => {
+  it("renders separate slash-command and skill toolbar buttons", () => {
     const { textarea } = renderMessageInput({
       commandPrefix: "$",
       commandLabel: "Codex commands",
       commands: ["model"],
       commandButtons: [
         {
-          prefix: "$",
+          prefix: "/",
           label: "Codex commands",
           showButton: true,
           commands: ["model"],
         },
         {
-          prefix: "/",
-          label: "Slash commands",
+          prefix: "$",
+          label: "Skills",
           showButton: true,
-          commands: ["help"],
+          commands: ["openai-docs"],
         },
       ],
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "Show skills" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "Show slash commands" }),
-    );
-    fireEvent.click(
-      within(screen.getByRole("menu", { name: "Slash commands" })).getByRole(
+      within(screen.getByRole("menu", { name: "Skills" })).getByRole(
         "menuitem",
-        { name: "/help" },
+        { name: "$openai-docs" },
       ),
     );
 
-    expect(textarea.value).toBe("/help ");
+    expect(textarea.value).toBe("$openai-docs ");
   });
 
   it("keeps the toolbar command button stable while commands are loading", () => {
@@ -200,16 +215,16 @@ describe("MessageInput command completion", () => {
     const onCustomCommand = vi.fn(() => true);
     const { textarea } = renderMessageInput({
       commandPrefix: "$",
-      commandLabel: "Codex commands",
-      commands: ["model"],
+      commandLabel: "Skills",
+      commands: ["openai-docs"],
       onCustomCommand,
     });
 
-    typeInTextarea(textarea, "$mo");
+    typeInTextarea(textarea, "$op");
     fireEvent.keyDown(textarea, { key: "Tab" });
 
     expect(onCustomCommand).not.toHaveBeenCalled();
-    expect(textarea.value).toBe("$model ");
+    expect(textarea.value).toBe("$openai-docs ");
   });
 
   it("still routes custom slash commands through the slash handler", () => {

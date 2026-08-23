@@ -373,4 +373,51 @@ describe("Codex native controls", () => {
       }),
     );
   });
+
+  it("uses the project-scoped endpoint to resume before compaction", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        sessionId: "session-1",
+        processId: "process-1",
+        permissionMode: "default",
+        modeVersion: 0,
+        control: "thread/compact/start",
+        data: {},
+      }),
+    } as Response);
+
+    await api.resumeAndExecuteCodexControl(
+      "project-1",
+      "session-1",
+      { control: "thread/compact/start" },
+      {
+        mode: "default",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        provider: "codex",
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project-1/sessions/session-1/codex-control",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          request: { control: "thread/compact/start" },
+          resume: {
+            mode: "default",
+            model: "gpt-5.6-sol",
+            thinking: undefined,
+            reasoningEffort: "xhigh",
+            provider: "codex",
+            codexMcpMode: undefined,
+            codexModelProvider: undefined,
+            llmGatewayConfig: undefined,
+            executor: undefined,
+          },
+        }),
+      }),
+    );
+  });
 });

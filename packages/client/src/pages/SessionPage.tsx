@@ -54,8 +54,14 @@ import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
 import {
   getAgentCommandConfig,
-  getStaticAgentCommandConfigs,
+  getAgentCommandConfigs,
 } from "../lib/agentCommands";
+import {
+  type CodexSkillCommand,
+  parseCodexSkillsList,
+  parseCodexSlashCommand,
+  resolveCodexSkillInputs,
+} from "../lib/codexInputCommands";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
@@ -559,6 +565,31 @@ function SessionPageContent({
     return slashCommands;
   }, [slashCommands, status.owner]);
 
+  const [codexSkills, setCodexSkills] = useState<CodexSkillCommand[]>([]);
+  const ownedProcessId = status.owner === "self" ? status.processId : undefined;
+  useEffect(() => {
+    if (effectiveProvider !== "codex" || !ownedProcessId) {
+      setCodexSkills([]);
+      return;
+    }
+
+    let cancelled = false;
+    api
+      .executeCodexControl(actualSessionId ?? sessionId, {
+        control: "skills/list",
+      })
+      .then((response) => {
+        if (!cancelled) setCodexSkills(parseCodexSkillsList(response.data));
+      })
+      .catch(() => {
+        if (!cancelled) setCodexSkills([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [actualSessionId, effectiveProvider, sessionId, ownedProcessId]);
+
   // Get provider capabilities based on session's provider
   const { providers } = useProviders();
   const currentProviderInfo = useMemo(() => {
@@ -595,8 +626,25 @@ function SessionPageContent({
   const commandLabel = commandConfig.label;
   const commandButtons = useMemo(() => {
     if (status.owner !== "self") return [];
-    return getStaticAgentCommandConfigs(allSlashCommands);
-  }, [allSlashCommands, status.owner]);
+    return getAgentCommandConfigs(
+      effectiveProvider,
+      supportsSlashCommands,
+      allSlashCommands,
+      codexSkills.map((skill) => skill.name),
+      {
+        codexCommands: t("codexCommandsLabel"),
+        skills: t("codexSkillsLabel"),
+        slashCommands: t("slashCommandsLabel"),
+      },
+    );
+  }, [
+    allSlashCommands,
+    codexSkills,
+    effectiveProvider,
+    status.owner,
+    supportsSlashCommands,
+    t,
+  ]);
 
   // Inline title editing state
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -677,6 +725,8 @@ function SessionPageContent({
   // Model switch modal state
   const [showModelSwitchModal, setShowModelSwitchModal] = useState(false);
   const [showGoalModal, setShowGoalModal] = useState(false);
+  const [isStartingCodexCompaction, setIsStartingCodexCompaction] =
+    useState(false);
 
   // Track user engagement to mark session as "seen".
   // Opening a session counts as reading the current content even when an
@@ -709,7 +759,85 @@ function SessionPageContent({
     enabled: Boolean(session),
   });
 
+  const requestCodexCompaction = async (): Promise<boolean> => {
+    if (status.owner === "external") {
+      showToast(t("codexCompactExternalSessionRequired"), "error");
+      return false;
+    }
+    if (
+      status.owner === "self" &&
+      status.processId &&
+      processState !== "idle"
+    ) {
+      showToast(t("codexCompactActiveSessionRequired"), "error");
+      return false;
+    }
+    if (isCompacting || isStartingCodexCompaction) {
+      showToast(t("codexCompactAlreadyRunning"), "info");
+      return false;
+    }
+
+    setIsStartingCodexCompaction(true);
+    try {
+      if (status.owner === "self" && status.processId) {
+        await api.executeCodexControl(actualSessionId ?? sessionId, {
+          control: "thread/compact/start",
+        });
+      } else {
+        const result = await api.resumeAndExecuteCodexControl(
+          projectId,
+          actualSessionId ?? sessionId,
+          { control: "thread/compact/start" },
+          {
+            mode: permissionMode,
+            model: session?.model ?? getModelSetting(),
+            thinking: getThinkingSetting(),
+            reasoningEffort: session?.reasoningEffort,
+            provider: "codex",
+            codexModelProvider: session?.codexModelProvider,
+            executor: session?.executor,
+          },
+        );
+        setStatus({ owner: "self", processId: result.processId });
+        setProcessState("idle");
+      }
+      showToast(t("sessionCompactionStarted"), "success");
+      return true;
+    } catch (err) {
+      console.error("Failed to compact Codex session:", err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      showToast(t("sessionCompactFailed", { message: errorMsg }), "error");
+      return false;
+    } finally {
+      setIsStartingCodexCompaction(false);
+    }
+  };
+
   const handleSend = async (text: string) => {
+    if (effectiveProvider === "codex") {
+      const command = parseCodexSlashCommand(text);
+      if (command.kind === "invalid-compact-args") {
+        draftControlsRef.current?.restoreFromStorage();
+        showToast(t("codexCompactBareCommandRequired"), "error");
+        return;
+      }
+      if (command.kind === "compact") {
+        if (await requestCodexCompaction()) {
+          draftControlsRef.current?.clearDraft();
+        } else {
+          draftControlsRef.current?.restoreFromStorage();
+        }
+        return;
+      }
+    }
+
+    const resolvedCodexInputs =
+      effectiveProvider === "codex"
+        ? resolveCodexSkillInputs(text, codexSkills)
+        : [];
+    const codexInputs =
+      resolvedCodexInputs.length > 0 ? resolvedCodexInputs : undefined;
+
     // Add to pending queue and get tempId to pass to server
     const tempId = addPendingMessage(text);
     let historicalEditPostAttempted = false;
@@ -753,6 +881,7 @@ function SessionPageContent({
           reasoningEffort: session?.reasoningEffort,
           provider: effectiveProvider,
           executor: session?.executor,
+          codexInputs,
         };
         const attachmentsArg =
           currentAttachments.length > 0 ? currentAttachments : undefined;
@@ -922,6 +1051,7 @@ function SessionPageContent({
             reasoningEffort: session?.reasoningEffort,
             provider: effectiveProvider,
             executor: session?.executor,
+            codexInputs,
           },
           currentAttachments.length > 0 ? currentAttachments : undefined,
           tempId,
@@ -956,6 +1086,8 @@ function SessionPageContent({
           tempId,
           thinking,
           session?.reasoningEffort,
+          false,
+          codexInputs,
         );
         // If process was restarted due to thinking mode change, reconnect stream
         if (result.restarted && result.processId) {
@@ -988,6 +1120,7 @@ function SessionPageContent({
               reasoningEffort: session?.reasoningEffort,
               provider: effectiveProvider,
               executor: session?.executor,
+              codexInputs,
             },
             currentAttachments.length > 0 ? currentAttachments : undefined,
             tempId,
@@ -1071,6 +1204,10 @@ function SessionPageContent({
 
     try {
       const thinking = getThinkingSetting();
+      const resolvedCodexInputs =
+        effectiveProvider === "codex"
+          ? resolveCodexSkillInputs(text, codexSkills)
+          : [];
       await api.queueMessage(
         sessionId,
         text,
@@ -1080,6 +1217,7 @@ function SessionPageContent({
         thinking,
         session?.reasoningEffort,
         true, // deferred
+        resolvedCodexInputs.length > 0 ? resolvedCodexInputs : undefined,
       );
       removePendingMessage(tempId);
       draftControlsRef.current?.clearDraft();
@@ -1634,6 +1772,10 @@ function SessionPageContent({
   };
 
   const handleCompact = async () => {
+    if (effectiveProvider === "codex") {
+      await requestCodexCompaction();
+      return;
+    }
     if (status.owner === "self" && status.processId) {
       try {
         await api.compactProcess(status.processId);
@@ -1879,7 +2021,8 @@ function SessionPageContent({
                     }}
                     onTerminate={handleTerminate}
                     onCompact={
-                      session?.provider === "zcode" &&
+                      (session?.provider === "zcode" ||
+                        session?.provider === "codex") &&
                       status.owner === "self" &&
                       status.processId
                         ? handleCompact

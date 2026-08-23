@@ -1,5 +1,6 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetSessionSnapshotCacheForTests } from "../../lib/sessionSnapshotCache";
 import type { Message, Session } from "../../types";
 import {
   planActiveMessageWindowTrim,
@@ -10,6 +11,10 @@ import {
 const { mockGetSession } = vi.hoisted(() => ({
   mockGetSession: vi.fn(),
 }));
+
+afterEach(() => {
+  resetSessionSnapshotCacheForTests();
+});
 
 vi.mock("../../api/client", () => ({
   api: {
@@ -207,6 +212,149 @@ describe("useSessionMessages Codex snapshot refresh", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("paints a recent session snapshot immediately and revalidates by ID", async () => {
+    const firstA = message("a-1", {
+      timestamp: "2026-08-22T00:00:01.000Z",
+    });
+    const secondA = message("a-2", {
+      type: "assistant",
+      timestamp: "2026-08-22T00:00:02.000Z",
+    });
+    const firstB = message("b-1", {
+      timestamp: "2026-08-22T00:00:03.000Z",
+    });
+    const revalidateA = deferred<ReturnType<typeof sessionResponse>>();
+    mockGetSession
+      .mockResolvedValueOnce(
+        sessionResponse("2026-08-22T00:00:01.000Z", [firstA], {
+          id: "session-a",
+        }),
+      )
+      .mockResolvedValueOnce(
+        sessionResponse("2026-08-22T00:00:03.000Z", [firstB], {
+          id: "session-b",
+        }),
+      )
+      .mockReturnValueOnce(revalidateA.promise);
+
+    const { result, rerender } = renderHook(
+      ({ sessionId }: { sessionId: string }) =>
+        useSessionMessages({ projectId: "project-1", sessionId }),
+      { initialProps: { sessionId: "session-a" } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.messages.map((item) => item.id)).toEqual(["a-1"]);
+
+    rerender({ sessionId: "session-b" });
+    await waitFor(() =>
+      expect(result.current.messages.map((item) => item.id)).toEqual(["b-1"]),
+    );
+
+    rerender({ sessionId: "session-a" });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.messages.map((item) => item.id)).toEqual(["a-1"]);
+    const cachedFirstMessage = result.current.messages[0];
+
+    await act(async () => {
+      revalidateA.resolve(
+        sessionResponse("2026-08-22T00:00:02.000Z", [firstA, secondA], {
+          id: "session-a",
+        }),
+      );
+      await revalidateA.promise;
+    });
+
+    expect(result.current.messages.map((item) => item.id)).toEqual([
+      "a-1",
+      "a-2",
+    ]);
+    expect(result.current.messages[0]).toBe(cachedFirstMessage);
+  });
+
+  it("keeps the bounded snapshot across a route remount", async () => {
+    const firstA = message("a-1", {
+      timestamp: "2026-08-22T00:00:01.000Z",
+    });
+    mockGetSession.mockResolvedValueOnce(
+      sessionResponse("2026-08-22T00:00:01.000Z", [firstA], {
+        id: "session-a",
+      }),
+    );
+    const firstMount = renderHook(() =>
+      useSessionMessages({ projectId: "project-1", sessionId: "session-a" }),
+    );
+    await waitFor(() => expect(firstMount.result.current.loading).toBe(false));
+    firstMount.unmount();
+
+    const revalidate = deferred<ReturnType<typeof sessionResponse>>();
+    mockGetSession.mockReturnValueOnce(revalidate.promise);
+    const secondMount = renderHook(() =>
+      useSessionMessages({ projectId: "project-1", sessionId: "session-a" }),
+    );
+
+    expect(secondMount.result.current.loading).toBe(false);
+    expect(secondMount.result.current.messages.map((item) => item.id)).toEqual([
+      "a-1",
+    ]);
+
+    await act(async () => {
+      revalidate.resolve(
+        sessionResponse("2026-08-22T00:00:01.000Z", [firstA], {
+          id: "session-a",
+        }),
+      );
+      await revalidate.promise;
+    });
+  });
+
+  it("does not let a late response from another session overwrite a cache hit", async () => {
+    const firstA = message("a-1", {
+      timestamp: "2026-08-22T00:00:01.000Z",
+    });
+    const lateB = deferred<ReturnType<typeof sessionResponse>>();
+    const revalidateA = deferred<ReturnType<typeof sessionResponse>>();
+    mockGetSession
+      .mockResolvedValueOnce(
+        sessionResponse("2026-08-22T00:00:01.000Z", [firstA], {
+          id: "session-a",
+        }),
+      )
+      .mockReturnValueOnce(lateB.promise)
+      .mockReturnValueOnce(revalidateA.promise);
+
+    const { result, rerender } = renderHook(
+      ({ sessionId }: { sessionId: string }) =>
+        useSessionMessages({ projectId: "project-1", sessionId }),
+      { initialProps: { sessionId: "session-a" } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    rerender({ sessionId: "session-b" });
+    rerender({ sessionId: "session-a" });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.messages.map((item) => item.id)).toEqual(["a-1"]);
+
+    await act(async () => {
+      lateB.resolve(
+        sessionResponse("2026-08-22T00:00:09.000Z", [message("b-late")], {
+          id: "session-b",
+        }),
+      );
+      await lateB.promise;
+    });
+    expect(result.current.messages.map((item) => item.id)).toEqual(["a-1"]);
+
+    await act(async () => {
+      revalidateA.resolve(
+        sessionResponse("2026-08-22T00:00:02.000Z", [firstA], {
+          id: "session-a",
+        }),
+      );
+      await revalidateA.promise;
+    });
+    expect(result.current.messages.map((item) => item.id)).toEqual(["a-1"]);
   });
 
   it("applies live Codex usage without rendering a control message", async () => {

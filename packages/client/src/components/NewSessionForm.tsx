@@ -48,7 +48,7 @@ import {
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
-import { getStaticAgentCommandConfigs } from "../lib/agentCommands";
+import { getAgentCommandConfigs } from "../lib/agentCommands";
 import {
   getModelReasoningEfforts,
   resolveModelReasoningEffort,
@@ -650,7 +650,21 @@ export function NewSessionForm({
       !selectedModelInfo ||
       selectedModelInfo.supportsAdaptiveThinking === true ||
       selectedModelInfo.supportsEffort === true);
-  const commandButtons = useMemo(() => getStaticAgentCommandConfigs(), []);
+  const commandButtons = useMemo(
+    () =>
+      getAgentCommandConfigs(
+        selectedProvider,
+        selectedProviderInfo?.supportsSlashCommands,
+        [],
+        [],
+        {
+          codexCommands: t("codexCommandsLabel"),
+          skills: t("codexSkillsLabel"),
+          slashCommands: t("slashCommandsLabel"),
+        },
+      ),
+    [selectedProvider, selectedProviderInfo?.supportsSlashCommands, t],
+  );
 
   const applyProviderSelection = useCallback(
     (provider: ProviderInfo, savedDefaults?: NewSessionProviderDefaults) => {
@@ -1635,16 +1649,18 @@ export function NewSessionForm({
             disabled={isStarting}
             className="toolbar-button"
           />
-          {commandButtons.map((button) => (
-            <SlashCommandButton
-              key={button.prefix}
-              commands={button.commands}
-              onSelectCommand={handleSelectCommand}
-              disabled={isStarting}
-              prefix={button.prefix}
-              label={button.label}
-            />
-          ))}
+          {commandButtons
+            .filter((button) => button.showButton && button.commands.length > 0)
+            .map((button) => (
+              <SlashCommandButton
+                key={button.prefix}
+                commands={button.commands}
+                onSelectCommand={handleSelectCommand}
+                disabled={isStarting}
+                prefix={button.prefix}
+                label={button.label}
+              />
+            ))}
           {supportsThinkingToggle && compact && (
             <button
               type="button"

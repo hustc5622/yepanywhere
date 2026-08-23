@@ -17,6 +17,12 @@ import {
   mergeStreamMessage,
 } from "../lib/mergeMessages";
 import { isMobileShellDocument } from "../lib/nativePushBridge";
+import {
+  type SessionSnapshotValue,
+  getSessionSnapshot,
+  invalidateSessionSnapshots,
+  putSessionSnapshot,
+} from "../lib/sessionSnapshotCache";
 import { getProvider } from "../providers/registry";
 import type { Message, PermissionMode, Session, SessionStatus } from "../types";
 
@@ -150,6 +156,44 @@ export interface UseSessionMessagesResult {
 
 function isCodexProvider(provider?: string): boolean {
   return provider === "codex" || provider === "codex-oss";
+}
+
+type SessionApiSnapshot = Awaited<ReturnType<typeof api.getSession>>;
+
+function getSessionHistorySource(data: SessionApiSnapshot): string {
+  if (data.historySource) return data.historySource;
+  const canonical = data.codexCanonicalView;
+  if (canonical?.sourceKind === "rollout") return "codex-rollout";
+  if (canonical)
+    return `codex-canonical:${canonical.sourceKind}:${canonical.source}`;
+  return isCodexProvider(data.session.provider)
+    ? "codex-rollout"
+    : `provider:${data.session.provider}`;
+}
+
+function getSessionSnapshotRevision(data: SessionApiSnapshot): string {
+  return data.pagination?.rolloutRevision ?? data.session.updatedAt;
+}
+
+function cacheSessionApiSnapshot(
+  projectId: string,
+  sessionId: string,
+  branchId: string | undefined,
+  data: SessionApiSnapshot,
+): string | null {
+  if (!isCodexProvider(data.session.provider)) return null;
+  const historySource = getSessionHistorySource(data);
+  const cached = putSessionSnapshot({
+    projectId,
+    sessionId,
+    branchId,
+    historySource,
+    session: data.session,
+    messages: data.messages,
+    pagination: data.pagination,
+    revision: getSessionSnapshotRevision(data),
+  });
+  return cached ? historySource : null;
 }
 
 /**
@@ -429,9 +473,22 @@ export function useSessionMessages(
 ): UseSessionMessagesResult {
   const { projectId, sessionId, branchId, onLoadComplete, onLoadError } =
     options;
+  const initialSnapshotRef = useRef<SessionSnapshotValue | null | undefined>(
+    undefined,
+  );
+  if (initialSnapshotRef.current === undefined) {
+    initialSnapshotRef.current = getSessionSnapshot({
+      projectId,
+      sessionId,
+      branchId,
+    });
+  }
+  const initialSnapshot = initialSnapshotRef.current;
 
   // Core state
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(
+    () => initialSnapshot?.messages ?? [],
+  );
   const [agentContent, setAgentContent] = useState<AgentContentMap>({});
   const [toolUseToAgent, setToolUseToAgent] = useState<Map<string, string>>(
     () => new Map(),
@@ -439,16 +496,20 @@ export function useSessionMessages(
   const [toolUseToAgentIds, setToolUseToAgentIds] = useState<
     Map<string, string[]>
   >(() => new Map());
-  const [loading, setLoading] = useState(true);
-  const [session, setSession] = useState<Session | null>(null);
-  const [pagination, setPagination] = useState<PaginationInfo | undefined>();
+  const [loading, setLoading] = useState(() => !initialSnapshot);
+  const [session, setSession] = useState<Session | null>(
+    () => initialSnapshot?.session ?? null,
+  );
+  const [pagination, setPagination] = useState<PaginationInfo | undefined>(
+    () => initialSnapshot?.pagination,
+  );
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [loadingTargetMessage, setLoadingTargetMessage] = useState(false);
   const [activeWindowTrimRevision, setActiveWindowTrimRevision] = useState(0);
   const [activeWindowTrimCheckRevision, setActiveWindowTrimCheckRevision] =
     useState(0);
-  const sessionRef = useRef<Session | null>(null);
+  const sessionRef = useRef<Session | null>(initialSnapshot?.session ?? null);
 
   // Buffering: queue stream messages until initial load completes
   const streamBufferRef = useRef<
@@ -465,7 +526,9 @@ export function useSessionMessages(
   );
 
   // Track provider for DAG ordering decisions
-  const providerRef = useRef<string | undefined>(undefined);
+  const providerRef = useRef<string | undefined>(
+    initialSnapshot?.session.provider,
+  );
 
   // Track last message ID for incremental fetching
   const lastMessageIdRef = useRef<string | undefined>(undefined);
@@ -476,7 +539,9 @@ export function useSessionMessages(
   // Tracks whether the same session has already completed its first load.
   // Branch changes reuse the page shell and should keep showing the
   // previous message list until the selected branch content arrives.
-  const loadedSessionKeyRef = useRef<string | null>(null);
+  const loadedSessionKeyRef = useRef<string | null>(
+    initialSnapshot ? `${projectId}\u0000${sessionId}` : null,
+  );
   // A full persisted refresh can be triggered by file activity, the focused
   // session watcher, and connection catch-up at the same time. Once a refresh
   // commits, responses from earlier generations must not overwrite it.
@@ -701,6 +766,12 @@ export function useSessionMessages(
     const sessionLoadKey = `${projectId}\u0000${sessionId}`;
     const isBranchReloadWithinSession =
       loadedSessionKeyRef.current === sessionLoadKey;
+    const cachedSnapshot = getSessionSnapshot({
+      projectId,
+      sessionId,
+      branchId,
+    });
+    const cachedHistorySource = cachedSnapshot?.historySource;
     let isCurrent = true;
 
     // A route/session/branch load supersedes any refresh started for the
@@ -711,13 +782,20 @@ export function useSessionMessages(
     initialLoadCompleteRef.current = false;
     streamBufferRef.current = [];
     maxPersistedTimestampMsRef.current = Number.NEGATIVE_INFINITY;
+    if (cachedSnapshot) {
+      applySessionSnapshot(cachedSnapshot);
+      loadedSessionKeyRef.current = sessionLoadKey;
+      setLoading(false);
+    }
     if (!isBranchReloadWithinSession) {
       // History navigation only suppresses trimming for the session in which
       // it happened. A route change starts from the new session's live tail.
       activeWindowFollowingBottomRef.current = true;
       activeWindowTrimSuppressedRef.current = false;
-      setLoading(true);
+      if (!cachedSnapshot) setLoading(true);
       setAgentContent({});
+      setToolUseToAgent(new Map());
+      setToolUseToAgentIds(new Map());
     }
 
     api
@@ -732,7 +810,27 @@ export function useSessionMessages(
         const supersededByCommittedRefresh =
           initialLoadGeneration < refreshAppliedGenerationRef.current;
         if (!supersededByCommittedRefresh) {
-          applySessionSnapshot(data);
+          const historySource = getSessionHistorySource(data);
+          const shouldMergeCachedSnapshot =
+            cachedSnapshot !== null &&
+            cachedHistorySource === historySource &&
+            isCodexProvider(data.session.provider) &&
+            !codexSnapshotDeactivatesCurrentBranch(
+              sessionRef.current,
+              data.session,
+            );
+          applySessionSnapshot(data, {
+            mergeCodexMessages: shouldMergeCachedSnapshot,
+          });
+          if (cachedHistorySource && cachedHistorySource !== historySource) {
+            invalidateSessionSnapshots({
+              projectId,
+              sessionId,
+              branchId,
+              historySource: cachedHistorySource,
+            });
+          }
+          cacheSessionApiSnapshot(projectId, sessionId, branchId, data);
         }
 
         // Mark ready and flush buffer
@@ -770,7 +868,9 @@ export function useSessionMessages(
         initialLoadCompleteRef.current = true;
         flushBuffer();
         setLoading(false);
-        onLoadError?.(err);
+        // A stale snapshot remains useful during a transient SWR failure. Cold
+        // loads preserve the existing error behavior.
+        if (!cachedSnapshot) onLoadError?.(err);
       });
 
     return () => {
@@ -948,6 +1048,7 @@ export function useSessionMessages(
       return;
     }
 
+    invalidateSessionSnapshots({ projectId, sessionId, branchId });
     try {
       const data = await api.getSession(
         projectId,
@@ -1016,6 +1117,18 @@ export function useSessionMessages(
         options?.branchId === undefined
           ? branchId
           : (options.branchId ?? undefined);
+      const cachedSnapshot = getSessionSnapshot({
+        projectId,
+        sessionId,
+        branchId: resolvedBranchId,
+      });
+      if (options?.replaceMessages) {
+        invalidateSessionSnapshots({
+          projectId,
+          sessionId,
+          branchId: resolvedBranchId,
+        });
+      }
       try {
         const data = await api.getSession(projectId, sessionId, undefined, {
           view: "canonical",
@@ -1049,6 +1162,19 @@ export function useSessionMessages(
         const refreshedSession = applySessionSnapshot(data, {
           mergeCodexMessages: !shouldReplaceMessages,
         });
+        const historySource = getSessionHistorySource(data);
+        if (
+          cachedSnapshot?.historySource &&
+          cachedSnapshot.historySource !== historySource
+        ) {
+          invalidateSessionSnapshots({
+            projectId,
+            sessionId,
+            branchId: resolvedBranchId,
+            historySource: cachedSnapshot.historySource,
+          });
+        }
+        cacheSessionApiSnapshot(projectId, sessionId, resolvedBranchId, data);
         onLoadComplete?.({
           session: data.session,
           status: data.ownership,
@@ -1179,6 +1305,7 @@ export function useSessionMessages(
         }
 
         const loadedSession = applySessionSnapshot(data);
+        cacheSessionApiSnapshot(projectId, sessionId, branchId, data);
         onLoadComplete?.({
           session: data.session,
           status: data.ownership,
@@ -1218,11 +1345,12 @@ export function useSessionMessages(
       // tail after the optimistic truncation.
       refreshRequestGenerationRef.current += 1;
       refreshAppliedGenerationRef.current = refreshRequestGenerationRef.current;
+      invalidateSessionSnapshots({ projectId, sessionId, branchId });
       setMessages((prev) =>
         truncateMessagesForEdit(prev, uuid, preserveTempId),
       );
     },
-    [],
+    [projectId, sessionId, branchId],
   );
 
   return {

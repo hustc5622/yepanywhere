@@ -68,6 +68,13 @@ export interface PaginationInfo {
   rolloutRevision?: string;
 }
 
+export interface CodexCanonicalViewInfo {
+  source: string;
+  sourceKind: "provider" | "legacy-bridge-full" | "custom" | "rollout";
+  fallback: "rollout";
+  fallbackReason?: string;
+}
+
 export interface ResumeSessionStartedResponse {
   sessionId: string;
   processId: string;
@@ -88,6 +95,12 @@ export type ResumeSessionResponse =
 
 export type StartSessionResponse = ResumeSessionResponse;
 export type CreateSessionResponse = ResumeSessionResponse;
+
+export interface ResumedCodexControlResponse
+  extends ResumeSessionStartedResponse {
+  control: string;
+  data: unknown;
+}
 
 export function isQueuedResumeSessionResponse(
   response: ResumeSessionResponse,
@@ -134,7 +147,7 @@ export interface GlobalSessionItem {
   title: string | null;
   createdAt: string;
   updatedAt: string;
-  messageCount: number;
+  messageCount?: number;
   userQuestions?: SessionQuestion[];
   provider: ProviderName;
   projectId: string;
@@ -1018,6 +1031,10 @@ export const api = {
       pendingInputRequest?: InputRequest | null;
       slashCommands?: SlashCommand[] | null;
       pagination?: PaginationInfo;
+      /** Public history source selected by the server; introduced with app-server paging. */
+      historySource?: string;
+      historyFallbackReason?: string;
+      codexCanonicalView?: CodexCanonicalViewInfo;
     }>(`/projects/${projectId}/sessions/${sessionId}${qs ? `?${qs}` : ""}`);
   },
 
@@ -1173,6 +1190,33 @@ export const api = {
       {
         method: "POST",
         body: JSON.stringify(request),
+      },
+    ),
+
+  resumeAndExecuteCodexControl: (
+    projectId: string,
+    sessionId: string,
+    request: { control: "thread/compact/start" },
+    options?: SessionOptions,
+  ) =>
+    fetchJSON<ResumedCodexControlResponse>(
+      `/projects/${projectId}/sessions/${sessionId}/codex-control`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          request,
+          resume: {
+            mode: options?.mode,
+            model: options?.model,
+            thinking: options?.thinking,
+            reasoningEffort: options?.reasoningEffort,
+            provider: "codex",
+            codexMcpMode: options?.codexMcpMode,
+            codexModelProvider: options?.codexModelProvider,
+            llmGatewayConfig: options?.llmGatewayConfig,
+            executor: options?.executor,
+          },
+        }),
       },
     ),
 

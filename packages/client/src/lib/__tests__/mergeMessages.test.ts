@@ -213,6 +213,56 @@ describe("mergeJSONLMessages", () => {
       expect(result.messages[0]?._source).toBe("jsonl");
     });
 
+    it("retains the existing object when an authoritative snapshot is unchanged", () => {
+      const existingMessage: Message = {
+        id: "msg-1",
+        type: "assistant",
+        content: "same",
+        _source: "jsonl",
+      };
+
+      const result = mergeJSONLMessages(
+        [existingMessage],
+        [{ id: "msg-1", type: "assistant", content: "same" }],
+        { skipDagOrdering: true },
+      );
+
+      expect(result.messages[0]).toBe(existingMessage);
+    });
+
+    it("keeps a near-limit unchanged payload by reference without stringify allocations", () => {
+      const existingPayload = "x".repeat(5_500_000);
+      const independentlyLoadedPayload = [
+        "x".repeat(2_750_000),
+        "x".repeat(2_750_000),
+      ].join("");
+      const existingMessage: Message = {
+        id: "large-message",
+        type: "assistant",
+        message: { role: "assistant", content: existingPayload },
+        _source: "jsonl",
+      };
+      const startedAt = performance.now();
+      const result = mergeJSONLMessages(
+        [existingMessage],
+        [
+          {
+            id: "large-message",
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: independentlyLoadedPayload,
+            },
+          },
+        ],
+        { skipDagOrdering: true },
+      );
+      const durationMs = performance.now() - startedAt;
+
+      expect(durationMs).toBeLessThan(100);
+      expect(result.messages[0]).toBe(existingMessage);
+    });
+
     it("preserves SDK-only fields when merging with JSONL", () => {
       const existing: Message[] = [
         {

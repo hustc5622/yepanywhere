@@ -68,6 +68,7 @@ const baseSessionSummary = {
   ...baseSession,
   projectId,
   fullTitle: null,
+  messageCount: baseSession.messageCount ?? 0,
 };
 
 function response(sessions: GlobalSessionItem[]) {

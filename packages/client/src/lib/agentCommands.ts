@@ -2,7 +2,7 @@ import type { ProviderName } from "@yep-anywhere/shared";
 
 export type AgentCommandPrefix = "/" | "$";
 
-export const CODEX_DOLLAR_COMMANDS = [
+export const CODEX_SLASH_COMMANDS = [
   "permissions",
   "ide",
   "keymap",
@@ -82,6 +82,18 @@ export interface AgentCommandConfig {
   commands: string[];
 }
 
+export interface AgentCommandLabels {
+  codexCommands: string;
+  skills: string;
+  slashCommands: string;
+}
+
+const DEFAULT_AGENT_COMMAND_LABELS: AgentCommandLabels = {
+  codexCommands: "Codex commands",
+  skills: "Skills",
+  slashCommands: "Slash commands",
+};
+
 export function isCodexCommandProvider(
   provider: ProviderName | string | undefined | null,
 ): provider is "codex" | "codex-oss" {
@@ -98,23 +110,49 @@ function mergeCommands(...commandGroups: string[][]): string[] {
   return Array.from(new Set(commandGroups.flat().filter(Boolean)));
 }
 
+export function getAgentCommandConfigs(
+  provider: ProviderName | string | undefined | null,
+  supportsSlashCommands?: boolean,
+  slashCommands: string[] = [],
+  codexSkills: string[] = [],
+  labels: AgentCommandLabels = DEFAULT_AGENT_COMMAND_LABELS,
+): AgentCommandConfig[] {
+  if (isCodexCommandProvider(provider)) {
+    return [
+      {
+        prefix: "/",
+        label: labels.codexCommands,
+        showButton: true,
+        commands: CODEX_SLASH_COMMANDS,
+      },
+      {
+        prefix: "$",
+        label: labels.skills,
+        showButton: true,
+        commands: mergeCommands(codexSkills),
+      },
+    ];
+  }
+
+  const canUseSlashCommands =
+    supportsSlashCommands ?? providerDefaultsToSlashCommands(provider);
+
+  return [
+    {
+      prefix: "/",
+      label: labels.slashCommands,
+      showButton: canUseSlashCommands,
+      commands: canUseSlashCommands
+        ? mergeCommands(STATIC_SLASH_COMMANDS, slashCommands)
+        : [],
+    },
+  ];
+}
+
 export function getStaticAgentCommandConfigs(
   slashCommands: string[] = [],
 ): AgentCommandConfig[] {
-  return [
-    {
-      prefix: "$",
-      label: "Codex commands",
-      showButton: true,
-      commands: CODEX_DOLLAR_COMMANDS,
-    },
-    {
-      prefix: "/",
-      label: "Slash commands",
-      showButton: true,
-      commands: mergeCommands(STATIC_SLASH_COMMANDS, slashCommands),
-    },
-  ];
+  return getAgentCommandConfigs("claude", true, slashCommands);
 }
 
 export function getAgentCommandConfig(
@@ -122,24 +160,9 @@ export function getAgentCommandConfig(
   supportsSlashCommands?: boolean,
   slashCommands: string[] = [],
 ): AgentCommandConfig {
-  if (isCodexCommandProvider(provider)) {
-    return {
-      prefix: "$",
-      label: "Codex commands",
-      showButton: true,
-      commands: CODEX_DOLLAR_COMMANDS,
-    };
-  }
-
-  const canUseSlashCommands =
-    supportsSlashCommands ?? providerDefaultsToSlashCommands(provider);
-
-  return {
-    prefix: "/",
-    label: "Slash commands",
-    showButton: canUseSlashCommands,
-    commands: canUseSlashCommands
-      ? mergeCommands(STATIC_SLASH_COMMANDS, slashCommands)
-      : [],
-  };
+  return getAgentCommandConfigs(
+    provider,
+    supportsSlashCommands,
+    slashCommands,
+  )[0] as AgentCommandConfig;
 }

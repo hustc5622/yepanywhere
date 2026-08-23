@@ -53,6 +53,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function structurallyEquivalent(left: unknown, right: unknown): boolean {
+  const pending: Array<[unknown, unknown]> = [[left, right]];
+  const compared = new WeakMap<object, WeakSet<object>>();
+  while (pending.length > 0) {
+    const pair = pending.pop();
+    if (!pair) continue;
+    const [a, b] = pair;
+    if (Object.is(a, b)) continue;
+    if (
+      !a ||
+      !b ||
+      typeof a !== "object" ||
+      typeof b !== "object" ||
+      Array.isArray(a) !== Array.isArray(b)
+    ) {
+      return false;
+    }
+    const seenRight = compared.get(a);
+    if (seenRight?.has(b)) continue;
+    if (seenRight) seenRight.add(b);
+    else compared.set(a, new WeakSet([b]));
+
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length) return false;
+      for (let index = 0; index < a.length; index += 1) {
+        pending.push([a[index], b[index]]);
+      }
+      continue;
+    }
+
+    const leftRecord = a as Record<string, unknown>;
+    const rightRecord = b as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord);
+    const rightKeys = Object.keys(rightRecord);
+    if (leftKeys.length !== rightKeys.length) return false;
+    for (const key of leftKeys) {
+      if (!Object.hasOwn(rightRecord, key)) return false;
+      pending.push([leftRecord[key], rightRecord[key]]);
+    }
+  }
+  return true;
+}
+
 type MergeableContentBlock = ContentBlock & Record<string, unknown>;
 
 function isContentBlock(value: unknown): value is MergeableContentBlock {
@@ -399,11 +442,12 @@ export function mergeMessage(
     // spread here would discard SDK-only block fields such as `partialOutput`
     // (or replace a complete tool result with a shorter persisted snapshot).
     const mergedContent = mergeAuthoritativeContentBlocks(existing, incoming);
-    return {
+    const merged: Message = {
       ...existing,
       ...mergedContent,
       _source: "jsonl",
     };
+    return structurallyEquivalent(existing, merged) ? existing : merged;
   }
 
   // If incoming is SDK and existing is JSONL, keep JSONL (it's authoritative)
@@ -423,7 +467,10 @@ export function mergeMessage(
   }
 
   // Both are SDK - use the newer one (incoming)
-  return { ...mergeSdkContentBlocks(existing, incoming), _source: "sdk" };
+  return {
+    ...mergeSdkContentBlocks(existing, incoming),
+    _source: "sdk",
+  };
 }
 
 export interface MergeJSONLResult {
