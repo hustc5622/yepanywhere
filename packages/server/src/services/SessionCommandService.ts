@@ -133,6 +133,22 @@ export interface ResumeSessionCommandInput {
   origin?: SessionCommandOrigin;
   /** Reject atomically when resuming would enter the worker queue. */
   requireImmediate?: boolean;
+  /** Internal provider-native action to run after a message-free resume. */
+  controlAfterResume?: Extract<
+    CodexNativeControlRequest,
+    { control: "thread/compact/start" }
+  >;
+}
+
+export interface ResumeCodexControlCommandInput {
+  projectId: string;
+  sessionId: string;
+  request: Extract<
+    CodexNativeControlRequest,
+    { control: "thread/compact/start" }
+  >;
+  body?: CreateSessionBody;
+  origin?: SessionCommandOrigin;
 }
 
 export interface QueueSessionMessageCommandInput {
@@ -817,6 +833,7 @@ export class SessionCommandService {
     input: ResumeSessionCommandInput,
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { projectId, sessionId, body } = input;
+    const controlAfterResume = input.controlAfterResume;
     const persistedProvider =
       this.deps.sessionMetadataService?.getPersistedProvider?.(sessionId) ??
       this.deps.sessionMetadataService?.getProvider(sessionId);
@@ -858,7 +875,9 @@ export class SessionCommandService {
       await this.deps.recentsService?.recordVisit(sessionId, recoveredId);
     }
 
-    if (!body.message) return commandFailure("Message is required", 400);
+    if (!body.message && !controlAfterResume) {
+      return commandFailure("Message is required", 400);
+    }
     const codexInputsError = validateOptionalCodexInputs(body.codexInputs);
     if (codexInputsError) return commandFailure(codexInputsError, 400);
     if (body.mode !== undefined && !this.isPermissionMode(body.mode)) {
@@ -936,6 +955,13 @@ export class SessionCommandService {
         body.provider ??
         project.provider;
     }
+    if (controlAfterResume && providerName !== "codex") {
+      return commandFailure(
+        "Only Codex sessions can resume for native compaction",
+        400,
+        { code: "unsupported_provider" },
+      );
+    }
 
     const model = resolveSessionModel(body.model, providerName);
     let effectiveCodexForkExcludedTurns = parsedRollbackNumTurns.value;
@@ -1012,6 +1038,7 @@ export class SessionCommandService {
             : null,
         tempId: body.tempId ?? null,
         messageLength: body.message.length,
+        controlAfterResume: controlAfterResume?.control ?? null,
         llmGatewayConfig: llmGatewayConfig
           ? {
               model: llmGatewayConfig.model,
@@ -1067,9 +1094,14 @@ export class SessionCommandService {
     const result = await this.deps.runtimeController.resumeSession({
       sessionId,
       projectPath: project.path,
-      message: this.toUserMessage(body, effectivePermissionMode),
+      ...(controlAfterResume
+        ? {}
+        : { message: this.toUserMessage(body, effectivePermissionMode) }),
       permissionMode: effectivePermissionMode,
-      requireImmediate: input.requireImmediate || isSourcePreservingFork,
+      requireImmediate:
+        input.requireImmediate ||
+        isSourcePreservingFork ||
+        !!controlAfterResume,
       modelSettings: {
         model,
         thinking,
@@ -1223,7 +1255,7 @@ export class SessionCommandService {
       "Session resume process started",
     );
 
-    return commandSuccess({
+    const resumeBody = {
       sessionId: actualSessionId,
       ...(actualSessionId !== sessionId && isSourcePreservingFork
         ? { forkParentSessionId: sessionId }
@@ -1232,6 +1264,94 @@ export class SessionCommandService {
       permissionMode: result.permissionMode,
       modeVersion: result.modeVersion,
       reasoningEffort: resumeReasoningEffort,
+    };
+
+    if (controlAfterResume) {
+      const controlResult =
+        await this.deps.runtimeController.executeCodexControl({
+          sessionId: actualSessionId,
+          request: controlAfterResume,
+        });
+      if (!controlResult.ok) {
+        const status =
+          controlResult.error.code === "provider_error"
+            ? 502
+            : controlResult.error.code === "not_ready"
+              ? 410
+              : 400;
+        return commandFailure(controlResult.error.message, status, {
+          code: controlResult.error.code,
+          control: controlResult.control,
+          retryable: controlResult.error.retryable,
+          ...resumeBody,
+        });
+      }
+      getLogger().info(
+        {
+          event: "codex_compact_after_resume_started",
+          sessionId: actualSessionId,
+          processId: result.id,
+          projectId: resolvedProjectId,
+        },
+        "Resumed inactive Codex session and started native compaction",
+      );
+      return commandSuccess({
+        ...resumeBody,
+        control: controlResult.control,
+        data: controlResult.data,
+      });
+    }
+
+    return commandSuccess(resumeBody);
+  }
+
+  async resumeCodexControl(
+    input: ResumeCodexControlCommandInput,
+  ): Promise<SessionCommandResult<Record<string, unknown>>> {
+    const existing =
+      await this.deps.runtimeController.getProcessSnapshotForSession(
+        input.sessionId,
+      );
+    if (existing) {
+      if (existing.provider !== "codex") {
+        return commandFailure(
+          "Session is not backed by Codex app-server",
+          400,
+          { code: "unsupported_provider" },
+        );
+      }
+      if (existing.state !== "idle") {
+        return commandFailure(
+          "Wait for the active Codex turn to finish before compacting",
+          409,
+          { code: "session_busy" },
+        );
+      }
+      const controlResult = await this.executeCodexControl({
+        sessionId: input.sessionId,
+        request: input.request,
+      });
+      if (!controlResult.ok) return controlResult;
+      return commandSuccess({
+        sessionId: input.sessionId,
+        processId: existing.id,
+        permissionMode: existing.permissionMode,
+        modeVersion: existing.modeVersion,
+        ...controlResult.body,
+      });
+    }
+
+    return this.resume({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      body: {
+        ...input.body,
+        message: "",
+        provider: "codex",
+      },
+      origin: input.origin,
+      requireImmediate: true,
+      controlAfterResume: input.request,
     });
   }
 

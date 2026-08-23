@@ -1789,7 +1789,9 @@ export class CodexSessionReader implements ISessionReader {
     const sessionFile = await this.findSessionFile(sessionId);
     if (!sessionFile) return null;
 
+    const summaryScanStartedAt = performance.now();
     const scan = await this.scanCodexRolloutSummary(sessionFile.filePath);
+    const summaryScanMs = performance.now() - summaryScanStartedAt;
     if (!scan.metaEntry) return null;
 
     if (
@@ -1814,7 +1816,9 @@ export class CodexSessionReader implements ISessionReader {
       if (scan.logicalBytes > CODEX_ROLLBACK_FULL_READ_MAX_BYTES) {
         throw new CodexHistoryUnavailableError();
       }
+      const pageReadStartedAt = performance.now();
       const loaded = await this.loadSessionEntries(sessionId);
+      const pageReadMs = performance.now() - pageReadStartedAt;
       if (
         options.rolloutRevision &&
         codexRolloutRevision(loaded?.stats ?? scan.stats).key !==
@@ -1844,6 +1848,8 @@ export class CodexSessionReader implements ISessionReader {
         branchState: branchView.branchState,
         codexBranchState: branchView.branchState,
         codexRolloutBytes: scan.stats.size,
+        historySource: "codex-rollout",
+        historyReadTimings: { summaryScanMs, pageReadMs },
       };
     }
 
@@ -1851,12 +1857,14 @@ export class CodexSessionReader implements ISessionReader {
     if (!summary) return null;
     const codexProvider = this.determineProvider(scan.metaEntry, scan.model);
 
+    const pageReadStartedAt = performance.now();
     const page = await this.scanCodexRolloutPage(
       sessionFile.filePath,
       scan,
       options,
       afterMessageId,
     );
+    const pageReadMs = performance.now() - pageReadStartedAt;
     if (page.revisionKey !== scan.revisionKey) {
       throw new Error("ROLLOUT_CHANGED_DURING_SCAN");
     }
@@ -1872,6 +1880,7 @@ export class CodexSessionReader implements ISessionReader {
       sessionId,
       options.branchId,
     );
+    const normalizeStartedAt = performance.now();
     const projectedMessages = convertCodexEntries(
       page.entries,
       sessionId,
@@ -1879,6 +1888,7 @@ export class CodexSessionReader implements ISessionReader {
       {
         model: summary.model,
         provider: codexProvider,
+        workspaceRoot: scan.metaEntry.payload.cwd,
         hasResponseItemUser: scan.hasResponseItemUser,
         patchApplyCallIds: scan.patchApplyCallIds,
         directEditCallIds: scan.directEditCallIds,
@@ -1886,6 +1896,7 @@ export class CodexSessionReader implements ISessionReader {
         imageGenerationEndIds: scan.imageGenerationEndIds,
       },
     );
+    const normalizeMs = performance.now() - normalizeStartedAt;
     const pagination = this.buildCodexPagination(
       page,
       projectedMessages,
@@ -1905,6 +1916,8 @@ export class CodexSessionReader implements ISessionReader {
       pagination,
       paginationApplied: true,
       codexRolloutBytes: scan.stats.size,
+      historySource: "codex-rollout",
+      historyReadTimings: { summaryScanMs, pageReadMs, normalizeMs },
     };
   }
 

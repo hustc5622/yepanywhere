@@ -4,6 +4,10 @@ import {
   type CodexSessionMetaEntry,
   parseCodexSessionEntry,
 } from "@yep-anywhere/shared";
+import {
+  type CodexManifestFileHeader,
+  scanCodexManifestHeadersInWorker,
+} from "../codex-history/CodexManifestScanWorker.js";
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { getLogger } from "../logging/logger.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
@@ -129,7 +133,13 @@ async function buildCodexSessionManifest(
     return createManifest([]);
   }
 
-  const files = await findRolloutFiles(sessionsDir);
+  const workerRows = await scanCodexManifestHeadersInWorker(
+    sessionsDir,
+    CODEX_META_READ_MAX_BYTES,
+  );
+  const files = workerRows
+    ? dedupeWorkerRows(workerRows)
+    : await findRolloutFiles(sessionsDir);
   getLogger().debug(
     `[CodexManifest] Found ${files.length} rollout files in ${sessionsDir}`,
   );
@@ -139,7 +149,15 @@ async function buildCodexSessionManifest(
 
   for (let i = 0; i < files.length; i += MANIFEST_SCAN_BATCH_SIZE) {
     const batch = files.slice(i, i + MANIFEST_SCAN_BATCH_SIZE);
-    const results = await Promise.all(batch.map(readSessionManifestEntry));
+    const results = await Promise.all(
+      batch.map((file) =>
+        typeof file === "string"
+          ? readSessionManifestEntry(file)
+          : file.firstLine
+            ? manifestEntryFromHeader(file)
+            : readSessionManifestEntry(file.filePath),
+      ),
+    );
     for (const result of results) {
       if (result) {
         sessions.push(result);
@@ -150,8 +168,9 @@ async function buildCodexSessionManifest(
   }
 
   if (files.length > 0 && sessions.length === 0) {
+    const firstFile = files[0];
     getLogger().warn(
-      `[CodexManifest] Found ${files.length} rollout files but parsed 0 sessions (${failCount} failed). First file: ${files[0]}`,
+      `[CodexManifest] Found ${files.length} rollout files but parsed 0 sessions (${failCount} failed). First file: ${typeof firstFile === "string" ? firstFile : firstFile?.filePath}`,
     );
   } else if (failCount > 0) {
     getLogger().debug(
@@ -160,6 +179,54 @@ async function buildCodexSessionManifest(
   }
 
   return createManifest(sessions);
+}
+
+function dedupeWorkerRows(
+  rows: CodexManifestFileHeader[],
+): CodexManifestFileHeader[] {
+  const plain = new Set(
+    rows
+      .filter((row) => row.filePath.endsWith(".jsonl"))
+      .map((row) => row.filePath),
+  );
+  return rows.filter(
+    (row) =>
+      !row.filePath.endsWith(`.jsonl${CODEX_ROLLOUT_COMPRESSED_SUFFIX}`) ||
+      !plain.has(plainCodexRolloutPath(row.filePath)),
+  );
+}
+
+function manifestEntryFromHeader(
+  header: CodexManifestFileHeader,
+): CodexSessionManifestEntry | null {
+  const entry = parseCodexSessionEntry(header.firstLine ?? "");
+  if (!entry || entry.type !== "session_meta") return null;
+  const meta = entry.payload;
+  if (!meta.id || !meta.cwd) return null;
+  const subagentMeta = getCodexSubagentMetadata(meta);
+  return {
+    id: meta.id,
+    cwd: meta.cwd,
+    filePath: header.filePath,
+    compressed: false,
+    timestamp: meta.timestamp,
+    mtime: header.mtimeMs,
+    size: header.size,
+    isSubagent: subagentMeta.isSubagent,
+    ...(subagentMeta.parentThreadId !== undefined
+      ? { parentThreadId: subagentMeta.parentThreadId }
+      : {}),
+    ...(subagentMeta.agentPath !== undefined
+      ? { agentPath: subagentMeta.agentPath }
+      : {}),
+    ...(subagentMeta.agentNickname !== undefined
+      ? { agentNickname: subagentMeta.agentNickname }
+      : {}),
+    ...(subagentMeta.agentRole !== undefined
+      ? { agentRole: subagentMeta.agentRole }
+      : {}),
+    ...(subagentMeta.depth !== undefined ? { depth: subagentMeta.depth } : {}),
+  };
 }
 
 function createManifest(

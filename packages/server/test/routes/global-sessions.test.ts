@@ -204,6 +204,25 @@ describe("Global Sessions Routes", () => {
       expect(result.hasMore).toBe(false);
     });
 
+    it("reports bounded list stages through Server-Timing", async () => {
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([]);
+      const routes = createGlobalSessionsRoutes(getDeps());
+
+      const response = await routes.request("/");
+
+      expect(response.status).toBe(200);
+      const timing = response.headers.get("server-timing");
+      for (const stage of [
+        "projectLookup",
+        "bridgeView",
+        "catalog",
+        "sessionScan",
+        "total",
+      ]) {
+        expect(timing).toContain(`${stage};dur=`);
+      }
+    });
+
     it("returns sessions from multiple projects", async () => {
       const project1 = createProject("proj1", "project-one", "/sessions/proj1");
       const project2 = createProject("proj2", "project-two", "/sessions/proj2");

@@ -14,6 +14,7 @@
 
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
 import {
   type CodexSessionManifestEntry,
   getCodexSessionManifest,
@@ -49,6 +50,7 @@ export interface CodexScannerOptions {
 
 export class CodexSessionScanner {
   private sessionsDir: string;
+  private sessionCatalog?: CodexSessionCatalog;
 
   constructor(options: CodexScannerOptions = {}) {
     this.sessionsDir = options.sessionsDir ?? CODEX_SESSIONS_DIR;
@@ -56,6 +58,11 @@ export class CodexSessionScanner {
 
   invalidateCache(): void {
     invalidateCodexSessionManifest(this.sessionsDir);
+    this.sessionCatalog?.invalidate();
+  }
+
+  setSessionCatalog(catalog: CodexSessionCatalog | undefined): void {
+    this.sessionCatalog = catalog;
   }
 
   /**
@@ -63,6 +70,22 @@ export class CodexSessionScanner {
    * Returns projects sorted by last activity (most recent first).
    */
   async listProjects(): Promise<Project[]> {
+    const catalog = await this.sessionCatalog?.getSnapshot();
+    if (catalog) {
+      return Array.from(catalog.byProjectPath, ([cwd, sessions]) => ({
+        id: encodeProjectId(cwd),
+        path: cwd,
+        name: basename(cwd),
+        sessionCount: sessions.length,
+        sessionDir: this.sessionsDir,
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: sessions[0]?.updatedAt ?? null,
+        provider: "codex" as const,
+      })).sort((left, right) =>
+        (right.lastActivity ?? "").localeCompare(left.lastActivity ?? ""),
+      );
+    }
     const manifest = await getCodexSessionManifest(this.sessionsDir);
 
     // Group sessions by cwd

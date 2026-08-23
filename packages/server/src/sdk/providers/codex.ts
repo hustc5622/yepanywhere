@@ -325,7 +325,7 @@ interface JsonRpcError {
   data?: unknown;
 }
 
-class CodexJsonRpcError extends Error {
+export class CodexJsonRpcError extends Error {
   constructor(
     readonly code: number,
     message: string,
@@ -685,7 +685,7 @@ interface AppServerEventObserver {
   ): Promise<CodexEventEnvelope>;
 }
 
-class CodexAppServerClient {
+export class CodexAppServerClient {
   private process: ChildProcess | null = null;
   private socket: WebSocket | null = null;
   private stdoutBuffer = "";
@@ -2788,6 +2788,7 @@ export class CodexProvider implements AgentProvider {
         store: this.eventStore,
         runtime: CODEX_EVENT_RUNTIME_IDENTITY,
         sessionId,
+        workspaceRoot: options.cwd,
         ...(options.codexEventProjectId
           ? { projectId: options.codexEventProjectId }
           : {}),
@@ -3114,6 +3115,7 @@ export class CodexProvider implements AgentProvider {
               true,
               false,
               legacyRetryableErrorsByTurnId,
+              options.cwd,
             );
           } else {
             const canonicalMessages = this.convertNotificationToSDKMessages(
@@ -3129,6 +3131,7 @@ export class CodexProvider implements AgentProvider {
               projectionMode === "primary",
               true,
               canonicalRetryableErrorsByTurnId,
+              options.cwd,
             );
             const legacyMessages = this.convertNotificationToSDKMessages(
               rawNotification,
@@ -3143,6 +3146,7 @@ export class CodexProvider implements AgentProvider {
               projectionMode === "shadow",
               false,
               legacyRetryableErrorsByTurnId,
+              options.cwd,
             );
             const parity = activeEventIngress.recordProjectionParity(
               canonicalEvent,
@@ -3991,6 +3995,7 @@ export class CodexProvider implements AgentProvider {
     emitProjectionDiagnostics = true,
     emitUnknownCompatibilityMessage = false,
     retryableErrorsByTurnId: Map<string, CanonicalCodexError> = new Map(),
+    workspaceRoot?: string,
   ): SDKMessage[] {
     switch (notification.method) {
       case "thread/tokenUsage/updated": {
@@ -4149,6 +4154,7 @@ export class CodexProvider implements AgentProvider {
           sessionId,
           turnId,
           notification.method,
+          workspaceRoot,
         ).map((message) => ({
           ...message,
           turnId,
@@ -4365,18 +4371,23 @@ export class CodexProvider implements AgentProvider {
     const item = asRecord(payload?.item);
     if (!item || typeof item.type !== "string") return messages;
 
-    const extensions = {
-      codexThreadItem: publicCodexThreadItem(item),
-      codexThreadItemLifecycle:
-        event.method === "item/completed"
-          ? ("completed" as const)
-          : ("started" as const),
+    const lifecycle =
+      event.method === "item/completed"
+        ? ("completed" as const)
+        : ("started" as const);
+    const provenance = {
+      ...(typeof item.id === "string" ? { codexThreadItemId: item.id } : {}),
+      codexThreadItemLifecycle: lifecycle,
       ...(event.threadId ? { codexThreadId: event.threadId } : {}),
       ...(event.turnId ? { codexTurnId: event.turnId } : {}),
       codexEventSequence: event.sequence,
-      codexRawReasoningAllowed: false,
+      ...(item.type === "reasoning" ? { codexRawReasoningAllowed: false } : {}),
     };
+    const dedicatedThreadItem = isBoundedDedicatedCodexThreadItem(item)
+      ? publicCodexThreadItem(item)
+      : null;
     if (messages.length === 0) {
+      if (!dedicatedThreadItem) return messages;
       return [
         withCodexTimestamp(
           {
@@ -4384,7 +4395,8 @@ export class CodexProvider implements AgentProvider {
             subtype: "codex_native_item",
             session_id: sessionId,
             uuid: `codex-native-${event.itemId ?? event.eventId}-${event.sequence}`,
-            ...extensions,
+            ...provenance,
+            codexThreadItem: dedicatedThreadItem,
           } as SDKMessage,
           new Date(event.receivedAtMs).toISOString(),
         ),
@@ -4394,7 +4406,10 @@ export class CodexProvider implements AgentProvider {
       (message) =>
         ({
           ...message,
-          ...extensions,
+          ...provenance,
+          ...(dedicatedThreadItem
+            ? { codexThreadItem: dedicatedThreadItem }
+            : {}),
         }) as SDKMessage,
     );
   }
@@ -4898,6 +4913,7 @@ export class CodexProvider implements AgentProvider {
     sessionId: string,
     turnId: string,
     sourceEvent: "item/started" | "item/completed",
+    workspaceRoot?: string,
   ): SDKMessage[] {
     const isComplete = sourceEvent === "item/completed";
     const observedAt = new Date().toISOString();
@@ -5058,7 +5074,9 @@ export class CodexProvider implements AgentProvider {
       }
 
       case "file_change": {
-        const publicChanges = publicCodexFileChanges(item.changes);
+        const publicChanges = publicCodexFileChanges(item.changes, {
+          workspaceRoot,
+        });
         const editInput = buildCodexEditInput(publicChanges);
 
         const toolUseMessage = withCodexTimestamp(
@@ -5682,10 +5700,115 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function publicCodexThreadItem(
+function isBoundedDedicatedCodexThreadItem(
+  item: Record<string, unknown>,
+): boolean {
+  if (
+    item.type !== "plan" &&
+    item.type !== "collabAgentToolCall" &&
+    item.type !== "subAgentActivity"
+  ) {
+    return false;
+  }
+  const pending: unknown[] = [item];
+  const seen = new WeakSet<object>();
+  let size = 0;
+  while (pending.length > 0 && size <= 64 * 1024) {
+    const value = pending.pop();
+    if (typeof value === "string") size += value.length;
+    else if (Array.isArray(value)) {
+      size += value.length * 8;
+      for (const entry of value) pending.push(entry);
+    } else if (value && typeof value === "object") {
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const entries = Object.entries(value);
+      size += entries.length * 16;
+      for (const [key, entry] of entries) {
+        size += key.length;
+        pending.push(entry);
+      }
+    } else {
+      size += 8;
+    }
+  }
+  return size <= 64 * 1024;
+}
+
+export function publicCodexThreadItem(
   item: Record<string, unknown>,
 ): Record<string, unknown> {
   const clone = structuredClone(item);
+  if (clone.type === "reasoning") {
+    const { content: _rawReasoning, ...summaryOnly } = clone;
+    return { ...summaryOnly, content: [] };
+  }
+  if (clone.type === "userMessage" || clone.type === "user_message") {
+    return {
+      ...clone,
+      content: Array.isArray(clone.content)
+        ? clone.content.map((rawInput) => {
+            const input = asRecord(rawInput);
+            if (!input) return rawInput;
+            if (
+              input.type === "localImage" ||
+              input.type === "localAudio" ||
+              input.type === "skill" ||
+              input.type === "mention"
+            ) {
+              return {
+                ...input,
+                ...(typeof input.path === "string"
+                  ? { path: publicCodexFilePath(input.path) }
+                  : {}),
+              };
+            }
+            if (input.type === "image" || input.type === "audio") {
+              return {
+                ...input,
+                ...(typeof input.url === "string" &&
+                publicCodexImageUrl(input.url)
+                  ? { url: input.url }
+                  : { url: "[url hidden]" }),
+              };
+            }
+            return input;
+          })
+        : [],
+    };
+  }
+  if (clone.type === "hookPrompt" || clone.type === "hook_prompt") {
+    return {
+      ...clone,
+      fragments: Array.isArray(clone.fragments)
+        ? clone.fragments.map((rawFragment) => {
+            const fragment = asRecord(rawFragment);
+            return fragment && typeof fragment.hookRunId === "string"
+              ? { hookRunId: fragment.hookRunId }
+              : {};
+          })
+        : [],
+    };
+  }
+  if (clone.type === "commandExecution" || clone.type === "command_execution") {
+    return {
+      ...clone,
+      ...(typeof clone.cwd === "string"
+        ? { cwd: publicCodexFilePath(clone.cwd) }
+        : {}),
+      ...(typeof clone.scriptPath === "string"
+        ? { scriptPath: publicCodexFilePath(clone.scriptPath) }
+        : {}),
+      commandActions: Array.isArray(clone.commandActions)
+        ? clone.commandActions.map((rawAction) => {
+            const action = asRecord(rawAction);
+            return action && typeof action.path === "string"
+              ? { ...action, path: publicCodexFilePath(action.path) }
+              : rawAction;
+          })
+        : [],
+    };
+  }
   if (clone.type === "fileChange" || clone.type === "file_change") {
     return {
       ...clone,
@@ -5699,6 +5822,41 @@ function publicCodexThreadItem(
         ? { path: publicCodexFilePath(clone.path) }
         : {}),
     };
+  }
+  if (clone.type === "mcpToolCall" || clone.type === "mcp_tool_call") {
+    const appContext = asRecord(clone.appContext);
+    return {
+      ...clone,
+      ...(appContext
+        ? {
+            appContext: {
+              ...appContext,
+              ...(typeof appContext.resourceUri === "string"
+                ? {
+                    resourceUri: publicCodexImageUrl(appContext.resourceUri)
+                      ? appContext.resourceUri
+                      : "[resource hidden]",
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      ...(typeof clone.mcpAppResourceUri === "string"
+        ? {
+            mcpAppResourceUri: publicCodexImageUrl(clone.mcpAppResourceUri)
+              ? clone.mcpAppResourceUri
+              : "[resource hidden]",
+          }
+        : {}),
+    };
+  }
+  if (clone.type === "collabAgentToolCall") {
+    const { prompt: _prompt, ...withoutPrompt } = clone;
+    return withoutPrompt;
+  }
+  if (clone.type === "subAgentActivity") {
+    const { agentPath: _agentPath, ...withoutAgentPath } = clone;
+    return withoutAgentPath;
   }
   if (!isCodexImageGenerationRecord(clone)) return clone;
   return Object.fromEntries(
@@ -5721,7 +5879,9 @@ function isLocalImagePathValue(value: string): boolean {
   );
 }
 
-function publicCodexImageUrl(value: string | undefined): string | undefined {
+export function publicCodexImageUrl(
+  value: string | undefined,
+): string | undefined {
   if (!value) return undefined;
   try {
     const parsed = new URL(value);

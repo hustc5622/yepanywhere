@@ -483,6 +483,63 @@ describe("Sessions metadata route", () => {
     );
   });
 
+  it("uses catalog metadata without invoking a cold Codex rollout summary scan", async () => {
+    const project = createProject();
+    const summary = {
+      ...createSummary(),
+      messageCount: 1,
+      contextUsage: {
+        inputTokens: 100,
+        contextWindow: 200_000,
+        percentage: 0.05,
+      },
+    };
+    const claudeGetSummary = vi.fn(async () => null);
+    const codexGetSummary = vi.fn(async () => {
+      throw new Error("expensive rollout summary must not run");
+    });
+    const catalogLookup = vi.fn(async () => summary);
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () =>
+          ({
+            getSessionSummary: claudeGetSummary,
+          }) as unknown as ISessionReader,
+      ),
+      codexSessionsDir: "/tmp/codex-sessions",
+      codexReaderFactory: vi.fn(
+        () =>
+          ({
+            getSessionSummary: codexGetSummary,
+          }) as unknown as CodexSessionReader,
+      ),
+      codexSessionCatalog: {
+        getSessionSummary: catalogLookup,
+      } as unknown as NonNullable<SessionsDeps["codexSessionCatalog"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}/metadata`,
+    );
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.session).toMatchObject({
+      provider: "codex",
+      contextUsage: summary.contextUsage,
+    });
+    expect(json.session).not.toHaveProperty("messageCount");
+    expect(catalogLookup).toHaveBeenCalledWith(summary.id, project.path);
+    expect(claudeGetSummary).not.toHaveBeenCalled();
+    expect(codexGetSummary).not.toHaveBeenCalled();
+  });
+
   it("keeps persisted provider when metadata refresh misses the session summary", async () => {
     const project = createProject();
 
@@ -661,11 +718,206 @@ describe("Sessions metadata route", () => {
       `/projects/${project.id}/sessions/${summary.id}`,
     );
     expect(response.status).toBe(200);
+    const serverTiming = response.headers.get("server-timing");
+    for (const stage of [
+      "projectLookup",
+      "bridgeView",
+      "historyCapability",
+      "summaryScan",
+      "pageRead",
+      "normalize",
+      "canonicalSelect",
+      "canonicalOverlay",
+      "augment",
+    ]) {
+      expect(serverTiming).toContain(`${stage};dur=`);
+    }
     const json = await response.json();
     expect(json.session.ownership).toEqual({ owner: "external" });
     // The view already answered liveness; probing /active again doubled the
     // bridge (and, behind it, upstream) request count on every session open.
     expect(isSessionActive).not.toHaveBeenCalled();
+  });
+
+  it("uses the paginated app-server history snapshot before the rollout reader", async () => {
+    const project = { ...createProject(), provider: "codex" as const };
+    const summary: SessionSummary = {
+      id: "0198f000-0000-7000-8000-000000000001",
+      projectId: project.id,
+      title: "Paginated history",
+      fullTitle: "Paginated history",
+      createdAt: "2026-08-22T00:00:00.000Z",
+      updatedAt: "2026-08-22T00:00:01.000Z",
+      messageCount: 1,
+      ownership: { owner: "none" },
+      provider: "codex",
+    };
+    const rolloutGetSession = vi.fn();
+    const appHistoryGetSession = vi.fn(async () => ({
+      kind: "loaded" as const,
+      session: {
+        summary,
+        data: { provider: "codex" as const, session: { entries: [] } },
+        projectedMessages: [
+          {
+            type: "user",
+            uuid: "user-1-turn-1",
+            message: { role: "user", content: "hello" },
+          },
+        ],
+        paginationApplied: true,
+        pagination: {
+          hasOlderMessages: false,
+          totalMessageCount: 1,
+          returnedMessageCount: 1,
+          totalCompactions: 0,
+        },
+        historySource: "codex-app-server" as const,
+      },
+    }));
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+        wasEverOwned: vi.fn(async () => false),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () => ({ getSession: rolloutGetSession }) as unknown as ISessionReader,
+      ),
+      codexAppServerHistoryReader: {
+        getSession: appHistoryGetSession,
+      } as unknown as NonNullable<SessionsDeps["codexAppServerHistoryReader"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}`,
+    );
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.historySource).toBe("codex-app-server");
+    expect(json.messages).toHaveLength(1);
+    expect(json.session).not.toHaveProperty("messageCount");
+    expect(appHistoryGetSession).toHaveBeenCalledOnce();
+    expect(rolloutGetSession).not.toHaveBeenCalled();
+  });
+
+  it("resolves a process-less Codex session from the catalog in a mixed-provider project", async () => {
+    const project = createProject();
+    const summary: SessionSummary = {
+      ...createSummary(),
+    };
+    const primaryGetSession = vi.fn();
+    const appHistoryGetSession = vi.fn(async () => ({
+      kind: "loaded" as const,
+      session: {
+        summary,
+        data: { provider: "codex" as const, session: { entries: [] } },
+        projectedMessages: [
+          {
+            type: "user",
+            uuid: "catalog-user",
+            message: { role: "user", content: "hello" },
+          },
+        ],
+        paginationApplied: true,
+        pagination: {
+          hasOlderMessages: false,
+          totalMessageCount: 1,
+          returnedMessageCount: 1,
+          totalCompactions: 0,
+        },
+        historySource: "codex-app-server" as const,
+      },
+    }));
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+        wasEverOwned: vi.fn(async () => false),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () => ({ getSession: primaryGetSession }) as unknown as ISessionReader,
+      ),
+      codexSessionCatalog: {
+        getSessionSummary: vi.fn(async () => summary),
+      } as unknown as NonNullable<SessionsDeps["codexSessionCatalog"]>,
+      codexAppServerHistoryReader: {
+        getSession: appHistoryGetSession,
+      } as unknown as NonNullable<SessionsDeps["codexAppServerHistoryReader"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}`,
+    );
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.historySource).toBe("codex-app-server");
+    expect(json.messages[0]?.uuid).toBe("catalog-user");
+    expect(json.session).not.toHaveProperty("messageCount");
+    expect(appHistoryGetSession).toHaveBeenCalledOnce();
+    expect(primaryGetSession).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the existing rollout reader with a typed history reason", async () => {
+    const project = { ...createProject(), provider: "codex" as const };
+    const summary: SessionSummary = {
+      id: "0198f000-0000-7000-8000-000000000002",
+      projectId: project.id,
+      title: "Legacy history",
+      fullTitle: "Legacy history",
+      createdAt: "2026-08-22T00:00:00.000Z",
+      updatedAt: "2026-08-22T00:00:01.000Z",
+      messageCount: 1,
+      ownership: { owner: "none" },
+      provider: "codex",
+    };
+    const rolloutGetSession = vi.fn(async () => ({
+      summary,
+      data: { provider: "codex" as const, session: { entries: [] } },
+      projectedMessages: [
+        {
+          type: "user",
+          uuid: "legacy-user",
+          message: { role: "user", content: "legacy" },
+        },
+      ],
+      historySource: "codex-rollout" as const,
+    }));
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+        wasEverOwned: vi.fn(async () => false),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () => ({ getSession: rolloutGetSession }) as unknown as ISessionReader,
+      ),
+      codexAppServerHistoryReader: {
+        getSession: vi.fn(async () => ({
+          kind: "fallback" as const,
+          reason: "legacy_history" as const,
+        })),
+      } as unknown as NonNullable<SessionsDeps["codexAppServerHistoryReader"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}`,
+    );
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.historySource).toBe("codex-rollout");
+    expect(json.historyFallbackReason).toBe("legacy_history");
+    expect(json.messages[0]?.uuid).toBe("legacy-user");
+    expect(rolloutGetSession).toHaveBeenCalledOnce();
   });
 
   it("prefers persisted provider and Codex source over conflicting resume settings", async () => {

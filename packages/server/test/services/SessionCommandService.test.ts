@@ -785,6 +785,134 @@ describe("SessionCommandService runtime boundary", () => {
     });
   });
 
+  it("resumes an inactive Codex session without a message before compacting", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "codex-compact-resume-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project: Project = {
+        id: projectId,
+        path: projectPath,
+        name: "codex-compact-resume",
+        sessionCount: 1,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex",
+      };
+      const resumeSession = vi.fn(async () => ({
+        id: "process-compact",
+        sessionId: "session-compact",
+        provider: "codex" as const,
+        permissionMode: "default" as const,
+        modeVersion: 0,
+      }));
+      const executeCodexControl = vi.fn(async () => ({
+        ok: true as const,
+        control: "thread/compact/start" as const,
+        data: {},
+      }));
+      const service = new SessionCommandService({
+        runtimeController: {
+          getProcessSnapshotForSession: vi.fn(async () => null),
+          resumeSession,
+          executeCodexControl,
+        } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+          mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+        sessionMetadataService: {
+          getPersistedProvider: vi.fn(() => "codex"),
+          getPermissionMode: vi.fn(() => "default"),
+          getExecutor: vi.fn(() => undefined),
+          getLlmGatewayConfig: vi.fn(() => undefined),
+          getCodexMcpMode: vi.fn(() => undefined),
+          getCodexModelProvider: vi.fn(() => "openai"),
+          setPermissionMode: vi.fn(async () => undefined),
+          setCodexModelProvider: vi.fn(async () => undefined),
+        } as unknown as SessionMetadataService,
+      });
+
+      await expect(
+        service.resumeCodexControl({
+          projectId,
+          sessionId: "session-compact",
+          request: { control: "thread/compact/start" },
+          body: {
+            mode: "default",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "xhigh",
+          },
+        }),
+      ).resolves.toMatchObject({
+        ok: true,
+        status: 200,
+        body: {
+          sessionId: "session-compact",
+          processId: "process-compact",
+          control: "thread/compact/start",
+          data: {},
+        },
+      });
+
+      expect(resumeSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "session-compact",
+          projectPath,
+          requireImmediate: true,
+          modelSettings: expect.objectContaining({
+            providerName: "codex",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "xhigh",
+          }),
+        }),
+      );
+      expect(resumeSession.mock.calls[0]?.[0]).not.toHaveProperty("message");
+      expect(executeCodexControl).toHaveBeenCalledWith({
+        sessionId: "session-compact",
+        request: { control: "thread/compact/start" },
+      });
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses a concurrently restored idle Codex process for compaction", async () => {
+    const resumeSession = vi.fn();
+    const executeCodexControl = vi.fn(async () => ({
+      ok: true as const,
+      control: "thread/compact/start" as const,
+      data: {},
+    }));
+    const service = createService({
+      getProcessSnapshotForSession: vi.fn(async () =>
+        processSnapshot({ state: "idle" }),
+      ),
+      resumeSession,
+      executeCodexControl,
+    });
+
+    await expect(
+      service.resumeCodexControl({
+        projectId: "project-1",
+        sessionId: "session-1",
+        request: { control: "thread/compact/start" },
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      body: {
+        sessionId: "session-1",
+        processId: "process-1",
+        control: "thread/compact/start",
+      },
+    });
+    expect(resumeSession).not.toHaveBeenCalled();
+    expect(executeCodexControl).toHaveBeenCalledTimes(1);
+  });
+
   it("delegates interactions and runtime subscriptions", async () => {
     const getPendingInput = vi.fn(async () => null);
     const respondToInput = vi.fn(async () => ({

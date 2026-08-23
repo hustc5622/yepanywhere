@@ -16,6 +16,7 @@ import { FeishuChannelRuntime } from "./channels/feishu/channel-runtime.js";
 import { CodexBridgeHttpClient } from "./codex-bridge/CodexBridgeHttpClient.js";
 import { CodexBridgeService } from "./codex-bridge/CodexBridgeService.js";
 import type { CodexBridgeController } from "./codex-bridge/types.js";
+import { shutdownCodexHistoryClient } from "./codex-history/CodexHistoryClient.js";
 import {
   closeCodexCorrelationDebugLogger,
   initCodexCorrelationDebugLogger,
@@ -209,6 +210,8 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
       console.error("[Shutdown] Error shutting down Codex bridge:", error);
     }
   }
+
+  shutdownCodexHistoryClient();
 
   sessionInteractionServiceForShutdown?.dispose();
   sessionInteractionServiceForShutdown = null;

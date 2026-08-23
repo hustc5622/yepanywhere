@@ -1,0 +1,138 @@
+{
+  "turns": [
+    {
+      "id": "turn-golden",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "failed",
+      "error": {
+        "message": "provider unavailable",
+        "codexErrorInfo": null,
+        "additionalDetails": "private provider detail"
+      },
+      "startedAt": 1777000010,
+      "completedAt": 1777000020,
+      "durationMs": 10000
+    }
+  ],
+  "entries": [
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "userMessage",
+        "id": "user-media",
+        "clientId": null,
+        "content": [
+          { "type": "text", "text": "inspect media", "text_elements": [] },
+          {
+            "type": "image",
+            "url": "https://media.example/image.png",
+            "detail": "high"
+          },
+          {
+            "type": "localImage",
+            "path": "/private/image.png",
+            "detail": "low"
+          },
+          { "type": "audio", "url": "https://media.example/audio.wav" },
+          { "type": "localAudio", "path": "/private/audio.wav" }
+        ]
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "reasoning",
+        "id": "reasoning-1",
+        "summary": ["safe summary"],
+        "content": ["raw secret reasoning"]
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "commandExecution",
+        "id": "command-failed",
+        "pluginId": null,
+        "scriptPath": null,
+        "command": "false",
+        "cwd": "/private/project",
+        "processId": null,
+        "source": "agent",
+        "status": "failed",
+        "commandActions": [],
+        "aggregatedOutput": "failed output",
+        "exitCode": 1,
+        "durationMs": 12
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "dynamicToolCall",
+        "id": "dynamic-running",
+        "namespace": "fixture",
+        "tool": "wait",
+        "arguments": { "key": "value" },
+        "status": "inProgress",
+        "contentItems": null,
+        "success": null,
+        "durationMs": null
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "imageView",
+        "id": "image-view",
+        "path": "/private/view.png"
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "imageGeneration",
+        "id": "image-generation",
+        "status": "completed",
+        "revisedPrompt": "safe revised prompt",
+        "result": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+        "transparentBackground": true,
+        "savedPath": "/private/generated.png"
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "hookPrompt",
+        "id": "hook-1",
+        "fragments": [
+          { "text": "private injected prompt", "hookRunId": "hook-run-1" }
+        ]
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "sleep",
+        "id": "sleep-1",
+        "durationMs": 500
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "enteredReviewMode",
+        "id": "review-enter",
+        "review": "review started"
+      }
+    },
+    {
+      "turnId": "turn-golden",
+      "item": {
+        "type": "exitedReviewMode",
+        "id": "review-exit",
+        "review": "review complete"
+      }
+    }
+  ]
+}

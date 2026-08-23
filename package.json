@@ -30,6 +30,7 @@
     "test": "corepack pnpm -r test",
     "test:e2e": "corepack pnpm --filter client test:e2e",
     "test:codex-app-server-smoke": "tsx --conditions source scripts/smoke-codex-app-server.ts",
+    "test:codex-history-read-smoke": "tsx --conditions source scripts/smoke-codex-history-read.ts --read-only --summary",
     "test:zcode-app-server-smoke": "tsx --conditions source scripts/smoke-zcode-app-server.ts",
     "test:e2e:ui": "corepack pnpm --filter client test:e2e:ui",
     "test:e2e:android": "corepack pnpm --filter client test:e2e:android",

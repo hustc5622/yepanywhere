@@ -153,7 +153,8 @@ export interface CreateRuntimeSessionRequest {
 export interface ResumeRuntimeSessionRequest {
   sessionId: string;
   projectPath: string;
-  message: UserMessage;
+  /** Omit only for provider-native control flows that resume without a turn. */
+  message?: UserMessage;
   permissionMode?: PermissionMode;
   modelSettings?: ModelSettings;
   /** Reject atomically instead of admitting this resume to the worker queue. */

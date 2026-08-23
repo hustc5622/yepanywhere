@@ -26,6 +26,7 @@ import {
 } from "../bridge-common/session-state.js";
 import type { BridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
+import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/index.js";
@@ -60,6 +61,15 @@ import type {
 } from "../supervisor/types.js";
 import type { BusEvent, EventBus } from "../watcher/index.js";
 import { buildProviderProjectCatalog } from "./provider-catalog.js";
+import { ServerTimingRecorder } from "./server-timing.js";
+
+const SESSION_LIST_TIMING_NAMES = [
+  "projectLookup",
+  "bridgeView",
+  "catalog",
+  "sessionScan",
+  "total",
+] as const;
 
 export interface GlobalSessionsDeps {
   scanner: ProjectScanner;
@@ -76,6 +86,7 @@ export interface GlobalSessionsDeps {
   codexSessionsDir?: string;
   /** Optional shared Codex reader factory for cross-provider session lookups */
   codexReaderFactory?: (projectPath: string) => CodexSessionReader;
+  codexSessionCatalog?: CodexSessionCatalog;
   /** Gemini scanner for checking if a project has Gemini sessions */
   geminiScanner?: GeminiSessionScanner;
   /** Gemini sessions directory (defaults to ~/.gemini/tmp) */
@@ -120,7 +131,7 @@ export interface GlobalSessionItem {
   title: string | null;
   createdAt: string;
   updatedAt: string;
-  messageCount: number;
+  messageCount?: number;
   userQuestions?: SessionQuestion[];
   provider: ProviderName;
   // Project context
@@ -410,6 +421,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       geminiScanner: deps.geminiScanner,
       piScanner: deps.piScanner,
       kimiScanner: deps.kimiScanner,
+      codexSessionCatalog: deps.codexSessionCatalog,
     });
     const seenSessionIds = new Set<string>();
 
@@ -504,6 +516,8 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
 
   // GET /api/sessions - Get all sessions with pagination
   routes.get("/", async (c) => {
+    const requestStartedAt = performance.now();
+    const serverTiming = new ServerTimingRecorder(SESSION_LIST_TIMING_NAMES);
     const processBySessionId = new Map<string, SessionRuntimeProcess>();
     if (deps.runtimeController) {
       for (const process of await deps.runtimeController.listProcessSnapshots()) {
@@ -534,7 +548,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
     );
 
     // Get all projects
-    const allProjects = await deps.scanner.listProjects();
+    const allProjects = await serverTiming.measure("projectLookup", () =>
+      deps.scanner.listProjects(),
+    );
 
     // Filter to single project if projectId query param provided
     const projects = filterProjectId
@@ -545,7 +561,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
     const projectOptions: ProjectOption[] = allProjects
       .map((p) => ({ id: p.id, name: p.name }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    const bridgeSessionViews = await listBridgeSessionViews(deps);
+    const bridgeSessionViews = await serverTiming.measure("bridgeView", () =>
+      listBridgeSessionViews(deps),
+    );
     for (const item of bridgeSessionViews) {
       if (
         !projectOptions.some((project) => project.id === item.session.projectId)
@@ -567,18 +585,22 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
     const maxCandidates = limit + 1;
     const topSessions: GlobalSessionItem[] = [];
     const knownSessionIds = new Set<string>();
-    const providerCatalog = await buildProviderProjectCatalog({
-      projects: allProjects,
-      codexScanner: deps.codexScanner,
-      geminiScanner: deps.geminiScanner,
-      piScanner: deps.piScanner,
-      kimiScanner: deps.kimiScanner,
-    });
+    const providerCatalog = await serverTiming.measure("catalog", () =>
+      buildProviderProjectCatalog({
+        projects: allProjects,
+        codexScanner: deps.codexScanner,
+        geminiScanner: deps.geminiScanner,
+        piScanner: deps.piScanner,
+        kimiScanner: deps.kimiScanner,
+        codexSessionCatalog: deps.codexSessionCatalog,
+      }),
+    );
 
     const projectsForSessionScan = shouldCollectStats
       ? projects
       : [...projects].sort(compareProjectsByLastActivityDesc);
 
+    const sessionScanStartedAt = performance.now();
     for (const project of projectsForSessionScan) {
       if (
         !shouldCollectStats &&
@@ -699,7 +721,11 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
             title: session.title,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt,
-            messageCount: session.messageCount,
+            ...(bridgedSession
+              ? { messageCount: bridgedSession.session.messageCount }
+              : providerCatalog.codexUnknownMessageCountIds?.has(session.id)
+                ? {}
+                : { messageCount: session.messageCount }),
             userQuestions: session.userQuestions,
             provider: session.provider,
             projectId: session.projectId,
@@ -743,6 +769,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         );
       }
     }
+    serverTiming.set("sessionScan", performance.now() - sessionScanStartedAt);
 
     for (const item of bridgeSessionViews) {
       const session = item.session;
@@ -875,6 +902,8 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       projects: projectOptions,
     };
 
+    serverTiming.set("total", performance.now() - requestStartedAt);
+    c.header("Server-Timing", serverTiming.headerValue());
     return c.json(response);
   });
 

@@ -1,3 +1,4 @@
+import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
@@ -5,6 +6,7 @@ import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ZCodeSessionScanner } from "../projects/zcode-scanner.js";
 import type { Project } from "../supervisor/types.js";
+import type { SessionSummary } from "../supervisor/types.js";
 
 export interface ProviderCatalogDeps {
   codexScanner?: CodexSessionScanner;
@@ -13,6 +15,7 @@ export interface ProviderCatalogDeps {
   kimiScanner?: KimiSessionScanner;
   zcodeScanner?: ZCodeSessionScanner;
   projects?: Project[];
+  codexSessionCatalog?: CodexSessionCatalog;
 }
 
 export interface ProviderProjectCatalog {
@@ -22,6 +25,8 @@ export interface ProviderProjectCatalog {
   kimiPaths: Set<string>;
   zcodePaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
+  codexSessionsByPath?: Map<string, SessionSummary[]>;
+  codexUnknownMessageCountIds?: ReadonlySet<string>;
 }
 
 /**
@@ -32,6 +37,7 @@ export interface ProviderProjectCatalog {
 export async function buildProviderProjectCatalog(
   deps: ProviderCatalogDeps,
 ): Promise<ProviderProjectCatalog> {
+  const codexCatalog = await deps.codexSessionCatalog?.getSnapshot();
   if (deps.projects) {
     const codexPaths = new Set(
       deps.projects
@@ -43,6 +49,9 @@ export async function buildProviderProjectCatalog(
         )
         .map((project) => canonicalizeProjectPath(project.path)),
     );
+    for (const path of codexCatalog?.byProjectPath.keys() ?? []) {
+      codexPaths.add(path);
+    }
     const geminiPaths = new Set(
       deps.projects
         .filter(
@@ -79,12 +88,14 @@ export async function buildProviderProjectCatalog(
         .map((project) => canonicalizeProjectPath(project.path)),
     );
 
-    const needsCodexScan = deps.projects.some(
-      (project) =>
-        project.provider !== "codex" &&
-        project.provider !== "codex-oss" &&
-        project.hasCodexSessions === undefined,
-    );
+    const needsCodexScan =
+      !codexCatalog &&
+      deps.projects.some(
+        (project) =>
+          project.provider !== "codex" &&
+          project.provider !== "codex-oss" &&
+          project.hasCodexSessions === undefined,
+      );
     const needsGeminiScan = deps.projects.some(
       (project) =>
         project.provider !== "gemini" &&
@@ -118,6 +129,8 @@ export async function buildProviderProjectCatalog(
         kimiPaths,
         zcodePaths,
         geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+        codexSessionsByPath: codexCatalog?.byProjectPath,
+        codexUnknownMessageCountIds: codexCatalog?.unknownMessageCountIds,
       };
     }
 
@@ -171,6 +184,8 @@ export async function buildProviderProjectCatalog(
       kimiPaths,
       zcodePaths,
       geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+      codexSessionsByPath: codexCatalog?.byProjectPath,
+      codexUnknownMessageCountIds: codexCatalog?.unknownMessageCountIds,
     };
   }
 
@@ -181,7 +196,9 @@ export async function buildProviderProjectCatalog(
     kimiProjects,
     zcodeProjects,
   ] = await Promise.all([
-    deps.codexScanner?.listProjects() ?? Promise.resolve([]),
+    codexCatalog
+      ? Promise.resolve([])
+      : (deps.codexScanner?.listProjects() ?? Promise.resolve([])),
     deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
     deps.piScanner?.listProjects() ?? Promise.resolve([]),
     deps.kimiScanner?.listProjects() ?? Promise.resolve([]),
@@ -189,9 +206,10 @@ export async function buildProviderProjectCatalog(
   ]);
 
   return {
-    codexPaths: new Set(
-      codexProjects.map((project) => canonicalizeProjectPath(project.path)),
-    ),
+    codexPaths: new Set([
+      ...codexProjects.map((project) => canonicalizeProjectPath(project.path)),
+      ...(codexCatalog?.byProjectPath.keys() ?? []),
+    ]),
     geminiPaths: new Set(
       geminiProjects
         .map((project) => canonicalizeProjectPath(project.path))
@@ -207,5 +225,7 @@ export async function buildProviderProjectCatalog(
       zcodeProjects.map((project) => canonicalizeProjectPath(project.path)),
     ),
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
+    codexSessionsByPath: codexCatalog?.byProjectPath,
+    codexUnknownMessageCountIds: codexCatalog?.unknownMessageCountIds,
   };
 }

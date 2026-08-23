@@ -24,6 +24,7 @@ export interface ProviderProjectCatalog {
   kimiPaths: Set<string>;
   zcodePaths: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
+  codexSessionsByPath?: Map<string, SessionSummary[]>;
 }
 
 export interface ProviderResolutionDeps {
@@ -323,7 +324,18 @@ async function listSessionsForSource(
   project: Project,
   source: SessionSource,
   deps: ProviderResolutionDeps,
+  catalog?: ProviderProjectCatalog,
 ): Promise<SessionSummary[]> {
+  if (source.kind === "codex" && catalog?.codexSessionsByPath) {
+    return collapseEditForkFamilies(
+      applyForkLineageMetadata(
+        catalog.codexSessionsByPath.get(
+          canonicalizeProjectPath(project.path),
+        ) ?? [],
+        deps,
+      ),
+    );
+  }
   if (!deps.sessionIndexService) {
     return collapseEditForkFamilies(
       applyForkLineageMetadata(
@@ -384,7 +396,12 @@ export async function listSessionsAcrossProviders(
   const seenSessionIds = new Set<string>();
 
   for (const source of getSessionSources(project, deps, undefined, catalog)) {
-    const sourceSessions = await listSessionsForSource(project, source, deps);
+    const sourceSessions = await listSessionsForSource(
+      project,
+      source,
+      deps,
+      catalog,
+    );
     for (const session of sourceSessions) {
       if (seenSessionIds.has(session.id)) continue;
       seenSessionIds.add(session.id);

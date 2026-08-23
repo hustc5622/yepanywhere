@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import type { HttpBindings } from "@hono/node-server";
 import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
 import {
@@ -21,6 +21,9 @@ import type { FeishuDurableInbox } from "./channels/feishu/inbox.js";
 import type { FeishuOperationStore } from "./channels/feishu/operation-store.js";
 import type { FeishuChannelService } from "./channels/feishu/service.js";
 import type { CodexBridgeController } from "./codex-bridge/types.js";
+import { CodexAppServerHistoryReader } from "./codex-history/CodexAppServerHistoryReader.js";
+import { getCodexHistoryClient } from "./codex-history/CodexHistoryClient.js";
+import { CodexSessionCatalog } from "./codex-history/CodexSessionCatalog.js";
 import type { SessionTitleGenerationConfig } from "./config.js";
 import type { DeviceBridgeService } from "./device/DeviceBridgeService.js";
 import type { FrontendProxy } from "./frontend/index.js";
@@ -128,6 +131,7 @@ import { SessionCommandService } from "./services/SessionCommandService.js";
 import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
 import { CodexSessionReader } from "./sessions/codex-reader.js";
+import { invalidateCodexSessionManifest } from "./sessions/codex-session-manifest.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
 import { KimiSessionReader } from "./sessions/kimi-reader.js";
 import { normalizeSession } from "./sessions/normalization.js";
@@ -643,6 +647,33 @@ export function createApp(options: AppOptions): AppResult {
           projectPath,
         }),
     );
+  const codexHistoryClient =
+    codexEnabled && !options.sdk ? getCodexHistoryClient() : undefined;
+  const codexAppServerHistoryReader = codexHistoryClient
+    ? new CodexAppServerHistoryReader({ client: codexHistoryClient })
+    : undefined;
+  const codexSessionCatalog = codexHistoryClient
+    ? new CodexSessionCatalog({
+        client: codexHistoryClient,
+        sessionsDir: CODEX_SESSIONS_DIR,
+      })
+    : undefined;
+  codexScanner?.setSessionCatalog(codexSessionCatalog);
+  options.eventBus?.subscribe((event) => {
+    if (event.type !== "file-change" || event.provider !== "codex") return;
+    invalidateCodexSessionManifest(CODEX_SESSIONS_DIR);
+    const match = basename(event.path).match(
+      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i,
+    );
+    if (match?.[1] && event.changeType === "delete") {
+      codexSessionCatalog?.invalidateSession(match[1]);
+    } else {
+      // Create/modify must not evict a manifest-confirmed row while the state
+      // DB is still catching up. Expire the snapshot and let reconciliation
+      // refresh it in place; only a confirmed delete removes the overlay.
+      codexSessionCatalog?.invalidate();
+    }
+  });
   const geminiReaderFactory = (projectPath: string): GeminiSessionReader =>
     getOrCreateReader(
       `gemini-extra::${GEMINI_TMP_DIR}::${projectPath}`,
@@ -1313,6 +1344,7 @@ export function createApp(options: AppOptions): AppResult {
       codexScanner,
       codexSessionsDir: CODEX_SESSIONS_DIR,
       codexReaderFactory,
+      codexSessionCatalog,
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
@@ -1342,6 +1374,8 @@ export function createApp(options: AppOptions): AppResult {
       codexScanner,
       codexSessionsDir: CODEX_SESSIONS_DIR,
       codexReaderFactory,
+      codexAppServerHistoryReader,
+      codexSessionCatalog,
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
@@ -1461,6 +1495,7 @@ export function createApp(options: AppOptions): AppResult {
       codexScanner,
       codexSessionsDir: CODEX_SESSIONS_DIR,
       codexReaderFactory,
+      codexSessionCatalog,
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,

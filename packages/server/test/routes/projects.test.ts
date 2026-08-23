@@ -67,6 +67,10 @@ describe("Projects Routes", () => {
 
     const response = await routes.request("/");
     expect(response.status).toBe(200);
+    expect(response.headers.get("server-timing")).toContain(
+      "projectLookup;dur=",
+    );
+    expect(response.headers.get("server-timing")).toContain("bridgeView;dur=");
 
     const json = await response.json();
     expect(gitStatusProvider).toHaveBeenCalledWith(project);
@@ -106,6 +110,8 @@ describe("Projects Routes", () => {
 
     const response = await routes.request("/proj-1/sessions");
     expect(response.status).toBe(200);
+    expect(response.headers.get("server-timing")).toContain("catalog;dur=");
+    expect(response.headers.get("server-timing")).toContain("sessionScan;dur=");
 
     const json = await response.json();
     expect(json.sessions).toHaveLength(1);

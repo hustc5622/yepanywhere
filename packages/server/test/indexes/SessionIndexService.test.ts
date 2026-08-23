@@ -590,6 +590,84 @@ describe("SessionIndexService", () => {
       },
     );
 
+    it.each(["gemini", "kimi"] as const)(
+      "does not leak a modified %s session into another project scope",
+      async (provider) => {
+        const eventBus = new EventBus();
+        const scopedService = new SessionIndexService({
+          dataDir,
+          projectsDir,
+          eventBus,
+          fullValidationIntervalMs: 60_000,
+        });
+        await scopedService.initialize();
+        const sharedDir = join(testDir, `${provider}-shared-scope`);
+        await mkdir(sharedDir, { recursive: true });
+        const filePath = join(sharedDir, "session-1.jsonl");
+        await writeFile(filePath, "scope-a\n");
+        const projectA = toUrlProjectId("/scope/a");
+        const projectB = toUrlProjectId("/scope/b");
+        const makeReader = (scope: "a" | "b"): ISessionReader => ({
+          getIndexScopeKey: (dir) => `${provider}::${dir}::${scope}`,
+          listSessionFiles: async () =>
+            scope === "a" ? [{ sessionId: "session-1", filePath }] : [],
+          getSessionSummary: async (sessionId, scopedProjectId) =>
+            scope === "a"
+              ? {
+                  id: sessionId,
+                  projectId: scopedProjectId,
+                  title: "scope-a",
+                  fullTitle: "scope-a",
+                  createdAt: "2026-08-22T00:00:00.000Z",
+                  updatedAt: "2026-08-22T00:00:00.000Z",
+                  messageCount: 1,
+                  ownership: { owner: "none" },
+                  provider,
+                }
+              : null,
+          getAgentMappings: async () => [],
+          getAgentSession: async () => null,
+        });
+        const readerA = makeReader("a");
+        const readerB = makeReader("b");
+
+        expect(
+          (
+            await scopedService.getSessionsWithCache(
+              sharedDir,
+              projectA,
+              readerA,
+            )
+          ).map((session) => session.id),
+        ).toEqual(["session-1"]);
+        expect(
+          await scopedService.getSessionsWithCache(
+            sharedDir,
+            projectB,
+            readerB,
+          ),
+        ).toEqual([]);
+
+        await writeFile(filePath, "scope-a-updated\n");
+        eventBus.emit({
+          type: "file-change",
+          provider,
+          path: filePath,
+          relativePath: "session-1.jsonl",
+          changeType: "modify",
+          timestamp: new Date().toISOString(),
+          fileType: "session",
+        });
+
+        const afterB = await scopedService.getSessionsWithCache(
+          sharedDir,
+          projectB,
+          readerB,
+        );
+        expect(afterB.map((session) => session.id)).toEqual([]);
+      },
+    );
+
     it("refreshes Kimi metadata when only state.json changes", async () => {
       const eventBus = new EventBus();
       const kimiService = new SessionIndexService({

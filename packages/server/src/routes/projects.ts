@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import { listActiveBridgeSessionViews } from "../bridge-common/multi.js";
 import type { BridgeSessionView as CommonBridgeSessionView } from "../bridge-common/types.js";
 import type { CodexBridgeController } from "../codex-bridge/types.js";
+import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
 import { GitStatusSummaryCache } from "../git-status-summary.js";
 import type { SessionIndexService } from "../indexes/index.js";
 import type {
@@ -43,6 +44,15 @@ import type {
   SessionSummary,
 } from "../supervisor/types.js";
 import { buildProviderProjectCatalog } from "./provider-catalog.js";
+import { ServerTimingRecorder } from "./server-timing.js";
+
+const PROJECT_LIST_TIMING_NAMES = [
+  "projectLookup",
+  "bridgeView",
+  "catalog",
+  "sessionScan",
+  "total",
+] as const;
 
 export interface ProjectsDeps {
   scanner: ProjectScanner;
@@ -65,6 +75,7 @@ export interface ProjectsDeps {
   codexSessionsDir?: string;
   /** Optional shared Codex reader factory for cross-provider session lookups */
   codexReaderFactory?: (projectPath: string) => CodexSessionReader;
+  codexSessionCatalog?: CodexSessionCatalog;
   /** Gemini scanner for checking if a project has Gemini sessions */
   geminiScanner?: GeminiSessionScanner;
   /** Gemini sessions directory (defaults to ~/.gemini/tmp) */
@@ -214,6 +225,7 @@ function mergeBridgeSessions(
         ? {
             ...view.session,
             ...existing,
+            messageCount: view.session.messageCount,
             ownership: view.session.ownership,
             pendingInputType:
               view.session.pendingInputType ??
@@ -456,7 +468,11 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
 
   // GET /api/projects - List all projects
   routes.get("/", async (c) => {
-    const rawProjects = await deps.scanner.listProjects();
+    const requestStartedAt = performance.now();
+    const serverTiming = new ServerTimingRecorder(PROJECT_LIST_TIMING_NAMES);
+    const rawProjects = await serverTiming.measure("projectLookup", () =>
+      deps.scanner.listProjects(),
+    );
     const gitStatusProvider =
       deps.gitStatusProvider ??
       ((project: Project) => gitStatusCache.get(project.path));
@@ -464,7 +480,9 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       await Promise.all([
         loadOwnedProcessViews(deps),
         getProjectGitStatusSummaries(rawProjects, gitStatusProvider),
-        getActiveBridgeSessionViews(deps),
+        serverTiming.measure("bridgeView", () =>
+          getActiveBridgeSessionViews(deps),
+        ),
       ]);
     const activityCounts = await getProjectActivityCounts(
       ownedProcesses,
@@ -500,6 +518,8 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       );
     });
 
+    serverTiming.set("total", performance.now() - requestStartedAt);
+    c.header("Server-Timing", serverTiming.headerValue());
     return c.json({ projects });
   });
 
@@ -649,55 +669,86 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
 
   // GET /api/projects/:projectId/sessions - List sessions
   routes.get("/:projectId/sessions", async (c) => {
+    const requestStartedAt = performance.now();
+    const serverTiming = new ServerTimingRecorder(PROJECT_LIST_TIMING_NAMES);
     const projectId = c.req.param("projectId");
 
     // Validate projectId format at API boundary
     if (!isUrlProjectId(projectId)) {
+      c.header("Server-Timing", serverTiming.headerValue());
       return c.json({ error: "Invalid project ID format" }, 400);
     }
 
     // Use getOrCreateProject to support new projects without sessions yet
-    const project = await deps.scanner.getOrCreateProject(projectId);
+    const project = await serverTiming.measure("projectLookup", () =>
+      deps.scanner.getOrCreateProject(projectId),
+    );
     if (!project) {
+      serverTiming.set("total", performance.now() - requestStartedAt);
+      c.header("Server-Timing", serverTiming.headerValue());
       return c.json({ error: "Project not found" }, 404);
     }
 
-    const providerCatalog = await buildProviderProjectCatalog({
-      projects: [project],
-      codexScanner: deps.codexScanner,
-      geminiScanner: deps.geminiScanner,
-      piScanner: deps.piScanner,
-      kimiScanner: deps.kimiScanner,
-    });
-    let sessions = await listSessionsAcrossProviders(
-      project,
-      {
-        readerFactory: deps.readerFactory,
-        sessionMetadataService: deps.sessionMetadataService,
-        sessionIndexService: deps.sessionIndexService,
-        codexSessionsDir: deps.codexSessionsDir,
-        codexReaderFactory: deps.codexReaderFactory,
-        geminiSessionsDir: deps.geminiSessionsDir,
-        geminiReaderFactory: deps.geminiReaderFactory,
-        geminiHashToCwd: providerCatalog.geminiHashToCwd,
-        piSessionsDir: deps.piSessionsDir,
-        piReaderFactory: deps.piReaderFactory,
-        kimiSessionsDir: deps.kimiSessionsDir,
-        kimiReaderFactory: deps.kimiReaderFactory,
-      },
-      providerCatalog,
+    const providerCatalog = await serverTiming.measure("catalog", () =>
+      buildProviderProjectCatalog({
+        projects: [project],
+        codexScanner: deps.codexScanner,
+        geminiScanner: deps.geminiScanner,
+        piScanner: deps.piScanner,
+        kimiScanner: deps.kimiScanner,
+        codexSessionCatalog: deps.codexSessionCatalog,
+      }),
+    );
+    let sessions = await serverTiming.measure("sessionScan", () =>
+      listSessionsAcrossProviders(
+        project,
+        {
+          readerFactory: deps.readerFactory,
+          sessionMetadataService: deps.sessionMetadataService,
+          sessionIndexService: deps.sessionIndexService,
+          codexSessionsDir: deps.codexSessionsDir,
+          codexReaderFactory: deps.codexReaderFactory,
+          geminiSessionsDir: deps.geminiSessionsDir,
+          geminiReaderFactory: deps.geminiReaderFactory,
+          geminiHashToCwd: providerCatalog.geminiHashToCwd,
+          piSessionsDir: deps.piSessionsDir,
+          piReaderFactory: deps.piReaderFactory,
+          kimiSessionsDir: deps.kimiSessionsDir,
+          kimiReaderFactory: deps.kimiReaderFactory,
+        },
+        providerCatalog,
+      ),
     );
 
-    const activeBridgeViews = (await getActiveBridgeSessionViews(deps)).filter(
-      (view) => view.session.projectId === projectId,
-    );
+    const activeBridgeViews = (
+      await serverTiming.measure("bridgeView", () =>
+        getActiveBridgeSessionViews(deps),
+      )
+    ).filter((view) => view.session.projectId === projectId);
     sessions = mergeBridgeSessions(sessions, activeBridgeViews);
 
     // Add missing owned sessions (new sessions that don't have user/assistant messages yet)
     const ownedProcesses = await loadOwnedProcessViews(deps);
     sessions = addMissingOwnedSessions(sessions, projectId, ownedProcesses);
+    const bridgedIds = new Set(
+      activeBridgeViews.map((view) => view.session.id),
+    );
+    const publicSessions = enrichSessions(sessions, ownedProcesses).map(
+      (session) => {
+        if (
+          bridgedIds.has(session.id) ||
+          !providerCatalog.codexUnknownMessageCountIds?.has(session.id)
+        ) {
+          return session;
+        }
+        const { messageCount: _unknownCount, ...withoutUnknownCount } = session;
+        return withoutUnknownCount;
+      },
+    );
 
-    return c.json({ sessions: enrichSessions(sessions, ownedProcesses) });
+    serverTiming.set("total", performance.now() - requestStartedAt);
+    c.header("Server-Timing", serverTiming.headerValue());
+    return c.json({ sessions: publicSessions });
   });
 
   return routes;

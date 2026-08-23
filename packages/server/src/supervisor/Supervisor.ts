@@ -423,8 +423,9 @@ export class Supervisor {
   }
 
   /**
-   * Create a session using the provider interface without an initial message.
-   * The session is created and waits for a message to be queued.
+   * Start or resume a provider session without an initial message. New
+   * sessions wait for a queued message; resumed sessions can accept a native
+   * control without manufacturing a user turn.
    */
   private async createProviderSession(
     projectPath: string,
@@ -432,6 +433,7 @@ export class Supervisor {
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
     provider?: AgentProvider,
+    resumeSessionId?: string,
   ): Promise<Process> {
     const activeProvider = provider ?? this.provider;
     if (!activeProvider) {
@@ -440,7 +442,7 @@ export class Supervisor {
 
     const processHolder: { process: Process | null } = { process: null };
     const effectiveMode = permissionMode ?? this.defaultPermissionMode;
-    const tempSessionId = randomUUID();
+    const tempSessionId = resumeSessionId ?? randomUUID();
     const startupId =
       activeProvider.name === "claude" ? randomUUID() : undefined;
     const startupStartedAtMs = Date.now();
@@ -448,7 +450,9 @@ export class Supervisor {
     if (startupId) {
       getLogger().info(
         {
-          event: "provider_session_create_requested",
+          event: resumeSessionId
+            ? "provider_session_resume_without_message_requested"
+            : "provider_session_create_requested",
           startupId,
           tempSessionId,
           providerName: activeProvider.name,
@@ -456,7 +460,9 @@ export class Supervisor {
           projectPath,
           executor: modelSettings?.executor,
         },
-        "Provider session creation requested",
+        resumeSessionId
+          ? "Provider session resume without an initial message requested"
+          : "Provider session creation requested",
       );
     }
 
@@ -465,6 +471,7 @@ export class Supervisor {
       startupId,
       cwd: projectPath,
       // No initialMessage - queue will block until one is pushed
+      resumeSessionId,
       permissionMode: effectiveMode,
       model: modelSettings?.model,
       thinking: modelSettings?.thinking,
@@ -490,7 +497,9 @@ export class Supervisor {
     if (startupId) {
       getLogger().info(
         {
-          event: "provider_session_handle_created",
+          event: resumeSessionId
+            ? "provider_session_resume_without_message_handle_created"
+            : "provider_session_handle_created",
           startupId,
           tempSessionId,
           providerName: activeProvider.name,
@@ -498,7 +507,9 @@ export class Supervisor {
           executor: modelSettings?.executor,
           requestElapsedMs: Date.now() - startupStartedAtMs,
         },
-        "Provider returned a session handle",
+        resumeSessionId
+          ? "Provider returned a resumed session handle without an initial message"
+          : "Provider returned a session handle",
       );
     }
 
@@ -526,7 +537,7 @@ export class Supervisor {
     const options: ProcessConstructorOptions = {
       startupId,
       startupStartedAtMs,
-      unmaterializedSession: true,
+      unmaterializedSession: !resumeSessionId,
       projectPath,
       projectId,
       sessionId: tempSessionId,
@@ -566,10 +577,18 @@ export class Supervisor {
     processHolder.process = process;
 
     // Wait for the real session ID from the provider
-    await process.waitForSessionId();
+    try {
+      await process.waitForSessionId(
+        activeProvider.name === "codex" ? CODEX_SESSION_ID_TIMEOUT_MS : 5000,
+        { strict: activeProvider.name === "codex" },
+      );
+    } catch (error) {
+      await process.abort();
+      throw error;
+    }
+    process.markReadyWithoutTurn();
 
-    // Register as a new session
-    this.registerProcess(process, true);
+    this.registerProcess(process, !resumeSessionId);
 
     return process;
   }
@@ -830,7 +849,7 @@ export class Supervisor {
   async resumeSession(
     sessionId: string,
     projectPath: string,
-    message: UserMessage,
+    message?: UserMessage,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
     admission?: {
@@ -938,6 +957,9 @@ export class Supervisor {
           }
           // Queue message to existing process (if we didn't fall through to restart)
           if (!existingProcess.isTerminated) {
+            if (!message) {
+              return existingProcess;
+            }
             const result = await existingProcess.queueMessage(message);
             if (result.success) {
               return existingProcess;
@@ -982,7 +1004,7 @@ export class Supervisor {
 
     const releaseWorkerStart = await this.tryReserveWorkerStart();
     if (!releaseWorkerStart) {
-      if (admission?.requireImmediate) {
+      if (admission?.requireImmediate || !message) {
         return { error: "immediate_start_unavailable" };
       }
       const result = this.workerQueue.enqueue({
@@ -1007,6 +1029,16 @@ export class Supervisor {
     try {
       const provider = this.resolveProvider(modelSettings);
       if (provider) {
+        if (!message) {
+          return await this.createProviderSession(
+            projectPath,
+            projectId,
+            permissionMode,
+            modelSettings,
+            provider,
+            sessionId,
+          );
+        }
         return await this.startProviderSession(
           projectPath,
           projectId,
@@ -1019,6 +1051,11 @@ export class Supervisor {
             allowMissingRolloutReplacement:
               admission?.allowMissingRolloutReplacement,
           },
+        );
+      }
+      if (!message) {
+        throw new Error(
+          "Resume without an initial message requires a resident provider",
         );
       }
       return await this.startLegacySession(
@@ -1301,7 +1338,7 @@ export class Supervisor {
     // Emit ownership change event
     this.emitOwnershipChange(process.sessionId, process.projectId, ownership);
 
-    // Emit initial agent activity (process starts in in-turn state)
+    // Emit initial agent activity when startup already owns an active turn.
     const initialState = process.state;
     if (
       initialState.type === "in-turn" ||

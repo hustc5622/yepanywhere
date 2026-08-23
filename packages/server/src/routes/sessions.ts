@@ -43,6 +43,9 @@ import {
   selectCodexEventSourceWithCache,
   selectCodexProviderErrorEventSource,
 } from "../codex-events/index.js";
+import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
+import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
+import type { CodexHistoryFallbackReason } from "../codex-history/types.js";
 import {
   type SessionInputResponseBody,
   SessionInteractionService,
@@ -110,6 +113,20 @@ import type {
 } from "../supervisor/types.js";
 import { UploadManager } from "../uploads/index.js";
 import type { EventBus } from "../watcher/index.js";
+import { ServerTimingRecorder } from "./server-timing.js";
+
+const SESSION_DETAIL_TIMING_NAMES = [
+  "projectLookup",
+  "bridgeView",
+  "historyCapability",
+  "summaryScan",
+  "pageRead",
+  "normalize",
+  "canonicalSelect",
+  "canonicalOverlay",
+  "augment",
+] as const;
+
 function isCodexProviderName(
   provider: ProviderName | string | undefined,
 ): provider is "codex" | "codex-oss" {
@@ -145,6 +162,10 @@ export interface SessionsDeps {
   codexSessionsDir?: string;
   /** Optional shared Codex reader factory for cross-provider session lookups */
   codexReaderFactory?: (projectPath: string) => CodexSessionReader;
+  /** Read-only app-server history path for paginated Codex threads. */
+  codexAppServerHistoryReader?: CodexAppServerHistoryReader;
+  /** Provider-wide cheap Codex metadata and provider-resolution source. */
+  codexSessionCatalog?: CodexSessionCatalog;
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   /** Optional shared Gemini reader factory for cross-provider session lookups */
@@ -987,15 +1008,32 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const metadataProvider = deps.sessionMetadataService?.getProvider(
       sessionId,
     ) as ProviderName | undefined;
-    const sessionSummaryResult = await findSessionSummaryAcrossProviders(
-      project,
-      sessionId,
-      projectId as UrlProjectId,
-      toProviderResolutionDeps(deps),
-      metadataProvider ?? process?.provider,
-    );
+    const catalogSummary = await deps.codexSessionCatalog
+      ?.getSessionSummary(sessionId, project.path)
+      .catch(() => null);
+    const providerResolutionDeps = toProviderResolutionDeps(deps);
+    const cheapResolutionDeps = deps.codexSessionCatalog
+      ? (({
+          codexSessionsDir: _codexSessionsDir,
+          codexReaderFactory: _codexReaderFactory,
+          ...remaining
+        }) => remaining)(providerResolutionDeps)
+      : providerResolutionDeps;
+    const sessionSummaryResult =
+      bridgedSession || catalogSummary
+        ? null
+        : await findSessionSummaryAcrossProviders(
+            project,
+            sessionId,
+            projectId as UrlProjectId,
+            cheapResolutionDeps,
+            metadataProvider ?? process?.provider,
+          );
     const sessionSummary =
-      sessionSummaryResult?.summary ?? bridgedSession?.session ?? null;
+      bridgedSession?.session ??
+      catalogSummary ??
+      sessionSummaryResult?.summary ??
+      null;
 
     if (!sessionSummary && !process) {
       return c.json({ error: "Session not found" }, 404);
@@ -1018,7 +1056,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         fullTitle: sessionSummary?.fullTitle ?? null,
         createdAt: sessionSummary?.createdAt ?? new Date().toISOString(),
         updatedAt: sessionSummary?.updatedAt ?? new Date().toISOString(),
-        messageCount: sessionSummary?.messageCount ?? 0,
+        ...(catalogSummary && !bridgedSession
+          ? {}
+          : { messageCount: sessionSummary?.messageCount ?? 0 }),
         userQuestions: sessionSummary?.userQuestions,
         ownership,
         provider:
@@ -1267,6 +1307,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   //   ?deferThinking=1 - omit Pi thinking blocks from the first response
   //   ?view=canonical - explicitly request canonical overlay; default is legacy
   routes.get("/projects/:projectId/sessions/:sessionId", async (c) => {
+    const serverTiming = new ServerTimingRecorder(SESSION_DETAIL_TIMING_NAMES);
+    const applyServerTiming = () => {
+      c.header("Server-Timing", serverTiming.headerValue());
+    };
     const projectId = c.req.param("projectId");
     const requestedSessionId = c.req.param("sessionId");
     const afterMessageId = c.req.query("afterMessageId");
@@ -1296,12 +1340,16 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Validate projectId format at API boundary
     if (!isUrlProjectId(projectId)) {
+      applyServerTiming();
       return c.json({ error: "Invalid project ID format" }, 400);
     }
 
     // Use getOrCreateProject to support Codex projects that may not be in the scan cache yet
-    const project = await deps.scanner.getOrCreateProject(projectId);
+    const project = await serverTiming.measure("projectLookup", () =>
+      deps.scanner.getOrCreateProject(projectId),
+    );
     if (!project) {
+      applyServerTiming();
       return c.json({ error: "Project not found" }, 404);
     }
 
@@ -1317,7 +1365,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (!process && sessionId !== requestedSessionId) {
       process = await runtimeController.getProcessSnapshotForSession(sessionId);
     }
-    const bridgeView = await getBridgeSessionView(deps, sessionId);
+    const bridgeView = await serverTiming.measure("bridgeView", () =>
+      getBridgeSessionView(deps, sessionId),
+    );
     const bridgedSession =
       bridgeView?.session.projectId === projectId ? bridgeView : null;
     // The view already carries the sidecar's liveness verdict, so no extra
@@ -1368,13 +1418,55 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       rolloutRevision: rolloutRevision ?? undefined,
     };
     let loadedSession: Awaited<ReturnType<ISessionReader["getSession"]>>;
+    let historyFallbackReason: CodexHistoryFallbackReason | undefined;
+    let fallbackHistoryCapabilityMs: number | undefined;
+    const pageReadStartedAt = performance.now();
     try {
-      loadedSession = await reader.getSession(
-        sessionId,
-        project.id,
-        readerAfterMessageId,
-        readerOptions,
-      );
+      const persistedProvider =
+        deps.sessionMetadataService?.getProvider(sessionId);
+      const catalogSummary =
+        !process && !persistedProvider && !isCodexProviderName(project.provider)
+          ? await deps.codexSessionCatalog
+              ?.getSessionSummary(sessionId, project.path)
+              .catch(() => null)
+          : null;
+      const preferredProvider =
+        process?.provider ??
+        persistedProvider ??
+        catalogSummary?.provider ??
+        project.provider;
+      if (
+        deps.codexAppServerHistoryReader &&
+        isCodexProviderName(preferredProvider)
+      ) {
+        const appServerHistory =
+          await deps.codexAppServerHistoryReader.getSession(
+            sessionId,
+            project.id,
+            project.path,
+            readerAfterMessageId,
+            readerOptions,
+          );
+        if (appServerHistory.kind === "loaded") {
+          loadedSession = appServerHistory.session;
+        } else {
+          historyFallbackReason = appServerHistory.reason;
+          fallbackHistoryCapabilityMs = appServerHistory.historyCapabilityMs;
+          loadedSession = await reader.getSession(
+            sessionId,
+            project.id,
+            readerAfterMessageId,
+            readerOptions,
+          );
+        }
+      } else {
+        loadedSession = await reader.getSession(
+          sessionId,
+          project.id,
+          readerAfterMessageId,
+          readerOptions,
+        );
+      }
 
       // For mixed projects, fall back to the other providers' session stores if
       // the primary reader didn't find the session. Candidate ordering and
@@ -1399,6 +1491,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message === "ROLLOUT_CURSOR_STALE") {
+        serverTiming.set("pageRead", performance.now() - pageReadStartedAt);
+        applyServerTiming();
         return c.json(
           {
             error: "Codex session cursor belongs to an older file revision",
@@ -1408,6 +1502,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         );
       }
       if (message === "ROLLOUT_CHANGED_DURING_SCAN") {
+        serverTiming.set("pageRead", performance.now() - pageReadStartedAt);
+        applyServerTiming();
         return c.json(
           {
             error: "Codex session changed while it was being loaded",
@@ -1421,6 +1517,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         (error instanceof Error &&
           error.name === "CodexHistoryUnavailableError")
       ) {
+        serverTiming.set("pageRead", performance.now() - pageReadStartedAt);
+        applyServerTiming();
         return c.json(
           {
             error:
@@ -1435,6 +1533,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         message.includes("scan exceeds") ||
         (error instanceof Error && error.name === "CodexRolloutScanError")
       ) {
+        serverTiming.set("pageRead", performance.now() - pageReadStartedAt);
+        applyServerTiming();
         return c.json(
           {
             error: "Codex session history exceeds the configured load budget",
@@ -1446,15 +1546,31 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       throw error;
     }
 
+    const historyReadTimings = loadedSession?.historyReadTimings;
+    serverTiming.set(
+      "historyCapability",
+      historyReadTimings?.historyCapabilityMs ?? fallbackHistoryCapabilityMs,
+    );
+    serverTiming.set("summaryScan", historyReadTimings?.summaryScanMs);
+    serverTiming.set(
+      "pageRead",
+      historyReadTimings?.pageReadMs ?? performance.now() - pageReadStartedAt,
+    );
+    serverTiming.add("normalize", historyReadTimings?.normalizeMs);
+
     const readerPagination = loadedSession?.pagination;
     const readerPaginationApplied = loadedSession?.paginationApplied === true;
+    const appServerHistorySelected =
+      loadedSession?.historySource === "codex-app-server";
     const codexRolloutBytes = loadedSession?.codexRolloutBytes;
     const codexCanonicalAdmissionAllowed =
       codexRolloutBytes === undefined ||
       codexRolloutBytes <= CODEX_CANONICAL_MAX_ROLLOUT_BYTES;
-    let session = loadedSession
-      ? normalizeSession(loadedSession, { deferMedia, deferThinking })
-      : null;
+    let session = serverTiming.measureSync("normalize", () =>
+      loadedSession
+        ? normalizeSession(loadedSession, { deferMedia, deferThinking })
+        : null,
+    );
     let codexCanonicalView:
       | {
           requested: true;
@@ -1469,22 +1585,24 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           firstAvailableSequence?: number;
           lastSequence?: number;
         }
-      | undefined = canonicalViewRequested
-      ? {
-          requested: true,
-          source: "rollout",
-          sourceKind: "rollout",
-          coverage: "rollout-only",
-          fallback: "rollout",
-          fallbackReason: "canonical_source_not_selected",
-        }
-      : undefined;
+      | undefined =
+      canonicalViewRequested && !appServerHistorySelected
+        ? {
+            requested: true,
+            source: "rollout",
+            sourceKind: "rollout",
+            coverage: "rollout-only",
+            fallback: "rollout",
+            fallbackReason: "canonical_source_not_selected",
+          }
+        : undefined;
 
     // The Codex reader applies bounded windows before normalization. Keep the
     // parsed bound for canonical overlay admission, but do not slice the page
     // a second time below.
     if (
       session &&
+      !appServerHistorySelected &&
       canonicalViewRequested &&
       isCodexProviderName(session.provider) &&
       !codexCanonicalAdmissionAllowed
@@ -1510,6 +1628,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     if (
       session &&
+      !appServerHistorySelected &&
       canonicalViewRequested &&
       codexCanonicalAdmissionAllowed &&
       isCodexProviderName(session.provider) &&
@@ -1521,13 +1640,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       // from a slow overlay without it.
       let journalReplayMs: number | undefined;
       try {
-        const selectStartedMs = Date.now();
-        const selected = await selectCodexEventSourceWithCache(
-          codexEventStoreSources,
-          sessionId,
-          codexProjectionCache,
+        const selectStartedAt = performance.now();
+        const selected = await serverTiming.measure("canonicalSelect", () =>
+          selectCodexEventSourceWithCache(
+            codexEventStoreSources,
+            sessionId,
+            codexProjectionCache,
+          ),
         );
-        journalReplayMs = Date.now() - selectStartedMs;
+        journalReplayMs = performance.now() - selectStartedAt;
         // The budget starts here, after the journal is in memory. Selection and
         // replay are an uninterruptible cold-load cost that no amount of budget
         // can shorten, and including them meant the overlay was skipped because
@@ -1592,22 +1713,25 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             );
           }
           const overlayStartedMs = Date.now();
-          const overlay = overlayCanonicalCodexSessionMessages(
-            sessionId,
-            session.messages,
-            selected.events,
-            {
-              appendUnmatched: afterMessageId === undefined,
-              ...(afterMessageId === undefined ? {} : { afterMessageId }),
-              generatedArtifacts,
-              sourceId: selected.sourceId,
-              projectionCache: codexProjectionCache,
-              startedMs: budgetStartedMs,
-              budgetMs: canonicalOverlayBudgetMs,
-              ...(candidateWindow === undefined
-                ? {}
-                : { maxCandidateCount: candidateWindow }),
-            },
+          const sessionMessages = session.messages;
+          const overlay = serverTiming.measureSync("canonicalOverlay", () =>
+            overlayCanonicalCodexSessionMessages(
+              sessionId,
+              sessionMessages,
+              selected.events,
+              {
+                appendUnmatched: afterMessageId === undefined,
+                ...(afterMessageId === undefined ? {} : { afterMessageId }),
+                generatedArtifacts,
+                sourceId: selected.sourceId,
+                projectionCache: codexProjectionCache,
+                startedMs: budgetStartedMs,
+                budgetMs: canonicalOverlayBudgetMs,
+                ...(candidateWindow === undefined
+                  ? {}
+                  : { maxCandidateCount: candidateWindow }),
+              },
+            ),
           );
           session = {
             ...session,
@@ -1693,6 +1817,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     if (
       session &&
+      !appServerHistorySelected &&
       !canonicalViewRequested &&
       afterMessageId === undefined &&
       codexCanonicalAdmissionAllowed &&
@@ -1701,15 +1826,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     ) {
       const errorOverlayStartedMs = Date.now();
       try {
-        const selected = await selectCodexProviderErrorEventSource(
-          codexEventStoreSources,
-          sessionId,
+        const selected = await serverTiming.measure("canonicalSelect", () =>
+          selectCodexProviderErrorEventSource(
+            codexEventStoreSources,
+            sessionId,
+          ),
         );
         if (selected) {
-          const overlay = overlayCodexProviderErrorMessages(
-            sessionId,
-            session.messages,
-            selected.events,
+          const sessionMessages = session.messages;
+          const overlay = serverTiming.measureSync("canonicalOverlay", () =>
+            overlayCodexProviderErrorMessages(
+              sessionId,
+              sessionMessages,
+              selected.events,
+            ),
           );
           session = {
             ...session,
@@ -1819,6 +1949,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         const hasUnread = deps.notificationService
           ? deps.notificationService.hasUnread(sessionId, newSessionUpdatedAt)
           : undefined;
+        applyServerTiming();
         return c.json({
           session: {
             id: sessionId,
@@ -1865,6 +1996,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
               bridgedSession.session.updatedAt,
             )
           : undefined;
+        applyServerTiming();
         return c.json({
           session: {
             ...bridgedSession.session,
@@ -1892,11 +2024,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           ...getSessionPermissionModeState(deps, sessionId, process),
         });
       }
+      applyServerTiming();
       return c.json({ error: "Session not found" }, 404);
     }
 
     // Get session metadata (custom title, archived, starred)
     const metadata = deps.sessionMetadataService?.getMetadata(sessionId);
+    if (loadedSession?.historySource === "codex-app-server" && metadata) {
+      session = {
+        ...session,
+        model: session.model ?? metadata.model,
+        codexModelProvider:
+          session.codexModelProvider ?? metadata.codexModelProvider,
+      };
+    }
 
     // Get notification data (lastSeenAt, hasUnread)
     const lastSeenEntry = deps.notificationService?.getLastSeen(sessionId);
@@ -1946,7 +2087,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     }
 
     // Keep persisted rendering in lockstep with stream augmentation behavior.
-    await augmentPersistedSessionMessages(session.messages);
+    await serverTiming.measure("augment", () =>
+      augmentPersistedSessionMessages(session.messages),
+    );
 
     const persistedPendingInputRequest =
       activePendingInputRequest === null &&
@@ -1987,11 +2130,21 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // `messages` is returned once at the top level. Spreading `session` here
     // used to emit a byte-identical second copy that no client ever read, which
     // doubled the serialized message payload on every session open.
-    const { messages: _sessionMessages, ...sessionWithoutMessages } = session;
+    const {
+      messages: _sessionMessages,
+      messageCount: normalizedMessageCount,
+      ...sessionWithoutMessages
+    } = session;
 
+    applyServerTiming();
     return c.json({
       session: {
         ...sessionWithoutMessages,
+        ...(bridgedSession
+          ? { messageCount: bridgedSession.session.messageCount }
+          : appServerHistorySelected
+            ? {}
+            : { messageCount: normalizedMessageCount }),
         ownership,
         pendingInputType,
         activity: runtime.activity,
@@ -2026,6 +2179,10 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       slashCommands,
       ...getSessionPermissionModeState(deps, sessionId, process),
       ...(paginationInfo && { pagination: paginationInfo }),
+      ...(loadedSession?.historySource && {
+        historySource: loadedSession.historySource,
+      }),
+      ...(historyFallbackReason && { historyFallbackReason }),
       ...(codexCanonicalView && { codexCanonicalView }),
     });
   });
@@ -2096,8 +2253,69 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     return c.json(result.body, result.status);
   });
 
+  // POST /api/projects/:projectId/sessions/:sessionId/codex-control - Resume
+  // an inactive Codex session without a model turn, then start compaction.
+  routes.post(
+    "/projects/:projectId/sessions/:sessionId/codex-control",
+    async (c) => {
+      let body: {
+        request?: CodexNativeControlRequest;
+        resume?: CreateSessionBody;
+      };
+      try {
+        body = await c.req.json<{
+          request?: CodexNativeControlRequest;
+          resume?: CreateSessionBody;
+        }>();
+      } catch {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      const request = body?.request;
+      if (
+        !request ||
+        typeof request !== "object" ||
+        !isCodexNativeControlMethod((request as { control?: unknown }).control)
+      ) {
+        return c.json({ error: "Supported Codex control is required" }, 400);
+      }
+      if (request.control !== "thread/compact/start") {
+        return c.json(
+          { error: "Only Codex compaction can auto-resume a session" },
+          400,
+        );
+      }
+      if (
+        body.resume !== undefined &&
+        (body.resume === null ||
+          typeof body.resume !== "object" ||
+          Array.isArray(body.resume))
+      ) {
+        return c.json({ error: "resume must be an object" }, 400);
+      }
+
+      const sessionId = c.req.param("sessionId");
+      if (deps.externalTracker?.isExternal(sessionId)) {
+        return c.json(
+          {
+            error: "Codex session is controlled by an external process",
+            code: "session_external",
+          },
+          409,
+        );
+      }
+
+      const result = await sessionCommandService.resumeCodexControl({
+        projectId: c.req.param("projectId"),
+        sessionId,
+        request,
+        body: body.resume,
+      });
+      return c.json(result.body, result.status);
+    },
+  );
+
   // POST /api/sessions/:sessionId/codex-control - Execute a bounded,
-  // capability-gated Codex app-server control through the authenticated API.
+  // capability-gated control against an already-active Codex app-server.
   routes.post("/sessions/:sessionId/codex-control", async (c) => {
     let request: CodexNativeControlRequest;
     try {

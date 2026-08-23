@@ -157,6 +157,8 @@ export interface AppMessageExtensions {
   codexThreadItemLifecycle?: "started" | "completed";
   codexThreadId?: string;
   codexTurnId?: string;
+  /** Stable app-server item identity without duplicating the native payload. */
+  codexThreadItemId?: string;
   /** Stable native identity shared by Codex live items and rollout records. */
   codexCorrelationKey?: string;
   codexEventSequence?: number;

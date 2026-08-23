@@ -821,6 +821,12 @@ export class Process {
     return this._state.type === "terminated";
   }
 
+  /** Mark a message-free provider startup as ready to accept native controls. */
+  markReadyWithoutTurn(): void {
+    if (this.isTerminated || this._state.type === "waiting-input") return;
+    this.transitionToIdle();
+  }
+
   /**
    * Get the termination reason if the process was terminated.
    */

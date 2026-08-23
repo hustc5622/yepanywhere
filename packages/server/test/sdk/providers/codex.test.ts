@@ -1850,15 +1850,15 @@ process.stdin.on("data", (chunk) => {
             codexThreadItemLifecycle: "completed",
             codexThreadId: "thread-new",
             codexTurnId: "turn-rewrite",
+            codexThreadItemId: "agent-event-spine",
             codexEventSequence: 6,
-            codexRawReasoningAllowed: false,
-            codexThreadItem: expect.objectContaining({
-              id: "agent-event-spine",
-              type: "agentMessage",
-              text: "event spine reply",
-            }),
           }),
         );
+        expect(
+          output.find(
+            (message) => message.codexThreadItemId === "agent-event-spine",
+          ),
+        ).not.toHaveProperty("codexThreadItem");
         expect(output).toContainEqual(
           expect.objectContaining({
             type: "system",
@@ -2006,9 +2006,7 @@ process.stdin.on("data", (chunk) => {
         ).resolves.toEqual([]);
 
         const serialized = JSON.stringify(
-          output.filter(
-            (item) => item.codexThreadItem?.id === "file-generated",
-          ),
+          output.filter((item) => item.codexThreadItemId === "file-generated"),
         );
         expect(serialized).not.toContain(tempDir);
         expect(serialized).not.toContain("fixture-only-private");
@@ -2791,6 +2789,55 @@ describe("CodexProvider Event Normalization", () => {
     });
   });
 
+  it("projects live app-server file changes relative to the session cwd", () => {
+    const provider = createTestProvider() as unknown as {
+      convertItemToSDKMessages: (
+        item: unknown,
+        sessionId: string,
+        turnId: string,
+        sourceEvent: "item/started" | "item/completed",
+        workspaceRoot?: string,
+      ) => Array<Record<string, unknown>>;
+    };
+
+    const messages = provider.convertItemToSDKMessages(
+      {
+        id: "file-change-1",
+        type: "file_change",
+        status: "completed",
+        changes: [
+          {
+            path: "/workspace/project/src/a.ts",
+            kind: "update",
+            diff: "@@ -1 +1 @@\n-old\n+new\n",
+          },
+        ],
+      },
+      "thread-1",
+      "turn-1",
+      "item/completed",
+      "/workspace/project",
+    );
+
+    expect(messages[0]?.message).toMatchObject({
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "file-change-1",
+          name: "Edit",
+          input: {
+            file_path: "src/a.ts",
+            changes: [
+              expect.objectContaining({ path: "src/a.ts", kind: "update" }),
+            ],
+          },
+        },
+      ],
+    });
+    expect(JSON.stringify(messages)).not.toContain("/workspace/project");
+  });
+
   it("correlates turn completion with its native status", () => {
     const provider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (
@@ -3245,7 +3292,7 @@ describe("CodexProvider Event Normalization", () => {
     expect(JSON.stringify(messages)).not.toContain("/tmp/generated.png");
   });
 
-  it("keeps canonical generated/file items path-free for public SDK messages", () => {
+  it("keeps common canonical generated/file messages provenance-only", () => {
     const provider = createTestProvider() as unknown as {
       attachCanonicalCodexItem: (
         messages: Array<Record<string, unknown>>,
@@ -3255,7 +3302,7 @@ describe("CodexProvider Event Normalization", () => {
     };
 
     const generated = provider.attachCanonicalCodexItem(
-      [],
+      [{ type: "assistant", uuid: "generated-normalized" }],
       {
         method: "item/completed",
         payload: {
@@ -3279,7 +3326,7 @@ describe("CodexProvider Event Normalization", () => {
       "session-1",
     );
     const changed = provider.attachCanonicalCodexItem(
-      [],
+      [{ type: "assistant", uuid: "file-normalized" }],
       {
         method: "item/completed",
         payload: {
@@ -3311,14 +3358,16 @@ describe("CodexProvider Event Normalization", () => {
     const serialized = JSON.stringify([generated, changed]);
     expect(serialized).not.toContain("/private/test");
     expect(serialized).not.toContain("must-not-be-published");
-    expect(changed[0]?.codexThreadItem).toMatchObject({
-      changes: [
-        {
-          path: "[path hidden]",
-          diff: "[REDACTED:secret-diff]",
-        },
-      ],
+    expect(generated[0]).toMatchObject({
+      codexThreadItemId: "img-local",
+      codexThreadItemLifecycle: "completed",
     });
+    expect(changed[0]).toMatchObject({
+      codexThreadItemId: "file-local",
+      codexThreadItemLifecycle: "completed",
+    });
+    expect(generated[0]).not.toHaveProperty("codexThreadItem");
+    expect(changed[0]).not.toHaveProperty("codexThreadItem");
   });
 
   it("normalizes legacy image_generation_call rows without publishing saved_path", () => {

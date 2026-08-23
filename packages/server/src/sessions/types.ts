@@ -58,6 +58,18 @@ export interface LoadedSession {
   paginationApplied?: boolean;
   /** Physical Codex rollout bytes used for large-history admission. */
   codexRolloutBytes?: number;
+  /** Public history backend used for this snapshot. */
+  historySource?: "codex-app-server" | "codex-rollout";
+  /**
+   * Internal read-stage timings used to populate the session detail
+   * `Server-Timing` header without exposing provider data in the response.
+   */
+  historyReadTimings?: {
+    historyCapabilityMs?: number;
+    summaryScanMs?: number;
+    pageReadMs?: number;
+    normalizeMs?: number;
+  };
   /** Provider-agnostic branch state for sessions with editable DAG/rollback history. */
   branchState?: SessionBranchState;
   /** Codex-only branch state derived from thread_rolled_back markers. */

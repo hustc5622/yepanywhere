@@ -1,5 +1,5 @@
 import type { UrlProjectId } from "@yep-anywhere/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   findSessionSummaryAcrossProviders,
   listSessionsAcrossProviders,
@@ -114,5 +114,36 @@ describe("provider fork lineage resolution", () => {
     await expect(listSessionsAcrossProviders(project, deps)).resolves.toEqual([
       child,
     ]);
+  });
+
+  it("uses the provider-wide Codex catalog instead of scanning a project scope", async () => {
+    const catalogSession = summary("catalog", "2026-08-08T02:00:00.000Z");
+    const codexListSessions = vi.fn(async () => {
+      throw new Error("rollout scan should not run");
+    });
+    const codexReader = {
+      ...reader([]),
+      listSessions: codexListSessions,
+    };
+
+    await expect(
+      listSessionsAcrossProviders(
+        project,
+        {
+          readerFactory: () => reader([]),
+          codexSessionsDir: "/codex/sessions",
+          codexReaderFactory: () => codexReader as never,
+        },
+        {
+          codexPaths: new Set(["/repo"]),
+          geminiPaths: new Set(),
+          piPaths: new Set(),
+          kimiPaths: new Set(),
+          zcodePaths: new Set(),
+          codexSessionsByPath: new Map([["/repo", [catalogSession]]]),
+        },
+      ),
+    ).resolves.toEqual([catalogSession]);
+    expect(codexListSessions).not.toHaveBeenCalled();
   });
 });
