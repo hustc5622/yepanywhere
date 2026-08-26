@@ -521,12 +521,17 @@ export function SessionInspector({
               <EmptyState text={t("sessionInspectorGitUnavailable")} />
             ) : gitStatus && !gitStatus.isGitRepo ? (
               <EmptyState text={t("sessionInspectorGitNotRepo")} />
-            ) : gitStatus?.isClean ? (
-              <EmptyState text={t("sessionInspectorGitClean")} />
             ) : gitStatus ? (
               <div className="session-inspector-git">
                 <div className="session-inspector-git-branch">
-                  <span>{gitStatus.branch ?? "HEAD"}</span>
+                  <span className="session-inspector-git-branch-main">
+                    <span className="session-inspector-git-scope">
+                      {t("sessionInspectorGitCurrentProject")}
+                    </span>
+                    <code title={gitStatus.branch ?? "HEAD"}>
+                      {gitStatus.branch ?? "HEAD"}
+                    </code>
+                  </span>
                   {(gitStatus.ahead > 0 || gitStatus.behind > 0) && (
                     <span className="session-inspector-row-meta">
                       {gitStatus.ahead > 0 ? `+${gitStatus.ahead}` : ""}
@@ -534,30 +539,34 @@ export function SessionInspector({
                     </span>
                   )}
                 </div>
-                <ul className="session-inspector-list">
-                  {gitStatus.files.slice(0, 8).map((file) => (
-                    <li key={`${file.path}-${file.staged}`}>
-                      <Link
-                        className="session-inspector-row"
-                        to={`${basePath}/settings/source-control?projectId=${encodeURIComponent(projectId)}`}
-                        title={file.path}
-                      >
-                        <span className="session-inspector-git-status">
-                          {file.status}
-                        </span>
-                        <span className="session-inspector-row-main">
-                          <span className="session-inspector-row-title">
-                            {shortPath(file.path)}
+                {gitStatus.isClean ? (
+                  <EmptyState text={t("sessionInspectorGitClean")} />
+                ) : (
+                  <ul className="session-inspector-list">
+                    {gitStatus.files.slice(0, 8).map((file) => (
+                      <li key={`${file.path}-${file.staged}`}>
+                        <Link
+                          className="session-inspector-row"
+                          to={`${basePath}/settings/source-control?projectId=${encodeURIComponent(projectId)}`}
+                          title={file.path}
+                        >
+                          <span className="session-inspector-git-status">
+                            {file.status}
                           </span>
-                          <span className="session-inspector-row-meta">
-                            {file.staged ? "staged" : "working"}
-                            {formatLineDelta(file)}
+                          <span className="session-inspector-row-main">
+                            <span className="session-inspector-row-title">
+                              {shortPath(file.path)}
+                            </span>
+                            <span className="session-inspector-row-meta">
+                              {file.staged ? "staged" : "working"}
+                              {formatLineDelta(file)}
+                            </span>
                           </span>
-                        </span>
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             ) : null}
           </InspectorSection>

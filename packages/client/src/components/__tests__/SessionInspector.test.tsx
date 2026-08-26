@@ -9,7 +9,15 @@ import { SessionInspector } from "../SessionInspector";
 
 vi.mock("../../hooks/useGitStatus", () => ({
   useGitStatus: () => ({
-    gitStatus: { isGitRepo: true, isClean: true, files: [] },
+    gitStatus: {
+      isGitRepo: true,
+      branch: "main",
+      upstream: "origin/main",
+      ahead: 0,
+      behind: 0,
+      isClean: true,
+      files: [],
+    },
     loading: false,
     error: null,
   }),
@@ -59,6 +67,14 @@ describe("SessionInspector", () => {
     fireEvent.click(collapseButton);
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the current project branch visible when the working tree is clean", () => {
+    renderInspector("claude", []);
+
+    expect(screen.getByText("Current project state")).not.toBeNull();
+    expect(screen.getByText("main")).not.toBeNull();
+    expect(screen.getByText("Working tree clean")).not.toBeNull();
   });
 
   it("shows Codex channel metadata for Codex sessions", () => {

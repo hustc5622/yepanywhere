@@ -12,7 +12,7 @@ import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { activityBus } from "../lib/activityBus";
 import { formatSmartTime } from "../lib/datetime";
-import { ProjectGitStatusInline } from "./ProjectGitStatusInline";
+import { ProjectGitStatusButton } from "./ProjectGitStatusButton";
 import { RemoteProjectIcon } from "./RemoteProjectIcon";
 import { SessionListItem } from "./SessionListItem";
 import {
@@ -689,11 +689,6 @@ export function Sidebar({
                     <RemoteProjectIcon
                       isRemoteProject={project?.isRemoteProject}
                     />
-                    <ProjectGitStatusInline
-                      status={gitStatus}
-                      variant="sidebar"
-                      showIcon={false}
-                    />
                     {group.runningCount > 0 && (
                       <span
                         className="sidebar-project-status sidebar-project-status--running"
@@ -733,6 +728,10 @@ export function Sidebar({
                   </span>
                 </span>
               </button>
+              <ProjectGitStatusButton
+                status={gitStatus}
+                projectName={group.projectName}
+              />
               <Link
                 to={`${basePath}/new-session?projectId=${encodeURIComponent(group.projectId)}`}
                 className="sidebar-project-new-session"

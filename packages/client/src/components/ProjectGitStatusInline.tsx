@@ -18,18 +18,21 @@ function formatGitSummaryTitle(
     status.isClean ? t("gitStatusClean") : t("gitStatusDirty"),
   ];
 
-  if (status.ahead > 0) parts.push(`ahead ${status.ahead}`);
-  if (status.behind > 0) parts.push(`behind ${status.behind}`);
+  if (status.ahead > 0) parts.push(`${t("gitStatusAhead")}: ${status.ahead}`);
+  if (status.behind > 0)
+    parts.push(`${t("gitStatusBehind")}: ${status.behind}`);
   if (status.stagedCount > 0)
     parts.push(`${t("gitStatusStaged")}: ${status.stagedCount}`);
   if (status.unstagedCount > 0)
     parts.push(`${t("gitStatusChanges")}: ${status.unstagedCount}`);
-  if (status.deletedCount > 0) parts.push(`deleted: ${status.deletedCount}`);
+  if (status.deletedCount > 0)
+    parts.push(`${t("gitStatusDeleted")}: ${status.deletedCount}`);
   if (status.untrackedCount > 0)
     parts.push(`${t("gitStatusUntracked")}: ${status.untrackedCount}`);
   if (status.conflictedCount > 0)
-    parts.push(`conflicts: ${status.conflictedCount}`);
-  if (status.stashCount > 0) parts.push(`stashes: ${status.stashCount}`);
+    parts.push(`${t("gitStatusConflicts")}: ${status.conflictedCount}`);
+  if (status.stashCount > 0)
+    parts.push(`${t("gitStatusStashes")}: ${status.stashCount}`);
 
   return parts.join(" · ");
 }

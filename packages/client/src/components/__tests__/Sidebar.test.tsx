@@ -216,6 +216,49 @@ describe("Sidebar recent session browsing", () => {
     ).toBe(true);
   });
 
+  it("moves the project Git summary out of the crowded project title", () => {
+    const project: Project = {
+      id: "project-1",
+      path: "/workspace/project-1",
+      name: "Project 1",
+      sessionCount: 1,
+      activeOwnedCount: 0,
+      activeExternalCount: 0,
+      lastActivity: "2026-01-01T00:05:00.000Z",
+      gitStatus: {
+        isGitRepo: true,
+        branch: "feature/sidebar-details",
+        head: "abc1234",
+        upstream: "origin/feature/sidebar-details",
+        ahead: 1,
+        behind: 0,
+        isClean: false,
+        stagedCount: 0,
+        unstagedCount: 4,
+        deletedCount: 0,
+        untrackedCount: 1,
+        conflictedCount: 0,
+        stashCount: 0,
+      },
+    };
+    const { container } = renderSidebar([createSession()], {}, [project]);
+
+    expect(container.querySelector(".sidebar-project-title")?.textContent).toBe(
+      "Project 1",
+    );
+    expect(screen.queryByText("feature/sidebar-details")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Show Git details for Project 1",
+      }),
+    );
+
+    expect(screen.getByRole("tooltip").textContent).toContain(
+      "feature/sidebar-details",
+    );
+  });
+
   it("keeps project order stable when an active session receives a newer timestamp", () => {
     const projectB = createSession({
       id: "session-b",
