@@ -57,6 +57,7 @@ export interface BridgePollEntry<TState extends BridgePollState> {
 }
 
 export interface BridgeChangeSignal {
+  instanceId?: string;
   revision?: number;
   baseRevision?: number;
   changedSessionIds: string[];
@@ -258,9 +259,36 @@ export abstract class BridgeHttpClient<
     );
   }
 
+  /**
+   * Cached `/sessions` snapshot, revalidated with If-None-Match.
+   *
+   * This endpoint is not on the poll path; it is fetched on demand, mainly by
+   * the session locator when a lookup misses every cheaper source. At ~100 KiB
+   * each of those lookups used to cost a full transfer and JSON parse.
+   */
+  private sessionsCache?: { etag: string; sessions: TSession[] };
+
   async listSessions(): Promise<TSession[]> {
-    const data = await this.fetchJson<{ sessions?: TSession[] }>("/sessions");
-    return data?.sessions ?? [];
+    const response = await this.fetchJsonResponse<{ sessions?: TSession[] }>(
+      "/sessions",
+      this.sessionsCache
+        ? { headers: { "if-none-match": this.sessionsCache.etag } }
+        : undefined,
+    );
+    if (!response) return this.sessionsCache?.sessions ?? [];
+    if (response.status === 304) {
+      return this.sessionsCache?.sessions ?? [];
+    }
+    const sessions = response.data?.sessions ?? [];
+    // Only cache when the sidecar actually supports the conditional contract.
+    // An older sidecar returns 200 with no ETag; caching that would pin a
+    // snapshot we could never revalidate.
+    if (response.etag) {
+      this.sessionsCache = { etag: response.etag, sessions };
+    } else {
+      this.sessionsCache = undefined;
+    }
+    return sessions;
   }
 
   async listSessionViews(): Promise<BridgeSessionView[]> {
@@ -605,6 +633,9 @@ function parseBridgeSseFrame(frame: string): BridgeChangeSignal | null {
       : [];
     return {
       changedSessionIds,
+      ...(typeof value.instanceId === "string" && value.instanceId.length > 0
+        ? { instanceId: value.instanceId }
+        : {}),
       ...(typeof value.revision === "number"
         ? { revision: value.revision }
         : {}),

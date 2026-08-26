@@ -17,6 +17,7 @@ describe("CodexBridgeHttpClient", () => {
   let requestPaths: string[];
   let fullSnapshotEtags: Array<string | undefined>;
   let revision: number;
+  let sidecarInstanceId = "testinst";
   let eventSubscribers: Set<ServerResponse>;
   let sendChange: (input: {
     revision: number;
@@ -49,9 +50,11 @@ describe("CodexBridgeHttpClient", () => {
     requestPaths = [];
     fullSnapshotEtags = [];
     revision = 1;
+    sidecarInstanceId = "testinst";
     eventSubscribers = new Set();
     sendChange = (input) => {
       const frame = `event: changed\ndata: ${JSON.stringify({
+        instanceId: sidecarInstanceId,
         revision: input.revision,
         baseRevision: input.baseRevision,
         changedSessionIds: input.changedSessionIds,
@@ -80,6 +83,13 @@ describe("CodexBridgeHttpClient", () => {
       }
 
       if (url.pathname === "/sessions") {
+        const etag = `W/"${sidecarInstanceId}-${revision}"`;
+        res.setHeader("etag", etag);
+        if (req.headers["if-none-match"] === etag) {
+          res.statusCode = 304;
+          res.end();
+          return;
+        }
         res.end(
           JSON.stringify({
             sessions: sessionViews.map(createSessionFromView),
@@ -101,14 +111,20 @@ describe("CodexBridgeHttpClient", () => {
 
       if (url.pathname === "/session-views") {
         fullSnapshotEtags.push(req.headers["if-none-match"]);
-        const etag = `W/"${revision}"`;
+        const etag = `W/"${sidecarInstanceId}-${revision}"`;
         res.setHeader("etag", etag);
         if (req.headers["if-none-match"] === etag) {
           res.statusCode = 304;
           res.end();
           return;
         }
-        res.end(JSON.stringify({ revision, sessions: sessionViews }));
+        res.end(
+          JSON.stringify({
+            instanceId: sidecarInstanceId,
+            revision,
+            sessions: sessionViews,
+          }),
+        );
         return;
       }
 
@@ -208,6 +224,45 @@ describe("CodexBridgeHttpClient", () => {
       session: { id: "has-messages", ownership: { owner: "external" } },
       activity: "idle",
     });
+  });
+
+  it("revalidates the session list with If-None-Match instead of refetching", async () => {
+    const client = new CodexBridgeHttpClient({ baseUrl });
+
+    const first = await client.listSessions();
+    expect(first.map((session) => session.id)).toEqual([
+      "empty-idle",
+      "active-empty",
+      "has-messages",
+    ]);
+
+    requestPaths = [];
+    const second = await client.listSessions();
+    expect(second).toEqual(first);
+    expect(requestPaths).toEqual(["/sessions"]);
+
+    // A changed catalog must still come through: the sidecar advances its
+    // revision, so the conditional request misses and returns a fresh body.
+    sessionViews = [createView("has-messages", { messageCount: 2 })];
+    revision = 9;
+    const third = await client.listSessions();
+    expect(third.map((session) => session.id)).toEqual(["has-messages"]);
+  });
+
+  it("does not serve a cached session list across a sidecar restart", async () => {
+    const client = new CodexBridgeHttpClient({ baseUrl });
+
+    await expect(client.listSessions()).resolves.toHaveLength(3);
+
+    // A restarted sidecar restores persisted sessions without notifying, so
+    // its revision counter is back at its initial value while the catalog is
+    // different. The instance id in the tag is what prevents a false 304.
+    sidecarInstanceId = "testinst2";
+    sessionViews = [createView("has-messages", { messageCount: 1 })];
+
+    await expect(client.listSessions()).resolves.toMatchObject([
+      { id: "has-messages" },
+    ]);
   });
 
   it("reads account usage from the bridge sidecar", async () => {
@@ -424,7 +479,10 @@ describe("CodexBridgeHttpClient", () => {
         () => fullSnapshotEtags.length >= fullRequestsAfterTargeted + 2,
       );
       expect(fullSnapshotEtags.slice(fullRequestsAfterTargeted)).toEqual(
-        expect.arrayContaining(['W/"2"', 'W/"2"']),
+        expect.arrayContaining([
+          `W/"${sidecarInstanceId}-2"`,
+          `W/"${sidecarInstanceId}-2"`,
+        ]),
       );
       expect(client.getPollDebugStats().parsedSessionViews).toBe(
         parsedAfterTargeted,

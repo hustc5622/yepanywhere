@@ -904,12 +904,11 @@ export class CodexBridgeService implements CodexBridgeController {
       return;
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
-      writeJson(res, 200, { sessions: this.listSessions() });
-      return;
-    }
-    if (req.method === "GET" && url.pathname === "/session-views") {
-      const revision = this.eventNotifier.getRevision();
-      const etag = `W/"${revision}"`;
+      // Same freshness rule as /session-views: both are projections of the
+      // session map. This list is fetched on demand (session-locator misses,
+      // the main server's /api/codex-bridge/sessions), and at ~100 KiB an
+      // unconditional response was a full re-parse per lookup.
+      const etag = this.eventNotifier.snapshotEtag();
       res.setHeader("etag", etag);
       res.setHeader("cache-control", "no-cache");
       if (req.headers["if-none-match"] === etag) {
@@ -917,7 +916,24 @@ export class CodexBridgeService implements CodexBridgeController {
         res.end();
         return;
       }
-      writeJson(res, 200, { revision, sessions: this.listSessionViews() });
+      writeJson(res, 200, { sessions: this.listSessions() });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/session-views") {
+      const revision = this.eventNotifier.getRevision();
+      const etag = this.eventNotifier.snapshotEtag(revision);
+      res.setHeader("etag", etag);
+      res.setHeader("cache-control", "no-cache");
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304);
+        res.end();
+        return;
+      }
+      writeJson(res, 200, {
+        instanceId: this.eventNotifier.getInstanceId(),
+        revision,
+        sessions: this.listSessionViews(),
+      });
       return;
     }
 

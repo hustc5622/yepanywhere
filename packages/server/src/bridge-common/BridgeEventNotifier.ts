@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ServerResponse } from "node:http";
 
 const DEFAULT_DEBOUNCE_MS = 50;
@@ -21,9 +22,35 @@ export class BridgeEventNotifier {
   private revision = 0;
   private readonly changedSessionIds = new Set<string>();
   private pendingBaseRevision: number | null = null;
+  /**
+   * Per-process identity, regenerated on every sidecar start.
+   *
+   * The revision alone cannot key an HTTP cache. `notify()` is the only thing
+   * that advances it, but a restarting sidecar repopulates its session map
+   * from persisted state *without* notifying, so revision 0 can describe two
+   * different session lists across a restart. A client holding `W/"0"` would
+   * then get a 304 for a snapshot it has never seen. Mixing this id into the
+   * tag makes any restart a guaranteed cache miss.
+   */
+  private readonly instanceId = randomUUID().slice(0, 8);
 
   getRevision(): number {
     return this.revision;
+  }
+
+  getInstanceId(): string {
+    return this.instanceId;
+  }
+
+  /**
+   * Entity tag for any endpoint whose body is derived from the session map.
+   *
+   * Shared so `/sessions` and `/session-views` cannot drift into different
+   * freshness rules: both are projections of the same records, so both are
+   * invalidated by exactly the same events.
+   */
+  snapshotEtag(revision: number = this.revision): string {
+    return `W/"${this.instanceId}-${revision}"`;
   }
 
   attach(res: ServerResponse): void {
@@ -55,6 +82,7 @@ export class BridgeEventNotifier {
     this.notifyTimer = setTimeout(() => {
       this.notifyTimer = null;
       const frame = `event: changed\ndata: ${JSON.stringify({
+        instanceId: this.instanceId,
         revision: this.revision,
         baseRevision: this.pendingBaseRevision ?? this.revision,
         changedSessionIds: Array.from(this.changedSessionIds),

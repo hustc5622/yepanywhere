@@ -56,6 +56,7 @@ export class CodexBridgeHttpClient
 {
   private lastSessionViewsEtag: string | undefined;
   private lastRevision: number | undefined;
+  private lastInstanceId: string | undefined;
   private readonly pollDebugStats: CodexBridgePollDebugStats = {
     polls: 0,
     snapshotBytes: 0,
@@ -160,7 +161,12 @@ export class CodexBridgeHttpClient
       changeSignal?.changedSessionIds.length &&
       changeSignal.revision !== undefined &&
       changeSignal.baseRevision !== undefined &&
-      changeSignal.baseRevision === this.lastRevision
+      changeSignal.baseRevision === this.lastRevision &&
+      // A restarted sidecar restarts its revision counter too, so a matching
+      // baseRevision across instances would authorize a targeted refresh
+      // against a catalog this client has never seen.
+      changeSignal.instanceId !== undefined &&
+      changeSignal.instanceId === this.lastInstanceId
     ) {
       const targeted = await this.collectTargetedEntries(
         changeSignal.changedSessionIds,
@@ -173,7 +179,7 @@ export class CodexBridgeHttpClient
       // The sidecar snapshot ETag is defined by this same monotonically
       // increasing revision. Advancing both prevents the next interval from
       // re-downloading the full catalog after a successful targeted refresh.
-      this.lastSessionViewsEtag = `W/"${changeSignal.revision}"`;
+      this.lastSessionViewsEtag = `W/"${changeSignal.instanceId}-${changeSignal.revision}"`;
       this.recordPollSnapshot(
         reason,
         targeted.responseBytes,
@@ -191,6 +197,7 @@ export class CodexBridgeHttpClient
     }
 
     const response = await this.fetchJsonResponse<{
+      instanceId?: string;
       revision?: number;
       sessions?: CodexBridgeSessionView[];
     }>("/session-views", {
@@ -212,6 +219,7 @@ export class CodexBridgeHttpClient
       return this.knownPollEntries();
     }
     this.lastRevision = viewsData.revision;
+    this.lastInstanceId = viewsData.instanceId;
     const views = this.normalizePollViews(viewsData.sessions ?? []);
     const entries = this.pollEntriesFromViews(views);
     this.recordPollSnapshot(
