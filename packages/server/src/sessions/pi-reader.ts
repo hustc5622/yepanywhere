@@ -20,6 +20,7 @@ import { convertPiSession, derivePiSession } from "./normalization.js";
 import {
   PI_SESSIONS_DIR,
   type PiSessionFileRecord,
+  invalidatePiSessionFileCatalog,
   listPiSessionFiles,
   readFirstJsonlRecord,
 } from "./pi-files.js";
@@ -47,7 +48,6 @@ export interface PiSessionReaderOptions {
 interface ParsedPiSessionCacheEntry {
   sessionId: string;
   content: PiSessionContent;
-  at: number;
   mtime: number;
   size: number;
   filePath: string;
@@ -96,8 +96,7 @@ export class PiSessionReader implements ISessionReader {
     Promise<PiSessionContent | null>
   >();
   private parsedCacheGeneration = 0;
-
-  private static readonly PARSED_CACHE_TTL_MS = 15_000;
+  private readonly parsedFileGenerations = new Map<string, number>();
 
   constructor(options: PiSessionReaderOptions = {}) {
     this.sessionsDir = options.sessionsDir ?? PI_SESSIONS_DIR;
@@ -106,10 +105,34 @@ export class PiSessionReader implements ISessionReader {
   }
 
   invalidateCache(): void {
+    invalidatePiSessionFileCatalog(this.sessionsDir);
     this.cache = null;
     this.parsedCacheGeneration += 1;
+    this.parsedFileGenerations.clear();
     this.parsedCache.clear();
     this.parsedInFlight.clear();
+  }
+
+  /** Invalidate only the Pi file that changed, preserving other parsed sessions. */
+  invalidateFile(filePath: string): void {
+    invalidatePiSessionFileCatalog(this.sessionsDir);
+    const targetPath = resolve(filePath);
+    this.cache = null;
+    this.parsedFileGenerations.set(
+      targetPath,
+      (this.parsedFileGenerations.get(targetPath) ?? 0) + 1,
+    );
+    for (const [cacheKey, cached] of this.parsedCache) {
+      if (resolve(cached.filePath) === targetPath) {
+        this.parsedCache.delete(cacheKey);
+      }
+    }
+    for (const cacheKey of this.parsedInFlight.keys()) {
+      const [, cachedPath] = cacheKey.split("\u0000");
+      if (cachedPath && resolve(cachedPath) === targetPath) {
+        this.parsedInFlight.delete(cacheKey);
+      }
+    }
   }
 
   async listSessions(projectId: UrlProjectId): Promise<SessionSummary[]> {
@@ -139,7 +162,10 @@ export class PiSessionReader implements ISessionReader {
     }
 
     try {
-      const parsed = await this.getParsedSession(record);
+      // Summary derivation never needs inline image bytes. Match the client's
+      // normal first-load projection so list/detail requests can share one
+      // parsed snapshot and one in-flight read.
+      const parsed = await this.getParsedSession(record, { deferMedia: true });
       return parsed
         ? await this.buildSummary(sessionId, projectId, record, parsed)
         : null;
@@ -429,6 +455,9 @@ export class PiSessionReader implements ISessionReader {
     const deferMedia = options.deferMedia === true;
     const deferThinking = options.deferThinking === true;
     const generation = this.parsedCacheGeneration;
+    const resolvedFilePath = resolve(record.filePath);
+    const fileGeneration =
+      this.parsedFileGenerations.get(resolvedFilePath) ?? 0;
     const cacheKey = [
       record.sessionId,
       record.filePath,
@@ -437,11 +466,8 @@ export class PiSessionReader implements ISessionReader {
       deferMedia ? "media" : "full-media",
       deferThinking ? "thinking" : "full-thinking",
     ].join("\u0000");
-    const now = Date.now();
     const cached = this.parsedCache.get(cacheKey);
-    if (cached && now - cached.at < PiSessionReader.PARSED_CACHE_TTL_MS) {
-      return cached.content;
-    }
+    if (cached) return cached.content;
 
     const inFlight = this.parsedInFlight.get(cacheKey);
     if (inFlight) return inFlight;
@@ -451,18 +477,21 @@ export class PiSessionReader implements ISessionReader {
         parsePiSessionJsonl(content, { deferMedia, deferThinking }),
       )
       .then((parsed) => {
-        if (parsed && generation === this.parsedCacheGeneration) {
+        const canCache =
+          generation === this.parsedCacheGeneration &&
+          fileGeneration ===
+            (this.parsedFileGenerations.get(resolvedFilePath) ?? 0);
+        if (parsed && canCache) {
           this.parsedCache.set(cacheKey, {
             sessionId: record.sessionId,
             content: parsed,
-            at: Date.now(),
             mtime: record.mtime,
             size: record.size,
             filePath: record.filePath,
             deferMedia,
             deferThinking,
           });
-        } else if (!parsed && generation === this.parsedCacheGeneration) {
+        } else if (!parsed && canCache) {
           this.parsedCache.delete(cacheKey);
         }
         return parsed;
@@ -499,11 +528,16 @@ export class PiSessionReader implements ISessionReader {
     if (invalidated) this.parsedCacheGeneration += 1;
   }
 
-  private async scan(force = false): Promise<PiSessionFileRecord[]> {
-    if (!force && this.cache && Date.now() - this.cache.at < 5_000) {
+  private async scan(
+    forceLocal = false,
+    forceCatalog = false,
+  ): Promise<PiSessionFileRecord[]> {
+    if (!forceLocal && this.cache && Date.now() - this.cache.at < 5_000) {
       return this.cache.records;
     }
-    const records = await listPiSessionFiles(this.sessionsDir);
+    const records = await listPiSessionFiles(this.sessionsDir, {
+      force: forceCatalog,
+    });
     this.cache = { records, at: Date.now() };
     this.invalidateParsedCacheForRecords(records);
     return records;
@@ -522,7 +556,7 @@ export class PiSessionReader implements ISessionReader {
     // still hold the source-session scan from the request that initiated that
     // fork, so retry misses without waiting for the short list cache to expire.
     return (
-      (await this.scan(true)).find(
+      (await this.scan(true, true)).find(
         (candidate) => candidate.sessionId === sessionId,
       ) ?? null
     );

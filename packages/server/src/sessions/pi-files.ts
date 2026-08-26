@@ -92,31 +92,52 @@ const PI_TERMINAL_STOP_REASONS = new Set([
  * append-only log is the only evidence that a turn is running, so callers use
  * this to decide liveness when a process probe reports nothing.
  *
- * Only the last bytes are read: a session log grows into the megabytes, and the
- * newest appended entry is all that matters here. Reading backwards also keeps
- * the answer correct for a log holding several branches, because the physically
- * last entry is always the most recent write regardless of which branch it is
- * on.
+ * The file is read backwards from a small tail chunk and expands only far
+ * enough to capture the newest conversation entry. This keeps ordinary reads
+ * bounded while still handling a single JSONL record containing a large image,
+ * tool result, or reasoning block. Reading backwards also keeps the answer
+ * correct for a log holding several branches, because the physically last entry
+ * is always the most recent write regardless of which branch it is on.
  */
 export async function readPiSessionTailActivity(
   filePath: string,
 ): Promise<PiSessionTailActivity> {
-  let tail: string;
   try {
     const handle = await open(filePath, "r");
     try {
       const { size } = await handle.stat();
-      const start = Math.max(0, size - PI_TAIL_READ_BYTES);
-      const length = Math.min(size, PI_TAIL_READ_BYTES);
-      if (length === 0) return "unknown";
-      const buffer = Buffer.alloc(length);
-      const { bytesRead } = await handle.read(buffer, 0, length, start);
-      tail = buffer.subarray(0, bytesRead).toString("utf8");
-      // A non-zero offset almost certainly lands mid-line; that partial first
-      // line is not parseable and must not be mistaken for a record.
-      if (start > 0) {
-        const firstNewline = tail.indexOf("\n");
-        tail = firstNewline >= 0 ? tail.slice(firstNewline + 1) : "";
+      if (size === 0) return "unknown";
+
+      // Read backwards in bounded chunks. `carry` holds the beginning of the
+      // suffix line until its preceding newline is found, so a single JSONL
+      // record larger than the initial 256 KiB window is still classified
+      // correctly. Keeping bytes (rather than decoded strings) also avoids
+      // corrupting UTF-8 when a chunk boundary splits a multibyte character.
+      let position = size;
+      let carry = Buffer.alloc(0);
+      let nextReadBytes = PI_TAIL_READ_BYTES;
+      while (position > 0) {
+        const start = Math.max(0, position - nextReadBytes);
+        const length = position - start;
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, start);
+        const combined = Buffer.concat([buffer.subarray(0, bytesRead), carry]);
+        const firstNewline = start === 0 ? -1 : combined.indexOf(0x0a);
+        const completeLines =
+          start === 0
+            ? combined
+            : firstNewline >= 0
+              ? combined.subarray(firstNewline + 1)
+              : Buffer.alloc(0);
+
+        const activity = classifyPiTailLines(completeLines.toString("utf8"));
+        if (activity) return activity;
+
+        if (start === 0) return "unknown";
+        carry =
+          firstNewline >= 0 ? combined.subarray(0, firstNewline) : combined;
+        position = start;
+        nextReadBytes *= 2;
       }
     } finally {
       await handle.close();
@@ -124,7 +145,10 @@ export async function readPiSessionTailActivity(
   } catch {
     return "unknown";
   }
+  return "unknown";
+}
 
+function classifyPiTailLines(tail: string): PiSessionTailActivity | null {
   const lines = tail.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trim();
@@ -138,7 +162,7 @@ export async function readPiSessionTailActivity(
     const activity = classifyPiTailEntry(entry);
     if (activity) return activity;
   }
-  return "unknown";
+  return null;
 }
 
 function classifyPiTailEntry(entry: unknown): PiSessionTailActivity | null {
@@ -187,8 +211,43 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
   return paths;
 }
 
-export async function listPiSessionFiles(
+interface PiSessionFileCatalogState {
+  records?: PiSessionFileRecord[];
+  at: number;
+  generation: number;
+  inFlight?: {
+    generation: number;
+    promise: Promise<PiSessionFileRecord[]>;
+  };
+}
+
+const PI_SESSION_FILE_CATALOG_TTL_MS = 5_000;
+const piSessionFileCatalogs = new Map<string, PiSessionFileCatalogState>();
+
+function getPiSessionFileCatalogState(
+  sessionsDir: string,
+): PiSessionFileCatalogState {
+  const key = resolve(sessionsDir);
+  let state = piSessionFileCatalogs.get(key);
+  if (!state) {
+    state = { at: 0, generation: 0 };
+    piSessionFileCatalogs.set(key, state);
+  }
+  return state;
+}
+
+/** Invalidate the provider-wide Pi file catalog after a watcher event. */
+export function invalidatePiSessionFileCatalog(
   sessionsDir = PI_SESSIONS_DIR,
+): void {
+  const state = getPiSessionFileCatalogState(sessionsDir);
+  state.generation += 1;
+  state.records = undefined;
+  state.at = 0;
+}
+
+async function scanPiSessionFiles(
+  sessionsDir: string,
 ): Promise<PiSessionFileRecord[]> {
   const files = await collectJsonlFiles(sessionsDir);
   const records = await Promise.all(
@@ -221,10 +280,54 @@ export async function listPiSessionFiles(
   );
 }
 
+export async function listPiSessionFiles(
+  sessionsDir = PI_SESSIONS_DIR,
+  options: { force?: boolean } = {},
+): Promise<PiSessionFileRecord[]> {
+  const state = getPiSessionFileCatalogState(sessionsDir);
+  if (options.force) {
+    state.generation += 1;
+    state.records = undefined;
+    state.at = 0;
+  }
+
+  if (state.records && Date.now() - state.at < PI_SESSION_FILE_CATALOG_TTL_MS) {
+    return state.records;
+  }
+
+  const generation = state.generation;
+  if (state.inFlight?.generation === generation) {
+    return state.inFlight.promise;
+  }
+
+  const promise = scanPiSessionFiles(sessionsDir).then((records) => {
+    if (state.generation !== generation) {
+      // A watcher invalidated the catalog while this scan was reading. Do not
+      // hand the stale array to a project reader (which would cache it again);
+      // join or start the scan for the new generation instead.
+      return listPiSessionFiles(sessionsDir);
+    }
+    state.records = records;
+    state.at = Date.now();
+    return records;
+  });
+  state.inFlight = { generation, promise };
+  void promise.finally(() => {
+    if (state.inFlight?.promise === promise) state.inFlight = undefined;
+  });
+  return promise;
+}
+
 export async function findPiSessionFile(
   sessionId: string,
   sessionsDir = PI_SESSIONS_DIR,
 ): Promise<PiSessionFileRecord | null> {
   const records = await listPiSessionFiles(sessionsDir);
-  return records.find((record) => record.sessionId === sessionId) ?? null;
+  const record = records.find((candidate) => candidate.sessionId === sessionId);
+  if (record) return record;
+  return (
+    (await listPiSessionFiles(sessionsDir, { force: true })).find(
+      (candidate) => candidate.sessionId === sessionId,
+    ) ?? null
+  );
 }

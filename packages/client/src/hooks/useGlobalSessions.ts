@@ -521,7 +521,9 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       prev.map((session) => {
         if (session.id !== event.sessionId) return session;
         const activity =
-          event.ownership.owner === "none" ? undefined : session.activity;
+          event.ownership.owner === "none"
+            ? undefined
+            : (event.activity ?? session.activity);
         return {
           ...session,
           ownership: event.ownership,
@@ -633,6 +635,8 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
           model: event.session.model,
           reasoningEffort: event.session.reasoningEffort,
           serviceTier: event.session.serviceTier,
+          lastTurnStatus: event.session.lastTurnStatus,
+          lastErrorMessage: event.session.lastErrorMessage,
         };
 
         return [globalSession, ...prev];
@@ -775,6 +779,12 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
             }),
             ...(event.serviceTier !== undefined && {
               serviceTier: event.serviceTier,
+            }),
+            ...(event.lastTurnStatus !== undefined && {
+              lastTurnStatus: event.lastTurnStatus ?? undefined,
+            }),
+            ...(event.lastErrorMessage !== undefined && {
+              lastErrorMessage: event.lastErrorMessage ?? undefined,
             }),
           };
         });

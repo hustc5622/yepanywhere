@@ -59,6 +59,10 @@ export interface CachedSessionSummary {
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;
+  /** Terminal/interrupted status derived from the newest provider turn. */
+  lastTurnStatus?: SessionSummary["lastTurnStatus"];
+  /** Provider error associated with the newest failed turn. */
+  lastErrorMessage?: string;
   /** Launcher identifier from provider metadata (e.g. "Codex Desktop") */
   originator?: string;
   /** Session source from provider metadata (e.g. "appServer", "exec") */
@@ -90,6 +94,15 @@ export interface SessionIndexState {
 }
 
 const CURRENT_VERSION = 11;
+
+function needsPiTurnStatusMigration(index: SessionIndexState): boolean {
+  return Object.values(index.sessions).some(
+    (session) =>
+      session.provider === "pi" &&
+      session.messageCount > 0 &&
+      !Object.hasOwn(session, "lastTurnStatus"),
+  );
+}
 
 interface SessionFileStat {
   mtimeMs: number;
@@ -361,7 +374,8 @@ export class SessionIndexService implements ISessionIndexService {
       // Validate version and projectId
       if (
         parsed.version === CURRENT_VERSION &&
-        parsed.projectId === projectId
+        parsed.projectId === projectId &&
+        !needsPiTurnStatusMigration(parsed)
       ) {
         this.indexCache.set(cacheKey, parsed);
         this.evictIfNeeded();
@@ -622,6 +636,8 @@ export class SessionIndexService implements ISessionIndexService {
       model: cached.model,
       reasoningEffort: cached.reasoningEffort,
       serviceTier: cached.serviceTier,
+      lastTurnStatus: cached.lastTurnStatus,
+      lastErrorMessage: cached.lastErrorMessage,
       originator: cached.originator,
       source: cached.source,
       createdBy: cached.createdBy,
@@ -654,6 +670,8 @@ export class SessionIndexService implements ISessionIndexService {
       model: summary.model,
       reasoningEffort: summary.reasoningEffort,
       serviceTier: summary.serviceTier,
+      lastTurnStatus: summary.lastTurnStatus,
+      lastErrorMessage: summary.lastErrorMessage,
       originator: summary.originator,
       source: summary.source,
       createdBy: summary.createdBy,

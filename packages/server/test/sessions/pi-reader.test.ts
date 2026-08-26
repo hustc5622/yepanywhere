@@ -295,4 +295,71 @@ describe("Pi native session reader", () => {
       }),
     ]);
   });
+
+  it("keeps unchanged parsed sessions cached when another Pi file changes", async () => {
+    const sessionsDir = join(tmpdir(), `pi-sessions-${randomUUID()}`);
+    const projectPath = join(tmpdir(), `pi-project-${randomUUID()}`);
+    const projectDir = join(sessionsDir, "--pi-cache-project--");
+    tempDirs.push(sessionsDir);
+    await mkdir(projectDir, { recursive: true });
+
+    const makeRecords = (sessionId: string, answer = "done") => [
+      {
+        type: "session",
+        version: 3,
+        id: sessionId,
+        timestamp: "2026-08-25T01:00:00.000Z",
+        cwd: projectPath,
+      },
+      {
+        type: "message",
+        id: `${sessionId}-user`,
+        parentId: null,
+        timestamp: "2026-08-25T01:00:01.000Z",
+        message: { role: "user", content: "prompt", timestamp: 1 },
+      },
+      {
+        type: "message",
+        id: `${sessionId}-assistant`,
+        parentId: `${sessionId}-user`,
+        timestamp: "2026-08-25T01:00:02.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: answer }],
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      },
+    ];
+
+    const firstPath = join(projectDir, "first.jsonl");
+    const secondPath = join(projectDir, "second.jsonl");
+    await Promise.all([
+      writeFile(firstPath, jsonl(makeRecords("first"))),
+      writeFile(secondPath, jsonl(makeRecords("second"))),
+    ]);
+
+    const reader = new PiSessionReader({ sessionsDir, projectPath });
+    const projectId = encodeProjectId(projectPath);
+    const firstLoad = await reader.getSession("second", projectId, undefined, {
+      deferMedia: true,
+    });
+    expect(firstLoad).not.toBeNull();
+
+    await writeFile(firstPath, jsonl(makeRecords("first", "changed")));
+    reader.invalidateFile(firstPath);
+
+    const secondLoad = await reader.getSession("second", projectId, undefined, {
+      deferMedia: true,
+    });
+    expect(secondLoad).not.toBeNull();
+    expect(secondLoad?.data.provider).toBe("pi");
+    expect(firstLoad?.data.provider).toBe("pi");
+    if (
+      firstLoad?.data.provider === "pi" &&
+      secondLoad?.data.provider === "pi"
+    ) {
+      expect(secondLoad.data.session).toBe(firstLoad.data.session);
+    }
+  });
 });

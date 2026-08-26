@@ -324,14 +324,17 @@ export function parsePiSessionJsonl(
     }
     const entry = parsePiSessionEntry(value);
     if (entry) {
-      entries.push(
-        entry.type === "message" && "message" in entry
-          ? {
-              ...entry,
-              message: deferPiMessage(entry.message as PiAgentMessage, options),
-            }
-          : entry,
-      );
+      if (entry.type === "message" && "message" in entry) {
+        const message = entry.message as PiAgentMessage;
+        const projectedMessage = deferPiMessage(message, options);
+        entries.push(
+          projectedMessage === message
+            ? entry
+            : { ...entry, message: projectedMessage },
+        );
+      } else {
+        entries.push(entry);
+      }
     }
   }
 

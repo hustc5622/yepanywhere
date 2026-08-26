@@ -15,7 +15,7 @@ import {
   processStateFromProcessEvent,
   reconcilePendingMessagesWithConfirmedMessages,
   sessionTurnHealthFromSession,
-  shouldDeferKimiPersistedSync,
+  shouldDeferUncorrelatedPersistedSync,
   shouldFetchSessionMetadataForUpdate,
   shouldRefreshFullPersistedSession,
   shouldRefreshSettledAuthoritativeSnapshot,
@@ -284,22 +284,35 @@ describe("shouldRefreshSettledAuthoritativeSnapshot", () => {
   );
 });
 
-describe("shouldDeferKimiPersistedSync", () => {
-  it.each(["in-turn", "waiting-input", "hold", undefined] as const)(
-    "defers an owned Kimi snapshot while state=%s",
-    (state) => {
-      expect(shouldDeferKimiPersistedSync("kimi", "self", state)).toBe(true);
+describe("shouldDeferUncorrelatedPersistedSync", () => {
+  it.each(["pi", "kimi"] as const)(
+    "defers an owned %s snapshot until the turn is idle",
+    (provider) => {
+      for (const state of [
+        "in-turn",
+        "waiting-input",
+        "hold",
+        undefined,
+      ] as const) {
+        expect(
+          shouldDeferUncorrelatedPersistedSync(provider, "self", state),
+        ).toBe(true);
+      }
     },
   );
 
   it.each([
     ["kimi", "self", "idle"],
+    ["pi", "self", "idle"],
     ["kimi", "none", "in-turn"],
-    ["pi", "self", "in-turn"],
+    ["pi", "external", "in-turn"],
+    ["claude", "self", "in-turn"],
   ] as const)(
     "does not defer provider=%s owner=%s state=%s",
     (provider, owner, state) => {
-      expect(shouldDeferKimiPersistedSync(provider, owner, state)).toBe(false);
+      expect(shouldDeferUncorrelatedPersistedSync(provider, owner, state)).toBe(
+        false,
+      );
     },
   );
 });

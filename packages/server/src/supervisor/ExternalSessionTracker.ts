@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import {
+  type AgentActivity,
   type ContextCompactEvent,
   type ContextCumulativeUsage,
   type DirProjectId,
@@ -11,7 +12,10 @@ import {
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { decodeProjectId, encodeProjectId } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
-import { readPiSessionTailActivity } from "../sessions/pi-files.js";
+import {
+  type PiSessionTailActivity,
+  readPiSessionTailActivity,
+} from "../sessions/pi-files.js";
 import { readFirstLine } from "../utils/jsonl.js";
 import { BatchProcessor } from "../watcher/BatchProcessor.js";
 import type {
@@ -44,10 +48,12 @@ interface ExternalSessionInfo {
   projectId?: UrlProjectId;
   /** Session provider */
   provider: FileChangeEvent["provider"];
+  /** Activity proven for this exact session, not inferred from project ownership. */
+  activity?: AgentActivity;
   /**
    * Session log path, kept for providers whose liveness can be read back out
    * of the log when the process table has nothing to show (see
-   * {@link ExternalSessionTracker.hasLiveTurnEvidence}).
+   * {@link ExternalSessionTracker.getPiTailActivity}).
    */
   sessionFilePath?: string;
   timeoutId: ReturnType<typeof setTimeout>;
@@ -57,6 +63,8 @@ interface ExternalSessionInfo {
 /** Everything needed to decide whether one unowned session is externally active. */
 interface ExternalSessionCandidate {
   provider: FileChangeEvent["provider"];
+  /** Activity proven for this exact session, not inferred from project ownership. */
+  activity?: AgentActivity;
   dirProjectId?: DirProjectId;
   projectId?: UrlProjectId;
   sessionFilePath?: string;
@@ -149,6 +157,8 @@ export class ExternalSessionTracker {
       model?: string;
       reasoningEffort?: string;
       serviceTier?: string;
+      lastTurnStatus?: SessionSummary["lastTurnStatus"];
+      lastErrorMessage?: string;
     }
   > = new Map();
   private missingProjectWarningTimestamps: Map<string, number> = new Map();
@@ -207,6 +217,8 @@ export class ExternalSessionTracker {
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,
+              lastTurnStatus: summary.lastTurnStatus,
+              lastErrorMessage: summary.lastErrorMessage,
             });
             this.createdSessions.add(sessionId);
 
@@ -232,6 +244,8 @@ export class ExternalSessionTracker {
                 model: summary.model,
                 reasoningEffort: summary.reasoningEffort,
                 serviceTier: summary.serviceTier,
+                lastTurnStatus: summary.lastTurnStatus ?? null,
+                lastErrorMessage: summary.lastErrorMessage ?? null,
                 timestamp: now,
               };
               this.eventBus.emit(event);
@@ -264,6 +278,8 @@ export class ExternalSessionTracker {
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,
+              lastTurnStatus: summary.lastTurnStatus,
+              lastErrorMessage: summary.lastErrorMessage,
             });
           }
         } else {
@@ -297,6 +313,10 @@ export class ExternalSessionTracker {
             cached?.reasoningEffort !== summary.reasoningEffort;
           const serviceTierChanged =
             cached?.serviceTier !== summary.serviceTier;
+          const lastTurnStatusChanged =
+            cached?.lastTurnStatus !== summary.lastTurnStatus;
+          const lastErrorMessageChanged =
+            cached?.lastErrorMessage !== summary.lastErrorMessage;
 
           if (
             titleChanged ||
@@ -307,7 +327,9 @@ export class ExternalSessionTracker {
             compactEventsChanged ||
             modelChanged ||
             reasoningEffortChanged ||
-            serviceTierChanged
+            serviceTierChanged ||
+            lastTurnStatusChanged ||
+            lastErrorMessageChanged
           ) {
             const event: SessionUpdatedEvent = {
               type: "session-updated",
@@ -323,6 +345,8 @@ export class ExternalSessionTracker {
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,
+              lastTurnStatus: summary.lastTurnStatus ?? null,
+              lastErrorMessage: summary.lastErrorMessage ?? null,
               timestamp: now,
             };
             this.eventBus.emit(event);
@@ -339,6 +363,8 @@ export class ExternalSessionTracker {
               model: summary.model,
               reasoningEffort: summary.reasoningEffort,
               serviceTier: summary.serviceTier,
+              lastTurnStatus: summary.lastTurnStatus,
+              lastErrorMessage: summary.lastErrorMessage,
             });
           }
         }
@@ -371,6 +397,11 @@ export class ExternalSessionTracker {
    */
   isExternal(sessionId: string): boolean {
     return this.externalSessions.has(sessionId);
+  }
+
+  /** Activity that is proven for this exact external session. */
+  getExternalActivity(sessionId: string): AgentActivity | undefined {
+    return this.externalSessions.get(sessionId)?.activity;
   }
 
   /**
@@ -765,12 +796,21 @@ export class ExternalSessionTracker {
     sessionId: string,
     info: ExternalSessionCandidate,
   ): Promise<void> {
-    const activeExternalProcess = await this.checkExternalProcessForInfo(info);
+    const [activeExternalProcess, piTailActivity] = await Promise.all([
+      this.checkExternalProcessForInfo(info),
+      this.getPiTailActivity(info),
+    ]);
 
-    if (
-      activeExternalProcess === false &&
-      !(await this.hasLiveTurnEvidence(info))
-    ) {
+    // A Pi process can sit idle in the same cwd indefinitely, and the process
+    // probe cannot identify which native session it has open. A terminal Pi
+    // log tail is therefore the authoritative turn verdict for this session.
+    if (piTailActivity === "settled") {
+      this.removeExternal(sessionId);
+      this.enqueueSessionParse(sessionId, info);
+      return;
+    }
+
+    if (activeExternalProcess === false && piTailActivity !== "in-flight") {
       this.removeExternal(sessionId);
       this.enqueueSessionParse(sessionId, info);
       return;
@@ -778,7 +818,10 @@ export class ExternalSessionTracker {
 
     // If probing is unavailable (null), keep the previous behavior and treat
     // recent external file activity as active until the decay timeout expires.
-    this.markExternal(sessionId, info);
+    this.markExternal(
+      sessionId,
+      piTailActivity === "in-flight" ? { ...info, activity: "in-turn" } : info,
+    );
   }
 
   /**
@@ -798,13 +841,11 @@ export class ExternalSessionTracker {
    * Periodic validation bounds how long that evidence remains authoritative
    * without another file change, so a host that dies mid-turn is retired.
    */
-  private async hasLiveTurnEvidence(
+  private async getPiTailActivity(
     info: ExternalSessionCandidate,
-  ): Promise<boolean> {
-    if (info.provider !== "pi" || !info.sessionFilePath) return false;
-    return (
-      (await readPiSessionTailActivity(info.sessionFilePath)) === "in-flight"
-    );
+  ): Promise<PiSessionTailActivity> {
+    if (info.provider !== "pi" || !info.sessionFilePath) return "unknown";
+    return readPiSessionTailActivity(info.sessionFilePath);
   }
 
   /**
@@ -814,11 +855,12 @@ export class ExternalSessionTracker {
    */
   private async hasRecentLiveTurnEvidence(
     info: ExternalSessionInfo,
+    activity?: PiSessionTailActivity,
   ): Promise<boolean> {
     if (Date.now() - info.lastActivity.getTime() >= this.piInFlightStaleMs) {
       return false;
     }
-    return this.hasLiveTurnEvidence(info);
+    return (activity ?? (await this.getPiTailActivity(info))) === "in-flight";
   }
 
   private enqueueSessionParse(
@@ -851,6 +893,7 @@ export class ExternalSessionTracker {
       existing.lastActivity = now;
       existing.sessionFilePath =
         info.sessionFilePath ?? existing.sessionFilePath;
+      existing.activity = info.activity ?? existing.activity;
       existing.timeoutId = this.createDecayTimeout(sessionId);
       existing.validationTimeoutId =
         this.createProcessValidationTimeout(sessionId);
@@ -864,6 +907,7 @@ export class ExternalSessionTracker {
         dirProjectId: info.dirProjectId,
         projectId: info.projectId,
         provider: info.provider,
+        activity: info.activity,
         sessionFilePath: info.sessionFilePath,
         timeoutId: this.createDecayTimeout(sessionId),
         validationTimeoutId: null,
@@ -908,12 +952,19 @@ export class ExternalSessionTracker {
     const info = this.externalSessions.get(sessionId);
     if (!info) return;
 
-    const activeExternalProcess = await this.checkExternalProcessForInfo(info);
+    const [activeExternalProcess, piTailActivity] = await Promise.all([
+      this.checkExternalProcessForInfo(info),
+      this.getPiTailActivity(info),
+    ]);
+    if (piTailActivity === "settled") {
+      this.removeExternal(sessionId);
+      return;
+    }
     // A long thinking phase writes nothing to the log, so decay must also ask
     // whether the last recorded turn ever finished before retiring a session.
     if (
       activeExternalProcess === true ||
-      (await this.hasRecentLiveTurnEvidence(info))
+      (await this.hasRecentLiveTurnEvidence(info, piTailActivity))
     ) {
       info.timeoutId = this.createDecayTimeout(sessionId);
       return;
@@ -936,10 +987,17 @@ export class ExternalSessionTracker {
     const info = this.externalSessions.get(sessionId);
     if (!info) return;
 
-    const activeExternalProcess = await this.checkExternalProcessForInfo(info);
+    const [activeExternalProcess, piTailActivity] = await Promise.all([
+      this.checkExternalProcessForInfo(info),
+      this.getPiTailActivity(info),
+    ]);
+    if (piTailActivity === "settled") {
+      this.removeExternal(sessionId);
+      return;
+    }
     if (
       activeExternalProcess === false &&
-      !(await this.hasRecentLiveTurnEvidence(info))
+      !(await this.hasRecentLiveTurnEvidence(info, piTailActivity))
     ) {
       this.removeExternal(sessionId);
       return;
@@ -981,6 +1039,9 @@ export class ExternalSessionTracker {
         sessionId,
         projectId: info.projectId,
         ownership,
+        ...(ownership.owner === "external" && info.activity
+          ? { activity: info.activity }
+          : {}),
         timestamp: new Date().toISOString(),
       };
       this.eventBus.emit(event);
@@ -1006,6 +1067,9 @@ export class ExternalSessionTracker {
       sessionId,
       projectId: project.id,
       ownership,
+      ...(ownership.owner === "external" && info.activity
+        ? { activity: info.activity }
+        : {}),
       timestamp: new Date().toISOString(),
     };
 

@@ -880,4 +880,64 @@ describe("useSessionMessages Kimi authoritative snapshot sync", () => {
       result.current.messages.every((item) => item._source === "jsonl"),
     ).toBe(true);
   });
+
+  it("replaces Pi live UUID copies with the native entry order", async () => {
+    const persistedFirst = message("pi-entry-user-1", {
+      timestamp: "2026-08-25T01:00:00.000Z",
+      message: { role: "user", content: "first" },
+    });
+    mockGetSession.mockResolvedValueOnce(
+      sessionResponse("2026-08-25T01:00:00.000Z", [persistedFirst], {
+        provider: "pi",
+      }),
+    );
+
+    const { result } = renderHook(() =>
+      useSessionMessages({ projectId: "project-1", sessionId: "session-1" }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.handleStreamMessageEvent(
+        message("pi-live-user-2", {
+          timestamp: "2026-08-25T01:01:00.000Z",
+          message: { role: "user", content: "second" },
+        }),
+      );
+      result.current.handleStreamMessageEvent(
+        message("pi-live-assistant-2", {
+          type: "assistant",
+          timestamp: "2026-08-25T01:01:01.000Z",
+          message: { role: "assistant", content: "answer" },
+        }),
+      );
+    });
+
+    const persistedSecond = message("pi-entry-user-2", {
+      timestamp: "2026-08-25T01:01:00.000Z",
+      message: { role: "user", content: "second" },
+    });
+    const persistedAnswer = message("pi-entry-assistant-2", {
+      type: "assistant",
+      timestamp: "2026-08-25T01:01:01.000Z",
+      message: { role: "assistant", content: "answer" },
+    });
+    mockGetSession.mockResolvedValueOnce(
+      sessionResponse(
+        "2026-08-25T01:01:01.000Z",
+        [persistedFirst, persistedSecond, persistedAnswer],
+        { provider: "pi" },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.fetchNewMessages();
+    });
+
+    expect(result.current.messages.map((item) => item.id)).toEqual([
+      "pi-entry-user-1",
+      "pi-entry-user-2",
+      "pi-entry-assistant-2",
+    ]);
+  });
 });

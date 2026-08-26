@@ -300,16 +300,20 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
 }
 
 /**
- * Kimi's persisted transcript uses synthesized message ids while its live
- * stream uses process UUIDs. Do not replace the live tail with a potentially
- * lagging full snapshot until the owned turn has settled.
+ * Pi and Kimi persist different message ids from the UUIDs used by their live
+ * streams. Do not merge or replace an owned live tail with a potentially
+ * lagging full snapshot until the turn has settled.
  */
-export function shouldDeferKimiPersistedSync(
+export function shouldDeferUncorrelatedPersistedSync(
   provider: Session["provider"] | undefined,
   owner: SessionStatus["owner"],
   processState: ProcessState | undefined,
 ): boolean {
-  return provider === "kimi" && owner === "self" && processState !== "idle";
+  return (
+    (provider === "pi" || provider === "kimi") &&
+    owner === "self" &&
+    processState !== "idle"
+  );
 }
 
 function normalizeKimiSnapshotText(text: string): string {
@@ -1112,10 +1116,12 @@ export function useSession(
 
   const fetchPersistedSessionChanges = useCallback(() => {
     const provider = session?.provider;
-    // An owned Kimi turn is already supplied by the live stream. Its reader
-    // returns a full snapshot even when afterMessageId is provided, so wait
-    // until idle rather than replacing an in-flight live tail with disk lag.
-    if (shouldDeferKimiPersistedSync(provider, status.owner, processState)) {
+    // Owned Pi/Kimi turns are already supplied by the live stream. Their
+    // persisted ids cannot be correlated with live UUIDs, so wait until idle
+    // rather than replacing an in-flight tail with a lagging full snapshot.
+    if (
+      shouldDeferUncorrelatedPersistedSync(provider, status.owner, processState)
+    ) {
       return;
     }
 
@@ -1197,14 +1203,17 @@ export function useSession(
         setAgentMappingsRevision((revision) => revision + 1);
       }
 
-      // Owned sessions normally stay on their stream. Kimi is the exception:
-      // turn.ended does not await its wire persistence queue, so a main-agent
-      // wire.jsonl event observed after idle is an additional convergence signal.
+      // Owned sessions normally stay on their stream. Pi/Kimi need one
+      // authoritative replacement after idle because live and persisted ids do
+      // not correlate; a later file event is an additional convergence signal.
       if (status.owner === "self") {
         if (historyRewriteRequest) {
           signalHistoryRewriteSync();
         }
-        if (session?.provider === "kimi" && processState === "idle") {
+        if (
+          (session?.provider === "pi" || session?.provider === "kimi") &&
+          processState === "idle"
+        ) {
           scheduleAuthoritativeSnapshotRefresh();
         }
         return;
@@ -1252,8 +1261,30 @@ export function useSession(
           ...(event.serviceTier !== undefined && {
             serviceTier: event.serviceTier,
           }),
+          ...(event.lastTurnStatus !== undefined && {
+            lastTurnStatus: event.lastTurnStatus ?? undefined,
+          }),
+          ...(event.lastErrorMessage !== undefined && {
+            lastErrorMessage: event.lastErrorMessage ?? undefined,
+          }),
         };
       });
+      if (
+        event.lastTurnStatus !== undefined ||
+        event.lastErrorMessage !== undefined
+      ) {
+        const lastTurnStatus = event.lastTurnStatus ?? undefined;
+        const lastErrorMessage = event.lastErrorMessage ?? undefined;
+        setTurnHealth((current) =>
+          lastTurnStatus || lastErrorMessage || current?.retryStatus
+            ? {
+                lastTurnStatus,
+                lastErrorMessage,
+                retryStatus: current?.retryStatus,
+              }
+            : null,
+        );
+      }
 
       // The initial GET can still be in flight when a stream event arrives
       // (e.g. the +1s/+3s reconcile events for a new session). Fetch metadata
@@ -1315,6 +1346,12 @@ export function useSession(
     (event: SessionStatusEvent) => {
       if (event.sessionId === sessionId) {
         setStatus(event.ownership);
+        const nextProcessState = processStateFromActivity(event.activity);
+        if (nextProcessState) {
+          setProcessState(nextProcessState);
+        } else if (event.ownership.owner === "none") {
+          setProcessState("idle");
+        }
       }
     },
     [sessionId],
@@ -1846,9 +1883,9 @@ export function useSession(
         // Sync deferred messages from connected event
         setDeferredMessages(connectedData.deferredMessages ?? []);
 
-        // Fetch messages from JSONL since the last known message. Kimi cannot
-        // provide a real incremental slice, so an active turn stays on the live
-        // stream and replaces itself with the full snapshot only after idle.
+        // Fetch messages from JSONL since the last known message. Pi/Kimi
+        // cannot provide a correlated incremental slice, so an active turn
+        // stays on the stream and replaces itself only after idle.
         // Codex keeps its existing first-connect guard for early normalization.
         const connectedProvider = connectedData.provider ?? session?.provider;
         const isCodexProvider =
@@ -1866,7 +1903,7 @@ export function useSession(
         if (historyRewriteRequest) {
           signalHistoryRewriteSync();
         } else if (
-          shouldDeferKimiPersistedSync(
+          shouldDeferUncorrelatedPersistedSync(
             connectedProvider,
             "self",
             connectedProcessState,
@@ -1874,7 +1911,7 @@ export function useSession(
         ) {
           // The stream will carry the active turn; idle/complete schedules the
           // authoritative replacement and retries until wire.jsonl catches up.
-        } else if (connectedProvider === "kimi") {
+        } else if (connectedProvider === "pi" || connectedProvider === "kimi") {
           scheduleAuthoritativeSnapshotRefresh();
         } else if (!(isFirstConnectedEvent && isCodexProvider)) {
           fetchNewMessages();
@@ -2010,7 +2047,7 @@ export function useSession(
         current === "waiting-input" ? nextState : current,
       );
       if (
-        !shouldDeferKimiPersistedSync(
+        !shouldDeferUncorrelatedPersistedSync(
           session?.provider,
           status.owner,
           nextState,

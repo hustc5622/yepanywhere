@@ -705,7 +705,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         const runtime = deriveSessionRuntime({
           process,
           externalActive: isExternal,
-          externalActivity: bridgedSession?.activity,
+          externalActivity:
+            bridgedSession?.activity ??
+            deps.externalTracker?.getExternalActivity?.(session.id),
           fallbackOwnership: session.ownership,
         });
         const ownership: SessionOwnership = runtime.ownership;

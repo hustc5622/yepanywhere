@@ -974,7 +974,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const runtime = deriveSessionRuntime({
       process,
       externalActive: isExternal,
-      externalActivity: bridgedSession?.activity,
+      externalActivity:
+        bridgedSession?.activity ??
+        deps.externalTracker?.getExternalActivity?.(sessionId),
     });
     const ownership = runtime.ownership;
 
@@ -1873,7 +1875,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const runtime = deriveSessionRuntime({
       process,
       externalActive: isExternal,
-      externalActivity: bridgedSession?.activity,
+      externalActivity:
+        bridgedSession?.activity ??
+        deps.externalTracker?.getExternalActivity?.(sessionId),
       fallbackOwnership: session?.ownership,
     });
     const ownership = runtime.ownership;
@@ -2576,7 +2580,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         externalActive:
           (deps.externalTracker?.isExternal(sessionId) ?? false) ||
           isBridgeSessionLive,
-        externalActivity: bridgeView?.activity,
+        externalActivity:
+          bridgeView?.activity ??
+          deps.externalTracker?.getExternalActivity?.(sessionId),
       });
 
       if (!runtime.canArchive) {

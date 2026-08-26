@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import {
   PI_SESSIONS_DIR,
   type PiSessionFileRecord,
+  invalidatePiSessionFileCatalog,
   listPiSessionFiles,
 } from "../sessions/pi-files.js";
 import type { Project } from "../supervisor/types.js";
@@ -24,6 +25,7 @@ export class PiSessionScanner {
 
   invalidateCache(): void {
     this.cache = null;
+    invalidatePiSessionFileCatalog(this.sessionsDir);
   }
 
   async listProjects(): Promise<Project[]> {

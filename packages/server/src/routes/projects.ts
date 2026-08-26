@@ -434,7 +434,9 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
         }
       } else {
         pendingInputType = session.pendingInputType;
-        activity = session.activity;
+        activity = isExternal
+          ? deps.externalTracker?.getExternalActivity?.(session.id)
+          : session.activity;
       }
 
       // Get last seen and unread status

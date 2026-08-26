@@ -935,17 +935,21 @@ describe("Global Sessions Routes", () => {
       expect(result.sessions[0].activity).toBe("in-turn");
     });
 
-    it("enriches with external ownership", async () => {
+    it("surfaces session-specific activity for an external Pi turn", async () => {
       const project = createProject("proj1", "project", "/sessions/proj1");
-      const session = createSession("sess1", "proj1", minutesAgo(5));
+      const session = createSession("sess1", "proj1", minutesAgo(5), {
+        provider: "pi",
+      });
 
       vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
       sessionsByDir.set("/sessions/proj1", [session]);
       externalSessions.add("sess1");
+      mockExternalTracker.getExternalActivity = vi.fn(() => "in-turn");
 
       const result = await makeRequest();
 
       expect(result.sessions[0].ownership).toEqual({ owner: "external" });
+      expect(result.sessions[0].activity).toBe("in-turn");
     });
 
     it("marks idle bridged sessions with open connections as external", async () => {

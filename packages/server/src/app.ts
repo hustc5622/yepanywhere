@@ -490,9 +490,9 @@ export function createApp(options: AppOptions): AppResult {
   const readerCache = new Map<string, ISessionReader>();
   const maxReaderCacheSize = 500;
 
-  // Kimi and Pi readers cache their shared-tree directory scans briefly. Clear
-  // them on file changes before the next project/session request so a watcher-
-  // driven index refresh cannot reconcile against a stale file list.
+  // Kimi and Pi readers cache their shared-tree directory scans briefly. Pi's
+  // parsed-session cache is much larger, so invalidate only the file that
+  // changed instead of making every project reparse its whole history.
   options.eventBus?.subscribe((event) => {
     if (
       event.type !== "file-change" ||
@@ -505,7 +505,7 @@ export function createApp(options: AppOptions): AppResult {
         reader.invalidateCache();
       }
       if (event.provider === "pi" && reader instanceof PiSessionReader) {
-        reader.invalidateCache();
+        reader.invalidateFile(event.path);
       }
     }
   });
@@ -685,7 +685,7 @@ export function createApp(options: AppOptions): AppResult {
         }),
     );
   const piReaderFactory = (projectPath: string): PiSessionReader =>
-    getOrCreateReader(`pi-extra::${PI_SESSIONS_DIR}::${projectPath}`, () => {
+    getOrCreateReader(`pi::${PI_SESSIONS_DIR}::${projectPath}`, () => {
       const mis = options.modelInfoService;
       return new PiSessionReader({
         sessionsDir: PI_SESSIONS_DIR,

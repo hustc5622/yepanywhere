@@ -37,7 +37,10 @@ function createProject(): Project {
   };
 }
 
-function createSummary(sessionId: string): SessionSummary {
+function createSummary(
+  sessionId: string,
+  overrides: Partial<SessionSummary> = {},
+): SessionSummary {
   return {
     id: sessionId,
     projectId,
@@ -48,6 +51,7 @@ function createSummary(sessionId: string): SessionSummary {
     messageCount: 1,
     ownership: { owner: "none" },
     provider: "pi",
+    ...overrides,
   };
 }
 
@@ -96,6 +100,9 @@ describe("ExternalSessionTracker Pi in-process hosts", () => {
     externalProcessProbe: () => Promise<boolean | null>,
     processValidationMs = VALIDATION_MS,
     piInFlightStaleMs = 5 * 60_000,
+    getSessionSummary = vi.fn(async (sessionId: string) =>
+      createSummary(sessionId),
+    ),
   ): ExternalSessionTracker {
     const project = createProject();
     return new ExternalSessionTracker({
@@ -112,7 +119,7 @@ describe("ExternalSessionTracker Pi in-process hosts", () => {
       processValidationMs,
       piInFlightStaleMs,
       externalProcessProbe,
-      getSessionSummary: vi.fn(async (sessionId) => createSummary(sessionId)),
+      getSessionSummary,
     });
   }
 
@@ -196,7 +203,8 @@ describe("ExternalSessionTracker Pi in-process hosts", () => {
         (event) =>
           event.type === "session-status-changed" &&
           event.sessionId === "pi-live" &&
-          event.ownership.owner === "external",
+          event.ownership.owner === "external" &&
+          event.activity === "in-turn",
       ),
     ).toBe(true);
   });
@@ -227,6 +235,36 @@ describe("ExternalSessionTracker Pi in-process hosts", () => {
     await writeSession("pi-turn", [userPrompt, settledAnswer]);
     await settle();
     expect(tracker.isExternal("pi-turn")).toBe(false);
+  });
+
+  it("publishes the persisted terminal turn status when a Pi turn settles", async () => {
+    let lastTurnStatus: SessionSummary["lastTurnStatus"] = "interrupted";
+    tracker = createTracker(
+      async () => false,
+      VALIDATION_MS,
+      5 * 60_000,
+      vi.fn(async (sessionId: string) =>
+        createSummary(sessionId, { lastTurnStatus }),
+      ),
+    );
+    const filePath = await writeSession("pi-status", [userPrompt, toolCall]);
+
+    emitFileChange(filePath);
+    await settle(380);
+
+    lastTurnStatus = "completed";
+    await writeSession("pi-status", [userPrompt, settledAnswer]);
+    emitFileChange(filePath);
+    await settle(380);
+
+    expect(
+      events.some(
+        (event) =>
+          event.type === "session-updated" &&
+          event.sessionId === "pi-status" &&
+          event.lastTurnStatus === "completed",
+      ),
+    ).toBe(true);
   });
 
   it("survives the decay timeout while a turn is still unfinished", async () => {
@@ -263,14 +301,16 @@ describe("ExternalSessionTracker Pi in-process hosts", () => {
     );
   });
 
-  it("still trusts a positive process probe for a settled log", async () => {
-    // A CLI sitting at an idle prompt owns the session even with nothing to do.
+  it("treats a settled log as idle even when a Pi process remains in the project", async () => {
+    // A resident Pi CLI can stay open at its prompt, and another Pi session may
+    // be running in the same cwd. The terminal log tail is session-specific;
+    // the process probe is not.
     tracker = createTracker(async () => true);
     const filePath = await writeSession("pi-cli", [userPrompt, settledAnswer]);
 
     emitFileChange(filePath);
     await settle();
 
-    expect(tracker.isExternal("pi-cli")).toBe(true);
+    expect(tracker.isExternal("pi-cli")).toBe(false);
   });
 });

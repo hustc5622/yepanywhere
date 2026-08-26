@@ -132,6 +132,30 @@ describe("readPiSessionTailActivity", () => {
     );
   });
 
+  it("expands backwards when the newest JSONL record exceeds one tail chunk", async () => {
+    const oversizedText = "z".repeat(300 * 1024);
+    const settledPath = await writeSession([
+      message("user"),
+      message("assistant", {
+        stopReason: "stop",
+        content: [{ type: "text", text: oversizedText }],
+      }),
+    ]);
+    await expect(readPiSessionTailActivity(settledPath)).resolves.toBe(
+      "settled",
+    );
+
+    const runningPath = await writeSession([
+      message("assistant", { stopReason: "stop" }),
+      message("user", {
+        content: [{ type: "text", text: oversizedText }],
+      }),
+    ]);
+    await expect(readPiSessionTailActivity(runningPath)).resolves.toBe(
+      "in-flight",
+    );
+  });
+
   it("reports unknown for a missing or contentless log", async () => {
     await expect(
       readPiSessionTailActivity(join(tmpdir(), `missing-${randomUUID()}`)),

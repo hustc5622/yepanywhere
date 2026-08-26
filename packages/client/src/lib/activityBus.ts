@@ -44,6 +44,8 @@ export interface SessionStatusEvent {
   sessionId: string;
   projectId: UrlProjectId;
   ownership: SessionStatus;
+  /** Session-specific activity when the tracker can prove it. */
+  activity?: AgentActivity;
   timestamp: string;
 }
 
@@ -119,6 +121,10 @@ export interface SessionUpdatedEvent {
   reasoningEffort?: string;
   /** Provider-specific service tier / speed label (e.g. "fast") */
   serviceTier?: string;
+  /** Terminal/interrupted status derived from the newest persisted turn. */
+  lastTurnStatus?: SessionLastTurnStatus | null;
+  /** Provider error associated with the newest failed turn. */
+  lastErrorMessage?: string | null;
   timestamp: string;
 }
 

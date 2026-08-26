@@ -1056,12 +1056,11 @@ export function useSessionMessages(
         lastMessageIdRef.current,
         { view: "canonical", branchId },
       );
-      if (data.session.provider === "kimi") {
-        // Kimi's reader cannot honor afterMessageId because its normalized
-        // message ids are synthesized from the full wire transcript. Treat
-        // the response as an authoritative snapshot instead of appending it:
-        // live Kimi messages use process UUIDs, so an incremental merge would
-        // see every persisted copy as new and append old turns at the tail.
+      if (data.session.provider === "pi" || data.session.provider === "kimi") {
+        // Pi and Kimi cannot correlate their persisted entry ids with live
+        // process UUIDs, and their readers return a full transcript even when
+        // `afterMessageId` is supplied. Treat it as an authoritative snapshot;
+        // merging would append persisted copies of old user turns at the tail.
         applySessionSnapshot(data);
       } else if (data.messages.length > 0) {
         updatePersistedTimestampWatermark(data.messages);
@@ -1077,7 +1076,7 @@ export function useSessionMessages(
       }
       // Update session metadata (including title, model, contextUsage) which may have changed
       // For new sessions, prev may be null if JSONL didn't exist on initial load
-      if (data.session.provider !== "kimi") {
+      if (data.session.provider !== "pi" && data.session.provider !== "kimi") {
         setSession((prev) =>
           prev ? { ...prev, ...data.session } : data.session,
         );
