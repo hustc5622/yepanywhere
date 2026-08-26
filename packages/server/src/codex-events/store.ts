@@ -292,7 +292,7 @@ const APPEND_ONLY_IDENTITY_WINDOW = 4096;
 /**
  * Optional append-only durable store. It hydrates its indexes once, serializes
  * concurrent appends, and uses the same replay contract as the in-memory
- * implementation. The payload reaching this class must already be redacted.
+ * implementation. The payload reaching this class must already be bounded JSON.
  */
 export class JsonlCodexEventStore implements CodexEventStore {
   private readonly filePath: string;

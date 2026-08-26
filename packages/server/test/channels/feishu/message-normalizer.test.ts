@@ -101,7 +101,7 @@ describe("FeishuMessageNormalizer", () => {
     },
   );
 
-  it("applies privacy policy to location and hongbao while retaining stickers", async () => {
+  it("retains location coordinates and message type formatting", async () => {
     const normalizer = new FeishuMessageNormalizer();
     const location = await normalizer.normalize({
       botIdentity,
@@ -115,8 +115,8 @@ describe("FeishuMessageNormalizer", () => {
       }),
     });
     expect(location.content).toContain("Office");
-    expect(location.content).toContain("精确坐标已按隐私策略隐藏");
-    expect(location.content).not.toContain("31.2304");
+    expect(location.content).not.toContain("精确坐标已按隐私策略隐藏");
+    expect(location.content).toContain("31.2304");
 
     const hongbao = await normalizer.normalize({
       botIdentity,

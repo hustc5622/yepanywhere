@@ -1198,6 +1198,13 @@ function extractToolPaths(item: ToolCallItem): string[] {
     input.oldPath,
     input.new_path,
     input.newPath,
+    // Codex apply_patch can update several files in one Edit. Such inputs
+    // intentionally have no top-level file_path.
+    ...(Array.isArray(input.changes)
+      ? input.changes.flatMap((change) =>
+          isRecord(change) ? [change.path] : [],
+        )
+      : []),
   ];
   return uniqueStrings(candidates).filter(
     (path) => !looksLikeShellCommand(path),

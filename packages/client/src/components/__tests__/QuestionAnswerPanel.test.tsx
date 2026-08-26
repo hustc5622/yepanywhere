@@ -301,7 +301,7 @@ describe("QuestionAnswerPanel", () => {
     );
 
     const input = screen.getByPlaceholderText(/answer/i) as HTMLInputElement;
-    expect(input.type).toBe("password");
+    expect(input.type).toBe("text");
     fireEvent.click(screen.getByRole("button", { name: /Submit/ }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({}));
@@ -331,6 +331,7 @@ describe("QuestionAnswerPanel", () => {
     fireEvent.change(input, { target: { value: "do-not-store-me" } });
 
     expect(input.value).toBe("do-not-store-me");
+    expect(input.type).toBe("text");
     expect(
       Array.from({ length: localStorage.length }, (_, index) =>
         localStorage.getItem(localStorage.key(index) ?? ""),

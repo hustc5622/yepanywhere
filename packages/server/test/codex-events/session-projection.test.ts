@@ -9,10 +9,112 @@ import {
   selectCodexEventSourceWithCache,
   selectCodexProviderErrorEventSource,
 } from "../../src/codex-events/index.js";
+import {
+  buildCodexEditInput,
+  publicCodexFileChanges,
+} from "../../src/codex/file-change.js";
+import {
+  codexFilePathFingerprint,
+  publicCodexFileChangePath,
+} from "../../src/codex/path-projection.js";
 import type { Message } from "../../src/supervisor/types.js";
 import { testEvent } from "./helpers.js";
 
 describe("canonical Codex persisted session projection", () => {
+  it.each([false, true])(
+    "recovers original paths from the matching rollout without positional guesses (legacy label: %s)",
+    (hasLabel) => {
+      const first = "/tmp/one/api_request.py";
+      const second = "/tmp/two/api_request.py";
+      const legacy: Message[] = [
+        {
+          uuid: "legacy-edit",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "patch-1",
+                name: "Edit",
+                input: buildCodexEditInput(
+                  publicCodexFileChanges([
+                    { path: first, kind: "add", diff: "import json" },
+                    { path: second, kind: "add", diff: "import os" },
+                  ]),
+                ),
+              },
+            ],
+          },
+        },
+      ];
+      const events = [
+        testEvent(1, "item/completed", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "patch-1",
+            type: "fileChange",
+            status: "completed",
+            changes: [second, first].map((path) => ({
+              pathFingerprint: codexFilePathFingerprint(path),
+              ...(hasLabel
+                ? {
+                    path: `[tmp:${codexFilePathFingerprint(path).slice(7)}]/api_request.py`,
+                  }
+                : {}),
+              kind: { type: "add" },
+            })),
+          },
+        }),
+      ];
+      const result = overlayCanonicalCodexSessionMessages(
+        "session-1",
+        legacy,
+        events,
+      );
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0]?.codexThreadItem).toMatchObject({
+        changes: expect.arrayContaining(
+          [first, second].map((path) => ({
+            path: publicCodexFileChangePath(path),
+            pathFingerprint: codexFilePathFingerprint(path),
+            kind: "add",
+          })),
+        ),
+      });
+      expect(JSON.stringify(result.messages)).not.toContain("[path hidden");
+      expect(JSON.stringify(result.messages)).toContain("/tmp/");
+      expect(legacy[0]?.codexThreadItem).toBeUndefined();
+
+      const unrelated = overlayCanonicalCodexSessionMessages(
+        "session-1",
+        [
+          {
+            ...legacy[0],
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "another-patch",
+                  name: "Edit",
+                  input: buildCodexEditInput(
+                    publicCodexFileChanges([{ path: first, kind: "add" }]),
+                  ),
+                },
+              ],
+            },
+          } as Message,
+        ],
+        events,
+      );
+      expect(JSON.stringify(unrelated.messages)).toContain(
+        hasLabel ? "[tmp:" : "[path hidden:",
+      );
+    },
+  );
+
   it("enriches the matching legacy row with the live-equivalent native item", () => {
     const legacy: Message[] = [
       {
@@ -57,7 +159,7 @@ describe("canonical Codex persisted session projection", () => {
       codexTurnId: "turn-1",
       codexEventSequence: 1,
       codexThreadItemLifecycle: "completed",
-      codexRawReasoningAllowed: false,
+      codexRawReasoningAllowed: true,
       codexThreadItem: {
         id: "agent-1",
         type: "agentMessage",
@@ -350,7 +452,7 @@ describe("canonical Codex persisted session projection", () => {
     expect(expired.messages[0]?.codexGeneratedArtifacts).toBeUndefined();
   });
 
-  it("omits raw reasoning, commands, artifact paths, diffs, and generated prompts", () => {
+  it("retains original reasoning, commands, paths, diffs and generated prompts", () => {
     const events = [
       testEvent(1, "item/completed", {
         threadId: "thread-1",
@@ -414,14 +516,14 @@ describe("canonical Codex persisted session projection", () => {
     const serialized = JSON.stringify(result.messages);
 
     expect(serialized).toContain("Safe summary");
-    expect(serialized).toContain("[command hidden in persisted refresh]");
-    expect(serialized).toContain("[path hidden]");
-    expect(serialized).not.toContain("private chain of thought");
-    expect(serialized).not.toContain("/Users/example");
-    expect(serialized).not.toContain("sk-private-token-value");
-    expect(serialized).not.toContain("PASSWORD=do-not-show");
-    expect(serialized).not.toContain("API_KEY=do-not-show");
-    expect(serialized).not.toContain("private prompt");
+    expect(serialized).toContain("cat /Users/example/.env");
+    expect(serialized).toContain("/Users/example/private-project/.env");
+    expect(serialized).toContain("private chain of thought");
+    expect(serialized).toContain("/Users/example");
+    expect(serialized).toContain("sk-private-token-value");
+    expect(serialized).toContain("PASSWORD=do-not-show");
+    expect(serialized).toContain("API_KEY=do-not-show");
+    expect(serialized).toContain("private prompt");
     expect(serialized).not.toContain("private image bytes");
   });
 
@@ -582,7 +684,7 @@ describe("canonical Codex persisted session projection", () => {
         type: "system",
         subtype: "warning",
         content:
-          "Codex is busy and cannot process the request right now. Codex is retrying automatically; keep this turn running.",
+          "server overloaded Codex is retrying automatically; keep this turn running.",
         warningKind: "codex_provider_retry",
         willRetry: true,
         codexEventSequence: 1,
@@ -593,7 +695,7 @@ describe("canonical Codex persisted session projection", () => {
       }),
       expect.objectContaining({
         type: "error",
-        error: "Codex is busy and cannot process the request right now.",
+        error: "server overloaded",
         willRetry: false,
         codexRetryExhausted: true,
         codexEventSequence: 2,

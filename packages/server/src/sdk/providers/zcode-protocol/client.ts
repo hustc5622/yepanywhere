@@ -18,13 +18,13 @@
  *       1. Response to our request (resolve pending promise).
  *       2. Server notification (enqueue onto `AsyncQueue`).
  *       3. Server-to-client request (call registered handler, send response).
- *   - Bounded + redacted stderr tail.
+ *   - Bounded + plaintext stderr tail.
  *   - Per-request timeout, graceful close, and process-exit rejection of all
  *     pending requests.
  *
  * Security: arbitrary stream chunks are joined into complete lines before
- * entering the bounded diagnostic buffer, and each line is redacted first.
- * `getStderrTail()` therefore returns only the redacted tail.
+ * entering the bounded diagnostic buffer without masking their content.
+ * `getStderrTail()` therefore returns the original bounded tail.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -33,7 +33,7 @@ import type {
   ZCodeJsonRpcNotification,
 } from "@yep-anywhere/shared";
 import type { ZCodeErrorCode } from "@yep-anywhere/shared";
-import { redactSensitivePublicText } from "../../../codex-events/redaction.js";
+
 import { getLogger } from "../../../logging/logger.js";
 import type {
   ZCodePendingRequest,
@@ -187,9 +187,8 @@ export class ZCodeProtocolClient {
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      // Stream chunks are arbitrary and can split a credential in the middle.
-      // Join complete lines before redaction so a split Bearer/API key cannot
-      // bypass the detector. An unbounded line is omitted fail-closed.
+      // Stream chunks are arbitrary. Reassemble complete lines for diagnostics
+      // while keeping the pending line and retained tail bounded.
       this.stderrLineBuffer += chunk.toString("utf-8");
       const lines = this.stderrLineBuffer.split("\n");
       this.stderrLineBuffer = lines.pop() ?? "";
@@ -312,7 +311,7 @@ export class ZCodeProtocolClient {
     return await this.notifications.shift(signal);
   }
 
-  /** Get the redacted stderr tail for diagnostics. */
+  /** Get the plaintext stderr tail for diagnostics. */
   getStderrTail(): string {
     return this.stderrBuffer.trim();
   }
@@ -354,10 +353,7 @@ export class ZCodeProtocolClient {
     try {
       message = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      log.debug(
-        { line: redactSensitivePublicText(line) },
-        "Ignoring non-JSON app-server line",
-      );
+      log.debug({ line }, "Ignoring non-JSON app-server line");
       return;
     }
 
@@ -494,11 +490,10 @@ export class ZCodeProtocolClient {
   private appendStderrLine(line: string): void {
     const text = line.trim();
     if (!text) return;
-    const redacted = redactSensitivePublicText(text);
-    this.stderrBuffer = `${this.stderrBuffer}${redacted}\n`.slice(
+    this.stderrBuffer = `${this.stderrBuffer}${text}\n`.slice(
       -this.stderrBound,
     );
-    log.debug({ stderr: redacted }, "zcode app-server stderr");
+    log.debug({ stderr: text }, "zcode app-server stderr");
   }
 
   private sendRaw(payload: Record<string, unknown>): void {

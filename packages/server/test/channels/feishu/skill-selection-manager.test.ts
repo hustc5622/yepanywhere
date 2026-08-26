@@ -11,7 +11,7 @@ describe("FeishuSkillSelectionManager", () => {
     for (const manager of managers.splice(0)) manager.shutdown();
   });
 
-  it("projects at most 12 path-free choices with opaque-only action values", async () => {
+  it("projects at most 12 plaintext choices with opaque-only action values", async () => {
     const fixture = createFixture();
     managers.push(fixture.manager);
 
@@ -29,8 +29,8 @@ describe("FeishuSkillSelectionManager", () => {
     const card = fixture.api.createInputCard.mock.calls[0]?.[1];
     const serialized = JSON.stringify(card);
     expect(serialized).toContain("skill-1");
-    expect(serialized).toContain("[path]");
-    expect(serialized).not.toContain("/opt/yep-fixtures");
+    expect(serialized).not.toContain("[path]");
+    expect(serialized).toContain("/opt/yep-fixtures");
     expect(serialized).not.toContain("session-1");
     const values = findActionValues(card);
     expect(values).toHaveLength(12);
@@ -230,7 +230,7 @@ describe("FeishuSkillSelectionManager", () => {
     });
   });
 
-  it("redacts secret-like names and descriptions before card or fallback output", async () => {
+  it("retains credential-like names and descriptions in cards and fallback output", async () => {
     const fixture = createFixture();
     managers.push(fixture.manager);
     const data = {
@@ -256,22 +256,22 @@ describe("FeishuSkillSelectionManager", () => {
       makeContext(fixture.api),
       data,
     );
-    expect(card).toMatchObject({ mode: "card", shown: 1, total: 1 });
+    expect(card).toMatchObject({ mode: "card", shown: 2, total: 2 });
     const serialized = JSON.stringify(
       fixture.api.createInputCard.mock.calls.at(-1)?.[1],
     );
-    expect(serialized).toContain("[REDACTED:secret]");
-    expect(serialized).not.toContain("npm-token-must-not-leak");
-    expect(serialized).not.toContain("xoxb-0000000000-fixture-do-not-use");
+    expect(serialized).not.toContain("[REDACTED:secret]");
+    expect(serialized).toContain("npm-token-must-not-leak");
+    expect(serialized).toContain("xoxb-0000000000-fixture-do-not-use");
     expect(serialized).not.toContain("/opt/yep-fixtures");
 
     const fallback = await fixture.manager.presentPicker(
       { ...makeContext(fixture.api), api: undefined },
       data,
     );
-    expect(fallback.text).toContain("[REDACTED:secret]");
-    expect(fallback.text).not.toContain("npm-token-must-not-leak");
-    expect(fallback.text).not.toContain("xoxb-0000000000-fixture-do-not-use");
+    expect(fallback.text).not.toContain("[REDACTED:secret]");
+    expect(fallback.text).toContain("npm-token-must-not-leak");
+    expect(fallback.text).toContain("xoxb-0000000000-fixture-do-not-use");
     expect(fallback.text).not.toContain("/opt/yep-fixtures");
   });
 

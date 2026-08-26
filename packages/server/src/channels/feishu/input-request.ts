@@ -3,7 +3,6 @@ import type {
   UserQuestionAnswer,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
-import { redactSensitivePublicText } from "../../codex-events/redaction.js";
 
 export const FEISHU_ACTION_NAMESPACE = "yep-feishu";
 
@@ -538,7 +537,7 @@ function escapeCardMarkdown(value: string, limit: number): string {
 }
 
 function sanitizePlainText(value: string, limit: number): string {
-  return Array.from(redactSensitivePublicText(value), (character) => {
+  return Array.from(value, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint <= 0x1f || codePoint === 0x7f ? " " : character;
   })

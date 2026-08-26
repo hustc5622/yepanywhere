@@ -11,15 +11,7 @@ import {
   type CodexEventJournalMode,
   shouldJournalCodexEvent,
 } from "./journal-mode.js";
-import {
-  type CodexPayloadRedactionOptions,
-  type CodexServerRequestSecretContext,
-  type RedactedCodexPayload,
-  redactCodexPayload,
-  redactCodexServerRequestPayload,
-  redactCodexServerRequestResolutionPayload,
-  restoreCodexServerRequestSecretContext,
-} from "./redaction.js";
+import { type CodexPayloadOptions, serializeCodexPayload } from "./payload.js";
 import { reduceCodexEvent, reduceCodexEvents } from "./reducer.js";
 import type { CodexEventStore } from "./store.js";
 import {
@@ -45,7 +37,7 @@ export interface CodexEventIngressOptions {
   runtime: CodexRuntimeIdentity;
   sessionId: string;
   projectId?: string;
-  /** Trusted provider cwd used only to retain safe workspace-relative paths. */
+  /** Provider cwd retained as caller context; display paths remain plaintext. */
   workspaceRoot?: string;
   accountId?: string;
   connectionId?: string;
@@ -88,10 +80,6 @@ export class CodexEventIngress {
   private persistTail: Promise<void> = Promise.resolve();
   private readonly turnByClientRequestId = new Map<string, string>();
   private readonly turnByServerRequestId = new Map<string, string>();
-  private readonly secretsByServerRequestId = new Map<
-    string,
-    CodexServerRequestSecretContext
-  >();
   private parity: CodexProjectionParitySnapshot = {
     compared: 0,
     matched: 0,
@@ -298,12 +286,9 @@ export class CodexEventIngress {
     method: string;
     params?: unknown;
   }): Promise<CodexEventEnvelope> {
-    const redacted = redactCodexServerRequestPayload(
-      input.method,
-      input.params,
-      { workspaceRoot: this.workspaceRoot },
-    );
-    const payload = safePayloadFromRedaction(redacted);
+    const payload = safePayload(input.method, input.params, {
+      workspaceRoot: this.workspaceRoot,
+    });
     const payloadObject = asObject(payload.data);
     const turnId =
       readString(payloadObject, "turnId") ??
@@ -311,10 +296,6 @@ export class CodexEventIngress {
     if (turnId) {
       this.turnByServerRequestId.set(callIdKey(input.requestId), turnId);
     }
-    this.secretsByServerRequestId.set(
-      callIdKey(input.requestId),
-      redacted.secretContext,
-    );
     return await this.persist({
       method: input.method,
       direction: "server_request",
@@ -333,24 +314,22 @@ export class CodexEventIngress {
   }): Promise<CodexEventEnvelope> {
     const requestKey = callIdKey(input.requestId);
     const turnId = this.turnByServerRequestId.get(requestKey);
-    const redacted = redactCodexServerRequestResolutionPayload(
+    const payload = safePayload(
       input.method,
       input.error === undefined
         ? { result: input.result ?? null }
         : { error: input.error },
-      this.secretsByServerRequestId.get(requestKey),
       { workspaceRoot: this.workspaceRoot },
     );
     const event = await this.persist({
       method: input.method,
       direction: "client_response",
       phase: "resolved",
-      payload: safePayloadFromRedaction(redacted),
+      payload,
       requestId: input.requestId,
       correlationId: `server-request:${requestKey}`,
       ...(turnId === undefined ? {} : { turnId }),
     });
-    this.secretsByServerRequestId.delete(requestKey);
     return event;
   }
 
@@ -372,9 +351,7 @@ export class CodexEventIngress {
         : {
             lastMismatch: {
               eventId: event.eventId,
-              method: classifyCodexNotification(event.method).known
-                ? event.method
-                : "unknown",
+              method: event.method.slice(0, 2_048),
               legacyHash,
               canonicalHash,
             },
@@ -477,20 +454,6 @@ export class CodexEventIngress {
         if (event.turnId !== undefined) {
           this.turnByServerRequestId.set(requestKey, event.turnId);
         }
-        this.secretsByServerRequestId.set(
-          requestKey,
-          restoreCodexServerRequestSecretContext(
-            event.method,
-            event.payload.data,
-            event.payload.truncated === true,
-          ),
-        );
-      } else if (
-        event.direction === "client_response" &&
-        event.phase === "resolved" &&
-        event.correlationId === `server-request:${requestKey}`
-      ) {
-        this.secretsByServerRequestId.delete(requestKey);
       }
       if (event.turnId === undefined) continue;
       if (
@@ -520,21 +483,13 @@ export class CodexEventIngress {
 function safePayload(
   method: string,
   value: unknown,
-  options: CodexPayloadRedactionOptions = {},
+  options: CodexPayloadOptions = {},
 ): SafeCodexPayload {
-  return safePayloadFromRedaction(redactCodexPayload(method, value, options));
-}
-
-function safePayloadFromRedaction(
-  redacted: RedactedCodexPayload,
-): SafeCodexPayload {
+  const payload = serializeCodexPayload(method, value, options);
   return {
     safety: "safe",
-    data: redacted.data,
-    ...(redacted.redactionCount > 0
-      ? { redactionCount: redacted.redactionCount }
-      : {}),
-    ...(redacted.truncated ? { truncated: true } : {}),
+    data: payload.data,
+    ...(payload.truncated ? { truncated: true } : {}),
   };
 }
 

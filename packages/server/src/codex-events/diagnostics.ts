@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import type { ServerRequest } from "../sdk/providers/codex-protocol/index.js";
-import { CODEX_EVENT_RUNTIME_IDENTITY } from "./runtime.js";
 import type { CodexRuntimeIdentity } from "./types.js";
 
 export const CODEX_UNKNOWN_METHOD_BUCKET_LIMIT = 32;
@@ -34,12 +33,15 @@ export type CodexUnknownMethodDirection =
 
 export interface CodexUnknownMethodDiagnosticBucket {
   direction: CodexUnknownMethodDirection;
-  /** One-way, bounded identifier; the upstream method itself is never retained. */
+  /** Original provider method, bounded for diagnostics. */
+  method: string;
+  /** Stable grouping key, not a substitute for the original method. */
   methodFingerprint: string;
-  /** Only the checked-in baseline is displayed; other values are fingerprinted. */
+  /** Original runtime version. */
   runtimeVersion: string;
   /** One-way dimension for the protocol schema used by the event ingress. */
   schemaFingerprint: string;
+  schemaHash: string;
   profile: CodexRuntimeIdentity["profile"];
   total: number;
 }
@@ -100,7 +102,7 @@ function recordUnknownMethod(
   runtime: CodexRuntimeIdentity,
 ): void {
   const methodFingerprint = diagnosticFingerprint(method);
-  const runtimeVersion = safeRuntimeVersion(runtime.codexVersion);
+  const runtimeVersion = runtime.codexVersion.slice(0, 2_048);
   const schemaFingerprint = diagnosticFingerprint(runtime.schemaHash);
   const profile =
     runtime.profile === "experimental" ? "experimental" : "stable";
@@ -122,18 +124,14 @@ function recordUnknownMethod(
   }
   buckets.set(key, {
     direction,
+    method: method.slice(0, 2_048),
+    schemaHash: runtime.schemaHash.slice(0, 2_048),
     methodFingerprint,
     runtimeVersion,
     schemaFingerprint,
     profile,
     total: 1,
   });
-}
-
-function safeRuntimeVersion(version: string): string {
-  return version === CODEX_EVENT_RUNTIME_IDENTITY.codexVersion
-    ? version
-    : `other:${diagnosticFingerprint(version)}`;
 }
 
 function diagnosticFingerprint(value: string): string {

@@ -153,7 +153,7 @@ export async function probeZCodeCliVersion(
  * Returns a `ZCodeDiscoveryResult` with a stable `errorCode` when the CLI
  * cannot be used.  Does not spawn an app-server (that is the caller's job).
  *
- * Caller is responsible for redacting any diagnostic output — this function
+ * Caller is responsible for bounding diagnostic output — this function
  * does not log the CLI path or version beyond debug level.
  */
 export async function discoverZCodeCli(): Promise<ZCodeDiscoveryResult> {

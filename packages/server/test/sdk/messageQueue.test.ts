@@ -31,7 +31,7 @@ describe("MessageQueue lifecycle", () => {
     await expect(next).resolves.toEqual({ done: true, value: undefined });
   });
 
-  it("keeps managed paths internal while exposing bounded metadata", async () => {
+  it("preserves managed paths alongside bounded attachment metadata", async () => {
     const managedPath =
       "/private/uploads/folder: confidential/report\nsecond-line.pdf";
     const queue = new MessageQueue({ preserveAttachments: true });
@@ -58,15 +58,15 @@ describe("MessageQueue lifecycle", () => {
     expect(publicPrompt).toContain("report.pdf");
     expect(publicPrompt).toContain("2.0 KB");
     expect(publicPrompt).toContain("application/pdf_invalid");
-    expect(publicPrompt).toContain("[managed attachment]");
-    expect(publicPrompt).not.toContain("/private/uploads");
-    expect(publicPrompt).not.toContain("second-line.pdf");
+    expect(publicPrompt).not.toContain("[managed attachment]");
+    expect(publicPrompt).toContain("/private/uploads");
+    expect(publicPrompt).toContain("second-line.pdf");
     expect(publicPrompt).not.toContain("C:\\private");
     expect(Object.keys(queued)).not.toContain("internalPrompt");
     expect(Object.keys(queued)).not.toContain("publicPrompt");
   });
 
-  it("reconstructs a safe public prompt after a shallow queue clone", async () => {
+  it("reconstructs a plaintext prompt after a shallow queue clone", async () => {
     const managedPath =
       "C:\\managed\\folder: confidential\\voice.wav\nleaked-line";
     const queue = new MessageQueue({ preserveAttachments: true });
@@ -89,17 +89,15 @@ describe("MessageQueue lifecycle", () => {
     const projection = getUserPromptProjection({ ...queued });
     expect(projection.internalPrompt).toContain(managedPath);
     expect(projection.publicPrompt).toContain("voice.wav");
-    expect(projection.publicPrompt).toContain("[managed attachment]");
-    expect(projection.publicPrompt).not.toContain("C:\\managed");
-    expect(projection.publicPrompt).not.toContain("folder: confidential");
-    expect(projection.publicPrompt).not.toContain("leaked-line");
+    expect(projection.publicPrompt).not.toContain("[managed attachment]");
+    expect(projection.publicPrompt).toContain("C:\\managed");
+    expect(projection.publicPrompt).toContain("folder: confidential");
+    expect(projection.publicPrompt).toContain("leaked-line");
   });
 
-  it("projects valid managed uploads to path-free authenticated URLs", () => {
+  it("preserves the original managed upload location", () => {
     const managedPath =
       "/Users/test/.yep-anywhere/uploads/cHJvamVjdA/session-1/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
-    const downloadUrl =
-      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
     const projection = buildUserPromptProjection({
       text: "inspect",
       attachments: [
@@ -115,19 +113,19 @@ describe("MessageQueue lifecycle", () => {
     });
 
     expect(projection.internalPrompt).toContain(managedPath);
-    expect(projection.publicPrompt).toContain(downloadUrl);
-    expect(projection.publicPrompt).not.toContain("/Users/test");
+    expect(projection.publicPrompt).toContain(managedPath);
+    expect(projection.publicPrompt).toContain("/Users/test");
     expect(sanitizeManagedAttachmentPrompt(projection.publicPrompt)).toBe(
       projection.publicPrompt,
     );
   });
 
-  it("fails closed on ambiguous labels without scanning ordinary prose", () => {
+  it("keeps attachment labels and ordinary prose intact", () => {
     const ambiguous =
       "inspect\n\nUser uploaded files:\n- C:\\private\\bad: name.pdf (1.0 KB, application/pdf): /private/uploads/report.pdf";
     const projected = sanitizeManagedAttachmentPrompt(ambiguous);
-    expect(projected).not.toContain("C:\\private");
-    expect(projected).not.toContain("/private/uploads");
+    expect(projected).toContain("C:\\private");
+    expect(projected).toContain("/private/uploads");
 
     const ordinary =
       "Please edit /Users/example/project/file.ts and C:\\repo\\file.ts";

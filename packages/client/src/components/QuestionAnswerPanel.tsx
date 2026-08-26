@@ -430,7 +430,11 @@ export function QuestionAnswerPanel({
                 {isDirectInput ? (
                   <div className="question-other-input question-direct-input">
                     <input
-                      type={currentQuestion.inputType ?? "text"}
+                      type={
+                        currentQuestion.inputType === "password"
+                          ? "text"
+                          : (currentQuestion.inputType ?? "text")
+                      }
                       placeholder={t("questionPanelTypeAnswer")}
                       value={
                         typeof currentAnswer === "string" ? currentAnswer : ""
@@ -513,7 +517,7 @@ export function QuestionAnswerPanel({
                     {currentQuestion.inputType === "password" ? (
                       <input
                         ref={otherPasswordInputRef}
-                        type="password"
+                        type="text"
                         placeholder={t("questionPanelTypeAnswer")}
                         value={otherTexts[currentQuestionKey] || ""}
                         onChange={(e) => handleOtherTextChange(e.target.value)}

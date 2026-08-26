@@ -21,7 +21,7 @@ describe("Codex event compatibility diagnostics", () => {
     );
   });
 
-  it("bounds fingerprint-only method/runtime/schema buckets", async () => {
+  it("bounds plaintext method/runtime/schema buckets", async () => {
     vi.resetModules();
     const diagnostics = await import("../../src/codex-events/diagnostics.js");
     const runtime = {
@@ -63,18 +63,18 @@ describe("Codex event compatibility diagnostics", () => {
       expect.objectContaining({
         direction: "server_notification",
         methodFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
-        runtimeVersion: expect.stringMatching(/^other:sha256:[a-f0-9]{20}$/),
+        runtimeVersion: "secret-looking-runtime-version",
         schemaFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
         profile: "experimental",
         total: 2,
       }),
     );
     const serialized = JSON.stringify(snapshot);
-    expect(serialized).not.toContain(rawNotificationMethod);
-    expect(serialized).not.toContain(rawRequestMethod);
-    expect(serialized).not.toContain(runtime.codexVersion);
-    expect(serialized).not.toContain(runtime.schemaHash);
-    expect(serialized).not.toContain("/private/");
-    expect(serialized).not.toContain("do-not-expose");
+    expect(serialized).toContain(rawNotificationMethod);
+    expect(serialized).toContain(rawRequestMethod);
+    expect(serialized).toContain(runtime.codexVersion);
+    expect(serialized).toContain(runtime.schemaHash);
+    expect(serialized).toContain("/private/");
+    expect(serialized).toContain("do-not-expose");
   });
 });

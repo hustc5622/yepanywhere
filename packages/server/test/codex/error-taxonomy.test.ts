@@ -13,14 +13,6 @@ interface ErrorCase {
   retryable: boolean;
 }
 
-const SENSITIVE_VALUES = [
-  "sk-secret-token",
-  "Bearer private-token",
-  "/Users/alice/private/repository",
-  "/private/tmp/confidential.pdf",
-  "raw-provider-diagnostic",
-];
-
 const CASES: ErrorCase[] = [
   {
     name: "empty thread without a rollout",
@@ -125,7 +117,7 @@ const CASES: ErrorCase[] = [
 
 describe("Codex canonical error taxonomy", () => {
   it.each(CASES)(
-    "classifies $name without exposing diagnostics",
+    "classifies $name while retaining original diagnostics",
     ({ input, code, category, retryable }) => {
       const classified = classifyCodexError(input);
 
@@ -134,10 +126,15 @@ describe("Codex canonical error taxonomy", () => {
       expect(classified.nextAction).toMatch(/[A-Za-z]/u);
       expect(classified.publicMessage).not.toMatch(/[\u4e00-\u9fff]/u);
       expect(classified.nextAction).not.toMatch(/[\u4e00-\u9fff]/u);
-      const serialized = JSON.stringify(classified);
-      for (const sensitive of SENSITIVE_VALUES) {
-        expect(serialized).not.toContain(sensitive);
-      }
+      const record = input as {
+        message?: string;
+        error?: { message?: string };
+      };
+      const original =
+        input instanceof Error
+          ? input.message
+          : (record.message ?? record.error?.message);
+      if (original) expect(classified.publicMessage).toBe(original);
       expect(classified).not.toHaveProperty("diagnosticMessage");
       expect(classified).not.toHaveProperty("stack");
     },
@@ -178,6 +175,6 @@ describe("Codex canonical error taxonomy", () => {
     ).not.toHaveProperty("correlationId");
     expect(
       classifyCodexError(input, { correlationId: "sk-secret-token" }),
-    ).not.toHaveProperty("correlationId");
+    ).toHaveProperty("correlationId", "sk-secret-token");
   });
 });

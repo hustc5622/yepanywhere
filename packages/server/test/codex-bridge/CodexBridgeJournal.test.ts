@@ -33,11 +33,11 @@ describe("Codex bridge journal policy", () => {
     }
   });
 
-  it("fingerprints unknown methods without copying their text", () => {
+  it("retains bounded unknown method names", () => {
     const unsafe = "future/private-token/method";
     const safe = safeCodexBridgeMethod(unsafe);
-    expect(safe).toMatch(/^unknown:[a-f0-9]{16}$/);
-    expect(safe).not.toContain("private-token");
+    expect(safe).toBe(unsafe);
+    expect(safe).toContain("private-token");
     expect(shouldJournalServerNotification("lifecycle", unsafe)).toBe(false);
     expect(shouldJournalServerNotification("full", unsafe)).toBe(true);
   });

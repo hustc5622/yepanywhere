@@ -5,7 +5,7 @@ export * from "./ingress.js";
 export * from "./journal-mode.js";
 export * from "./journal-retention.js";
 export * from "./projection-cache.js";
-export * from "./redaction.js";
+export * from "./payload.js";
 export * from "./reducer.js";
 export * from "./rollout.js";
 export * from "./runtime.js";

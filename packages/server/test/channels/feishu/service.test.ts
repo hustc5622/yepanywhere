@@ -51,7 +51,7 @@ describe("FeishuChannelService", () => {
     );
     expect(publicAccount).toMatchObject({
       id: "team-bot",
-      secret: { configured: true, masked: "****alue" },
+      secret: { configured: true, value: "fixture-credential-value" },
     });
     expect(publicAccount).not.toHaveProperty("secretRef");
     expect(factory.transports).toHaveLength(1);

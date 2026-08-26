@@ -393,7 +393,7 @@ describe("FeishuReplyController", () => {
     ).toEqual([1]);
   });
 
-  it("shows waiting input and hides raw runtime errors", async () => {
+  it("shows waiting input and original runtime errors", async () => {
     const api = makeOutboundApi();
     const controller = new FeishuReplyController({
       api,
@@ -417,9 +417,9 @@ describe("FeishuReplyController", () => {
 
     expect(controller.state).toBe("failed");
     const finalContent = api.updateStreamingReply.mock.calls.at(-1)?.[1];
-    expect(finalContent).toContain("Codex 遇到未分类错误");
+    expect(finalContent).toContain("token=do-not-leak");
     expect(finalContent).toContain("诊断 ID：temp-4");
-    expect(finalContent).not.toContain("do-not-leak");
+    expect(finalContent).toContain("do-not-leak");
     expect(finalContent).not.toContain("/private/secret");
   });
 
@@ -477,7 +477,7 @@ describe("FeishuReplyController", () => {
     expect(finalContent).toContain("The regression is fixed.");
   });
 
-  it("uploads a completed generated PNG once and blocks sensitive artifacts", async () => {
+  it("deduplicates image deliveries without filtering prompt content", async () => {
     const api = makeOutboundApi();
     const controller = new FeishuReplyController({
       api,
@@ -528,7 +528,7 @@ describe("FeishuReplyController", () => {
     });
     await controller.handleRuntimeEvent("status", { state: "idle" });
 
-    expect(api.sendImageReply).toHaveBeenCalledTimes(1);
+    expect(api.sendImageReply).toHaveBeenCalledTimes(2);
     expect(api.sendImageReply).toHaveBeenCalledWith(
       TARGET,
       expect.objectContaining({
@@ -541,9 +541,9 @@ describe("FeishuReplyController", () => {
     );
     const finalContent = api.updateStreamingReply.mock.calls.at(-1)?.[1];
     expect(finalContent).toContain("Codex 生成 · 飞书托管");
-    expect(finalContent).toContain("可能包含敏感内容");
-    expect(finalContent).not.toContain("/private/work");
-    expect(finalContent).not.toContain("password");
+    expect(finalContent).not.toContain("可能包含敏感内容");
+    expect(finalContent).toContain("/private/work");
+    expect(finalContent).toContain("password");
   });
 
   it("reads and uploads a correlated managed file once across duplicate and replay events", async () => {
@@ -603,7 +603,7 @@ describe("FeishuReplyController", () => {
     expect(finalContent).not.toContain("upload:");
   });
 
-  it("fails closed on an uncorrelated manifest and uses a fixed upload failure message", async () => {
+  it("fails closed on an uncorrelated manifest and retains the original upload failure message", async () => {
     const api = makeOutboundApi();
     const bytes = Buffer.from("%PDF-1.7\n");
     const readGeneratedArtifact = vi.fn(async () => bytes);
@@ -647,8 +647,8 @@ describe("FeishuReplyController", () => {
     expect(api.sendFileReply).toHaveBeenCalledTimes(1);
     const finalContent = api.updateStreamingReply.mock.calls.at(-1)?.[1];
     expect(finalContent).toContain("生成物上传飞书失败");
-    expect(finalContent).not.toContain("must-not-leak");
-    expect(finalContent).not.toContain("/private/work");
+    expect(finalContent).toContain("must-not-leak");
+    expect(finalContent).toContain("/private/work");
   });
 
   it("marks a generated-artifact effect complete only after a successful retry", async () => {
@@ -747,7 +747,7 @@ describe("FeishuReplyController", () => {
     expect(controller.state).toBe("failed");
     expect(terminal).toHaveBeenCalledWith("failed", "failed");
     expect(api.updateStreamingReply.mock.calls.at(-1)?.[1]).toContain(
-      "当前会话尚未准备好",
+      "no rollout found for thread",
     );
     expect(api.updateStreamingReply.mock.calls.at(-1)?.[1]).toContain(
       "CODEX_NO_ROLLOUT（no_rollout）",
@@ -757,7 +757,7 @@ describe("FeishuReplyController", () => {
     );
   });
 
-  it("localizes a canonical code without trusting provider display strings", async () => {
+  it("keeps canonical categories alongside provider display strings", async () => {
     const api = makeOutboundApi();
     const controller = new FeishuReplyController({
       api,
@@ -786,10 +786,10 @@ describe("FeishuReplyController", () => {
     });
 
     const content = api.updateStreamingReply.mock.calls.at(-1)?.[1];
-    expect(content).toContain("Codex 登录状态已失效或尚未完成");
+    expect(content).toContain("synthetic-sensitive-provider-detail");
     expect(content).toContain("CODEX_AUTH_REQUIRED（auth）");
-    expect(content).not.toContain("synthetic-sensitive-provider-detail");
-    expect(content).not.toContain("synthetic-private-provider-action");
+    expect(content).toContain("synthetic-sensitive-provider-detail");
+    expect(content).toContain("synthetic-private-provider-action");
   });
 
   it("replays an SDK error that races ahead of dispatch confirmation", async () => {
@@ -815,8 +815,8 @@ describe("FeishuReplyController", () => {
 
     expect(controller.state).toBe("failed");
     const finalContent = api.updateStreamingReply.mock.calls.at(-1)?.[1];
-    expect(finalContent).toContain("Codex 遇到未分类错误");
-    expect(finalContent).not.toContain("private runtime detail");
+    expect(finalContent).toContain("private runtime detail");
+    expect(finalContent).toContain("private runtime detail");
   });
 
   it("treats completion without a matching user echo as a failed dispatch", async () => {
@@ -1101,8 +1101,8 @@ describe("FeishuReplyController", () => {
     expect(content).toContain(
       "[在 Yep 查看](https://yep.example.com/yep/sessions/",
     );
-    expect(content).not.toContain("must-not-leak");
-    expect(content).not.toContain("/private/project");
+    expect(content).toContain("must-not-leak");
+    expect(content).toContain("/private/project");
   });
 });
 

@@ -374,7 +374,7 @@ describe("GeneratedArtifactMaterializer", () => {
     ]);
   });
 
-  it("fails closed for secret names/content, oversize files and archives", async () => {
+  it("allows credential text while rejecting unsupported formats, oversize files and archives", async () => {
     const context = await createContext({
       maxArtifactBytes: 64,
       maxInlineImageBytes: 64,
@@ -394,19 +394,16 @@ describe("GeneratedArtifactMaterializer", () => {
       Buffer.from("504b0304", "hex"),
     );
 
-    await expectReason(context, ".env", "secret-name", "sensitive_content");
-    await expectReason(
-      context,
-      "notes.txt",
-      "secret-content",
-      "sensitive_content",
-    );
-    await expectReason(
-      context,
-      "prod-credentials-backup.txt",
-      "secret-filename",
-      "sensitive_content",
-    );
+    await expectReason(context, ".env", "env-file", "unsupported_format");
+    for (const path of ["notes.txt", "prod-credentials-backup.txt"]) {
+      const result = await context.materializer.materialize(
+        fileChangeItem(path, path),
+        context.grant,
+      );
+      expect(result.warnings).toEqual([]);
+      expect(result.artifacts).toHaveLength(1);
+      expect(result.artifacts[0]?.fileName).toBe(path);
+    }
     await expectReason(context, "large.txt", "large", "size_limit");
     await expectReason(context, "bundle.zip", "archive", "high_risk_archive");
   });
@@ -417,18 +414,21 @@ describe("GeneratedArtifactMaterializer", () => {
     "NPM_TOKEN=npm-token-must-not-leak",
     "DEPLOY_TOKEN=generic-token-must-not-leak",
     "SLACK_TOKEN=xoxb-1234567890-secret",
-  ])("blocks expanded unified secret syntax: %s", async (content) => {
-    const context = await createContext();
-    await writeFile(join(context.workspace, "result.txt"), `${content}\n`);
-    await expectReason(
-      context,
-      "result.txt",
-      `secret-${roots.length}`,
-      "sensitive_content",
-    );
-  });
+  ])(
+    "retains credential content in managed text artifacts: %s",
+    async (content) => {
+      const context = await createContext();
+      await writeFile(join(context.workspace, "result.txt"), `${content}\n`);
+      const result = await context.materializer.materialize(
+        fileChangeItem("result.txt", "secret-text"),
+        context.grant,
+      );
+      expect(result.warnings).toEqual([]);
+      expect(result.artifacts).toHaveLength(1);
+    },
+  );
 
-  it("applies the unified detector to generated-image prompts before persistence", async () => {
+  it("does not block generated images based on prompt content", async () => {
     const context = await createContext();
     const png = Buffer.from([
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
@@ -449,12 +449,8 @@ describe("GeneratedArtifactMaterializer", () => {
       context.grant,
     );
 
-    expect(result).toEqual({
-      artifacts: [],
-      warnings: [
-        { sourceId: "image-secret-prompt", reason: "sensitive_content" },
-      ],
-    });
+    expect(result.warnings).toEqual([]);
+    expect(result.artifacts).toHaveLength(1);
   });
 
   it("fails closed when generated registry/retention is missing, expired, or same-size bytes change", async () => {

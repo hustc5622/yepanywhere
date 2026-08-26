@@ -461,7 +461,7 @@ export class CodexBridgeService implements CodexBridgeController {
           res,
           500,
           "bridge_internal_error",
-          "Bridge request failed",
+          diagnostic.publicMessage,
         );
       });
     });
@@ -1152,8 +1152,8 @@ export class CodexBridgeService implements CodexBridgeController {
         ? new CodexBridgeEventSpine({
             store: this.legacyEventStore,
             ...eventIdentity,
-            onPersistenceError: (stage) => {
-              this.lastError = `Codex event spine ${stage} persistence failed`;
+            onPersistenceError: (stage, error) => {
+              this.lastError = `Codex event spine ${stage} persistence failed: ${classifyCodexError(error).publicMessage}`;
             },
           })
         : null,
@@ -1414,7 +1414,7 @@ export class CodexBridgeService implements CodexBridgeController {
         : connection.serverFrameChain;
     const task = previous.then(operation).catch((error: unknown) => {
       if (error instanceof CodexBridgeEventPersistenceError) {
-        this.lastError = `Codex event spine ${error.stage} persistence failed`;
+        this.lastError = error.message;
         console.warn(
           `[CodexBridge] Event spine persistence failed stage=${error.stage} connection=${connection.id}; closing connection`,
         );
@@ -1999,7 +1999,12 @@ export class CodexBridgeService implements CodexBridgeController {
         ...(status ? { status } : {}),
         ...(message.id === undefined
           ? {}
-          : { requestIdFingerprint: fingerprintJsonRpcId(message.id) }),
+          : {
+              requestId:
+                typeof message.id === "string"
+                  ? message.id.slice(0, 2_048)
+                  : message.id,
+            }),
         wireBytes,
       }),
       {
@@ -3567,7 +3572,7 @@ function projectBridgePublicDiagnostic(error: unknown): {
   const classified = classifyCodexError(error);
   return {
     publicMessage: classified.publicMessage,
-    logFields: `code=${classified.code} category=${classified.category} retryable=${String(classified.retryable)}`,
+    logFields: `code=${classified.code} category=${classified.category} retryable=${String(classified.retryable)} message=${JSON.stringify(classified.publicMessage)}`,
   };
 }
 
@@ -3585,18 +3590,14 @@ function sanitizeBridgePublicUrl(
     ) {
       return null;
     }
-    return `${parsed.protocol}//${parsed.host}`;
+    return value;
   } catch {
     return null;
   }
 }
 
 function summarizeBridgePublicArgs(args: readonly string[]): string[] {
-  return args.length === 0
-    ? []
-    : [
-        `[${args.length} configured argument${args.length === 1 ? "" : "s"} hidden]`,
-      ];
+  return [...args];
 }
 
 function sanitizeBridgeDiagnosticIdentifier(
@@ -3614,10 +3615,6 @@ function readBridgeThreadId(value: unknown): string | undefined {
     getString(record?.conversationId) ??
     getString(asRecord(record?.thread)?.id)
   );
-}
-
-function fingerprintJsonRpcId(id: JsonRpcId): string {
-  return createHash("sha256").update(idKey(id)).digest("hex").slice(0, 16);
 }
 
 function deriveLightweightJournalPath(

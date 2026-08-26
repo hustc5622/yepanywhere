@@ -82,7 +82,7 @@ export type FeishuSecretSource = "store" | "env" | "unknown";
 export interface FeishuSecretStatus {
   configured: boolean;
   source: FeishuSecretSource;
-  masked?: string;
+  value?: string;
 }
 
 export interface FeishuAccountPublicView

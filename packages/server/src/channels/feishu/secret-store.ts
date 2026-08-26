@@ -104,7 +104,7 @@ export class FeishuSecretStore {
     const source = parsed.data.startsWith("store:") ? "store" : "env";
     const value = this.resolve(parsed.data);
     return value
-      ? { configured: true, source, masked: maskSecret(value) }
+      ? { configured: true, source, value }
       : { configured: false, source };
   }
 
@@ -119,8 +119,4 @@ export class FeishuSecretStore {
       throw new Error("FeishuSecretStore is not initialized");
     }
   }
-}
-
-function maskSecret(secret: string): string {
-  return secret.length <= 4 ? "****" : `****${secret.slice(-4)}`;
 }

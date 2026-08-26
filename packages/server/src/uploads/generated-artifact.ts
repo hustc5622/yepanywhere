@@ -18,7 +18,6 @@ import {
   type GeneratedArtifactWarning,
   isUrlProjectId,
 } from "@yep-anywhere/shared";
-import { containsSensitiveText } from "../codex-events/redaction.js";
 import { readValidatedZipEntries } from "./attachment-extractor.js";
 import type { UploadManager } from "./manager.js";
 
@@ -39,39 +38,6 @@ const SEVEN_ZIP_SIGNATURE = Buffer.from("377abcaf271c", "hex");
 const RAR4_SIGNATURE = Buffer.from("526172211a0700", "hex");
 const RAR5_SIGNATURE = Buffer.from("526172211a070100", "hex");
 const GZIP_SIGNATURE = Buffer.from("1f8b", "hex");
-
-const SENSITIVE_PROMPT_PATTERNS = [
-  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,
-  /(?:api[_ -]?key|access[_ -]?token|password|passwd|credential|client[_ -]?secret|private[_ -]?key|authorization|cookie|\.env)/i,
-  /(?:密钥|口令|密码|令牌|凭据)/,
-];
-
-const SENSITIVE_FILE_NAMES = new Set([
-  ".env",
-  "credentials",
-  "credentials.json",
-  "id_dsa",
-  "id_ecdsa",
-  "id_ed25519",
-  "id_rsa",
-  "known_hosts",
-  "netrc",
-  ".netrc",
-  "secrets",
-  "secrets.json",
-]);
-
-const SENSITIVE_FILE_EXTENSIONS = new Set([
-  ".der",
-  ".key",
-  ".keystore",
-  ".p12",
-  ".pfx",
-  ".pem",
-]);
-
-const SENSITIVE_FILE_NAME_PATTERN =
-  /(?:^|[._-])(?:api[_-]?key|client[_-]?secret|credential(?:s)?|password|private[_-]?key|secret(?:s)?|token)(?:$|[._-])/i;
 
 export interface CodexGeneratedArtifactGrant {
   projectId: string;
@@ -356,9 +322,6 @@ export class GeneratedArtifactMaterializer {
     }
 
     const fileName = sanitizePublicFileName(basename(resolvedCandidate));
-    if (isSensitiveFileName(fileName)) {
-      throw new GeneratedArtifactPolicyError("sensitive_content");
-    }
     await this.options.beforeOpenForTest?.(lexicalCandidate);
 
     let bytes: Buffer;
@@ -569,16 +532,6 @@ function selectCandidates(
         warning: { sourceId: itemId, reason: "invalid_payload" },
       };
     }
-    const prompt = stringValue(item.revisedPrompt);
-    if (
-      prompt &&
-      (containsSensitiveText(prompt) ||
-        SENSITIVE_PROMPT_PATTERNS.some((pattern) => pattern.test(prompt)))
-    ) {
-      return {
-        warning: { sourceId: itemId, reason: "sensitive_content" },
-      };
-    }
     const encoded = stringValue(item.result)?.trim();
     if (encoded) {
       try {
@@ -654,9 +607,6 @@ function inspectBytes(
     throw new GeneratedArtifactPolicyError("size_limit");
   }
   const fileName = sanitizePublicFileName(rawFileName);
-  if (isSensitiveFileName(fileName) || containsSensitiveContent(bytes)) {
-    throw new GeneratedArtifactPolicyError("sensitive_content");
-  }
   const format = detectFormat(bytes, fileName, sourceType);
   return { fileName, bytes, ...format };
 }
@@ -770,16 +720,11 @@ function inspectSafeOfficeContainer(
     }
     const expanded = entry.content;
     if (
-      containsSensitiveContent(expanded) ||
       /TargetMode\s*=\s*["']External["']|macroEnabled|vbaProject|activeX/i.test(
         expanded.toString("utf8"),
       )
     ) {
-      throw new GeneratedArtifactPolicyError(
-        containsSensitiveContent(expanded)
-          ? "sensitive_content"
-          : "high_risk_archive",
-      );
+      throw new GeneratedArtifactPolicyError("high_risk_archive");
     }
     hasContentTypes ||= entryName === "[Content_Types].xml";
     hasWord ||= lowerName.startsWith("word/");
@@ -943,22 +888,6 @@ function replaceUnsafeFileNameCharacters(value: string): string {
         : character;
   }
   return sanitized;
-}
-
-function isSensitiveFileName(fileName: string): boolean {
-  const lower = fileName.toLowerCase();
-  return (
-    SENSITIVE_FILE_NAMES.has(lower) ||
-    lower.startsWith(".env.") ||
-    SENSITIVE_FILE_EXTENSIONS.has(extname(lower)) ||
-    SENSITIVE_FILE_NAME_PATTERN.test(lower)
-  );
-}
-
-function containsSensitiveContent(bytes: Uint8Array): boolean {
-  if (bytes.byteLength === 0) return false;
-  const text = Buffer.from(bytes).toString("utf8");
-  return containsSensitiveText(text);
 }
 
 function decodeSafeText(bytes: Buffer): string | undefined {

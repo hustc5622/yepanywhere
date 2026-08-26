@@ -19,7 +19,7 @@ export interface CodexBridgeEventSpineOptions {
   store: CodexEventStore;
   connectionId: string;
   connectionSessionId: string;
-  onPersistenceError?: (stage: string) => void;
+  onPersistenceError?: (stage: string, error: unknown) => void;
 }
 
 export interface CodexBridgeClientRequestScope {
@@ -34,14 +34,16 @@ export interface CodexBridgeServerRequestScope {
 }
 
 /**
- * Safe transport-facing error used to enforce store-before-forward without
- * exposing the rejected event or the storage driver's error message.
+ * Transport-facing storage error: retain the cause while enforcing store-before-forward.
  */
 export class CodexBridgeEventPersistenceError extends Error {
   readonly stage: string;
 
-  constructor(stage: string) {
-    super(`Codex event spine persistence failed at ${stage}`);
+  constructor(stage: string, cause: unknown) {
+    super(
+      `Codex event spine persistence failed at ${stage}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
     this.name = "CodexBridgeEventPersistenceError";
     this.stage = stage;
   }
@@ -57,7 +59,7 @@ export class CodexBridgeEventSpine {
   private readonly store: CodexEventStore;
   private readonly connectionId: string;
   private readonly connectionSessionId: string;
-  private readonly onPersistenceError?: (stage: string) => void;
+  private readonly onPersistenceError?: (stage: string, error: unknown) => void;
   private readonly ingresses = new Map<string, Promise<CodexEventIngress>>();
   private readonly clientRequests = new Map<
     string,
@@ -227,11 +229,11 @@ export class CodexBridgeEventSpine {
   ): Promise<void> {
     try {
       await operation();
-    } catch {
-      this.onPersistenceError?.(stage);
+    } catch (error) {
+      this.onPersistenceError?.(stage, error);
       // Canonical persistence is the commit point. A frame that did not reach
       // it must never enter bridge projections or cross the proxy boundary.
-      throw new CodexBridgeEventPersistenceError(stage);
+      throw new CodexBridgeEventPersistenceError(stage, error);
     }
   }
 }

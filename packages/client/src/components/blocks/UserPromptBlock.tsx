@@ -203,7 +203,7 @@ function getUploadUrl(filePath: string): string | null {
   if (isManagedUploadDownloadUrl(publicLocation)) return publicLocation;
 
   // Split path and get last 3 components: projectId, sessionId, filename
-  const parts = filePath.split("/");
+  const parts = filePath.replaceAll("\\", "/").split("/");
   if (parts.length < 3) return null;
 
   const filename = parts[parts.length - 1];
@@ -468,7 +468,7 @@ function UploadedFileItem({
         <button
           type="button"
           className="uploaded-file uploaded-file-clickable"
-          title={`${file.mimeType}, ${file.size}`}
+          title={`${file.mimeType}, ${file.size}\n${file.path}`}
           aria-label={
             i18n?.t("userPromptOpenAttachment", { name: displayName }) ??
             `Open ${displayName}`
@@ -500,7 +500,7 @@ function UploadedFileItem({
         href={managedUploadHref(apiPath)}
         target="_blank"
         rel="noopener noreferrer"
-        title={`${file.mimeType}, ${file.size}`}
+        title={`${file.mimeType}, ${file.size}\n${file.path}`}
         aria-label={
           i18n?.t("userPromptOpenAttachment", { name: displayName }) ??
           `Open ${displayName}`
@@ -513,7 +513,10 @@ function UploadedFileItem({
   }
 
   return (
-    <span className="uploaded-file" title={`${file.mimeType}, ${file.size}`}>
+    <span
+      className="uploaded-file"
+      title={`${file.mimeType}, ${file.size}\n${file.path}`}
+    >
       <span aria-hidden="true">📎</span>
       <span>{displayName}</span>
     </span>

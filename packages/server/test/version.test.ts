@@ -242,7 +242,7 @@ describe("GET /version", () => {
     });
   });
 
-  it("exposes bounded fingerprint-only Codex compatibility diagnostics", async () => {
+  it("exposes bounded plaintext Codex compatibility diagnostics", async () => {
     mockFetch(() => new Response(null, { status: 204 }));
 
     const { createVersionRoutes } = await importVersion();
@@ -271,23 +271,23 @@ describe("GET /version", () => {
       buckets: [
         expect.objectContaining({
           methodFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
-          runtimeVersion: expect.stringMatching(/^other:sha256:[a-f0-9]{20}$/),
+          runtimeVersion: runtime.codexVersion,
           schemaFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
         }),
         expect.objectContaining({
           methodFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
-          runtimeVersion: expect.stringMatching(/^other:sha256:[a-f0-9]{20}$/),
+          runtimeVersion: runtime.codexVersion,
           schemaFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
         }),
       ],
     });
     const serialized = JSON.stringify(json.codexProtocol.diagnostics);
-    expect(serialized).not.toContain(rawMethod);
-    expect(serialized).not.toContain(rawRequest);
-    expect(serialized).not.toContain(runtime.codexVersion);
-    expect(serialized).not.toContain(runtime.schemaHash);
-    expect(serialized).not.toContain("route-secret");
-    expect(serialized).not.toContain("/private/");
+    expect(serialized).toContain(rawMethod);
+    expect(serialized).toContain(rawRequest);
+    expect(serialized).toContain(runtime.codexVersion);
+    expect(serialized).toContain(runtime.schemaHash);
+    expect(serialized).toContain("route-secret");
+    expect(serialized).toContain("/private/");
   });
 
   it("reports update-available for stale bridge binaries", async () => {

@@ -4427,7 +4427,7 @@ export class CodexProvider implements AgentProvider {
       ...(event.threadId ? { codexThreadId: event.threadId } : {}),
       ...(event.turnId ? { codexTurnId: event.turnId } : {}),
       codexEventSequence: event.sequence,
-      ...(item.type === "reasoning" ? { codexRawReasoningAllowed: false } : {}),
+      ...(item.type === "reasoning" ? { codexRawReasoningAllowed: true } : {}),
     };
     const dedicatedThreadItem = isBoundedDedicatedCodexThreadItem(item)
       ? publicCodexThreadItem(item)
@@ -5785,135 +5785,13 @@ export function publicCodexThreadItem(
   item: Record<string, unknown>,
 ): Record<string, unknown> {
   const clone = structuredClone(item);
-  if (clone.type === "reasoning") {
-    const { content: _rawReasoning, ...summaryOnly } = clone;
-    return { ...summaryOnly, content: [] };
-  }
-  if (clone.type === "userMessage" || clone.type === "user_message") {
-    return {
-      ...clone,
-      content: Array.isArray(clone.content)
-        ? clone.content.map((rawInput) => {
-            const input = asRecord(rawInput);
-            if (!input) return rawInput;
-            if (
-              input.type === "localImage" ||
-              input.type === "localAudio" ||
-              input.type === "skill" ||
-              input.type === "mention"
-            ) {
-              return {
-                ...input,
-                ...(typeof input.path === "string"
-                  ? { path: publicCodexFilePath(input.path) }
-                  : {}),
-              };
-            }
-            if (input.type === "image" || input.type === "audio") {
-              return {
-                ...input,
-                ...(typeof input.url === "string" &&
-                publicCodexImageUrl(input.url)
-                  ? { url: input.url }
-                  : { url: "[url hidden]" }),
-              };
-            }
-            return input;
-          })
-        : [],
-    };
-  }
-  if (clone.type === "hookPrompt" || clone.type === "hook_prompt") {
-    return {
-      ...clone,
-      fragments: Array.isArray(clone.fragments)
-        ? clone.fragments.map((rawFragment) => {
-            const fragment = asRecord(rawFragment);
-            return fragment && typeof fragment.hookRunId === "string"
-              ? { hookRunId: fragment.hookRunId }
-              : {};
-          })
-        : [],
-    };
-  }
-  if (clone.type === "commandExecution" || clone.type === "command_execution") {
-    return {
-      ...clone,
-      ...(typeof clone.cwd === "string"
-        ? { cwd: publicCodexFilePath(clone.cwd) }
-        : {}),
-      ...(typeof clone.scriptPath === "string"
-        ? { scriptPath: publicCodexFilePath(clone.scriptPath) }
-        : {}),
-      commandActions: Array.isArray(clone.commandActions)
-        ? clone.commandActions.map((rawAction) => {
-            const action = asRecord(rawAction);
-            return action && typeof action.path === "string"
-              ? { ...action, path: publicCodexFilePath(action.path) }
-              : rawAction;
-          })
-        : [],
-    };
-  }
   if (clone.type === "fileChange" || clone.type === "file_change") {
-    return {
-      ...clone,
-      changes: publicCodexFileChanges(clone.changes),
-    };
+    clone.changes = publicCodexFileChanges(clone.changes);
   }
-  if (clone.type === "imageView" || clone.type === "image_view") {
-    return {
-      ...clone,
-      ...(typeof clone.path === "string"
-        ? { path: publicCodexFilePath(clone.path) }
-        : {}),
-    };
+  if (isCodexImageGenerationRecord(clone)) {
+    Reflect.deleteProperty(clone, "result");
   }
-  if (clone.type === "mcpToolCall" || clone.type === "mcp_tool_call") {
-    const appContext = asRecord(clone.appContext);
-    return {
-      ...clone,
-      ...(appContext
-        ? {
-            appContext: {
-              ...appContext,
-              ...(typeof appContext.resourceUri === "string"
-                ? {
-                    resourceUri: publicCodexImageUrl(appContext.resourceUri)
-                      ? appContext.resourceUri
-                      : "[resource hidden]",
-                  }
-                : {}),
-            },
-          }
-        : {}),
-      ...(typeof clone.mcpAppResourceUri === "string"
-        ? {
-            mcpAppResourceUri: publicCodexImageUrl(clone.mcpAppResourceUri)
-              ? clone.mcpAppResourceUri
-              : "[resource hidden]",
-          }
-        : {}),
-    };
-  }
-  if (clone.type === "collabAgentToolCall") {
-    const { prompt: _prompt, ...withoutPrompt } = clone;
-    return withoutPrompt;
-  }
-  if (clone.type === "subAgentActivity") {
-    const { agentPath: _agentPath, ...withoutAgentPath } = clone;
-    return withoutAgentPath;
-  }
-  if (!isCodexImageGenerationRecord(clone)) return clone;
-  return Object.fromEntries(
-    Object.entries(clone).filter(
-      ([key]) =>
-        key !== "savedPath" &&
-        key !== "saved_path" &&
-        key !== "path" &&
-        key !== "result",
-    ),
-  );
+  return clone;
 }
 
 function isLocalImagePathValue(value: string): boolean {
@@ -5947,7 +5825,7 @@ export function publicCodexImageUrl(
 /**
  * The canonical envelope proves that this is the completed item for the
  * active thread/turn. Materialization still uses the matching live payload so
- * a valid inline image is not destroyed by bounded journal redaction.
+ * a valid inline image is not destroyed by bounded journal serialization.
  */
 function selectCanonicalGeneratedArtifactSourceItem(
   notification: JsonRpcNotification,

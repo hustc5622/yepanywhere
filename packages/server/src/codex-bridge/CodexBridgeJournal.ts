@@ -52,6 +52,7 @@ export interface CodexBridgeJournalRecord {
   turnId?: string;
   itemId?: string;
   status?: string;
+  requestId?: string | number;
   requestIdFingerprint?: string;
   wireBytes: number;
   count: number;
@@ -623,6 +624,7 @@ export function createCodexBridgeJournalRecord(input: {
   turnId?: string;
   itemId?: string;
   status?: string;
+  requestId?: string | number;
   requestIdFingerprint?: string;
   wireBytes: number;
 }): CodexBridgeJournalRecord {
@@ -642,6 +644,7 @@ export function createCodexBridgeJournalRecord(input: {
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.itemId ? { itemId: input.itemId } : {}),
     ...(input.status ? { status: input.status } : {}),
+    ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
     ...(input.requestIdFingerprint
       ? { requestIdFingerprint: input.requestIdFingerprint }
       : {}),

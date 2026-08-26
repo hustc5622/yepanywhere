@@ -22,7 +22,7 @@ describe("Feishu channel routes", () => {
     );
   });
 
-  it("uses a write-only secret endpoint and never returns its reference or value", async () => {
+  it("keeps the dedicated secret endpoint and returns its plaintext value", async () => {
     const dataDir = await createDataDir(dataDirs);
     const service = new FeishuChannelService({ dataDir });
     await service.initialize();
@@ -47,14 +47,16 @@ describe("Feishu channel routes", () => {
     });
     const secretBody = await secretResponse.text();
     expect(secretResponse.status).toBe(200);
-    expect(secretBody).not.toContain("never-return-this-secret");
+    expect(secretBody).toContain("never-return-this-secret");
     expect(secretBody).not.toContain("secretRef");
     expect(JSON.parse(secretBody)).toMatchObject({
-      account: { secret: { configured: true, masked: "****cret" } },
+      account: {
+        secret: { configured: true, value: "never-return-this-secret" },
+      },
     });
 
     const listBody = await (await routes.request("/accounts")).text();
-    expect(listBody).not.toContain("never-return-this-secret");
+    expect(listBody).toContain("never-return-this-secret");
     expect(listBody).not.toContain("secretRef");
   });
 

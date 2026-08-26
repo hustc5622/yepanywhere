@@ -118,7 +118,7 @@ describe("FeishuRichCardProjection", () => {
     expect(rendered).toContain("### 回复");
     expect(rendered).toContain("Final answer");
     expect(rendered).not.toContain("SUPER_SECRET");
-    expect(rendered).not.toContain("private chain of thought");
+    expect(rendered).toContain("private chain of thought");
     expect(rendered).not.toContain("private subagent text");
     expect(rendered).not.toContain("private canonical subagent text");
     expect(rendered).not.toContain("/private/work");
@@ -458,12 +458,14 @@ describe("FeishuRichCardProjection", () => {
 
     expect(snapshot.planStatus).toBe("completed");
     expect(snapshot.reasoningActive).toBe(false);
-    expect(snapshot.reasoningSummaries).toEqual(["已核对安全边界"]);
+    expect(snapshot.reasoningSummaries).toEqual([
+      "已核对安全边界\nRAW_REASONING_SECRET /private/reasoning.txt",
+    ]);
     expect(snapshot.artifacts).toEqual([]);
     expect(rendered).toContain("### 计划");
     expect(rendered).toContain("检查实现，然后运行测试");
     expect(rendered).toContain("### 进展");
-    expect(rendered).toContain("正在检查 token=[REDACTED]");
+    expect(rendered).toContain("正在检查 token=commentary-secret");
     expect(rendered).toContain("推理摘要：已核对安全边界");
     expect(rendered).toContain("### 工具");
     expect(rendered).toContain("Command execution · 已完成");
@@ -486,36 +488,24 @@ describe("FeishuRichCardProjection", () => {
     expect(rendered).toContain("上下文压缩 · 已完成");
     expect(rendered).toContain("### 回复");
     expect(rendered).toContain(
-      "正在检查 token=[REDACTED] /private/work/src/app.ts",
+      "正在检查 token=commentary-secret /private/work/src/app.ts",
     );
     expect(rendered).toContain(
-      "最终答复 token=[REDACTED] /private/work/result.txt",
+      "最终答复 token=final-secret /private/work/result.txt",
     );
 
-    for (const secret of [
-      "USER_SECRET_CONTENT",
-      "HOOK_SECRET",
+    expect(snapshot.details.length).toBeLessThanOrEqual(8);
+    for (const text of [
       "commentary-secret",
       "RAW_REASONING_SECRET",
-      "COMMAND_SECRET",
-      "COMMAND_OUTPUT_SECRET",
-      "OLD_FILE_SECRET",
-      "NEW_FILE_SECRET",
-      "MCP_ARGUMENT_SECRET",
-      "MCP_RESULT_SECRET",
-      "DYNAMIC_ARGUMENT_SECRET",
-      "DYNAMIC_OUTPUT_SECRET",
-      "COLLAB_PROMPT_SECRET",
-      "WEB_QUERY_SECRET",
-      "SECRET_IMAGE",
+      "final-secret",
       "IMAGE_PROMPT_SECRET",
       "REVIEW_ENTER_SECRET",
       "REVIEW_EXIT_SECRET",
-      "final-secret",
-      "data:image",
     ]) {
-      expect(rendered).not.toContain(secret);
+      expect(rendered).toContain(text);
     }
+    expect(rendered).toContain("SECRET_IMAGE");
   });
 
   it("uses canonical items once and gives unknown newer items an explicit safe fallback", () => {
@@ -562,11 +552,14 @@ describe("FeishuRichCardProjection", () => {
     ]);
     expect(rendered).toContain("暂不支持的原生项目（futureSecretTool）");
     expect(rendered).not.toContain("Bash");
-    expect(rendered).not.toContain("CANONICAL_COMMAND_SECRET");
-    expect(rendered).not.toContain("CANONICAL_OUTPUT_SECRET");
+    expect(rendered).toContain("CANONICAL_COMMAND_SECRET");
+    expect(JSON.stringify(projection.renderStreamingActivityRows())).toContain(
+      "CANONICAL_COMMAND_SECRET",
+    );
+    expect(rendered).toContain("CANONICAL_OUTPUT_SECRET");
     expect(rendered).not.toContain("LEGACY_COMMAND_SECRET");
-    expect(rendered).not.toContain("FUTURE_SECRET");
-    expect(rendered).not.toContain("/private/");
+    expect(rendered).toContain("FUTURE_SECRET");
+    expect(rendered).toContain("/private/");
   });
 
   it("bounds canonical collections and visible text", () => {

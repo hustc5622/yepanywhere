@@ -12,13 +12,14 @@ export type SafeJsonValue =
 export type SafeJsonObject = { [key: string]: SafeJsonValue };
 
 /**
- * Payloads must be redacted before entering the event spine. This wrapper is a
+ * Payloads must be bounded JSON before entering the event spine. This wrapper is a
  * trust-boundary marker; it deliberately does not accept an arbitrary raw
  * JSON-RPC payload without an explicit caller conversion.
  */
 export interface SafeCodexPayload {
   safety: "safe";
   data: SafeJsonValue;
+  /** Historical count from older journals; new payloads retain plaintext. */
   redactionCount?: number;
   truncated?: boolean;
 }

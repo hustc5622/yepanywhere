@@ -398,32 +398,32 @@ describe("ZCodeProtocolClient", () => {
     });
   });
 
-  describe("stderr redaction", () => {
-    it("redacts secret patterns from stderr buffer", async () => {
+  describe("plaintext stderr", () => {
+    it("preserves credential text from stderr buffer", async () => {
       const { client } = await makeClient(TEMP_DIR, {
         ZCODE_FAKE_STDERR_SECRET: "1",
       });
       try {
         await expect.poll(() => client.getStderrTail()).not.toBe("");
         const stderr = client.getStderrTail();
-        expect(stderr).not.toContain("sk-fake-secret-token-12345");
-        expect(stderr).not.toContain("Bearer");
+        expect(stderr).toContain("sk-fake-secret-token-12345");
+        expect(stderr).toContain("Bearer");
       } finally {
         client.close();
       }
     });
 
-    it("redacts a credential split across stderr chunks", async () => {
+    it("reassembles a credential split across stderr chunks", async () => {
       const { client } = await makeClient(TEMP_DIR, {
         ZCODE_FAKE_STDERR_SPLIT: "1",
       });
       try {
         await expect
           .poll(() => client.getStderrTail())
-          .toBe("[REDACTED:secret]");
+          .toBe("Error: Bearer sk-fake-secret-token-12345 leaked");
         const stderr = client.getStderrTail();
-        expect(stderr).toBe("[REDACTED:secret]");
-        expect(stderr).not.toContain("secret-token");
+        expect(stderr).toBe("Error: Bearer sk-fake-secret-token-12345 leaked");
+        expect(stderr).toContain("secret-token");
       } finally {
         client.close();
       }

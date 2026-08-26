@@ -235,35 +235,51 @@ User uploaded files:
     expect(screen.getByRole("alert").textContent).toContain("File not found");
   });
 
-  it("opens path-free managed upload URLs from public prompts", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ error: "Synthetic preview failure" }), {
-        status: 503,
-        statusText: "Unavailable",
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const downloadUrl =
-      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
-    const content = `Check this image.\n\nUser uploaded files:\n- screenshot.png (1 KB, image/png): ${downloadUrl}`;
+  it.each(["url", "posix", "windows"])(
+    "opens authenticated upload previews from %s locations",
+    async (kind) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: "Synthetic preview failure" }), {
+          status: 503,
+          statusText: "Unavailable",
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const downloadUrl =
+        "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+      const localPath =
+        "/Users/test/.yep-anywhere/uploads/cHJvamVjdA/session-1/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+      const location =
+        kind === "url"
+          ? downloadUrl
+          : kind === "windows"
+            ? `C:${localPath.replaceAll("/", "\\")}`
+            : localPath;
+      const content = `Check this image.\n\nUser uploaded files:\n- screenshot.png (1 KB, image/png): ${location}`;
 
-    render(
-      <I18nProvider>
-        <UserPromptBlock content={content} />
-      </I18nProvider>,
-    );
+      render(
+        <I18nProvider>
+          <UserPromptBlock content={content} />
+        </I18nProvider>,
+      );
 
-    fireEvent.click(screen.getByRole("button", { name: /screenshot\.png/i }));
+      fireEvent.click(screen.getByRole("button", { name: /screenshot\.png/i }));
 
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(downloadUrl, {
-        credentials: "include",
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(downloadUrl, {
+          credentials: "include",
+        });
       });
-    });
-    expect(screen.getByRole("dialog")).toBeDefined();
-  });
+      expect(screen.getByRole("dialog")).toBeDefined();
+      expect(
+        screen
+          .getByRole("button", { name: /screenshot\.png/i })
+          .getAttribute("title"),
+      ).toContain(location);
+    },
+  );
 
   it("merges persisted Codex image data into the named managed attachment", () => {
     const downloadUrl =

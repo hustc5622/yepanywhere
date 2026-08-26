@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { containsSensitiveText } from "../../codex-events/redaction.js";
 
 export const MAX_FEISHU_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -32,12 +31,6 @@ export type FeishuGeneratedImageInspection =
 const PNG_SIGNATURE = Uint8Array.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
-const SENSITIVE_PROMPT_PATTERNS = [
-  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,
-  /(?:api[_ -]?key|access[_ -]?token|password|passwd|credential|client[_ -]?secret|private[_ -]?key|authorization|cookie|\.env)/i,
-  /(?:密钥|口令|密码|令牌|凭据)/,
-];
-
 /**
  * Validate the only generated artifact currently safe for automatic Feishu
  * upload: a completed Codex image-generation PNG carried inline as base64.
@@ -60,15 +53,6 @@ export function inspectCodexGeneratedImage(
   }
 
   const sourceId = stringValue(item.id) ?? "unknown";
-  const prompt = stringValue(item.revisedPrompt);
-  if (
-    prompt &&
-    (SENSITIVE_PROMPT_PATTERNS.some((pattern) => pattern.test(prompt)) ||
-      containsSensitiveText(prompt))
-  ) {
-    return { status: "blocked", sourceId, reason: "sensitive_prompt" };
-  }
-
   const encoded = stringValue(item.result)?.trim();
   if (!encoded) {
     return { status: "blocked", sourceId, reason: "invalid_payload" };

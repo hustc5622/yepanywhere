@@ -11,9 +11,10 @@ import {
   formatCodexRetryWarning,
 } from "../codex/error-taxonomy.js";
 import {
-  CODEX_HIDDEN_PATH,
-  publicCodexFilePath,
-} from "../codex/path-projection.js";
+  type NormalizedCodexFileChange,
+  publicCodexFileChanges,
+} from "../codex/file-change.js";
+import { isLegacyMaskedCodexFilePath } from "../codex/path-projection.js";
 import type { Message } from "../supervisor/types.js";
 import type { CodexProjectionCache } from "./projection-cache.js";
 import { reduceCodexEvents } from "./reducer.js";
@@ -536,7 +537,7 @@ function buildCanonicalMessageCandidates(
             codexThreadId: safeIdentity(thread.id, "thread"),
             codexTurnId: safeIdentity(turn.id, "turn"),
             codexEventSequence: sequence,
-            codexRawReasoningAllowed: false,
+            codexRawReasoningAllowed: true,
             codexCanonicalRefresh: true,
             ...(itemArtifacts.length > 0
               ? {
@@ -1169,6 +1170,7 @@ function projectSafeThreadItem(
     ? item.nativeType
     : "unknown";
   const base: Record<string, unknown> = {
+    ...snapshot,
     type: nativeType,
     id: safeIdentity(item.id, "item"),
   };
@@ -1206,11 +1208,10 @@ function projectSafeThreadItem(
           : (item.stream.reasoningSummary ??
             stringArray(snapshot?.summary) ??
             []);
-      // Raw reasoning is deliberately absent even if an older journal retained it.
-      base.content = [];
+      base.content = snapshot?.content ?? item.stream.reasoningContent ?? [];
       break;
     case "commandExecution":
-      base.command = "[command hidden in persisted refresh]";
+      base.command = readString(snapshot, "command") ?? "";
       copyString(snapshot, base, "source");
       copyString(snapshot, base, "pluginId");
       copyNumber(snapshot, base, "exitCode");
@@ -1258,17 +1259,15 @@ function projectSafeThreadItem(
     case "webSearch":
       copyString(snapshot, base, "query");
       base.action = safeWebAction(snapshot?.action);
-      if (Array.isArray(snapshot?.results)) {
-        base.results = snapshot.results.map(() => null);
-      }
       break;
     case "imageView":
-      // Never project the local path from a durable journal into the REST view.
+      copyString(snapshot, base, "path");
       break;
     case "sleep":
       copyNumber(snapshot, base, "durationMs");
       break;
     case "imageGeneration":
+      base.result = undefined;
       copyBoolean(snapshot, base, "transparentBackground");
       break;
     case "enteredReviewMode":
@@ -1278,7 +1277,7 @@ function projectSafeThreadItem(
     case "contextCompaction":
       break;
     default:
-      // Unknown native types intentionally expose type + opaque id only.
+      // Unknown native fields remain available in the bounded snapshot.
       break;
   }
   return removeUndefined(base);
@@ -1333,58 +1332,41 @@ function projectedStreamText(
 }
 
 function safeUserInputs(value: SafeJsonValue | undefined): unknown[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    const input = asObject(entry);
-    const type = readString(input, "type");
-    switch (type) {
-      case "text":
-        return [{ type, text: readString(input, "text") ?? "" }];
-      case "skill":
-      case "mention":
-        return [{ type, name: readString(input, "name") ?? "" }];
-      case "image":
-      case "localImage":
-      case "audio":
-      case "localAudio":
-        return [{ type }];
-      default:
-        return [{ type: "unknown" }];
-    }
-  });
+  return Array.isArray(value) ? value : [];
 }
 
 function safeHookFragments(value: SafeJsonValue | undefined): unknown[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    const fragment = asObject(entry);
-    const text = readString(fragment, "text");
-    if (!text) return [];
-    const hookRunId = readString(fragment, "hookRunId");
-    return [{ text, ...(hookRunId ? { hookRunId } : {}) }];
-  });
+  return Array.isArray(value) ? value : [];
 }
 
-function safeFileChanges(value: SafeJsonValue | undefined): unknown[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    const change = asObject(entry);
-    if (!change) return [];
-    const kind = readString(change, "kind");
-    const path = readString(change, "path");
-    return [
-      {
-        path: path ? publicCodexFilePath(path) : CODEX_HIDDEN_PATH,
-        ...(kind ? { kind } : {}),
-      },
-    ];
-  });
+function safeFileChanges(
+  value: unknown,
+  pathsOnly = false,
+): NormalizedCodexFileChange[] {
+  if (!pathsOnly) return publicCodexFileChanges(value);
+  // A replay may predate external-path labels. Retain its fingerprint so the
+  // matching rollout row can restore a label without guessing by array order.
+  const pathMetadata = Array.isArray(value)
+    ? value.slice(0, 200).map((entry) => {
+        const change = asObject(entry);
+        return {
+          path: change?.path,
+          pathFingerprint: change?.pathFingerprint,
+          kind: change?.kind,
+        };
+      })
+    : [];
+  return publicCodexFileChanges(pathMetadata).map(
+    ({ path, pathFingerprint, kind }) => ({
+      path,
+      pathFingerprint,
+      kind,
+    }),
+  );
 }
 
 function safeWebAction(value: SafeJsonValue | undefined): unknown {
-  const action = asObject(value);
-  const type = readString(action, "type");
-  return type ? { type } : null;
+  return value ?? null;
 }
 
 function safeAgentStates(value: SafeJsonValue | undefined): unknown {
@@ -1493,14 +1475,58 @@ function attachCanonicalItem(
   message: Message,
   candidate: CanonicalMessageCandidate,
 ): Message {
+  const threadItem = structuredClone(candidate.message.codexThreadItem);
+  const nativeItem = asUnknownObject(threadItem);
+  if (
+    candidate.nativeType === "fileChange" &&
+    Array.isArray(nativeItem?.changes) &&
+    nativeItem.changes.some((entry) => {
+      const path = readUnknownString(asUnknownObject(entry), "path");
+      return path !== undefined && isLegacyMaskedCodexFilePath(path);
+    })
+  ) {
+    const content = message.message?.content ?? message.content;
+    const tool = Array.isArray(content)
+      ? content.find(
+          (block) =>
+            block.type === "tool_use" && block.id === candidate.originalItemId,
+        )
+      : undefined;
+    const input = asUnknownObject(tool?.input);
+    // Recovery only needs path metadata; do not reprocess potentially large
+    // patch bodies while overlaying each historical file-change item.
+    const legacyChanges = safeFileChanges(input?.changes, true);
+    const pathsByFingerprint = new Map(
+      legacyChanges
+        .filter((change) => !isLegacyMaskedCodexFilePath(change.path))
+        .map((change) => [change.pathFingerprint, change.path]),
+    );
+    if (Array.isArray(nativeItem.changes)) {
+      nativeItem.changes = nativeItem.changes.map((entry) => {
+        const change = asUnknownObject(entry);
+        if (
+          !change ||
+          typeof change.path !== "string" ||
+          !isLegacyMaskedCodexFilePath(change.path)
+        ) {
+          return entry;
+        }
+        const fingerprint = readUnknownString(change, "pathFingerprint");
+        const recoveredPath = fingerprint
+          ? pathsByFingerprint.get(fingerprint)
+          : undefined;
+        return recoveredPath ? { ...change, path: recoveredPath } : entry;
+      });
+    }
+  }
   return {
     ...message,
-    codexThreadItem: structuredClone(candidate.message.codexThreadItem),
+    codexThreadItem: threadItem,
     codexThreadItemLifecycle: candidate.message.codexThreadItemLifecycle,
     codexThreadId: candidate.message.codexThreadId,
     codexTurnId: candidate.message.codexTurnId,
     codexEventSequence: candidate.sequence,
-    codexRawReasoningAllowed: false,
+    codexRawReasoningAllowed: true,
     codexCanonicalRefresh: true,
     ...(candidate.message.codexGeneratedArtifacts === undefined
       ? {}
@@ -1724,8 +1750,8 @@ function safeMethod(method: string): string {
   return method.slice(0, 160).replace(/[^A-Za-z0-9_./:-]/g, "?");
 }
 
-function safeIdentity(value: string, kind: string): string {
-  return SAFE_IDENTITY.test(value) ? value : `${kind}-${digest(value)}`;
+function safeIdentity(value: string, _kind: string): string {
+  return value.slice(0, 2_048);
 }
 
 function safeOptionalIdentity(

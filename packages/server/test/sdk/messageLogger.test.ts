@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { sanitizeSDKMessageForLog } from "../../src/sdk/messageLogger.js";
 
 describe("SDK message logger safety", () => {
-  it("removes structured Codex paths without dropping public names", () => {
+  it("retains structured Codex paths and names", () => {
     const safe = sanitizeSDKMessageForLog({
       type: "user",
       codexInputs: [
@@ -22,15 +22,23 @@ describe("SDK message logger safety", () => {
     expect(safe).toEqual({
       type: "user",
       codexInputs: [
-        { type: "skill", name: "skill-creator" },
-        { type: "mention", name: "github" },
+        {
+          type: "skill",
+          name: "skill-creator",
+          path: "/managed/workspace/.codex/skills/skill-creator/SKILL.md",
+        },
+        {
+          type: "mention",
+          name: "github",
+          path: "app://github/private-installation",
+        },
       ],
     });
-    expect(JSON.stringify(safe)).not.toContain("/managed/workspace");
-    expect(JSON.stringify(safe)).not.toContain("private-installation");
+    expect(JSON.stringify(safe)).toContain("/managed/workspace");
+    expect(JSON.stringify(safe)).toContain("private-installation");
   });
 
-  it("removes managed attachment and local-media paths from user events", () => {
+  it("retains managed attachment and local-media paths", () => {
     const safe = sanitizeSDKMessageForLog({
       type: "user",
       message: {
@@ -54,13 +62,13 @@ describe("SDK message logger safety", () => {
     });
 
     const serialized = JSON.stringify(safe);
-    expect(serialized).toContain("[managed attachment]");
-    expect(serialized).not.toContain("/managed/private");
-    expect(serialized).not.toContain("C:\\\\managed");
-    expect(serialized).not.toContain("folder: confidential");
+    expect(serialized).not.toContain("[managed attachment]");
+    expect(serialized).toContain("/managed/private");
+    expect(serialized).toContain("C:\\\\managed");
+    expect(serialized).toContain("folder: confidential");
   });
 
-  it("redacts Codex image-view paths in tool and canonical shapes", () => {
+  it("retains Codex image-view paths in tool and canonical shapes", () => {
     const managedPath = "/managed/workspace/screenshots/result.png";
     const safe = sanitizeSDKMessageForLog([
       {
@@ -103,19 +111,19 @@ describe("SDK message logger safety", () => {
     expect(safe).toMatchObject([
       {
         message: {
-          content: [{ input: { path: "[path hidden]" } }],
+          content: [{ input: { path: managedPath } }],
         },
       },
       {
         message: {
-          content: [{ content: "Viewed image: [path hidden]" }],
+          content: [{ content: `Viewed image: ${managedPath}` }],
         },
       },
       {
-        codexThreadItem: { path: "[path hidden]" },
+        codexThreadItem: { path: managedPath },
       },
     ]);
-    expect(JSON.stringify(safe)).not.toContain(managedPath);
+    expect(JSON.stringify(safe)).toContain(managedPath);
   });
 
   it("does not rewrite ordinary assistant text that quotes the marker", () => {

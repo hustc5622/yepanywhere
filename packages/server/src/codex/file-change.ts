@@ -1,8 +1,13 @@
-import { containsSensitiveText } from "../codex-events/redaction.js";
 import {
   type CodexPublicPathOptions,
-  publicCodexFilePath as projectPublicCodexFilePath,
+  codexFilePathFingerprint,
+  hiddenCodexFilePath,
+  isCodexPathFingerprint,
+  isHiddenCodexFilePath,
+  publicCodexFileChangePath,
 } from "./path-projection.js";
+
+export { publicCodexFilePath } from "./path-projection.js";
 
 export type CodexFileChangeKind = "add" | "delete" | "update";
 
@@ -16,6 +21,8 @@ export type CodexFileChangeStatus =
 /** Canonical shape shared by Codex JSONL and app-server projections. */
 export interface NormalizedCodexFileChange {
   path: string;
+  /** Correlates older fingerprint-only journals with a normalized rollout. */
+  pathFingerprint?: string;
   kind: CodexFileChangeKind;
   diff?: string;
 }
@@ -91,6 +98,9 @@ function normalizeChange(
 
   return {
     path,
+    ...(isCodexPathFingerprint(value.pathFingerprint)
+      ? { pathFingerprint: value.pathFingerprint }
+      : {}),
     kind: kindInfo.kind,
     ...(diff ? { diff } : {}),
   };
@@ -127,8 +137,8 @@ export function normalizeCodexFileChanges(
 /**
  * Public projection shared by live app-server events and persisted rollout
  * normalization. Provider-internal paths remain available to execution code,
- * while public transcripts receive only bounded relative paths and redacted
- * diffs.
+ * while transcripts retain original paths and bounded patch bodies. Fingerprints
+ * are kept only to correlate older journals that already lost their paths.
  */
 export function publicCodexFileChanges(
   value: unknown,
@@ -138,9 +148,11 @@ export function publicCodexFileChanges(
     ? value.map((entry) => {
         const change = isRecord(entry) ? entry : undefined;
         return change &&
-          typeof change.path !== "string" &&
-          typeof change.pathFingerprint === "string"
-          ? { ...change, path: "[path hidden]" }
+          (typeof change.path !== "string" ||
+            !change.path.trim() ||
+            isHiddenCodexFilePath(change.path)) &&
+          isCodexPathFingerprint(change.pathFingerprint)
+          ? { ...change, path: hiddenCodexFilePath(change.pathFingerprint) }
           : entry;
       })
     : value;
@@ -148,46 +160,18 @@ export function publicCodexFileChanges(
   return normalizeCodexFileChanges(pathSafeValue)
     .slice(0, 200)
     .map((change) => ({
-      path: projectPublicCodexFilePath(change.path, options),
+      path: publicCodexFileChangePath(change.path, options),
+      pathFingerprint:
+        change.pathFingerprint ?? codexFilePathFingerprint(change.path),
       kind: change.kind,
       ...(change.diff
         ? {
-            diff:
-              containsSensitiveText(change.diff) ||
-              containsSensitiveText(change.diff.replace(/^[+\- ]/gm, ""))
-                ? "[REDACTED:secret-diff]"
-                : redactAbsolutePaths(change.diff).slice(0, 64 * 1024),
+            diff: change.diff.slice(0, 64 * 1024),
           }
         : {}),
-    }));
-}
-
-export function publicCodexFilePath(value: string): string {
-  const normalized = value.trim().replaceAll("\\", "/");
-  const components = normalized.split("/");
-  if (
-    !normalized ||
-    normalized.includes("\0") ||
-    normalized.startsWith("/") ||
-    normalized.startsWith("file://") ||
-    /^[A-Za-z]:\//.test(normalized) ||
-    components.some((component) => component === "..")
-  ) {
-    return "[path hidden]";
-  }
-  return normalized.slice(0, 2_048);
-}
-
-function redactAbsolutePaths(value: string): string {
-  return value
-    .replace(/file:\/\/\/[^\s]+/gi, "[path hidden]")
-    .replace(
-      /(^|[\s([{"'`=])\/(?:[^/\s]+\/)*[^/\s)\]}"'`,;]+/gm,
-      "$1[path hidden]",
-    )
-    .replace(
-      /(^|[\s([{"'`=])[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gm,
-      "$1[path hidden]",
+    }))
+    .sort((left, right) =>
+      left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
     );
 }
 

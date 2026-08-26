@@ -68,7 +68,7 @@ describe("canonical Codex transcript", () => {
     );
   });
 
-  it("removes secrets, raw reasoning, binary bodies, and concrete artifact locations", () => {
+  it("preserves plaintext secrets, reasoning and artifact locations in exports", () => {
     const transcript = buildCanonicalCodexTranscriptFromEvents(
       "session-1",
       canonicalFixture(),
@@ -90,24 +90,16 @@ describe("canonical Codex transcript", () => {
       "mcp-secret-answer",
       "nested-client-secret",
     ]) {
-      expect(combined).not.toContain(forbidden);
+      expect(combined).toContain(forbidden);
     }
-    expect(combined).toContain("[REDACTED:secret-answer]");
-    expect(combined).toContain("[OMITTED:raw-reasoning]");
-    expect(combined).toContain("[REDACTED:raw-protocol-diagnostic]");
-    expect(combined).toContain("opaque_artifact_ref");
-    expect(combined).toContain("artifact:sha256:");
+    expect(combined).not.toContain("[REDACTED:");
+    expect(combined).not.toContain("[OMITTED:raw-reasoning]");
+    expect(combined).not.toContain("opaque_artifact_ref");
     expect(transcript.metadata.redaction).toMatchObject({
-      applied: true,
-      opaqueArtifactRefs: expect.any(Number),
+      applied: false,
+      count: 0,
+      opaqueArtifactRefs: 0,
     });
-    expect(transcript.metadata.redaction.counts.secret_answer).toBe(3);
-    expect(transcript.metadata.redaction.counts.raw_reasoning).toBeGreaterThan(
-      0,
-    );
-    expect(
-      transcript.metadata.redaction.counts.artifact_location,
-    ).toBeGreaterThan(0);
 
     const parsed = JSON.parse(json.body) as {
       metadata: { output: unknown };

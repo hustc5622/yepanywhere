@@ -114,7 +114,7 @@ export function createPushRoutes(deps: PushRoutesDeps): Hono {
     const subscriptions = pushService.getSubscriptions();
     const nativeSubscriptions = nativePushService?.getSubscriptions() ?? {};
 
-    // Return sanitized subscription info (hide sensitive keys)
+    // Include the original subscription for the authenticated owner.
     const sanitized = Object.entries(subscriptions).map(
       ([browserProfileId, sub]) => {
         // Safely extract domain from endpoint
@@ -129,6 +129,7 @@ export function createPushRoutes(deps: PushRoutesDeps): Hono {
 
         return {
           browserProfileId,
+          subscription: sub.subscription,
           createdAt: sub.createdAt,
           deviceName: sub.deviceName,
           endpointDomain,

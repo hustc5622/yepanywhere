@@ -481,7 +481,7 @@ describe("CodexBridgeService", () => {
     }
   });
 
-  it("returns a typed generic HTTP 500 without exposing handler diagnostics", async () => {
+  it("returns a typed generic HTTP 500 with plaintext handler diagnostics", async () => {
     const bridgeInternals = bridge as unknown as {
       handleHttpRequest: () => Promise<void>;
     };
@@ -499,23 +499,24 @@ describe("CodexBridgeService", () => {
       const response = await fetch(`http://127.0.0.1:${bridgePort}/status`);
       expect(response.status).toBe(500);
       await expect(response.json()).resolves.toEqual({
-        error: "Bridge request failed",
+        error:
+          "unauthorized Bearer http-wire-secret at /private/http/config.json",
         code: "bridge_internal_error",
       });
       expect(bridge.getStatus().lastError).toBe(
-        "Codex authentication has expired or is incomplete.",
+        "unauthorized Bearer http-wire-secret at /private/http/config.json",
       );
       const ordinaryLogs = JSON.stringify(warnSpy.mock.calls);
       expect(ordinaryLogs).toContain("code=CODEX_AUTH_REQUIRED");
-      expect(ordinaryLogs).not.toContain("http-wire-secret");
-      expect(ordinaryLogs).not.toContain("/private/http");
+      expect(ordinaryLogs).toContain("http-wire-secret");
+      expect(ordinaryLogs).toContain("/private/http");
     } finally {
       bridgeInternals.handleHttpRequest = originalHandler;
       warnSpy.mockRestore();
     }
   });
 
-  it("publishes only a safe external upstream origin and argument summary", async () => {
+  it("publishes the full upstream URL and configured arguments", async () => {
     const diagnosticBridge = new CodexBridgeService({
       enabled: false,
       host: "127.0.0.1",
@@ -528,17 +529,21 @@ describe("CodexBridgeService", () => {
     });
 
     const status = diagnosticBridge.getStatus();
-    expect(status.upstreamUrl).toBe("ws://127.0.0.1:4511");
+    expect(status.upstreamUrl).toBe(
+      "ws://provider:upstream-wire-secret@127.0.0.1:4511/private/socket?token=upstream-wire-secret",
+    );
     expect(status.upstreams.light).toMatchObject({
-      url: "ws://127.0.0.1:4511",
-      args: ["[1 configured argument hidden]"],
+      url: "ws://provider:upstream-wire-secret@127.0.0.1:4511/private/socket?token=upstream-wire-secret",
+      args: [
+        "--config=token=upstream-wire-secret,path=/private/upstream/config.json",
+      ],
     });
-    expect(JSON.stringify(status)).not.toContain("upstream-wire-secret");
-    expect(JSON.stringify(status)).not.toContain("/private/upstream");
+    expect(JSON.stringify(status)).toContain("upstream-wire-secret");
+    expect(JSON.stringify(status)).toContain("/private/upstream");
     await diagnosticBridge.shutdown();
   });
 
-  it("projects managed upstream spawn errors without logging the executable path", async () => {
+  it("projects managed upstream spawn errors with the executable path in diagnostics", async () => {
     const port = await findAvailablePort();
     const codexPath = join(
       tmpdir(),
@@ -562,14 +567,13 @@ describe("CodexBridgeService", () => {
       await waitForClose(client);
       await waitFor(
         () =>
-          diagnosticBridge.getStatus().lastError ===
-          "The Codex process exited unexpectedly before the task completed.",
+          diagnosticBridge.getStatus().lastError?.includes(codexPath) === true,
       );
       const ordinaryLogs = JSON.stringify(warnSpy.mock.calls);
       expect(ordinaryLogs).toContain("code=CODEX_PROCESS_EXITED");
-      expect(ordinaryLogs).not.toContain("codex-spawn-wire-secret");
-      expect(ordinaryLogs).not.toContain(codexPath);
-      expect(JSON.stringify(diagnosticBridge.getStatus())).not.toContain(
+      expect(ordinaryLogs).toContain("codex-spawn-wire-secret");
+      expect(ordinaryLogs).toContain(codexPath);
+      expect(JSON.stringify(diagnosticBridge.getStatus())).toContain(
         "codex-spawn-wire-secret",
       );
     } finally {
@@ -622,7 +626,7 @@ describe("CodexBridgeService", () => {
     }
   });
 
-  it("keeps persistence paths out of ordinary bridge logs", async () => {
+  it("keeps original persistence errors in bridge logs", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "codex-bridge-diagnostic-"));
     const blockingPath = join(tempDir, "persist-wire-secret");
     writeFileSync(blockingPath, "not a directory");
@@ -642,7 +646,7 @@ describe("CodexBridgeService", () => {
       await internals.persistSessions();
       const ordinaryLogs = JSON.stringify(warnSpy.mock.calls);
       expect(ordinaryLogs).toContain("code=CODEX_UNKNOWN");
-      expect(ordinaryLogs).not.toContain("persist-wire-secret");
+      expect(ordinaryLogs).toContain("persist-wire-secret");
       expect(ordinaryLogs).not.toContain("private-session-state.json");
     } finally {
       warnSpy.mockRestore();
@@ -882,7 +886,7 @@ describe("CodexBridgeService", () => {
     }
   });
 
-  it("counts unknown bridge server requests with fingerprint-only diagnostics", async () => {
+  it("counts unknown bridge server requests with plaintext method diagnostics", async () => {
     const diagnosticsBefore = getCodexEventDiagnostics();
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {
@@ -920,11 +924,9 @@ describe("CodexBridgeService", () => {
         diagnosticsBefore.unknownServerRequestsTotal + 1,
       );
       const serialized = JSON.stringify(diagnosticsAfter);
-      expect(serialized).not.toContain(
-        "future/bridge-request//private/project",
-      );
+      expect(serialized).toContain("future/bridge-request//private/project");
       expect(serialized).not.toContain("must-not-reach-diagnostics");
-      expect(serialized).not.toContain("/private/project");
+      expect(serialized).toContain("/private/project");
     } finally {
       client.close();
     }
@@ -977,12 +979,12 @@ describe("CodexBridgeService", () => {
     expect(upstreamMessages).toEqual([]);
     expect(eventStore.events).toEqual([]);
     expect(bridge.getStatus().lastError).toBe(
-      "Codex event spine client-request persistence failed",
+      "Codex event spine persistence failed at client-request: another storage wire-secret",
     );
-    expect(bridge.getStatus().lastError).not.toContain("wire-secret");
+    expect(bridge.getStatus().lastError).toContain("wire-secret");
   });
 
-  it("keeps wire payloads transparent while redacting raw reasoning, secrets, and unknown events in the spine", async () => {
+  it("keeps wire payloads transparent and retains plaintext reasoning, credentials and unknown events in the spine", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {
       client.send(
@@ -1039,7 +1041,7 @@ describe("CodexBridgeService", () => {
         method: "future/thread/telemetry",
         compatibility: "newer_server",
         payload: {
-          data: { authorization: "[REDACTED:secret]" },
+          data: { authorization: "Bearer visible-only-on-wire" },
         },
       });
       const storedRequest = eventStore.events.find(
@@ -1049,13 +1051,13 @@ describe("CodexBridgeService", () => {
         (event) => event.method === "item/reasoning/textDelta",
       );
       expect(storedRequest?.payload.data).toMatchObject({
-        api_key: "[REDACTED:secret]",
+        api_key: "wire-secret",
       });
       expect(storedReasoning?.payload.data).toMatchObject({
-        delta: expect.stringMatching(/^\[REDACTED:raw-reasoning:/),
+        delta: "private reasoning visible only on the wire",
       });
-      expect(JSON.stringify(eventStore.events)).not.toContain("wire-secret");
-      expect(JSON.stringify(eventStore.events)).not.toContain(
+      expect(JSON.stringify(eventStore.events)).toContain("wire-secret");
+      expect(JSON.stringify(eventStore.events)).toContain(
         "private reasoning visible only on the wire",
       );
     } finally {
@@ -1400,7 +1402,7 @@ describe("CodexBridgeService", () => {
     }
   });
 
-  it("keeps MCP diagnostic secrets and paths out of status and ordinary logs", async () => {
+  it("preserves MCP diagnostics in status and logs", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     const rawError =
@@ -1433,15 +1435,15 @@ describe("CodexBridgeService", () => {
         profile: "light",
         threadId: "thread-mcp-secret",
         status: "failed",
-        error: "Codex authentication has expired or is incomplete.",
+        error: rawError,
       });
       expect(status.recentMcpStartupEvents[0]?.name).toBeUndefined();
-      expect(JSON.stringify(status)).not.toContain("mcp-wire-secret");
-      expect(JSON.stringify(status)).not.toContain("/private/mcp");
+      expect(JSON.stringify(status)).toContain("mcp-wire-secret");
+      expect(JSON.stringify(status)).toContain("/private/mcp");
       const ordinaryLogs = JSON.stringify(logSpy.mock.calls);
       expect(ordinaryLogs).toContain("code=CODEX_AUTH_REQUIRED");
-      expect(ordinaryLogs).not.toContain("mcp-wire-secret");
-      expect(ordinaryLogs).not.toContain("/private/mcp");
+      expect(ordinaryLogs).toContain("mcp-wire-secret");
+      expect(ordinaryLogs).toContain("/private/mcp");
     } finally {
       client.close();
       logSpy.mockRestore();
@@ -2929,10 +2931,10 @@ describe("CodexBridgeService", () => {
       const session = bridge.listSessions().find((s) => s.id === "thread-err");
       expect(session?.lastTurnStatus).toBe("failed");
       expect(session?.lastErrorMessage).toBe(
-        "Codex encountered an unclassified error before the task completed.",
+        "model exploded token=bridge-error-secret at /private/uploads/report.pdf",
       );
-      expect(JSON.stringify(session)).not.toContain("bridge-error-secret");
-      expect(JSON.stringify(session)).not.toContain("/private/uploads");
+      expect(JSON.stringify(session)).toContain("bridge-error-secret");
+      expect(JSON.stringify(session)).toContain("/private/uploads");
     } finally {
       client.close();
     }

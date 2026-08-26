@@ -817,9 +817,9 @@ process.stdin.on("data", (chunk) => {
           turnId: "turn-rewrite",
           codexTurnId: "turn-rewrite",
           isOptimistic: false,
-          message: { content: expect.stringContaining("[managed attachment]") },
+          message: { content: expect.stringContaining(tempDir) },
         });
-        expect(JSON.stringify(acceptedUser)).not.toContain(tempDir);
+        expect(JSON.stringify(acceptedUser)).toContain(tempDir);
         expect(
           messages.find(
             (message) =>
@@ -957,7 +957,7 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
-    it("redacts a failed turn and preserves its accepted correlation", async () => {
+    it("preserves diagnostics for a failed turn and preserves its accepted correlation", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-failed-turn-"),
       );
@@ -993,8 +993,7 @@ process.stdin.on("data", (chunk) => {
         const failed = await session.iterator.next();
         expect(failed.value).toMatchObject({
           type: "error",
-          error:
-            "Codex encountered an unclassified error before the task completed.",
+          error: expect.stringContaining("synthetic-wire-secret"),
           turnId: "turn-rewrite",
           codexTurnId: "turn-rewrite",
           clientUserMessageId: "client-failed-turn",
@@ -1003,10 +1002,8 @@ process.stdin.on("data", (chunk) => {
             correlationId: "turn-rewrite",
           }),
         });
-        expect(JSON.stringify(failed.value)).not.toContain(
-          "synthetic-wire-secret",
-        );
-        expect(JSON.stringify(failed.value)).not.toContain("/private/provider");
+        expect(JSON.stringify(failed.value)).toContain("synthetic-wire-secret");
+        expect(JSON.stringify(failed.value)).toContain("/private/provider");
         await expect(session.iterator.next()).resolves.toMatchObject({
           value: {
             type: "result",
@@ -1376,7 +1373,7 @@ process.stdin.on("data", (chunk) => {
       ).toBe(true);
     });
 
-    it("classifies startup stderr without exposing it in public errors", async () => {
+    it("classifies startup errors while retaining stderr diagnostics", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-error-"),
       );
@@ -1399,14 +1396,15 @@ process.stdin.on("data", (chunk) => {
 
         expect(messages.at(-1)).toMatchObject({
           type: "error",
-          error:
-            "The Codex process exited unexpectedly before the task completed.",
+          error: expect.stringContaining(
+            "invalid transport in `mcp_servers.node_repl`",
+          ),
           codexError: expect.objectContaining({
             code: "CODEX_PROCESS_EXITED",
             category: "process_exit",
           }),
         });
-        expect(JSON.stringify(messages.at(-1))).not.toContain(
+        expect(JSON.stringify(messages.at(-1))).toContain(
           "invalid transport in `mcp_servers.node_repl`",
         );
       } finally {
@@ -1588,7 +1586,7 @@ process.stdin.on("data", (chunk) => {
           { codexRetryStatus: { attempt: 3, retryInMs: 200 } },
         ]);
         expect(messages[3]).toMatchObject({ type: "error" });
-        expect(JSON.stringify(messages[3])).not.toContain(
+        expect(JSON.stringify(messages[3])).toContain(
           "Server overloaded; retry later.",
         );
         expect(
@@ -1875,7 +1873,7 @@ process.stdin.on("data", (chunk) => {
           }),
           expect.objectContaining({ signal: expect.any(AbortSignal) }),
         );
-        expect(JSON.stringify(events)).not.toContain("must-not-be-persisted");
+        expect(JSON.stringify(events)).toContain("must-not-be-persisted");
         expect(JSON.stringify(output)).not.toContain("future/provider-event");
       } finally {
         session?.abort();
@@ -2008,8 +2006,8 @@ process.stdin.on("data", (chunk) => {
         const serialized = JSON.stringify(
           output.filter((item) => item.codexThreadItemId === "file-generated"),
         );
-        expect(serialized).not.toContain(tempDir);
-        expect(serialized).not.toContain("fixture-only-private");
+        expect(serialized).toContain(tempDir);
+        expect(serialized).toContain("fixture-only-private");
       } finally {
         session?.abort();
         restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
@@ -2789,54 +2787,65 @@ describe("CodexProvider Event Normalization", () => {
     });
   });
 
-  it("projects live app-server file changes relative to the session cwd", () => {
-    const provider = createTestProvider() as unknown as {
-      convertItemToSDKMessages: (
-        item: unknown,
-        sessionId: string,
-        turnId: string,
-        sourceEvent: "item/started" | "item/completed",
-        workspaceRoot?: string,
-      ) => Array<Record<string, unknown>>;
-    };
+  it.each([
+    ["/workspace/project/src/a.ts", "src/a.ts"],
+    [
+      "/tmp/authoring/api_request.py",
+      expect.stringMatching(/^\[tmp:[a-f0-9]{16}\]\/api_request\.py$/),
+    ],
+    [
+      "/Users/private-user/Downloads/api_request.py",
+      expect.stringMatching(/^\[home:[a-f0-9]{16}\]\/api_request\.py$/),
+    ],
+  ])(
+    "projects live app-server file changes without losing filenames: %s",
+    (path, _displayPath) => {
+      const provider = createTestProvider() as unknown as {
+        convertItemToSDKMessages: (
+          item: unknown,
+          sessionId: string,
+          turnId: string,
+          sourceEvent: "item/started" | "item/completed",
+          workspaceRoot?: string,
+        ) => Array<Record<string, unknown>>;
+      };
 
-    const messages = provider.convertItemToSDKMessages(
-      {
-        id: "file-change-1",
-        type: "file_change",
-        status: "completed",
-        changes: [
+      const messages = provider.convertItemToSDKMessages(
+        {
+          id: "file-change-1",
+          type: "file_change",
+          status: "completed",
+          changes: [
+            {
+              path,
+              kind: "update",
+              diff: "@@ -1 +1 @@\n-old\n+new\n",
+            },
+          ],
+        },
+        "thread-1",
+        "turn-1",
+        "item/completed",
+        "/workspace/project",
+      );
+
+      expect(messages[0]?.message).toMatchObject({
+        role: "assistant",
+        content: [
           {
-            path: "/workspace/project/src/a.ts",
-            kind: "update",
-            diff: "@@ -1 +1 @@\n-old\n+new\n",
+            type: "tool_use",
+            id: "file-change-1",
+            name: "Edit",
+            input: {
+              file_path: path,
+              changes: [expect.objectContaining({ path, kind: "update" })],
+            },
           },
         ],
-      },
-      "thread-1",
-      "turn-1",
-      "item/completed",
-      "/workspace/project",
-    );
-
-    expect(messages[0]?.message).toMatchObject({
-      role: "assistant",
-      content: [
-        {
-          type: "tool_use",
-          id: "file-change-1",
-          name: "Edit",
-          input: {
-            file_path: "src/a.ts",
-            changes: [
-              expect.objectContaining({ path: "src/a.ts", kind: "update" }),
-            ],
-          },
-        },
-      ],
-    });
-    expect(JSON.stringify(messages)).not.toContain("/workspace/project");
-  });
+      });
+      expect(JSON.stringify(messages)).toContain(path);
+    },
+  );
 
   it("correlates turn completion with its native status", () => {
     const provider = createTestProvider() as unknown as {
@@ -3569,14 +3578,15 @@ describe("CodexProvider Event Normalization", () => {
     expect(messages[0]).toMatchObject({
       type: "error",
       session_id: "session-1",
-      error: "The Codex usage quota or context budget has been reached.",
+      error:
+        "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
       codexError: expect.objectContaining({
         code: "CODEX_QUOTA_EXCEEDED",
         category: "quota",
       }),
       willRetry: false,
     });
-    expect(JSON.stringify(messages[0])).not.toContain("chatgpt.com");
+    expect(JSON.stringify(messages[0])).toContain("chatgpt.com");
   });
 
   it("keeps retrying Codex errors non-terminal", () => {
@@ -3610,12 +3620,12 @@ describe("CodexProvider Event Normalization", () => {
         type: "system",
         subtype: "warning",
         warning:
-          "Codex is busy and cannot process the request right now. Codex is retrying automatically; keep this turn running.",
+          "service unavailable at /private/secret Codex is retrying automatically; keep this turn running.",
         willRetry: true,
         codexError: expect.objectContaining({ category: "overloaded" }),
       }),
     ]);
-    expect(JSON.stringify(messages)).not.toContain("/private/secret");
+    expect(JSON.stringify(messages)).toContain("/private/secret");
   });
 
   it("preserves the retry cause when Codex reports an unknown terminal error", () => {
@@ -3676,7 +3686,7 @@ describe("CodexProvider Event Normalization", () => {
     expect(terminal).toEqual([
       expect.objectContaining({
         type: "error",
-        error: "Codex is busy and cannot process the request right now.",
+        error: "server overloaded",
         willRetry: false,
         codexRetryExhausted: true,
         codexError: expect.objectContaining({

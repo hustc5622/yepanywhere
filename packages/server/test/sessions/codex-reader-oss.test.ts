@@ -1036,7 +1036,7 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(summary?.messageCount).toBe(1);
   });
 
-  it("keeps legacy event summaries and questions free of managed paths", async () => {
+  it("preserves managed paths in legacy event summaries and questions", async () => {
     const sessionId = "legacy-managed-summary";
     const now = "2026-08-08T00:00:00.000Z";
     const managedPath = "/test/runtime/uploads/legacy-summary.pdf";
@@ -1076,8 +1076,8 @@ describe("CodexSessionReader - OSS Support", () => {
       summaries.find((item) => item.id === sessionId),
     ]) {
       const serialized = JSON.stringify(projected);
-      expect(serialized).not.toContain(managedPath);
-      expect(serialized).toContain("[managed attachment]");
+      expect(serialized).toContain(managedPath);
+      expect(serialized).not.toContain("[managed attachment]");
       expect(serialized).toContain(ordinaryPath);
     }
     expect(await readFile(sessionPath, "utf8")).toContain(managedPath);

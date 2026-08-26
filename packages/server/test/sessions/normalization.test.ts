@@ -272,7 +272,7 @@ describe("normalizeSession", () => {
       {
         type: "input_image",
         mime_type: "image/png",
-        managed_attachment: "[managed attachment]",
+        file_path: `${blobsDir}/${hash}`,
       },
       {
         type: "input_image",

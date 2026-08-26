@@ -374,7 +374,7 @@ describe("Process", () => {
       await process.abort();
     });
 
-    it("passes provider-only inputs to steer while publishing only the safe projection", async () => {
+    it("passes provider-only inputs to steer while publishing the plaintext projection", async () => {
       let resolveIterator: () => void;
       const iterator: AsyncIterator<SDKMessage> = {
         next: () =>
@@ -425,8 +425,8 @@ describe("Process", () => {
         emitted,
         history: process.getMessageHistory(),
       });
-      expect(publicProjection).toContain("[managed attachment]");
-      expect(publicProjection).not.toContain("/private/provider/steer");
+      expect(publicProjection).not.toContain("[managed attachment]");
+      expect(publicProjection).toContain("/private/provider/steer");
 
       resolveIterator?.();
       await process.abort();
@@ -1707,7 +1707,7 @@ describe("Process", () => {
       expect(userEmits).toHaveLength(1);
     });
 
-    it("publishes attachment metadata without server paths in history and SSE", async () => {
+    it("publishes original attachment paths in history and SSE", async () => {
       const managedPath =
         "/Users/test/.yep-anywhere/uploads/proj-1/sess-1/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
       const downloadUrl =
@@ -1755,13 +1755,13 @@ describe("Process", () => {
       expect(content).toContain("screenshot.png");
       expect(content).toContain("1.0 KB");
       expect(content).toContain("image/png");
-      expect(content).toContain(downloadUrl);
-      expect(content).not.toContain(managedPath);
-      expect(JSON.stringify(emittedMessages)).toContain(downloadUrl);
-      expect(JSON.stringify(emittedMessages)).not.toContain(managedPath);
+      expect(content).not.toContain(downloadUrl);
+      expect(content).toContain(managedPath);
+      expect(JSON.stringify(emittedMessages)).not.toContain(downloadUrl);
+      expect(JSON.stringify(emittedMessages)).toContain(managedPath);
     });
 
-    it("publishes a safe initial attachment projection", async () => {
+    it("publishes a plaintext initial attachment projection", async () => {
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },
       ]);
@@ -1791,8 +1791,8 @@ describe("Process", () => {
 
       const publicProjection = JSON.stringify(process.getMessageHistory());
       expect(publicProjection).toContain("report.pdf");
-      expect(publicProjection).toContain("[managed attachment]");
-      expect(publicProjection).not.toContain("/private/uploads/report.pdf");
+      expect(publicProjection).not.toContain("[managed attachment]");
+      expect(publicProjection).toContain("/private/uploads/report.pdf");
     });
 
     it("replaces a provider echo with the UUID-matched public prompt", async () => {
@@ -1850,12 +1850,12 @@ describe("Process", () => {
         ).toHaveLength(2);
       });
 
-      expect(JSON.stringify(emitted)).not.toContain("/private/provider-only");
-      expect(JSON.stringify(process.getMessageHistory())).not.toContain(
+      expect(JSON.stringify(emitted)).toContain("/private/provider-only");
+      expect(JSON.stringify(process.getMessageHistory())).toContain(
         "/private/provider-only",
       );
       expect(emitted.at(-1)?.message?.content).toContain(
-        "[managed attachment]",
+        "/private/provider-only/echo.pdf",
       );
       const replayedUser = process
         .getMessageHistory()
@@ -1866,7 +1866,9 @@ describe("Process", () => {
         turnId: "turn-echo",
         codexTurnId: "turn-echo",
         isOptimistic: false,
-        message: { content: expect.stringContaining("[managed attachment]") },
+        message: {
+          content: expect.stringContaining("/private/provider-only/echo.pdf"),
+        },
       });
     });
 
@@ -1915,7 +1917,7 @@ describe("Process", () => {
       ]);
     });
 
-    it("deduplicates by UUID even though public and internal prompts differ", async () => {
+    it("deduplicates matching plaintext prompts by UUID", async () => {
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },
       ]);
@@ -1961,8 +1963,8 @@ describe("Process", () => {
       const sdkMessage = await gen.next();
       const sdkContent = sdkMessage.value?.message?.content as string;
 
-      expect(historyContent).not.toBe(sdkContent);
-      expect(historyContent).not.toContain("/uploads/");
+      expect(historyContent).toBe(sdkContent);
+      expect(historyContent).toContain("/uploads/");
       expect(sdkContent).toContain("/uploads/screenshot.png");
       expect(process.getMessageHistory()[0]?.uuid).toBe(sdkMessage.value?.uuid);
     });

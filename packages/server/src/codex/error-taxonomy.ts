@@ -143,8 +143,6 @@ const CODEX_ERROR_INFO_NAMES = new Set([
 ]);
 
 const SAFE_CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const SENSITIVE_CORRELATION_MARKER =
-  /(?:^sk-|(?:^|[._:-])(?:bearer|token|secret|password|api[_-]?key)(?:[._:-]|$))/i;
 const MAX_SIGNAL_DEPTH = 5;
 const MAX_SIGNAL_TEXT_LENGTH = 16_000;
 
@@ -155,19 +153,30 @@ interface ErrorSignals {
   text: string[];
 }
 
-/** Convert provider-native or untyped Codex failures into a safe public error. */
+/** Classify failures without discarding the original diagnostic message. */
 export function classifyCodexError(
   error: unknown,
   options: ClassifyCodexErrorOptions = {},
 ): CanonicalCodexError {
-  const category = classifySignals(collectErrorSignals(error));
+  const record =
+    error && typeof error === "object"
+      ? (error as Record<string, unknown>)
+      : undefined;
+  const knownCategory = (
+    Object.keys(ERROR_DESCRIPTORS) as CodexErrorCategory[]
+  ).find(
+    (category) =>
+      ERROR_DESCRIPTORS[category].code ===
+      (record ? safeRead(record, "code") : undefined),
+  );
+  const category = knownCategory ?? classifySignals(collectErrorSignals(error));
   const descriptor = ERROR_DESCRIPTORS[category];
   const correlationId = safeCorrelationId(options.correlationId);
   return {
     code: descriptor.code,
     category,
     retryable: descriptor.retryable,
-    publicMessage: descriptor.publicMessage,
+    publicMessage: originalErrorMessage(error) ?? descriptor.publicMessage,
     nextAction: descriptor.nextAction,
     ...(correlationId ? { correlationId } : {}),
   };
@@ -357,9 +366,27 @@ function safeRead(record: Record<string, unknown>, key: string): unknown {
 }
 
 function safeCorrelationId(value: unknown): string | undefined {
-  return typeof value === "string" &&
-    SAFE_CORRELATION_ID.test(value) &&
-    !SENSITIVE_CORRELATION_MARKER.test(value)
+  return typeof value === "string" && SAFE_CORRELATION_ID.test(value)
     ? value
     : undefined;
+}
+
+function originalErrorMessage(error: unknown, depth = 0): string | undefined {
+  if (depth > MAX_SIGNAL_DEPTH) return undefined;
+  if (typeof error === "string")
+    return error.slice(0, MAX_SIGNAL_TEXT_LENGTH) || undefined;
+  if (!error || typeof error !== "object") return undefined;
+  const record = error as Record<string, unknown>;
+  for (const key of [
+    "message",
+    "publicMessage",
+    "error",
+    "reason",
+    "stderr",
+    "cause",
+  ]) {
+    const message = originalErrorMessage(safeRead(record, key), depth + 1);
+    if (message) return message;
+  }
+  return undefined;
 }

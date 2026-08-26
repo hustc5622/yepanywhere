@@ -535,12 +535,14 @@ function projectThreadItem(
         },
       ];
     case "reasoning": {
-      const thinking = item.summary.join("\n").trim();
+      const thinking = (item.content.length > 0 ? item.content : item.summary)
+        .join("\n")
+        .trim();
       return thinking
         ? [
             {
               ...base,
-              codexRawReasoningAllowed: false,
+              codexRawReasoningAllowed: true,
               type: "assistant",
               message: {
                 role: "assistant",

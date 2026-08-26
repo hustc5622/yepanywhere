@@ -79,7 +79,7 @@ describe("FeishuDurableOutbox", () => {
     expect(outbox.get(first.id)).toMatchObject({
       status: "pending",
       nextAttemptAt: "2026-08-08T00:00:01.000Z",
-      lastErrorCode: "HTTP_503__private_detail",
+      lastErrorCode: "HTTP 503: private detail",
     });
     expect(outbox.listRecoverable("account-a", now)).toEqual([]);
 
@@ -88,7 +88,7 @@ describe("FeishuDurableOutbox", () => {
     expect(outbox.get(first.id)).toMatchObject({ status: "delivered" });
   });
 
-  it("redacts expanded secret syntax before durable persistence", async () => {
+  it("preserves credential text through persistence and retry", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-outbox-"));
     dirs.push(dataDir);
     const outbox = new FeishuDurableOutbox({ dataDir });
@@ -106,13 +106,13 @@ describe("FeishuDurableOutbox", () => {
       now: new Date("2026-08-08T00:00:00.000Z"),
     });
 
-    expect(record.payload.content).toBe("[REDACTED:secret-value]");
+    expect(record.payload.content).toContain("must-not-leak");
     const persisted = await import("node:fs/promises").then(({ readFile }) =>
       readFile(outbox.filePath, "utf8"),
     );
-    expect(persisted).not.toContain("must-not-leak");
-    expect(persisted).not.toContain("fixture-basic-credential");
-    expect(persisted).not.toContain("xoxb-");
+    expect(persisted).toContain("must-not-leak");
+    expect(persisted).toContain("fixture-basic-credential");
+    expect(persisted).toContain("xoxb-");
 
     await outbox.claim(record.id, new Date("2026-08-08T00:00:00.000Z"));
     await outbox.retry(record.id, {
@@ -120,10 +120,12 @@ describe("FeishuDurableOutbox", () => {
       delayMs: 1_000,
       now: new Date("2026-08-08T00:00:00.000Z"),
     });
-    expect(outbox.get(record.id)?.lastErrorCode).toBe("REDACTED_ERROR");
+    expect(outbox.get(record.id)?.lastErrorCode).toBe(
+      "token=error-sentinel-do-not-leak",
+    );
   });
 
-  it("keeps local paths in delivered reply text while fingerprinting path fields", async () => {
+  it("keeps local paths in both reply text and structured fields", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-outbox-"));
     dirs.push(dataDir);
     const outbox = new FeishuDurableOutbox({ dataDir });
@@ -144,14 +146,14 @@ describe("FeishuDurableOutbox", () => {
 
     expect(record.payload).toMatchObject({
       content: `Changed ${localPath}`,
-      localPathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+      localPath,
     });
-    expect(record.payload).not.toHaveProperty("localPath");
+    expect(record.payload).toHaveProperty("localPath", localPath);
     const persisted = await readFile(outbox.filePath, "utf8");
     expect(persisted).toContain(localPath);
   });
 
-  it("re-projects legacy durable payloads and drops secret-bearing identities on load", async () => {
+  it("preserves legacy payloads and idempotency identities on load", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-outbox-"));
     dirs.push(dataDir);
     const outbox = new FeishuDurableOutbox({ dataDir });
@@ -200,15 +202,17 @@ describe("FeishuDurableOutbox", () => {
     await outbox.initialize(new Date("2026-08-08T00:00:01.000Z"));
     expect(outbox.get("a".repeat(64))).toMatchObject({
       payload: {
-        card: { prompt: "[REDACTED:secret-value]" },
+        card: { prompt: "token=legacy-sentinel-do-not-leak" },
       },
-      lastErrorCode: "REDACTED_ERROR",
+      lastErrorCode: "NPM_TOKEN=legacy-error-do-not-leak",
     });
-    expect(outbox.get("b".repeat(64))).toBeUndefined();
+    expect(outbox.get("b".repeat(64))).toMatchObject({
+      idempotencyKey: "token=identity-sentinel-do-not-leak",
+    });
     const persisted = await readFile(outbox.filePath, "utf8");
-    expect(persisted).not.toContain("legacy-sentinel-do-not-leak");
-    expect(persisted).not.toContain("identity-sentinel-do-not-leak");
-    expect(persisted).not.toContain("legacy-error-do-not-leak");
+    expect(persisted).toContain("legacy-sentinel-do-not-leak");
+    expect(persisted).toContain("identity-sentinel-do-not-leak");
+    expect(persisted).toContain("legacy-error-do-not-leak");
   });
 
   it("rejects oversized payloads and invalid delivery transitions", async () => {
@@ -258,7 +262,7 @@ describe("FeishuDurableOutbox", () => {
     expect(outbox.isOperational()).toBe(false);
   });
 
-  it("persists only the redacted projection of an input card", async () => {
+  it("preserves plaintext input cards through durable persistence", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "yep-feishu-outbox-"));
     dirs.push(dataDir);
     const outbox = new FeishuDurableOutbox({ dataDir });
@@ -285,8 +289,8 @@ describe("FeishuDurableOutbox", () => {
       operationId: "int_11111111-1111-4111-8111-111111111111",
       operationVersion: 0,
     });
-    expect(JSON.stringify(card)).toContain("[REDACTED:secret]");
-    expect(JSON.stringify(card)).not.toContain("fixture-must-not-leak");
+    expect(JSON.stringify(card)).not.toContain("[REDACTED:secret]");
+    expect(JSON.stringify(card)).toContain("fixture-must-not-leak");
 
     const record = await outbox.enqueue({
       owner: "account-a",
@@ -294,8 +298,10 @@ describe("FeishuDurableOutbox", () => {
       kind: "input_card_update",
       payload: { cardId: "card-fixture", card, sequence: 1 },
     });
-    expect(JSON.stringify(record.payload.card)).toContain("[REDACTED:secret]");
+    expect(JSON.stringify(record.payload.card)).not.toContain(
+      "[REDACTED:secret]",
+    );
     const persisted = await readFile(outbox.filePath, "utf8");
-    expect(persisted).not.toContain("fixture-must-not-leak");
+    expect(persisted).toContain("fixture-must-not-leak");
   });
 });

@@ -189,58 +189,69 @@ describe("CodexAppServerHistoryReader", () => {
     );
   });
 
-  it("projects app-server file changes to relative Edit paths", async () => {
-    const fake = client({
-      listItems: vi.fn(async () => ({
-        data: [
-          {
-            turnId: "turn-1",
-            item: {
-              type: "fileChange" as const,
-              id: "file-1",
-              status: "completed" as const,
-              changes: [
-                {
-                  path: "/tmp/project/src/a.ts",
-                  kind: { type: "update" as const, move_path: null },
-                  diff: "@@ -1 +1 @@\n-old\n+new\n",
-                },
-              ],
+  it.each([
+    ["/tmp/project/src/a.ts", "src/a.ts"],
+    [
+      "/var/folders/aa/private-user/T/run/api_request.py",
+      expect.stringMatching(/^\[tmp:[a-f0-9]{16}\]\/api_request\.py$/),
+    ],
+    [
+      "/Users/private-user/Downloads/report.py",
+      expect.stringMatching(/^\[home:[a-f0-9]{16}\]\/report\.py$/),
+    ],
+  ])(
+    "projects app-server file paths without losing external filenames: %s",
+    async (path, _displayPath) => {
+      const fake = client({
+        listItems: vi.fn(async () => ({
+          data: [
+            {
+              turnId: "turn-1",
+              item: {
+                type: "fileChange" as const,
+                id: "file-1",
+                status: "completed" as const,
+                changes: [
+                  {
+                    path,
+                    kind: { type: "update" as const, move_path: null },
+                    diff: "@@ -1 +1 @@\n-old\n+new\n",
+                  },
+                ],
+              },
             },
-          },
-        ],
-        nextCursor: null,
-        backwardsCursor: null,
-      })),
-    });
-    const reader = new CodexAppServerHistoryReader({ client: fake });
-    const result = await reader.getSession(
-      thread().id,
-      "project" as UrlProjectId,
-      "/tmp/project",
-      undefined,
-      { maxMessages: 10 },
-    );
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        })),
+      });
+      const reader = new CodexAppServerHistoryReader({ client: fake });
+      const result = await reader.getSession(
+        thread().id,
+        "project" as UrlProjectId,
+        "/tmp/project",
+        undefined,
+        { maxMessages: 10 },
+      );
 
-    expect(result.kind).toBe("loaded");
-    if (result.kind !== "loaded") return;
-    expect(
-      result.session.projectedMessages?.[0]?.message?.content,
-    ).toMatchObject([
-      {
-        type: "tool_use",
-        id: "file-1",
-        name: "Edit",
-        input: {
-          file_path: "src/a.ts",
-          changes: [expect.objectContaining({ path: "src/a.ts" })],
+      expect(result.kind).toBe("loaded");
+      if (result.kind !== "loaded") return;
+      expect(
+        result.session.projectedMessages?.[0]?.message?.content,
+      ).toMatchObject([
+        {
+          type: "tool_use",
+          id: "file-1",
+          name: "Edit",
+          input: {
+            file_path: path,
+            changes: [expect.objectContaining({ path })],
+          },
         },
-      },
-    ]);
-    expect(JSON.stringify(result.session.projectedMessages)).not.toContain(
-      "/tmp/project",
-    );
-  });
+      ]);
+      expect(JSON.stringify(result.session.projectedMessages)).toContain(path);
+    },
+  );
 
   it("passes only an app-server cursor to an older-page request", async () => {
     const fake = client();
@@ -720,7 +731,7 @@ describe("CodexAppServerHistoryReader", () => {
     if (result.kind !== "loaded") return;
     const messages = result.session.projectedMessages ?? [];
     const serialized = JSON.stringify(messages);
-    expect(serialized).not.toContain("raw secret reasoning");
+    expect(serialized).toContain("raw secret reasoning");
     expect(serialized.indexOf(largeOutput)).toBe(
       serialized.lastIndexOf(largeOutput),
     );
@@ -836,7 +847,7 @@ describe("CodexAppServerHistoryReader", () => {
     });
   });
 
-  it("redacts every generated path-bearing ThreadItem field", () => {
+  it("retains generated path-bearing fields while omitting inline image bodies", () => {
     const items = [
       {
         type: "commandExecution",
@@ -904,16 +915,16 @@ describe("CodexAppServerHistoryReader", () => {
     ].map((item) => publicCodexThreadItem(item));
     const serialized = JSON.stringify(items);
 
-    expect(serialized).not.toContain("/private/");
+    expect(serialized).toContain("/private/");
     expect(serialized).not.toContain("secret-base64");
     expect(items[0]).toMatchObject({
       command: "show files",
-      cwd: "[path hidden]",
-      scriptPath: "[path hidden]",
+      cwd: "/private/cwd",
+      scriptPath: "/private/plugin/script.js",
       commandActions: [
-        expect.objectContaining({ path: "[path hidden]" }),
-        expect.objectContaining({ path: "[path hidden]" }),
-        expect.objectContaining({ path: "[path hidden]" }),
+        expect.objectContaining({ path: "/private/a" }),
+        expect.objectContaining({ path: "/private/b" }),
+        expect.objectContaining({ path: "/private/c" }),
       ],
     });
   });

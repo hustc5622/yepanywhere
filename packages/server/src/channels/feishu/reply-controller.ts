@@ -656,9 +656,9 @@ export class FeishuReplyController {
       this.generatedArtifactEffectIds.add(effectId);
       this.generatedArtifactRetryableIds.delete(effectId);
       this.projection.recordGeneratedImage(image.fileName, image.sizeBytes);
-    } catch {
+    } catch (error) {
       this.generatedArtifactRetryableIds.add(effectId);
-      this.projection.recordGeneratedImageFailure("upload_failed");
+      this.projection.recordGeneratedImageFailure("upload_failed", error);
     }
     this.scheduleUpdate();
   }
@@ -692,9 +692,12 @@ export class FeishuReplyController {
       let bytes: Uint8Array;
       try {
         bytes = await readArtifact(artifact);
-      } catch {
+      } catch (error) {
         this.generatedArtifactRetryableIds.add(effectId);
-        this.projection.recordGeneratedArtifactFailure("managed_read_failed");
+        this.projection.recordGeneratedArtifactFailure(
+          "managed_read_failed",
+          error,
+        );
         return;
       }
       if (!validateGeneratedArtifactPayload(artifact, bytes)) {
@@ -766,9 +769,9 @@ export class FeishuReplyController {
           artifact.fileName,
           artifact.sizeBytes,
         );
-      } catch {
+      } catch (error) {
         this.generatedArtifactRetryableIds.add(effectId);
-        this.projection.recordGeneratedArtifactFailure("upload_failed");
+        this.projection.recordGeneratedArtifactFailure("upload_failed", error);
       }
     } finally {
       this.generatedArtifactInFlightIds.delete(effectId);
@@ -1294,14 +1297,17 @@ function canonicalCodexErrorValue(
   ) {
     return undefined;
   }
-  // Provider-supplied display strings are deliberately discarded. The
-  // stable code is the only public localization key at this channel boundary.
+  // Keep provider diagnostics alongside the stable localized category.
   return {
     code: error.code as CanonicalCodexError["code"],
     category: copy.category,
     retryable: copy.retryable,
-    publicMessage: copy.publicMessage,
-    nextAction: copy.nextAction,
+    publicMessage:
+      typeof error.publicMessage === "string"
+        ? error.publicMessage
+        : copy.publicMessage,
+    nextAction:
+      typeof error.nextAction === "string" ? error.nextAction : copy.nextAction,
   };
 }
 
@@ -1309,15 +1315,20 @@ function feishuCodexErrorCopy(error: CanonicalCodexError): {
   publicMessage: string;
   nextAction: string;
 } {
-  const copy = feishuCodexErrorCopyByCode(error.code);
-  if (
-    copy &&
-    copy.category === error.category &&
-    copy.retryable === error.retryable
-  ) {
-    return copy;
-  }
-  return FEISHU_CODEX_ERROR_COPY.CODEX_UNKNOWN;
+  const copy =
+    feishuCodexErrorCopyByCode(error.code) ??
+    FEISHU_CODEX_ERROR_COPY.CODEX_UNKNOWN;
+  const fallback = classifyCodexError({ code: error.code });
+  return {
+    publicMessage:
+      error.publicMessage && error.publicMessage !== fallback.publicMessage
+        ? error.publicMessage
+        : copy.publicMessage,
+    nextAction:
+      error.nextAction && error.nextAction !== fallback.nextAction
+        ? error.nextAction
+        : copy.nextAction,
+  };
 }
 
 function feishuCodexErrorCopyByCode(

@@ -26,14 +26,14 @@ describe("inspectCodexGeneratedImage", () => {
     expect(JSON.stringify(result)).not.toContain("provider-local-path");
   });
 
-  it("blocks sensitive prompts, malformed formats and oversized payloads", () => {
+  it("accepts prompt text while rejecting malformed formats and oversized payloads", () => {
     expect(
       inspectCodexGeneratedImage(
         imageMessage(pngBytes().toString("base64"), {
           revisedPrompt: "Render the API key from .env",
         }),
       ),
-    ).toMatchObject({ status: "blocked", reason: "sensitive_prompt" });
+    ).toMatchObject({ status: "ready" });
     expect(
       inspectCodexGeneratedImage(
         imageMessage(Buffer.from("not a png").toString("base64")),

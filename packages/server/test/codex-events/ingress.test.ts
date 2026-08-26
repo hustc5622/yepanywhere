@@ -16,10 +16,11 @@ import {
   JsonlCodexEventStore,
   codexEventRolloutConfigFromEnv,
   getCodexEventDiagnostics,
-  redactCodexPayload,
   replayCodexSession,
   resolveCodexEventProjectionMode,
+  serializeCodexPayload,
 } from "../../src/codex-events/index.js";
+import { publicCodexFileChanges } from "../../src/codex/file-change.js";
 import { testDraft } from "./helpers.js";
 
 const tempDirs: string[] = [];
@@ -61,175 +62,66 @@ describe("Codex event ingress", () => {
     });
   });
 
-  it("redacts secrets, binary data, stdin, and raw reasoning before persistence", () => {
-    const ordinary = redactCodexPayload("item/started", {
-      threadId: "thread-1",
+  it.each([
+    "item/started",
+    "item/completed",
+    "item/reasoning/textDelta",
+    "thread/read",
+    "thread/items/list",
+  ])("preserves plaintext provider payloads for %s", (method) => {
+    const payload = {
       token: "very-secret-token",
-      nested: {
-        authorization: "Bearer abcdefghijklmnopqrstuvwxyz",
-        stdin: "hunter2",
-        npm_token: "npm-keyed-secret",
-        _authToken: "npm-auth-secret",
-        image: "data:image/png;base64,AAAA",
-      },
-    });
-    expect(ordinary.data).toEqual({
-      threadId: "thread-1",
-      token: "[REDACTED:secret]",
-      nested: {
-        authorization: "[REDACTED:secret]",
-        stdin: "[REDACTED:secret]",
-        npm_token: "[REDACTED:secret]",
-        _authToken: "[REDACTED:secret]",
-        image: expect.stringMatching(/^\[REDACTED:data-url:image\/png:/),
-      },
-    });
-    expect(ordinary.redactionCount).toBe(6);
-
-    const reasoning = redactCodexPayload("item/reasoning/textDelta", {
-      threadId: "thread-1",
-      turnId: "turn-1",
-      itemId: "reasoning-1",
+      stdin: "hunter2",
+      authorization: "Bearer abcdefghijklmnopqrstuvwxyz",
+      image: "data:image/png;base64,AAAA",
+      cwd: "/Users/private/repo",
+      path: "C:\\Users\\private\\file.txt",
+      item: { type: "reasoning", content: ["private chain of thought"] },
       delta: "private reasoning",
-    });
-    expect(reasoning.data).toMatchObject({
-      threadId: "thread-1",
-      turnId: "turn-1",
-      itemId: "reasoning-1",
-      delta: expect.stringMatching(/^\[REDACTED:raw-reasoning:/),
-    });
-    const reasoningSnapshot = redactCodexPayload("item/completed", {
-      item: {
-        id: "reasoning-1",
-        type: "reasoning",
-        summary: ["safe summary"],
-        content: ["private chain of thought"],
+      error: { message: "api_key=fixture-secret-value" },
+      nested: {
+        type: "fileChange",
+        changes: [
+          {
+            path: "/tmp/sk-12345678901234567890.py",
+            diff: "+location:/Users/private/repo/config",
+          },
+        ],
       },
-    });
-    expect(reasoningSnapshot.data).toEqual({
-      item: {
-        id: "reasoning-1",
-        type: "reasoning",
-        summary: ["safe summary"],
-        content: [],
-      },
-    });
-
-    const error = redactCodexPayload("error", {
-      threadId: "thread-1",
-      turnId: "turn-1",
-      willRetry: false,
-      error: {
-        message: "Codex app-server exited: stderr contained api_key=secret",
-      },
-    });
-    expect(error.data).toMatchObject({
-      error: {
-        category: "process_exit",
-        message: "Codex app-server process exited",
-        publicMessage:
-          "The Codex process exited unexpectedly before the task completed.",
-      },
-    });
-    expect(JSON.stringify(error.data)).not.toContain("api_key=secret");
+    };
+    const result = serializeCodexPayload(method, payload);
+    expect(result).toEqual({ data: payload, truncated: false });
+    expect(result.data).not.toBe(payload);
   });
 
-  it("preserves paths in user-visible agent text while redacting other path-bearing fields", () => {
-    const delta = redactCodexPayload("item/agentMessage/delta", {
-      threadId: "thread-1",
-      turnId: "turn-1",
-      itemId: "agent-1",
-      delta: "See [app.ts](/Users/developer/project/src/app.ts:12)",
-    });
-    expect(delta.data).toMatchObject({
-      delta: "See [app.ts](/Users/developer/project/src/app.ts:12)",
-    });
-
-    const completed = redactCodexPayload("item/completed", {
-      threadId: "thread-1",
-      turnId: "turn-1",
-      item: {
-        id: "agent-1",
-        type: "agentMessage",
-        text: "Config: ~/.codex/config.toml; Windows: C:\\work\\app.ts",
+  it("bounds payloads without treating their contents as secrets", () => {
+    const cyclic: Record<string, unknown> = { token: "fixture-secret" };
+    cyclic.self = cyclic;
+    expect(
+      serializeCodexPayload("test", cyclic, { maxDepth: 2 }),
+    ).toMatchObject({
+      data: {
+        token: "fixture-secret",
+        self: { token: "fixture-secret", self: "[TRUNCATED:max-depth]" },
       },
-      diagnostic: "Host path: /Users/developer/private/diagnostic.log",
-      cwd: "/Users/developer/project",
+      truncated: true,
     });
-    expect(completed.data).toMatchObject({
-      item: {
-        text: "Config: ~/.codex/config.toml; Windows: C:\\work\\app.ts",
-      },
-      diagnostic: expect.stringContaining("[REDACTED:absolute-path:"),
-      cwdFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+    expect(
+      serializeCodexPayload(
+        "test",
+        { value: "abcdefgh", list: [1, 2, 3] },
+        { maxStringLength: 4, maxArrayItems: 2 },
+      ),
+    ).toEqual({
+      data: { value: "abcd[TRUNCATED:4]", list: [1, 2] },
+      truncated: true,
     });
-
-    const secret = redactCodexPayload("item/completed", {
-      item: {
-        id: "agent-secret",
-        type: "agentMessage",
-        text: "api_key=agent-reply-secret-value",
-      },
-    });
-    expect(secret.data).toMatchObject({
-      item: { text: "[REDACTED:secret-value]" },
-    });
-
-    const snapshotPath = "/Users/developer/project/snapshot.ts";
-    for (const [method, payload] of [
-      [
-        "turn/completed",
-        { turn: { items: [{ type: "agentMessage", text: snapshotPath }] } },
-      ],
-      [
-        "thread/read",
-        {
-          thread: {
-            turns: [{ items: [{ type: "agentMessage", text: snapshotPath }] }],
-          },
-        },
-      ],
-      [
-        "thread/turns/list",
-        { data: [{ items: [{ type: "agentMessage", text: snapshotPath }] }] },
-      ],
-      [
-        "thread/items/list",
-        { data: [{ item: { type: "agentMessage", text: snapshotPath } }] },
-      ],
-    ] as const) {
-      expect(
-        JSON.stringify(redactCodexPayload(method, payload).data),
-      ).toContain(snapshotPath);
-    }
-
-    const toolPath = "/Users/developer/private/tool-result.log";
-    const toolResult = redactCodexPayload("item/completed", {
-      item: {
-        id: "mcp-1",
-        type: "mcpToolCall",
-        result: {
-          content: [],
-          structuredContent: {
-            type: "agentMessage",
-            text: `Internal output: ${toolPath}`,
-          },
-          _meta: null,
-        },
-      },
-    });
-    expect(JSON.stringify(toolResult.data)).not.toContain(toolPath);
-    expect(JSON.stringify(toolResult.data)).toContain(
-      "[REDACTED:absolute-path:",
-    );
-
-    const malformedAgentText = redactCodexPayload("item/completed", {
-      item: {
-        type: "agentMessage",
-        text: { nested: toolPath },
-      },
-    });
-    expect(JSON.stringify(malformedAgentText.data)).not.toContain(toolPath);
+    expect(
+      serializeCodexPayload(
+        "test",
+        JSON.parse('{"__proto__":{"token":"original"}}'),
+      ).data,
+    ).toEqual(JSON.parse('{"__proto__":{"token":"original"}}'));
   });
 
   it("persists before reducing and correlates a client request with its turn", async () => {
@@ -290,7 +182,7 @@ describe("Codex event ingress", () => {
     expect(await store.latestSequence("thread-1")).toBe(4);
   });
 
-  it("persists structured inputs and generated images without filesystem paths or raw bytes", async () => {
+  it("persists original structured paths while summarizing generated image bytes", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-events-paths-"));
     tempDirs.push(directory);
     const filePath = join(directory, "events.jsonl");
@@ -369,54 +261,22 @@ describe("Codex event ingress", () => {
     });
 
     const onDisk = readFileSync(filePath, "utf8");
-    for (const forbidden of [
+    for (const path of [
       skillPath,
       mentionPath,
       imagePath,
       audioPath,
       generatedPath,
-      rawImageResult,
-      "/Users/private",
     ]) {
-      expect(onDisk).not.toContain(forbidden);
+      expect(onDisk).toContain(JSON.stringify(path).slice(1, -1));
     }
-    expect(onDisk).toContain("release-helper");
-    expect(onDisk).toContain("project-guide");
-    expect(onDisk).toContain("pathFingerprint");
-    expect(onDisk).toContain("resultSummary");
-    expect(onDisk).toContain("encodedSha256");
-
+    expect(onDisk).not.toContain(rawImageResult);
     const reopened = new JsonlCodexEventStore({ filePath });
     const replayed = await reopened.replay({ sessionId: "thread-path-safe" });
-    const serializedReplay = JSON.stringify(replayed);
-    expect(serializedReplay).not.toContain("/Users/private");
-    expect(serializedReplay).not.toContain(rawImageResult);
     expect(replayed[0]?.payload.data).toMatchObject({
-      input: [
-        {
-          type: "skill",
-          name: "release-helper",
-          pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-        },
-        {
-          type: "mention",
-          name: "project-guide",
-          pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-        },
-        {
-          type: "localImage",
-          detail: "high",
-          pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-        },
-        {
-          type: "localAudio",
-          pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-        },
-      ],
-      cwdFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-      runtimeWorkspaceRootFingerprints: [
-        expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-      ],
+      input: structuredInputs,
+      cwd: "/Users/private/project",
+      runtimeWorkspaceRoots: ["/Users/private/project"],
     });
     expect(replayed[2]?.payload.data).toMatchObject({
       item: {
@@ -427,24 +287,22 @@ describe("Codex event ingress", () => {
           encodedLength: rawImageResult.length,
           encodedSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
         },
-        savedPathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+        savedPath: generatedPath,
       },
     });
     expect(replayed[3]?.payload.data).toMatchObject({
       item: {
         id: "command-path-safe",
         type: "commandExecution",
-        command: expect.stringContaining("[REDACTED:absolute-path:"),
-        cwdFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-        scriptPathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
-        workingDirectoryFingerprint: expect.stringMatching(
-          /^sha256:[a-f0-9]{16}$/,
-        ),
+        command: "node /Users/private/project/scripts/build.js",
+        cwd: "/Users/private/project",
+        scriptPath: "/Users/private/project/scripts/build.js",
+        workingDirectory: "/Users/private/project",
       },
     });
   });
 
-  it("retains only workspace-relative file-change paths in the canonical journal", async () => {
+  it("retains original workspace and external paths in the canonical journal", async () => {
     const store = new InMemoryCodexEventStore();
     const ingress = await CodexEventIngress.create({
       store,
@@ -483,15 +341,86 @@ describe("Codex event ingress", () => {
     expect(replayed[0]?.payload.data).toMatchObject({
       item: {
         changes: [
-          { path: "src/a.ts" },
+          { path: "/workspace/project/src/a.ts" },
           {
-            pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+            path: "/private/outside.txt",
           },
         ],
       },
     });
-    expect(JSON.stringify(replayed)).not.toContain("/workspace/project");
-    expect(JSON.stringify(replayed)).not.toContain("/private/outside.txt");
+    expect(JSON.stringify(replayed)).toContain("/workspace/project");
+    expect(JSON.stringify(replayed)).toContain("/private/outside.txt");
+  });
+
+  it.each(["item/completed", "item/fileChange/patchUpdated"])(
+    "preserves external paths across live, durable and replay projections: %s",
+    (method) => {
+      const changes = [
+        {
+          path: "/repo/src/a.ts",
+          kind: { type: "update", move_path: null },
+          diff: "+safe",
+        },
+        {
+          path: "/var/folders/aa/private-user/T/run/api_request.py",
+          kind: { type: "add" },
+          diff: "import json",
+        },
+        {
+          path: "/Users/private-user/Downloads/my report.py",
+          kind: { type: "update", move_path: "/tmp/my report.py" },
+          diff: "@@ -1 +1 @@\n-old\n+new\n\nMoved to: /tmp/my report.py",
+        },
+      ];
+      const payload =
+        method === "item/completed"
+          ? {
+              item: { id: "patch", type: "fileChange", changes },
+              cwd: "/repo",
+              scriptPath: "/tmp/private-script.sh",
+            }
+          : {
+              itemId: "patch",
+              changes,
+              cwd: "/repo",
+              scriptPath: "/tmp/private-script.sh",
+            };
+      const projected = serializeCodexPayload(method, payload, {
+        workspaceRoot: "/repo",
+      });
+      const data = projected.data as {
+        item?: { changes: unknown };
+        changes?: unknown;
+      };
+      const replay = publicCodexFileChanges(data.item?.changes ?? data.changes);
+      expect(replay).toEqual(
+        publicCodexFileChanges(changes, { workspaceRoot: "/repo" }),
+      );
+      expect(JSON.stringify(projected.data)).toContain("private-user");
+      expect(JSON.stringify(projected.data)).toContain("/tmp/");
+      expect(projected.data).toMatchObject({
+        cwd: "/repo",
+        scriptPath: "/tmp/private-script.sh",
+      });
+    },
+  );
+
+  it("retains paths inside arbitrary tool arguments", () => {
+    const projected = serializeCodexPayload("item/completed", {
+      item: {
+        type: "mcpToolCall",
+        arguments: {
+          type: "fileChange",
+          changes: [{ path: "/tmp/private-script.py" }],
+        },
+      },
+    });
+    expect(JSON.stringify(projected.data)).toContain("private-script.py");
+    expect(projected.data).toMatchObject({
+      item: {
+        arguments: { changes: [{ path: "/tmp/private-script.py" }] },
+      },
+    });
   });
 
   it("summarizes TS-only raw image-generation response items before JSONL persistence", async () => {
@@ -545,7 +474,7 @@ describe("Codex event ingress", () => {
     const onDisk = readFileSync(filePath, "utf8");
     expect(onDisk).not.toContain(rawItemResult);
     expect(onDisk).not.toContain(nestedResult);
-    expect(onDisk).not.toContain(localPath);
+    expect(onDisk).toContain(localPath);
     expect(onDisk).toContain("resultSummary");
     expect(onDisk).toContain("encodedSha256");
 
@@ -563,7 +492,7 @@ describe("Codex event ingress", () => {
           encodedLength: rawItemResult.length,
           encodedSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
         },
-        saved_pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+        saved_path: localPath,
       },
     });
     expect(replayed[1]?.payload.data).toMatchObject({
@@ -577,7 +506,7 @@ describe("Codex event ingress", () => {
               encodedLength: nestedResult.length,
               encodedSha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
             },
-            pathFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+            path: localPath,
           },
         ],
       },
@@ -668,7 +597,7 @@ describe("Codex event ingress", () => {
     );
   });
 
-  it("does not retain an unknown method name in parity diagnostics", async () => {
+  it("retains the unknown method name in parity diagnostics", async () => {
     const ingress = await CodexEventIngress.create({
       store: new InMemoryCodexEventStore(),
       runtime: CODEX_EVENT_RUNTIME_IDENTITY,
@@ -681,9 +610,11 @@ describe("Codex event ingress", () => {
     ingress.recordProjectionParity(event, [], [{ type: "system" }]);
 
     expect(ingress.getParityDiagnostics()).toMatchObject({
-      lastMismatch: { method: "unknown" },
+      lastMismatch: {
+        method: "future/private-method-must-not-reach-diagnostics",
+      },
     });
-    expect(JSON.stringify(ingress.getParityDiagnostics())).not.toContain(
+    expect(JSON.stringify(ingress.getParityDiagnostics())).toContain(
       "private-method-must-not-reach-diagnostics",
     );
   });
@@ -729,8 +660,8 @@ describe("Codex event ingress", () => {
       ]),
     );
     const serialized = JSON.stringify(after);
-    expect(serialized).not.toContain("future/unknown-notification");
-    expect(serialized).not.toContain("future/unknown-request");
+    expect(serialized).toContain("future/unknown-notification");
+    expect(serialized).toContain("future/unknown-request");
     expect(serialized).not.toContain("notification-secret");
     expect(serialized).not.toContain("request-secret");
   });
@@ -948,7 +879,7 @@ describe("Codex JSONL event store", () => {
     expect(await store.replay({ sessionId: "thread-refresh" })).toEqual([]);
   });
 
-  it("redacts correlated secret defaults and answers before JSONL persistence, including after replay", async () => {
+  it("preserves correlated secret defaults and answers before JSONL persistence, including after replay", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-events-secrets-"));
     tempDirs.push(directory);
     const filePath = join(directory, "events.jsonl");
@@ -1031,11 +962,11 @@ describe("Codex JSONL event store", () => {
     });
 
     const requestsOnDisk = readFileSync(filePath, "utf8");
-    expect(requestsOnDisk).not.toContain("mcp-writeonly-default-private-11");
-    expect(requestsOnDisk).not.toContain("mcp-password-default-private-12");
-    expect(requestsOnDisk).not.toContain("mcp-named-default-private-13");
+    expect(requestsOnDisk).toContain("mcp-writeonly-default-private-11");
+    expect(requestsOnDisk).toContain("mcp-password-default-private-12");
+    expect(requestsOnDisk).toContain("mcp-named-default-private-13");
     expect(requestsOnDisk).toContain("visible-default-region");
-    expect(requestsOnDisk).toContain("[REDACTED:secret-default]");
+    expect(requestsOnDisk).not.toContain("[REDACTED:secret-default]");
 
     const reopenedStore = new JsonlCodexEventStore({ filePath });
     const reopenedIngress = await CodexEventIngress.create({
@@ -1082,11 +1013,11 @@ describe("Codex JSONL event store", () => {
       "mcp-password-default-private-12",
       "mcp-named-default-private-13",
     ]) {
-      expect(jsonl).not.toContain(forbidden);
+      expect(jsonl).toContain(forbidden);
     }
     expect(jsonl).toContain("visible-user-answer");
     expect(jsonl).toContain("visible-mcp-answer");
-    expect(jsonl).toContain("[REDACTED:secret-answer]");
+    expect(jsonl).not.toContain("[REDACTED:secret-answer]");
 
     const replayed = await reopenedStore.replay({
       sessionId: "thread-secrets",
@@ -1105,9 +1036,9 @@ describe("Codex JSONL event store", () => {
       result: {
         answers: {
           "credential-answer": {
-            answers: ["[REDACTED:secret-answer]"],
+            answers: ["request-input-answer-private-21"],
           },
-          password: { answers: ["[REDACTED:secret-answer]"] },
+          password: { answers: ["request-password-answer-private-22"] },
           "display-name": { answers: ["visible-user-answer"] },
         },
       },
@@ -1115,9 +1046,9 @@ describe("Codex JSONL event store", () => {
     expect(mcpResolution?.payload.data).toMatchObject({
       result: {
         content: {
-          apiCredential: "[REDACTED:secret-answer]",
-          passcode: "[REDACTED:secret-answer]",
-          secret: "[REDACTED:secret-answer]",
+          apiCredential: "mcp-writeonly-answer-private-23",
+          passcode: "mcp-password-answer-private-24",
+          secret: "mcp-named-answer-private-25",
           region: "visible-mcp-answer",
         },
       },

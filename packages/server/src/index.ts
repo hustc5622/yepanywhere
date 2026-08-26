@@ -381,13 +381,12 @@ function warnAboutLlmGatewayConfig(): void {
   if (channels.length === 0) return;
   // A retired credential answers `/models` exactly like a live one, so the
   // first visible symptom of a stale key is a failed turn inside a provider
-  // process. Print a key fingerprint so "which key is this server actually
+  // process. Print the configured key so "which key is this server actually
   // using" is answerable without restarting it.
   console.log(
     `[LLM gateways] Active channels: ${channels
       .map(
-        (channel) =>
-          `${channel.id}(${channel.apiBase}, key …${channel.apiKey.slice(-4)})`,
+        (channel) => `${channel.id}(${channel.apiBase}, key ${channel.apiKey})`,
       )
       .join(", ")}`,
   );

@@ -5,10 +5,6 @@ import type {
   FeishuSessionBinding,
   UploadedFile,
 } from "@yep-anywhere/shared";
-import {
-  containsSensitiveText,
-  redactSensitivePublicText,
-} from "../../codex-events/redaction.js";
 import { encodeProjectId } from "../../projects/paths.js";
 import type { CodexNativeControlRequest } from "../../sdk/providers/codex-controls.js";
 import type { SessionCommandService } from "../../services/SessionCommandService.js";
@@ -1328,12 +1324,6 @@ function parseFeishuCodexCommand(
         message: "用法：/codex goal set <objective>",
       };
     }
-    if (containsSensitiveText(objective)) {
-      return {
-        kind: "invalid",
-        message: "Goal objective 疑似包含敏感信息，未提交。",
-      };
-    }
     if (objective.length > MAX_CODEX_GOAL_OBJECTIVE_CHARS) {
       return {
         kind: "invalid",
@@ -1509,6 +1499,8 @@ function formatCodexControlFailure(
     case "invalid_request":
       return "Codex 拒绝了无效的控制参数，请检查命令用法。";
     case "provider_error":
+      if (typeof body.error === "string")
+        return sanitizeCodexPublicText(body.error, 1_024);
       return readBoolean(body.retryable)
         ? "Codex 暂时无法完成该控制，请稍后重试。"
         : "Codex 无法完成该控制，请在 Yep 中查看诊断。";
@@ -1520,12 +1512,7 @@ function formatCodexControlFailure(
 }
 
 function sanitizeCodexPublicText(value: string, maxChars: number): string {
-  const withoutPaths = redactSensitivePublicText(value)
-    .replace(/file:\/\/\/[^\s]+/gi, "[path]")
-    .replace(/(^|[\s([{"'`=])\/(?:[^/\s]+\/)+(?:[^\s)\]}"'`,;]*)/g, "$1[path]")
-    .replace(/(^|[\s([{"'`=])~\/(?:[^\s]+)/g, "$1[path]")
-    .replace(/(^|[\s([{"'`=])[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/g, "$1[path]");
-  const withoutControls = Array.from(withoutPaths, (character) => {
+  const withoutControls = Array.from(value, (character) => {
     const code = character.codePointAt(0) ?? 0;
     return code <= 0x1f || code === 0x7f ? " " : character;
   }).join("");

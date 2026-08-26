@@ -28,7 +28,7 @@ import type {
  * Thrown for transport issues (timeout, closed, start failed) and capability
  * gate failures (CLI not found, unsupported version, unsupported server
  * request).  The `code` field is the stable identifier Yep routes on; the
- * `message` is safe for diagnostics after redaction.
+ * `message` retains the original diagnostic text.
  */
 export class ZCodeProtocolError extends Error {
   constructor(
@@ -185,7 +185,7 @@ export type ZCodeProviderKind = "anthropic" | "openai" | "openai-compatible";
 
 /**
  * Where a provider's API key is sourced from.
- * Used for redaction and for marking models unavailable when the source is
+ * Used for marking models unavailable when the source is
  * missing.
  *
  * Real ZCode 0.16.1 stores secrets inside `options`:

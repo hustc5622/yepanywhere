@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { CodexBranchState, CodexSessionEntry } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import { preprocessMessages } from "../../../client/src/lib/preprocessMessages.ts";
+import { publicCodexFileChangePath } from "../../src/codex/path-projection.js";
 import {
   buildCodexBranchView,
   computeCodexRollbackNumTurns,
@@ -1064,12 +1065,12 @@ describe("Codex Normalization", () => {
     expect(editItem.toolInput).toMatchObject({
       changes: [
         {
-          path: "src/a.ts",
+          path: "/repo/src/a.ts",
           kind: "add",
           diff: "export const value = 1;\n",
         },
         {
-          path: "src/z.ts",
+          path: "/repo/src/z.ts",
           kind: "update",
           diff: "@@ -1 +1 @@\n-old\n+new\n",
         },
@@ -1078,6 +1079,56 @@ describe("Codex Normalization", () => {
     expect(editItem.toolResult?.content).toContain(
       "Success. Updated the following files:",
     );
+  });
+
+  it("restores temp and Downloads filenames from existing code-mode JSONL patches", () => {
+    const paths = [
+      "/var/folders/aa/private-user/T/authoring_run/api_request.py",
+      "/Users/private-user/Downloads/report/api_request.py",
+    ];
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "session_meta",
+        timestamp: "2026-08-26T12:00:00Z",
+        payload: {
+          id: "test-session",
+          timestamp: "2026-08-26T12:00:00Z",
+          cwd: "/repo",
+        },
+      },
+      ...paths.map(
+        (path, i) =>
+          ({
+            type: "event_msg",
+            timestamp: `2026-08-26T12:00:0${i + 1}Z`,
+            payload: {
+              type: "patch_apply_end",
+              call_id: `patch-${i}`,
+              success: true,
+              stdout: `Success. Updated the following files:\nA ${path}`,
+              stderr: "",
+              changes: { [path]: { type: "add", content: "import json\n" } },
+            },
+          }) as CodexSessionEntry,
+      ),
+    ];
+    const normalized = normalizeSession(buildLoadedSession(entries));
+    const edits = preprocessMessages(normalized.messages).filter(
+      (item) => item.type === "tool_call" && item.toolName === "Edit",
+    );
+    expect(edits).toHaveLength(2);
+    for (const [index, path] of paths.entries()) {
+      const edit = edits[index];
+      if (edit?.type !== "tool_call") throw new Error("Expected Edit row");
+      expect(edit.toolInput).toMatchObject({
+        file_path: publicCodexFileChangePath(path),
+      });
+      expect(edit.toolResult?.content).toContain(
+        publicCodexFileChangePath(path),
+      );
+    }
+    expect(JSON.stringify(edits)).not.toContain("[path hidden]");
+    expect(JSON.stringify(edits)).toContain("private-user");
   });
 
   it("surfaces a literal code-mode update_plan alongside the outer exec", () => {
@@ -2118,7 +2169,7 @@ describe("Codex Normalization", () => {
 });
 
 describe("Codex public prompt projection", () => {
-  it("keeps managed media paths out of normalized user content without mutating rollout", () => {
+  it("retains managed media paths without mutating rollout", () => {
     const uploadPath =
       "/test/runtime/uploads/cHJvamVjdA/session-1/123e4567-e89b-12d3-a456-426614174000_report.pdf";
     const downloadUrl =
@@ -2154,11 +2205,11 @@ describe("Codex public prompt projection", () => {
     const normalized = normalizeSession(buildLoadedSession(entries));
     const serialized = JSON.stringify(normalized);
 
-    expect(serialized).toContain("[managed attachment]");
-    expect(serialized).toContain(downloadUrl);
+    expect(serialized).not.toContain("[managed attachment]");
+    expect(serialized).not.toContain(downloadUrl);
     expect(serialized).toContain("/workspace/project/README.md");
-    expect(serialized).not.toContain(uploadPath);
-    expect(serialized).not.toContain(imagePath);
+    expect(serialized).toContain(uploadPath);
+    expect(serialized).toContain(imagePath);
     expect(entries).toEqual(original);
   });
 });

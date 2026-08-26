@@ -211,32 +211,12 @@ function sanitizePublicMediaBlock(block: ContentBlock): ContentBlock {
   const rawUrl = block[urlKey];
   const publicUrl = safePublicMediaUrl(rawUrl, kind);
   const mimeType = sanitizePublicMimeType(block.mime_type);
-  const hadManagedLocation =
-    typeof block.file_path === "string" ||
-    typeof block.path === "string" ||
-    (typeof rawUrl === "string" && !publicUrl);
-  const needsClone =
-    hadManagedLocation || publicUrl !== rawUrl || mimeType !== block.mime_type;
-  if (!needsClone) return block;
-
-  const projected = Object.fromEntries(
-    Object.entries(block).filter(
-      ([key]) =>
-        key !== "file_path" &&
-        key !== "path" &&
-        key !== urlKey &&
-        key !== "mime_type",
-    ),
-  ) as ContentBlock;
-  if (publicUrl) {
-    projected[urlKey] = publicUrl;
-  }
-  if (mimeType) {
-    projected.mime_type = mimeType;
-  }
-  if (hadManagedLocation) {
-    projected.managed_attachment = MANAGED_ATTACHMENT_MARKER;
-  }
+  if (publicUrl === rawUrl && mimeType === block.mime_type) return block;
+  const projected = { ...block };
+  if (publicUrl) projected[urlKey] = publicUrl;
+  else Reflect.deleteProperty(projected, urlKey);
+  if (mimeType) projected.mime_type = mimeType;
+  else Reflect.deleteProperty(projected, "mime_type");
   return projected;
 }
 
@@ -1813,9 +1793,11 @@ function convertCodexPatchApplyEndEvent(
   const isError = isCodexFileChangeError(status);
   const stdout = publicCodexTextPaths(payload.stdout?.trim() ?? "", {
     workspaceRoot,
+    fileChangePaths: true,
   });
   const stderr = publicCodexTextPaths(payload.stderr?.trim() ?? "", {
     workspaceRoot,
+    fileChangePaths: true,
   });
   const fallbackResult = formatCodexFileChangeResult(changes, status);
   const resultText = isError

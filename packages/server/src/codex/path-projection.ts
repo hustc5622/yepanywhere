@@ -1,10 +1,37 @@
+import { createHash } from "node:crypto";
 import { posix, win32 } from "node:path";
 
 export const CODEX_HIDDEN_PATH = "[path hidden]";
 
 export interface CodexPublicPathOptions {
-  /** Trusted workspace root for converting provider absolute paths to public relative paths. */
+  /** Compatibility context for callers; display paths remain plaintext. */
   workspaceRoot?: string;
+}
+
+export function codexFilePathFingerprint(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
+}
+
+export function isCodexPathFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{16}$/.test(value);
+}
+
+export function hiddenCodexFilePath(fingerprint: unknown): string {
+  return isCodexPathFingerprint(fingerprint)
+    ? `[path hidden:${fingerprint.slice(7)}]`
+    : CODEX_HIDDEN_PATH;
+}
+
+export function isHiddenCodexFilePath(value: string): boolean {
+  return /^\[path hidden(?::[a-f0-9]{16})?\]$/.test(value);
+}
+
+/** Recognize only labels written by older builds, for exact fingerprint recovery. */
+export function isLegacyMaskedCodexFilePath(value: string): boolean {
+  return (
+    isHiddenCodexFilePath(value) ||
+    /^\[(?:tmp|home|external):[a-f0-9]{16}\]\//.test(value)
+  );
 }
 
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\)/;
@@ -66,54 +93,26 @@ export function codexWorkspaceRelativePath(
   return isSafeRelativePath(relativePath) ? relativePath : undefined;
 }
 
-/**
- * Project a provider path across the public transcript boundary.
- * Safe relative paths survive; absolute paths only survive after bounded
- * conversion under the trusted workspace root.
- */
+/** Keep the original display path. This never grants filesystem access. */
 export function publicCodexFilePath(
   value: string,
-  options: CodexPublicPathOptions = {},
+  _options: CodexPublicPathOptions = {},
 ): string {
-  const trimmed = value.trim();
-  const normalized = normalizeSeparators(trimmed);
-  if (
-    !normalized ||
-    normalized.includes("\0") ||
-    /^file:\/\//i.test(normalized)
-  ) {
-    return CODEX_HIDDEN_PATH;
-  }
-
-  if (isAbsolutePath(trimmed)) {
-    return (
-      codexWorkspaceRelativePath(trimmed, options.workspaceRoot)?.slice(
-        0,
-        2_048,
-      ) ?? CODEX_HIDDEN_PATH
-    );
-  }
-
-  return isSafeRelativePath(normalized)
-    ? normalized.slice(0, 2_048)
-    : CODEX_HIDDEN_PATH;
+  return value.slice(0, 2_048);
 }
 
-/** Replace filesystem references embedded in public tool text/diffs. */
-export function publicCodexTextPaths(
+/** Plaintext display shared by live, persisted and historical file changes. */
+export function publicCodexFileChangePath(
   value: string,
   options: CodexPublicPathOptions = {},
 ): string {
-  return value
-    .replace(/file:\/\/\/[^\s]+/gi, CODEX_HIDDEN_PATH)
-    .replace(
-      /(^|[\s([{\"'`=])(\/(?:[^/\s]+\/)*[^/\s)\]}\"'`,;]+)/gm,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${publicCodexFilePath(path, options)}`,
-    )
-    .replace(
-      /(^|[\s([{\"'`=])([A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*)/gm,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${publicCodexFilePath(path, options)}`,
-    );
+  return publicCodexFilePath(value, options);
+}
+
+/** Compatibility entry point: tool text and patch headings stay verbatim. */
+export function publicCodexTextPaths(
+  value: string,
+  _options: CodexPublicPathOptions & { fileChangePaths?: boolean } = {},
+): string {
+  return value;
 }

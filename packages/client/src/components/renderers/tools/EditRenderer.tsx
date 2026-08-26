@@ -776,7 +776,7 @@ function EditInteractiveSummary({
 
   // Show loading state if no patch yet
   if (structuredPatch.length === 0) {
-    return <span>{fileName}</span>;
+    return <span title={filePath}>{fileName}</span>;
   }
 
   return (
@@ -784,6 +784,7 @@ function EditInteractiveSummary({
       <button
         type="button"
         className="file-link-inline"
+        title={filePath}
         onClick={(e) => {
           e.stopPropagation();
           setShowModal(true);

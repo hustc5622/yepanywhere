@@ -242,14 +242,13 @@ describe("sessions route canonical Codex refresh overlay", () => {
     });
     expect(body.messages[2]).toMatchObject({
       type: "error",
-      error: "Codex is busy and cannot process the request right now.",
+      error: "server overloaded",
       codexRetryExhausted: true,
       codexCanonicalRefresh: true,
     });
     expect(body.session).toMatchObject({
       lastTurnStatus: "failed",
-      lastErrorMessage:
-        "Codex is busy and cannot process the request right now.",
+      lastErrorMessage: "server overloaded",
     });
   });
 
@@ -316,7 +315,7 @@ describe("sessions route canonical Codex refresh overlay", () => {
     expect(failingStore.latestEventAtMs).toHaveBeenCalledOnce();
   });
 
-  it("keeps canonical refresh responses path-free without mutating rollout input", async () => {
+  it("keeps canonical refresh paths intact without mutating rollout input", async () => {
     const managedPath = "/tmp/yep-test/uploads/session-1/report.pdf";
     const prompt = `Review report\n\nUser uploaded files:\n- report.pdf (4.0 KB, application/pdf): ${managedPath}`;
     const entries: CodexSessionEntry[] = [
@@ -358,9 +357,9 @@ describe("sessions route canonical Codex refresh overlay", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     const serialized = JSON.stringify(body);
-    expect(serialized).toContain("[managed attachment]");
-    expect(serialized).not.toContain(managedPath);
-    expect(body.session.title).not.toContain(managedPath);
+    expect(serialized).not.toContain("[managed attachment]");
+    expect(serialized).toContain(managedPath);
+    expect(body.session.title).toContain(managedPath);
     expect(JSON.stringify(entries)).toContain(managedPath);
   });
 

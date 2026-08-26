@@ -107,19 +107,7 @@ export function shouldJournalServerNotification(
   return true;
 }
 
-/**
- * Keep unrecognised method names out of low-context diagnostics. The stable
- * fingerprint is enough to correlate repeats without copying attacker- or
- * extension-controlled strings into logs/journals.
- */
+/** Bound diagnostic labels without masking extension-supplied method names. */
 export function safeCodexBridgeMethod(method: string): string {
-  if (
-    KNOWN_NOTIFICATION_METHODS.has(method) ||
-    KNOWN_CLIENT_LIFECYCLE_METHODS.has(method) ||
-    method === "config/read" ||
-    method === "thread/read"
-  ) {
-    return method;
-  }
-  return `unknown:${createHash("sha256").update(method).digest("hex").slice(0, 16)}`;
+  return method.slice(0, 2_048);
 }

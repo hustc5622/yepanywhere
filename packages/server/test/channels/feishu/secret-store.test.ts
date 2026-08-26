@@ -15,7 +15,7 @@ describe("FeishuSecretStore", () => {
     );
   });
 
-  it("stores App Secrets only in a 0600 file and exposes a masked status", async () => {
+  it("stores App Secrets only in a 0600 file and exposes plaintext status to its owner", async () => {
     const dataDir = await createDataDir(dataDirs);
     const store = new FeishuSecretStore({ dataDir, env: {} });
     await store.initialize();
@@ -27,7 +27,7 @@ describe("FeishuSecretStore", () => {
     expect(store.describe(ref)).toEqual({
       configured: true,
       source: "store",
-      masked: "****alue",
+      value: "very-secret-value",
     });
     expect(await readFile(store.filePath, "utf8")).toContain(
       "very-secret-value",
@@ -48,7 +48,7 @@ describe("FeishuSecretStore", () => {
     expect(store.describe("env:FEISHU_TEAM_SECRET")).toEqual({
       configured: true,
       source: "env",
-      masked: "****cret",
+      value: "environment-secret",
     });
     await expect(readFile(store.filePath, "utf8")).rejects.toMatchObject({
       code: "ENOENT",

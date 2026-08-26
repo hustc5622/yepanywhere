@@ -104,29 +104,29 @@ describe("CodexBridgeService managed upstream profiles", () => {
         profile: "clear",
         running: true,
         starting: false,
-        args: ["[1 configured argument hidden]"],
+        args: ["--clear-profile"],
       });
       expect(status.upstreams.light).toMatchObject({
         profile: "light",
         running: true,
         starting: false,
-        args: ["[1 configured argument hidden]"],
+        args: [sensitiveArg],
       });
       expect(status.upstreams.full).toMatchObject({
         profile: "full",
         running: true,
         starting: false,
-        args: ["[1 configured argument hidden]"],
+        args: ["--full-profile"],
       });
-      expect(JSON.stringify(status)).not.toContain("profile-wire-secret");
-      expect(JSON.stringify(status)).not.toContain("/private/profile.json");
+      expect(JSON.stringify(status)).toContain("profile-wire-secret");
+      expect(JSON.stringify(status)).toContain("/private/profile.json");
       await waitFor(() => debugSpy.mock.calls.length >= 6);
       const ordinaryLogs = JSON.stringify([
         ...logSpy.mock.calls,
         ...debugSpy.mock.calls,
       ]);
-      expect(ordinaryLogs).not.toContain("profile-wire-secret");
-      expect(ordinaryLogs).not.toContain("/private/profile.json");
+      expect(ordinaryLogs).toContain("profile-wire-secret");
+      expect(ordinaryLogs).toContain("/private/profile.json");
       expect(ordinaryLogs).not.toContain(codexPath);
       expect(status.upstreams.light.url).not.toBe(status.upstreams.full.url);
       expect(status.upstreams.clear.url).not.toBe(status.upstreams.light.url);

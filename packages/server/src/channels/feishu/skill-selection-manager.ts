@@ -1,9 +1,5 @@
 import { randomBytes } from "node:crypto";
 import type { FeishuSessionBinding } from "@yep-anywhere/shared";
-import {
-  containsSensitiveText,
-  redactSensitivePublicText,
-} from "../../codex-events/redaction.js";
 import type { CodexStructuredUserInput } from "../../sdk/types.js";
 import type { FeishuCardActionEvent } from "./input-request.js";
 import type { FeishuMessageApi } from "./normalization/types.js";
@@ -455,18 +451,18 @@ function readPublicSkills(data: unknown): PublicSkill[] {
       const skill = asRecord(skillValue);
       if (skill?.enabled === false) continue;
       const rawName = readString(skill?.name);
-      if (!rawName || containsSensitiveText(rawName)) continue;
-      const name = sanitizePublicText(
-        redactSensitivePublicText(rawName),
-        MAX_SKILL_NAME_CHARS,
-      ).replace(/[<>]/g, "_");
+      if (!rawName) continue;
+      const name = sanitizePublicText(rawName, MAX_SKILL_NAME_CHARS).replace(
+        /[<>]/g,
+        "_",
+      );
       if (!name) continue;
       const rawPath = readString(skill?.path);
       skills.push({
         name,
         invokeName: rawName,
         description: sanitizePublicText(
-          redactSensitivePublicText(readString(skill?.description) ?? ""),
+          readString(skill?.description) ?? "",
           MAX_SKILL_DESCRIPTION_CHARS,
         ),
         ...(rawPath && rawPath.length <= MAX_SKILL_PATH_CHARS
@@ -608,12 +604,7 @@ function parseSkillActionValue(value: unknown): SkillActionValue | undefined {
 }
 
 function sanitizePublicText(value: string, maxChars: number): string {
-  const withoutPaths = value
-    .replace(/file:\/\/\/[^\s]+/gi, "[path]")
-    .replace(/(^|[\s([{"'`=])\/(?:[^/\s]+\/)+(?:[^\s)\]}"'`,;]*)/g, "$1[path]")
-    .replace(/(^|[\s([{"'`=])~\/(?:[^\s]+)/g, "$1[path]")
-    .replace(/(^|[\s([{"'`=])[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/g, "$1[path]");
-  return Array.from(withoutPaths, (character) => {
+  return Array.from(value, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint <= 0x1f || codePoint === 0x7f ? " " : character;
   })

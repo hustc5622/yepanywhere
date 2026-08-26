@@ -51,7 +51,7 @@ import {
   ZCODE_PREFERRED_DELIVERY_KIND,
   isZCodeVersionGte,
 } from "@yep-anywhere/shared";
-import { redactSensitivePublicText } from "../../codex-events/redaction.js";
+
 import { getLogger } from "../../logging/logger.js";
 import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type { CanUseTool, SDKMessage } from "../types.js";
@@ -319,9 +319,7 @@ export class ZCodeProvider implements AgentProvider {
           transport: entry.transport,
           toolCount: entry.toolCount,
           updatedAt: entry.updatedAt,
-          ...(entry.error !== undefined
-            ? { error: redactSensitivePublicText(entry.error) }
-            : {}),
+          ...(entry.error !== undefined ? { error: entry.error } : {}),
         };
       }
       return servers;
@@ -732,9 +730,8 @@ export class ZCodeProvider implements AgentProvider {
             yield {
               type: "error",
               session_id: resolvedSessionId,
-              error: redactSensitivePublicText(
+              error:
                 errorObj?.message ?? "ZCode app-server closed unexpectedly",
-              ),
             };
             turnComplete = true;
             break;
@@ -760,9 +757,8 @@ export class ZCodeProvider implements AgentProvider {
         // Aborted — don't yield error, just exit.
         return;
       }
-      const errorMessage = redactSensitivePublicText(
-        error instanceof Error ? error.message : "ZCode session failed",
-      );
+      const errorMessage =
+        error instanceof Error ? error.message : "ZCode session failed";
       log.error({ error: errorMessage }, "zcode session error");
       if (resolvedSessionId) {
         yield {

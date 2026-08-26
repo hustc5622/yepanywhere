@@ -23,6 +23,42 @@ if (!editRenderer.renderCollapsedPreview) {
 const renderCollapsedPreview = editRenderer.renderCollapsedPreview;
 
 describe("EditRenderer collapsed preview fallback", () => {
+  it.each([false, true])(
+    "shows an external filename and its distinct full label (diff ready: %s)",
+    (withDiff) => {
+      const path = "/tmp/example/api_request.py";
+      if (!editRenderer.renderInteractiveSummary)
+        throw new Error("Missing Edit summary");
+      render(
+        <div>
+          {editRenderer.renderInteractiveSummary(
+            {
+              file_path: path,
+              ...(withDiff
+                ? {
+                    _structuredPatch: [
+                      {
+                        oldStart: 1,
+                        oldLines: 1,
+                        newStart: 1,
+                        newLines: 1,
+                        lines: ["-old", "+new"],
+                      },
+                    ],
+                  }
+                : {}),
+            } as never,
+            undefined,
+            false,
+            renderContext,
+          )}
+        </div>,
+      );
+      expect(screen.getByTitle(path).textContent).toContain("api_request.py");
+      expect(screen.queryByText("[path hidden]")).toBeNull();
+    },
+  );
+
   afterEach(() => {
     cleanup();
   });

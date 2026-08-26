@@ -39,15 +39,6 @@ const PROJECTED_EVENT_METHODS = new Set([
   "item/fileChange/patchUpdated",
   "item/mcpToolCall/progress",
 ]);
-const SECRET_KEY_PATTERN =
-  /^(?:authorization|proxy-authorization|cookie|set-cookie|stdin|[A-Za-z0-9_-]*(?:password|passphrase|secret|tokens?|api[_-]?key|private[_-]?key|credentials?))$/i;
-const RAW_REASONING_KEY_PATTERN =
-  /^(?:raw[_-]?reasoning|reasoningContent|chain[_-]?of[_-]?thought|encrypted[_-]?content)$/i;
-const ARTIFACT_LOCATION_KEY_PATTERN =
-  /^(?:cwd|rawRef|[A-Za-z0-9_]*(?:path|url|uri)(?:ref)?)$/i;
-const ARTIFACT_LOCATION_ARRAY_KEY_PATTERN =
-  /^(?:paths|urls|uris|instructionSources|runtimeWorkspaceRoots)$/i;
-
 export type CodexTranscriptEntryKind =
   | "thread"
   | "turn"
@@ -434,22 +425,13 @@ function addInteractionEntries(
     if (request.direction !== "server_request") continue;
     const response = responsesByCorrelation.get(request.correlationId);
     const requestPayload = asObject(request.payload.data);
-    const secretQuestionIds = readSecretResponseFieldIds(requestPayload);
-    const safeRequestPayload = redactSecretSchemaDefaults(
-      request.payload.data,
-      secretQuestionIds,
-      context,
-    );
-    const responsePayload = response
-      ? redactSecretAnswers(response.payload.data, secretQuestionIds, context)
-      : undefined;
     const content: SafeJsonObject = {
-      request: sanitizeValue(safeRequestPayload, context, {
+      request: sanitizeValue(request.payload.data, context, {
         method: request.method,
         depth: 0,
       }),
       resolution: response
-        ? sanitizeValue(responsePayload ?? null, context, {
+        ? sanitizeValue(response.payload.data, context, {
             method: response.method,
             depth: 0,
           })
@@ -551,34 +533,17 @@ function addProtocolEventEntries(
     ) {
       continue;
     }
-    const rawProtocol =
-      event.method === "rawResponse/completed" ||
-      event.method === "rawResponseItem/completed";
-    if (rawProtocol) context.redactionCounts.raw_protocol += 1;
-    const unlinkedSensitiveResponse =
-      event.direction === "client_response" &&
-      (event.method === "item/tool/requestUserInput" ||
-        event.method === "mcpServer/elicitation/request" ||
-        event.method === "account/chatgptAuthTokens/refresh" ||
-        event.method === "attestation/generate");
-    if (unlinkedSensitiveResponse) {
-      context.redactionCounts.secret_answer += 1;
-    }
     const content: SafeJsonObject = {
       direction: event.direction,
       phase: event.phase,
       correlationId: event.correlationId,
-      payload: rawProtocol
-        ? "[REDACTED:raw-protocol-diagnostic]"
-        : unlinkedSensitiveResponse
-          ? "[REDACTED:unlinked-sensitive-response]"
-          : sanitizeValue(event.payload.data, context, {
-              method: event.method,
-              depth: 0,
-            }),
+      payload: sanitizeValue(event.payload.data, context, {
+        method: event.method,
+        depth: 0,
+      }),
     };
     if (event.rawRef !== undefined) {
-      content.rawRef = opaqueArtifactRef(event.rawRef, "raw", context);
+      content.rawRef = sanitizeText(event.rawRef, context);
     }
     if (event.payload.redactionCount !== undefined) {
       content.canonicalRedactionCount = event.payload.redactionCount;
@@ -679,17 +644,17 @@ function itemContent(
         ? snapshotSummary
         : (item.stream.reasoningSummary ?? []);
     const snapshotContent = snapshot.content;
-    const rawCount =
-      (Array.isArray(snapshotContent) ? snapshotContent.length : 0) +
-      (item.stream.reasoningContent?.length ?? 0);
-    if (rawCount > 0) context.redactionCounts.raw_reasoning += rawCount;
     return {
       summary: sanitizeValue(summary, context, {
         parentType: "reasoning",
         key: "summary",
         depth: 0,
       }),
-      rawReasoning: "[OMITTED:raw-reasoning]",
+      rawReasoning: sanitizeValue(
+        snapshotContent ?? item.stream.reasoningContent ?? [],
+        context,
+        { depth: 0 },
+      ),
       lateDeltaCount: item.lateDeltaCount,
     };
   }
@@ -777,33 +742,13 @@ function sanitizeValue(
   context: BuildContext,
   location: SanitizeContext,
 ): SafeJsonValue {
-  const { key, parentType, method, depth } = location;
-  if (key && SECRET_KEY_PATTERN.test(key)) {
-    context.redactionCounts.secret_key += 1;
-    return "[REDACTED:secret]";
-  }
-  if (
-    key &&
-    (RAW_REASONING_KEY_PATTERN.test(key) ||
-      (parentType === "reasoning" && key === "content") ||
-      (method === "item/reasoning/textDelta" && key === "delta"))
-  ) {
-    context.redactionCounts.raw_reasoning += 1;
-    return "[OMITTED:raw-reasoning]";
-  }
+  const { parentType, method, depth } = location;
   if (input === null) return null;
-  if (typeof input === "boolean" || typeof input === "number") {
+  if (typeof input === "boolean") return input;
+  if (typeof input === "number") {
     return Number.isFinite(input) ? input : String(input);
   }
   if (typeof input === "string") {
-    if (key && ARTIFACT_LOCATION_KEY_PATTERN.test(key)) {
-      context.redactionCounts.artifact_location += 1;
-      return opaqueArtifactRef(input, artifactKindForKey(key), context);
-    }
-    if (key === "data" && looksLikeBinaryData(input)) {
-      context.redactionCounts.binary_data += 1;
-      return opaqueArtifactRef(input, "binary", context);
-    }
     return sanitizeText(input, context);
   }
   if (
@@ -812,8 +757,7 @@ function sanitizeValue(
     typeof input === "symbol" ||
     typeof input === "bigint"
   ) {
-    context.redactionCounts.secret_value += 1;
-    return `[REDACTED:non-json:${typeof input}]`;
+    return input === undefined ? null : String(input);
   }
   if (depth >= context.limits.maxDepth) {
     context.truncationCounts.max_depth += 1;
@@ -826,14 +770,6 @@ function sanitizeValue(
         input.length - context.limits.maxArrayItems;
     }
     return input.slice(0, context.limits.maxArrayItems).map((value) => {
-      if (
-        key &&
-        ARTIFACT_LOCATION_ARRAY_KEY_PATTERN.test(key) &&
-        typeof value === "string"
-      ) {
-        context.redactionCounts.artifact_location += 1;
-        return opaqueArtifactRef(value, artifactKindForKey(key), context);
-      }
       return sanitizeValue(value, context, {
         method,
         parentType,
@@ -868,42 +804,6 @@ function sanitizeValue(
 
 function sanitizeText(value: string, context: BuildContext): string {
   let output = stripTerminalControls(value);
-  output = redactStringPattern(
-    output,
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-    "[REDACTED:private-key]",
-    context,
-  );
-  output = redactStringPattern(
-    output,
-    /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-    "Bearer [REDACTED]",
-    context,
-  );
-  output = redactStringPattern(
-    output,
-    /\bsk-[A-Za-z0-9_-]{12,}/g,
-    "[REDACTED:api-key]",
-    context,
-  );
-  output = redactStringPattern(
-    output,
-    /\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{24,})\b/g,
-    "[REDACTED:access-key]",
-    context,
-  );
-  output = redactStringPattern(
-    output,
-    /\b(authorization|cookie|[A-Za-z0-9_-]*(?:password|passphrase|secret|token|api[_-]?key|private[_-]?key|credential))\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-    "$1=[REDACTED]",
-    context,
-  );
-  output = redactStringPattern(
-    output,
-    /([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+@/gi,
-    "$1[REDACTED]@",
-    context,
-  );
   if (output.length > context.limits.maxStringCharacters) {
     context.truncationCounts.string_length += 1;
     context.omittedCharacters +=
@@ -911,152 +811,6 @@ function sanitizeText(value: string, context: BuildContext): string {
     output = `${safeStringSlice(output, context.limits.maxStringCharacters)}[TRUNCATED:${output.length - context.limits.maxStringCharacters}]`;
   }
   return output;
-}
-
-function redactStringPattern(
-  value: string,
-  pattern: RegExp,
-  replacement: string,
-  context: BuildContext,
-): string {
-  let count = 0;
-  const output = value.replace(pattern, (...args: unknown[]) => {
-    count += 1;
-    const match = String(args[0]);
-    if (!replacement.includes("$1")) return replacement;
-    const firstCapture = typeof args[1] === "string" ? args[1] : "";
-    return replacement.replace("$1", firstCapture || match);
-  });
-  context.redactionCounts.secret_value += count;
-  return output;
-}
-
-function redactSecretAnswers(
-  input: SafeJsonValue,
-  secretQuestionIds: ReadonlySet<string>,
-  context: BuildContext,
-  parentKey?: string,
-): SafeJsonValue {
-  if (secretQuestionIds.size === 0) return input;
-  if (Array.isArray(input)) {
-    return input.map((entry) =>
-      redactSecretAnswers(entry, secretQuestionIds, context, parentKey),
-    );
-  }
-  const object = asObject(input);
-  if (!object) return input;
-  const output: SafeJsonObject = {};
-  for (const [key, value] of Object.entries(object)) {
-    if (
-      (parentKey === "answers" || parentKey === "content") &&
-      secretQuestionIds.has(key)
-    ) {
-      context.redactionCounts.secret_answer += 1;
-      output[key] =
-        parentKey === "answers"
-          ? { answers: ["[REDACTED:secret-answer]"] }
-          : "[REDACTED:secret-answer]";
-    } else {
-      output[key] = redactSecretAnswers(value, secretQuestionIds, context, key);
-    }
-  }
-  return output;
-}
-
-function readSecretResponseFieldIds(
-  payload: SafeJsonObject | undefined,
-): ReadonlySet<string> {
-  const ids = new Set<string>();
-  const questions = payload?.questions;
-  if (Array.isArray(questions)) {
-    for (const questionValue of questions) {
-      const question = asObject(questionValue);
-      const id = readString(question, "id");
-      if (id && question?.isSecret === true) ids.add(id);
-    }
-  }
-  const requestedSchema = asObject(payload?.requestedSchema);
-  const properties = asObject(requestedSchema?.properties);
-  for (const [name, schemaValue] of Object.entries(properties ?? {})) {
-    const schema = asObject(schemaValue);
-    const format = readString(schema, "format")?.toLowerCase();
-    if (
-      SECRET_KEY_PATTERN.test(name) ||
-      schema?.writeOnly === true ||
-      format === "password" ||
-      format === "secret"
-    ) {
-      ids.add(name);
-    }
-  }
-  return ids;
-}
-
-function redactSecretSchemaDefaults(
-  input: SafeJsonValue,
-  secretFieldIds: ReadonlySet<string>,
-  context: BuildContext,
-  parentKey?: string,
-): SafeJsonValue {
-  if (secretFieldIds.size === 0) return input;
-  if (Array.isArray(input)) {
-    return input.map((entry) =>
-      redactSecretSchemaDefaults(entry, secretFieldIds, context, parentKey),
-    );
-  }
-  const object = asObject(input);
-  if (!object) return input;
-  const output: SafeJsonObject = {};
-  for (const [key, value] of Object.entries(object)) {
-    if (parentKey === "properties" && secretFieldIds.has(key)) {
-      const schema = asObject(value);
-      if (schema?.default !== undefined) {
-        context.redactionCounts.secret_answer += 1;
-        output[key] = {
-          ...schema,
-          default: "[REDACTED:secret-default]",
-        };
-        continue;
-      }
-    }
-    output[key] = redactSecretSchemaDefaults(
-      value,
-      secretFieldIds,
-      context,
-      key,
-    );
-  }
-  return output;
-}
-
-function opaqueArtifactRef(
-  value: string,
-  kind: "file" | "url" | "resource" | "raw" | "binary",
-  context: BuildContext,
-): SafeJsonObject {
-  const ref = `artifact:sha256:${createHash("sha256")
-    .update(`${kind}\0${value}`)
-    .digest("hex")
-    .slice(0, 24)}`;
-  context.artifactRefs.add(ref);
-  return {
-    type: "opaque_artifact_ref",
-    ref,
-    kind,
-  };
-}
-
-function artifactKindForKey(key: string): "file" | "url" | "resource" | "raw" {
-  if (/rawRef/i.test(key)) return "raw";
-  if (/url/i.test(key)) return "url";
-  if (/uri/i.test(key)) return "resource";
-  return "file";
-}
-
-function looksLikeBinaryData(value: string): boolean {
-  if (/^data:[^,]*;base64,/i.test(value)) return true;
-  if (value.length < 24 || value.length % 4 !== 0) return false;
-  return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
 }
 
 function exportWithEntryLimit(

@@ -70,8 +70,8 @@ describe("FeishuInboundProcessor", () => {
       "artifact: kind=text | mime=text/plain | bytes=42 | ref=upload:attachment-1:artifact:artifact-1",
     );
     expect(output).toContain("warning: TRUNCATED: bounded warning");
-    expect(output).toContain("warning: PATH: [path]");
-    expect(output).not.toContain("/opt/yep-fixtures/private");
+    expect(output).toContain("warning: PATH: /opt/yep-fixtures/private");
+    expect(output).toContain("/opt/yep-fixtures/private");
   });
 
   afterEach(async () => {
@@ -1345,7 +1345,7 @@ describe("FeishuInboundProcessor", () => {
     expect(outcomes[4]?.text).not.toContain("secret");
   });
 
-  it("dispatches bounded, path-redacted stable /codex controls", async () => {
+  it("dispatches bounded, plaintext stable /codex controls", async () => {
     const fixture = await createFixture(dataDirs);
     const account = fixture.account;
     const now = new Date().toISOString();
@@ -1504,7 +1504,7 @@ describe("FeishuInboundProcessor", () => {
     ]);
     expect(outcomes[0]?.text).toContain("skill-1");
     expect(outcomes[0]?.text).toContain("另有 12 项未显示");
-    expect(outcomes[0]?.text).not.toContain("/opt/yep-fixtures/");
+    expect(outcomes[0]?.text).toContain("/opt/yep-fixtures/");
     expect(outcomes[0]?.text).not.toContain("secret parser error");
     expect(Array.from(outcomes[0]?.text ?? "").length).toBeLessThanOrEqual(
       3_500,
@@ -1547,14 +1547,14 @@ describe("FeishuInboundProcessor", () => {
     expect(outcomes[3]?.text).toContain("顶层 /stop");
     expect(outcomes[5]?.text).toContain("未知或未开放");
     expect(outcomes[6]?.text).toBe("用法：/codex goal set <objective>");
-    expect(outcomes[7]?.text).toContain("疑似包含敏感信息");
+    expect(outcomes[7]?.text).toContain("当前没有 Codex 会话绑定");
     expect(outcomes.every((outcome) => outcome.command === "codex")).toBe(true);
     expect(fixture.commands.executeCodexControl).not.toHaveBeenCalled();
     expect(fixture.commands.send).not.toHaveBeenCalled();
     expect(fixture.commands.interrupt).not.toHaveBeenCalled();
   });
 
-  it("maps typed Codex provider failures without exposing raw errors", async () => {
+  it("maps typed provider failures with original diagnostic text", async () => {
     const fixture = await createFixture(dataDirs);
     const account = fixture.account;
     const now = new Date().toISOString();
@@ -1594,9 +1594,11 @@ describe("FeishuInboundProcessor", () => {
     );
     await eventually(() => expect(outcomes).toHaveLength(1));
 
-    expect(outcomes[0]?.text).toBe("Codex 暂时无法完成该控制，请稍后重试。");
+    expect(outcomes[0]?.text).toBe(
+      "synthetic provider error at /opt/yep-fixtures/private",
+    );
     expect(outcomes[0]?.text).not.toContain("secret");
-    expect(outcomes[0]?.text).not.toContain("/opt/yep-fixtures/");
+    expect(outcomes[0]?.text).toContain("/opt/yep-fixtures/");
   });
 
   it("retains a selected Skill until an existing-binding turn has a concrete process", async () => {

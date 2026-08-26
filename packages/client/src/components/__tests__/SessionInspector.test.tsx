@@ -50,6 +50,59 @@ function renderInspector(
 }
 
 describe("SessionInspector", () => {
+  it("indexes every file in a multi-file Codex Edit and separates external files with the same name", () => {
+    const first = "/tmp/one/api_request.py";
+    const second = "/tmp/two/api_request.py";
+    const messages: Message[] = [
+      {
+        uuid: "multi-edit",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "edit-1",
+              name: "Edit",
+              input: {
+                changes: [
+                  { path: first, kind: "add", diff: "import json" },
+                  { path: second, kind: "add", diff: "import os" },
+                  { path: "src/main.ts", kind: "update", diff: "+safe" },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: "repeat-edit",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "edit-2",
+              name: "Edit",
+              input: {
+                file_path: first,
+                changes: [{ path: first, kind: "update", diff: "+safe" }],
+              },
+            },
+          ],
+        },
+      },
+    ];
+    renderInspector("codex", messages);
+    const firstFile = screen.getByTitle(first);
+    expect(firstFile.textContent).toContain("Edit - 2");
+    expect(screen.getByTitle(second).textContent).toContain("Modified - Edit");
+    expect(screen.getByTitle(second).textContent).not.toContain("Edit - 2");
+    expect(screen.getByTitle("src/main.ts")).toBeDefined();
+    expect(screen.queryByText("[path hidden]")).toBeNull();
+  });
+
   afterEach(() => {
     cleanup();
     window.localStorage.removeItem(UI_KEYS.locale);

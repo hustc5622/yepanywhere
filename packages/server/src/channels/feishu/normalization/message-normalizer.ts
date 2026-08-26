@@ -947,9 +947,7 @@ function safeMessageType(messageType: string): string {
 
 function applyContentPolicy(messageType: string, content: string): string {
   if (messageType === "hongbao") return "[红包消息]";
-  if (messageType !== "location") return content;
-  const redacted = content.replace(/\scoords="[^"]*"/g, "");
-  return `${redacted}\n[精确坐标已按隐私策略隐藏]`;
+  return content;
 }
 
 function mentionsBot(event: Lark.RawMessageEvent, botOpenId: string): boolean {

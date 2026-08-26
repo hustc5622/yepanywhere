@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import type { GeneratedArtifactBlockReason } from "@yep-anywhere/shared";
 import { getMessageContent } from "../../augments/index.js";
+import { serializeCodexPayload } from "../../codex-events/payload.js";
 import {
   CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE,
   type CodexNativeThreadItemType,
@@ -53,6 +54,7 @@ export interface FeishuRichCardSnapshot {
   activities: FeishuActivityProjection[];
   warnings: string[];
   artifacts: string[];
+  details: string[];
 }
 
 export interface FeishuRichCardSections {
@@ -91,9 +93,8 @@ const MAX_STREAM_REASONING_ROWS = 4;
 const MAX_STREAM_PROGRESS_ROWS = 16;
 
 /**
- * Content-safe projection of provider messages into the sections a Feishu
- * task card can display. Command arguments, tool output and raw reasoning are
- * deliberately excluded from this state.
+ * Bounded plaintext projection of provider messages for the private instance.
+ * HTML/control safety and card size limits are independent of content masking.
  */
 export class FeishuRichCardProjection {
   private planExplanation?: string;
@@ -114,6 +115,7 @@ export class FeishuRichCardProjection {
   private readonly activities = new Map<string, FeishuActivityProjection>();
   private readonly warnings = new Set<string>();
   private readonly artifacts = new Set<string>();
+  private readonly detailsById = new Map<string, string>();
 
   observe(message: Record<string, unknown>): void {
     this.observeSubagent(message);
@@ -133,8 +135,16 @@ export class FeishuRichCardProjection {
       const block = objectValue(rawBlock);
       if (!block) continue;
       if (block.type === "thinking") {
-        // Reasoning presence is useful; hidden chain-of-thought is not.
+        // Show provider-supplied reasoning in the private instance.
         this.legacyReasoningActive = true;
+        const text = stringValue(block.thinking);
+        if (text)
+          setBoundedMap(
+            this.reasoningById,
+            stringValue(message.uuid) ?? "legacy-reasoning",
+            { status: "running", summary: safeVisibleText(text, 1_200) },
+            MAX_REASONING_ITEMS,
+          );
       } else if (block.type === "tool_use") {
         this.observeToolUse(message, block);
       } else if (block.type === "tool_result") {
@@ -175,8 +185,9 @@ export class FeishuRichCardProjection {
       | FeishuGeneratedImageBlockReason
       | "transport_unavailable"
       | "upload_failed",
+    error?: unknown,
   ): void {
-    this.recordGeneratedArtifactFailure(reason);
+    this.recordGeneratedArtifactFailure(reason, error);
   }
 
   recordGeneratedArtifactFailure(
@@ -186,6 +197,7 @@ export class FeishuRichCardProjection {
       | "managed_read_failed"
       | "transport_unavailable"
       | "upload_failed",
+    error?: unknown,
   ): void {
     const warning =
       reason === "sensitive_prompt" || reason === "sensitive_content"
@@ -212,7 +224,13 @@ export class FeishuRichCardProjection {
                       : reason === "upload_failed"
                         ? "生成物上传飞书失败，请在 Yep 中查看。"
                         : "生成物载荷无效，未自动上传到飞书。";
-    this.addWarning(warning);
+    const detail =
+      error instanceof Error
+        ? error.message
+        : error == null
+          ? ""
+          : String(error);
+    this.addWarning(detail ? `${warning} ${detail}` : warning);
   }
 
   /**
@@ -274,6 +292,7 @@ export class FeishuRichCardProjection {
       })),
       warnings: [...this.warnings],
       artifacts: [...this.artifacts],
+      details: [...this.detailsById.values()],
     };
   }
 
@@ -354,6 +373,14 @@ export class FeishuRichCardProjection {
     const progress: string[] = [];
     const tools: string[] = [];
     const artifacts: string[] = [];
+    if (snapshot.details.length > 0) {
+      tools.push(
+        [
+          "### 详情",
+          ...snapshot.details.map((detail) => escapeUnsafeCardMarkup(detail)),
+        ].join("\n\n"),
+      );
+    }
 
     if (snapshot.plan.length > 0 || snapshot.planExplanation) {
       const planLines = snapshot.plan.map(
@@ -386,9 +413,7 @@ export class FeishuRichCardProjection {
           ...snapshot.reasoningSummaries.map(
             (summary) => `推理摘要：${escapeUnsafeCardMarkup(summary)}`,
           ),
-          ...(snapshot.reasoningActive
-            ? ["Codex 正在推理（隐藏原始思维链）。"]
-            : []),
+          ...(snapshot.reasoningActive ? ["Codex 正在推理。"] : []),
         ].join("\n\n"),
       );
     }
@@ -499,14 +524,14 @@ export class FeishuRichCardProjection {
           content: reasoning.summary
             ? `推理摘要：${escapeUnsafeCardMarkup(reasoning.summary)}`
             : reasoning.status === "running"
-              ? "Codex 正在推理（隐藏原始思维链）。"
+              ? "Codex 正在推理。"
               : `推理 · ${toolStatusLabel(reasoning.status)}`,
         })),
       ...(this.legacyReasoningActive
         ? [
             {
               key: "reasoning:legacy",
-              content: "Codex 正在推理（隐藏原始思维链）。",
+              content: "Codex 正在推理。",
             },
           ]
         : []),
@@ -523,11 +548,11 @@ export class FeishuRichCardProjection {
     return [
       ...snapshot.tools.slice(-MAX_STREAM_TOOL_ROWS).map((tool) => ({
         key: `tool:${tool.id}`,
-        content: `${toolIcon(tool.status)} ${escapeLine(tool.name)} · ${toolStatusLabel(tool.status)}`,
+        content: `${toolIcon(tool.status)} ${escapeLine(tool.name)} · ${toolStatusLabel(tool.status)}${this.renderItemDetail(tool.id)}`,
       })),
       ...snapshot.diffs.slice(-MAX_STREAM_DIFF_ROWS).map((diff) => ({
         key: `diff:${diff.id}`,
-        content: `${toolIcon(diff.status)} 文件变更 · ${diff.files.map(escapeLine).join("、") || "文件"} · +${diff.additions} / -${diff.deletions} · ${toolStatusLabel(diff.status)}`,
+        content: `${toolIcon(diff.status)} 文件变更 · ${diff.files.map(escapeLine).join("、") || "文件"} · +${diff.additions} / -${diff.deletions} · ${toolStatusLabel(diff.status)}${this.renderItemDetail(diff.id)}`,
       })),
       ...snapshot.subagents
         .slice(-MAX_STREAM_SUBAGENT_ROWS)
@@ -539,7 +564,7 @@ export class FeishuRichCardProjection {
         .slice(-MAX_STREAM_ACTIVITY_ROWS)
         .map((activity) => ({
           key: `activity:${activity.id}`,
-          content: `${toolIcon(activity.status)} ${escapeLine(activity.label)} · ${toolStatusLabel(activity.status)}`,
+          content: `${toolIcon(activity.status)} ${escapeLine(activity.label)} · ${toolStatusLabel(activity.status)}${this.renderItemDetail(activity.id)}`,
         })),
     ];
   }
@@ -549,6 +574,11 @@ export class FeishuRichCardProjection {
    * Returning true tells the caller not to inspect the lossy legacy adapter on
    * the same SDK message.
    */
+  private renderItemDetail(id: string): string {
+    const detail = this.detailsById.get(id);
+    return detail ? `\n${escapeUnsafeCardMarkup(detail)}` : "";
+  }
+
   private observeCanonicalThreadItem(
     message: Record<string, unknown>,
   ): boolean {
@@ -566,7 +596,7 @@ export class FeishuRichCardProjection {
     if (!nativeType || !isCodexNativeThreadItemType(nativeType)) {
       const safeType = nativeType ? safeLine(nativeType, 80) : "unknown";
       this.addWarning(
-        `Codex 发送了暂不支持的原生项目（${safeType}）；已隐藏详情以保护敏感信息。`,
+        `Codex 发送了暂不支持的原生项目（${safeType}）：${safeVisibleText(JSON.stringify(item), 1_200)}`,
       );
       return true;
     }
@@ -577,6 +607,21 @@ export class FeishuRichCardProjection {
       message.codexThreadItemLifecycle,
     );
 
+    if (!["agentMessage", "reasoning", "plan"].includes(nativeType)) {
+      const data = serializeCodexPayload("feishu/detail", item, {
+        maxDepth: 6,
+        maxArrayItems: 12,
+        maxObjectEntries: 24,
+        maxStringLength: 800,
+      }).data;
+      setBoundedMap(
+        this.detailsById,
+        id,
+        safeVisibleText(JSON.stringify(data, null, 2), 1_200),
+        8,
+      );
+    }
+
     // This switch intentionally covers the generated ThreadItem union. A new
     // upstream variant is a compile-time error until its Feishu policy is
     // explicitly audited.
@@ -585,7 +630,6 @@ export class FeishuRichCardProjection {
         this.setActivity(id, "用户输入", status);
         return true;
       case "hookPrompt":
-        // Hook fragments may contain injected prompts, paths or credentials.
         this.setActivity(id, "Hook 上下文", status);
         return true;
       case "agentMessage":
@@ -598,11 +642,14 @@ export class FeishuRichCardProjection {
         return true;
       }
       case "reasoning": {
-        const summary = safeStringList(item.summary, 4)
+        const summary = [
+          ...safeStringList(item.summary, 4),
+          ...safeStringList(item.content, 4),
+        ]
           .map((part) => safeVisibleText(part, 600))
           .filter(Boolean)
           .join("\n");
-        // item.content is raw reasoning and is never read or rendered here.
+        // Both provider summaries and supplied reasoning text stay visible.
         setBoundedMap(
           this.reasoningById,
           id,
@@ -618,7 +665,6 @@ export class FeishuRichCardProjection {
         return true;
       }
       case "commandExecution":
-        // Command, cwd and aggregatedOutput are deliberately excluded.
         this.setTool(id, "Command execution", status);
         return true;
       case "fileChange": {
@@ -656,7 +702,6 @@ export class FeishuRichCardProjection {
         return true;
       }
       case "mcpToolCall": {
-        // Arguments, app context, result and error bodies stay private.
         const server = safeIdentifier(item.server, 32);
         const tool = safeIdentifier(item.tool, 48);
         const name =
@@ -667,7 +712,6 @@ export class FeishuRichCardProjection {
         return true;
       }
       case "dynamicToolCall": {
-        // Dynamic output can contain text, image/audio data URLs and secrets.
         const namespace = safeIdentifier(item.namespace, 32);
         const tool = safeIdentifier(item.tool, 48);
         const name =
@@ -683,7 +727,6 @@ export class FeishuRichCardProjection {
         return true;
       }
       case "subAgentActivity": {
-        // agentPath and prompt-like fields are never projected.
         const kind = subagentActivityLabel(item.kind);
         this.setSubagent(
           id,
@@ -693,12 +736,9 @@ export class FeishuRichCardProjection {
         return true;
       }
       case "webSearch":
-        // Search query/results may contain private context; the activity and
-        // lifecycle remain visible without copying their bodies to chat.
         this.setTool(id, "Web search", status);
         return true;
       case "imageView":
-        // Local image paths are intentionally omitted.
         this.setTool(id, "Image view", status);
         return true;
       case "sleep": {
@@ -707,8 +747,7 @@ export class FeishuRichCardProjection {
         return true;
       }
       case "imageGeneration":
-        // savedPath/result are not surfaced until a separate, policy-checked
-        // Feishu artifact upload path exists.
+        // Image bytes still go through the separate artifact upload pipeline.
         this.setTool(id, "Image generation", status);
         return true;
       case "enteredReviewMode":
@@ -1175,30 +1214,10 @@ function safeLine(value: string, limit: number): string {
 function safeVisibleText(value: string, limit: number): string {
   const scanLimit = Math.max(2_048, limit + 1_024);
   const inputTruncated = value.length > scanLimit;
-  let output = stripControlCharacters(value.slice(0, scanLimit))
-    .replace(/<script\b[^>]*>[\s\S]*?(?:<\/script>|$)/gi, "[已移除脚本]")
-    .replace(
-      /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-      "[REDACTED:private-key]",
-    )
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
-    .replace(/\bsk-[A-Za-z0-9_-]{12,}/g, "[REDACTED:api-key]")
-    .replace(
-      /\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{24,})\b/g,
-      "[REDACTED:access-key]",
-    )
-    .replace(
-      /\b(authorization|cookie|[A-Za-z0-9_-]{0,64}(?:password|passphrase|secret|token|api[_-]?key|private[_-]?key|credential))\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-      "$1=[REDACTED]",
-    )
-    .replace(
-      /([a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]+:)[^\s/@]+@/gi,
-      "$1[REDACTED]@",
-    )
-    .replace(
-      /data:[^;,\s]+(?:;[^,\s]*)?;base64,[A-Za-z0-9+/=_-]+/gi,
-      "[REDACTED:data-url]",
-    );
+  let output = stripControlCharacters(value.slice(0, scanLimit)).replace(
+    /<script\b[^>]*>[\s\S]*?(?:<\/script>|$)/gi,
+    "[已移除脚本]",
+  );
 
   output = renderLocalMarkdownLinksAsText(output);
   if (inputTruncated) output += "…";

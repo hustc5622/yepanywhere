@@ -1014,7 +1014,7 @@ export class SessionTitleService {
       {
         ...context,
         model: this.model,
-        apiBase: redactUrlForLog(url),
+        apiBase: url,
         requiredLanguage,
         userMessageChars: input.userMessage.length,
         assistantMessageChars:
@@ -1283,15 +1283,6 @@ function truncateForLog(value: string): string {
   return compact.length <= MAX_LOG_SNIPPET_CHARS
     ? compact
     : compact.slice(0, MAX_LOG_SNIPPET_CHARS);
-}
-
-function redactUrlForLog(value: string): string {
-  try {
-    const url = new URL(value);
-    return `${url.origin}${url.pathname}`;
-  } catch {
-    return value;
-  }
 }
 
 const SINGLE_TITLE_JSON_PATTERN =

@@ -521,7 +521,7 @@ check_session_title_preflight() {
         elif ! is_truthy "$SYNC_SESSION_TITLE_LAUNCHAGENT"; then
           dim "YEP_SYNC_SESSION_TITLE_LAUNCHAGENT is disabled"
         else
-          dim "persist it with: SESSION_TITLE_LLM_API_KEY=<redacted> scripts/install-launchagents.sh --server-only"
+          dim "persist it with: SESSION_TITLE_LLM_API_KEY=<your-api-key> scripts/install-launchagents.sh --server-only"
         fi
       else
         dim "set SESSION_TITLE_LLM_API_KEY or LLM_API_KEY in .env.deploy.local or the deploying shell"

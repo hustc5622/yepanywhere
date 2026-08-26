@@ -925,7 +925,7 @@ describe("ZCodeProvider", () => {
             transport: "stdio",
             toolCount: 0,
             updatedAt: "2026-08-13T00:01:00Z",
-            error: "[REDACTED:secret]",
+            error: "Authorization: Bearer secret-mcp-token",
           },
         });
       } finally {

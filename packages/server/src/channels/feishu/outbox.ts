@@ -2,10 +2,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import {
-  containsSensitiveText,
-  redactCodexPayload,
-} from "../../codex-events/redaction.js";
 import { atomicWriteJson } from "../../utils/atomic-json-file.js";
 
 export type FeishuOutboxKind =
@@ -117,14 +113,7 @@ export class FeishuDurableOutbox {
     }
     const cutoff = now.getTime() - this.deliveredTtlMs;
     const retained = parsed.records
-      // Re-project records written by older builds before they can be
-      // recovered or written back. A secret-bearing durable identity cannot
-      // be repaired without changing its idempotency semantics, so drop it.
-      .filter(
-        (record) =>
-          !containsSensitiveText(record.owner) &&
-          !containsSensitiveText(record.idempotencyKey),
-      )
+      // Validate durable payloads while preserving their original contents.
       .map((record) => {
         const projectedPayload = projectOutboxPayload(record.payload);
         const payload = isFeishuArtifactDeliveryPayload(projectedPayload)
@@ -170,20 +159,14 @@ export class FeishuDurableOutbox {
     now?: Date;
   }): Promise<FeishuOutboxRecord> {
     this.assertInitialized();
-    if (
-      containsSensitiveText(input.owner) ||
-      containsSensitiveText(input.idempotencyKey)
-    ) {
-      throw new Error("Invalid Feishu outbox identity");
-    }
     return this.withWrite(async () => {
       const id = outboxId(input.owner, input.idempotencyKey);
       const existing = this.records.get(id);
       if (existing) return structuredClone(existing);
       const now = (input.now ?? new Date()).toISOString();
-      const redactedPayload = projectOutboxPayload(input.payload);
-      if (isFeishuArtifactDeliveryPayload(redactedPayload)) {
-        ArtifactDeliveryPayloadSchema.parse(redactedPayload);
+      const projectedPayload = projectOutboxPayload(input.payload);
+      if (isFeishuArtifactDeliveryPayload(projectedPayload)) {
+        ArtifactDeliveryPayloadSchema.parse(projectedPayload);
       }
       const record = RecordSchema.parse({
         version: 1,
@@ -191,7 +174,7 @@ export class FeishuDurableOutbox {
         owner: input.owner,
         idempotencyKey: input.idempotencyKey,
         kind: input.kind,
-        payload: redactedPayload,
+        payload: projectedPayload,
         status: "pending",
         attempts: 0,
         nextAttemptAt: now,
@@ -443,8 +426,7 @@ function outboxId(owner: string, idempotencyKey: string): string {
 }
 
 function safeErrorCode(value: string): string {
-  if (containsSensitiveText(value)) return "REDACTED_ERROR";
-  return value.replace(/[^A-Z0-9_.-]/gi, "_").slice(0, 128) || "UNKNOWN";
+  return value.slice(0, 1_024) || "UNKNOWN";
 }
 
 function projectOutboxPayload(
@@ -452,7 +434,7 @@ function projectOutboxPayload(
 ): Record<string, unknown> {
   let jsonPayload: unknown;
   try {
-    // Match the durable JSON representation before redaction. In particular,
+    // Match the durable JSON representation before persistence. In particular,
     // omit undefined optional callback fields instead of turning them into
     // strings that could change a recovered card action.
     const serialized = JSON.stringify(payload);
@@ -463,20 +445,15 @@ function projectOutboxPayload(
   } catch {
     throw new Error("Invalid Feishu outbox payload");
   }
-  const redactedPayload = redactCodexPayload("feishu/outbox", jsonPayload, {
-    // Card/text content is already a user-visible projection. Preserve local
-    // paths mentioned in that text so a recovered delivery matches the first
-    // attempt; structured path fields remain fingerprinted by the redactor.
-    preserveAbsolutePathsInText: true,
-  }).data;
+  const projectedPayload = jsonPayload;
   if (
-    !redactedPayload ||
-    typeof redactedPayload !== "object" ||
-    Array.isArray(redactedPayload)
+    !projectedPayload ||
+    typeof projectedPayload !== "object" ||
+    Array.isArray(projectedPayload)
   ) {
     throw new Error("Invalid Feishu outbox payload");
   }
-  return redactedPayload as Record<string, unknown>;
+  return projectedPayload as Record<string, unknown>;
 }
 
 const ArtifactDeliveryPayloadSchema = z

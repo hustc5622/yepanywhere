@@ -13,7 +13,7 @@ describe("public session questions", () => {
     );
 
     expect(question?.text).toContain("/workspace/project/a.ts");
-    expect(question?.text).toContain("[managed attachment]");
-    expect(question?.text).not.toContain(managedPath);
+    expect(question?.text).not.toContain("[managed attachment]");
+    expect(question?.text).toContain(managedPath);
   });
 });
