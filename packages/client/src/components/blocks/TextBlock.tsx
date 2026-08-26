@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 import { useOptionalSessionMetadata } from "../../contexts/SessionMetadataContext";
 import { useStreamingMarkdownContext } from "../../contexts/StreamingMarkdownContext";
+import { useMarkdownCodeCopy } from "../../hooks/useMarkdownCodeCopy";
 import { useStreamingMarkdown } from "../../hooks/useStreamingMarkdown";
 import { useOptionalI18n } from "../../i18n";
 import { appPath } from "../../lib/apiPath";
@@ -162,6 +163,7 @@ export const TextBlock = memo(function TextBlock({
     null,
   );
   const blockRef = useRef<HTMLDivElement | null>(null);
+  const handleCodeBlockCopyClick = useMarkdownCodeCopy(blockRef);
   const sessionMetadata = useOptionalSessionMetadata();
   const benchmarkEval = useMemo(
     () => parseBenchmarkEvalResultBlock(text),
@@ -210,6 +212,7 @@ export const TextBlock = memo(function TextBlock({
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
+      if (handleCodeBlockCopyClick(e)) return;
       if (handleLocalMediaClick(e)) return;
 
       const target = (e.target as HTMLElement).closest?.(
@@ -252,7 +255,7 @@ export const TextBlock = memo(function TextBlock({
         lineNumber: localFileTarget.lineNumber,
       });
     },
-    [handleLocalMediaClick, sessionMetadata],
+    [handleCodeBlockCopyClick, handleLocalMediaClick, sessionMetadata],
   );
 
   const showStreamingContent = isStreaming && useStreamingContent;

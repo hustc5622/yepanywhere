@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { serializeMarkdownWithoutCopyControls } from "./useMarkdownCodeCopy";
 
 // Debug logging - enable via window.__STREAMING_DEBUG__ = true
 declare global {
@@ -262,7 +263,7 @@ export function useStreamingMarkdown(): StreamingMarkdownState & {
   const captureHtml = useCallback((): string | null => {
     const container = containerRef.current;
     if (!container) return null;
-    const html = container.innerHTML;
+    const html = serializeMarkdownWithoutCopyControls(container);
     debugLog("event", "Captured HTML", { length: html.length });
     return html || null;
   }, []);

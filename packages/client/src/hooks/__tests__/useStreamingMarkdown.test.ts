@@ -176,6 +176,34 @@ describe("useStreamingMarkdown", () => {
     expect(result.current.isStreaming).toBe(false);
   });
 
+  it("excludes client-only code copy controls from captured HTML", () => {
+    const { result } = renderHook(() => useStreamingMarkdown());
+    attachRefs(result.current);
+
+    act(() => {
+      result.current.onAugment({
+        blockIndex: 0,
+        html: '<pre class="shiki"><code>copy me</code></pre>',
+        type: "code",
+      });
+    });
+
+    const pre = container.querySelector("pre");
+    if (!pre) throw new Error("Expected rendered code block");
+    pre.classList.add("markdown-code-block-copyable");
+    const button = document.createElement("button");
+    button.setAttribute("data-yep-markdown-code-copy", "");
+    button.textContent = "client control";
+    pre.appendChild(button);
+
+    const captured = result.current.captureHtml();
+
+    expect(captured).toContain('<pre class="shiki"><code>copy me</code></pre>');
+    expect(captured).not.toContain("client control");
+    expect(captured).not.toContain("markdown-code-block-copyable");
+    expect(pre.contains(button)).toBe(true);
+  });
+
   it("handles augment without attached refs gracefully", () => {
     const { result } = renderHook(() => useStreamingMarkdown());
 

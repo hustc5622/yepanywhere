@@ -11,6 +11,11 @@ import { SessionMetadataProvider } from "../../../contexts/SessionMetadataContex
 import { I18nProvider } from "../../../i18n";
 import { TextBlock } from "../TextBlock";
 
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(
+  navigator,
+  "clipboard",
+);
+
 vi.mock("../../../api/client", () => ({
   api: {
     getFile: vi.fn(),
@@ -181,6 +186,41 @@ describe("TextBlock", () => {
 describe("TextBlock server-rendered markdown", () => {
   afterEach(() => {
     cleanup();
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(
+        navigator,
+        "clipboard",
+        originalClipboardDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("copies the exact plain text from a fenced code block", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    renderWithSessionMetadata(
+      <TextBlock
+        text={"```text\nfirst line\nsecond <tag>\n```"}
+        augmentHtml={
+          '<pre class="shiki"><code><span class="line">first line</span>\n<span class="line">second &lt;tag&gt;</span></code></pre>'
+        }
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Copy code block" }),
+    );
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("first line\nsecond <tag>");
+    });
+    expect(screen.getByRole("button", { name: "Copied!" })).toBeTruthy();
   });
 
   it("keeps the rendered nodes when the same HTML is applied again", () => {
@@ -227,5 +267,33 @@ describe("TextBlock server-rendered markdown", () => {
     );
     expect(screen.getByText("second")).toBeTruthy();
     expect(screen.queryByText("first")).toBeNull();
+  });
+
+  it("adds a copy button when a streamed code block replaces other HTML", async () => {
+    const { rerender } = renderWithSessionMetadata(
+      <TextBlock text="first" augmentHtml="<p>first</p>" />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Copy code block" }),
+    ).toBeNull();
+
+    rerender(
+      <I18nProvider>
+        <SessionMetadataProvider
+          projectId="proj-1"
+          projectPath="/Users/yueyuan/project"
+          sessionId="session-1"
+        >
+          <TextBlock
+            text="```text\nlate code\n```"
+            augmentHtml={'<pre class="shiki"><code>late code</code></pre>'}
+          />
+        </SessionMetadataProvider>
+      </I18nProvider>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Copy code block" }),
+    ).toBeTruthy();
   });
 });

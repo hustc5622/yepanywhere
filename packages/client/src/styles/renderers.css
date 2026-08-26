@@ -451,6 +451,70 @@
   padding: 0;
 }
 
+.text-block pre.markdown-code-block-copyable {
+  position: relative;
+  padding-right: calc(var(--space-2) + 2rem);
+}
+
+.markdown-code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 18%, transparent);
+  color: var(--text-muted);
+  opacity: 0.78;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease,
+    border-color 0.15s ease;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.markdown-code-copy:hover,
+.markdown-code-copy:focus-visible,
+.text-block pre:hover > .markdown-code-copy {
+  opacity: 1;
+}
+
+.markdown-code-copy:hover {
+  border-color: color-mix(
+    in srgb,
+    var(--app-yep-green) 42%,
+    var(--border-color)
+  );
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.markdown-code-copy:focus-visible {
+  outline: 2px solid var(--focus-border, var(--app-yep-green));
+  outline-offset: 1px;
+}
+
+.markdown-code-copy.is-copied {
+  border-color: color-mix(
+    in srgb,
+    var(--app-yep-green) 55%,
+    var(--border-color)
+  );
+  color: var(--app-yep-green);
+}
+
+.markdown-code-copy.is-failed {
+  border-color: color-mix(in srgb, var(--error-color) 55%, var(--border-color));
+  color: var(--error-color);
+}
+
 .text-block ul,
 .text-block ol {
   margin: var(--space-2) 0;
