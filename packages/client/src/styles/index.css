@@ -2827,6 +2827,7 @@ a.sidebar-nav-item {
 
 .project-git-popover__details > div {
   display: grid;
+  align-items: center;
   min-width: 0;
   grid-template-columns: 72px minmax(0, 1fr);
   gap: var(--space-2);
@@ -2846,6 +2847,62 @@ a.sidebar-nav-item {
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-git-popover__details dd.project-git-popover__ref {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  overflow: visible;
+}
+
+.project-git-popover__ref-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-git-popover__copy {
+  display: inline-flex;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.project-git-popover__copy:hover,
+.project-git-popover__copy:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.project-git-popover__copy:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
+
+.project-git-popover__copy.is-copied {
+  color: var(--success-color);
+}
+
+.project-git-popover__copy.is-failed {
+  color: var(--error-color);
+}
+
+@media (pointer: coarse) {
+  .project-git-popover__copy {
+    flex-basis: 32px;
+    width: 32px;
+    height: 32px;
+  }
 }
 
 .project-git-popover__changes {

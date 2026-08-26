@@ -11,6 +11,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../i18n";
+import { writeClipboardText } from "../lib/clipboard";
 
 interface ProjectGitStatusButtonProps {
   status?: ProjectGitStatusSummary | null;
@@ -19,6 +20,7 @@ interface ProjectGitStatusButtonProps {
 
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_MOVE_THRESHOLD = 10;
+const HOVER_CLOSE_DELAY_MS = 200;
 const POPOVER_WIDTH = 280;
 const POPOVER_ESTIMATED_HEIGHT = 260;
 const POPOVER_GUTTER = 12;
@@ -78,6 +80,77 @@ function GitBranchIcon() {
   );
 }
 
+function CopyableGitRef({
+  value,
+  copyLabel,
+}: { value: string; copyLabel: string }) {
+  const { t } = useI18n();
+  const [feedback, setFeedback] = useState<{
+    status: "copied" | "failed";
+  } | null>(null);
+
+  useEffect(() => {
+    if (!feedback) return;
+    const timer = window.setTimeout(() => setFeedback(null), 1500);
+    return () => window.clearTimeout(timer);
+  }, [feedback]);
+
+  const label =
+    feedback?.status === "copied"
+      ? t("projectGitCopied")
+      : feedback?.status === "failed"
+        ? t("projectGitCopyFailed")
+        : copyLabel;
+
+  return (
+    <dd className="project-git-popover__ref">
+      <span className="project-git-popover__ref-name" title={value}>
+        {value}
+      </span>
+      <button
+        type="button"
+        className={`project-git-popover__copy${feedback ? ` is-${feedback.status}` : ""}`}
+        aria-label={label}
+        aria-live="polite"
+        title={label}
+        onClick={async (event) => {
+          event.stopPropagation();
+          try {
+            await writeClipboardText(value);
+            setFeedback({ status: "copied" });
+          } catch (error) {
+            console.error("Failed to copy Git reference:", error);
+            setFeedback({ status: "failed" });
+          }
+        }}
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          {feedback?.status === "copied" ? (
+            <polyline points="20 6 9 17 4 12" />
+          ) : feedback?.status === "failed" ? (
+            <path d="M6 6l12 12M18 6 6 18" />
+          ) : (
+            <>
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </>
+          )}
+        </svg>
+      </button>
+    </dd>
+  );
+}
+
 export function ProjectGitStatusButton({
   status,
   projectName,
@@ -89,6 +162,7 @@ export function ProjectGitStatusButton({
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const longPressTimerRef = useRef<number | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const suppressNextClickRef = useRef(false);
   const popoverId = useId();
@@ -101,10 +175,35 @@ export function ProjectGitStatusButton({
     pointerStartRef.current = null;
   }, []);
 
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
   const closePopover = useCallback(() => {
+    clearCloseTimer();
     setIsPinned(false);
     setIsOpen(false);
-  }, []);
+  }, [clearCloseTimer]);
+
+  const scheduleClosePopover = useCallback(() => {
+    clearCloseTimer();
+    if (isPinned) return;
+    // Allow the pointer to cross the gap into the interactive portal.
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      const focused = document.activeElement;
+      if (
+        buttonRef.current?.contains(focused) ||
+        popoverRef.current?.contains(focused)
+      ) {
+        return;
+      }
+      closePopover();
+    }, HOVER_CLOSE_DELAY_MS);
+  }, [clearCloseTimer, closePopover, isPinned]);
 
   const updatePlacement = useCallback(() => {
     if (buttonRef.current) {
@@ -137,7 +236,12 @@ export function ProjectGitStatusButton({
       closePopover();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closePopover();
+      if (event.key === "Escape") {
+        if (popoverRef.current?.contains(document.activeElement)) {
+          buttonRef.current?.focus();
+        }
+        closePopover();
+      }
     };
 
     document.addEventListener("pointerdown", handlePointerDown, true);
@@ -149,6 +253,7 @@ export function ProjectGitStatusButton({
   }, [closePopover, isOpen]);
 
   useEffect(() => clearLongPress, [clearLongPress]);
+  useEffect(() => clearCloseTimer, [clearCloseTimer]);
 
   if (!status?.isGitRepo) return null;
 
@@ -231,7 +336,34 @@ export function ProjectGitStatusButton({
             id={popoverId}
             className="project-git-popover"
             style={placement}
-            role="tooltip"
+            role="dialog"
+            aria-label={t("projectGitCurrentStatus")}
+            onPointerEnter={clearCloseTimer}
+            onPointerLeave={(event) => {
+              if (event.pointerType === "mouse") scheduleClosePopover();
+            }}
+            onFocusCapture={clearCloseTimer}
+            onBlurCapture={scheduleClosePopover}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const copyButtons =
+                popoverRef.current?.querySelectorAll<HTMLButtonElement>(
+                  "button",
+                );
+              if (!copyButtons?.length) return;
+              const boundaryButton = event.shiftKey
+                ? copyButtons[0]
+                : copyButtons[copyButtons.length - 1];
+              if (document.activeElement !== boundaryButton) return;
+
+              buttonRef.current?.focus();
+              if (event.shiftKey) {
+                event.preventDefault();
+              } else {
+                // Continue native tab order from the trigger, not the portal.
+                closePopover();
+              }
+            }}
           >
             <div className="project-git-popover__header">
               <span>{t("projectGitCurrentStatus")}</span>
@@ -246,12 +378,24 @@ export function ProjectGitStatusButton({
             <dl className="project-git-popover__details">
               <div>
                 <dt>{t("gitStatusBranch")}</dt>
-                <dd title={branchLabel}>{branchLabel}</dd>
+                {status.branch ? (
+                  <CopyableGitRef
+                    key={status.branch}
+                    value={status.branch}
+                    copyLabel={t("projectGitCopyBranch")}
+                  />
+                ) : (
+                  <dd title={branchLabel}>{branchLabel}</dd>
+                )}
               </div>
               {status.upstream && (
                 <div>
                   <dt>{t("gitStatusUpstream")}</dt>
-                  <dd title={status.upstream}>{status.upstream}</dd>
+                  <CopyableGitRef
+                    key={status.upstream}
+                    value={status.upstream}
+                    copyLabel={t("projectGitCopyUpstream")}
+                  />
                 </div>
               )}
               {(status.ahead > 0 || status.behind > 0) && (
@@ -296,11 +440,12 @@ export function ProjectGitStatusButton({
           status.isClean ? " is-clean" : " is-dirty"
         }${isOpen ? " is-open" : ""}`}
         aria-label={buttonLabel}
+        aria-haspopup="dialog"
         aria-expanded={isOpen}
         aria-controls={isOpen ? popoverId : undefined}
-        aria-describedby={isOpen ? popoverId : undefined}
         onClick={(event) => {
           event.stopPropagation();
+          clearCloseTimer();
           if (suppressNextClickRef.current) {
             suppressNextClickRef.current = false;
             return;
@@ -309,15 +454,32 @@ export function ProjectGitStatusButton({
           setIsPinned(nextPinned);
           setIsOpen(nextPinned);
         }}
-        onFocus={() => setIsOpen(true)}
-        onBlur={() => {
-          if (!isPinned) setIsOpen(false);
+        onFocus={() => {
+          clearCloseTimer();
+          setIsOpen(true);
+        }}
+        onBlur={scheduleClosePopover}
+        onKeyDown={(event) => {
+          if (
+            event.key === "ArrowDown" ||
+            (event.key === "Tab" && !event.shiftKey)
+          ) {
+            const firstCopyButton =
+              popoverRef.current?.querySelector<HTMLButtonElement>("button");
+            if (firstCopyButton) {
+              event.preventDefault();
+              firstCopyButton.focus();
+            }
+          }
         }}
         onPointerEnter={(event) => {
-          if (event.pointerType === "mouse") setIsOpen(true);
+          if (event.pointerType === "mouse") {
+            clearCloseTimer();
+            setIsOpen(true);
+          }
         }}
         onPointerLeave={(event) => {
-          if (event.pointerType === "mouse" && !isPinned) setIsOpen(false);
+          if (event.pointerType === "mouse") scheduleClosePopover();
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

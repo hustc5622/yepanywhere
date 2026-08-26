@@ -254,7 +254,7 @@ describe("Sidebar recent session browsing", () => {
       }),
     );
 
-    expect(screen.getByRole("tooltip").textContent).toContain(
+    expect(screen.getByRole("dialog").textContent).toContain(
       "feature/sidebar-details",
     );
   });
