@@ -222,6 +222,12 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 /** Stats cache TTL in milliseconds */
 const STATS_CACHE_TTL_MS = 5000;
+/**
+ * Max number of extra "one session per project" entries appended when the
+ * caller asks for project coverage (`projectCoverageDays`). Keeps a machine
+ * with hundreds of projects from blowing up the sidebar payload.
+ */
+const MAX_PROJECT_COVERAGE_EXTRAS = 50;
 
 function createEmptyStats(): GlobalSessionStats {
   return {
@@ -539,8 +545,25 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       : undefined;
     const afterCursor = c.req.query("after");
     const includeArchived = c.req.query("includeArchived") === "true";
-    const starredOnly = c.req.query("starred") === "true";
+    const pinnedOnly =
+      c.req.query("pinned") === "true" || c.req.query("starred") === "true";
+    // Sidebar pin coverage: return ordinary top-N results and append every
+    // pinned session that would otherwise fall outside that page. The stored
+    // metadata key remains `isStarred` for backward compatibility.
+    const includePinned = c.req.query("includePinned") === "true";
     const includeStats = c.req.query("includeStats") === "true";
+    // When set, every project with at least one visible session inside the
+    // window keeps its newest session in the response, even if the global
+    // top-N cut it off. Used by the sidebar so an active working directory
+    // never disappears just because other projects are busier.
+    const coverageDaysParam = Number.parseInt(
+      c.req.query("projectCoverageDays") || "",
+      10,
+    );
+    const coverageSinceMs =
+      Number.isFinite(coverageDaysParam) && coverageDaysParam > 0
+        ? Date.now() - coverageDaysParam * 24 * 60 * 60 * 1000
+        : null;
     const limitParam = c.req.query("limit");
     const limit = Math.min(
       Math.max(1, Number.parseInt(limitParam || "", 10) || DEFAULT_LIMIT),
@@ -585,6 +608,22 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
     const maxCandidates = limit + 1;
     const topSessions: GlobalSessionItem[] = [];
     const knownSessionIds = new Set<string>();
+    const pinnedSessionExtras = new Map<string, GlobalSessionItem>();
+    /** Newest in-window session per project, used for coverage backfill. */
+    const projectCoverage = new Map<string, GlobalSessionItem>();
+
+    const isCoverageCandidate = (session: {
+      projectId: string;
+      updatedAt: string;
+    }): boolean => {
+      if (coverageSinceMs === null) return false;
+      const timestamp = new Date(session.updatedAt).getTime();
+      if (!Number.isFinite(timestamp) || timestamp < coverageSinceMs) {
+        return false;
+      }
+      const existing = projectCoverage.get(session.projectId);
+      return !existing || timestamp > updatedAtMs(existing);
+    };
     const providerCatalog = await serverTiming.measure("catalog", () =>
       buildProviderProjectCatalog({
         projects: allProjects,
@@ -596,14 +635,23 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       }),
     );
 
-    const projectsForSessionScan = shouldCollectStats
-      ? projects
-      : [...projects].sort(compareProjectsByLastActivityDesc);
+    const projectsForSessionScan =
+      shouldCollectStats || includePinned
+        ? projects
+        : [...projects].sort(compareProjectsByLastActivityDesc);
 
     const sessionScanStartedAt = performance.now();
     for (const project of projectsForSessionScan) {
+      // Projects are sorted by lastActivity desc, so once a project falls out
+      // of the coverage window every remaining project does too.
+      const projectInCoverageWindow =
+        coverageSinceMs !== null &&
+        (timestampMs(project.lastActivity) ?? Number.NEGATIVE_INFINITY) >=
+          coverageSinceMs;
       if (
         !shouldCollectStats &&
+        !includePinned &&
+        !projectInCoverageWindow &&
         canStopBeforeProject(topSessions, project, maxCandidates)
       ) {
         break;
@@ -642,8 +690,8 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         // Skip archived sessions unless explicitly requested
         if (isArchived && !includeArchived) continue;
 
-        // Skip non-starred sessions if starred filter is active
-        if (starredOnly && !isStarred) continue;
+        // `starred=true` remains a legacy alias for older API consumers.
+        if (pinnedOnly && !isStarred) continue;
 
         if (
           !matchesSessionKindFilters(
@@ -683,7 +731,14 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
           }
         }
 
-        if (!canEnterTopSessions(topSessions, session, maxCandidates)) {
+        const entersTopSessions = canEnterTopSessions(
+          topSessions,
+          session,
+          maxCandidates,
+        );
+        const coversProject = isCoverageCandidate(session);
+        const coversPinnedSession = includePinned && isStarred;
+        if (!entersTopSessions && !coversProject && !coversPinnedSession) {
           continue;
         }
 
@@ -716,59 +771,65 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
           bridgedSession?.pendingInputType;
         const activity = runtime.activity;
 
-        addTopSession(
-          topSessions,
-          {
-            id: session.id,
-            title: session.title,
-            createdAt: session.createdAt,
-            updatedAt: session.updatedAt,
-            ...(bridgedSession
-              ? { messageCount: bridgedSession.session.messageCount }
-              : providerCatalog.codexUnknownMessageCountIds?.has(session.id)
-                ? {}
-                : { messageCount: session.messageCount }),
-            userQuestions: session.userQuestions,
-            provider: session.provider,
-            projectId: session.projectId,
-            projectName: project.name,
-            ownership,
-            pendingInputType,
-            activity,
-            runtime,
-            hasUnread,
-            customTitle,
-            aiTitle,
-            isArchived,
-            isStarred,
-            executor,
-            createdBy,
-            originChannel,
-            originator: session.originator,
-            source: session.source,
-            contextUsage: session.contextUsage,
-            cumulativeUsage: session.cumulativeUsage,
-            compactCount: session.compactCount,
-            compactEvents: session.compactEvents,
-            model: session.model,
-            reasoningEffort: session.reasoningEffort,
-            serviceTier: session.serviceTier,
-            interrupted:
-              ownership.owner === "none" ? session.interrupted : undefined,
-            lastTurnStatus: bridgedSession
-              ? bridgedSession.session.lastTurnStatus
-              : session.lastTurnStatus,
-            lastErrorMessage: bridgedSession
-              ? bridgedSession.session.lastErrorMessage
-              : session.lastErrorMessage,
-            retryStatus: process
-              ? process.retryStatus
-              : bridgedSession
-                ? bridgedSession.session.retryStatus
-                : session.retryStatus,
-          },
-          maxCandidates,
-        );
+        const item: GlobalSessionItem = {
+          id: session.id,
+          title: session.title,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          ...(bridgedSession
+            ? { messageCount: bridgedSession.session.messageCount }
+            : providerCatalog.codexUnknownMessageCountIds?.has(session.id)
+              ? {}
+              : { messageCount: session.messageCount }),
+          userQuestions: session.userQuestions,
+          provider: session.provider,
+          projectId: session.projectId,
+          projectName: project.name,
+          ownership,
+          pendingInputType,
+          activity,
+          runtime,
+          hasUnread,
+          customTitle,
+          aiTitle,
+          isArchived,
+          isStarred,
+          executor,
+          createdBy,
+          originChannel,
+          originator: session.originator,
+          source: session.source,
+          contextUsage: session.contextUsage,
+          cumulativeUsage: session.cumulativeUsage,
+          compactCount: session.compactCount,
+          compactEvents: session.compactEvents,
+          model: session.model,
+          reasoningEffort: session.reasoningEffort,
+          serviceTier: session.serviceTier,
+          interrupted:
+            ownership.owner === "none" ? session.interrupted : undefined,
+          lastTurnStatus: bridgedSession
+            ? bridgedSession.session.lastTurnStatus
+            : session.lastTurnStatus,
+          lastErrorMessage: bridgedSession
+            ? bridgedSession.session.lastErrorMessage
+            : session.lastErrorMessage,
+          retryStatus: process
+            ? process.retryStatus
+            : bridgedSession
+              ? bridgedSession.session.retryStatus
+              : session.retryStatus,
+        };
+
+        if (coversProject) {
+          projectCoverage.set(item.projectId, item);
+        }
+        if (coversPinnedSession) {
+          pinnedSessionExtras.set(item.id, item);
+        }
+        if (entersTopSessions) {
+          addTopSession(topSessions, item, maxCandidates);
+        }
       }
     }
     serverTiming.set("sessionScan", performance.now() - sessionScanStartedAt);
@@ -801,7 +862,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       }
 
       if (isArchived && !includeArchived) continue;
-      if (starredOnly && !isStarred) continue;
+      if (pinnedOnly && !isStarred) continue;
       if (
         !matchesSessionKindFilters(
           { title: session.title, customTitle },
@@ -833,7 +894,14 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         }
       }
 
-      if (!canEnterTopSessions(topSessions, session, maxCandidates)) {
+      const entersTopSessions = canEnterTopSessions(
+        topSessions,
+        session,
+        maxCandidates,
+      );
+      const coversProject = isCoverageCandidate(session);
+      const coversPinnedSession = includePinned && isStarred;
+      if (!entersTopSessions && !coversProject && !coversPinnedSession) {
         continue;
       }
 
@@ -843,54 +911,85 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         fallbackOwnership: session.ownership,
       });
 
-      addTopSession(
-        topSessions,
-        {
-          id: session.id,
-          title: session.title,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-          messageCount: session.messageCount,
-          userQuestions: session.userQuestions,
-          provider: session.provider,
-          projectId: session.projectId,
-          projectName: item.projectName,
-          ownership: runtime.ownership,
-          pendingInputType: item.pendingInputType,
-          activity: runtime.activity,
-          runtime,
-          hasUnread,
-          customTitle,
-          aiTitle,
-          isArchived,
-          isStarred,
-          executor,
-          createdBy,
-          originChannel,
-          originator: session.originator,
-          source: session.source,
-          contextUsage: session.contextUsage,
-          cumulativeUsage: session.cumulativeUsage,
-          compactCount: session.compactCount,
-          compactEvents: session.compactEvents,
-          model: session.model,
-          reasoningEffort: session.reasoningEffort,
-          serviceTier: session.serviceTier,
-          lastTurnStatus: session.lastTurnStatus,
-          lastErrorMessage: session.lastErrorMessage,
-          retryStatus: session.retryStatus,
-          interrupted:
-            runtime.ownership.owner === "none"
-              ? session.interrupted
-              : undefined,
-        },
-        maxCandidates,
-      );
+      const bridgeItem: GlobalSessionItem = {
+        id: session.id,
+        title: session.title,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messageCount: session.messageCount,
+        userQuestions: session.userQuestions,
+        provider: session.provider,
+        projectId: session.projectId,
+        projectName: item.projectName,
+        ownership: runtime.ownership,
+        pendingInputType: item.pendingInputType,
+        activity: runtime.activity,
+        runtime,
+        hasUnread,
+        customTitle,
+        aiTitle,
+        isArchived,
+        isStarred,
+        executor,
+        createdBy,
+        originChannel,
+        originator: session.originator,
+        source: session.source,
+        contextUsage: session.contextUsage,
+        cumulativeUsage: session.cumulativeUsage,
+        compactCount: session.compactCount,
+        compactEvents: session.compactEvents,
+        model: session.model,
+        reasoningEffort: session.reasoningEffort,
+        serviceTier: session.serviceTier,
+        lastTurnStatus: session.lastTurnStatus,
+        lastErrorMessage: session.lastErrorMessage,
+        retryStatus: session.retryStatus,
+        interrupted:
+          runtime.ownership.owner === "none" ? session.interrupted : undefined,
+      };
+
+      if (coversProject) {
+        projectCoverage.set(bridgeItem.projectId, bridgeItem);
+      }
+      if (coversPinnedSession) {
+        pinnedSessionExtras.set(bridgeItem.id, bridgeItem);
+      }
+      if (entersTopSessions) {
+        addTopSession(topSessions, bridgeItem, maxCandidates);
+      }
     }
 
     // Get one extra to determine hasMore
     const hasMore = topSessions.length > limit;
     const sessions = topSessions.slice(0, limit);
+
+    // Pins share the ordinary response and are deduplicated against the top-N
+    // page. This replaces the sidebar's former second "starred sessions"
+    // request and its independent pagination/display state.
+    if (pinnedSessionExtras.size > 0) {
+      const includedSessionIds = new Set(sessions.map((session) => session.id));
+      const extras = Array.from(pinnedSessionExtras.values())
+        .filter((candidate) => !includedSessionIds.has(candidate.id))
+        .sort((a, b) => updatedAtMs(b) - updatedAtMs(a));
+      sessions.push(...extras);
+    }
+
+    // Backfill one session for every in-window project the top-N dropped, so
+    // the sidebar always lists recently used working directories.
+    if (projectCoverage.size > 0) {
+      const includedProjectIds = new Set(sessions.map((s) => s.projectId));
+      const includedSessionIds = new Set(sessions.map((s) => s.id));
+      const extras = Array.from(projectCoverage.values())
+        .filter(
+          (candidate) =>
+            !includedProjectIds.has(candidate.projectId) &&
+            !includedSessionIds.has(candidate.id),
+        )
+        .sort((a, b) => updatedAtMs(b) - updatedAtMs(a))
+        .slice(0, MAX_PROJECT_COVERAGE_EXTRAS);
+      sessions.push(...extras);
+    }
 
     if (shouldCollectStats) {
       cachedStats = { value: stats, timestamp: Date.now() };

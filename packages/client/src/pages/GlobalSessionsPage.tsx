@@ -31,7 +31,7 @@ import { toUrlProjectId } from "../utils";
 const LONG_PRESS_MS = 500;
 
 // Status filter options
-type StatusFilter = "all" | "unread" | "starred" | "archived";
+type StatusFilter = "all" | "unread" | "pinned" | "archived";
 
 // Age filter options (days)
 type AgeFilter = "3" | "7" | "14" | "30";
@@ -108,8 +108,9 @@ export function GlobalSessionsPage() {
     if (!param) return [];
     return param
       .split(",")
+      .map((status) => (status === "starred" ? "pinned" : status))
       .filter((s): s is StatusFilter =>
-        ["all", "unread", "starred", "archived"].includes(s),
+        ["all", "unread", "pinned", "archived"].includes(s),
       );
   }, [searchParams]);
 
@@ -222,6 +223,7 @@ export function GlobalSessionsPage() {
       projectId: projectFilter,
       searchQuery,
       includeArchived,
+      includePinned: statusFilters.includes("pinned"),
       includeStats: !projectFilter,
       sessionKind,
     });
@@ -248,7 +250,7 @@ export function GlobalSessionsPage() {
               if (session.hasUnread && !session.isArchived)
                 matchesStatus = true;
               break;
-            case "starred":
+            case "pinned":
               if (session.isStarred) matchesStatus = true;
               break;
             case "archived":
@@ -308,8 +310,8 @@ export function GlobalSessionsPage() {
         count: showCounts ? stats.unreadCount : undefined,
       },
       {
-        value: "starred",
-        label: t("globalSessionsStatusStarred"),
+        value: "pinned",
+        label: t("globalSessionsStatusPinned"),
         count: showCounts ? stats.starredCount : undefined,
       },
       {
@@ -568,13 +570,13 @@ export function GlobalSessionsPage() {
     }
   }, [selectedIds, isBulkActionPending, handleClearSelection, showToast, t]);
 
-  const handleBulkStar = useCallback(async () => {
+  const handleBulkPin = useCallback(async () => {
     if (isBulkActionPending) return;
     setIsBulkActionPending(true);
     try {
       await Promise.all(
         Array.from(selectedIds).map((id) =>
-          api.updateSessionMetadata(id, { starred: true }),
+          api.updateSessionMetadata(id, { pinned: true }),
         ),
       );
       handleClearSelection();
@@ -583,13 +585,13 @@ export function GlobalSessionsPage() {
     }
   }, [selectedIds, isBulkActionPending, handleClearSelection]);
 
-  const handleBulkUnstar = useCallback(async () => {
+  const handleBulkUnpin = useCallback(async () => {
     if (isBulkActionPending) return;
     setIsBulkActionPending(true);
     try {
       await Promise.all(
         Array.from(selectedIds).map((id) =>
-          api.updateSessionMetadata(id, { starred: false }),
+          api.updateSessionMetadata(id, { pinned: false }),
         ),
       );
       handleClearSelection();
@@ -649,8 +651,8 @@ export function GlobalSessionsPage() {
     return {
       canArchive: selectedSessions.some(canArchiveSession),
       canUnarchive: selectedSessions.some((s) => s.isArchived),
-      canStar: selectedSessions.some((s) => !s.isStarred),
-      canUnstar: selectedSessions.some((s) => s.isStarred),
+      canPin: selectedSessions.some((s) => !s.isStarred),
+      canUnpin: selectedSessions.some((s) => s.isStarred),
       canMarkRead: selectedSessions.some((s) => s.hasUnread),
       canMarkUnread: selectedSessions.some((s) => !s.hasUnread),
     };
@@ -939,7 +941,7 @@ export function GlobalSessionsPage() {
                         createdBy={session.createdBy}
                         originator={session.originator}
                         sessionSource={session.source}
-                        isStarred={session.isStarred}
+                        isPinned={session.isStarred}
                         isArchived={session.isArchived}
                         mode="card"
                         showContextUsage={false}
@@ -996,16 +998,16 @@ export function GlobalSessionsPage() {
               selectedCount={selectedIds.size}
               onArchive={handleBulkArchive}
               onUnarchive={handleBulkUnarchive}
-              onStar={handleBulkStar}
-              onUnstar={handleBulkUnstar}
+              onPin={handleBulkPin}
+              onUnpin={handleBulkUnpin}
               onMarkRead={handleBulkMarkRead}
               onMarkUnread={handleBulkMarkUnread}
               onClearSelection={handleClearSelection}
               isPending={isBulkActionPending}
               canArchive={bulkActionState.canArchive}
               canUnarchive={bulkActionState.canUnarchive}
-              canStar={bulkActionState.canStar}
-              canUnstar={bulkActionState.canUnstar}
+              canPin={bulkActionState.canPin}
+              canUnpin={bulkActionState.canUnpin}
               canMarkRead={bulkActionState.canMarkRead}
               canMarkUnread={bulkActionState.canMarkUnread}
               onArchiveAllFiltered={

@@ -3053,6 +3053,16 @@ a.sidebar-nav-item {
   background-color: var(--bg-hover);
 }
 
+.recent-session-item.pinned {
+  background: color-mix(in srgb, var(--app-yep-green) 9%, transparent);
+  box-shadow: inset 3px 0 0
+    color-mix(in srgb, var(--app-yep-green) 72%, transparent);
+}
+
+.recent-session-item.pinned:hover {
+  background: color-mix(in srgb, var(--app-yep-green) 13%, var(--bg-hover));
+}
+
 .recent-session-item:active {
   background-color: var(--bg-active);
 }
@@ -3087,8 +3097,8 @@ a.sidebar-nav-item {
   color: var(--text-primary);
 }
 
-.recent-session-star {
-  color: var(--accent-star);
+.recent-session-pin {
+  color: var(--app-yep-green);
   flex-shrink: 0;
 }
 
@@ -7296,9 +7306,10 @@ a.sidebar-nav-item {
   /* Note: Don't use overflow:hidden here - it clips the dropdown menu */
 }
 
-/* Star indicator next to title */
-.star-indicator-inline {
-  color: var(--warning-color);
+/* Pin indicator next to title */
+.pin-indicator-inline {
+  display: inline-flex;
+  color: var(--app-yep-green);
   margin-right: var(--space-1);
   flex-shrink: 0;
 }
@@ -7382,17 +7393,6 @@ a.sidebar-nav-item {
 .session-menu-dropdown button.terminate-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-/* Star button special styling */
-
-/* Star indicator in session list */
-.star-indicator {
-  display: inline-flex;
-  align-items: center;
-  color: var(--warning-color);
-  margin-right: var(--space-1);
-  vertical-align: middle;
 }
 
 /* Archived badge */
@@ -11848,6 +11848,18 @@ button.context-usage-indicator--button:focus-visible {
   background: var(--bg-hover);
 }
 
+.session-list-item--card.pinned .session-list-item__link {
+  border: 1px solid
+    color-mix(in srgb, var(--app-yep-green) 34%, var(--border-subtle));
+  background: color-mix(in srgb, var(--app-yep-green) 9%, var(--bg-secondary));
+  box-shadow: inset 3px 0 0
+    color-mix(in srgb, var(--app-yep-green) 72%, transparent);
+}
+
+.session-list-item--card.pinned .session-list-item__link:hover {
+  background: color-mix(in srgb, var(--app-yep-green) 13%, var(--bg-hover));
+}
+
 .session-list-item--card .session-list-item__title {
   display: flex;
   align-items: center;
@@ -11935,6 +11947,18 @@ button.context-usage-indicator--button:focus-visible {
   background: var(--bg-hover);
 }
 
+.session-list-item--compact.pinned {
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--app-yep-green) 9%, transparent);
+  box-shadow: inset 3px 0 0
+    color-mix(in srgb, var(--app-yep-green) 72%, transparent);
+}
+
+.session-list-item--compact.pinned .session-list-item__link:hover,
+.session-list-item--compact.pinned.current .session-list-item__link {
+  background: color-mix(in srgb, var(--app-yep-green) 13%, var(--bg-hover));
+}
+
 .session-list-item--compact .session-list-item__compact-content {
   display: flex;
   flex: 1;
@@ -12010,10 +12034,10 @@ button.context-usage-indicator--button:focus-visible {
   background: color-mix(in srgb, var(--app-yep-green) 14%, transparent);
 }
 
-/* Star icon */
-.session-star-icon {
+/* Pin icon */
+.session-pin-icon {
   flex-shrink: 0;
-  color: var(--warning-color);
+  color: var(--app-yep-green);
   margin-top: 2px;
 }
 

@@ -1,11 +1,12 @@
 import { useI18n } from "../i18n";
+import { PinIcon } from "./PinIcon";
 
 interface BulkActionBarProps {
   selectedCount: number;
   onArchive: () => Promise<void>;
   onUnarchive: () => Promise<void>;
-  onStar: () => Promise<void>;
-  onUnstar: () => Promise<void>;
+  onPin: () => Promise<void>;
+  onUnpin: () => Promise<void>;
   onMarkRead: () => Promise<void>;
   onMarkUnread: () => Promise<void>;
   onClearSelection: () => void;
@@ -14,10 +15,10 @@ interface BulkActionBarProps {
   canArchive?: boolean;
   /** True if any selected item can be unarchived (is archived) */
   canUnarchive?: boolean;
-  /** True if any selected item can be starred (is not starred) */
-  canStar?: boolean;
-  /** True if any selected item can be unstarred (is starred) */
-  canUnstar?: boolean;
+  /** True if any selected item can be pinned (is not pinned) */
+  canPin?: boolean;
+  /** True if any selected item can be unpinned (is pinned) */
+  canUnpin?: boolean;
   /** True if any selected item can be marked as read (has unread) */
   canMarkRead?: boolean;
   /** True if any selected item can be marked as unread (is read) */
@@ -36,16 +37,16 @@ export function BulkActionBar({
   selectedCount,
   onArchive,
   onUnarchive,
-  onStar,
-  onUnstar,
+  onPin,
+  onUnpin,
   onMarkRead,
   onMarkUnread,
   onClearSelection,
   isPending = false,
   canArchive = true,
   canUnarchive = true,
-  canStar = true,
-  canUnstar = true,
+  canPin = true,
+  canUnpin = true,
   canMarkRead = true,
   canMarkUnread = true,
   onArchiveAllFiltered,
@@ -180,54 +181,29 @@ export function BulkActionBar({
           </button>
         )}
 
-        {canStar && (
+        {canPin && (
           <button
             type="button"
             className="bulk-action-button"
-            onClick={onStar}
+            onClick={onPin}
             disabled={isPending}
-            title={t("bulkStarSelected")}
+            title={t("bulkPinSelected")}
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-            </svg>
-            <span>{t("bulkStar")}</span>
+            <PinIcon size={16} />
+            <span>{t("bulkPin")}</span>
           </button>
         )}
 
-        {canUnstar && (
+        {canUnpin && (
           <button
             type="button"
             className="bulk-action-button"
-            onClick={onUnstar}
+            onClick={onUnpin}
             disabled={isPending}
-            title={t("bulkUnstarSelected")}
+            title={t("bulkUnpinSelected")}
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-              <line x1="4" y1="4" x2="20" y2="20" />
-            </svg>
-            <span>{t("bulkUnstar")}</span>
+            <PinIcon size={16} />
+            <span>{t("bulkUnpin")}</span>
           </button>
         )}
 

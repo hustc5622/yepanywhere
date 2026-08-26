@@ -683,6 +683,126 @@ describe("Global Sessions Routes", () => {
     });
   });
 
+  describe("project coverage", () => {
+    it("keeps one session per in-window project beyond the limit", async () => {
+      const busy = {
+        ...createProject("busy", "busy", "/sessions/busy"),
+        lastActivity: minutesAgo(1),
+      };
+      const quiet = {
+        ...createProject("quiet", "quiet", "/sessions/quiet"),
+        lastActivity: hoursAgo(48),
+      };
+
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([busy, quiet]);
+      sessionsByDir.set(
+        "/sessions/busy",
+        Array.from({ length: 3 }, (_, i) =>
+          createSession(`busy${i}`, "busy", minutesAgo(i + 1)),
+        ),
+      );
+      sessionsByDir.set("/sessions/quiet", [
+        createSession("quiet-new", "quiet", hoursAgo(48)),
+        createSession("quiet-old", "quiet", hoursAgo(72)),
+      ]);
+
+      const withoutCoverage = await makeRequest("?limit=2");
+      expect(withoutCoverage.sessions.map((s) => s.id)).toEqual([
+        "busy0",
+        "busy1",
+      ]);
+
+      const withCoverage = await makeRequest("?limit=2&projectCoverageDays=7");
+      expect(withCoverage.sessions.map((s) => s.id)).toEqual([
+        "busy0",
+        "busy1",
+        "quiet-new",
+      ]);
+      expect(withCoverage.hasMore).toBe(true);
+    });
+
+    it("ignores projects whose last session is outside the window", async () => {
+      const busy = {
+        ...createProject("busy", "busy", "/sessions/busy"),
+        lastActivity: minutesAgo(1),
+      };
+      const stale = {
+        ...createProject("stale", "stale", "/sessions/stale"),
+        lastActivity: hoursAgo(24 * 30),
+      };
+
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([busy, stale]);
+      sessionsByDir.set("/sessions/busy", [
+        createSession("busy0", "busy", minutesAgo(1)),
+        createSession("busy1", "busy", minutesAgo(2)),
+      ]);
+      sessionsByDir.set("/sessions/stale", [
+        createSession("stale0", "stale", hoursAgo(24 * 30)),
+      ]);
+
+      const result = await makeRequest("?limit=1&projectCoverageDays=7");
+
+      expect(result.sessions.map((s) => s.id)).toEqual(["busy0"]);
+    });
+
+    it("does not duplicate projects already present in the top results", async () => {
+      const project = {
+        ...createProject("proj1", "project", "/sessions/proj1"),
+        lastActivity: minutesAgo(1),
+      };
+
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
+      sessionsByDir.set(
+        "/sessions/proj1",
+        Array.from({ length: 4 }, (_, i) =>
+          createSession(`sess${i}`, "proj1", minutesAgo(i + 1)),
+        ),
+      );
+
+      const result = await makeRequest("?limit=2&projectCoverageDays=7");
+
+      expect(result.sessions.map((s) => s.id)).toEqual(["sess0", "sess1"]);
+    });
+  });
+
+  describe("pin coverage", () => {
+    it("appends an old pinned session to the ordinary limited result", async () => {
+      const recentProject = {
+        ...createProject("recent", "recent", "/sessions/recent"),
+        lastActivity: minutesAgo(1),
+      };
+      const oldProject = {
+        ...createProject("old", "old", "/sessions/old"),
+        lastActivity: hoursAgo(24 * 30),
+      };
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([
+        recentProject,
+        oldProject,
+      ]);
+      sessionsByDir.set("/sessions/recent", [
+        createSession("recent-session", "recent", minutesAgo(1)),
+      ]);
+      sessionsByDir.set("/sessions/old", [
+        createSession("old-pinned", "old", hoursAgo(24 * 30)),
+        createSession("old-unpinned", "old", hoursAgo(24 * 31)),
+      ]);
+      metadataMap.set("old-pinned", { isStarred: true });
+
+      const result = await makeRequest("?limit=1&includePinned=true");
+
+      expect(result.sessions.map((session) => session.id)).toEqual([
+        "recent-session",
+        "old-pinned",
+      ]);
+      expect(result.hasMore).toBe(true);
+      expect(
+        vi
+          .mocked(mockSessionIndexService.getSessionsWithCache)
+          .mock.calls.map((call) => call[0]),
+      ).toEqual(["/sessions/recent", "/sessions/old"]);
+    });
+  });
+
   describe("provider catalog", () => {
     it("reuses provider presence from listed projects before consulting scanners", async () => {
       const project = {

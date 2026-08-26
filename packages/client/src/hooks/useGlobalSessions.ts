@@ -150,10 +150,16 @@ export interface UseGlobalSessionsOptions {
   searchQuery?: string;
   limit?: number;
   includeArchived?: boolean;
-  starred?: boolean;
   sessionKind?: SessionKind | null;
   excludeSessionKind?: SessionKind | null;
   includeStats?: boolean;
+  /** Append pinned sessions that fall outside the ordinary page limit. */
+  includePinned?: boolean;
+  /**
+   * Ask the server to keep at least one session per project that was active
+   * within the last N days, even when the global `limit` would drop it.
+   */
+  projectCoverageDays?: number;
   /** Skip initial fetch and live refetches while the consuming UI is hidden. */
   enabled?: boolean;
   /** Subscribe to live session activity and reconnect refreshes. */
@@ -178,10 +184,11 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     searchQuery,
     limit,
     includeArchived,
-    starred,
     sessionKind,
     excludeSessionKind,
     includeStats = false,
+    includePinned = false,
+    projectCoverageDays,
     enabled = true,
     liveUpdates = true,
     metadataLiveUpdates = liveUpdates,
@@ -210,10 +217,11 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     searchQuery?: string;
     limit?: number;
     includeArchived?: boolean;
-    starred?: boolean;
     sessionKind?: SessionKind | null;
     excludeSessionKind?: SessionKind | null;
     includeStats?: boolean;
+    includePinned?: boolean;
+    projectCoverageDays?: number;
     enabled?: boolean;
   }>({});
 
@@ -255,10 +263,11 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       lastFetchOptionsRef.current.projectId !== projectId ||
       lastFetchOptionsRef.current.searchQuery !== searchQuery ||
       lastFetchOptionsRef.current.includeArchived !== includeArchived ||
-      lastFetchOptionsRef.current.starred !== starred ||
       lastFetchOptionsRef.current.sessionKind !== sessionKind ||
       lastFetchOptionsRef.current.excludeSessionKind !== excludeSessionKind ||
       lastFetchOptionsRef.current.includeStats !== includeStats ||
+      lastFetchOptionsRef.current.includePinned !== includePinned ||
+      lastFetchOptionsRef.current.projectCoverageDays !== projectCoverageDays ||
       lastFetchOptionsRef.current.enabled !== enabled;
 
     if (optionsChanged) {
@@ -270,10 +279,11 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       searchQuery,
       limit,
       includeArchived,
-      starred,
       sessionKind,
       excludeSessionKind,
       includeStats,
+      includePinned,
+      projectCoverageDays,
       enabled,
     };
 
@@ -289,10 +299,11 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         q: searchQuery || undefined,
         limit,
         includeArchived,
-        starred,
         includeStats: false,
         kind: sessionKind ?? undefined,
         excludeKind: excludeSessionKind ?? undefined,
+        includePinned,
+        projectCoverageDays,
       });
 
       for (const session of data.sessions) {
@@ -343,10 +354,11 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     searchQuery,
     limit,
     includeArchived,
-    starred,
     sessionKind,
     excludeSessionKind,
     includeStats,
+    includePinned,
+    projectCoverageDays,
     enabled,
     clearPendingTitleRefetch,
   ]);
@@ -470,7 +482,6 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         limit,
         after: lastSession.updatedAt,
         includeArchived,
-        starred,
         includeStats: false,
         kind: sessionKind ?? undefined,
         excludeKind: excludeSessionKind ?? undefined,
@@ -494,7 +505,6 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     searchQuery,
     limit,
     includeArchived,
-    starred,
     sessionKind,
     excludeSessionKind,
     enabled,
@@ -572,9 +582,6 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       // If we have a project filter, only add sessions from that project
       if (projectId && event.session.projectId !== projectId) return;
 
-      // If we have a starred filter, only add starred sessions
-      if (starred && !event.session.isStarred) return;
-
       if (
         !matchesSessionKindFilters(event.session, {
           sessionKind,
@@ -645,7 +652,6 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     [
       projectId,
       searchQuery,
-      starred,
       sessionKind,
       excludeSessionKind,
       enabled,
@@ -658,6 +664,7 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
   const handleSessionMetadataChange = useCallback(
     (event: SessionMetadataChangedEvent) => {
       if (!enabled) return;
+      const pinned = event.pinned ?? event.starred;
 
       if (event.title?.trim() || event.aiTitle?.trim()) {
         clearPendingTitleRefetch(event.sessionId);
@@ -679,7 +686,7 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
             ...(event.title !== undefined && { customTitle: nextCustomTitle }),
             ...(event.aiTitle !== undefined && { aiTitle: nextAiTitle }),
             ...(event.archived !== undefined && { isArchived: event.archived }),
-            ...(event.starred !== undefined && { isStarred: event.starred }),
+            ...(pinned !== undefined && { isStarred: pinned }),
           };
         });
 
@@ -690,11 +697,6 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
           }),
         );
 
-        // If this hook has a starred filter, remove sessions that are no longer starred
-        if (starred && event.starred === false) {
-          return filtered.filter((s) => s.id !== event.sessionId);
-        }
-
         return filtered;
       });
 
@@ -702,12 +704,16 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         debouncedRefetch();
       } else if (existingSession && refreshProjectId) {
         void refreshSessionMetadata(event.sessionId, refreshProjectId);
-      } else if (sessionKind || excludeSessionKind) {
+      } else if (
+        (includePinned && pinned !== undefined) ||
+        sessionKind ||
+        excludeSessionKind
+      ) {
         debouncedRefetch();
       }
     },
     [
-      starred,
+      includePinned,
       sessionKind,
       excludeSessionKind,
       searchQuery,
@@ -820,7 +826,7 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     onSessionMetadataChange: metadataLiveUpdates
       ? handleSessionMetadataChange
       : undefined,
-    // Seen/unread is a metadata-level change (like title/starred), not a
+    // Seen/unread is a metadata-level change (like title/pinned), not a
     // high-frequency process activity. Bind it to metadataLiveUpdates so the
     // sidebar (liveUpdates=false, metadataLiveUpdates=true) still clears the
     // unread dot via a single-item update instead of waiting for a full refetch.

@@ -48,7 +48,7 @@ interface UseFileActivityOptions {
   onSessionSeen?: (event: SessionSeenEvent) => void;
   /** Callback when a process state changes (running/waiting-input) */
   onProcessStateChange?: (event: ProcessStateEvent) => void;
-  /** Callback when session metadata changes (title, archived, starred) */
+  /** Callback when session metadata changes (title, archived, pinned) */
   onSessionMetadataChange?: (event: SessionMetadataChangedEvent) => void;
   /** Callback when session content changes (auto-generated title, messageCount) */
   onSessionUpdated?: (event: SessionUpdatedEvent) => void;

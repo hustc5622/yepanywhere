@@ -299,6 +299,15 @@ describe("useGlobalSessions", () => {
     expect(result.current.stats).toEqual(globalStats);
   });
 
+  it("requests pinned-session coverage in the same list fetch", async () => {
+    renderHook(() => useGlobalSessions({ includePinned: true, limit: 50 }));
+    await flushPromises();
+
+    expect(mockGetGlobalSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ includePinned: true }),
+    );
+  });
+
   it("does not fetch global stats for a project-scoped list", async () => {
     const { result } = renderHook(() =>
       useGlobalSessions({ projectId, includeStats: true, limit: 50 }),

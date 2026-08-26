@@ -1,25 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { shouldSkipAutoArchiveForStarredSession } from "../../src/app.js";
+import { shouldSkipAutoArchiveForPinnedSession } from "../../src/app.js";
 
 describe("auto archive guards", () => {
-  it("skips sessions starred in persisted metadata", () => {
+  it("skips sessions pinned in persisted metadata", () => {
     expect(
-      shouldSkipAutoArchiveForStarredSession(
+      shouldSkipAutoArchiveForPinnedSession(
         { isStarred: false },
         { isStarred: true },
       ),
     ).toBe(true);
   });
 
-  it("skips sessions starred in session summaries", () => {
+  it("skips sessions pinned in session summaries", () => {
     expect(
-      shouldSkipAutoArchiveForStarredSession({ isStarred: true }, undefined),
+      shouldSkipAutoArchiveForPinnedSession({ isStarred: true }, undefined),
     ).toBe(true);
   });
 
-  it("allows non-starred sessions to be auto-archived", () => {
+  it("allows unpinned sessions to be auto-archived", () => {
     expect(
-      shouldSkipAutoArchiveForStarredSession({ isStarred: false }, undefined),
+      shouldSkipAutoArchiveForPinnedSession({ isStarred: false }, undefined),
     ).toBe(false);
   });
 });

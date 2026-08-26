@@ -2542,7 +2542,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return c.json({ error: "Session metadata service not available" }, 503);
     }
 
-    let body: { title?: string; archived?: boolean; starred?: boolean } = {};
+    let body: {
+      title?: string;
+      archived?: boolean;
+      pinned?: boolean;
+      /** Legacy request field accepted during the pin migration. */
+      starred?: boolean;
+    } = {};
     try {
       body = await c.req.json();
     } catch {
@@ -2553,10 +2559,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (
       body.title === undefined &&
       body.archived === undefined &&
+      body.pinned === undefined &&
       body.starred === undefined
     ) {
       return c.json(
-        { error: "At least title, archived, or starred must be provided" },
+        { error: "At least title, archived, or pinned must be provided" },
         400,
       );
     }
@@ -2663,10 +2670,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       }
     }
 
+    const pinned = body.pinned ?? body.starred;
     await deps.sessionMetadataService.updateMetadata(sessionId, {
       title: body.title,
       archived: body.archived,
-      starred: body.starred,
+      // `isStarred` remains the on-disk compatibility key. There is only one
+      // durable bit; existing favorites immediately become pins.
+      starred: pinned,
     });
 
     // Emit SSE event so sidebar and other clients can update
@@ -2676,7 +2686,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         sessionId,
         title: body.title,
         archived: body.archived,
-        starred: body.starred,
+        pinned,
+        starred: pinned,
         timestamp: new Date().toISOString(),
       });
     }

@@ -5,6 +5,7 @@ import type { GlobalSessionItem } from "../api/client";
 import type { AgentActivity } from "../hooks/useFileActivity";
 import { useGlobalSessions } from "../hooks/useGlobalSessions";
 import { CompactCountBadge } from "./CompactCountBadge";
+import { PinIcon } from "./PinIcon";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { TokenUsageBadge } from "./TokenUsageBadge";
 
@@ -163,7 +164,7 @@ export function RecentSessionsDropdown({
               <Link
                 key={session.id}
                 to={`${basePath}/projects/${session.projectId}/sessions/${session.id}`}
-                className={`recent-session-item${session.hasUnread ? " unread" : ""}`}
+                className={`recent-session-item${session.hasUnread ? " unread" : ""}${session.isStarred ? " pinned" : ""}`}
                 onClick={() => {
                   onNavigate(session.id, session.projectId);
                   onClose();
@@ -172,18 +173,7 @@ export function RecentSessionsDropdown({
                 <div className="recent-session-content">
                   <span className="recent-session-title">
                     {session.isStarred && (
-                      <svg
-                        className="recent-session-star"
-                        width="10"
-                        height="10"
-                        viewBox="0 0 24 24"
-                        fill="currentColor"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        aria-hidden="true"
-                      >
-                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                      </svg>
+                      <PinIcon size={11} className="recent-session-pin" />
                     )}
                     <span className="recent-session-title-text">
                       {getDisplayTitle(session)}

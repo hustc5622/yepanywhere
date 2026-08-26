@@ -1400,7 +1400,13 @@ export const api = {
 
   updateSessionMetadata: (
     sessionId: string,
-    updates: { title?: string; archived?: boolean; starred?: boolean },
+    updates: {
+      title?: string;
+      archived?: boolean;
+      pinned?: boolean;
+      /** @deprecated Use `pinned`; accepted for older callers. */
+      starred?: boolean;
+    },
   ) =>
     fetchJSON<SessionMetadataUpdateResponse>(
       `/sessions/${sessionId}/metadata`,
@@ -1701,10 +1707,19 @@ export const api = {
     after?: string;
     limit?: number;
     includeArchived?: boolean;
+    pinned?: boolean;
+    /** @deprecated Use `pinned`; accepted by older servers. */
     starred?: boolean;
     includeStats?: boolean;
     kind?: SessionKind;
     excludeKind?: SessionKind;
+    /** Append pinned sessions that fall outside the ordinary page limit. */
+    includePinned?: boolean;
+    /**
+     * Keep at least one session per project that was active within the last N
+     * days, even if the global top-N cut it off.
+     */
+    projectCoverageDays?: number;
   }) => {
     const searchParams = new URLSearchParams();
     if (params?.project) searchParams.set("project", params.project);
@@ -1712,11 +1727,18 @@ export const api = {
     if (params?.after) searchParams.set("after", params.after);
     if (params?.limit) searchParams.set("limit", String(params.limit));
     if (params?.includeArchived) searchParams.set("includeArchived", "true");
-    if (params?.starred) searchParams.set("starred", "true");
+    if (params?.pinned) searchParams.set("pinned", "true");
+    else if (params?.starred) searchParams.set("starred", "true");
     if (params?.includeStats) searchParams.set("includeStats", "true");
     if (params?.kind) searchParams.set("kind", params.kind);
     if (params?.excludeKind)
       searchParams.set("excludeKind", params.excludeKind);
+    if (params?.includePinned) searchParams.set("includePinned", "true");
+    if (params?.projectCoverageDays)
+      searchParams.set(
+        "projectCoverageDays",
+        String(params.projectCoverageDays),
+      );
     const query = searchParams.toString();
     return fetchJSON<GlobalSessionsResponse>(
       query ? `/sessions?${query}` : "/sessions",

@@ -40,7 +40,7 @@ function renderItem(
   );
 }
 
-describe("SessionListItem archive feedback", () => {
+describe("SessionListItem actions", () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -94,6 +94,25 @@ describe("SessionListItem archive feedback", () => {
         screen.getByText("This session is waiting for input."),
       ).toBeTruthy();
     });
+  });
+
+  it("pins a session through the compatibility metadata API and applies the pinned style", async () => {
+    mockUpdateSessionMetadata.mockResolvedValueOnce({ updated: true });
+    const { container } = renderItem();
+
+    fireEvent.click(screen.getByRole("button", { name: /options/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Pin" }));
+
+    await waitFor(() => {
+      expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-1", {
+        pinned: true,
+      });
+    });
+    expect(
+      container
+        .querySelector(".session-list-item")
+        ?.classList.contains("pinned"),
+    ).toBe(true);
   });
 
   it("copies session info from the menu", async () => {

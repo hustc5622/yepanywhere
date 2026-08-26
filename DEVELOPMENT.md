@@ -76,7 +76,7 @@ PORT=4000 pnpm dev  # 使用 4000、4001、4002
 - `logs/`：服务器日志
 - `indexes/`：会话索引缓存
 - `uploads/`：上传文件
-- `session-metadata.json`：自定义标题、归档/收藏状态
+- `session-metadata.json`：自定义标题、归档/置顶状态
 
 ### 同时运行多个实例
 

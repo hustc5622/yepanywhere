@@ -3,7 +3,7 @@
  *
  * This class encapsulates all the data needed to render session UI components:
  * - Title handling (auto, AI-generated, custom, display priority)
- * - Metadata (starred, archived)
+ * - Metadata (pinned via the legacy `isStarred` field, archived)
  * - Notification state (unread, pending input)
  * - Process state (running, idle, waiting)
  * - Context usage
@@ -52,7 +52,7 @@ export class SessionView {
     readonly ownership: SessionOwnership,
     /** Whether session is archived (hidden from default list) */
     readonly isArchived: boolean,
-    /** Whether session is starred/favorited */
+    /** Whether the session is pinned (legacy field name) */
     readonly isStarred: boolean,
     /** Type of pending input if session needs user action */
     readonly pendingInputType: PendingInputType | undefined,

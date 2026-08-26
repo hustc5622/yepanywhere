@@ -15,6 +15,7 @@ import type { RuntimeProcessSnapshot } from "../../src/runtime/types.js";
 import type { CodexSessionReader } from "../../src/sessions/codex-reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
 import type { Project, SessionSummary } from "../../src/supervisor/types.js";
+import { EventBus } from "../../src/watcher/EventBus.js";
 
 interface TestSqliteStatement {
   run(...params: unknown[]): void;
@@ -216,6 +217,42 @@ function createSummary(): SessionSummary {
 }
 
 describe("Sessions metadata route", () => {
+  it("accepts the pin API while persisting the existing metadata bit", async () => {
+    const updateMetadata = vi.fn(async () => undefined);
+    const eventBus = new EventBus();
+    const emit = vi.spyOn(eventBus, "emit");
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      scanner: {} as SessionsDeps["scanner"],
+      readerFactory: vi.fn() as unknown as SessionsDeps["readerFactory"],
+      sessionMetadataService: {
+        updateMetadata,
+      } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
+      eventBus,
+    });
+
+    const response = await routes.request("/sessions/session-1/metadata", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: true }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(updateMetadata).toHaveBeenCalledWith("session-1", {
+      title: undefined,
+      archived: undefined,
+      starred: true,
+    });
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "session-metadata-changed",
+        sessionId: "session-1",
+        pinned: true,
+        starred: true,
+      }),
+    );
+  });
+
   it("returns live usage and retry status before the session file exists", async () => {
     const project = createProject();
     const process = {

@@ -86,6 +86,8 @@ export interface SessionMetadataChangedEvent {
   title?: string;
   aiTitle?: string;
   archived?: boolean;
+  pinned?: boolean;
+  /** @deprecated Compatibility alias sent by older servers. */
   starred?: boolean;
   timestamp: string;
 }

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GlobalSessionItem } from "../../api/client";
 import { ToastProvider } from "../../contexts/ToastContext";
 import { I18nProvider } from "../../i18n";
+import type { Project } from "../../types";
 import { Sidebar } from "../Sidebar";
 
 const {
@@ -59,16 +60,16 @@ function createSession(
 function renderSidebar(
   sessions: GlobalSessionItem[],
   props: Partial<ComponentProps<typeof Sidebar>> = {},
-  starredSessions: GlobalSessionItem[] = [],
+  projects: Project[] = [],
 ) {
-  mockUseGlobalSessions.mockImplementation((options) => ({
-    sessions: options?.starred ? starredSessions : sessions,
+  mockUseGlobalSessions.mockImplementation(() => ({
+    sessions,
     loading: false,
     refetch: vi.fn(),
   }));
   mockUseRecentProjects.mockReturnValue({
-    recentProjects: [],
-    projects: [],
+    recentProjects: projects,
+    projects,
     loading: false,
     refetch: vi.fn(),
   });
@@ -168,20 +169,51 @@ describe("Sidebar recent session browsing", () => {
     expect(onToggleExpanded).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps starred sessions collapsed until the section header is clicked", () => {
-    const starredSession = createSession({
-      id: "starred-session",
-      title: "Important Session",
+  it("places a pinned session first in its project with a distinct background", async () => {
+    const pinnedSession = createSession({
+      id: "pinned-session",
+      title: "Pinned Session",
+      updatedAt: "2025-01-01T00:00:00.000Z",
       isStarred: true,
     });
+    const newerSession = createSession({
+      id: "newer-session",
+      title: "Newer Session",
+      updatedAt: new Date().toISOString(),
+    });
 
-    renderSidebar([], {}, [starredSession]);
+    const { container } = renderSidebar([newerSession, pinnedSession]);
 
-    expect(screen.queryByText("Important Session")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByText("Pinned Session")).toBeTruthy(),
+    );
+    expect(screen.queryByText("Newer Session")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: /Starred/i }));
+    fireEvent.click(
+      container.querySelector(".sidebar-project-toggle") as HTMLButtonElement,
+    );
 
-    expect(screen.getByText("Important Session")).toBeTruthy();
+    const selectLabels = Array.from(
+      container.querySelectorAll('[aria-label^="Select "]'),
+      (node) => node.getAttribute("aria-label"),
+    );
+    expect(selectLabels).toEqual([
+      "Select Pinned Session",
+      "Select Newer Session",
+    ]);
+    expect(
+      screen
+        .getByText("Pinned Session")
+        .closest("li")
+        ?.classList.contains("pinned"),
+    ).toBe(true);
+    expect(screen.queryByRole("button", { name: /Starred/i })).toBeNull();
+    expect(mockUseGlobalSessions).toHaveBeenCalled();
+    expect(
+      mockUseGlobalSessions.mock.calls.every(
+        ([options]) => options?.includePinned === true && !options?.starred,
+      ),
+    ).toBe(true);
   });
 
   it("keeps project order stable when an active session receives a newer timestamp", () => {
@@ -207,16 +239,14 @@ describe("Sidebar recent session browsing", () => {
 
     expect(projectNameOrder(container)).toEqual(["Project B", "Project A"]);
 
-    mockUseGlobalSessions.mockImplementation((options) => ({
-      sessions: options?.starred
-        ? []
-        : [
-            projectB,
-            {
-              ...projectA,
-              updatedAt: "2026-01-01T00:20:00.000Z",
-            },
-          ],
+    mockUseGlobalSessions.mockImplementation(() => ({
+      sessions: [
+        projectB,
+        {
+          ...projectA,
+          updatedAt: "2026-01-01T00:20:00.000Z",
+        },
+      ],
       loading: false,
       refetch: vi.fn(),
     }));
@@ -293,15 +323,13 @@ describe("Sidebar recent session browsing", () => {
     fireEvent.click(screen.getByRole("button", { name: /Project A/i }));
     expect(screen.queryByText("Session A")).toBeNull();
 
-    mockUseGlobalSessions.mockImplementation((options) => ({
-      sessions: options?.starred
-        ? []
-        : [
-            {
-              ...currentSession,
-              updatedAt: "2026-01-01T00:20:00.000Z",
-            },
-          ],
+    mockUseGlobalSessions.mockImplementation(() => ({
+      sessions: [
+        {
+          ...currentSession,
+          updatedAt: "2026-01-01T00:20:00.000Z",
+        },
+      ],
       loading: false,
       refetch: vi.fn(),
     }));

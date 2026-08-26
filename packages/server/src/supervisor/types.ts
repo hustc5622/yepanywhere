@@ -108,7 +108,7 @@ export interface SessionSummary {
   aiTitle?: string;
   /** Whether the session is archived (hidden from default list) */
   isArchived?: boolean;
-  /** Whether the session is starred/favorited */
+  /** Whether the session is pinned (legacy field name) */
   isStarred?: boolean;
   /** Context usage from the last assistant message */
   contextUsage?: ContextUsage;

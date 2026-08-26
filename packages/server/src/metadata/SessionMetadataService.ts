@@ -1,6 +1,6 @@
 /**
- * SessionMetadataService manages custom session metadata (titles, archive status).
- * This enables renaming sessions and archiving them to hide from default view.
+ * SessionMetadataService manages custom session metadata (titles, archive and
+ * pin status). This enables renaming, retention pins, and archive visibility.
  *
  * State is persisted to a JSON file for durability across server restarts.
  */
@@ -25,7 +25,7 @@ export interface SessionMetadata {
   aiTitle?: string;
   /** Whether the session is archived (hidden from default list) */
   isArchived?: boolean;
-  /** Whether the session is starred/favorited */
+  /** Whether the session is pinned (legacy persisted key kept for compatibility) */
   isStarred?: boolean;
   /** Model used for this session (resolved, not "default") */
   model?: string;
@@ -208,7 +208,7 @@ export class SessionMetadataService {
   }
 
   /**
-   * Set the starred status for a session.
+   * Set the legacy persisted bit now used as the session pin status.
    */
   async setStarred(sessionId: string, starred: boolean): Promise<void> {
     this.updateSessionMetadata(sessionId, (metadata) => ({
@@ -476,7 +476,7 @@ export class SessionMetadataService {
   }
 
   /**
-   * Update metadata for a session (title, archived, starred).
+   * Update metadata for a session (title, archived, pinned compatibility bit).
    */
   async updateMetadata(
     sessionId: string,

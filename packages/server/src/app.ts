@@ -371,10 +371,13 @@ function emitArchiveFileChange(
   }
 }
 
-export function shouldSkipAutoArchiveForStarredSession(
+export function shouldSkipAutoArchiveForPinnedSession(
   session: Pick<SessionSummary, "isStarred">,
   metadata: Pick<SessionMetadata, "isStarred"> | undefined,
 ): boolean {
+  // `isStarred` is the legacy persisted key now interpreted as the session's
+  // pin. Keeping the same bit preserves existing favorites and their retention
+  // protection without a second source of truth.
   return metadata?.isStarred ?? session.isStarred ?? false;
 }
 
@@ -1102,7 +1105,7 @@ export function createApp(options: AppOptions): AppResult {
             const metadata = options.sessionMetadataService?.getMetadata(
               session.id,
             );
-            if (shouldSkipAutoArchiveForStarredSession(session, metadata)) {
+            if (shouldSkipAutoArchiveForPinnedSession(session, metadata)) {
               skippedCount++;
               continue;
             }

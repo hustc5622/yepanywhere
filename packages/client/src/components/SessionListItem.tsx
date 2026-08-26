@@ -20,6 +20,7 @@ import type {
 } from "../types";
 import { CompactCountBadge } from "./CompactCountBadge";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
+import { PinIcon } from "./PinIcon";
 import { ProviderBadge } from "./ProviderBadge";
 import { SessionMenu } from "./SessionMenu";
 import { SessionStatusBadge } from "./StatusBadge";
@@ -78,9 +79,9 @@ interface SessionListItemProps {
   customBadges?: Array<{ label: string; className: string; title?: string }>;
 
   // Actions (menu hidden when all undefined)
-  isStarred?: boolean;
+  isPinned?: boolean;
   isArchived?: boolean;
-  onToggleStar?: () => void;
+  onTogglePin?: () => void;
   onToggleArchive?: () => void;
   onToggleRead?: () => void;
   onRename?: () => void;
@@ -180,8 +181,8 @@ function getSessionCreationIndicator({
  * RecentsPage, and InboxContent.
  *
  * Features:
- * - Star indicator, title, draft badge
- * - SessionMenu (star, archive, rename actions) - hidden when no action handlers
+ * - Pin indicator, title, draft badge
+ * - SessionMenu (pin, archive, rename actions) - hidden when no action handlers
  * - Inline rename editing with optimistic updates
  * - Card mode: context usage indicator, full status badge, time display
  * - Compact mode: abbreviated badges (Appr/Q/Running)
@@ -225,9 +226,9 @@ export function SessionListItem({
   customBadge,
   customBadges,
   // Actions
-  isStarred: isStarredProp,
+  isPinned: isPinnedProp,
   isArchived: isArchivedProp,
-  onToggleStar,
+  onTogglePin,
   onToggleArchive,
   onToggleRead,
   onRename,
@@ -253,7 +254,7 @@ export function SessionListItem({
   const navigate = useNavigate();
 
   // Local state for optimistic updates (only used when action handlers are provided)
-  const [localIsStarred, setLocalIsStarred] = useState<boolean | undefined>(
+  const [localIsPinned, setLocalIsPinned] = useState<boolean | undefined>(
     undefined,
   );
   const [localIsArchived, setLocalIsArchived] = useState<boolean | undefined>(
@@ -267,7 +268,7 @@ export function SessionListItem({
   const isSavingRef = useRef(false);
 
   // Computed values with optimistic fallback
-  const isStarred = localIsStarred ?? isStarredProp;
+  const isPinned = localIsPinned ?? isPinnedProp;
   const isArchived = localIsArchived ?? isArchivedProp;
   const canArchive = isArchived || runtime?.canArchive !== false;
   const archiveBlockReason =
@@ -320,15 +321,16 @@ export function SessionListItem({
   );
 
   // Handlers for menu actions
-  const handleToggleStar = async () => {
-    const newStarred = !isStarred;
-    setLocalIsStarred(newStarred);
+  const handleTogglePin = async () => {
+    const newPinned = !isPinned;
+    setLocalIsPinned(newPinned);
     try {
-      await api.updateSessionMetadata(sessionId, { starred: newStarred });
-      onToggleStar?.();
+      await api.updateSessionMetadata(sessionId, { pinned: newPinned });
+      onTogglePin?.();
     } catch (err) {
-      console.error("Failed to update star status:", err);
-      setLocalIsStarred(undefined); // Revert on error
+      console.error("Failed to update pin status:", err);
+      showToast(t("sessionPinFailed"), "error");
+      setLocalIsPinned(undefined); // Revert on error
     }
   };
 
@@ -492,28 +494,10 @@ export function SessionListItem({
     hasUnread && "unread",
     isSelected && "selected",
     isArchived && "archived",
+    isPinned && "pinned",
   ]
     .filter(Boolean)
     .join(" ");
-
-  // Star icon SVG
-  const StarIcon = ({
-    filled,
-    size = 10,
-  }: { filled: boolean; size?: number }) => (
-    <svg
-      className="session-star-icon"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill={filled ? "currentColor" : "none"}
-      stroke="currentColor"
-      strokeWidth="2"
-      aria-hidden="true"
-    >
-      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-    </svg>
-  );
 
   return (
     <li className={liClasses}>
@@ -556,7 +540,7 @@ export function SessionListItem({
             // Card mode: title on one line, meta on second line
             <>
               <strong className="session-list-item__title">
-                {isStarred && <StarIcon filled size={12} />}
+                {isPinned && <PinIcon size={12} className="session-pin-icon" />}
                 {isNewSession && <ThinkingIndicator />}
                 {displayTitle}
                 {hasDraft && <span className="session-draft-badge">Draft</span>}
@@ -655,7 +639,9 @@ export function SessionListItem({
             <>
               <span className="session-list-item__compact-content">
                 <span className="session-list-item__title-row">
-                  {isStarred && <StarIcon filled />}
+                  {isPinned && (
+                    <PinIcon size={11} className="session-pin-icon" />
+                  )}
                   {isNewSession && <ThinkingIndicator />}
                   <span className="session-list-item__title-text">
                     {displayTitle}
@@ -716,13 +702,13 @@ export function SessionListItem({
           sessionId={sessionId}
           projectId={projectId}
           title={displayTitle}
-          isStarred={isStarred ?? false}
+          isPinned={isPinned ?? false}
           isArchived={isArchived ?? false}
           hasUnread={hasUnread ?? false}
           provider={provider}
           canArchive={canArchive}
           archiveBlockReason={archiveBlockReason}
-          onToggleStar={handleToggleStar}
+          onTogglePin={handleTogglePin}
           onToggleArchive={handleToggleArchive}
           onToggleRead={handleToggleRead}
           onRename={() => {

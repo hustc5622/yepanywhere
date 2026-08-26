@@ -17,6 +17,7 @@ import { MessageInput, type UploadProgress } from "../components/MessageInput";
 import { MessageInputToolbar } from "../components/MessageInputToolbar";
 import { MessageList } from "../components/MessageList";
 import { ModelSwitchModal } from "../components/ModelSwitchModal";
+import { PinIcon } from "../components/PinIcon";
 import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { QuestionAnswerPanel } from "../components/QuestionAnswerPanel";
 import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
@@ -665,7 +666,7 @@ function SessionPageContent({
   const [localIsArchived, setLocalIsArchived] = useState<boolean | undefined>(
     undefined,
   );
-  const [localIsStarred, setLocalIsStarred] = useState<boolean | undefined>(
+  const [localIsPinned, setLocalIsPinned] = useState<boolean | undefined>(
     undefined,
   );
   const [localHasUnread, setLocalHasUnread] = useState<boolean | undefined>(
@@ -677,7 +678,7 @@ function SessionPageContent({
   useEffect(() => {
     setLocalCustomTitle(undefined);
     setLocalIsArchived(undefined);
-    setLocalIsStarred(undefined);
+    setLocalIsPinned(undefined);
     setLocalHasUnread(undefined);
   }, [sessionId]);
 
@@ -1624,7 +1625,9 @@ function SessionPageContent({
     initialTitle ??
     t("sessionUntitled");
   const isArchived = localIsArchived ?? session?.isArchived ?? false;
-  const isStarred = localIsStarred ?? session?.isStarred ?? false;
+  // `isStarred` is the persisted compatibility bit; the product semantics are
+  // now pinning, so existing favorites become pins without a migration.
+  const isPinned = localIsPinned ?? session?.isStarred ?? false;
   const isRuntimeBusy =
     processState === "in-turn" ||
     processState === "waiting-input" ||
@@ -1721,18 +1724,18 @@ function SessionPageContent({
     }
   };
 
-  const handleToggleStar = async () => {
-    const newStarred = !isStarred;
+  const handleTogglePin = async () => {
+    const newPinned = !isPinned;
     try {
-      await api.updateSessionMetadata(sessionId, { starred: newStarred });
-      setLocalIsStarred(newStarred);
+      await api.updateSessionMetadata(sessionId, { pinned: newPinned });
+      setLocalIsPinned(newPinned);
       showToast(
-        newStarred ? t("sessionStarred") : t("sessionUnstarred"),
+        newPinned ? t("sessionPinned") : t("sessionUnpinned"),
         "success",
       );
     } catch (err) {
-      console.error("Failed to update star status:", err);
-      showToast(t("sessionStarFailed"), "error");
+      console.error("Failed to update pin status:", err);
+      showToast(t("sessionPinFailed"), "error");
     }
   };
 
@@ -1927,21 +1930,15 @@ function SessionPageContent({
                 </Link>
               )}
               <div className="session-title-row">
-                {isStarred && (
-                  <svg
-                    className="star-indicator-inline"
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    stroke="currentColor"
-                    strokeWidth="2"
+                {isPinned && (
+                  <span
+                    className="pin-indicator-inline"
                     role="img"
-                    aria-label={t("sessionStarredLabel")}
+                    aria-label={t("sessionPinnedLabel")}
+                    title={t("sessionPinnedLabel")}
                   >
-                    <title>{t("sessionStarredLabel")}</title>
-                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                  </svg>
+                    <PinIcon size={12} />
+                  </span>
                 )}
                 {loading ? (
                   <span className="session-title-skeleton" />
@@ -2001,7 +1998,7 @@ function SessionPageContent({
                     sessionId={sessionId}
                     projectId={projectId}
                     title={displayTitle}
-                    isStarred={isStarred}
+                    isPinned={isPinned}
                     isArchived={isArchived}
                     hasUnread={hasUnread}
                     provider={session?.provider}
@@ -2010,7 +2007,7 @@ function SessionPageContent({
                     }
                     canArchive={canArchive}
                     archiveBlockReason={archiveBlockReason}
-                    onToggleStar={handleToggleStar}
+                    onTogglePin={handleTogglePin}
                     onToggleArchive={handleToggleArchive}
                     onToggleRead={handleToggleRead}
                     onRename={handleStartEditingTitle}

@@ -161,7 +161,7 @@ export interface WorkerActivityEvent {
   timestamp: string;
 }
 
-/** Event emitted when session metadata changes (title, AI title, archived, starred) */
+/** Event emitted when session metadata changes (title, AI title, archived, pinned) */
 export interface SessionMetadataChangedEvent {
   type: "session-metadata-changed";
   sessionId: string;
@@ -173,7 +173,9 @@ export interface SessionMetadataChangedEvent {
   aiTitle?: string;
   /** Updated archived status (if changed) */
   archived?: boolean;
-  /** Updated starred status (if changed) */
+  /** Updated pin status (if changed) */
+  pinned?: boolean;
+  /** @deprecated Compatibility alias for older clients. */
   starred?: boolean;
   timestamp: string;
 }

@@ -28,6 +28,11 @@ const SWIPE_THRESHOLD = 50; // Minimum distance to trigger close
 const SWIPE_ENGAGE_THRESHOLD = 15; // Minimum horizontal distance before swipe engages
 const RECENT_SESSIONS_INITIAL = 12; // Initial number of recent sessions to show
 const RECENT_SESSIONS_INCREMENT = 10; // How many more to show on each expand
+/**
+ * Any project touched within this window keeps at least one session in the
+ * sidebar, even when busier projects fill up the global session limit.
+ */
+const PROJECT_COVERAGE_DAYS = 7;
 
 const getSessionListTitle = (session: GlobalSessionItem): string | null =>
   session.customTitle ?? session.aiTitle ?? session.title ?? null;
@@ -72,6 +77,9 @@ function compareSessionsByUpdatedAtDesc(
   a: GlobalSessionItem,
   b: GlobalSessionItem,
 ): number {
+  // A pin is scoped to its project group: pinned sessions stay above that
+  // project's ordinary sessions without creating a separate global section.
+  if (a.isStarred !== b.isStarred) return a.isStarred ? -1 : 1;
   const diff =
     new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
   if (diff !== 0) return diff;
@@ -169,7 +177,8 @@ export function Sidebar({
   const basePath = useRemoteBasePath();
   const shouldLoadSessionLists = isDesktop ? !isCollapsed : isOpen;
 
-  // Fetch global sessions for sidebar (non-starred only for recent/older sections)
+  // One combined list powers the project groups. `includePinned` asks the
+  // server to append old pins that fall outside the ordinary top-N window.
   const {
     sessions: globalSessions,
     loading: globalLoading,
@@ -178,27 +187,14 @@ export function Sidebar({
     limit: 50,
     includeStats: false,
     excludeSessionKind: SLASH_COMMAND_SESSION_KIND,
+    projectCoverageDays: PROJECT_COVERAGE_DAYS,
+    includePinned: true,
     enabled: shouldLoadSessionLists,
     liveUpdates: true,
     metadataLiveUpdates: true,
   });
 
-  // Fetch starred sessions separately to ensure we get ALL starred sessions
-  const {
-    sessions: starredSessions,
-    loading: starredLoading,
-    refetch: refetchStarredSessions,
-  } = useGlobalSessions({
-    starred: true,
-    limit: 100,
-    includeStats: false,
-    excludeSessionKind: SLASH_COMMAND_SESSION_KIND,
-    enabled: shouldLoadSessionLists,
-    liveUpdates: true,
-    metadataLiveUpdates: true,
-  });
-
-  const sessionsLoading = globalLoading || starredLoading;
+  const sessionsLoading = globalLoading;
 
   const {
     recentProjects,
@@ -230,11 +226,6 @@ export function Sidebar({
   const [olderProjectGroupsLimit, setOlderProjectGroupsLimit] = useState(
     RECENT_SESSIONS_INITIAL,
   );
-  const [starredSessionsLimit, setStarredSessionsLimit] = useState(
-    RECENT_SESSIONS_INITIAL,
-  );
-  const [isStarredSectionExpanded, setIsStarredSectionExpanded] =
-    useState(false);
   const [isRefreshingSessions, setIsRefreshingSessions] = useState(false);
   const [expandedProjectGroups, setExpandedProjectGroups] = useState<
     Set<string>
@@ -247,17 +238,8 @@ export function Sidebar({
   const refetchSessionLists = useCallback(async () => {
     if (!shouldLoadSessionLists) return;
 
-    await Promise.all([
-      refetchGlobalSessions(),
-      refetchStarredSessions(),
-      refetchProjects(),
-    ]);
-  }, [
-    refetchGlobalSessions,
-    refetchProjects,
-    refetchStarredSessions,
-    shouldLoadSessionLists,
-  ]);
+    await Promise.all([refetchGlobalSessions(), refetchProjects()]);
+  }, [refetchGlobalSessions, refetchProjects, shouldLoadSessionLists]);
 
   const handleRefreshRecentSessions = useCallback(async () => {
     if (isRefreshingSessions) return;
@@ -276,7 +258,11 @@ export function Sidebar({
     const unsubscribeMetadata = activityBus.on(
       "session-metadata-changed",
       (event) => {
-        if (event.archived !== undefined || event.starred !== undefined) {
+        if (
+          event.archived !== undefined ||
+          event.pinned !== undefined ||
+          event.starred !== undefined
+        ) {
           void refetchSessionLists();
         }
       },
@@ -384,27 +370,24 @@ export function Sidebar({
     };
   }, [isResizing, onResize, onResizeEnd]);
 
-  // Starred sessions come from dedicated fetch (filtered by server)
-  // Filter out archived just in case
-  const filteredStarredSessions = useMemo(() => {
-    return starredSessions.filter((s) => !s.isArchived);
-  }, [starredSessions]);
-
-  // Sessions updated in the last 24 hours (non-starred, non-archived).
+  // Sessions updated in the last 24 hours, plus every pinned session. An old
+  // pin is elevated into its project's recent card instead of living in a
+  // second, independently maintained collection.
   // Keep the hook-provided order stable so high-frequency live updates don't
   // move an active session back under the user's pointer while browsing.
-  const recentDaySessions = useMemo(() => {
+  const recentSessions = useMemo(() => {
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
     const isWithinLastDay = (date: Date) => date.getTime() >= oneDayAgo;
 
     return globalSessions.filter(
       (s) =>
-        !s.isStarred && !s.isArchived && isWithinLastDay(new Date(s.updatedAt)),
+        !s.isArchived &&
+        (s.isStarred || isWithinLastDay(new Date(s.updatedAt))),
     );
   }, [globalSessions]);
 
-  // Older sessions (non-starred, non-archived, NOT in last 24 hours).
-  // Preserve stable ordering here for the same reason as recentDaySessions.
+  // Older sessions (unpinned, non-archived, NOT in last 24 hours).
+  // Preserve stable ordering here for the same reason as recentSessions.
   const olderSessions = useMemo(() => {
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
     const isOlderThanOneDay = (date: Date) => date.getTime() < oneDayAgo;
@@ -418,8 +401,8 @@ export function Sidebar({
   }, [globalSessions]);
 
   const sidebarSessions = useMemo(
-    () => [...filteredStarredSessions, ...recentDaySessions, ...olderSessions],
-    [filteredStarredSessions, olderSessions, recentDaySessions],
+    () => [...recentSessions, ...olderSessions],
+    [olderSessions, recentSessions],
   );
 
   const sidebarSessionsById = useMemo(
@@ -544,8 +527,8 @@ export function Sidebar({
   const drafts = useDrafts();
 
   const allRecentProjectGroups = useMemo(
-    () => groupSessionsByProject("recent", recentDaySessions),
-    [recentDaySessions],
+    () => groupSessionsByProject("recent", recentSessions),
+    [recentSessions],
   );
 
   const recentProjectGroups = useMemo(
@@ -636,7 +619,7 @@ export function Sidebar({
       lastTurnStatus={session.lastTurnStatus}
       lastErrorMessage={session.lastErrorMessage}
       retryStatus={session.retryStatus}
-      isStarred={session.isStarred}
+      isPinned={session.isStarred}
       isArchived={session.isArchived}
       mode="compact"
       isCurrent={session.id === currentSessionId}
@@ -666,6 +649,11 @@ export function Sidebar({
     <div className="sidebar-project-groups">
       {groups.map((group) => {
         const isExpanded = expandedProjectGroups.has(group.key);
+        // Pins remain visible in a collapsed project; expanding reveals the
+        // rest of the already pin-first ordered session list.
+        const visibleSessions = isExpanded
+          ? group.sessions
+          : group.sessions.filter((session) => session.isStarred);
         const isCurrentGroup = group.sessions.some(
           (session) => session.id === currentSessionId,
         );
@@ -768,9 +756,9 @@ export function Sidebar({
                 </svg>
               </Link>
             </div>
-            {isExpanded && (
+            {visibleSessions.length > 0 && (
               <ul className="sidebar-session-list sidebar-project-session-list">
-                {group.sessions.map((session) =>
+                {visibleSessions.map((session) =>
                   renderSessionListItem(session, false),
                 )}
               </ul>
@@ -1011,62 +999,7 @@ export function Sidebar({
           )}
 
           {/* Global sessions list */}
-          {filteredStarredSessions.length > 0 && (
-            <div className="sidebar-section">
-              <h3 className="sidebar-section-title sidebar-collapsible-title">
-                <button
-                  type="button"
-                  className="sidebar-section-toggle"
-                  onClick={() =>
-                    setIsStarredSectionExpanded((expanded) => !expanded)
-                  }
-                  aria-expanded={isStarredSectionExpanded}
-                >
-                  <span
-                    className={`sidebar-section-chevron${
-                      isStarredSectionExpanded ? " expanded" : ""
-                    }`}
-                    aria-hidden="true"
-                  >
-                    ›
-                  </span>
-                  <span>{t("sidebarSectionStarred")}</span>
-                  <span className="sidebar-section-count">
-                    {filteredStarredSessions.length}
-                  </span>
-                </button>
-              </h3>
-              {isStarredSectionExpanded && (
-                <>
-                  <ul className="sidebar-session-list">
-                    {filteredStarredSessions
-                      .slice(0, starredSessionsLimit)
-                      .map((session) => renderSessionListItem(session, true))}
-                  </ul>
-                  {filteredStarredSessions.length > starredSessionsLimit && (
-                    <button
-                      type="button"
-                      className="sidebar-show-more"
-                      onClick={() =>
-                        setStarredSessionsLimit(
-                          (prev) => prev + RECENT_SESSIONS_INCREMENT,
-                        )
-                      }
-                    >
-                      {t("actionShowMore", {
-                        count: Math.min(
-                          RECENT_SESSIONS_INCREMENT,
-                          filteredStarredSessions.length - starredSessionsLimit,
-                        ),
-                      })}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {recentDaySessions.length > 0 && (
+          {recentSessions.length > 0 && (
             <div className="sidebar-section">
               <div className="sidebar-section-heading">
                 <h3 className="sidebar-section-title">
@@ -1148,8 +1081,7 @@ export function Sidebar({
             </div>
           )}
 
-          {filteredStarredSessions.length === 0 &&
-            recentDaySessions.length === 0 &&
+          {recentSessions.length === 0 &&
             olderSessions.length === 0 &&
             (sessionsLoading ? (
               <div className="sidebar-loading">
