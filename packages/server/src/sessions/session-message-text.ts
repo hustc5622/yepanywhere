@@ -59,6 +59,167 @@ export function extractFirstAssistantResponseText(
   return null;
 }
 
+export type SessionTitleTranscriptEntry =
+  | { kind: "user"; text: string }
+  | {
+      kind: "assistant_progress" | "assistant_thinking" | "assistant_response";
+      text: string;
+    };
+
+/**
+ * Build the conversation context used by explicit session-title generation.
+ *
+ * Unlike the old first-turn automatic title path, a user-triggered title uses
+ * everything that exists at click time: real user prompts, assistant progress
+ * updates, reasoning/thinking, and final responses. Tool calls and tool results
+ * are deliberately omitted, including their arguments and output text.
+ */
+export function extractSessionTitleTranscript(
+  session: Session,
+): SessionTitleTranscriptEntry[] {
+  const entries: SessionTitleTranscriptEntry[] = [];
+
+  for (const message of session.messages) {
+    const role = getSessionMessageRole(message)?.toLowerCase();
+    const messageType = message.type.toLowerCase();
+    if (isToolContentType(messageType)) continue;
+
+    if (role === "user") {
+      const text = extractTitleContentSegments(
+        message.message?.content ?? message.content,
+        "user",
+      )
+        .map((segment) => segment.text)
+        .join("\n")
+        .trim();
+      if (!text || isSyntheticUserPromptText(text)) continue;
+      entries.push({ kind: "user", text });
+      continue;
+    }
+
+    const isThinkingMessage =
+      messageType === "reasoning" || messageType === "thinking";
+    if (role !== "assistant" && !isThinkingMessage) continue;
+
+    const phase = (message as { codexMessagePhase?: unknown })
+      .codexMessagePhase;
+    const defaultKind: Exclude<SessionTitleTranscriptEntry["kind"], "user"> =
+      isThinkingMessage
+        ? "assistant_thinking"
+        : phase === "commentary"
+          ? "assistant_progress"
+          : "assistant_response";
+    const segments = extractTitleContentSegments(
+      message.message?.content ?? message.content,
+      defaultKind,
+    );
+
+    for (const segment of segments) {
+      const previous = entries.at(-1);
+      if (previous?.kind === segment.kind) {
+        previous.text = `${previous.text}\n${segment.text}`;
+      } else {
+        entries.push(segment);
+      }
+    }
+  }
+
+  // Codex sessions can retain the original prompt only in the rollout/session
+  // summary after compaction or legacy projection. Tool-only user messages are
+  // intentionally filtered above, so reuse the same trusted title fallback as
+  // the legacy title path only when no real user text survived in history.
+  if (!entries.some((entry) => entry.kind === "user")) {
+    const fallbackUserPrompt = extractFirstUserPromptText(session);
+    if (fallbackUserPrompt) {
+      entries.unshift({ kind: "user", text: fallbackUserPrompt });
+    }
+  }
+
+  return entries;
+}
+
+function extractTitleContentSegments(
+  content: unknown,
+  defaultKind: SessionTitleTranscriptEntry["kind"],
+): SessionTitleTranscriptEntry[] {
+  if (typeof content === "string") {
+    const text = cleanMessageText(content).trim();
+    return text
+      ? [{ kind: defaultKind, text } as SessionTitleTranscriptEntry]
+      : [];
+  }
+  if (!Array.isArray(content)) return [];
+
+  const segments: SessionTitleTranscriptEntry[] = [];
+  for (const block of content) {
+    if (typeof block === "string") {
+      appendTitleSegment(segments, defaultKind, block);
+      continue;
+    }
+    if (!block || typeof block !== "object") continue;
+
+    const record = block as Record<string, unknown>;
+    const type =
+      typeof record.type === "string" ? record.type.toLowerCase() : undefined;
+    if (type && isToolContentType(type)) continue;
+
+    if (type === "reasoning" || type === "thinking") {
+      const thinking =
+        typeof record.thinking === "string"
+          ? record.thinking
+          : typeof record.text === "string"
+            ? record.text
+            : "";
+      appendTitleSegment(segments, "assistant_thinking", thinking);
+      continue;
+    }
+    if (type === "input_image" || type === "image") {
+      appendTitleSegment(segments, defaultKind, "[image]");
+      continue;
+    }
+    if (type === "document") {
+      appendTitleSegment(segments, defaultKind, "[document]");
+      continue;
+    }
+
+    const text = typeof record.text === "string" ? record.text : "";
+    if (!isIdeMetadata(text)) {
+      appendTitleSegment(segments, defaultKind, text);
+    }
+  }
+
+  return segments;
+}
+
+function appendTitleSegment(
+  segments: SessionTitleTranscriptEntry[],
+  kind: SessionTitleTranscriptEntry["kind"],
+  rawText: string,
+): void {
+  const text = cleanMessageText(rawText).trim();
+  if (!text) return;
+  const previous = segments.at(-1);
+  if (previous?.kind === kind) {
+    previous.text = `${previous.text}\n${text}`;
+  } else {
+    segments.push({ kind, text } as SessionTitleTranscriptEntry);
+  }
+}
+
+function isToolContentType(type: string): boolean {
+  const normalized = type.toLowerCase().replaceAll("-", "_");
+  return (
+    normalized.includes("tool") ||
+    normalized === "function_call" ||
+    normalized === "function_call_output" ||
+    normalized === "command" ||
+    normalized === "command_execution" ||
+    normalized === "command_output" ||
+    normalized === "file_change" ||
+    normalized === "web_search"
+  );
+}
+
 function hasToolPart(message: Message): boolean {
   const content = message.message?.content ?? message.content;
   if (!Array.isArray(content)) return false;

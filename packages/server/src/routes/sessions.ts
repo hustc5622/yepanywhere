@@ -75,6 +75,10 @@ import {
   SessionCommandService,
   type StartSessionBody,
 } from "../services/SessionCommandService.js";
+import {
+  ManualSessionTitleError,
+  type SessionTitleService,
+} from "../services/SessionTitleService.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
@@ -157,6 +161,8 @@ export interface SessionsDeps {
   externalTracker?: ExternalSessionTracker;
   notificationService?: NotificationService;
   sessionMetadataService?: SessionMetadataService;
+  /** Explicit, user-triggered AI session title generation. */
+  sessionTitleService?: Pick<SessionTitleService, "generateTitleManually">;
   eventBus?: EventBus;
   codexScanner?: CodexSessionScanner;
   codexSessionsDir?: string;
@@ -2534,7 +2540,56 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     });
   });
 
-  // PUT /api/sessions/:sessionId/metadata - Update session metadata (title, archived, starred)
+  // POST /api/projects/:projectId/sessions/:sessionId/title - Explicitly generate a title
+  routes.post("/projects/:projectId/sessions/:sessionId/title", async (c) => {
+    const projectId = c.req.param("projectId");
+    const sessionId = c.req.param("sessionId");
+    if (!isUrlProjectId(projectId)) {
+      return c.json({ error: "Invalid project ID format" }, 400);
+    }
+    if (!deps.sessionTitleService) {
+      return c.json(
+        {
+          error: "Session title generation is not configured",
+          code: "not_configured",
+        },
+        503,
+      );
+    }
+
+    try {
+      const title = await deps.sessionTitleService.generateTitleManually(
+        sessionId,
+        projectId,
+      );
+      return c.json({ title });
+    } catch (error) {
+      if (error instanceof ManualSessionTitleError) {
+        const body = { error: error.message, code: error.code };
+        switch (error.code) {
+          case "not_configured":
+          case "service_stopped":
+            return c.json(body, 503);
+          case "already_in_flight":
+            return c.json(body, 409);
+          case "session_not_found":
+            return c.json(body, 404);
+          case "insufficient_context":
+            return c.json(body, 422);
+          case "model_failed":
+            return c.json(body, 502);
+        }
+      }
+
+      getLogger().warn(
+        { err: error, sessionId, projectId },
+        "Failed to generate session title",
+      );
+      return c.json({ error: "Failed to generate session title" }, 500);
+    }
+  });
+
+  // PUT /api/sessions/:sessionId/metadata - Update session metadata (title, archived, pinned)
   routes.put("/sessions/:sessionId/metadata", async (c) => {
     const sessionId = c.req.param("sessionId");
 

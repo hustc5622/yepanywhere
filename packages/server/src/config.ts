@@ -61,7 +61,7 @@ export interface Config {
   codexSessionsDir: string;
   /** Kimi sessions directory (~/.kimi-code/sessions) */
   kimiSessionsDir: string;
-  /** AI title generation for completed first-turn sessions. */
+  /** User-triggered AI session title generation. */
   sessionTitleGeneration: SessionTitleGenerationConfig;
   /** Whether to run the local Codex CLI bridge for `codex --remote ws://...`. */
   codexBridgeEnabled: boolean;
@@ -207,14 +207,6 @@ export interface SessionTitleGenerationConfig {
   retryBaseDelayMs: number;
   /** Upper bound for retry backoff and Retry-After delays. */
   retryMaxDelayMs: number;
-  /** How far back startup title recovery may inspect sessions. */
-  startupBackfillWindowMs: number;
-  /** Maximum sessions considered for title recovery per startup. */
-  startupBackfillLimit: number;
-  /** Maximum concurrent startup title recovery workers. */
-  startupBackfillConcurrency: number;
-  /** Maximum recent projects whose session indexes are inspected per startup. */
-  startupBackfillMaxProjects: number;
 }
 
 /**
@@ -348,7 +340,7 @@ export function loadConfig(): Config {
     enabled: sessionTitleGenerationRequested && Boolean(sessionTitleApiKey),
     apiBase: sessionTitleApiBase,
     apiKey: sessionTitleApiKey,
-    model: process.env.SESSION_TITLE_MODEL ?? "deepseek-v4-pro",
+    model: process.env.SESSION_TITLE_MODEL ?? "deepseek-v4-flash",
     subModule:
       process.env.SESSION_TITLE_SUB_MODULE ??
       process.env.LLM_SUB_MODULE ??
@@ -368,25 +360,6 @@ export function loadConfig(): Config {
     retryMaxDelayMs: Math.max(
       0,
       parseIntOrDefault(process.env.SESSION_TITLE_RETRY_MAX_DELAY_MS, 60000),
-    ),
-    startupBackfillWindowMs: Math.max(
-      0,
-      parseIntOrDefault(
-        process.env.SESSION_TITLE_BACKFILL_WINDOW_MS,
-        7 * 24 * 60 * 60 * 1000,
-      ),
-    ),
-    startupBackfillLimit: Math.max(
-      0,
-      parseIntOrDefault(process.env.SESSION_TITLE_BACKFILL_LIMIT, 25),
-    ),
-    startupBackfillConcurrency: Math.max(
-      1,
-      parseIntOrDefault(process.env.SESSION_TITLE_BACKFILL_CONCURRENCY, 2),
-    ),
-    startupBackfillMaxProjects: Math.max(
-      1,
-      parseIntOrDefault(process.env.SESSION_TITLE_BACKFILL_MAX_PROJECTS, 20),
     ),
   };
 

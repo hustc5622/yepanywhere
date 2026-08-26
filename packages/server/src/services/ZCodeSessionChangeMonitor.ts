@@ -106,7 +106,7 @@ function cursorEquals(
  * fs.watch + poll change-detection model.
  *
  * This monitor deliberately does not read messages or call a title model.
- * SessionTitleService remains the sole readiness check and AI title writer.
+ * Explicit title generation loads the session only when the user requests it.
  */
 export class ZCodeSessionChangeMonitor {
   private readonly dbPath: string;

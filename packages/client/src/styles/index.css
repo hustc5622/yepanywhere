@@ -7435,6 +7435,37 @@ a.sidebar-nav-item {
   /* Note: Don't use overflow:hidden here - it clips the dropdown menu */
 }
 
+.session-title-generation-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-yep-green) 12%, transparent);
+  color: var(--app-yep-green);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.session-title-generation-spinner {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-title-generation-spinner {
+    animation: none;
+  }
+}
+
 /* Pin indicator next to title */
 .pin-indicator-inline {
   display: inline-flex;

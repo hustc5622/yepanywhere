@@ -80,6 +80,10 @@ export interface SessionMenuProps {
   onToggleArchive: () => void | Promise<void>;
   onToggleRead?: () => void | Promise<void>;
   onRename: () => void;
+  /** Called after an explicitly generated title has been persisted. */
+  onTitleGenerated?: (title: string) => void | Promise<void>;
+  /** Reports the lifetime of the explicit title-generation request. */
+  onTitleGenerationStateChange?: (isGenerating: boolean) => void;
   /** Called after successful clone with the new session ID */
   onClone?: (newSessionId: string) => void | Promise<void>;
   /** Called to terminate the session's process */
@@ -115,6 +119,8 @@ export function SessionMenu({
   onToggleArchive,
   onToggleRead,
   onRename,
+  onTitleGenerated,
+  onTitleGenerationStateChange,
   onClone,
   onTerminate,
   onCompact,
@@ -132,6 +138,7 @@ export function SessionMenu({
   const [isTerminating, setIsTerminating] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [dropdownPosition, setDropdownPosition] = useState<{
     top: number;
     left?: number;
@@ -187,7 +194,7 @@ export function SessionMenu({
       if (useFixedPositioning && triggerRef.current) {
         const rect = triggerRef.current.getBoundingClientRect();
         const dropdownWidth = 190; // Approximate width of dropdown
-        const dropdownHeight = 224; // Approximate height of dropdown (varies by options)
+        const dropdownHeight = 260; // Approximate height of dropdown (varies by options)
         const rightPosition = window.innerWidth - rect.right;
         const margin = 8;
 
@@ -290,6 +297,31 @@ export function SessionMenu({
     }
   };
 
+  const handleGenerateTitle = async () => {
+    if (isGeneratingTitle) return;
+    setIsGeneratingTitle(true);
+    onTitleGenerationStateChange?.(true);
+    setIsOpen(false);
+    setDropdownPosition(null);
+    triggerRef.current?.blur();
+    try {
+      const result = await api.generateSessionTitle(projectId, sessionId);
+      await onTitleGenerated?.(result.title);
+      showToast(t("sessionTitleGenerated"), "success");
+    } catch (error) {
+      console.error("Failed to generate session title:", error);
+      showToast(
+        error instanceof Error
+          ? error.message
+          : t("sessionTitleGenerationFailed"),
+        "error",
+      );
+    } finally {
+      setIsGeneratingTitle(false);
+      onTitleGenerationStateChange?.(false);
+    }
+  };
+
   const handleShare = async () => {
     if (isSharing || !onShare) return;
     setIsSharing(true);
@@ -364,6 +396,28 @@ export function SessionMenu({
           <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
         </svg>
         {t("sessionMenuRename")}
+      </button>
+      <button
+        type="button"
+        onClick={handleGenerateTitle}
+        disabled={isGeneratingTitle}
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          aria-hidden="true"
+        >
+          <path d="M12 3l1.4 3.6L17 8l-3.6 1.4L12 13l-1.4-3.6L7 8l3.6-1.4L12 3z" />
+          <path d="M19 13l.9 2.1L22 16l-2.1.9L19 19l-.9-2.1L16 16l2.1-.9L19 13z" />
+          <path d="M5 14l1.1 2.9L9 18l-2.9 1.1L5 22l-1.1-2.9L1 18l2.9-1.1L5 14z" />
+        </svg>
+        {isGeneratingTitle
+          ? t("sessionMenuGeneratingTitle")
+          : t("sessionMenuGenerateTitle")}
       </button>
       {onClone && getProvider(provider).capabilities.supportsCloning && (
         <button type="button" onClick={handleClone} disabled={isCloning}>

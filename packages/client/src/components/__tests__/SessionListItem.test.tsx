@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { toUrlProjectId } from "@yep-anywhere/shared";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -7,12 +13,16 @@ import { ToastProvider } from "../../contexts/ToastContext";
 import { I18nProvider } from "../../i18n";
 import { SessionListItem } from "../SessionListItem";
 
-const { mockUpdateSessionMetadata } = vi.hoisted(() => ({
-  mockUpdateSessionMetadata: vi.fn(),
-}));
+const { mockGenerateSessionTitle, mockUpdateSessionMetadata } = vi.hoisted(
+  () => ({
+    mockGenerateSessionTitle: vi.fn(),
+    mockUpdateSessionMetadata: vi.fn(),
+  }),
+);
 
 vi.mock("../../api/client", () => ({
   api: {
+    generateSessionTitle: mockGenerateSessionTitle,
     updateSessionMetadata: mockUpdateSessionMetadata,
   },
 }));
@@ -148,6 +158,37 @@ describe("SessionListItem actions", () => {
         `Link: ${window.location.origin}/projects/${projectId}/sessions/session-1`,
       ].join("\n"),
     );
+  });
+
+  it("generates a title only after the session menu action is clicked", async () => {
+    let resolveTitle!: (value: { title: string }) => void;
+    mockGenerateSessionTitle.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveTitle = resolve;
+        }),
+    );
+    renderItem();
+
+    expect(mockGenerateSessionTitle).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /options/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate title" }));
+
+    expect(
+      await screen.findByRole("status", { name: "Generating title..." }),
+    ).toBeTruthy();
+    await act(async () => {
+      resolveTitle({ title: "Generated session title" });
+    });
+
+    await waitFor(() => {
+      expect(mockGenerateSessionTitle).toHaveBeenCalledWith(
+        "project-1",
+        "session-1",
+      );
+      expect(screen.getByText("Generated session title")).toBeTruthy();
+      expect(screen.queryByRole("status")).toBeNull();
+    });
   });
 
   it("shows effective usage and compact count in compact mode", () => {

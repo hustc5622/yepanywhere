@@ -12,6 +12,7 @@ import {
   createSessionsRoutes,
 } from "../../src/routes/sessions.js";
 import type { RuntimeProcessSnapshot } from "../../src/runtime/types.js";
+import { ManualSessionTitleError } from "../../src/services/SessionTitleService.js";
 import type { CodexSessionReader } from "../../src/sessions/codex-reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
 import type { Project, SessionSummary } from "../../src/supervisor/types.js";
@@ -217,6 +218,56 @@ function createSummary(): SessionSummary {
 }
 
 describe("Sessions metadata route", () => {
+  it("generates a title only through the explicit project session endpoint", async () => {
+    const projectId = encodeProjectId("/tmp/project");
+    const generateTitleManually = vi.fn(async () => "Generated title");
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      scanner: {} as SessionsDeps["scanner"],
+      readerFactory: vi.fn() as unknown as SessionsDeps["readerFactory"],
+      sessionTitleService: { generateTitleManually },
+    });
+
+    expect(generateTitleManually).not.toHaveBeenCalled();
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/session-1/title`,
+      { method: "POST" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ title: "Generated title" });
+    expect(generateTitleManually).toHaveBeenCalledWith("session-1", projectId);
+  });
+
+  it("returns a useful status when manual title generation cannot run", async () => {
+    const projectId = encodeProjectId("/tmp/project");
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      scanner: {} as SessionsDeps["scanner"],
+      readerFactory: vi.fn() as unknown as SessionsDeps["readerFactory"],
+      sessionTitleService: {
+        generateTitleManually: vi.fn(async () => {
+          throw new ManualSessionTitleError(
+            "insufficient_context",
+            "The session needs both user input and AI output before a title can be generated",
+          );
+        }),
+      },
+    });
+
+    const response = await routes.request(
+      `/projects/${projectId}/sessions/session-1/title`,
+      { method: "POST" },
+    );
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      error:
+        "The session needs both user input and AI output before a title can be generated",
+      code: "insufficient_context",
+    });
+  });
+
   it("accepts the pin API while persisting the existing metadata bit", async () => {
     const updateMetadata = vi.fn(async () => undefined);
     const eventBus = new EventBus();

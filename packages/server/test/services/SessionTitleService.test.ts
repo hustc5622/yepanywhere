@@ -104,7 +104,7 @@ describe("SessionTitleService", () => {
     );
   });
 
-  it("uses DeepSeek v4 Pro by default", async () => {
+  it("uses DeepSeek v4 Flash by default", async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(
         JSON.stringify({
@@ -125,7 +125,190 @@ describe("SessionTitleService", () => {
     await service.generateForSession("session-1", "project-1" as UrlProjectId);
 
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(body.model).toBe("deepseek-v4-pro");
+    expect(body.model).toBe("deepseek-v4-flash");
+  });
+
+  it("manually generates from all user and assistant text while excluding tool traffic", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            { message: { content: '{"title":"手动生成完整会话标题"}' } },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    await metadataService.setTitle("session-1", "Old custom title");
+    const events: unknown[] = [];
+    eventBus.subscribe((event) => events.push(event));
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      retryMaxAttempts: 1,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          provider: "codex",
+          messageCount: 7,
+          messages: [
+            {
+              type: "user",
+              message: {
+                role: "user",
+                content: "请修改会话标题生成逻辑",
+              },
+            },
+            {
+              type: "assistant",
+              codexMessagePhase: "commentary",
+              message: {
+                role: "assistant",
+                content: "我先确认现有自动触发链路。",
+              },
+            },
+            {
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: [
+                  { type: "thinking", thinking: "需要改成显式 API 触发。" },
+                  {
+                    type: "tool_use",
+                    name: "Read",
+                    input: { path: "TOOL_ARGUMENT_MUST_NOT_LEAK" },
+                  },
+                  { type: "text", text: "阶段结论是移除启动回填。" },
+                ],
+              },
+            },
+            {
+              type: "user",
+              message: {
+                role: "user",
+                content: [
+                  {
+                    type: "tool_result",
+                    content: "TOOL_RESULT_MUST_NOT_LEAK",
+                  },
+                ],
+              },
+            },
+            {
+              type: "user",
+              message: {
+                role: "user",
+                content: "默认使用 DeepSeek Flash。",
+              },
+            },
+            {
+              type: "assistant",
+              codexMessagePhase: "final_answer",
+              message: {
+                role: "assistant",
+                content: "已完成手动标题入口。",
+              },
+            },
+          ],
+        }),
+    });
+
+    const title = await service.generateTitleManually(
+      "session-1",
+      "project-1" as UrlProjectId,
+    );
+
+    expect(title).toBe("手动生成完整会话标题");
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const prompt = body.messages[1].content as string;
+    expect(prompt).toContain("请修改会话标题生成逻辑");
+    expect(prompt).toContain("我先确认现有自动触发链路");
+    expect(prompt).toContain("需要改成显式 API 触发");
+    expect(prompt).toContain("阶段结论是移除启动回填");
+    expect(prompt).toContain("默认使用 DeepSeek Flash");
+    expect(prompt).toContain("已完成手动标题入口");
+    expect(prompt).not.toContain("TOOL_ARGUMENT_MUST_NOT_LEAK");
+    expect(prompt).not.toContain("TOOL_RESULT_MUST_NOT_LEAK");
+    expect(metadataService.getMetadata("session-1")).toEqual({
+      aiTitle: "手动生成完整会话标题",
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "session-metadata-changed",
+        sessionId: "session-1",
+        title: "",
+        aiTitle: "手动生成完整会话标题",
+      }),
+    );
+  });
+
+  it("uses the session prompt summary when Codex history retains only tool-result user messages", async () => {
+    const originalPrompt =
+      "把最近会话的收藏能力改成项目内置顶，并保留自动归档保护";
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"title":"项目内置顶会话"}' } }],
+        }),
+        { status: 200 },
+      );
+    });
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      retryMaxAttempts: 1,
+      fetchImpl: fetchMock,
+      loadSession: async () =>
+        createSession({
+          provider: "codex",
+          title: `${originalPrompt}...`,
+          fullTitle: originalPrompt,
+          messageCount: 4,
+          messages: [
+            {
+              type: "user",
+              message: {
+                role: "user",
+                content: [
+                  {
+                    type: "tool_result",
+                    content: "TOOL_RESULT_MUST_NOT_LEAK",
+                  },
+                ],
+              },
+            },
+            {
+              type: "assistant",
+              codexMessagePhase: "commentary",
+              message: {
+                role: "assistant",
+                content: "已将旧收藏状态兼容为置顶状态。",
+              },
+            },
+            {
+              type: "assistant",
+              codexMessagePhase: "final_answer",
+              message: {
+                role: "assistant",
+                content: "置顶会话会在所属项目内优先展示。",
+              },
+            },
+          ],
+        }),
+    });
+
+    await expect(
+      service.generateTitleManually("session-1", "project-1" as UrlProjectId),
+    ).resolves.toBe("项目内置顶会话");
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const prompt = body.messages[1].content as string;
+    expect(prompt).toContain(originalPrompt);
+    expect(prompt).toContain("已将旧收藏状态兼容为置顶状态");
+    expect(prompt).toContain("置顶会话会在所属项目内优先展示");
+    expect(prompt).not.toContain("TOOL_RESULT_MUST_NOT_LEAK");
   });
 
   it("accepts a JSON object wrapped in a bare or JSON code fence", async () => {

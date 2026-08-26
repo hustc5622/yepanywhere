@@ -25,6 +25,7 @@ import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
 import { SessionSearchBar } from "../components/SessionSearchBar";
+import { SessionTitleGenerationStatus } from "../components/SessionTitleGenerationStatus";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
 import { AgentContentProvider } from "../contexts/AgentContentContext";
@@ -672,6 +673,7 @@ function SessionPageContent({
   const [localHasUnread, setLocalHasUnread] = useState<boolean | undefined>(
     undefined,
   );
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
 
   // Reset local metadata state when sessionId changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally reset on sessionId change
@@ -680,6 +682,7 @@ function SessionPageContent({
     setLocalIsArchived(undefined);
     setLocalIsPinned(undefined);
     setLocalHasUnread(undefined);
+    setIsGeneratingTitle(false);
   }, [sessionId]);
 
   // Record session visit for recents tracking
@@ -1986,6 +1989,7 @@ function SessionPageContent({
                       triggerRef={titleButtonRef}
                       basePath={basePath}
                     />
+                    {isGeneratingTitle && <SessionTitleGenerationStatus />}
                   </>
                 )}
                 {!loading && isArchived && (
@@ -2011,6 +2015,10 @@ function SessionPageContent({
                     onToggleArchive={handleToggleArchive}
                     onToggleRead={handleToggleRead}
                     onRename={handleStartEditingTitle}
+                    onTitleGenerated={(generatedTitle) => {
+                      setLocalCustomTitle(generatedTitle);
+                    }}
+                    onTitleGenerationStateChange={setIsGeneratingTitle}
                     onClone={(newSessionId) => {
                       navigate(
                         `${basePath}/projects/${projectId}/sessions/${newSessionId}`,

@@ -197,6 +197,24 @@ export class SessionMetadataService {
   }
 
   /**
+   * Replace the visible title with an explicitly requested AI title.
+   *
+   * A custom title normally wins display precedence over `aiTitle`. Clearing it
+   * in the same persisted update ensures that clicking "Generate title" has an
+   * immediate, deterministic visible result rather than silently writing a
+   * hidden title underneath an older rename.
+   */
+  async setGeneratedTitle(sessionId: string, title: string): Promise<void> {
+    const trimmedTitle = title.trim();
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      customTitle: undefined,
+      aiTitle: trimmedTitle || undefined,
+    }));
+    await this.save();
+  }
+
+  /**
    * Set the archived status for a session.
    */
   async setArchived(sessionId: string, archived: boolean): Promise<void> {

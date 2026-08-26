@@ -135,8 +135,8 @@ AI session title deploy config:
   YEP_LLM_GATEWAYS                 Extra Pi LLM gateway channels; referenced key variables
                                    are copied into the server LaunchAgent
   YEP_LLM_GATEWAY_MODELS           Comma-separated Pi picker model prefixes; empty shows all
-  SESSION_TITLE_MODEL              Title model (default: deepseek-v4-pro)
-  SESSION_TITLE_GENERATION=false   Disable title generation
+  SESSION_TITLE_MODEL              Title model (default: deepseek-v4-flash)
+  SESSION_TITLE_GENERATION=false   Disable manual title generation
   SESSION_TITLE_TIMEOUT_MS         Title request timeout in milliseconds
   YEP_SYNC_SESSION_TITLE_LAUNCHAGENT=false
                                     Disable automatic server LaunchAgent title env sync

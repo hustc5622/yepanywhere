@@ -23,6 +23,7 @@ import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { PinIcon } from "./PinIcon";
 import { ProviderBadge } from "./ProviderBadge";
 import { SessionMenu } from "./SessionMenu";
+import { SessionTitleGenerationStatus } from "./SessionTitleGenerationStatus";
 import { SessionStatusBadge } from "./StatusBadge";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { TokenUsageBadge } from "./TokenUsageBadge";
@@ -263,6 +264,7 @@ export function SessionListItem({
   const [isEditing, setIsEditing] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [localTitle, setLocalTitle] = useState<string | undefined>(undefined);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const isSavingRef = useRef(false);
@@ -543,6 +545,7 @@ export function SessionListItem({
                 {isPinned && <PinIcon size={12} className="session-pin-icon" />}
                 {isNewSession && <ThinkingIndicator />}
                 {displayTitle}
+                {isGeneratingTitle && <SessionTitleGenerationStatus />}
                 {hasDraft && <span className="session-draft-badge">Draft</span>}
                 {isArchived && (
                   <span className="session-archived-badge">Archived</span>
@@ -646,6 +649,7 @@ export function SessionListItem({
                   <span className="session-list-item__title-text">
                     {displayTitle}
                   </span>
+                  {isGeneratingTitle && <SessionTitleGenerationStatus />}
                 </span>
                 <span className="session-list-item__meta session-list-item__meta--compact">
                   {showProjectName && projectName && (
@@ -715,6 +719,11 @@ export function SessionListItem({
             setRenameValue(displayTitle);
             setIsEditing(true);
           }}
+          onTitleGenerated={(generatedTitle) => {
+            setLocalTitle(generatedTitle);
+            onRename?.();
+          }}
+          onTitleGenerationStateChange={setIsGeneratingTitle}
           onClone={(newSessionId) => {
             navigate(
               `${basePath}/projects/${projectId}/sessions/${newSessionId}`,

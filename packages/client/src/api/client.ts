@@ -324,6 +324,10 @@ export interface SessionMetadataUpdateResponse {
   };
 }
 
+export interface GenerateSessionTitleResponse {
+  title: string;
+}
+
 export interface ApiError extends Error {
   status: number;
   code?: string;
@@ -1414,6 +1418,12 @@ export const api = {
         method: "PUT",
         body: JSON.stringify(updates),
       },
+    ),
+
+  generateSessionTitle: (projectId: string, sessionId: string) =>
+    fetchJSON<GenerateSessionTitleResponse>(
+      `/projects/${projectId}/sessions/${sessionId}/title`,
+      { method: "POST" },
     ),
 
   getArchivedSessions: () =>

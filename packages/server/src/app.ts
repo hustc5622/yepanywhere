@@ -2,10 +2,7 @@ import { stat } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import type { HttpBindings } from "@hono/node-server";
 import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
-import {
-  type RemoteExecutorConfig,
-  isSlashCommandSession,
-} from "@yep-anywhere/shared";
+import type { RemoteExecutorConfig } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import { compress } from "hono/compress";
 import {
@@ -254,7 +251,7 @@ export interface AppOptions {
   feishuOperationStore?: FeishuOperationStore;
   /** Adapter-wide readiness, including persistence and recovery. */
   feishuChannelReady?: () => boolean;
-  /** AI title generation settings. */
+  /** User-triggered AI title generation settings. */
   sessionTitleGeneration?: SessionTitleGenerationConfig;
   /** If non-empty, only these provider names are exposed via the API. */
   enabledProviders?: string[];
@@ -841,124 +838,16 @@ export function createApp(options: AppOptions): AppResult {
       })
     : undefined;
 
+  let sessionTitleService: SessionTitleService | undefined;
   if (
     options.eventBus &&
     options.sessionMetadataService &&
     options.sessionTitleGeneration?.enabled
   ) {
-    const sessionTitleService = new SessionTitleService({
+    sessionTitleService = new SessionTitleService({
       eventBus: options.eventBus,
       metadataService: options.sessionMetadataService,
       ...options.sessionTitleGeneration,
-      scanRecentSessions: async ({ updatedAfterMs, limit, maxProjects }) => {
-        const projects = (await scanner.listProjects())
-          .filter((project) => {
-            const lastActivityMs = new Date(
-              project.lastActivity ?? "",
-            ).getTime();
-            return (
-              Number.isFinite(lastActivityMs) &&
-              lastActivityMs >= updatedAfterMs
-            );
-          })
-          .sort(
-            (a, b) =>
-              new Date(b.lastActivity ?? "").getTime() -
-              new Date(a.lastActivity ?? "").getTime(),
-          )
-          .slice(0, maxProjects);
-        const providerCatalog = await buildProviderProjectCatalog({
-          projects,
-          codexScanner,
-          geminiScanner,
-          piScanner,
-          kimiScanner,
-        });
-        const candidates: Array<{
-          sessionId: string;
-          projectId: SessionSummary["projectId"];
-          updatedAt: string;
-          messageCount: number;
-        }> = [];
-        let scannedProjects = 0;
-        let scannedSessions = 0;
-
-        for (const project of projects) {
-          scannedProjects += 1;
-          let sessions: SessionSummary[];
-          try {
-            sessions = await listSessionsAcrossProviders(
-              project,
-              {
-                readerFactory,
-                sessionMetadataService: options.sessionMetadataService,
-                sessionIndexService: options.sessionIndexService,
-                codexSessionsDir: CODEX_SESSIONS_DIR,
-                codexReaderFactory,
-                geminiSessionsDir: GEMINI_TMP_DIR,
-                geminiReaderFactory,
-                geminiHashToCwd: providerCatalog.geminiHashToCwd,
-                piSessionsDir: PI_SESSIONS_DIR,
-                zcodeDbPath: ZCODE_DB_PATH,
-                piReaderFactory,
-                zcodeReaderFactory,
-                kimiSessionsDir: KIMI_SESSIONS_DIR,
-                kimiReaderFactory,
-                // Recovery must observe files written while the server was down.
-                // A stale persisted index can show the pre-crash message count.
-                allowStaleSessionCache: false,
-              },
-              providerCatalog,
-            );
-          } catch (error) {
-            getLogger().warn(
-              { err: error, projectId: project.id, projectPath: project.path },
-              "[SessionTitleService] Skipping project after startup backfill scan failure",
-            );
-            continue;
-          }
-          scannedSessions += sessions.length;
-
-          for (const session of sessions) {
-            const updatedAtMs = new Date(session.updatedAt).getTime();
-            if (
-              !Number.isFinite(updatedAtMs) ||
-              updatedAtMs < updatedAfterMs ||
-              session.messageCount < 2
-            ) {
-              continue;
-            }
-            const metadata = options.sessionMetadataService?.getMetadata(
-              session.id,
-            );
-            if (
-              metadata?.customTitle ||
-              metadata?.aiTitle ||
-              isSlashCommandSession({
-                title: session.fullTitle ?? session.title,
-                customTitle: metadata?.customTitle ?? session.customTitle,
-              })
-            ) {
-              continue;
-            }
-
-            candidates.push({
-              sessionId: session.id,
-              projectId: session.projectId,
-              updatedAt: session.updatedAt,
-              messageCount: session.messageCount,
-            });
-            candidates.sort(
-              (a, b) =>
-                new Date(b.updatedAt).getTime() -
-                new Date(a.updatedAt).getTime(),
-            );
-            if (candidates.length > limit) candidates.pop();
-          }
-        }
-
-        return { candidates, scannedProjects, scannedSessions };
-      },
       loadSession: async (sessionId, projectId) => {
         const project = await scanner.getProject(projectId);
         if (!project) return null;
@@ -1000,23 +889,17 @@ export function createApp(options: AppOptions): AppResult {
         };
       },
     });
-    sessionTitleService.start();
+    // Do not call SessionTitleService.start(): that legacy hook subscribes to
+    // lifecycle events and performs automatic/backfill generation. The product
+    // path is intentionally manual-only through the POST route below.
     getLogger().info(
       {
         model: options.sessionTitleGeneration.model,
         apiBase: options.sessionTitleGeneration.apiBase,
         subModule: options.sessionTitleGeneration.subModule,
         retryMaxAttempts: options.sessionTitleGeneration.retryMaxAttempts,
-        startupBackfillWindowMs:
-          options.sessionTitleGeneration.startupBackfillWindowMs,
-        startupBackfillLimit:
-          options.sessionTitleGeneration.startupBackfillLimit,
-        startupBackfillConcurrency:
-          options.sessionTitleGeneration.startupBackfillConcurrency,
-        startupBackfillMaxProjects:
-          options.sessionTitleGeneration.startupBackfillMaxProjects,
       },
-      "[SessionTitleService] Enabled",
+      "[SessionTitleService] Manual title generation enabled",
     );
   }
 
@@ -1373,6 +1256,7 @@ export function createApp(options: AppOptions): AppResult {
       externalTracker,
       notificationService: options.notificationService,
       sessionMetadataService: options.sessionMetadataService,
+      sessionTitleService,
       eventBus: options.eventBus,
       codexScanner,
       codexSessionsDir: CODEX_SESSIONS_DIR,
