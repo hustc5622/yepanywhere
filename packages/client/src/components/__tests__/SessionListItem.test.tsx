@@ -62,25 +62,32 @@ describe("SessionListItem actions", () => {
     vi.clearAllMocks();
   });
 
-  it("disables archive with the runtime block reason", () => {
-    renderItem({
-      runtime: {
-        ownership: { owner: "self", processId: "proc-1" },
-        activity: "in-turn",
-        isBusy: true,
-        hasResidentWorker: false,
-        canArchive: false,
-        archiveBlockCode: "agent_in_turn",
-        archiveBlockReason: "Agent is still running",
-      },
-    });
+  it.each(["card", "compact"] as const)(
+    "disables archive with the runtime block reason in %s mode",
+    (mode) => {
+      renderItem({
+        mode,
+        onSelectForArchive: mode === "compact" ? vi.fn() : undefined,
+        runtime: {
+          ownership: { owner: "self", processId: "proc-1" },
+          activity: "in-turn",
+          isBusy: true,
+          hasResidentWorker: false,
+          canArchive: false,
+          archiveBlockCode: "agent_in_turn",
+          archiveBlockReason: "Agent is still running",
+        },
+      });
 
-    fireEvent.click(screen.getByRole("button", { name: /options/i }));
+      fireEvent.click(screen.getByRole("button", { name: /options/i }));
 
-    const archiveButton = screen.getByRole("button", { name: /archive/i });
-    expect((archiveButton as HTMLButtonElement).disabled).toBe(true);
-    expect(archiveButton.getAttribute("title")).toBe("Agent is still running");
-  });
+      const archiveButton = screen.getByRole("button", { name: /archive/i });
+      expect((archiveButton as HTMLButtonElement).disabled).toBe(true);
+      expect(archiveButton.getAttribute("title")).toBe(
+        "Agent is still running",
+      );
+    },
+  );
 
   it("shows the server archive error in a toast", async () => {
     mockUpdateSessionMetadata.mockRejectedValueOnce(
@@ -106,24 +113,30 @@ describe("SessionListItem actions", () => {
     });
   });
 
-  it("pins a session through the compatibility metadata API and applies the pinned style", async () => {
-    mockUpdateSessionMetadata.mockResolvedValueOnce({ updated: true });
-    const { container } = renderItem();
+  it.each(["card", "compact"] as const)(
+    "pins a %s session and only shows the pin icon on cards",
+    async (mode) => {
+      mockUpdateSessionMetadata.mockResolvedValueOnce({ updated: true });
+      const { container } = renderItem({ mode });
 
-    fireEvent.click(screen.getByRole("button", { name: /options/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Pin" }));
+      fireEvent.click(screen.getByRole("button", { name: /options/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Pin" }));
 
-    await waitFor(() => {
-      expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-1", {
-        pinned: true,
+      await waitFor(() => {
+        expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-1", {
+          pinned: true,
+        });
       });
-    });
-    expect(
-      container
-        .querySelector(".session-list-item")
-        ?.classList.contains("pinned"),
-    ).toBe(true);
-  });
+      expect(
+        container
+          .querySelector(".session-list-item")
+          ?.classList.contains("pinned"),
+      ).toBe(true);
+      expect(container.querySelector(".session-pin-icon") !== null).toBe(
+        mode === "card",
+      );
+    },
+  );
 
   it("copies session info from the menu", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);

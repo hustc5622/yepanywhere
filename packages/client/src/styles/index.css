@@ -12167,8 +12167,6 @@ button.context-usage-indicator--button:focus-visible {
 .session-list-item--compact.pinned {
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--app-yep-green) 9%, transparent);
-  box-shadow: inset 3px 0 0
-    color-mix(in srgb, var(--app-yep-green) 72%, transparent);
 }
 
 .session-list-item--compact.pinned .session-list-item__link:hover,
@@ -12186,7 +12184,7 @@ button.context-usage-indicator--button:focus-visible {
 
 .session-list-item--compact .session-list-item__title-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-2);
   flex: 1;
   min-width: 0;
@@ -12196,13 +12194,11 @@ button.context-usage-indicator--button:focus-visible {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  display: block;
+  text-overflow: ellipsis;
   font-size: var(--font-size-sm);
   line-height: 1.3;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .session-list-item--compact .session-list-item__meta--compact {

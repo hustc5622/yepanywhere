@@ -84,10 +84,12 @@ interface SessionListItemProps {
   isArchived?: boolean;
   onTogglePin?: () => void;
   onToggleArchive?: () => void;
+  /** Let the sidebar enter archive selection instead of archiving immediately. */
+  onSelectForArchive?: () => void;
   onToggleRead?: () => void;
   onRename?: () => void;
 
-  // Selection (for All Sessions page)
+  // Selection (for session lists and the sidebar)
   isCurrent?: boolean;
   isSelected?: boolean;
   isSelectionMode?: boolean;
@@ -231,6 +233,7 @@ export function SessionListItem({
   isArchived: isArchivedProp,
   onTogglePin,
   onToggleArchive,
+  onSelectForArchive,
   onToggleRead,
   onRename,
   // Selection
@@ -642,9 +645,6 @@ export function SessionListItem({
             <>
               <span className="session-list-item__compact-content">
                 <span className="session-list-item__title-row">
-                  {isPinned && (
-                    <PinIcon size={11} className="session-pin-icon" />
-                  )}
                   {isNewSession && <ThinkingIndicator />}
                   <span className="session-list-item__title-text">
                     {displayTitle}
@@ -701,7 +701,7 @@ export function SessionListItem({
       )}
 
       {/* Only show menu when provider is available (required for clone) */}
-      {provider && (
+      {provider && !(mode === "compact" && isSelectionMode) && (
         <SessionMenu
           sessionId={sessionId}
           projectId={projectId}
@@ -714,6 +714,7 @@ export function SessionListItem({
           archiveBlockReason={archiveBlockReason}
           onTogglePin={handleTogglePin}
           onToggleArchive={handleToggleArchive}
+          onSelectForArchive={onSelectForArchive}
           onToggleRead={handleToggleRead}
           onRename={() => {
             setRenameValue(displayTitle);

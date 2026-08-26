@@ -123,9 +123,9 @@ function groupSessionsByProject(
 
   const groups = Array.from(groupsByProject.values());
 
-  // Surface the freshest session at the top of each collapsed group. Group
-  // order itself stays in hook (insertion) order so an active session's project
-  // does not jump under the pointer during high-frequency live updates.
+  // Keep pins first, then sort each project's sessions by activity. Group order
+  // itself stays in hook (insertion) order so an active session's project does
+  // not jump under the pointer during high-frequency live updates.
   for (const group of groups) {
     group.sessions.sort(compareSessionsByUpdatedAtDesc);
   }
@@ -233,6 +233,7 @@ export function Sidebar({
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [isBulkArchivePending, setIsBulkArchivePending] = useState(false);
 
   const refetchSessionLists = useCallback(async () => {
@@ -418,8 +419,6 @@ export function Sidebar({
     [selectedSessionIds, sidebarSessionsById],
   );
 
-  const isSelectionMode = selectedSessionIds.size > 0;
-
   useEffect(() => {
     setSelectedSessionIds((current) => {
       let changed = false;
@@ -454,6 +453,7 @@ export function Sidebar({
 
   const handleClearSelection = useCallback(() => {
     setSelectedSessionIds(new Set());
+    setIsSelectionMode(false);
   }, []);
 
   const handleBulkArchiveSelected = useCallback(async () => {
@@ -633,10 +633,14 @@ export function Sidebar({
       compactEvents={session.compactEvents}
       hasDraft={drafts.has(session.id)}
       isSelected={selectedSessionIds.has(session.id)}
-      isSelectionMode={isSelectionMode && !isDesktop}
-      onSelect={handleSelectSession}
+      isSelectionMode={isSelectionMode}
+      onSelect={isSelectionMode ? handleSelectSession : undefined}
+      onSelectForArchive={() => {
+        setIsSelectionMode(true);
+        handleSelectSession(session.id, true);
+      }}
       onNavigate={() => {
-        if (isSelectionMode && !isDesktop) {
+        if (isSelectionMode) {
           handleSelectSession(session.id, !selectedSessionIds.has(session.id));
           return;
         }
@@ -649,11 +653,6 @@ export function Sidebar({
     <div className="sidebar-project-groups">
       {groups.map((group) => {
         const isExpanded = expandedProjectGroups.has(group.key);
-        // Pins remain visible in a collapsed project; expanding reveals the
-        // rest of the already pin-first ordered session list.
-        const visibleSessions = isExpanded
-          ? group.sessions
-          : group.sessions.filter((session) => session.isStarred);
         const isCurrentGroup = group.sessions.some(
           (session) => session.id === currentSessionId,
         );
@@ -755,9 +754,9 @@ export function Sidebar({
                 </svg>
               </Link>
             </div>
-            {visibleSessions.length > 0 && (
+            {isExpanded && (
               <ul className="sidebar-session-list sidebar-project-session-list">
-                {visibleSessions.map((session) =>
+                {group.sessions.map((session) =>
                   renderSessionListItem(session, false),
                 )}
               </ul>
@@ -975,8 +974,8 @@ export function Sidebar({
                   className="sidebar-bulk-toolbar__icon-button"
                   onClick={handleClearSelection}
                   disabled={isBulkArchivePending}
-                  aria-label={t("bulkClearSelection")}
-                  title={t("bulkClearSelection")}
+                  aria-label={t("sidebarCancelArchiveSelection")}
+                  title={t("sidebarCancelArchiveSelection")}
                 >
                   <svg
                     width="16"

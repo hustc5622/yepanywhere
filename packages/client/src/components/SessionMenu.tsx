@@ -78,6 +78,8 @@ export interface SessionMenuProps {
   archiveBlockReason?: string;
   onTogglePin: () => void | Promise<void>;
   onToggleArchive: () => void | Promise<void>;
+  /** Replace direct archiving with a parent-controlled selection flow. */
+  onSelectForArchive?: () => void;
   onToggleRead?: () => void | Promise<void>;
   onRename: () => void;
   /** Called after an explicitly generated title has been persisted. */
@@ -117,6 +119,7 @@ export function SessionMenu({
   archiveBlockReason,
   onTogglePin,
   onToggleArchive,
+  onSelectForArchive,
   onToggleRead,
   onRename,
   onTitleGenerated,
@@ -493,7 +496,13 @@ export function SessionMenu({
       )}
       <button
         type="button"
-        onClick={() => handleAction(onToggleArchive)}
+        onClick={() =>
+          handleAction(
+            !isArchived && onSelectForArchive
+              ? onSelectForArchive
+              : onToggleArchive,
+          )
+        }
         disabled={!isArchived && canArchive === false}
         title={
           !isArchived && canArchive === false ? archiveBlockReason : undefined
@@ -512,7 +521,11 @@ export function SessionMenu({
           <rect x="1" y="3" width="22" height="5" />
           <line x1="10" y1="12" x2="14" y2="12" />
         </svg>
-        {isArchived ? t("sessionMenuUnarchive") : t("sessionMenuArchive")}
+        {isArchived
+          ? t("sessionMenuUnarchive")
+          : onSelectForArchive
+            ? t("sessionMenuSelectForArchive")
+            : t("sessionMenuArchive")}
       </button>
       {onToggleRead && (
         <button type="button" onClick={() => handleAction(onToggleRead)}>

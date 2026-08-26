@@ -98,6 +98,19 @@ function projectNameOrder(container: HTMLElement): string[] {
   );
 }
 
+function sessionTitleOrder(container: HTMLElement): string[] {
+  return Array.from(
+    container.querySelectorAll(".session-list-item__title-text"),
+    (node) => node.textContent ?? "",
+  );
+}
+
+function enterArchiveSelection(title: string) {
+  const row = screen.getByText(title).closest("li") as HTMLElement;
+  fireEvent.click(within(row).getByRole("button", { name: /options/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Select to archive…" }));
+}
+
 describe("Sidebar recent session browsing", () => {
   const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(
     globalThis,
@@ -169,7 +182,7 @@ describe("Sidebar recent session browsing", () => {
     expect(onToggleExpanded).toHaveBeenCalledTimes(1);
   });
 
-  it("places a pinned session first in its project with a distinct background", async () => {
+  it("collapses pinned sessions with their project and keeps pins first when expanded", () => {
     const pinnedSession = createSession({
       id: "pinned-session",
       title: "Pinned Session",
@@ -183,23 +196,18 @@ describe("Sidebar recent session browsing", () => {
     });
 
     const { container } = renderSidebar([newerSession, pinnedSession]);
+    const projectToggle = screen.getByRole("button", { name: /Project 1/i });
 
-    await waitFor(() =>
-      expect(screen.getByText("Pinned Session")).toBeTruthy(),
-    );
+    expect(projectToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Pinned Session")).toBeNull();
     expect(screen.queryByText("Newer Session")).toBeNull();
 
-    fireEvent.click(
-      container.querySelector(".sidebar-project-toggle") as HTMLButtonElement,
-    );
+    fireEvent.click(projectToggle);
 
-    const selectLabels = Array.from(
-      container.querySelectorAll('[aria-label^="Select "]'),
-      (node) => node.getAttribute("aria-label"),
-    );
-    expect(selectLabels).toEqual([
-      "Select Pinned Session",
-      "Select Newer Session",
+    expect(projectToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(sessionTitleOrder(container)).toEqual([
+      "Pinned Session",
+      "Newer Session",
     ]);
     expect(
       screen
@@ -207,6 +215,7 @@ describe("Sidebar recent session browsing", () => {
         .closest("li")
         ?.classList.contains("pinned"),
     ).toBe(true);
+    expect(container.querySelector(".session-pin-icon")).toBeNull();
     expect(screen.queryByRole("button", { name: /Starred/i })).toBeNull();
     expect(mockUseGlobalSessions).toHaveBeenCalled();
     expect(
@@ -214,6 +223,19 @@ describe("Sidebar recent session browsing", () => {
         ([options]) => options?.includePinned === true && !options?.starred,
       ),
     ).toBe(true);
+
+    fireEvent.click(projectToggle);
+
+    expect(projectToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Pinned Session")).toBeNull();
+    expect(screen.queryByText("Newer Session")).toBeNull();
+
+    fireEvent.click(projectToggle);
+
+    expect(sessionTitleOrder(container)).toEqual([
+      "Pinned Session",
+      "Newer Session",
+    ]);
   });
 
   it("moves the project Git summary out of the crowded project title", () => {
@@ -335,102 +357,149 @@ describe("Sidebar recent session browsing", () => {
       currentSessionId: "session-older",
     });
 
-    const selectLabels = Array.from(
-      container.querySelectorAll('[aria-label^="Select "]'),
-      (node) => node.getAttribute("aria-label"),
-    );
-
-    expect(selectLabels).toEqual([
-      "Select Newer Session",
-      "Select Older Session",
+    expect(sessionTitleOrder(container)).toEqual([
+      "Newer Session",
+      "Older Session",
     ]);
   });
 
-  it("does not reopen the current session group after the user collapses it", async () => {
-    const currentSession = createSession({
-      id: "session-a",
-      title: "Session A",
-      projectId: "project-a",
-      projectName: "Project A",
-      updatedAt: "2026-01-01T00:01:00.000Z",
+  it.each([false, true])(
+    "does not reopen the current session group after the user collapses it (isStarred=%s)",
+    async (isStarred) => {
+      const currentSession = createSession({
+        id: "session-a",
+        title: "Session A",
+        projectId: "project-a",
+        projectName: "Project A",
+        updatedAt: "2026-01-01T00:01:00.000Z",
+        isStarred,
+      });
+
+      const { rerender } = renderSidebar([currentSession], {
+        currentSessionId: "session-a",
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("Session A")).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /Project A/i }));
+      expect(screen.queryByText("Session A")).toBeNull();
+
+      mockUseGlobalSessions.mockImplementation(() => ({
+        sessions: [
+          {
+            ...currentSession,
+            updatedAt: "2026-01-01T00:20:00.000Z",
+          },
+        ],
+        loading: false,
+        refetch: vi.fn(),
+      }));
+
+      rerender(
+        <MemoryRouter>
+          <I18nProvider>
+            <ToastProvider>
+              <Sidebar
+                isOpen
+                onClose={vi.fn()}
+                onNavigate={vi.fn()}
+                isDesktop
+                currentSessionId="session-a"
+              />
+            </ToastProvider>
+          </I18nProvider>
+        </MemoryRouter>,
+      );
+
+      expect(screen.queryByText("Session A")).toBeNull();
+    },
+  );
+
+  it.each([true, false])(
+    "shows checkboxes only during menu-initiated archiving (isDesktop=%s)",
+    async (isDesktop) => {
+      mockUpdateSessionMetadata.mockResolvedValue({});
+      const onNavigate = vi.fn();
+
+      renderSidebar(
+        [
+          createSession({
+            id: "session-a",
+            title: "Session A",
+            projectId: "project-a",
+            projectName: "Project A",
+            updatedAt: new Date().toISOString(),
+          }),
+          createSession({
+            id: "session-b",
+            title: "Session B",
+            projectId: "project-a",
+            projectName: "Project A",
+            updatedAt: new Date(Date.now() - 60_000).toISOString(),
+          }),
+        ],
+        { currentSessionId: "session-a", isDesktop, onNavigate },
+      );
+
+      expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+      enterArchiveSelection("Session A");
+
+      expect(screen.getAllByRole("checkbox")).toHaveLength(2);
+      expect(
+        (screen.getByLabelText("Select Session A") as HTMLInputElement).checked,
+      ).toBe(true);
+      expect(mockUpdateSessionMetadata).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByText("Session B"));
+      expect(
+        (screen.getByLabelText("Select Session B") as HTMLInputElement).checked,
+      ).toBe(true);
+      expect(onNavigate).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+      await waitFor(() => {
+        expect(mockUpdateSessionMetadata).toHaveBeenCalledTimes(2);
+        expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+        expect(
+          screen.queryByRole("button", { name: "Cancel archiving" }),
+        ).toBeNull();
+      });
+      expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-a", {
+        archived: true,
+      });
+      expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-b", {
+        archived: true,
+      });
+    },
+  );
+
+  it("keeps empty selection editable until cancellation and then restores navigation", () => {
+    const onNavigate = vi.fn();
+    renderSidebar([createSession()], {
+      currentSessionId: "session-1",
+      onNavigate,
     });
 
-    const { rerender } = renderSidebar([currentSession], {
-      currentSessionId: "session-a",
-    });
+    enterArchiveSelection("Session 1");
+    fireEvent.click(screen.getByLabelText("Select Session 1"));
 
-    await waitFor(() => {
-      expect(screen.getByText("Session A")).toBeTruthy();
-    });
+    expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+    expect(screen.getByText("0 selected")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Archive" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: /Project A/i }));
-    expect(screen.queryByText("Session A")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel archiving" }));
 
-    mockUseGlobalSessions.mockImplementation(() => ({
-      sessions: [
-        {
-          ...currentSession,
-          updatedAt: "2026-01-01T00:20:00.000Z",
-        },
-      ],
-      loading: false,
-      refetch: vi.fn(),
-    }));
+    expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+    expect(screen.queryByText("0 selected")).toBeNull();
+    expect(mockUpdateSessionMetadata).not.toHaveBeenCalled();
 
-    rerender(
-      <MemoryRouter>
-        <I18nProvider>
-          <ToastProvider>
-            <Sidebar
-              isOpen
-              onClose={vi.fn()}
-              onNavigate={vi.fn()}
-              isDesktop
-              currentSessionId="session-a"
-            />
-          </ToastProvider>
-        </I18nProvider>
-      </MemoryRouter>,
-    );
-
-    expect(screen.queryByText("Session A")).toBeNull();
-  });
-
-  it("archives checked sidebar sessions in one action", async () => {
-    mockUpdateSessionMetadata.mockResolvedValue({});
-
-    renderSidebar(
-      [
-        createSession({
-          id: "session-a",
-          title: "Session A",
-          projectId: "project-a",
-          projectName: "Project A",
-          updatedAt: new Date().toISOString(),
-        }),
-        createSession({
-          id: "session-b",
-          title: "Session B",
-          projectId: "project-a",
-          projectName: "Project A",
-          updatedAt: new Date(Date.now() - 60_000).toISOString(),
-        }),
-      ],
-      { currentSessionId: "session-a" },
-    );
-
-    fireEvent.click(screen.getByLabelText("Select Session A"));
-    fireEvent.click(screen.getByLabelText("Select Session B"));
-    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
-
-    await waitFor(() => {
-      expect(mockUpdateSessionMetadata).toHaveBeenCalledTimes(2);
-    });
-    expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-a", {
-      archived: true,
-    });
-    expect(mockUpdateSessionMetadata).toHaveBeenCalledWith("session-b", {
-      archived: true,
-    });
+    fireEvent.click(screen.getByText("Session 1"));
+    expect(onNavigate).toHaveBeenCalledTimes(1);
   });
 });
