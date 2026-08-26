@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { CODEX_NOTIFICATION_CLASSIFICATIONS } from "../codex-events/classification.js";
+import { CODEX_EVENT_DELTA_METHODS } from "../codex-events/journal-retention.js";
 
 export const CODEX_BRIDGE_JOURNAL_MODES = [
   "off",
@@ -18,26 +19,10 @@ export type CodexBridgeNotificationClass =
   | "diagnostic";
 
 /**
- * Notifications whose payload is already represented by a later item/turn
- * snapshot or by the native Codex rollout. These must always stay on the wire,
- * but the production bridge journal never needs their content.
+ * Re-exported under the bridge's original name. The set itself now lives in
+ * `codex-events` so the provider journal and this one cannot drift apart.
  */
-export const CODEX_BRIDGE_DELTA_METHODS = new Set<string>([
-  "command/exec/outputDelta",
-  "item/agentMessage/delta",
-  "item/commandExecution/outputDelta",
-  "item/fileChange/outputDelta",
-  "item/fileChange/patchUpdated",
-  "item/mcpToolCall/progress",
-  "item/plan/delta",
-  "item/reasoning/summaryPartAdded",
-  "item/reasoning/summaryTextDelta",
-  "item/reasoning/textDelta",
-  "process/outputDelta",
-  "thread/realtime/outputAudio/delta",
-  "thread/realtime/transcript/delta",
-  "turn/diff/updated",
-]);
+export const CODEX_BRIDGE_DELTA_METHODS = CODEX_EVENT_DELTA_METHODS;
 
 export const CODEX_BRIDGE_TERMINAL_METHODS = new Set<string>([
   "error",

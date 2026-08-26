@@ -209,6 +209,15 @@ export interface CodexJournalGap {
 export interface JsonlCodexEventStoreOptions {
   filePath: string;
   now?: () => number;
+  /**
+   * Index for appends only, never retaining event bodies.
+   *
+   * Set this on a writer whose reads are served by a separate instance. The
+   * store then keeps per-session sequences, a bounded recent-identity window
+   * and dedupe keys instead of every envelope, and `replay` is rejected so a
+   * read path cannot silently attach to a writer.
+   */
+  appendOnly?: boolean;
   /** Called for a malformed historical line. No raw line is exposed. */
   onCorruptLine?: (details: { lineNumber: number; reason: string }) => void;
   /** Full-load read chunk size in bytes. Overridable for tests. */
@@ -271,6 +280,16 @@ const DEFAULT_ROTATE_MAX_BYTES = 256 * 1024 * 1024;
 const DEFAULT_ROTATE_KEEP_SEGMENTS = 3;
 
 /**
+ * How many recently written identity keys an append-only store remembers.
+ *
+ * After an append the file snapshot is deliberately left at its pre-append
+ * offset, so the next refresh re-reads the lines this instance just wrote and
+ * must recognise them. That window is a handful of records, never a history,
+ * so a small bound keeps the re-read idempotent without an unbounded index.
+ */
+const APPEND_ONLY_IDENTITY_WINDOW = 4096;
+
+/**
  * Optional append-only durable store. It hydrates its indexes once, serializes
  * concurrent appends, and uses the same replay contract as the in-memory
  * implementation. The payload reaching this class must already be redacted.
@@ -299,6 +318,18 @@ export class JsonlCodexEventStore implements CodexEventStore {
    */
   private readonly sessionCountsByFile = new Map<string, Map<string, number>>();
   /**
+   * Append-side index, used when `appendOnly` is set.
+   *
+   * A writer needs three things: the next sequence for a session, whether an
+   * event was already recorded, and per-file counts for prune reporting. It
+   * does not need the events themselves. Retaining them is what made a cold
+   * load of an 892 MB journal cost several GiB of resident heap in a store
+   * whose only job is to append.
+   */
+  private readonly appendSessionLastSequence = new Map<string, number>();
+  private readonly appendDedupeSequences = new Map<string, number>();
+  private readonly appendRecentIdentities = new Map<string, number>();
+  /**
    * Counts for the file currently being appended to.
    *
    * Tracked separately from `sessionCountsByFile` because rotation renames the
@@ -313,6 +344,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private lastKnownFileSize = 0;
   private lastKnownMtimeMs = 0;
   private lastKnownFileIdentity: string | null = null;
+  private readonly appendOnly: boolean;
 
   constructor(options: JsonlCodexEventStoreOptions) {
     if (!options.filePath.trim()) {
@@ -333,6 +365,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
     );
     this.onRotate = options.onRotate;
     this.onJournalGaps = options.onJournalGaps;
+    this.appendOnly = options.appendOnly ?? false;
   }
 
   async append(event: CodexEventDraft): Promise<CodexEventAppendResult> {
@@ -347,12 +380,28 @@ export class JsonlCodexEventStore implements CodexEventStore {
       if (existing) {
         return { event: structuredClone(existing), inserted: false };
       }
+      const existingSequence = this.appendOnly
+        ? this.findExistingSequence(event)
+        : undefined;
+      if (existingSequence !== undefined) {
+        return {
+          event: {
+            ...structuredClone(event),
+            persistedAtMs: event.receivedAtMs,
+            sequence: existingSequence,
+          },
+          inserted: false,
+        };
+      }
 
       const sessionEvents = this.eventsBySession.get(event.sessionId) ?? [];
+      const lastSequence = this.appendOnly
+        ? (this.appendSessionLastSequence.get(event.sessionId) ?? 0)
+        : (sessionEvents.at(-1)?.sequence ?? 0);
       const persisted: CodexEventEnvelope = {
         ...structuredClone(event),
         persistedAtMs: this.now(),
-        sequence: (sessionEvents.at(-1)?.sequence ?? 0) + 1,
+        sequence: lastSequence + 1,
       };
       await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
       await appendFile(
@@ -400,6 +449,11 @@ export class JsonlCodexEventStore implements CodexEventStore {
   async replay(
     query: CodexEventReplayQuery,
   ): Promise<readonly CodexEventEnvelope[]> {
+    if (this.appendOnly) {
+      throw new Error(
+        "Codex append-only event store cannot replay; use a reader instance",
+      );
+    }
     await this.ensureLoaded();
     return await this.withAppendLock(async () => {
       await this.refreshFromDisk();
@@ -426,6 +480,9 @@ export class JsonlCodexEventStore implements CodexEventStore {
     await this.ensureLoaded();
     return await this.withAppendLock(async () => {
       await this.refreshFromDisk();
+      if (this.appendOnly) {
+        return this.appendSessionLastSequence.get(sessionId) ?? 0;
+      }
       return this.eventsBySession.get(sessionId)?.at(-1)?.sequence ?? 0;
     });
   }
@@ -434,6 +491,11 @@ export class JsonlCodexEventStore implements CodexEventStore {
     await this.ensureLoaded();
     return await this.withAppendLock(async () => {
       await this.refreshFromDisk();
+      if (this.appendOnly) {
+        // Freshness ranking is a reader concern; an append-only store never
+        // participates in source selection.
+        return 0;
+      }
       return latestEventTimestamp(this.eventsBySession.get(sessionId));
     });
   }
@@ -666,6 +728,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
    */
   private reportJournalGaps(journalFiles: number): void {
     if (!this.onJournalGaps) return;
+    if (this.appendOnly) return;
     const gaps: CodexJournalGap[] = [];
     for (const [sessionId, events] of this.eventsBySession) {
       const firstSequence = events[0]?.sequence ?? 0;
@@ -953,6 +1016,9 @@ export class JsonlCodexEventStore implements CodexEventStore {
     this.eventsBySessionMethod.clear();
     this.eventsByIdentity.clear();
     this.eventsByDedupeKey.clear();
+    this.appendSessionLastSequence.clear();
+    this.appendDedupeSequences.clear();
+    this.appendRecentIdentities.clear();
     this.sessionCountsByFile.clear();
     this.activeFileSessionCounts = new Map();
     this.needsAppendSeparator = false;
@@ -974,6 +1040,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private findExisting(
     event: Pick<CodexEventDraft, "sessionId" | "eventId" | "dedupeKey">,
   ): CodexEventEnvelope | undefined {
+    if (this.appendOnly) return undefined;
     const byId = this.eventsByIdentity.get(
       this.identityKey(event.sessionId, event.eventId),
     );
@@ -985,7 +1052,53 @@ export class JsonlCodexEventStore implements CodexEventStore {
       : undefined;
   }
 
+  /**
+   * Sequence of an already-recorded event, when the append-side index knows it.
+   *
+   * Append-only stores keep sequences rather than envelopes, so a duplicate is
+   * reported by replaying the caller's own draft at the recorded sequence. The
+   * caller treats `inserted: false` as "already durable", which is exactly what
+   * this establishes.
+   */
+  private findExistingSequence(
+    event: Pick<CodexEventDraft, "sessionId" | "eventId" | "dedupeKey">,
+  ): number | undefined {
+    const byId = this.appendRecentIdentities.get(
+      this.identityKey(event.sessionId, event.eventId),
+    );
+    if (byId !== undefined) return byId;
+    return event.dedupeKey
+      ? this.appendDedupeSequences.get(
+          this.identityKey(event.sessionId, event.dedupeKey),
+        )
+      : undefined;
+  }
+
+  private indexForAppend(event: CodexEventEnvelope): void {
+    const previous = this.appendSessionLastSequence.get(event.sessionId) ?? 0;
+    if (event.sequence > previous) {
+      this.appendSessionLastSequence.set(event.sessionId, event.sequence);
+    }
+    const identity = this.identityKey(event.sessionId, event.eventId);
+    this.appendRecentIdentities.set(identity, event.sequence);
+    if (this.appendRecentIdentities.size > APPEND_ONLY_IDENTITY_WINDOW) {
+      // Map preserves insertion order, so the first key is the oldest.
+      const oldest = this.appendRecentIdentities.keys().next();
+      if (!oldest.done) this.appendRecentIdentities.delete(oldest.value);
+    }
+    if (event.dedupeKey) {
+      this.appendDedupeSequences.set(
+        this.identityKey(event.sessionId, event.dedupeKey),
+        event.sequence,
+      );
+    }
+  }
+
   private index(event: CodexEventEnvelope): void {
+    if (this.appendOnly) {
+      this.indexForAppend(event);
+      return;
+    }
     const events = this.eventsBySession.get(event.sessionId) ?? [];
     events.push(event);
     this.eventsBySession.set(event.sessionId, events);

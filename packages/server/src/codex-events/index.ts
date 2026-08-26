@@ -2,6 +2,8 @@ export * from "./classification.js";
 export * from "./diagnostics.js";
 export * from "./envelope.js";
 export * from "./ingress.js";
+export * from "./journal-mode.js";
+export * from "./journal-retention.js";
 export * from "./projection-cache.js";
 export * from "./redaction.js";
 export * from "./reducer.js";

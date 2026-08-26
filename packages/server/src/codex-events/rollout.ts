@@ -12,7 +12,27 @@ export interface CodexEventRolloutScope {
 }
 
 export interface CodexEventRolloutConfig {
-  /** Default is shadow: persist/reduce every event while preserving old UI. */
+  /**
+   * Default is legacy: ingest and journal every event, project once.
+   *
+   * `shadow` additionally runs the canonical projection and hashes both to
+   * compare them. That comparison cannot currently succeed. The canonical side
+   * consumes the *redacted* envelope payload while the legacy side consumes the
+   * raw notification, and redaction rewrites `path`/`movePath` to
+   * workspace-relative form, fingerprints other path-bearing keys, and scrubs
+   * absolute paths inside strings. Only `timestamp` is normalised before
+   * hashing, so any payload carrying a path diverges by construction --
+   * measured on one install as 53,649 warnings dominated by
+   * `item/commandExecution/outputDelta` (37,302) and `item/started` /
+   * `item/completed` (16,331), against just 16 for the path-free
+   * `turn/plan/updated`.
+   *
+   * So shadow was paying for a second projection and two SHA-256 hashes per
+   * event to re-report redaction, into a parity snapshot no caller reads. It
+   * stays available for whoever resumes the canonical-to-primary migration,
+   * which is the only context where the signal is worth its cost and where the
+   * comparison itself needs fixing first.
+   */
   defaultMode?: CodexEventProjectionMode;
   primarySessionIds?: readonly string[];
   primaryAccountIds?: readonly string[];
@@ -44,7 +64,7 @@ export function codexEventRolloutConfigFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): CodexEventRolloutConfig {
   return {
-    defaultMode: parseMode(env.YEP_CODEX_EVENT_SPINE_MODE) ?? "shadow",
+    defaultMode: parseMode(env.YEP_CODEX_EVENT_SPINE_MODE) ?? "legacy",
     primarySessionIds: parseCsv(env.YEP_CODEX_EVENT_SPINE_PRIMARY_SESSIONS),
     primaryAccountIds: parseCsv(env.YEP_CODEX_EVENT_SPINE_PRIMARY_ACCOUNTS),
     legacySessionIds: parseCsv(env.YEP_CODEX_EVENT_SPINE_LEGACY_SESSIONS),
@@ -76,7 +96,7 @@ export function resolveCodexEventProjectionMode(
   ) {
     return "primary";
   }
-  return config.defaultMode ?? "shadow";
+  return config.defaultMode ?? "legacy";
 }
 
 function parseMode(value: string | undefined): CodexEventProjectionMode | null {

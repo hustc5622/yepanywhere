@@ -167,13 +167,14 @@ describe("CodexBridgeService × Feishu integration", () => {
     ).toBe(false);
 
     const canonical = await eventStore.replay({ sessionId: THREAD_ID });
-    expect(canonical.map((event) => event.method)).toEqual(
-      expect.arrayContaining([
-        "item/agentMessage/delta",
-        "item/completed",
-        "turn/completed",
-      ]),
+    const journalledMethods = canonical.map((event) => event.method);
+    // Settled records are journalled; high-frequency deltas are projected and
+    // then dropped. The card assertion above already proved the delta text
+    // reached the user, so this pins retention without weakening rendering.
+    expect(journalledMethods).toEqual(
+      expect.arrayContaining(["item/completed", "turn/completed"]),
     );
+    expect(journalledMethods).not.toContain("item/agentMessage/delta");
     expect(canonical.some((event) => event.accountId === "team-bot")).toBe(
       true,
     );

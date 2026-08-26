@@ -32,6 +32,7 @@ import {
   JsonlCodexEventStore,
   classifyCodexNotification,
   codexEventRolloutConfigFromEnv,
+  resolveCodexEventJournalMode,
   resolveCodexEventProjectionMode,
 } from "../../codex-events/index.js";
 import {
@@ -1225,6 +1226,29 @@ export class CodexProvider implements AgentProvider {
   private bridgeExecution?: CodexBridgeExecutionConfig;
   private readonly eventSpineConfig: CodexEventRolloutConfig;
   private readonly eventStore: CodexEventStore;
+  /**
+   * Durable retention for the provider journal. Defaults to `lifecycle`: the
+   * always-on error/turn-health overlay and the opt-in canonical view keep
+   * every correlation-bearing record, while high-frequency deltas are
+   * projected live and then dropped instead of being written to disk.
+   */
+  private readonly eventJournalMode = resolveCodexEventJournalMode(
+    process.env.YEP_CODEX_EVENT_JOURNAL_MODE,
+  );
+  /**
+   * Retention sized against the reader's admission budget, not free disk.
+   *
+   * `selectCodexEventSource` refuses a journal whose retained bytes exceed
+   * `CODEX_EVENT_STORE_ADMISSION_BYTES` (512 MiB) and falls back to the
+   * rollout. The previous 256 MiB x 3 default could retain ~1 GiB, which put
+   * the journal permanently over that line: every canonical overlay was
+   * rejected, so the journal was being written and never read. Keeping the
+   * ceiling well under the budget is what makes the overlay reachable at all.
+   */
+  private static readonly DEFAULT_STORE_ROTATION = {
+    maxBytes: 64 * 1024 * 1024,
+    keepSegments: 2,
+  } as const;
   /** Per-source model list cache (keyed by Codex model source id). */
   private readonly modelCacheBySource = new Map<
     string,
@@ -1245,15 +1269,27 @@ export class CodexProvider implements AgentProvider {
       (this.eventSpineConfig.durableStorePath
         ? new JsonlCodexEventStore({
             filePath: this.eventSpineConfig.durableStorePath,
+            // Readers attach their own instances to this path (see
+            // createDefaultCodexTranscriptStoreSources), so the provider's
+            // store only ever appends and must not retain the journal.
+            appendOnly: true,
             onCorruptLine: ({ lineNumber, reason }) => {
               log.warn(
                 { lineNumber, reason },
                 "Skipped malformed canonical Codex event-store line",
               );
             },
-            ...(this.eventSpineConfig.storeRotation
-              ? { rotation: this.eventSpineConfig.storeRotation }
-              : {}),
+            // The production singleton passes an override object even when
+            // neither env var is set. Resolve each field here so undefined
+            // overrides cannot fall back to the store's larger generic limits.
+            rotation: {
+              maxBytes:
+                this.eventSpineConfig.storeRotation?.maxBytes ??
+                CodexProvider.DEFAULT_STORE_ROTATION.maxBytes,
+              keepSegments:
+                this.eventSpineConfig.storeRotation?.keepSegments ??
+                CodexProvider.DEFAULT_STORE_ROTATION.keepSegments,
+            },
             ...(this.eventSpineConfig.onStoreRotate
               ? { onRotate: this.eventSpineConfig.onStoreRotate }
               : {}),
@@ -2372,6 +2408,8 @@ export class CodexProvider implements AgentProvider {
     // UI can stream command output like the Codex TUI does.
     const commandOutputBuffers = new Map<string, string>();
     const shadowCommandOutputBuffers = new Map<string, string>();
+    /** Methods whose canonical/legacy divergence has already been reported. */
+    const reportedParityMismatchMethods = new Set<string>();
     const canonicalRetryableErrorsByTurnId = new Map<
       string,
       CanonicalCodexError
@@ -2789,6 +2827,7 @@ export class CodexProvider implements AgentProvider {
         runtime: CODEX_EVENT_RUNTIME_IDENTITY,
         sessionId,
         workspaceRoot: options.cwd,
+        journalMode: this.eventJournalMode,
         ...(options.codexEventProjectId
           ? { projectId: options.codexEventProjectId }
           : {}),
@@ -3155,8 +3194,15 @@ export class CodexProvider implements AgentProvider {
             );
             if (
               parity.lastMismatch?.eventId === canonicalEvent.eventId &&
-              parity.mismatched > 0
+              parity.mismatched > 0 &&
+              !reportedParityMismatchMethods.has(parity.lastMismatch.method)
             ) {
+              // One line per method, not per event. Divergence here is
+              // systematic rather than incidental (the canonical side reads a
+              // redacted payload), so an unthrottled warning produced tens of
+              // thousands of identical lines per process and buried everything
+              // else in the log. Running totals stay on the parity snapshot.
+              reportedParityMismatchMethods.add(parity.lastMismatch.method);
               log.warn(
                 {
                   sessionId,

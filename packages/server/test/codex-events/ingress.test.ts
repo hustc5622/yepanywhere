@@ -1170,6 +1170,24 @@ describe("Codex JSONL event store", () => {
 });
 
 describe("Codex event projection rollout", () => {
+  it("defaults to legacy so no session pays for the double projection", () => {
+    // Shadow compares a canonical projection built from the redacted payload
+    // against a legacy one built from the raw notification, so it cannot match
+    // whenever a path is present. It stays opt-in rather than default.
+    const config = codexEventRolloutConfigFromEnv({});
+    expect(config.defaultMode).toBe("legacy");
+    expect(
+      resolveCodexEventProjectionMode({ sessionId: "normal" }, config),
+    ).toBe("legacy");
+    expect(resolveCodexEventProjectionMode({ sessionId: "normal" }, {})).toBe(
+      "legacy",
+    );
+    expect(
+      codexEventRolloutConfigFromEnv({ YEP_CODEX_EVENT_SPINE_MODE: "shadow" })
+        .defaultMode,
+    ).toBe("shadow");
+  });
+
   it("supports account/session canaries and a legacy rollback override", () => {
     const config = codexEventRolloutConfigFromEnv({
       YEP_CODEX_EVENT_SPINE_MODE: "shadow",

@@ -8,6 +8,10 @@ import {
 } from "./diagnostics.js";
 import { createCodexEventDraft } from "./envelope.js";
 import {
+  type CodexEventJournalMode,
+  shouldJournalCodexEvent,
+} from "./journal-mode.js";
+import {
   type CodexPayloadRedactionOptions,
   type CodexServerRequestSecretContext,
   type RedactedCodexPayload,
@@ -45,6 +49,11 @@ export interface CodexEventIngressOptions {
   workspaceRoot?: string;
   accountId?: string;
   connectionId?: string;
+  /**
+   * Durable retention policy. Defaults to `full` so existing embedders keep
+   * journalling everything; the provider opts into `lifecycle` explicitly.
+   */
+  journalMode?: CodexEventJournalMode;
   now?: () => number;
 }
 
@@ -72,6 +81,7 @@ export class CodexEventIngress {
   private readonly projectId?: string;
   private readonly workspaceRoot?: string;
   private readonly accountId?: string;
+  private readonly journalMode: CodexEventJournalMode;
   private readonly now: () => number;
   private state: CanonicalCodexSessionState;
   private eventCounter = 0;
@@ -98,6 +108,7 @@ export class CodexEventIngress {
     this.projectId = options.projectId;
     this.workspaceRoot = options.workspaceRoot;
     this.accountId = options.accountId;
+    this.journalMode = options.journalMode ?? "full";
     this.connectionId = options.connectionId ?? randomUUID();
     this.now = options.now ?? Date.now;
     this.state = initialState;
@@ -106,6 +117,19 @@ export class CodexEventIngress {
   static async create(
     options: CodexEventIngressOptions,
   ): Promise<CodexEventIngress> {
+    // Replaying the session journal only ever recovers state for a connection
+    // that already wrote to it: `restoreCorrelations` matches on
+    // `source.connectionId`, and the reduced projection is rebuilt from the
+    // same events. A caller that does not supply a connection id gets a fresh
+    // random one, which by construction cannot appear in any prior record, so
+    // the replay resolves to zero correlations and a projection nobody reads --
+    // while forcing a cold hydration of the entire journal at session start.
+    if (options.connectionId === undefined) {
+      return new CodexEventIngress(
+        options,
+        createCanonicalCodexSessionState(options.sessionId),
+      );
+    }
     const events = await options.store.replay({ sessionId: options.sessionId });
     const state = reduceCodexEvents(
       createCanonicalCodexSessionState(options.sessionId),
@@ -383,22 +407,35 @@ export class CodexEventIngress {
   ): Promise<CodexEventEnvelope> {
     return await this.withPersistLock(async () => {
       const eventId = `${this.connectionId}:${++this.eventCounter}`;
-      const result = await this.store.append(
-        createCodexEventDraft({
-          ...input,
-          eventId,
-          runtime: this.runtime,
-          sessionId: this.sessionId,
-          ...(this.projectId === undefined
-            ? {}
-            : { projectId: this.projectId }),
-          ...(this.accountId === undefined
-            ? {}
-            : { accountId: this.accountId }),
-          connectionId: this.connectionId,
-          receivedAtMs: this.now(),
-        }),
-      );
+      const draft = createCodexEventDraft({
+        ...input,
+        eventId,
+        runtime: this.runtime,
+        sessionId: this.sessionId,
+        ...(this.projectId === undefined ? {} : { projectId: this.projectId }),
+        ...(this.accountId === undefined ? {} : { accountId: this.accountId }),
+        connectionId: this.connectionId,
+        receivedAtMs: this.now(),
+      });
+
+      if (!shouldJournalCodexEvent(this.journalMode, draft)) {
+        // Not journalled: no disk write, no store index, no reduction. The
+        // envelope is still returned because the live projection is built from
+        // its payload, so dropping the record changes what we retain, never
+        // what the client sees for this event.
+        //
+        // `sequence: 0` marks it as unsequenced. Sequences are assigned by the
+        // store and are only meaningful for records that made it in; handing a
+        // synthetic one to the reducer would manufacture out-of-order anomalies
+        // against the real journal.
+        return {
+          ...draft,
+          persistedAtMs: draft.receivedAtMs,
+          sequence: 0,
+        };
+      }
+
+      const result = await this.store.append(draft);
       if (result.inserted) {
         this.state = reduceCodexEvent(this.state, result.event);
         if (
