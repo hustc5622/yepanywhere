@@ -1619,24 +1619,44 @@ describe("SessionIndexService full-validation admission", () => {
     });
     await service.initialize();
 
+    let signalBlockerStarted!: () => void;
+    let releaseBlocker!: () => void;
+    const blockerStarted = new Promise<void>((resolve) => {
+      signalBlockerStarted = resolve;
+    });
+    const blockerReleased = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    const blockerReader = reader("/blocker", 0);
+    vi.spyOn(blockerReader, "listSessionFiles").mockImplementation(async () => {
+      signalBlockerStarted();
+      await blockerReleased;
+      return [];
+    });
+
     const blocker = service.getSessionsWithCache(
       sessionDir,
       projectId,
-      reader("/blocker", 400),
+      blockerReader,
     );
-    const startedMs = Date.now();
-    await service.getSessionsWithCache(
-      sessionDir,
-      projectId,
-      reader("/waiter", 0),
-    );
-    const waiterElapsedMs = Date.now() - startedMs;
-    await blocker;
+    try {
+      // Index loading does asynchronous I/O before admission. Wait until the
+      // blocker owns the slot, then keep it occupied regardless of CI speed.
+      await blockerStarted;
+      await service.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader("/waiter", 0),
+      );
 
-    // Bounded by the cap, not by the blocking scan.
-    expect(waiterElapsedMs).toBeLessThan(300);
-    expect(
-      service.getDebugStats().fullValidationQueueBypasses,
-    ).toBeGreaterThanOrEqual(1);
+      // Only the waiter has completed: it must have escaped via the wait cap,
+      // not by winning the initial I/O race or waiting for the blocker to end.
+      const stats = service.getDebugStats();
+      expect(stats.fullScans).toBe(1);
+      expect(stats.fullValidationQueueBypasses).toBe(1);
+    } finally {
+      releaseBlocker();
+      await blocker;
+    }
   });
 });
