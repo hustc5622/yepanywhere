@@ -49,6 +49,7 @@ import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
 import { getAgentCommandConfigs } from "../lib/agentCommands";
+import { readClipboardUserInput } from "../lib/clipboard";
 import {
   getModelReasoningEfforts,
   resolveModelReasoningEffort,
@@ -1409,6 +1410,34 @@ export function NewSessionForm({
   };
 
   const handlePaste = (e: ClipboardEvent) => {
+    const copiedInput = readClipboardUserInput(e.clipboardData);
+    if (copiedInput && copiedInput.images.length > 0) {
+      e.preventDefault();
+
+      if (copiedInput.text) {
+        const textarea = textareaRef.current;
+        const currentValue = textarea?.value ?? message;
+        const start = textarea?.selectionStart ?? currentValue.length;
+        const end = textarea?.selectionEnd ?? start;
+        const nextMessage = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
+        const nextCursor = start + copiedInput.text.length;
+
+        setInterimTranscript("");
+        setMessage(nextMessage);
+        setTimeout(() => {
+          textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+        }, 0);
+      }
+
+      const newPendingFiles: PendingFile[] = copiedInput.images.map((file) => ({
+        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      }));
+      setPendingFiles((prev) => [...prev, ...newPendingFiles]);
+      return;
+    }
+
     const items = e.clipboardData?.items;
     if (!items) return;
 

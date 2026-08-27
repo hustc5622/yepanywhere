@@ -8,6 +8,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 用户消息复制按钮现在会复制整条 session 输入：保留纯文本剪贴板格式，同时把该条输入中的全部可读图片写入富剪贴板；粘贴到现有会话或新建会话输入框时会恢复原文本和所有图片附件。无法使用富剪贴板或读取部分图片时会降级为文本并显示部分复制提示。
 - 为项目 Git 状态弹窗中的分支和上游分支添加完整名称复制按钮，提供中英文成功/失败提示，并支持鼠标移入弹窗及键盘操作。
 - Add a one-click copy control to every fenced code block in assistant Markdown, including live streaming blocks and nested agent output, with bilingual labels, clipboard fallback, and success/failure feedback.
 - Expose DeepSeek V4 Flash Vision (Experimental) in the Codex model-source catalog as `deepseek-v4-flash-vision-exp`, with the official 1,048,576-token context window, 384K maximum output, `low/high/max` reasoning tiers, and text-plus-image input metadata. The managed catalog now marks the existing V4 Flash and V4 Pro entries as text-only and advertises original-detail images only for the Vision model, matching DeepSeek's Codex catalog instead of claiming image support for every DeepSeek model.

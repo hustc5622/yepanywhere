@@ -56,6 +56,31 @@ describe("UserPromptBlock", () => {
     expect(screen.queryByText("<image>")).toBeNull();
     expect(screen.getByText(/pasted-image-1\.png/)).toBeDefined();
     expect(screen.queryByText(/data:image\/png;base64/i)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Copy message and images" }),
+    ).toBeDefined();
+  });
+
+  it("keeps the copy action for an image-only user input", () => {
+    const content: ContentBlock[] = [
+      {
+        type: "input_image",
+        image_url: "data:image/png;base64,AAAA",
+        mime_type: "image/png",
+      },
+    ];
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    const copyButton = screen.getByRole("button", {
+      name: "Copy message and images",
+    });
+    expect(copyButton.closest(".message-user-prompt")).not.toBeNull();
+    expect(screen.getByText(/pasted-image-1\.png/)).toBeDefined();
   });
 
   it("renders Feishu prompts without raw manifests and keeps image preview", () => {

@@ -256,4 +256,39 @@ describe("MessageInput command completion", () => {
     expect(onSend).toHaveBeenCalledWith("/deep-research");
     expect(textarea.value).toBe("");
   });
+
+  it("pastes a copied user input as text plus all image attachments", () => {
+    const onAttach = vi.fn();
+    const { textarea } = renderMessageInput({
+      projectId: "project",
+      sessionId: "session",
+      onAttach,
+    });
+    typeInTextarea(textarea, "prefix suffix");
+    textarea.setSelectionRange(7, 7);
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        items: [],
+        getData: (type: string) => {
+          if (type === "text/plain") return "review both ";
+          if (type === "text/html") {
+            return `<div data-yep-anywhere-user-input="1">
+              <img src="data:image/png;base64,Zmlyc3Q=" data-yep-anywhere-attachment-name="first.png">
+              <img src="data:image/png;base64,c2Vjb25k" data-yep-anywhere-attachment-name="second.png">
+            </div>`;
+          }
+          return "";
+        },
+      },
+    });
+
+    expect(textarea.value).toBe("prefix review both suffix");
+    expect(onAttach).toHaveBeenCalledTimes(1);
+    const attached = onAttach.mock.calls[0]?.[0] as File[];
+    expect(attached.map((file) => file.name)).toEqual([
+      "first.png",
+      "second.png",
+    ]);
+  });
 });

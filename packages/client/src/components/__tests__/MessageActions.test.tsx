@@ -159,6 +159,31 @@ describe("MessageActions", () => {
     expect(execCommand).toHaveBeenCalledWith("copy");
   });
 
+  it("reports a text-only fallback when rich image copying is unavailable", async () => {
+    renderWithI18n(
+      <MessageActions
+        copyText="prompt with image"
+        copyImages={[
+          {
+            name: "screenshot.png",
+            mimeType: "image/png",
+            sourceUrl: "data:image/png;base64,Zm9v",
+          },
+        ]}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy message and images" }),
+    );
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Copied, but some images could not be included",
+      }),
+    ).toBeTruthy();
+    expect(writeText).toHaveBeenCalledWith("prompt with image");
+  });
+
   it("falls back when the Clipboard API rejects the write", async () => {
     writeText.mockRejectedValueOnce(
       new DOMException("Clipboard permission denied", "NotAllowedError"),

@@ -4214,6 +4214,10 @@ a.sidebar-nav-item {
   color: var(--app-yep-green);
 }
 
+.message-actions-copy.is-partial {
+  color: var(--warning-color, #d97706);
+}
+
 .message-actions-copy.is-failed {
   color: var(--error-color, #dc2626);
 }

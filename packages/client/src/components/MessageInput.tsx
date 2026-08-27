@@ -15,6 +15,7 @@ import {
 } from "../hooks/useDraftPersistence";
 import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
+import { readClipboardUserInput } from "../lib/clipboard";
 import { hasCoarsePointer } from "../lib/deviceDetection";
 import type { ContextUsage, PermissionMode } from "../types";
 import { MessageInputToolbar } from "./MessageInputToolbar";
@@ -490,6 +491,31 @@ export function MessageInput({
 
   const handlePaste = (e: ClipboardEvent) => {
     if (!canAttach || !onAttach) return;
+
+    const copiedInput = readClipboardUserInput(e.clipboardData);
+    if (copiedInput && copiedInput.images.length > 0) {
+      e.preventDefault();
+
+      if (copiedInput.text) {
+        const textarea = textareaRef.current;
+        const currentValue = textarea?.value ?? text;
+        const start = textarea?.selectionStart ?? currentValue.length;
+        const end = textarea?.selectionEnd ?? start;
+        const nextText = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
+        const nextCursor = start + copiedInput.text.length;
+
+        setInterimTranscript("");
+        setDismissedCompletionKey(null);
+        setText(nextText);
+        setCursorPosition(nextCursor);
+        setTimeout(() => {
+          textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+        }, 0);
+      }
+
+      onAttach(copiedInput.images);
+      return;
+    }
 
     const items = e.clipboardData?.items;
     if (!items) return;

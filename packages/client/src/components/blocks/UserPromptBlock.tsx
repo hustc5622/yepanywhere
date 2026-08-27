@@ -3,6 +3,7 @@ import { type ReactNode, memo, useState } from "react";
 import { useFetchedImage } from "../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../i18n";
 import { apiPath as resolveApiPath } from "../../lib/apiPath";
+import type { ClipboardImageSource } from "../../lib/clipboard";
 import {
   type FeishuPromptInfo,
   type SkillInfo,
@@ -216,6 +217,45 @@ function getUploadUrl(filePath: string): string | null {
   if (!/^[0-9a-f-]{36}_/.test(filename)) return null;
 
   return `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(filename)}`;
+}
+
+function getClipboardImageSourceUrl(
+  file: UploadedFileInfo,
+): string | undefined {
+  const previewUrl = file.previewUrl?.trim();
+  if (previewUrl) {
+    return previewUrl.startsWith("/api")
+      ? managedUploadHref(previewUrl)
+      : previewUrl;
+  }
+
+  const path = file.path.trim();
+  if (/^(?:https?:|data:|blob:)/i.test(path)) return path;
+  if (path.startsWith("/api")) return managedUploadHref(path);
+
+  const uploadUrl = getUploadUrl(path);
+  if (uploadUrl) return managedUploadHref(uploadUrl);
+
+  // Provider-native image blocks can retain an allowed absolute path instead
+  // of a managed upload URL. The local-image endpoint applies the server's
+  // configured allowlist before returning any bytes.
+  if (path.startsWith("/")) {
+    return resolveApiPath(`/local-image?path=${encodeURIComponent(path)}`);
+  }
+
+  return undefined;
+}
+
+function getClipboardImageSources(
+  files: UploadedFileInfo[],
+): ClipboardImageSource[] {
+  return files
+    .filter((file) => isImageMimeType(file.mimeType))
+    .map((file) => ({
+      name: file.originalName,
+      mimeType: file.mimeType,
+      sourceUrl: getClipboardImageSourceUrl(file),
+    }));
 }
 
 function isInputImageBlock(block: ContentBlock): block is InputImageBlock {
@@ -737,10 +777,29 @@ export const UserPromptBlock = memo(function UserPromptBlock({
   if (typeof content === "string") {
     const { text, openedFiles, uploadedFiles, skills, feishu } =
       parseUserPrompt(content);
+    const copyImages = getClipboardImageSources(uploadedFiles);
 
     // Don't render if there's no actual text content
     if (!text && skills.length === 0) {
       const hasMetadata = openedFiles.length > 0 || uploadedFiles.length > 0;
+      if (copyImages.length > 0) {
+        return (
+          <div className="user-prompt-container">
+            <div className="message message-user-prompt message-user-prompt-copyable">
+              <MessageActions
+                copyText=""
+                copyImages={copyImages}
+                placement="bubble"
+              />
+              <div className="message-content">
+                <FeishuPromptSource info={feishu} />
+                <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
+              </div>
+            </div>
+            <OpenedFilesMetadata files={openedFiles} />
+          </div>
+        );
+      }
       if (feishu && hasMetadata) {
         return (
           <div className="user-prompt-container">
@@ -772,7 +831,11 @@ export const UserPromptBlock = memo(function UserPromptBlock({
           onEdit={onEdit && text ? () => onEdit(text) : undefined}
         />
         <div className="message message-user-prompt message-user-prompt-copyable">
-          <MessageActions copyText={copyText} placement="bubble" />
+          <MessageActions
+            copyText={copyText}
+            copyImages={copyImages}
+            placement="bubble"
+          />
           <div className="message-content">
             <FeishuPromptSource info={feishu} />
             {text && <CollapsibleText text={text} />}
@@ -806,9 +869,28 @@ export const UserPromptBlock = memo(function UserPromptBlock({
   const { text, openedFiles, uploadedFiles, skills, feishu } =
     parseUserPrompt(textForParsing);
   const allUploadedFiles = mergeUploadedFiles(uploadedFiles, codexImageFiles);
+  const copyImages = getClipboardImageSources(allUploadedFiles);
 
   if (!text && skills.length === 0) {
     const hasMetadata = openedFiles.length > 0 || allUploadedFiles.length > 0;
+    if (copyImages.length > 0) {
+      return (
+        <div className="user-prompt-container">
+          <div className="message message-user-prompt message-user-prompt-copyable">
+            <MessageActions
+              copyText=""
+              copyImages={copyImages}
+              placement="bubble"
+            />
+            <div className="message-content">
+              <FeishuPromptSource info={feishu} />
+              <UploadedFilesMetadata files={allUploadedFiles} feishu={feishu} />
+            </div>
+          </div>
+          <OpenedFilesMetadata files={openedFiles} />
+        </div>
+      );
+    }
     if (feishu && hasMetadata) {
       return (
         <div className="user-prompt-container">
@@ -846,7 +928,11 @@ export const UserPromptBlock = memo(function UserPromptBlock({
         onEdit={onEdit && text ? () => onEdit(text) : undefined}
       />
       <div className="message message-user-prompt message-user-prompt-copyable">
-        <MessageActions copyText={copyText} placement="bubble" />
+        <MessageActions
+          copyText={copyText}
+          copyImages={copyImages}
+          placement="bubble"
+        />
         <div className="message-content">
           <FeishuPromptSource info={feishu} />
           {text && <CollapsibleText text={text} />}
