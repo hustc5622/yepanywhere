@@ -179,24 +179,64 @@ export function RepoTree({ projectId, onOpenFile }: RepoTreeProps) {
 
   const loadDir = useCallback(
     (relativePath: string) => {
-      setDirs((prev) => ({ ...prev, [relativePath]: { loading: true } }));
+      // Keep the previously-loaded entries visible while a refresh is in
+      // flight, so the tree never blinks to an empty / loading state.
+      setDirs((prev) => ({
+        ...prev,
+        [relativePath]: { ...prev[relativePath], loading: true },
+      }));
       api
         .browseProjectFiles(projectId, relativePath)
         .then((data: ProjectBrowseResponse) => {
-          setDirs((prev) => ({
-            ...prev,
-            [relativePath]: {
-              loading: false,
-              entries: sortEntries(data.entries),
-              error: data.error,
-            },
-          }));
+          const nextEntries = sortEntries(data.entries);
+          setDirs((prev) => {
+            const current = prev[relativePath];
+            // Nothing actually changed → don't touch state. This avoids a
+            // needless re-render (and any chance of a visible flash) on every
+            // background refresh.
+            if (
+              current?.entries &&
+              entriesEqual(current.entries, nextEntries) &&
+              current.error === data.error
+            ) {
+              if (current.loading) {
+                return {
+                  ...prev,
+                  [relativePath]: { ...current, loading: false },
+                };
+              }
+              return prev;
+            }
+            return {
+              ...prev,
+              [relativePath]: {
+                loading: false,
+                entries: nextEntries,
+                error: data.error,
+              },
+            };
+          });
         })
         .catch(() => {
-          setDirs((prev) => ({
-            ...prev,
-            [relativePath]: { loading: false, error: t("repoError" as never) },
-          }));
+          setDirs((prev) => {
+            const current = prev[relativePath];
+            // A transient refresh failure shouldn't blank a previously-good
+            // tree. Only surface the error when we have no entries to show.
+            if (current?.entries && current.entries.length > 0) {
+              return {
+                ...prev,
+                [relativePath]: { ...current, loading: false },
+              };
+            }
+            return {
+              ...prev,
+              [relativePath]: {
+                ...current,
+                loading: false,
+                error: t("repoError" as never),
+              },
+            };
+          });
         });
     },
     [projectId, t],
@@ -351,6 +391,27 @@ function sortEntries(entries: ProjectBrowseEntry[]): ProjectBrowseEntry[] {
   return [...entries].sort((a, b) => {
     if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
     return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Cheap structural comparison of two (already name-sorted) directory listings.
+ * Used to skip redundant state updates on background refreshes so the tree
+ * doesn't re-render (or flash) when nothing actually changed.
+ */
+function entriesEqual(
+  a: ProjectBrowseEntry[],
+  b: ProjectBrowseEntry[],
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => {
+    const y = b[i];
+    return (
+      y !== undefined &&
+      x.path === y.path &&
+      x.type === y.type &&
+      x.size === y.size
+    );
   });
 }
 
