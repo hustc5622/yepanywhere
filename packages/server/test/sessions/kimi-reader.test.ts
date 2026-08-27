@@ -1,6 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { KIMI_ACP_SINGLE_QUESTION_REMINDER } from "@yep-anywhere/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { encodeProjectId } from "../../src/projects/paths.js";
 import {
@@ -116,6 +117,103 @@ const AGENT1_WIRE = jsonl([
 ]);
 
 describe("KimiSessionReader state v2 discovery", () => {
+  it("falls back to the first public prompt for a poisoned automatic title", async () => {
+    const sessionsDir = join(
+      tmpdir(),
+      `kimi-title-${Math.random().toString(36).slice(2)}`,
+    );
+    const sessionId = "session_title";
+    const sessionDir = join(sessionsDir, "wd_v2", sessionId);
+
+    try {
+      await mkdir(join(sessionDir, "agents", "main"), { recursive: true });
+      await writeFile(
+        join(sessionDir, "state.json"),
+        JSON.stringify({
+          version: 2,
+          cwd: WORK_DIR,
+          title:
+            "<system-reminder> [yep-anywhere:kimi-acp-single-question] This ACP host can transport exactly one AskUserQuestion ite...",
+          isCustomTitle: false,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+      await writeFile(
+        join(sessionDir, "agents", "main", "wire.jsonl"),
+        jsonl([
+          {
+            type: "turn.prompt",
+            input: [
+              {
+                type: "text",
+                text: `${KIMI_ACP_SINGLE_QUESTION_REMINDER}\n\n你好`,
+              },
+            ],
+            time: Date.now(),
+          },
+        ]),
+      );
+
+      const reader = new KimiSessionReader({
+        sessionsDir,
+        projectPath: WORK_DIR,
+      });
+      const summary = await reader.getSessionSummary(sessionId, PROJECT_ID);
+
+      expect(summary?.title).toBe("你好");
+      expect(summary?.fullTitle).toBe("你好");
+    } finally {
+      await rm(sessionsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an explicitly custom title even when it contains the marker", async () => {
+    const sessionsDir = join(
+      tmpdir(),
+      `kimi-custom-title-${Math.random().toString(36).slice(2)}`,
+    );
+    const sessionId = "session_custom_title";
+    const sessionDir = join(sessionsDir, "wd_v2", sessionId);
+    const customTitle =
+      "<system-reminder> [yep-anywhere:kimi-acp-single-question] custom";
+
+    try {
+      await mkdir(join(sessionDir, "agents", "main"), { recursive: true });
+      await writeFile(
+        join(sessionDir, "state.json"),
+        JSON.stringify({
+          version: 2,
+          cwd: WORK_DIR,
+          title: customTitle,
+          isCustomTitle: true,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+      await writeFile(
+        join(sessionDir, "agents", "main", "wire.jsonl"),
+        jsonl([
+          {
+            type: "turn.prompt",
+            input: [{ type: "text", text: "hello" }],
+            time: Date.now(),
+          },
+        ]),
+      );
+
+      const reader = new KimiSessionReader({
+        sessionsDir,
+        projectPath: WORK_DIR,
+      });
+      const summary = await reader.getSessionSummary(sessionId, PROJECT_ID);
+
+      expect(summary?.fullTitle).toBe(customTitle);
+    } finally {
+      await rm(sessionsDir, { recursive: true, force: true });
+    }
+  });
+
   it("lists a Kimi Code 0.34 session under its cwd project", async () => {
     const sessionsDir = join(
       tmpdir(),

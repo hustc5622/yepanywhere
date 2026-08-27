@@ -17,6 +17,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { initializeFontSize } from "./hooks/useFontSize";
 import { initializeTabSize } from "./hooks/useTabSize";
 import { initializeTheme } from "./hooks/useTheme";
+import { I18nProvider } from "./i18n";
 import { NavigationLayout } from "./layouts";
 import { armSplashSafety } from "./lib/splash";
 import "./styles/index.css";
@@ -140,67 +141,74 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <Wrapper>
-    <ErrorBoundary>
-      <BrowserRouter basename={basename}>
-        <App>
-          <Suspense fallback={null}>
-            <Routes>
-              <Route path="/" element={<Navigate to="/projects" replace />} />
-              {/* Login page (no layout wrapper) */}
-              <Route path="/login" element={<LoginPage />} />
-              {/* IMPORTANT: Keep routes in sync with remote-main.tsx — adding a route here? Add it there too! */}
-              <Route element={<NavigationLayout />}>
-                <Route path="/projects" element={<ProjectsPage />} />
-                <Route path="/sessions" element={<GlobalSessionsPage />} />
-                <Route path="/archive" element={<ArchivePage />} />
-                <Route path="/search" element={<SearchPage />} />
-                <Route path="/reports" element={<ReportsPage />} />
-                <Route path="/agents" element={<AgentsPage />} />
-                <Route path="/inbox" element={<InboxPage />} />
-                <Route path="/settings" element={<SettingsLayout />} />
+    <I18nProvider>
+      <ErrorBoundary>
+        <BrowserRouter basename={basename}>
+          <App>
+            <Suspense fallback={null}>
+              <Routes>
+                <Route path="/" element={<Navigate to="/projects" replace />} />
+                {/* Login page (no layout wrapper) */}
+                <Route path="/login" element={<LoginPage />} />
+                {/* IMPORTANT: Keep routes in sync with remote-main.tsx — adding a route here? Add it there too! */}
+                <Route element={<NavigationLayout />}>
+                  <Route path="/projects" element={<ProjectsPage />} />
+                  <Route path="/sessions" element={<GlobalSessionsPage />} />
+                  <Route path="/archive" element={<ArchivePage />} />
+                  <Route path="/search" element={<SearchPage />} />
+                  <Route path="/reports" element={<ReportsPage />} />
+                  <Route path="/agents" element={<AgentsPage />} />
+                  <Route path="/inbox" element={<InboxPage />} />
+                  <Route path="/settings" element={<SettingsLayout />} />
+                  <Route
+                    path="/settings/:category"
+                    element={<SettingsLayout />}
+                  />
+                  {/* Project-scoped pages */}
+                  <Route
+                    path="/projects/:projectId"
+                    element={<Navigate to="/sessions" replace />}
+                  />
+                  <Route
+                    path="/git-status"
+                    element={
+                      <RedirectWithSearch to="/settings/source-control" />
+                    }
+                  />
+                  <Route path="/devices" element={<LegacyDeviceRedirect />} />
+                  <Route
+                    path="/devices/:deviceId"
+                    element={<LegacyDeviceRedirect />}
+                  />
+                  <Route path="/terminal" element={<TerminalPage />} />
+                  <Route
+                    path="/terminal/:terminalId"
+                    element={<TerminalPage />}
+                  />
+                  <Route path="/new-session" element={<NewSessionPage />} />
+                  <Route
+                    path="/projects/:projectId/sessions/:sessionId"
+                    element={<SessionPage />}
+                  />
+                  {/* Bare session id: resolve its project, then redirect. */}
+                  <Route
+                    path="/sessions/:sessionId"
+                    element={<SessionLocatorPage />}
+                  />
+                </Route>
+                {/* File page has its own layout (no sidebar) */}
                 <Route
-                  path="/settings/:category"
-                  element={<SettingsLayout />}
+                  path="/projects/:projectId/file"
+                  element={<FilePage />}
                 />
-                {/* Project-scoped pages */}
-                <Route
-                  path="/projects/:projectId"
-                  element={<Navigate to="/sessions" replace />}
-                />
-                <Route
-                  path="/git-status"
-                  element={<RedirectWithSearch to="/settings/source-control" />}
-                />
-                <Route path="/devices" element={<LegacyDeviceRedirect />} />
-                <Route
-                  path="/devices/:deviceId"
-                  element={<LegacyDeviceRedirect />}
-                />
-                <Route path="/terminal" element={<TerminalPage />} />
-                <Route
-                  path="/terminal/:terminalId"
-                  element={<TerminalPage />}
-                />
-                <Route path="/new-session" element={<NewSessionPage />} />
-                <Route
-                  path="/projects/:projectId/sessions/:sessionId"
-                  element={<SessionPage />}
-                />
-                {/* Bare session id: resolve its project, then redirect. */}
-                <Route
-                  path="/sessions/:sessionId"
-                  element={<SessionLocatorPage />}
-                />
-              </Route>
-              {/* File page has its own layout (no sidebar) */}
-              <Route path="/projects/:projectId/file" element={<FilePage />} />
-              {/* Activity page has its own layout */}
-              <Route path="/activity" element={<ActivityPage />} />
-            </Routes>
-          </Suspense>
-        </App>
-      </BrowserRouter>
-    </ErrorBoundary>
+                {/* Activity page has its own layout */}
+                <Route path="/activity" element={<ActivityPage />} />
+              </Routes>
+            </Suspense>
+          </App>
+        </BrowserRouter>
+      </ErrorBoundary>
+    </I18nProvider>
   </Wrapper>,
 );
 

@@ -331,6 +331,42 @@ describe("SessionIndexService", () => {
       );
       expect(sessions).toHaveLength(1);
     });
+
+    it("rebuilds a current-version index containing a poisoned Kimi title", async () => {
+      await createSession("session-1", "Recovered title");
+      const fileStats = await stat(join(sessionDir, "session-1.jsonl"));
+      const poisonedTitle =
+        "<system-reminder> [yep-anywhere:kimi-acp-single-question] This ACP host can transport exactly one AskUserQuestion ite...";
+      const indexPath = service.getIndexPath(sessionDir);
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          version: 11,
+          projectId,
+          sessions: {
+            "session-1": {
+              title: poisonedTitle,
+              fullTitle: poisonedTitle,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              messageCount: 1,
+              indexedBytes: fileStats.size,
+              fileMtime: fileStats.mtimeMs,
+              provider: "kimi",
+            },
+          },
+        }),
+      );
+
+      const sessions = await service.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+
+      expect(sessions[0]?.title).toBe("Recovered title");
+      expect(sessions[0]?.provider).not.toBe("kimi");
+    });
   });
 
   describe("index file location", () => {

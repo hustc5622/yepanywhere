@@ -37,6 +37,7 @@ import type {
 import {
   KIMI_ACP_SINGLE_QUESTION_REMINDER,
   type ModelInfo,
+  parseKimiReadMediaOutput,
 } from "@yep-anywhere/shared";
 import { normalizeKimiToolInput } from "../../kimi/tool-input.js";
 import { getLogger } from "../../logging/logger.js";
@@ -766,6 +767,28 @@ function getKimiAcpToolOutput(
   }
   if (textParts.length > 0) return textParts.join("\n");
   return stringifyKimiAcpValue(update.rawOutput);
+}
+
+function getKimiAcpToolResultProjection(
+  update: Extract<SessionUpdate, { sessionUpdate: "tool_call_update" }>,
+): { content: string; structured?: Record<string, unknown> } {
+  const rawSummary = parseKimiReadMediaOutput(update.rawOutput);
+  const textOutput = rawSummary ? "" : getKimiAcpToolOutput(update);
+  const summary = rawSummary ?? parseKimiReadMediaOutput(textOutput);
+  if (!summary) return { content: textOutput };
+
+  const label = summary.path ? basename(summary.path) : summary.kind;
+  return {
+    content: `${summary.kind} loaded: ${label}`,
+    structured: {
+      type: "media",
+      kind: summary.kind,
+      ...(summary.path ? { path: summary.path } : {}),
+      ...(summary.mimeType ? { mimeType: summary.mimeType } : {}),
+      ...(summary.bytes !== undefined ? { bytes: summary.bytes } : {}),
+      ...(summary.mediaUrl ? { previewUrl: summary.mediaUrl } : {}),
+    },
+  };
 }
 
 /**
@@ -1572,6 +1595,7 @@ export class KimiProvider implements AgentProvider {
 
       case "tool_call_update": {
         if (update.status === "completed" || update.status === "failed") {
+          const result = getKimiAcpToolResultProjection(update);
           return {
             type: "user",
             uuid: randomUUID(),
@@ -1582,11 +1606,12 @@ export class KimiProvider implements AgentProvider {
                 {
                   type: "tool_result",
                   tool_use_id: update.toolCallId,
-                  content: getKimiAcpToolOutput(update),
+                  content: result.content,
                   ...(update.status === "failed" && { is_error: true }),
                 },
               ],
             },
+            ...(result.structured ? { toolUseResult: result.structured } : {}),
           } as SDKMessage;
         }
 

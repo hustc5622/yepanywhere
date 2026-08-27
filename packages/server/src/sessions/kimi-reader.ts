@@ -34,6 +34,7 @@ import {
   getKimiSubagentType,
   getModelContextWindow,
   inferKimiSubagentStatus,
+  isKimiAcpCompatibilityTitle,
   isKimiContextApplyCompactionRecord,
   isKimiFullCompactionBeginRecord,
   isKimiLoopEventRecord,
@@ -72,6 +73,7 @@ interface KimiSessionCacheEntry {
   sessionDir: string;
   workDir?: string;
   title?: string;
+  isCustomTitle?: boolean;
   createdAt?: string;
   updatedAt?: string;
   mtime: number;
@@ -146,10 +148,15 @@ export class KimiSessionReader implements ISessionReader {
       if (derived.messageCount === 0) return null;
 
       const stats = await stat(entry.filePath);
-      const fullTitle = sanitizePublicUserPrompt(
-        entry.title && entry.title !== "New Session"
+      const providerTitle =
+        entry.title &&
+        entry.title !== "New Session" &&
+        (entry.isCustomTitle === true ||
+          !isKimiAcpCompatibilityTitle(entry.title))
           ? entry.title
-          : (derived.firstPromptText ?? entry.title ?? ""),
+          : undefined;
+      const fullTitle = sanitizePublicUserPrompt(
+        providerTitle ?? derived.firstPromptText ?? entry.title ?? "",
       ).trim();
       const title =
         fullTitle.length === 0
@@ -677,6 +684,7 @@ export class KimiSessionReader implements ISessionReader {
       );
       let workDir: string | undefined;
       let title: string | undefined;
+      let isCustomTitle: boolean | undefined;
       let createdAt: string | undefined;
       let updatedAt: string | undefined;
 
@@ -689,6 +697,7 @@ export class KimiSessionReader implements ISessionReader {
         if (state) {
           workDir = state.workDir;
           title = state.title;
+          isCustomTitle = state.isCustomTitle;
           createdAt = state.createdAt;
           updatedAt = state.updatedAt;
         }
@@ -702,6 +711,7 @@ export class KimiSessionReader implements ISessionReader {
         sessionDir,
         workDir,
         title,
+        isCustomTitle,
         createdAt,
         updatedAt,
         mtime: fingerprint.mtime,

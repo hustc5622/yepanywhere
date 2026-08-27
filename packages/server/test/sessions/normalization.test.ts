@@ -1119,6 +1119,66 @@ describe("normalizeSession", () => {
 });
 
 describe("convertKimiMessages", () => {
+  it("projects persisted ReadMediaFile arrays into bounded structured results", () => {
+    const hash = "a".repeat(64);
+    const messages = convertKimiMessages({
+      sessionId: "session-media",
+      blobsDir: "/tmp/kimi-session/agents/main/blobs",
+      records: [
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.call",
+            toolCallId: "ReadMediaFile:0",
+            name: "ReadMediaFile",
+            args: { path: "/tmp/example.png" },
+          },
+          time: 1,
+        },
+        {
+          type: "context.append_loop_event",
+          event: {
+            type: "tool.result",
+            toolCallId: "ReadMediaFile:0",
+            result: {
+              output: [
+                { type: "text", text: '<image path="/tmp/example.png">' },
+                {
+                  type: "image_url",
+                  imageUrl: { url: `blobref:image/png;${hash}` },
+                },
+                { type: "text", text: "</image>" },
+              ],
+            },
+          },
+          time: 2,
+        },
+      ],
+    });
+
+    expect(messages[1]).toMatchObject({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "ReadMediaFile:0",
+            content: "image loaded: example.png",
+          },
+        ],
+      },
+      toolUseResult: {
+        type: "media",
+        kind: "image",
+        path: "/tmp/example.png",
+        mimeType: "image/png",
+        filePath: `/tmp/kimi-session/agents/main/blobs/${hash}`,
+        previewUrl: expect.stringContaining("/api/local-image?path="),
+      },
+    });
+    expect(JSON.stringify(messages)).not.toContain("blobref:");
+  });
+
   it("replays TodoList from the durable tool call without duplicating its store update", () => {
     const messages = convertKimiMessages({
       sessionId: "session-todo",

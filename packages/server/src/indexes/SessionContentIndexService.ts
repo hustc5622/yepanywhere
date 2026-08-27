@@ -21,6 +21,7 @@ import {
   DEFAULT_PROVIDER,
   type ProviderName,
   type UrlProjectId,
+  isKimiAcpCompatibilityTitle,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { isRetiredProviderName } from "../sdk/providers/policy.js";
@@ -65,6 +66,13 @@ export interface SessionContentIndexState {
 }
 
 const CURRENT_VERSION = 1;
+
+function needsKimiTitleMigration(index: SessionContentIndexState): boolean {
+  return Object.values(index.sessions).some(
+    (session) =>
+      session.provider === "kimi" && isKimiAcpCompatibilityTitle(session.title),
+  );
+}
 
 /**
  * Loads a session's normalized messages on cache miss. Provided by the caller
@@ -211,7 +219,8 @@ export class SessionContentIndexService {
       const parsed = JSON.parse(content) as SessionContentIndexState;
       if (
         parsed.version === CURRENT_VERSION &&
-        parsed.projectId === projectId
+        parsed.projectId === projectId &&
+        !needsKimiTitleMigration(parsed)
       ) {
         this.indexCache.set(cacheKey, parsed);
         this.evictIfNeeded();

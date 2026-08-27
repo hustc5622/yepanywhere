@@ -13,7 +13,6 @@ import { useNeedsAttentionBadge } from "./hooks/useNeedsAttentionBadge";
 import { useSyncNotifyInAppSetting } from "./hooks/useNotifyInApp";
 import { useOnboarding } from "./hooks/useOnboarding";
 import { useReloadNotifications } from "./hooks/useReloadNotifications";
-import { I18nProvider } from "./i18n";
 import { initTextSelectionTracking } from "./lib/clipboard";
 import { initClientLogCollection } from "./lib/diagnostics";
 
@@ -98,19 +97,17 @@ export function App({ children }: Props) {
   const { showWizard, isLoading, completeOnboarding } = useOnboarding();
 
   return (
-    <I18nProvider>
-      <ToastProvider>
-        <AuthProvider>
-          <InboxProvider>
-            <SchemaValidationProvider>
-              <AppContent>{children}</AppContent>
-              {!isLoading && showWizard && (
-                <OnboardingWizard onComplete={completeOnboarding} />
-              )}
-            </SchemaValidationProvider>
-          </InboxProvider>
-        </AuthProvider>
-      </ToastProvider>
-    </I18nProvider>
+    <ToastProvider>
+      <AuthProvider>
+        <InboxProvider>
+          <SchemaValidationProvider>
+            <AppContent>{children}</AppContent>
+            {!isLoading && showWizard && (
+              <OnboardingWizard onComplete={completeOnboarding} />
+            )}
+          </SchemaValidationProvider>
+        </InboxProvider>
+      </AuthProvider>
+    </ToastProvider>
   );
 }

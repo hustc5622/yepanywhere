@@ -30,6 +30,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function getReadInputFilePath(input: unknown): string | undefined {
+  if (!isRecord(input)) return undefined;
+  return [input.file_path, input.path, input.filePath].find(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+}
+
 function getReadSessionId(result: unknown): string | number | undefined {
   if (!isRecord(result)) {
     return undefined;
@@ -57,7 +64,7 @@ function isPtyHandoffTextRead(
 
 function normalizeReadResult(
   result: ReadResultWithAugment | string | undefined,
-  input?: ReadInput,
+  input?: Partial<ReadInput>,
 ): ReadResultWithAugment | undefined {
   if (!result) {
     return undefined;
@@ -67,12 +74,7 @@ function normalizeReadResult(
     return result;
   }
 
-  const filePath =
-    getXmlTag(result, "path") ??
-    input?.file_path ??
-    (isRecord(input) && typeof input.filePath === "string"
-      ? input.filePath
-      : undefined);
+  const filePath = getXmlTag(result, "path") ?? getReadInputFilePath(input);
   if (!filePath) {
     return undefined;
   }
@@ -133,7 +135,8 @@ function parseReadTotalLines(text: string): number | undefined {
 /**
  * Extract filename from path
  */
-function getFileName(filePath: string): string {
+function getFileName(filePath: string | undefined): string {
+  if (!filePath) return "Reading...";
   return filePath.split("/").pop() || filePath;
 }
 
@@ -165,8 +168,8 @@ function getLineCountLabel(file: TextFile): string {
 /**
  * Read tool use - shows file path being read
  */
-function ReadToolUse({ input }: { input: ReadInput }) {
-  const fileName = getFileName(input.file_path);
+function ReadToolUse({ input }: { input: Partial<ReadInput> }) {
+  const fileName = getFileName(getReadInputFilePath(input));
   return (
     <div className="read-tool-use">
       <span className="file-path">{fileName}</span>
@@ -543,7 +546,7 @@ function ReadToolResult({
 }: {
   result: ReadResultWithAugment | string | undefined;
   isError: boolean;
-  input?: ReadInput;
+  input?: Partial<ReadInput>;
 }) {
   const normalizedResult = normalizeReadResult(result, input);
   const { enabled, reportValidationError, isToolIgnored } =
@@ -627,7 +630,7 @@ function ReadInteractiveSummary({
   result,
   isError,
 }: {
-  input: ReadInput;
+  input: Partial<ReadInput>;
   result: ReadResultWithAugment | string | undefined;
   isError: boolean;
 }) {
@@ -654,7 +657,7 @@ function ReadInteractiveSummary({
   const showValidationWarning =
     enabled && validationErrors && !isToolIgnored("Read");
 
-  const fileName = getFileName(input.file_path);
+  const fileName = getFileName(getReadInputFilePath(input));
 
   if (isError) {
     return (
@@ -790,11 +793,11 @@ function TextReadInteractiveSummary({
   );
 }
 
-export const readRenderer: ToolRenderer<ReadInput, ReadResult> = {
+export const readRenderer: ToolRenderer<unknown, unknown> = {
   tool: "Read",
 
   renderToolUse(input, _context) {
-    return <ReadToolUse input={input as ReadInput} />;
+    return <ReadToolUse input={(input ?? {}) as Partial<ReadInput>} />;
   },
 
   renderToolResult(result, isError, _context, input) {
@@ -802,21 +805,21 @@ export const readRenderer: ToolRenderer<ReadInput, ReadResult> = {
       <ReadToolResult
         result={result as ReadResultWithAugment | string | undefined}
         isError={isError}
-        input={input as ReadInput | undefined}
+        input={input as Partial<ReadInput> | undefined}
       />
     );
   },
 
   getUseSummary(input) {
-    return getFileName((input as ReadInput).file_path);
+    return getFileName(getReadInputFilePath(input));
   },
 
   getResultSummary(result, isError, input?) {
-    if (isError && input) return getFileName((input as ReadInput).file_path);
+    if (isError && input) return getFileName(getReadInputFilePath(input));
     if (isError) return "Error";
     const r = normalizeReadResult(
       result as ReadResultWithAugment | string | undefined,
-      input as ReadInput | undefined,
+      input as Partial<ReadInput> | undefined,
     );
     if (!r?.file) return "Reading...";
     if (isPtyHandoffTextRead(r)) return "continues in Shell";
@@ -826,9 +829,12 @@ export const readRenderer: ToolRenderer<ReadInput, ReadResult> = {
   },
 
   renderInteractiveSummary(input, result, isError, _context) {
+    const partialInput = (input ?? {}) as Partial<ReadInput>;
+    if (!isError && !getReadInputFilePath(partialInput) && result === undefined)
+      return null;
     return (
       <ReadInteractiveSummary
-        input={input as ReadInput}
+        input={partialInput}
         result={result as ReadResultWithAugment | string | undefined}
         isError={isError}
       />

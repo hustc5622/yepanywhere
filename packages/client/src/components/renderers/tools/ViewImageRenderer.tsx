@@ -76,6 +76,13 @@ function getUrlFileName(url: string): string | undefined {
   }
 }
 
+function getImageLabel(input: ViewImageInput, path: string): string {
+  const title = getString(input.title);
+  return title && title !== "Generated image"
+    ? title
+    : getFileName(path) || title || "Generated image";
+}
+
 function getProjectRelativePath(
   path: string,
   projectPath: string | null,
@@ -100,14 +107,14 @@ function getImageSource(
       return {
         type: "direct",
         url: api.getFileRawUrl(metadata.projectId, projectRelativePath),
-        label: getFileName(input.path) || input.title || "Generated image",
+        label: getImageLabel(input, input.path),
       };
     }
 
     return {
       type: "local",
       path: input.path,
-      label: getFileName(input.path) || input.title || "Generated image",
+      label: getImageLabel(input, input.path),
     };
   }
 

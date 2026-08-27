@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type {
   ClaudeSessionEntry,
   CodexCompactedEntry,
@@ -50,6 +50,7 @@ import {
   isKimiLoopEventRecord,
   isKimiTurnEndedRecord,
   isKimiTurnPromptRecord,
+  parseKimiReadMediaOutput,
 } from "@yep-anywhere/shared";
 import {
   isCodexCorrelationDebugEnabled,
@@ -2968,6 +2969,60 @@ function buildKimiUserContent(
   return blocks;
 }
 
+function buildKimiMediaToolResult(
+  output: unknown,
+  blobsDir: string | undefined,
+): { content: string; structured: Record<string, unknown> } | null {
+  const summary = parseKimiReadMediaOutput(output);
+  if (!summary) return null;
+
+  const filePath =
+    summary.kind === "image" && summary.blobRef && blobsDir
+      ? join(blobsDir, summary.blobRef.hash)
+      : undefined;
+  const previewUrl = filePath
+    ? `/api/local-image?path=${encodeURIComponent(filePath)}`
+    : summary.mediaUrl;
+  const label = summary.path ? basename(summary.path) : summary.kind;
+
+  return {
+    content: `${summary.kind} loaded: ${label}`,
+    structured: {
+      type: "media",
+      kind: summary.kind,
+      ...(summary.path ? { path: summary.path } : {}),
+      ...(summary.mimeType ? { mimeType: summary.mimeType } : {}),
+      ...(summary.bytes !== undefined ? { bytes: summary.bytes } : {}),
+      ...(filePath ? { filePath } : {}),
+      ...(previewUrl ? { previewUrl } : {}),
+    },
+  };
+}
+
+function getKimiToolResultText(
+  output: unknown,
+  note: string | undefined,
+): string {
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) {
+    const text = output
+      .flatMap((part) => {
+        if (
+          typeof part === "object" &&
+          part !== null &&
+          (part as { type?: unknown }).type === "text" &&
+          typeof (part as { text?: unknown }).text === "string"
+        ) {
+          return [(part as { text: string }).text];
+        }
+        return [];
+      })
+      .join("\n");
+    if (text) return text;
+  }
+  return note ?? "";
+}
+
 // --- Kimi Conversion Logic ---
 
 /**
@@ -3110,6 +3165,7 @@ export function convertKimiMessages(session: KimiSessionContent): Message[] {
         const toolResult = event as KimiToolResultEvent;
         const output =
           toolResult.result?.output ?? toolResult.result?.note ?? "";
+        const mediaResult = buildKimiMediaToolResult(output, session.blobsDir);
         const toolUseId = toolResult.toolCallId ?? "";
         messages.push({
           uuid: `${sid}-result-${toolResult.toolCallId ?? `${assistantSeq}-${messages.length}`}`,
@@ -3120,11 +3176,14 @@ export function convertKimiMessages(session: KimiSessionContent): Message[] {
               {
                 type: "tool_result",
                 tool_use_id: toolUseId,
-                content: output,
+                content:
+                  mediaResult?.content ??
+                  getKimiToolResultText(output, toolResult.result?.note),
                 ...(toolResult.result?.isError === true && { is_error: true }),
               },
             ],
           },
+          ...(mediaResult ? { toolUseResult: mediaResult.structured } : {}),
           timestamp: toIso(record.time),
         });
         break;

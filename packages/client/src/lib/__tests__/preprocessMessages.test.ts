@@ -298,6 +298,183 @@ describe("preprocessMessages", () => {
     });
   });
 
+  it("keeps Kimi ReadMediaFile arrays as bounded structured results", () => {
+    const hash = "c".repeat(64);
+    const messages: Message[] = [
+      {
+        id: "media-use",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "ReadMediaFile:0",
+            name: "ReadMediaFile",
+            input: { path: "/tmp/example.png" },
+          },
+        ],
+      },
+      {
+        id: "media-result",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "ReadMediaFile:0",
+            content: [
+              { type: "text", text: '<image path="/tmp/example.png">' },
+              {
+                type: "image_url",
+                imageUrl: { url: `blobref:image/png;${hash}` },
+              },
+              { type: "text", text: "</image>" },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      toolName: "ReadMediaFile",
+      status: "complete",
+      toolResult: {
+        content: "image loaded",
+        isError: false,
+        structured: {
+          type: "media",
+          kind: "image",
+          path: "/tmp/example.png",
+          mimeType: "image/png",
+        },
+      },
+    });
+    const toolItem = items[0];
+    expect(
+      JSON.stringify(
+        toolItem?.type === "tool_call" ? toolItem.toolResult : undefined,
+      ),
+    ).not.toContain("blobref:");
+  });
+
+  it("upgrades a live Kimi media result with its persisted preview", () => {
+    const messages: Message[] = [
+      {
+        id: "media-use",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "ReadMediaFile:0",
+            name: "ReadMediaFile",
+            input: { path: "/tmp/example.png" },
+          },
+        ],
+      },
+      {
+        id: "media-live-result",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "ReadMediaFile:0",
+            content: "image loaded: example.png",
+          },
+        ],
+        toolUseResult: {
+          type: "media",
+          kind: "image",
+          path: "/tmp/example.png",
+          mimeType: "image/png",
+          bytes: 4,
+        },
+      },
+      {
+        id: "media-persisted-result",
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "ReadMediaFile:0",
+            content: "image loaded: example.png",
+          },
+        ],
+        toolUseResult: {
+          type: "media",
+          kind: "image",
+          path: "/tmp/example.png",
+          mimeType: "image/png",
+          filePath: "/safe/blobs/image-hash",
+          previewUrl: "/api/local-image?path=safe",
+        },
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      status: "complete",
+      toolResult: {
+        structured: {
+          type: "media",
+          kind: "image",
+          filePath: "/safe/blobs/image-hash",
+          previewUrl: "/api/local-image?path=safe",
+        },
+      },
+    });
+  });
+
+  it("upgrades a lazy-created Kimi Write call when rawInput arrives later", () => {
+    const messages: Message[] = [
+      {
+        id: "write-lazy",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "Write:10",
+            name: "Write",
+            input: {},
+          },
+        ],
+      },
+      {
+        id: "write-full",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "Write:10",
+            name: "Write",
+            input: {
+              path: "/repo/src/app.ts",
+              content: "export const value = 1;\n",
+            },
+          },
+        ],
+      },
+    ];
+
+    const items = preprocessMessages(messages);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_call",
+      id: "Write:10",
+      status: "pending",
+      toolInput: {
+        path: "/repo/src/app.ts",
+        file_path: "/repo/src/app.ts",
+        content: "export const value = 1;\n",
+      },
+    });
+  });
+
   it("normalizes Kimi JSON question answers without inventing a missing answer", () => {
     const questions = [
       {

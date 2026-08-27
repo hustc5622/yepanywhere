@@ -53,6 +53,44 @@ export const KimiImagePartSchema = z.object({
 });
 export type KimiImagePart = z.infer<typeof KimiImagePartSchema>;
 
+export const KimiVideoPartSchema = z.object({
+  type: z.literal("video_url"),
+  videoUrl: z.object({
+    url: z.string(),
+    id: z.string().nullish(),
+  }),
+});
+
+export const KimiAudioPartSchema = z.object({
+  type: z.literal("audio_url"),
+  audioUrl: z.object({
+    url: z.string(),
+    id: z.string().nullish(),
+  }),
+});
+
+const KimiUnknownToolResultPartSchema = z
+  .object({ type: z.string() })
+  .passthrough();
+
+export const KimiToolResultContentPartSchema = z.union([
+  KimiTextPartSchema,
+  KimiThinkPartSchema,
+  KimiImagePartSchema,
+  KimiVideoPartSchema,
+  KimiAudioPartSchema,
+  KimiUnknownToolResultPartSchema,
+]);
+export type KimiToolResultContentPart = z.infer<
+  typeof KimiToolResultContentPartSchema
+>;
+
+export const KimiToolResultOutputSchema = z.union([
+  z.string(),
+  z.array(KimiToolResultContentPartSchema),
+]);
+export type KimiToolResultOutput = z.infer<typeof KimiToolResultOutputSchema>;
+
 /** A part inside `content.part` — either assistant text or reasoning. */
 export const KimiContentPartValueSchema = z.union([
   KimiTextPartSchema,
@@ -96,7 +134,7 @@ export const KimiToolResultEventSchema = z.object({
   parentUuid: z.string().optional(),
   result: z
     .object({
-      output: z.string().optional(),
+      output: KimiToolResultOutputSchema.optional(),
       note: z.string().optional(),
       isError: z.boolean().optional(),
     })
@@ -1002,10 +1040,32 @@ const KIMI_SYSTEM_PART_RE =
  * Exporting the exact text also lets persisted Kimi prompt replay remove only
  * Yep's own compatibility block without hiding similar user-authored prose.
  */
+export const KIMI_ACP_SINGLE_QUESTION_MARKER =
+  "[yep-anywhere:kimi-acp-single-question]";
+
 export const KIMI_ACP_SINGLE_QUESTION_REMINDER = `<system-reminder>
-[yep-anywhere:kimi-acp-single-question]
+${KIMI_ACP_SINGLE_QUESTION_MARKER}
 This ACP host can transport exactly one AskUserQuestion item per tool call. Put exactly one question in every AskUserQuestion call and wait for its answer before asking the next. If a result omits any question, ask each missing question in a new one-question call. Never infer an omitted answer or treat a Recommended option as selected.
 </system-reminder>`;
+
+const KIMI_ACP_SINGLE_QUESTION_TITLE_PREFIX = `${KIMI_ACP_SINGLE_QUESTION_MARKER} This ACP host can transport exactly one AskUserQuestion`;
+
+/** Whether a provider-generated Kimi title begins with Yep's hidden reminder. */
+export function isKimiAcpCompatibilityTitle(
+  title: string | null | undefined,
+): boolean {
+  if (!title) return false;
+  const normalized = title.trimStart().replace(/\s+/g, " ");
+  const markerIndex = normalized.indexOf(KIMI_ACP_SINGLE_QUESTION_MARKER);
+  if (markerIndex < 0) return false;
+
+  const prefix = normalized.slice(0, markerIndex).trim();
+  if (prefix === "<system-reminder>") return true;
+  return (
+    markerIndex === 0 &&
+    normalized.startsWith(KIMI_ACP_SINGLE_QUESTION_TITLE_PREFIX)
+  );
+}
 
 function isKimiInjectedSystemText(text: string): boolean {
   return KIMI_SYSTEM_PART_RE.test(text.trim());
@@ -1061,6 +1121,119 @@ export function parseKimiBlobRef(url: string): KimiBlobRef | null {
   // Content-addressed by sha256; reject anything that could escape the blobs dir.
   if (!mimeType || !/^[0-9a-f]{64}$/.test(hash)) return null;
   return { mimeType, hash };
+}
+
+export interface KimiReadMediaSummary {
+  kind: "image" | "video" | "audio";
+  path?: string;
+  mimeType?: string;
+  bytes?: number;
+  mediaUrl?: string;
+  blobRef?: KimiBlobRef;
+}
+
+const KIMI_MEDIA_PATH_TAG_RE = /^<(image|video|audio)\s+path="([^"]+)">$/;
+const KIMI_DATA_URL_HEADER_RE = /^data:([^;,]+);base64,/;
+
+function base64DecodedBytes(url: string, payloadOffset: number): number {
+  const length = Math.max(0, url.length - payloadOffset);
+  if (length === 0) return 0;
+  const padding = url.endsWith("==") ? 2 : url.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((length * 3) / 4) - padding);
+}
+
+function asKimiRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function parseKimiToolResultParts(output: unknown): unknown[] | null {
+  let parsed = output;
+  if (typeof output === "string") {
+    const trimmed = output.trim();
+    if (!trimmed.startsWith("[")) return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  return Array.isArray(parsed) ? parsed : null;
+}
+
+/** Parse Kimi's bounded ReadMediaFile envelope without retaining data URLs. */
+export function parseKimiReadMediaOutput(
+  output: unknown,
+): KimiReadMediaSummary | null {
+  const parts = parseKimiToolResultParts(output);
+  if (!parts) return null;
+
+  let kind: KimiReadMediaSummary["kind"] | undefined;
+  let path: string | undefined;
+  let mimeType: string | undefined;
+  let bytes: number | undefined;
+  let mediaUrl: string | undefined;
+  let blobRef: KimiBlobRef | undefined;
+  let foundMedia = false;
+
+  for (const rawPart of parts) {
+    const part = asKimiRecord(rawPart);
+    if (!part) continue;
+
+    if (part.type === "text" && typeof part.text === "string") {
+      const match = KIMI_MEDIA_PATH_TAG_RE.exec(part.text);
+      if (match?.[1] && match[2]) {
+        kind = match[1] as KimiReadMediaSummary["kind"];
+        path = match[2];
+      }
+      continue;
+    }
+
+    const mediaType =
+      part.type === "image_url"
+        ? "image"
+        : part.type === "video_url"
+          ? "video"
+          : part.type === "audio_url"
+            ? "audio"
+            : null;
+    if (!mediaType) continue;
+
+    const holderKey = `${mediaType}Url`;
+    const holder =
+      asKimiRecord(part[holderKey]) ?? asKimiRecord(part[`${mediaType}_url`]);
+    if (!holder || typeof holder.url !== "string") continue;
+
+    foundMedia = true;
+    kind = mediaType;
+    const url = holder.url;
+    const ref = parseKimiBlobRef(url);
+    if (ref) {
+      blobRef = ref;
+      mimeType = ref.mimeType;
+      continue;
+    }
+
+    const dataHeader = KIMI_DATA_URL_HEADER_RE.exec(url);
+    if (dataHeader?.[1] !== undefined) {
+      mimeType = dataHeader[1];
+      bytes = base64DecodedBytes(url, dataHeader[0].length);
+      continue;
+    }
+
+    mediaUrl = url;
+  }
+
+  if (!foundMedia || !kind) return null;
+  return {
+    kind,
+    ...(path ? { path } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(bytes !== undefined ? { bytes } : {}),
+    ...(mediaUrl ? { mediaUrl } : {}),
+    ...(blobRef ? { blobRef } : {}),
+  };
 }
 
 /** An image referenced by a user turn, resolved for presentation. */

@@ -2,6 +2,7 @@ import {
   CODEX_THREAD_ITEM_TYPES,
   type KimiGoalSnapshot,
   type MarkdownAugment,
+  parseKimiReadMediaOutput,
 } from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 import type {
@@ -1360,17 +1361,29 @@ function countToolResultBlocks(message: Message): number {
 /** Rough completeness score used to decide which duplicate result to keep. */
 function scoreToolResult(result: ToolResultData): number {
   let score = result.content.length;
-  if (result.structured !== undefined && result.structured !== null) {
+  const structured = result.structured;
+  if (structured !== undefined && structured !== null) {
     // Structured payloads unlock rich renderers; weigh them heavily so a
     // JSONL-complete result beats a partial streaming snapshot.
     score += 10_000;
+
+    if (isRecord(structured) && structured.type === "media") {
+      // Live Kimi media updates intentionally omit preview bytes, while the
+      // persisted projection can add a safe blob-backed preview. Prefer that
+      // richer snapshot even when both copies have identical display text.
+      if (typeof structured.previewUrl === "string") score += 256;
+      if (typeof structured.filePath === "string") score += 128;
+      if (typeof structured.path === "string") score += 16;
+      if (typeof structured.mimeType === "string") score += 8;
+      if (typeof structured.kind === "string") score += 4;
+      if (typeof structured.bytes === "number") score += 2;
+    }
   }
   // For question results, richer answer sets should outrank partial ones. A
   // live-stream `{questions, answers:{}}` snapshot arrives
   // before the completed tool_result carries the real `metadata.answers`;
   // without this, the empty-answers copy scores equal to the filled one and
   // `attachToolResult` keeps the stale copy on duplicate arrival.
-  const structured = result.structured;
   if (
     structured &&
     typeof structured === "object" &&
@@ -1382,6 +1395,41 @@ function scoreToolResult(result: ToolResultData): number {
     }
   }
   return score;
+}
+
+function normalizeKimiReadMediaResult(
+  toolName: string,
+  output: unknown,
+): Record<string, unknown> | undefined {
+  if (toolName.toLowerCase() !== "readmediafile") return undefined;
+  const summary = parseKimiReadMediaOutput(output);
+  if (!summary) return undefined;
+
+  return {
+    type: "media",
+    kind: summary.kind,
+    ...(summary.path ? { path: summary.path } : {}),
+    ...(summary.mimeType ? { mimeType: summary.mimeType } : {}),
+    ...(summary.bytes !== undefined ? { bytes: summary.bytes } : {}),
+    ...(summary.mediaUrl ? { previewUrl: summary.mediaUrl } : {}),
+  };
+}
+
+function getToolResultTextContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((part) => {
+      if (
+        isRecord(part) &&
+        part.type === "text" &&
+        typeof part.text === "string"
+      ) {
+        return [part.text];
+      }
+      return [];
+    })
+    .join("\n");
 }
 
 function attachToolResult(
@@ -1417,7 +1465,13 @@ function attachToolResult(
 
   // Attach result to existing tool call
   // Handle both camelCase (toolUseResult) and snake_case (tool_use_result) from SDK
-  const content = typeof block.content === "string" ? block.content : "";
+  const mediaResult = normalizeKimiReadMediaResult(
+    item.toolName,
+    block.content,
+  );
+  const content = mediaResult
+    ? `${String(mediaResult.kind)} loaded`
+    : getToolResultTextContent(block.content);
   // Only trust the message-level structured result when it unambiguously
   // belongs to this block (single tool_result per message).
   let structured =
@@ -1425,6 +1479,8 @@ function attachToolResult(
       ? (resultMessage.toolUseResult ??
         (resultMessage as Record<string, unknown>).tool_use_result)
       : undefined;
+
+  structured ??= mediaResult;
 
   if (!structured && item.toolName.toLowerCase() === "askuserquestion") {
     structured = normalizeAskUserQuestionResult(item.toolInput, content);

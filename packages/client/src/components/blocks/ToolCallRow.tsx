@@ -7,6 +7,7 @@ import type { ToolResultData } from "../../types/renderItems";
 import { toolRegistry } from "../renderers/tools";
 import type { RenderContext } from "../renderers/types";
 import { getToolSummary } from "../tools/summaries";
+import { ToolRenderErrorBoundary } from "./ToolRenderErrorBoundary";
 
 interface Props {
   id: string;
@@ -21,7 +22,7 @@ interface Props {
 
 type ToolCallStatus = Props["status"];
 
-export const ToolCallRow = memo(function ToolCallRow({
+const ToolCallRowContent = memo(function ToolCallRowContent({
   id,
   toolName,
   toolInput,
@@ -223,6 +224,20 @@ export const ToolCallRow = memo(function ToolCallRow({
         </div>
       )}
     </div>
+  );
+});
+
+export const ToolCallRow = memo(function ToolCallRow(props: Props) {
+  return (
+    <ToolRenderErrorBoundary
+      toolId={props.id}
+      toolName={props.toolName}
+      status={props.status}
+      input={props.toolInput}
+      result={props.toolResult}
+    >
+      <ToolCallRowContent {...props} />
+    </ToolRenderErrorBoundary>
   );
 });
 

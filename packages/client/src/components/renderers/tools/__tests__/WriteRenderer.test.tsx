@@ -44,4 +44,63 @@ describe("WriteRenderer", () => {
     expect(screen.getByText(/CREATE TABLE benchmark_metric/)).toBeDefined();
     expect(screen.queryByText("Wrote file successfully.")).toBeNull();
   });
+
+  it("tolerates a lazy-created Write call with no input yet", () => {
+    expect(writeRenderer.getUseSummary?.({})).toBe("Writing...");
+    expect(
+      writeRenderer.renderCollapsedPreview?.(
+        {},
+        undefined,
+        false,
+        renderContext,
+      ),
+    ).toBeNull();
+
+    render(<div>{writeRenderer.renderToolUse({}, renderContext)}</div>);
+    expect(screen.getByText("Preparing write")).toBeDefined();
+  });
+
+  it("accepts Kimi's path alias once the streamed input is complete", () => {
+    render(
+      <div>
+        {writeRenderer.renderCollapsedPreview?.(
+          {
+            path: "/repo/src/app.ts",
+            content: "export const value = 1;\n",
+          },
+          undefined,
+          false,
+          renderContext,
+        )}
+      </div>,
+    );
+
+    expect(screen.getByText("2 lines")).toBeDefined();
+    expect(screen.getByText(/export const value/)).toBeDefined();
+  });
+
+  it("renders a complete structured result without relying on tool input", () => {
+    render(
+      <div>
+        {writeRenderer.renderToolResult(
+          {
+            type: "text",
+            file: {
+              filePath: "/repo/src/result.ts",
+              content: "done\n",
+              numLines: 2,
+              startLine: 1,
+              totalLines: 2,
+            },
+          },
+          false,
+          renderContext,
+          {},
+        )}
+      </div>,
+    );
+
+    expect(screen.getByText("result.ts")).toBeDefined();
+    expect(screen.getByText("2 lines written")).toBeDefined();
+  });
 });

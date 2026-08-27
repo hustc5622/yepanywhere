@@ -903,6 +903,52 @@ describe("KimiProvider ACP updates", () => {
     });
   });
 
+  it("projects ACP ReadMediaFile raw arrays without rebroadcasting base64", () => {
+    const provider = new KimiProvider();
+    const output = [
+      { type: "text", text: '<image path="/tmp/example.png">' },
+      {
+        type: "image_url",
+        imageUrl: { url: "data:image/png;base64,QUJDRA==" },
+      },
+      { type: "text", text: "</image>" },
+    ];
+
+    const message = convertKimiUpdate(provider, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "ReadMediaFile:0",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: JSON.stringify(output) },
+        },
+      ],
+      rawOutput: output,
+    });
+
+    expect(message).toMatchObject({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "ReadMediaFile:0",
+            content: "image loaded: example.png",
+          },
+        ],
+      },
+      toolUseResult: {
+        type: "media",
+        kind: "image",
+        path: "/tmp/example.png",
+        mimeType: "image/png",
+        bytes: 4,
+      },
+    });
+    expect(JSON.stringify(message)).not.toContain("QUJDRA==");
+  });
+
   it("keeps Kimi thoughts but drops the duplicate ACP TodoList plan", () => {
     const provider = new KimiProvider();
 

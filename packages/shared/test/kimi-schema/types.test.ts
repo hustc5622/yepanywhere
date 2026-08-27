@@ -13,6 +13,7 @@ import {
   getKimiPromptText,
   getKimiSubagentType,
   inferKimiSubagentStatus,
+  isKimiAcpCompatibilityTitle,
   isKimiGoalCreateRecord,
   isKimiGoalUpdateRecord,
   isKimiInteractionRequestRecord,
@@ -20,6 +21,7 @@ import {
   isKimiTurnCancelRecord,
   isKimiTurnEndedRecord,
   parseKimiBlobRef,
+  parseKimiReadMediaOutput,
   parseKimiSessionState,
   parseKimiWireJsonl,
 } from "../../src/kimi-schema/types.js";
@@ -138,6 +140,80 @@ describe("parseKimiBlobRef", () => {
     expect(parseKimiBlobRef("blobref:image/png;../../etc/passwd")).toBeNull();
     expect(parseKimiBlobRef("blobref:image/png;short")).toBeNull();
     expect(parseKimiBlobRef(`blobref:;${hash}`)).toBeNull();
+  });
+});
+
+describe("parseKimiReadMediaOutput", () => {
+  const hash = "b".repeat(64);
+  const imageOutput = [
+    { type: "text", text: '<image path="/tmp/example.png">' },
+    {
+      type: "image_url",
+      imageUrl: { url: `blobref:image/png;${hash}` },
+    },
+    { type: "text", text: "</image>" },
+  ];
+
+  it("parses persisted blobref media arrays", () => {
+    expect(parseKimiReadMediaOutput(imageOutput)).toEqual({
+      kind: "image",
+      path: "/tmp/example.png",
+      mimeType: "image/png",
+      blobRef: { mimeType: "image/png", hash },
+    });
+  });
+
+  it("parses ACP JSON-string arrays without returning the data URL", () => {
+    const summary = parseKimiReadMediaOutput(
+      JSON.stringify([
+        { type: "text", text: '<video path="/tmp/example.mp4">' },
+        {
+          type: "video_url",
+          videoUrl: { url: "data:video/mp4;base64,QUJDRA==" },
+        },
+        { type: "text", text: "</video>" },
+      ]),
+    );
+
+    expect(summary).toEqual({
+      kind: "video",
+      path: "/tmp/example.mp4",
+      mimeType: "video/mp4",
+      bytes: 4,
+    });
+    expect(summary).not.toHaveProperty("mediaUrl");
+  });
+
+  it("rejects ordinary strings and malformed media envelopes", () => {
+    expect(parseKimiReadMediaOutput("image loaded")).toBeNull();
+    expect(parseKimiReadMediaOutput("[not json")).toBeNull();
+    expect(
+      parseKimiReadMediaOutput([{ type: "text", text: "no media" }]),
+    ).toBeNull();
+  });
+});
+
+describe("isKimiAcpCompatibilityTitle", () => {
+  it("recognizes flattened and truncated provider reminder titles", () => {
+    expect(
+      isKimiAcpCompatibilityTitle(
+        "<system-reminder> [yep-anywhere:kimi-acp-single-question] This ACP host can transport exactly one AskUserQuestion ite...",
+      ),
+    ).toBe(true);
+    expect(
+      isKimiAcpCompatibilityTitle(
+        "[yep-anywhere:kimi-acp-single-question] This ACP host can transport exactly one AskUserQuestion",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify ordinary user prose as a compatibility title", () => {
+    expect(
+      isKimiAcpCompatibilityTitle(
+        "[yep-anywhere:kimi-acp-single-question] is user prose",
+      ),
+    ).toBe(false);
+    expect(isKimiAcpCompatibilityTitle("Discuss system reminders")).toBe(false);
   });
 });
 

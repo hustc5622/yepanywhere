@@ -31,6 +31,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   imageView: "ViewImage",
   image_generation: "ViewImage",
   imageGeneration: "ViewImage",
+  readmediafile: "ReadMediaFile",
   skill: "Skill",
 };
 
@@ -198,6 +199,7 @@ import { exitPlanModeRenderer } from "./ExitPlanModeRenderer";
 import { globRenderer } from "./GlobRenderer";
 import { grepRenderer } from "./GrepRenderer";
 import { killShellRenderer } from "./KillShellRenderer";
+import { readMediaFileRenderer } from "./ReadMediaFileRenderer";
 import { readRenderer } from "./ReadRenderer";
 import { skillRenderer } from "./SkillRenderer";
 import { taskOutputRenderer } from "./TaskOutputRenderer";
@@ -215,6 +217,7 @@ toolRegistry.register(bashRenderer);
 toolRegistry.register(codexExecRenderer);
 toolRegistry.register(codexWaitRenderer);
 toolRegistry.register(readRenderer);
+toolRegistry.register(readMediaFileRenderer);
 toolRegistry.register(editRenderer);
 toolRegistry.register(writeRenderer);
 toolRegistry.register(globRenderer);

@@ -34,6 +34,39 @@ describe("ToolCallRow", () => {
     expect(container.querySelector(".tool-use-expanded")).toBeNull();
   });
 
+  it("keeps a lazy-created Kimi Write row stable until input arrives", () => {
+    const { container } = renderWithToolProviders(
+      <ToolCallRow
+        id="Write:10"
+        toolName="Write"
+        toolInput={{}}
+        status="pending"
+        sessionProvider="kimi"
+      />,
+    );
+
+    expect(screen.getByText("Write")).toBeDefined();
+    expect(screen.getByText("Writing...")).toBeDefined();
+    expect(container.querySelector(".tool-row-collapsed-preview")).toBeNull();
+    expect(container.querySelector(".tool-spinner")).not.toBeNull();
+  });
+
+  it("keeps a lazy-created Kimi Read row stable until input arrives", () => {
+    const { container } = renderWithToolProviders(
+      <ToolCallRow
+        id="Read:11"
+        toolName="Read"
+        toolInput={{}}
+        status="pending"
+        sessionProvider="kimi"
+      />,
+    );
+
+    expect(screen.getByText("Read")).toBeDefined();
+    expect(screen.getByText("Reading...")).toBeDefined();
+    expect(container.querySelector(".tool-spinner")).not.toBeNull();
+  });
+
   it("shows PTY-backed read shell rows inline without requiring expansion", () => {
     const { container } = render(
       <ToolCallRow

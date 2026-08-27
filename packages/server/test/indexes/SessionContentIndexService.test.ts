@@ -138,6 +138,42 @@ describe("SessionContentIndexService", () => {
     expect(service.searchScope(index, "nonexistent", 3)).toHaveLength(0);
   });
 
+  it("rebuilds a current-version content index with a poisoned Kimi title", async () => {
+    await createSession("s1", "Recovered title", "searchable body");
+    const fileStats = await stat(join(sessionDir, "s1.jsonl"));
+    const poisonedTitle =
+      "<system-reminder> [yep-anywhere:kimi-acp-single-question] This ACP host can transport exactly one AskUserQuestion ite...";
+    const indexPath = service.getIndexPath(sessionDir, reader);
+    await writeFile(
+      indexPath,
+      JSON.stringify({
+        version: 1,
+        projectId,
+        sessions: {
+          s1: {
+            fileMtime: fileStats.mtimeMs,
+            indexedBytes: fileStats.size,
+            title: poisonedTitle,
+            updatedAt: new Date().toISOString(),
+            provider: "kimi",
+            messages: [],
+          },
+        },
+      }),
+    );
+
+    const index = await service.ensureIndexed(
+      sessionDir,
+      projectId,
+      reader,
+      loadMessages,
+    );
+
+    expect(index.sessions.s1?.title).toBe("Recovered title");
+    expect(index.sessions.s1?.provider).not.toBe("kimi");
+    expect(index.sessions.s1?.messages).not.toHaveLength(0);
+  });
+
   it("ignores persisted search entries from a retired provider", () => {
     const results = service.searchScope(
       {
