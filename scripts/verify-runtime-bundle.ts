@@ -2,6 +2,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   ROOT_DIR,
   assertRuntimeLockMatchesDependencies,
@@ -82,6 +83,18 @@ for (const [name, expectedVersion] of Object.entries(expectedDependencies)) {
       `${name} 安装版本 ${installedPackage.version ?? "unknown"} 与锁定版本 ${expectedVersion} 不一致`,
     );
   }
+}
+
+const nodeWsEntry = path.join(
+  bundleDir,
+  "node_modules/@hono/node-ws/dist/index.js",
+);
+try {
+  await import(pathToFileURL(nodeWsEntry).href);
+} catch (error) {
+  throw new Error(`Bundle 无法加载 @hono/node-ws: ${nodeWsEntry}`, {
+    cause: error,
+  });
 }
 
 const claudeSdk = readJson<PackageJson>(
