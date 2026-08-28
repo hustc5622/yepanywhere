@@ -459,6 +459,7 @@ export function useSessionMessages(
     const isBranchReloadWithinSession =
       loadedSessionKeyRef.current === sessionLoadKey;
     let isCurrent = true;
+    const abortController = new AbortController();
 
     initialLoadCompleteRef.current = false;
     streamBufferRef.current = [];
@@ -473,6 +474,7 @@ export function useSessionMessages(
         tailCompactions: 2,
         maxMessages: INITIAL_MESSAGE_LIMIT,
         branchId,
+        signal: abortController.signal,
       })
       .then((data) => {
         if (!isCurrent) return;
@@ -503,6 +505,7 @@ export function useSessionMessages(
 
     return () => {
       isCurrent = false;
+      abortController.abort();
     };
   }, [
     projectId,

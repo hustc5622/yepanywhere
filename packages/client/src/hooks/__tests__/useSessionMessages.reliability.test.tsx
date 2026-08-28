@@ -108,4 +108,38 @@ describe("useSessionMessages initial-load reliability", () => {
     );
     expect(result.current.session).toBe(nextSession);
   });
+
+  it("aborts the previous snapshot request when the session changes", async () => {
+    let firstRequestSignal: AbortSignal | undefined;
+    getSession
+      .mockImplementationOnce(
+        (
+          _projectId: string,
+          _sessionId: string,
+          _afterMessageId: string | undefined,
+          options: { signal?: AbortSignal },
+        ) => {
+          firstRequestSignal = options.signal;
+          return new Promise(() => {});
+        },
+      )
+      .mockResolvedValueOnce({
+        ...sessionResponse,
+        session: { ...session, id: "session-2" },
+      });
+
+    const { rerender } = renderHook(
+      ({ sessionId }) =>
+        useSessionMessages({ projectId: "project-1", sessionId }),
+      { initialProps: { sessionId: "session-1" } },
+    );
+
+    await waitFor(() => expect(getSession).toHaveBeenCalledTimes(1));
+    expect(firstRequestSignal?.aborted).toBe(false);
+
+    rerender({ sessionId: "session-2" });
+
+    await waitFor(() => expect(firstRequestSignal?.aborted).toBe(true));
+    await waitFor(() => expect(getSession).toHaveBeenCalledTimes(2));
+  });
 });

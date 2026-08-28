@@ -183,75 +183,13 @@ export class CodexSessionReader implements ISessionReader {
     if (!sessionFile) return null;
 
     try {
-      const lines = await readJsonlLines(sessionFile.filePath);
-      if (lines.length === 0 || (lines.length === 1 && !lines[0])) return null;
-      const entries: CodexSessionEntry[] = [];
-
-      for (const line of lines) {
-        const entry = parseCodexSessionEntry(line);
-        if (entry) {
-          entries.push(entry);
-        }
-      }
-
-      if (entries.length === 0) return null;
-      const visibleEntries = applyCodexRollbackMarkers(entries);
-
-      // Extract session metadata from first entry
-      const metaEntry = entries.find((e) => e.type === "session_meta") as
-        | CodexSessionMetaEntry
-        | undefined;
-      if (!metaEntry) return null;
-
-      const stats = await stat(sessionFile.filePath);
-      const { title, fullTitle } = this.extractTitle(visibleEntries);
-      const userQuestions = this.extractUserQuestions(visibleEntries);
-      const messageCount = this.countMessages(visibleEntries);
-      const model = this.extractModel(visibleEntries);
-      const provider = this.determineProvider(metaEntry, model);
-      const turnContext = this.extractTurnContext(visibleEntries);
-      const runtimeConfig = this.extractRuntimeConfig(visibleEntries);
-      const contextUsage = this.extractContextUsage(
-        visibleEntries,
-        model,
-        provider,
-      );
-
-      // Skip sessions with no actual conversation messages
-      if (messageCount === 0) return null;
-
-      return {
-        id: sessionId,
+      const entries = await this.readSessionEntries(sessionFile);
+      return this.createSessionSummary(
+        sessionId,
         projectId,
-        title,
-        fullTitle,
-        createdAt: metaEntry.payload.timestamp,
-        updatedAt:
-          latestVisibleEntryTimestamp(visibleEntries) ??
-          stats.mtime.toISOString(),
-        messageCount,
-        userQuestions,
-        ownership: { owner: "none" },
-        contextUsage,
-        provider,
-        model,
-        reasoningEffort: runtimeConfig.reasoningEffort,
-        serviceTier: runtimeConfig.serviceTier,
-        originator: metaEntry.payload.originator,
-        cliVersion: metaEntry.payload.cli_version,
-        source: normalizeCodexSessionSource(metaEntry.payload.source),
-        approvalPolicy: turnContext?.payload.approval_policy,
-        sandboxPolicy: turnContext?.payload.sandbox_policy
-          ? {
-              type: turnContext.payload.sandbox_policy.type,
-              networkAccess: turnContext.payload.sandbox_policy.network_access,
-              excludeTmpdirEnvVar:
-                turnContext.payload.sandbox_policy.exclude_tmpdir_env_var,
-              excludeSlashTmp:
-                turnContext.payload.sandbox_policy.exclude_slash_tmp,
-            }
-          : undefined,
-      };
+        sessionFile,
+        entries,
+      );
     } catch {
       return null;
     }
@@ -263,21 +201,23 @@ export class CodexSessionReader implements ISessionReader {
     afterMessageId?: string,
     options?: GetSessionOptions,
   ): Promise<LoadedSession | null> {
-    const summary = await this.getSessionSummary(sessionId, projectId);
-    if (!summary) return null;
-
     const sessionFile = await this.findSessionFile(sessionId);
     if (!sessionFile) return null;
 
-    const lines = await readJsonlLines(sessionFile.filePath);
-
-    const entries: CodexSessionEntry[] = [];
-    for (const line of lines) {
-      const entry = parseCodexSessionEntry(line);
-      if (entry) {
-        entries.push(entry);
-      }
+    let entries: CodexSessionEntry[];
+    let summary: SessionSummary | null;
+    try {
+      entries = await this.readSessionEntries(sessionFile);
+      summary = await this.createSessionSummary(
+        sessionId,
+        projectId,
+        sessionFile,
+        entries,
+      );
+    } catch {
+      return null;
     }
+    if (!summary) return null;
 
     // Filter entries if needed (for incremental fetching)
     // Note: Codex entries are not 1:1 with messages, so standard ID filtering is tricky
@@ -303,6 +243,83 @@ export class CodexSessionReader implements ISessionReader {
       },
       branchState: branchView.branchState,
       codexBranchState: branchView.branchState,
+    };
+  }
+
+  private async readSessionEntries(
+    sessionFile: CodexSessionFile,
+  ): Promise<CodexSessionEntry[]> {
+    const lines = await readJsonlLines(sessionFile.filePath);
+    if (lines.length === 0 || (lines.length === 1 && !lines[0])) return [];
+
+    const entries: CodexSessionEntry[] = [];
+    for (const line of lines) {
+      const entry = parseCodexSessionEntry(line);
+      if (entry) entries.push(entry);
+    }
+    return entries;
+  }
+
+  private async createSessionSummary(
+    sessionId: string,
+    projectId: UrlProjectId,
+    sessionFile: CodexSessionFile,
+    entries: CodexSessionEntry[],
+  ): Promise<SessionSummary | null> {
+    if (entries.length === 0) return null;
+    const visibleEntries = applyCodexRollbackMarkers(entries);
+    const metaEntry = entries.find((e) => e.type === "session_meta") as
+      | CodexSessionMetaEntry
+      | undefined;
+    if (!metaEntry) return null;
+
+    const stats = await stat(sessionFile.filePath);
+    const { title, fullTitle } = this.extractTitle(visibleEntries);
+    const userQuestions = this.extractUserQuestions(visibleEntries);
+    const messageCount = this.countMessages(visibleEntries);
+    if (messageCount === 0) return null;
+
+    const model = this.extractModel(visibleEntries);
+    const provider = this.determineProvider(metaEntry, model);
+    const turnContext = this.extractTurnContext(visibleEntries);
+    const runtimeConfig = this.extractRuntimeConfig(visibleEntries);
+    const contextUsage = this.extractContextUsage(
+      visibleEntries,
+      model,
+      provider,
+    );
+
+    return {
+      id: sessionId,
+      projectId,
+      title,
+      fullTitle,
+      createdAt: metaEntry.payload.timestamp,
+      updatedAt:
+        latestVisibleEntryTimestamp(visibleEntries) ??
+        stats.mtime.toISOString(),
+      messageCount,
+      userQuestions,
+      ownership: { owner: "none" },
+      contextUsage,
+      provider,
+      model,
+      reasoningEffort: runtimeConfig.reasoningEffort,
+      serviceTier: runtimeConfig.serviceTier,
+      originator: metaEntry.payload.originator,
+      cliVersion: metaEntry.payload.cli_version,
+      source: normalizeCodexSessionSource(metaEntry.payload.source),
+      approvalPolicy: turnContext?.payload.approval_policy,
+      sandboxPolicy: turnContext?.payload.sandbox_policy
+        ? {
+            type: turnContext.payload.sandbox_policy.type,
+            networkAccess: turnContext.payload.sandbox_policy.network_access,
+            excludeTmpdirEnvVar:
+              turnContext.payload.sandbox_policy.exclude_tmpdir_env_var,
+            excludeSlashTmp:
+              turnContext.payload.sandbox_policy.exclude_slash_tmp,
+          }
+        : undefined,
     };
   }
 

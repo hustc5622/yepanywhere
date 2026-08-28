@@ -9,6 +9,7 @@ import { encodeProjectId } from "../../src/projects/paths.js";
 import { CodexSessionReader } from "../../src/sessions/codex-reader.js";
 import { invalidateCodexSessionManifest } from "../../src/sessions/codex-session-manifest.js";
 import { normalizeSession } from "../../src/sessions/normalization.js";
+import * as jsonl from "../../src/utils/jsonl.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -127,6 +128,20 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(second).toHaveLength(1);
     expect(first[0]?.sessionId).toBe(sessionId);
     expect(second[0]?.sessionId).toBe(sessionId);
+  });
+
+  it("reads a session JSONL only once when loading its detail", async () => {
+    const sessionId = randomUUID();
+    await createSessionFile(sessionId, "openai", "gpt-5");
+    const readJsonlLines = vi.spyOn(jsonl, "readJsonlLines");
+
+    const loaded = await reader.getSession(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+
+    expect(loaded).not.toBeNull();
+    expect(readJsonlLines).toHaveBeenCalledTimes(1);
   });
 
   it("hides recommended plugin context from the title and conversation", async () => {

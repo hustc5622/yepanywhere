@@ -361,26 +361,28 @@ function TreeNode({ entry, depth, dirs, expanded, onToggle }: TreeNodeProps) {
       </button>
       {isOpen && (
         <ul className="repo-tree-list" role="group">
-          {dirState?.loading ? (
+          {dirState?.entries ? (
+            dirState.entries.length === 0 ? (
+              <li className="repo-tree-empty repo-tree-child">{""}</li>
+            ) : (
+              dirState.entries.map((child) => (
+                <TreeNode
+                  key={child.path}
+                  entry={child}
+                  depth={depth + 1}
+                  dirs={dirs}
+                  expanded={expanded}
+                  onToggle={onToggle}
+                />
+              ))
+            )
+          ) : dirState?.loading ? (
             <li className="repo-tree-loading repo-tree-child">{""}</li>
           ) : dirState?.error ? (
             <li className="repo-tree-error repo-tree-child">
               {dirState.error}
             </li>
-          ) : dirState?.entries && dirState.entries.length === 0 ? (
-            <li className="repo-tree-empty repo-tree-child">{""}</li>
-          ) : (
-            dirState?.entries?.map((child) => (
-              <TreeNode
-                key={child.path}
-                entry={child}
-                depth={depth + 1}
-                dirs={dirs}
-                expanded={expanded}
-                onToggle={onToggle}
-              />
-            ))
-          )}
+          ) : null}
         </ul>
       )}
     </li>

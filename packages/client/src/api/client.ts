@@ -776,6 +776,7 @@ export const api = {
       afterWindowMessageId?: string;
       branchId?: string;
       maxMessages?: number;
+      signal?: AbortSignal;
     },
   ) => {
     const params = new URLSearchParams();
@@ -800,7 +801,9 @@ export const api = {
       pendingInputRequest?: InputRequest | null;
       slashCommands?: SlashCommand[] | null;
       pagination?: PaginationInfo;
-    }>(`/projects/${projectId}/sessions/${sessionId}${qs ? `?${qs}` : ""}`);
+    }>(`/projects/${projectId}/sessions/${sessionId}${qs ? `?${qs}` : ""}`, {
+      signal: options?.signal,
+    });
   },
 
   /**

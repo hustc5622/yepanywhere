@@ -18,7 +18,10 @@ import { initializeFontSize } from "./hooks/useFontSize";
 import { initializeTabSize } from "./hooks/useTabSize";
 import { initializeTheme } from "./hooks/useTheme";
 import { NavigationLayout } from "./layouts";
-import { installBuildRecoveryListeners } from "./lib/buildRecovery";
+import {
+  checkForBuildRecovery,
+  installBuildRecoveryListeners,
+} from "./lib/buildRecovery";
 import { armSplashSafety } from "./lib/splash";
 import "./styles/index.css";
 
@@ -75,11 +78,14 @@ const SearchPage = lazy(() =>
     default: module.SearchPage,
   })),
 );
-const SessionPage = lazy(() =>
-  import("./pages/SessionPage").then((module) => ({
-    default: module.SessionPage,
-  })),
-);
+const SessionPage = lazy(async () => {
+  const module = await import("./pages/SessionPage");
+  if (!module?.SessionPage) {
+    void checkForBuildRecovery("dynamic-import-error");
+    throw new Error("Failed to fetch dynamically imported module: SessionPage");
+  }
+  return { default: module.SessionPage };
+});
 const TerminalPage = lazy(() =>
   import("./pages/TerminalPage").then((module) => ({
     default: module.TerminalPage,
