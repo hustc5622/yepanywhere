@@ -199,6 +199,7 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const nextCursorRef = useRef<string | null>(null);
   const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTitleRefetchTimersRef = useRef<
     Map<string, Set<ReturnType<typeof setTimeout>>>
@@ -340,6 +341,9 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       }
 
       setHasMore(data.hasMore);
+      nextCursorRef.current = data.hasMore
+        ? (data.nextCursor ?? data.sessions.at(-1)?.updatedAt ?? null)
+        : null;
       if (!includeStats || projectId) {
         setStats(DEFAULT_STATS);
       }
@@ -472,15 +476,15 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
   const loadMore = useCallback(async () => {
     if (!enabled || !hasMore || sessions.length === 0) return;
 
-    const lastSession = sessions[sessions.length - 1];
-    if (!lastSession) return;
+    const nextCursor = nextCursorRef.current;
+    if (!nextCursor) return;
 
     try {
       const data = await api.getGlobalSessions({
         project: projectId ?? undefined,
         q: searchQuery || undefined,
         limit,
-        after: lastSession.updatedAt,
+        after: nextCursor,
         includeArchived,
         includeStats: false,
         kind: sessionKind ?? undefined,
@@ -495,6 +499,9 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       });
 
       setHasMore(data.hasMore);
+      nextCursorRef.current = data.hasMore
+        ? (data.nextCursor ?? data.sessions.at(-1)?.updatedAt ?? null)
+        : null;
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     }

@@ -25,6 +25,7 @@ import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
+import { compareSessionsByPinAndUpdatedAt } from "../lib/sessionOrdering";
 import { toUrlProjectId } from "../utils";
 
 // Long-press threshold for entering selection mode on mobile
@@ -223,7 +224,9 @@ export function GlobalSessionsPage() {
       projectId: projectFilter,
       searchQuery,
       includeArchived,
-      includePinned: statusFilters.includes("pinned"),
+      // Pinned sessions must be present before the client can elevate them.
+      // The server appends pins that fall outside the ordinary recency page.
+      includePinned: true,
       includeStats: !projectFilter,
       sessionKind,
     });
@@ -233,7 +236,7 @@ export function GlobalSessionsPage() {
 
   // Filter sessions based on status and provider filters (client-side)
   const filteredSessions = useMemo(() => {
-    return sessions.filter((session) => {
+    const filtered = sessions.filter((session) => {
       // Status filtering (empty = show all non-archived)
       if (statusFilters.length === 0) {
         // Default: show non-archived
@@ -287,6 +290,8 @@ export function GlobalSessionsPage() {
 
       return true;
     });
+
+    return filtered.sort(compareSessionsByPinAndUpdatedAt);
   }, [sessions, statusFilters, providerFilters, executorFilters, ageFilter]);
 
   // Track which sessions have unsent drafts

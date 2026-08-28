@@ -795,6 +795,10 @@ describe("Global Sessions Routes", () => {
         "old-pinned",
       ]);
       expect(result.hasMore).toBe(true);
+      expect(result.nextCursor).toBe(
+        result.sessions.find((session) => session.id === "recent-session")
+          ?.updatedAt,
+      );
       expect(
         vi
           .mocked(mockSessionIndexService.getSessionsWithCache)

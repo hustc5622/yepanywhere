@@ -37,6 +37,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复“全部会话”仍只按时间排列、没有体现置顶优先级的问题：当前筛选范围内的置顶会话现在统一排在普通会话之前，两组内部继续按最近更新时间排序；接口会补齐落在普通首屏之外的置顶项，并用补齐前的时间页边界继续分页，避免“加载更多”漏掉中间会话。
 - 修复 Kimi ACP 会话的标题与工具展示兼容性：隐藏 reminder 不再污染自动标题并会定向刷新旧索引；`ReadMediaFile` 的图片/视频结果以有界摘要和可用预览展示，不再变成 `""` 或重复传输 base64；`Write` 等工具在流式参数尚未补齐时安全等待，单个 renderer 异常只降级对应工具行；全局错误页仅在两端 buildId 确实不一致时提示版本问题。
 - 修复侧边栏项目收起后置顶会话仍显示的问题；置顶会话随项目统一折叠，重新展开后仍优先显示。
 - Keep Pi transcripts ordered across reconnects by treating persisted Pi history as an authoritative snapshot instead of incrementally merging native entry IDs with unrelated live UUIDs, and defer that replacement until an owned turn is idle. Pi session discovery now shares one provider-wide file catalog, unchanged parsed sessions survive unrelated file changes without periodic forced reparsing, summary/detail reads share the normal media-deferred snapshot, and project reader aliases reuse the same cache instead of scanning the full Pi tree independently.

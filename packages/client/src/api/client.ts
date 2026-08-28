@@ -240,6 +240,8 @@ export interface ProjectDirectoryBrowseResponse {
 export interface GlobalSessionsResponse {
   sessions: GlobalSessionItem[];
   hasMore: boolean;
+  /** Cursor for the next ordinary recency page, before coverage extras. */
+  nextCursor?: string;
   /** Global stats computed from all sessions (not just paginated results) */
   stats: GlobalSessionStats;
   /** All projects for filter dropdown */

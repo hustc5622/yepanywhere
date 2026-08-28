@@ -209,6 +209,8 @@ export interface ProjectOption {
 export interface GlobalSessionsResponse {
   sessions: GlobalSessionItem[];
   hasMore: boolean;
+  /** Cursor for the next ordinary recency page, before coverage extras. */
+  nextCursor?: string;
   /** Global stats computed from all sessions (not just paginated results) */
   stats: GlobalSessionStats;
   /** All projects for filter dropdown */
@@ -963,6 +965,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
     // Get one extra to determine hasMore
     const hasMore = topSessions.length > limit;
     const sessions = topSessions.slice(0, limit);
+    // Capture the ordinary page boundary before pinned/project coverage rows
+    // are appended. Their timestamps can be much older and are not cursors.
+    const nextCursor = hasMore ? sessions.at(-1)?.updatedAt : undefined;
 
     // Pins share the ordinary response and are deduplicated against the top-N
     // page. This replaces the sidebar's former second "starred sessions"
@@ -999,6 +1004,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
     const response: GlobalSessionsResponse = {
       sessions,
       hasMore,
+      ...(nextCursor ? { nextCursor } : {}),
       stats,
       projects: projectOptions,
     };

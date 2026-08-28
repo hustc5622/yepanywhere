@@ -12,6 +12,7 @@ import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { activityBus } from "../lib/activityBus";
 import { formatSmartTime } from "../lib/datetime";
+import { compareSessionsByPinAndUpdatedAt } from "../lib/sessionOrdering";
 import { ProjectGitStatusButton } from "./ProjectGitStatusButton";
 import { RemoteProjectIcon } from "./RemoteProjectIcon";
 import { SessionListItem } from "./SessionListItem";
@@ -73,20 +74,6 @@ function formatBusyNames(
   return label;
 }
 
-function compareSessionsByUpdatedAtDesc(
-  a: GlobalSessionItem,
-  b: GlobalSessionItem,
-): number {
-  // A pin is scoped to its project group: pinned sessions stay above that
-  // project's ordinary sessions without creating a separate global section.
-  if (a.isStarred !== b.isStarred) return a.isStarred ? -1 : 1;
-  const diff =
-    new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-  if (diff !== 0) return diff;
-  // Stable, deterministic tiebreaker when timestamps match.
-  return a.id.localeCompare(b.id);
-}
-
 function groupSessionsByProject(
   sectionKey: string,
   sessions: GlobalSessionItem[],
@@ -127,7 +114,7 @@ function groupSessionsByProject(
   // itself stays in hook (insertion) order so an active session's project does
   // not jump under the pointer during high-frequency live updates.
   for (const group of groups) {
-    group.sessions.sort(compareSessionsByUpdatedAtDesc);
+    group.sessions.sort(compareSessionsByPinAndUpdatedAt);
   }
 
   return groups;
