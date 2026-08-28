@@ -4,6 +4,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const sdk = vi.hoisted(() => ({
   clientOptions: [] as Array<Record<string, unknown>>,
   wsOptions: [] as Array<Record<string, unknown>>,
+  httpInstance: {
+    defaults: {} as Record<string, unknown>,
+    request: vi.fn(),
+    get: vi.fn(),
+    delete: vi.fn(),
+    head: vi.fn(),
+    options: vi.fn(),
+    post: vi.fn(),
+    put: vi.fn(),
+    patch: vi.fn(),
+  },
   handlers: {} as Record<string, (event: unknown) => Promise<void>>,
   request: vi.fn(),
   register: vi.fn(),
@@ -35,6 +46,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => {
   return {
     AppType: { SelfBuild: "self-build" },
     Client,
+    defaultHttpInstance: sdk.httpInstance,
     Domain: { Feishu: "domain-feishu", Lark: "domain-lark" },
     EventDispatcher,
     LoggerLevel: { error: "error" },
@@ -73,8 +85,22 @@ import type { FeishuTransportCallbacks } from "../../../src/channels/feishu/tran
 
 describe("LarkSdkFeishuTransport inbound boundary", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     sdk.clientOptions.length = 0;
     sdk.wsOptions.length = 0;
+    for (const method of [
+      sdk.httpInstance.request,
+      sdk.httpInstance.get,
+      sdk.httpInstance.delete,
+      sdk.httpInstance.head,
+      sdk.httpInstance.options,
+      sdk.httpInstance.post,
+      sdk.httpInstance.put,
+      sdk.httpInstance.patch,
+    ]) {
+      method.mockReset().mockResolvedValue({});
+    }
     for (const key of Object.keys(sdk.handlers)) delete sdk.handlers[key];
     sdk.request.mockReset().mockResolvedValue({
       bot: { open_id: "ou_bot_fixture", app_name: "Fixture Bot" },
@@ -129,6 +155,7 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
         domain: "domain-lark",
       }),
     ]);
+    expect(sdk.clientOptions[0]).not.toHaveProperty("httpInstance");
     expect(sdk.request).toHaveBeenCalledWith({
       url: "/open-apis/bot/v3/info",
       method: "GET",
@@ -138,6 +165,7 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
       name: "Fixture Bot",
     });
     expect(callbacks.onReady).toHaveBeenCalledTimes(1);
+    expect(sdk.wsOptions.at(-1)).not.toHaveProperty("httpInstance");
     expect(Object.keys(sdk.handlers).sort()).toEqual([
       "card.action.trigger",
       "im.message.reaction.created_v1",
@@ -204,8 +232,71 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
     expect(transport.getMessageApi()).toBeUndefined();
   });
 
+  it("bypasses inherited proxies for Feishu without mutating the SDK default", async () => {
+    vi.stubEnv("HTTPS_PROXY", "http://127.0.0.1:8485/private-value");
+    const transport = new LarkSdkFeishuTransport({
+      account: makeAccount(),
+      appSecret: "fixture-secret",
+      callbacks: makeCallbacks(),
+    });
+
+    await transport.start();
+
+    const directHttpInstance = sdk.clientOptions.at(-1)?.httpInstance as
+      | { request(options: Record<string, unknown>): Promise<unknown> }
+      | undefined;
+    expect(directHttpInstance).toBeDefined();
+    expect(directHttpInstance).not.toBe(sdk.httpInstance);
+    expect(sdk.wsOptions.at(-1)?.httpInstance).toBe(directHttpInstance);
+    expect(sdk.httpInstance.defaults).toEqual({});
+
+    await directHttpInstance?.request({
+      url: "https://open.feishu.cn/open-apis/bot/v3/info",
+      method: "GET",
+    });
+    expect(sdk.httpInstance.request).toHaveBeenCalledWith({
+      url: "https://open.feishu.cn/open-apis/bot/v3/info",
+      method: "GET",
+      proxy: false,
+    });
+  });
+
+  it("honors an account-level environment proxy override for Feishu", async () => {
+    const transport = new LarkSdkFeishuTransport({
+      account: makeAccount({ proxyMode: "environment" }),
+      appSecret: "fixture-secret",
+      callbacks: makeCallbacks(),
+    });
+
+    await transport.start();
+
+    expect(sdk.clientOptions.at(-1)).not.toHaveProperty("httpInstance");
+    expect(sdk.wsOptions.at(-1)).not.toHaveProperty("httpInstance");
+  });
+
+  it("allows an account-level direct override for international Lark", async () => {
+    const transport = new LarkSdkFeishuTransport({
+      account: makeAccount({ domain: "lark", proxyMode: "direct" }),
+      appSecret: "fixture-secret",
+      callbacks: makeCallbacks(),
+    });
+
+    await transport.start();
+
+    expect(sdk.clientOptions.at(-1)?.httpInstance).toBeDefined();
+    expect(sdk.wsOptions.at(-1)?.httpInstance).toBe(
+      sdk.clientOptions.at(-1)?.httpInstance,
+    );
+  });
+
   it("fails closed before WebSocket startup when bot identity cannot be verified", async () => {
-    sdk.request.mockRejectedValueOnce(new Error("fixture identity failure"));
+    vi.stubEnv("HTTPS_PROXY", "http://127.0.0.1:8485/private-value");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    sdk.request.mockRejectedValueOnce(
+      Object.assign(new Error("fixture identity failure"), {
+        code: "ECONNREFUSED",
+      }),
+    );
     const callbacks = makeCallbacks();
     const transport = new LarkSdkFeishuTransport({
       account: makeAccount(),
@@ -221,6 +312,10 @@ describe("LarkSdkFeishuTransport inbound boundary", () => {
     );
     expect(sdk.wsOptions).toHaveLength(0);
     expect(callbacks.onMessage).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(
+      "[Feishu] event=feishu_transport_request_failed accountId=fixture-bot phase=bot_identity errorCode=ECONNREFUSED httpStatus=none inheritedProxy=true proxyBypassed=true",
+    );
+    expect(warning.mock.calls.flat().join(" ")).not.toContain("8485");
   });
 
   it("rejects malformed card-action envelopes at the transport boundary", () => {

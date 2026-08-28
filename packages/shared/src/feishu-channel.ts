@@ -4,6 +4,9 @@ import type { CodexMcpMode, PermissionMode } from "./types.js";
 export const FeishuDomainSchema = z.enum(["feishu", "lark"]);
 export type FeishuDomain = z.infer<typeof FeishuDomainSchema>;
 
+export const FeishuProxyModeSchema = z.enum(["auto", "direct", "environment"]);
+export type FeishuProxyMode = z.infer<typeof FeishuProxyModeSchema>;
+
 export const FeishuReplyModeSchema = z.enum(["card", "markdown", "text"]);
 export type FeishuReplyMode = z.infer<typeof FeishuReplyModeSchema>;
 
@@ -44,6 +47,7 @@ export const FeishuAccountConfigSchema = z.object({
   name: z.string().trim().min(1).max(100),
   enabled: z.boolean().default(false),
   domain: FeishuDomainSchema.default("feishu"),
+  proxyMode: FeishuProxyModeSchema.default("auto"),
   appId: z
     .string()
     .trim()

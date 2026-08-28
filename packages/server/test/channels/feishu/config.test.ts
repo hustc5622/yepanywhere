@@ -89,6 +89,20 @@ describe("FeishuAccountConfigStore", () => {
     expect((await stat(reader.filePath)).mode & 0o777).toBe(0o600);
   });
 
+  it("defaults proxy policy and validates account-level overrides", () => {
+    expect(makeAccount().proxyMode).toBe("auto");
+    expect(makeAccount({ proxyMode: "direct" }).proxyMode).toBe("direct");
+    expect(makeAccount({ proxyMode: "environment" }).proxyMode).toBe(
+      "environment",
+    );
+    expect(() =>
+      FeishuAccountConfigSchema.parse({
+        ...makeAccount(),
+        proxyMode: "invalid",
+      }),
+    ).toThrow();
+  });
+
   it("fails closed without replacing a malformed existing file", async () => {
     const dataDir = await createDataDir(dataDirs);
     const filePath = join(dataDir, "channels", "feishu", "accounts.json");

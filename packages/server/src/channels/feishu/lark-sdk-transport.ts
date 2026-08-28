@@ -11,6 +11,14 @@ import type {
 } from "./transport.js";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+const PROXY_ENV_KEYS = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+] as const;
 
 const silentLogger: Lark.Logger = {
   error: () => undefined,
@@ -49,11 +57,14 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
     await this.options.outbox?.initialize();
     const domain =
       account.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
+    const proxyBypassed = shouldBypassProxy(account);
+    const httpInstance = proxyBypassed ? directLarkHttpInstance() : undefined;
     const client = new Lark.Client({
       appId: account.appId,
       appSecret,
       appType: Lark.AppType.SelfBuild,
       domain,
+      ...(httpInstance ? { httpInstance } : {}),
       logger: silentLogger,
       loggerLevel: Lark.LoggerLevel.error,
     });
@@ -69,7 +80,13 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
         url: "/open-apis/bot/v3/info",
         method: "GET",
       });
-    } catch {
+    } catch (error) {
+      logTransportRequestFailure(
+        account.id,
+        "bot_identity",
+        error,
+        proxyBypassed,
+      );
       callbacks.onTerminalError("BOT_IDENTITY_FAILED");
       throw new Error("FEISHU_BOT_IDENTITY_FAILED");
     }
@@ -146,6 +163,7 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
         appId: account.appId,
         appSecret,
         domain,
+        ...(httpInstance ? { httpInstance } : {}),
         logger: silentLogger,
         loggerLevel: Lark.LoggerLevel.error,
         autoReconnect: true,
@@ -182,6 +200,91 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
   getMessageApi(): LarkSdkFeishuMessageApi | undefined {
     return this.messageApi;
   }
+}
+
+let sharedDirectHttpInstance: Lark.HttpInstance | undefined;
+
+function directLarkHttpInstance(): Lark.HttpInstance {
+  if (sharedDirectHttpInstance) return sharedDirectHttpInstance;
+
+  // Keep proxy selection scoped to the account. Mutating the SDK's shared Axios
+  // defaults would also force international Lark accounts (and any future SDK
+  // clients in this process) off an environment proxy they may require.
+  const base = Lark.defaultHttpInstance;
+  const directOptions = (
+    options?: Lark.HttpRequestOptions<unknown>,
+  ): Lark.HttpRequestOptions<unknown> =>
+    ({ ...(options ?? {}), proxy: false }) as Lark.HttpRequestOptions<unknown>;
+  sharedDirectHttpInstance = {
+    request: (options: Lark.HttpRequestOptions<unknown>) =>
+      base.request(directOptions(options) as never),
+    get: (url: string, options?: Lark.HttpRequestOptions<unknown>) =>
+      base.get(url, directOptions(options) as never),
+    delete: (url: string, options?: Lark.HttpRequestOptions<unknown>) =>
+      base.delete(url, directOptions(options) as never),
+    head: (url: string, options?: Lark.HttpRequestOptions<unknown>) =>
+      base.head(url, directOptions(options) as never),
+    options: (url: string, options?: Lark.HttpRequestOptions<unknown>) =>
+      base.options(url, directOptions(options) as never),
+    post: (
+      url: string,
+      data?: unknown,
+      options?: Lark.HttpRequestOptions<unknown>,
+    ) => base.post(url, data, directOptions(options) as never),
+    put: (
+      url: string,
+      data?: unknown,
+      options?: Lark.HttpRequestOptions<unknown>,
+    ) => base.put(url, data, directOptions(options) as never),
+    patch: (
+      url: string,
+      data?: unknown,
+      options?: Lark.HttpRequestOptions<unknown>,
+    ) => base.patch(url, data, directOptions(options) as never),
+  } as unknown as Lark.HttpInstance;
+  return sharedDirectHttpInstance;
+}
+
+function shouldBypassProxy(
+  account: FeishuTransportFactoryInput["account"],
+): boolean {
+  if (account.proxyMode === "direct") return true;
+  if (account.proxyMode === "environment") return false;
+  return account.domain === "feishu";
+}
+
+function logTransportRequestFailure(
+  accountId: string,
+  phase: string,
+  error: unknown,
+  proxyBypassed: boolean,
+): void {
+  const errorRecord = asRecord(error);
+  const causeRecord = asRecord(errorRecord?.cause);
+  const responseRecord = asRecord(errorRecord?.response);
+  const errorCode = sanitizeLogToken(
+    typeof errorRecord?.code === "string"
+      ? errorRecord.code
+      : typeof causeRecord?.code === "string"
+        ? causeRecord.code
+        : "UNKNOWN",
+  );
+  const httpStatus =
+    typeof responseRecord?.status === "number" &&
+    Number.isFinite(responseRecord.status)
+      ? Math.trunc(responseRecord.status)
+      : "none";
+  const inheritedProxy = PROXY_ENV_KEYS.some((key) =>
+    Boolean(process.env[key]?.trim()),
+  );
+  console.warn(
+    `[Feishu] event=feishu_transport_request_failed accountId=${sanitizeLogToken(accountId)} phase=${sanitizeLogToken(phase)} errorCode=${errorCode} httpStatus=${httpStatus} inheritedProxy=${inheritedProxy} proxyBypassed=${proxyBypassed}`,
+  );
+}
+
+function sanitizeLogToken(value: string): string {
+  const safe = value.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
+  return safe || "UNKNOWN";
 }
 
 export function normalizeFeishuCardAction(

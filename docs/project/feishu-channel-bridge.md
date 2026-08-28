@@ -51,6 +51,7 @@
 
 - `accountId`：本机稳定命名空间，只允许小写字母、数字、`_` 和 `-`；
 - `domain`：国内 Feishu 选择 `feishu`，国际 Lark 选择 `lark`；
+- `proxyMode`：控制 OpenAPI 与 WebSocket endpoint discovery；`auto` 默认让国内 Feishu 直连、国际 Lark 继承环境代理，`direct` 强制该账号直连，`environment` 强制该账号遵循 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`。实际 WebSocket 仍由 SDK 直连，除非显式提供 proxy agent；
 - `allowedUsers` / `adminUsers`：至少配置一个，否则账号进入 `locked`；
 - `allowedChats`：群聊 allowlist；空集合不得被解释为“允许所有群聊”；
 - `allowedWorkspaceRoots`：所有可启动项目的真实路径边界；
