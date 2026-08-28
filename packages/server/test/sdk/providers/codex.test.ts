@@ -814,6 +814,7 @@ process.stdin.on("data", (chunk) => {
           uuid: "client-native-input",
           tempId: "temp-native-input",
           clientUserMessageId: "client-native-input",
+          codexCorrelationKey: "codex:user-message:client-native-input",
           turnId: "turn-rewrite",
           codexTurnId: "turn-rewrite",
           isOptimistic: false,

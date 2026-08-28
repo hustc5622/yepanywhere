@@ -484,6 +484,7 @@ describe("Process", () => {
         projectPath: "/test",
         projectId: "proj-1",
         sessionId: "sess-1",
+        provider: "codex",
         idleTimeoutMs: 100,
         queue: new MessageQueue(),
         steerFn,
@@ -511,11 +512,15 @@ describe("Process", () => {
         type: "user",
         tempId: "temp-steer",
         clientUserMessageId: expect.any(String),
+        codexCorrelationKey: expect.stringMatching(/^codex:user-message:/),
         turnId: "turn-steer",
         codexTurnId: "turn-steer",
         isOptimistic: true,
       });
       expect(userMessages[0]?.clientUserMessageId).toBe(userMessages[0]?.uuid);
+      expect(userMessages[0]?.codexCorrelationKey).toBe(
+        `codex:user-message:${userMessages[0]?.uuid}`,
+      );
 
       resolveIterator?.();
       await process.abort();

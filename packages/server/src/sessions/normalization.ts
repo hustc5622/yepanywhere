@@ -80,6 +80,7 @@ import {
   parseCodexToolArguments,
 } from "../codex/normalization.js";
 import { publicCodexTextPaths } from "../codex/path-projection.js";
+import { codexUserMessageIdentity } from "../codex/user-message-identity.js";
 import { normalizeKimiToolInput } from "../kimi/tool-input.js";
 import type {
   ContentBlock,
@@ -1222,6 +1223,7 @@ export function convertCodexEntries(
   const hasResponseItemUser =
     contextOptions.hasResponseItemUser ??
     hasCodexResponseItemUserMessages(entries);
+  const responseUserClientIds = collectCodexResponseUserClientIds(entries);
   const compactedTimestamps = entries
     .filter((entry) => entry.type === "compacted")
     .map((entry) => timestampToMs(entry.timestamp))
@@ -1272,12 +1274,18 @@ export function convertCodexEntries(
           : [];
       const correlationKey = getCodexResponseCorrelationKey(entry.payload);
       const responseTurnId = getCodexResponsePayloadTurnId(entry.payload);
+      const responseUserIdentity = codexUserMessageIdentity(
+        responseUserClientIds.get(entry),
+      );
       for (const msg of convertedMessages) {
         if (correlationKey) {
           msg.codexCorrelationKey = correlationKey;
         }
         if (responseTurnId) {
           msg.codexTurnId = responseTurnId;
+        }
+        if (responseUserIdentity) {
+          Object.assign(msg, responseUserIdentity);
         }
         if (isCodexCorrelationDebugEnabled()) {
           logCodexCorrelationDebug({
@@ -1530,6 +1538,45 @@ function getCodexResponseEventKind(
     return payload.role === "assistant" ? "assistant_message" : "user_message";
   }
   return payload.type;
+}
+
+/**
+ * Codex persists a user ResponseItem first, then emits the legacy
+ * `user_message` event for that same input. The ResponseItem owns the durable
+ * transcript row while the following event owns the client-generated id.
+ * Pair them by this protocol ordering once, before normalization, so media
+ * wrappers and source-native UUIDs never enter identity decisions.
+ */
+function collectCodexResponseUserClientIds(
+  entries: readonly CodexSessionEntry[],
+): WeakMap<CodexResponseItemEntry, string> {
+  const clientIds = new WeakMap<CodexResponseItemEntry, string>();
+  let pendingUserResponse: CodexResponseItemEntry | null = null;
+
+  for (const entry of entries) {
+    if (entry.type === "response_item") {
+      if (entry.payload.type === "message" && entry.payload.role === "user") {
+        // Startup context can contain several synthetic user ResponseItems. The
+        // actual prompt is the last one before Codex emits user_message.
+        pendingUserResponse = entry;
+      } else {
+        pendingUserResponse = null;
+      }
+      continue;
+    }
+
+    if (entry.type !== "event_msg" || entry.payload.type !== "user_message") {
+      continue;
+    }
+
+    const clientId = entry.payload.client_id?.trim();
+    if (pendingUserResponse && clientId) {
+      clientIds.set(pendingUserResponse, clientId);
+    }
+    pendingUserResponse = null;
+  }
+
+  return clientIds;
 }
 
 function getCodexResponsePayloadCallId(
@@ -2792,6 +2839,7 @@ function convertCodexEventMsg(
       return {
         uuid,
         type: "user",
+        ...codexUserMessageIdentity(payload.client_id),
         message: {
           role: "user",
           content: payload.message,

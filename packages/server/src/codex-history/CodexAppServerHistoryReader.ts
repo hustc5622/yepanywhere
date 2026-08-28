@@ -3,6 +3,7 @@ import {
   buildCodexEditInput,
   publicCodexFileChanges,
 } from "../codex/file-change.js";
+import { codexUserMessageIdentity } from "../codex/user-message-identity.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { ThreadItem } from "../sdk/providers/codex-protocol/generated/v2/ThreadItem.js";
 import type { ThreadItemEntry } from "../sdk/providers/codex-protocol/generated/v2/ThreadItemEntry.js";
@@ -521,6 +522,7 @@ function projectThreadItem(
       return [
         {
           ...base,
+          ...codexUserMessageIdentity(item.clientId),
           type: "user",
           message: { role: "user", content: userInputBlocks(item.content) },
         },

@@ -392,6 +392,69 @@ describe("Codex Normalization", () => {
     ]);
   });
 
+  it("projects persisted user client identity onto the owning response item", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2026-08-27T09:31:11.130Z",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "# AGENTS.md instructions for /repo" },
+          ],
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: "2026-08-27T09:31:11.197Z",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "Inspect the screenshot" },
+            {
+              type: "input_text",
+              text: '<image name=[Image #1] path="/tmp/screenshot.png">',
+            },
+            {
+              type: "input_image",
+              image_url: "data:image/png;base64,AA==",
+            },
+            { type: "input_text", text: "</image>" },
+          ],
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2026-08-27T09:31:11.198Z",
+        payload: {
+          type: "user_message",
+          client_id: "client-message-1",
+          message: "Inspect the screenshot",
+          images: [],
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+    const prompt = result.messages.find(
+      (message) => message.clientUserMessageId === "client-message-1",
+    );
+
+    expect(prompt).toMatchObject({
+      type: "user",
+      clientUserMessageId: "client-message-1",
+      codexCorrelationKey: "codex:user-message:client-message-1",
+    });
+    expect(prompt?.uuid).not.toBe("client-message-1");
+    expect(
+      result.messages.find((message) =>
+        firstMessageText(message)?.startsWith("# AGENTS.md instructions"),
+      ),
+    ).not.toHaveProperty("clientUserMessageId");
+  });
+
   it("applies Codex thread_rolled_back markers before normalizing", () => {
     const entries: CodexSessionEntry[] = [
       codexUserMessage("q1", 1),

@@ -169,6 +169,60 @@ describe("canonical Codex persisted session projection", () => {
     });
   });
 
+  it("matches a persisted user row to its canonical item by client identity", () => {
+    const legacy: Message[] = [
+      {
+        uuid: "rollout-user",
+        type: "user",
+        clientUserMessageId: "client-user-1",
+        codexCorrelationKey: "codex:user-message:client-user-1",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Inspect this\n<image name=[Image #1]>\n</image>",
+            },
+            { type: "input_image", image_url: "data:image/png;base64,AA==" },
+          ],
+        },
+      },
+    ];
+    const events = [
+      testEvent(1, "item/completed", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "native-user-1",
+          type: "userMessage",
+          clientId: "client-user-1",
+          content: [
+            { type: "text", text: "Inspect this", text_elements: [] },
+            { type: "localImage", path: "/tmp/screenshot.png" },
+          ],
+        },
+      }),
+    ];
+
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      legacy,
+      events,
+    );
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      uuid: "rollout-user",
+      clientUserMessageId: "client-user-1",
+      codexCorrelationKey: "codex:user-message:client-user-1",
+      codexThreadItem: {
+        type: "userMessage",
+        id: "native-user-1",
+        clientId: "client-user-1",
+      },
+    });
+  });
+
   it("keeps item identity matches stable when earlier synthetic rows are inserted", () => {
     const legacy: Message[] = [
       {

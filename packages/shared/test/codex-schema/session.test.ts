@@ -83,6 +83,24 @@ describe("Codex local media session schema", () => {
   });
 });
 
+describe("Codex user-message identity schema", () => {
+  it("retains the client id echoed by the persisted legacy event", () => {
+    const raw = {
+      timestamp: "2026-08-27T09:31:11.198Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        client_id: "client-message-1",
+        message: "Inspect the screenshot",
+        images: [],
+      },
+    } as const;
+
+    expect(CodexSessionEntrySchema.parse(raw)).toEqual(raw);
+    expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+  });
+});
+
 describe("Codex terminal turn session schema", () => {
   it("preserves task_complete error details for status derivation", () => {
     const raw = {

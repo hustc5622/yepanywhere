@@ -96,7 +96,7 @@ function client(overrides: Record<string, unknown> = {}) {
           item: {
             type: "userMessage" as const,
             id: "user-1",
-            clientId: null,
+            clientId: "client-user-1",
             content: [
               { type: "text" as const, text: "Run tests", text_elements: [] },
             ],
@@ -162,6 +162,10 @@ describe("CodexAppServerHistoryReader", () => {
     expect(
       result.session.projectedMessages?.[2]?.message?.content,
     ).toMatchObject([{ type: "tool_use", id: "command-1", name: "Bash" }]);
+    expect(result.session.projectedMessages?.[0]).toMatchObject({
+      clientUserMessageId: "client-user-1",
+      codexCorrelationKey: "codex:user-message:client-user-1",
+    });
     expect(result.session.projectedMessages?.[2]).toMatchObject({
       codexThreadId: thread().id,
       codexTurnId: "turn-1",

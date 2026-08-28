@@ -115,6 +115,51 @@ describe("reconcileCodexLinearMessages", () => {
     expect(result[0]?.uuid).toBe("codex-12-persisted");
   });
 
+  it("converges live and persisted user prompts by client identity, not media text", () => {
+    const correlationKey = "codex:user-message:client-user-1";
+    const live: Message = {
+      uuid: "client-user-1",
+      type: "user",
+      timestamp: "2026-08-27T09:31:04.398Z",
+      _source: "sdk",
+      clientUserMessageId: "client-user-1",
+      codexCorrelationKey: correlationKey,
+      message: {
+        role: "user",
+        content:
+          "Inspect this\n\nUser uploaded files:\n- screenshot.png: /tmp/screenshot.png",
+      },
+    };
+    const persisted: Message = {
+      uuid: "rollout-user-1",
+      type: "user",
+      timestamp: "2026-08-27T09:31:11.198Z",
+      _source: "jsonl",
+      clientUserMessageId: "client-user-1",
+      codexCorrelationKey: correlationKey,
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Inspect this\n\nUser uploaded files:\n- screenshot.png: /tmp/screenshot.png\n<image name=[Image #1]>\n</image>",
+          },
+          { type: "input_image", image_url: "data:image/png;base64,AA==" },
+        ],
+      },
+    };
+
+    const result = reconcileCodexLinearMessages([live, persisted]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      uuid: "rollout-user-1",
+      _source: "jsonl",
+      clientUserMessageId: "client-user-1",
+      codexCorrelationKey: correlationKey,
+    });
+  });
+
   it("keeps intentional same-text messages with different native identities", () => {
     const messages: Message[] = [
       {

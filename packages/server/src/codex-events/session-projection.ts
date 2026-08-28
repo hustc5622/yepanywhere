@@ -15,6 +15,7 @@ import {
   publicCodexFileChanges,
 } from "../codex/file-change.js";
 import { isLegacyMaskedCodexFilePath } from "../codex/path-projection.js";
+import { codexUserMessageIdentity } from "../codex/user-message-identity.js";
 import type { Message } from "../supervisor/types.js";
 import type { CodexProjectionCache } from "./projection-cache.js";
 import { reduceCodexEvents } from "./reducer.js";
@@ -284,12 +285,19 @@ export function overlayCanonicalCodexSessionMessages(
   const appendUnmatched =
     options.appendUnmatched !== false || canonicalCursorIndex >= 0;
 
-  // Pre-build a legacy itemId -> index index so findLegacyItemMatch's first
-  // pass (identity match) is O(1) average instead of O(M) per candidate.
+  // Pre-build exact native/correlation indexes so live, rollout and canonical
+  // rows meet by provider identity before any legacy content compatibility.
   const legacyItemIdIndex = new Map<string, number>();
+  const legacyCorrelationKeyIndex = new Map<string, number>();
   for (let i = 0; i < messages.length; i += 1) {
     const message = messages[i];
     if (!message) continue;
+    if (
+      typeof message.codexCorrelationKey === "string" &&
+      !legacyCorrelationKeyIndex.has(message.codexCorrelationKey)
+    ) {
+      legacyCorrelationKeyIndex.set(message.codexCorrelationKey, i);
+    }
     for (const itemId of extractLegacyItemIds(message)) {
       if (!legacyItemIdIndex.has(itemId)) {
         legacyItemIdIndex.set(itemId, i);
@@ -311,6 +319,7 @@ export function overlayCanonicalCodexSessionMessages(
       candidate,
       claimedLegacyIndexes,
       legacyItemIdIndex,
+      legacyCorrelationKeyIndex,
     );
     if (matchedIndex >= 0) {
       const current = messages[matchedIndex];
@@ -511,6 +520,10 @@ function buildCanonicalMessageCandidates(
         const event = eventBySequence.get(sequence);
         const occurredAtMs = eventTime(event);
         const safeItem = projectSafeThreadItem(item);
+        const userMessageIdentity =
+          item.nativeType === "userMessage"
+            ? codexUserMessageIdentity(safeItem.clientId)
+            : undefined;
         const itemArtifacts =
           artifactsBySource.get(
             generatedArtifactSourceKey(thread.id, turn.id, item.id),
@@ -532,6 +545,7 @@ function buildCanonicalMessageCandidates(
               ? { timestamp: new Date(occurredAtMs).toISOString() }
               : {}),
             codexThreadItem: safeItem,
+            ...(userMessageIdentity ?? {}),
             codexThreadItemLifecycle:
               item.status === "completed" ? "completed" : "started",
             codexThreadId: safeIdentity(thread.id, "thread"),
@@ -1410,7 +1424,23 @@ function findLegacyItemMatch(
   candidate: CanonicalMessageCandidate,
   claimed: ReadonlySet<number>,
   legacyItemIdIndex: ReadonlyMap<string, number>,
+  legacyCorrelationKeyIndex: ReadonlyMap<string, number>,
 ): number {
+  const correlationKey = candidate.message.codexCorrelationKey;
+  if (typeof correlationKey === "string") {
+    const correlated = legacyCorrelationKeyIndex.get(correlationKey);
+    const correlatedMessage =
+      correlated === undefined ? undefined : messages[correlated];
+    if (
+      correlated !== undefined &&
+      correlatedMessage !== undefined &&
+      !claimed.has(correlated) &&
+      correlatedMessage.codexCorrelationKey === correlationKey
+    ) {
+      return correlated;
+    }
+  }
+
   const itemId = candidate.originalItemId;
   if (!itemId) return -1;
 
@@ -1525,6 +1555,12 @@ function attachCanonicalItem(
     codexThreadItemLifecycle: candidate.message.codexThreadItemLifecycle,
     codexThreadId: candidate.message.codexThreadId,
     codexTurnId: candidate.message.codexTurnId,
+    ...(candidate.message.clientUserMessageId === undefined
+      ? {}
+      : { clientUserMessageId: candidate.message.clientUserMessageId }),
+    ...(candidate.message.codexCorrelationKey === undefined
+      ? {}
+      : { codexCorrelationKey: candidate.message.codexCorrelationKey }),
     codexEventSequence: candidate.sequence,
     codexRawReasoningAllowed: true,
     codexCanonicalRefresh: true,

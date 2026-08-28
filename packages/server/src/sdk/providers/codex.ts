@@ -76,6 +76,7 @@ import {
   normalizeCodexToolOutputWithContext,
   parseCodexToolArguments,
 } from "../../codex/normalization.js";
+import { codexUserMessageIdentity } from "../../codex/user-message-identity.js";
 import { getDataDir } from "../../config.js";
 import { getLogger } from "../../logging/logger.js";
 import { encodeProjectId } from "../../projects/paths.js";
@@ -3084,6 +3085,7 @@ export class CodexProvider implements AgentProvider {
           tempId: message.tempId,
           session_id: sessionId,
           clientUserMessageId: message.uuid,
+          ...codexUserMessageIdentity(message.uuid),
           turnId: activeTurnId,
           codexTurnId: activeTurnId,
           isOptimistic: false,

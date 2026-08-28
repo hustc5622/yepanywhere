@@ -12,6 +12,7 @@ import type {
   UrlProjectId,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import { codexUserMessageIdentity } from "../codex/user-message-identity.js";
 import { getLogger } from "../logging/logger.js";
 import { sanitizeSDKMessageForPublic } from "../sdk/messageLogger.js";
 import {
@@ -1247,6 +1248,7 @@ export class Process {
       uuid,
       tempId,
       clientUserMessageId: uuid,
+      ...(this.provider === "codex" ? codexUserMessageIdentity(uuid) : {}),
       isOptimistic: true,
       message: { role: "user", content: publicPrompt },
     } as SDKMessage);
@@ -1379,6 +1381,9 @@ export class Process {
       uuid: message.uuid,
       tempId: message.tempId,
       clientUserMessageId: message.uuid,
+      ...(this.provider === "codex"
+        ? codexUserMessageIdentity(message.uuid)
+        : {}),
       isOptimistic: true,
       ...(turnId ? { turnId, codexTurnId: turnId } : {}),
       message: { role: "user", content },

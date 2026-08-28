@@ -412,6 +412,8 @@ export const CodexTokenUsageInfoSchema = z.object({
  */
 export const CodexUserMessageEventSchema = z.object({
   type: z.literal("user_message"),
+  /** Echo of turn/start.clientUserMessageId / turn/steer.clientUserMessageId. */
+  client_id: z.string().nullable().optional(),
   message: z.string(),
   images: z.array(z.unknown()).optional(),
 });
