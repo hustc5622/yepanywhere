@@ -330,7 +330,14 @@ function resolveCodexModelProviderForStart(
 ): { value?: string; error?: string; code?: string } {
   if (provider !== "codex") return { value: undefined };
   const registry = getCodexModelSourceRegistry();
-  const sourceId = codexModelProvider?.trim() || "openai";
+  // Channel entry points (e.g. the Feishu bot) only carry a model slug and
+  // never name a source. Infer the custom source that owns the slug, mirroring
+  // `resolveCodexResumeSource`, so a managed model such as `deepseek-v4-flash`
+  // never starts against the built-in OpenAI source.
+  const sourceId =
+    codexModelProvider?.trim() ||
+    registry.findModelSource(model?.trim()) ||
+    "openai";
   try {
     const source = registry.require(sourceId);
     registry.assertModelSelectable(source.id, model);

@@ -186,6 +186,65 @@ describe("SessionCommandService runtime boundary", () => {
     }
   });
 
+  it("infers the Codex model source that owns a channel-selected model", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-source-"));
+    vi.stubEnv("DEEPSEEK_API_KEY", "sk-test-deepseek");
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project: Project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-source",
+        sessionCount: 0,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex",
+      };
+      const startSession = vi.fn(async () => ({
+        id: "process-source",
+        sessionId: "thread-source",
+        provider: "codex" as const,
+        permissionMode: "default" as const,
+        modeVersion: 1,
+      }));
+      const service = new SessionCommandService({
+        runtimeController: { startSession } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+          mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+      });
+
+      await expect(
+        service.start({
+          projectId,
+          requireImmediate: true,
+          origin: { createdBy: "channel", originChannel: "feishu" },
+          body: {
+            message: "channel turn",
+            provider: "codex",
+            model: "deepseek-v4-flash",
+          },
+        }),
+      ).resolves.toMatchObject({ ok: true, status: 200 });
+      expect(startSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelSettings: expect.objectContaining({
+            model: "deepseek-v4-flash",
+            codexModelProvider: "deepseek",
+          }),
+        }),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it("maps immediate create rejection without accepting queue ownership", async () => {
     const projectPath = mkdtempSync(join(tmpdir(), "session-command-create-"));
     try {
