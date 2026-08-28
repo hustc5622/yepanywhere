@@ -31,7 +31,7 @@ const originalSecureContextDescriptor = Object.getOwnPropertyDescriptor(
 function renderViewer() {
   return render(
     <I18nProvider>
-      <FileViewer projectId="project-1" filePath="notes.md" />
+      <FileViewer projectId="project-1" filePath="docs/notes.md" />
     </I18nProvider>,
   );
 }
@@ -44,8 +44,8 @@ describe("FileViewer", () => {
     getFile.mockReset();
     getFile.mockResolvedValue({
       metadata: {
-        path: "notes.md",
-        absolutePath: "/workspace/notes.md",
+        path: "docs/notes.md",
+        absolutePath: "/workspace/docs/notes.md",
         size: 12,
         mimeType: "text/markdown",
         isText: true,
@@ -93,6 +93,14 @@ describe("FileViewer", () => {
     }
 
     vi.restoreAllMocks();
+  });
+
+  it("separates the filename from its directory and metadata", async () => {
+    renderViewer();
+
+    expect(await screen.findByText("12 B • 2 lines")).toBeTruthy();
+    expect(screen.getByText("docs")).toBeTruthy();
+    expect(screen.getByText("notes.md")).toBeTruthy();
   });
 
   it("copies through the synchronous fallback in an insecure context", async () => {

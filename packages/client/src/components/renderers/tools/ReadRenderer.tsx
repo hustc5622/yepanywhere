@@ -5,7 +5,7 @@ import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataCon
 import { validateToolResult } from "../../../lib/validateToolResult";
 import { FileViewerModal } from "../../FilePathLink";
 import { SchemaWarning } from "../../SchemaWarning";
-import { Modal } from "../../ui/Modal";
+import { DetailPanel } from "../../ui/DetailPanel";
 import type {
   ImageFile,
   PdfFile,
@@ -376,14 +376,14 @@ function ReadFileModal({
   }
 
   return (
-    <Modal title={<FileModalTitle file={file} />} onClose={onClose}>
+    <DetailPanel title={<FileModalTitle file={file} />} onClose={onClose}>
       <FileModalContent
         file={file}
         highlightedHtml={highlightedHtml}
         highlightedTruncated={highlightedTruncated}
         renderedMarkdownHtml={renderedMarkdownHtml}
       />
-    </Modal>
+    </DetailPanel>
   );
 }
 
@@ -713,9 +713,9 @@ function ReadInteractiveSummary({
           )}
         </button>
         {showModal && (
-          <Modal title={fileName} onClose={() => setShowModal(false)}>
+          <DetailPanel title={fileName} onClose={() => setShowModal(false)}>
             <ImageFileResult file={imageFile} />
-          </Modal>
+          </DetailPanel>
         )}
       </>
     );

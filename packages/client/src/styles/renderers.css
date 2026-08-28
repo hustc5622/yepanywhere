@@ -2557,6 +2557,108 @@ details[open] .collapsible__icon {
   padding: 0.5rem;
 }
 
+/* File/report details become a real sibling of the session on desktop. The
+   same component keeps the base modal behaviour below the desktop layout
+   breakpoint, including the existing full-screen mobile rules. */
+.detail-panel-host--overlay > .detail-panel.modal {
+  height: min(85vh, calc(100vh - 2rem));
+  overflow: hidden;
+}
+
+.detail-panel-host--docked.modal-overlay {
+  position: relative;
+  inset: auto;
+  z-index: 20;
+  flex: 0 0 var(--detail-panel-width, clamp(380px, 40vw, 820px));
+  width: var(--detail-panel-width, clamp(380px, 40vw, 820px));
+  min-width: 0;
+  height: 100dvh;
+  align-items: stretch;
+  justify-content: stretch;
+  background: transparent;
+}
+
+.detail-panel-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  z-index: 4;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.detail-panel-resize-handle::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  content: "";
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.detail-panel-resize-handle:hover::after,
+.detail-panel-resize-handle:focus-visible::after,
+.detail-panel-resize-handle.active::after {
+  background: color-mix(in srgb, var(--app-yep-green) 70%, transparent);
+}
+
+.detail-panel-resize-handle:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: -2px;
+}
+
+body.detail-panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.detail-panel-host--docked > .detail-panel.modal {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.16);
+}
+
+.detail-panel-header {
+  min-height: 44px;
+  box-sizing: border-box;
+  border-radius: 0;
+}
+
+.detail-panel-title {
+  display: block;
+  flex: 1 1 auto;
+}
+
+.detail-panel-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.detail-panel-content--flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.detail-panel-host--docked .local-file-modal-content {
+  height: 100%;
+  max-height: none;
+}
+
+/* The file panel takes over the inspector's right-hand slot while it is open.
+   Preserve the inspector state so it comes back exactly as it was on close. */
+.session-page:has(> .detail-panel-host--docked) .session-inspector--sidebar {
+  display: none;
+}
+
 /* Mobile: Make modals nearly full-screen with minimal chrome */
 @media (max-width: 600px) {
   .modal-overlay {
@@ -2585,6 +2687,10 @@ details[open] .collapsible__icon {
        paint blank on Android WebView). */
     transform: translateZ(0);
     will-change: auto;
+  }
+
+  .detail-panel-host--overlay > .detail-panel.modal {
+    height: auto;
   }
 
   /* Push the header below the iOS notch / Android status bar / browser
@@ -4450,8 +4556,9 @@ details[open] .collapsible__icon {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.375rem 0.5rem;
+  gap: 0.75rem;
+  min-height: 54px;
+  padding: 0.5rem 0.75rem;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
@@ -4460,21 +4567,50 @@ details[open] .collapsible__icon {
 .file-viewer-info {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.2rem;
   min-width: 0;
   flex: 1;
+  overflow: hidden;
 }
 
-.file-viewer-path {
+.file-viewer-name {
+  overflow: hidden;
+  color: var(--text-primary);
   font-family: "SF Mono", Monaco, monospace;
-  font-size: var(--font-size-base);
-  color: var(--link-color);
-  word-break: break-all;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-viewer-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.35;
+}
+
+.file-viewer-directory {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-viewer-meta-separator {
+  flex: 0 0 auto;
+  color: var(--text-dimmed);
 }
 
 .file-viewer-meta {
-  font-size: var(--font-size-sm);
-  color: var(--text-muted);
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .file-viewer-actions {
@@ -4513,7 +4649,7 @@ details[open] .collapsible__icon {
 }
 
 .file-viewer-close {
-  margin-left: 0.5rem;
+  margin-left: 0.25rem;
 }
 
 .file-viewer-body {
@@ -4528,6 +4664,7 @@ details[open] .collapsible__icon {
 .file-viewer-loading,
 .file-viewer-error {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   justify-content: center;
   padding: 2rem;
@@ -4874,26 +5011,6 @@ pre.code-highlighter-plain code {
 }
 
 /* ==========================================================================
-   File Viewer Modal - extends base modal styles
-   ========================================================================== */
-
-.file-viewer-modal .file-viewer {
-  height: 100%;
-}
-
-.file-viewer-modal {
-  height: min(85vh, calc(100vh - 2rem));
-  overflow: hidden;
-}
-
-@media (max-width: 600px) {
-  .file-viewer-modal {
-    height: auto;
-    max-height: none;
-  }
-}
-
-/* ==========================================================================
    File Page (Standalone)
    ========================================================================== */
 
@@ -4967,6 +5084,10 @@ pre.code-highlighter-plain code {
     padding: 0.25rem 0.5rem;
   }
 
+  .file-viewer-info {
+    width: 100%;
+  }
+
   .file-viewer-actions {
     align-self: flex-end;
   }
@@ -5027,6 +5148,38 @@ pre.code-highlighter-plain code {
   padding: 1rem;
   line-height: 1.6;
   color: var(--text-primary);
+}
+
+/* The split detail panel is narrower than a standalone report page. Keep its
+   Markdown compact enough to scan beside the conversation without changing
+   typography on ReportsPage or other full-page Markdown surfaces. */
+.detail-panel .markdown-preview .markdown-rendered {
+  padding: 1rem 1.25rem 2rem;
+  font-size: var(--font-size-base);
+  line-height: 1.65;
+}
+
+.detail-panel .markdown-preview .markdown-rendered h1 {
+  font-size: 1.6em;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+
+.detail-panel .markdown-preview .markdown-rendered h2 {
+  font-size: 1.35em;
+  line-height: 1.35;
+}
+
+.detail-panel .markdown-preview .markdown-rendered h3 {
+  font-size: 1.15em;
+  line-height: 1.4;
+}
+
+.detail-panel .markdown-preview .markdown-rendered h4,
+.detail-panel .markdown-preview .markdown-rendered h5,
+.detail-panel .markdown-preview .markdown-rendered h6 {
+  font-size: 1em;
+  line-height: 1.45;
 }
 
 .markdown-preview .markdown-rendered h1,

@@ -10,7 +10,7 @@ import {
 } from "../../../lib/classifyToolError";
 import { validateToolResult } from "../../../lib/validateToolResult";
 import { SchemaWarning } from "../../SchemaWarning";
-import { Modal } from "../../ui/Modal";
+import { DetailPanel } from "../../ui/DetailPanel";
 import type { EditInput, EditResult, PatchHunk, ToolRenderer } from "./types";
 
 /**
@@ -598,7 +598,7 @@ function EditCollapsedPreview({
           )}
         </div>
         {isModalOpen && hasProposedDiff && (
-          <Modal
+          <DetailPanel
             title={<span className="file-path">{fileName}</span>}
             onClose={handleClose}
           >
@@ -609,7 +609,7 @@ function EditCollapsedPreview({
               oldString={oldString}
               newString={newString}
             />
-          </Modal>
+          </DetailPanel>
         )}
       </>
     );
@@ -648,12 +648,12 @@ function EditCollapsedPreview({
             )}
           </div>
           {isModalOpen && (
-            <Modal
+            <DetailPanel
               title={<span className="file-path">{fileName}</span>}
               onClose={handleClose}
             >
               <RawPatchModalContent rawPatch={rawPatch} />
-            </Modal>
+            </DetailPanel>
           )}
         </>
       );
@@ -698,7 +698,7 @@ function EditCollapsedPreview({
         )}
       </div>
       {isModalOpen && (
-        <Modal
+        <DetailPanel
           title={<span className="file-path">{fileName}</span>}
           onClose={handleClose}
         >
@@ -710,7 +710,7 @@ function EditCollapsedPreview({
             newString={newString}
             originalFile={originalFile}
           />
-        </Modal>
+        </DetailPanel>
       )}
     </>
   );
@@ -799,7 +799,7 @@ function EditInteractiveSummary({
         )}
       </button>
       {showModal && (
-        <Modal
+        <DetailPanel
           title={<span className="file-path">{fileName}</span>}
           onClose={() => setShowModal(false)}
         >
@@ -811,7 +811,7 @@ function EditInteractiveSummary({
             newString={newString}
             originalFile={originalFile}
           />
-        </Modal>
+        </DetailPanel>
       )}
     </>
   );
@@ -992,7 +992,7 @@ function EditToolResult({
           )}
         </div>
         {showModal && hasProposedDiff && inputWithAugment && (
-          <Modal
+          <DetailPanel
             title={<span className="file-path">{fileName}</span>}
             onClose={() => setShowModal(false)}
           >
@@ -1003,7 +1003,7 @@ function EditToolResult({
               oldString={oldString}
               newString={newString}
             />
-          </Modal>
+          </DetailPanel>
         )}
       </>
     );
@@ -1040,12 +1040,12 @@ function EditToolResult({
             )}
           </div>
           {showModal && (
-            <Modal
+            <DetailPanel
               title={<span className="file-path">{fileName}</span>}
               onClose={() => setShowModal(false)}
             >
               <RawPatchModalContent rawPatch={rawPatch} />
-            </Modal>
+            </DetailPanel>
           )}
         </>
       );
@@ -1120,7 +1120,7 @@ function EditToolResult({
         </div>
       </div>
       {showModal && (
-        <Modal
+        <DetailPanel
           title={<span className="file-path">{fileName}</span>}
           onClose={() => setShowModal(false)}
         >
@@ -1131,7 +1131,7 @@ function EditToolResult({
             newString={newString ?? ""}
             originalFile={originalFile}
           />
-        </Modal>
+        </DetailPanel>
       )}
     </>
   );

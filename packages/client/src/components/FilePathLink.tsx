@@ -1,7 +1,7 @@
-import { memo, useCallback, useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { memo, useCallback, useState } from "react";
 import { appPath } from "../lib/apiPath";
 import { FileViewer } from "./FileViewer";
+import { DetailPanel } from "./ui/DetailPanel";
 
 interface FilePathLinkProps {
   /** The file path to display and link to */
@@ -86,23 +86,19 @@ export const FilePathLink = memo(function FilePathLink({
         <span className="file-path-link-name">{text}</span>
         {suffix && <span className="file-path-link-line">{suffix}</span>}
       </button>
-      {showModal &&
-        createPortal(
-          <FileViewerModal
-            projectId={projectId}
-            filePath={filePath}
-            lineNumber={lineNumber}
-            onClose={handleClose}
-          />,
-          document.body,
-        )}
+      {showModal && (
+        <FileViewerModal
+          projectId={projectId}
+          filePath={filePath}
+          lineNumber={lineNumber}
+          onClose={handleClose}
+        />
+      )}
     </>
   );
 });
 
-/**
- * Modal wrapper for FileViewer.
- */
+/** Desktop side-panel / mobile modal wrapper for FileViewer. */
 export function FileViewerModal({
   projectId,
   filePath,
@@ -114,55 +110,20 @@ export function FileViewerModal({
   lineNumber?: number;
   onClose: () => void;
 }) {
-  const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) {
-      onClose();
-    }
-  };
-
-  // Close on Escape key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, [onClose]);
-
-  // Prevent body scroll when modal is open
-  useEffect(() => {
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = "";
-    };
-  }, []);
-
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: Escape key handled in useEffect, click is for overlay dismiss
-    <div
-      className="modal-overlay"
-      onClick={handleOverlayClick}
-      onMouseDown={(e) => e.stopPropagation()}
+    <DetailPanel
+      title={filePath}
+      ariaLabel={filePath}
+      onClose={onClose}
+      hideHeader
+      flush
     >
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: click only stops propagation, keyboard handled globally */}
-      <div
-        className="modal file-viewer-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={filePath}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <FileViewer
-          projectId={projectId}
-          filePath={filePath}
-          lineNumber={lineNumber}
-          onClose={onClose}
-        />
-      </div>
-    </div>
+      <FileViewer
+        projectId={projectId}
+        filePath={filePath}
+        lineNumber={lineNumber}
+        onClose={onClose}
+      />
+    </DetailPanel>
   );
 }

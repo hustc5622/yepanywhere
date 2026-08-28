@@ -4,7 +4,7 @@ import { useSchemaValidationContext } from "../../../contexts/SchemaValidationCo
 import { useOptionalI18n } from "../../../i18n";
 import { validateToolResult } from "../../../lib/validateToolResult";
 import { SchemaWarning } from "../../SchemaWarning";
-import { Modal } from "../../ui/Modal";
+import { DetailPanel } from "../../ui/DetailPanel";
 import type { ToolRenderer, WriteResult } from "./types";
 
 const MAX_LINES_COLLAPSED = 30;
@@ -500,7 +500,7 @@ function WriteCollapsedPreview({
         </div>
       </button>
       {isModalOpen && (
-        <Modal
+        <DetailPanel
           title={<span className="file-path">{fileName}</span>}
           onClose={handleClose}
         >
@@ -516,7 +516,7 @@ function WriteCollapsedPreview({
             }
             input={normalizedInput}
           />
-        </Modal>
+        </DetailPanel>
       )}
     </>
   );

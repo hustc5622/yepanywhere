@@ -7,6 +7,8 @@
   "actionExpandSidebar": "Expand sidebar",
   "actionCollapseSidebar": "Collapse sidebar",
   "actionResizeSidebar": "Resize sidebar",
+  "actionResizeDetailPanel": "Resize detail panel",
+  "actionResizeDetailPanelHint": "Drag to resize; double-click to reset",
   "actionShowMore": "Show {count} more",
   "sidebarNewSession": "New Session",
   "sidebarInbox": "Inbox",

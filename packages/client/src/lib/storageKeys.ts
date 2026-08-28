@@ -47,6 +47,7 @@ export const UI_KEYS = {
   fontSize: "yep-anywhere-font-size",
   tabSize: "yep-anywhere-tab-size",
   sidebarWidth: "yep-anywhere-sidebar-width",
+  detailPanelWidthRatio: "yep-anywhere-detail-panel-width-ratio",
   sidebarExpanded: "yep-anywhere-sidebar-expanded",
   sessionInspectorExpanded: "yep-anywhere-session-inspector-expanded",
   reportsDocumentPanelExpanded: "yep-anywhere-reports-document-panel-expanded",

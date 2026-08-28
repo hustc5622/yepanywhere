@@ -87,8 +87,27 @@ function isMarkdownFile(filePath: string): boolean {
 /**
  * Get filename from path.
  */
+function getFilePathParts(filePath: string): {
+  fileName: string;
+  directory?: string;
+} {
+  const separatorIndex = Math.max(
+    filePath.lastIndexOf("/"),
+    filePath.lastIndexOf("\\"),
+  );
+  if (separatorIndex < 0) {
+    return { fileName: filePath };
+  }
+
+  return {
+    fileName: filePath.slice(separatorIndex + 1) || filePath,
+    directory:
+      separatorIndex === 0 ? filePath[0] : filePath.slice(0, separatorIndex),
+  };
+}
+
 function getFileName(filePath: string): string {
-  return filePath.split("/").pop() || filePath;
+  return getFilePathParts(filePath).fileName;
 }
 
 function getErrorFilePath(err: unknown, fallbackPath: string): string | null {
@@ -100,6 +119,70 @@ function getErrorFilePath(err: unknown, fallbackPath: string): string | null {
     return apiError.path;
   }
   return fallbackPath.startsWith("/") ? fallbackPath : null;
+}
+
+function FileViewerHeaderInfo({
+  displayPath,
+  compactPath,
+  meta,
+}: {
+  displayPath: string;
+  compactPath?: string;
+  meta?: string;
+}) {
+  const { fileName, directory } = getFilePathParts(compactPath ?? displayPath);
+
+  return (
+    <div className="file-viewer-info">
+      <span className="file-viewer-name" title={displayPath}>
+        {fileName}
+      </span>
+      {(directory || meta) && (
+        <span className="file-viewer-subtitle">
+          {directory && (
+            <span className="file-viewer-directory" title={directory}>
+              {directory}
+            </span>
+          )}
+          {directory && meta && (
+            <span className="file-viewer-meta-separator" aria-hidden="true">
+              •
+            </span>
+          )}
+          {meta && <span className="file-viewer-meta">{meta}</span>}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function FileViewerStateHeader({
+  filePath,
+  onClose,
+  closeLabel,
+}: {
+  filePath: string;
+  onClose?: () => void;
+  closeLabel: string;
+}) {
+  return (
+    <div className="file-viewer-header">
+      <FileViewerHeaderInfo displayPath={filePath} />
+      {onClose && (
+        <div className="file-viewer-actions">
+          <button
+            type="button"
+            className="file-viewer-action file-viewer-close"
+            onClick={onClose}
+            title={closeLabel}
+            aria-label={closeLabel}
+          >
+            <CloseIcon />
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -213,8 +296,15 @@ export const FileViewer = memo(function FileViewer({
   if (loading) {
     return (
       <div className="file-viewer">
-        <div className="file-viewer-loading">
-          {t("fileViewerLoading" as never, { name: fileName })}
+        <FileViewerStateHeader
+          filePath={filePath}
+          onClose={onClose}
+          closeLabel={t("modalClose")}
+        />
+        <div className="file-viewer-body">
+          <div className="file-viewer-loading">
+            {t("fileViewerLoading" as never, { name: fileName })}
+          </div>
         </div>
       </div>
     );
@@ -224,15 +314,22 @@ export const FileViewer = memo(function FileViewer({
   if (error || !fileData) {
     return (
       <div className="file-viewer">
-        <div className="file-viewer-error">
-          <div className="file-viewer-error-content">
-            <div>{error || t("fileViewerNotFound" as never)}</div>
-            {errorFilePath && (
-              <div className="file-viewer-error-path">
-                <span>{t("fileViewerAttemptedPath" as never)}</span>
-                <code>{errorFilePath}</code>
-              </div>
-            )}
+        <FileViewerStateHeader
+          filePath={filePath}
+          onClose={onClose}
+          closeLabel={t("modalClose")}
+        />
+        <div className="file-viewer-body">
+          <div className="file-viewer-error">
+            <div className="file-viewer-error-content">
+              <div>{error || t("fileViewerNotFound" as never)}</div>
+              {errorFilePath && (
+                <div className="file-viewer-error-path">
+                  <span>{t("fileViewerAttemptedPath" as never)}</span>
+                  <code>{errorFilePath}</code>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -249,6 +346,16 @@ export const FileViewer = memo(function FileViewer({
       : copyStatus === "failed"
         ? t("fileViewerCopyFailed" as never)
         : t("fileViewerCopyContent" as never);
+  const fileMeta = [
+    formatFileSize(metadata.size),
+    metadata.isText && content !== undefined
+      ? t("fileViewerLines" as never, {
+          count: content.split("\n").length,
+        })
+      : null,
+  ]
+    .filter((item): item is string => item !== null)
+    .join(" • ");
 
   // Render content based on file type
   const renderContent = () => {
@@ -411,19 +518,11 @@ export const FileViewer = memo(function FileViewer({
   // Header with file info and actions
   const header = (
     <div className="file-viewer-header">
-      <div className="file-viewer-info">
-        <span className="file-viewer-path" title={displayPath}>
-          {displayPath}
-        </span>
-        <span className="file-viewer-meta">
-          {formatFileSize(metadata.size)}
-          {metadata.isText &&
-            content &&
-            ` \u2022 ${t("fileViewerLines" as never, {
-              count: content.split("\n").length,
-            })}`}
-        </span>
-      </div>
+      <FileViewerHeaderInfo
+        displayPath={displayPath}
+        compactPath={filePath}
+        meta={fileMeta}
+      />
       <div className="file-viewer-actions">
         {content && (
           <button

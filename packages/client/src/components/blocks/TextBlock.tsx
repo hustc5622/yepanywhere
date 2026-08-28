@@ -7,7 +7,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { useOptionalSessionMetadata } from "../../contexts/SessionMetadataContext";
 import { useStreamingMarkdownContext } from "../../contexts/StreamingMarkdownContext";
 import { useMarkdownCodeCopy } from "../../hooks/useMarkdownCodeCopy";
@@ -332,17 +331,14 @@ export const TextBlock = memo(function TextBlock({
           onClose={closeModal}
         />
       )}
-      {fileModal &&
-        sessionMetadata?.projectId &&
-        createPortal(
-          <FileViewerModal
-            projectId={sessionMetadata.projectId}
-            filePath={fileModal.filePath}
-            lineNumber={fileModal.lineNumber}
-            onClose={() => setFileModal(null)}
-          />,
-          document.body,
-        )}
+      {fileModal && sessionMetadata?.projectId && (
+        <FileViewerModal
+          projectId={sessionMetadata.projectId}
+          filePath={fileModal.filePath}
+          lineNumber={fileModal.lineNumber}
+          onClose={() => setFileModal(null)}
+        />
+      )}
       {localFileModal && (
         <LocalFileModal
           path={localFileModal.path}

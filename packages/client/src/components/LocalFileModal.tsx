@@ -1,7 +1,7 @@
 import type { FileContentResponse } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useState } from "react";
 import { API_BASE } from "../lib/apiPath";
-import { Modal } from "./ui/Modal";
+import { DetailPanel } from "./ui/DetailPanel";
 
 interface LocalFileModalProps {
   path: string;
@@ -134,7 +134,7 @@ export function LocalFileModal({
     !!data?.renderedMarkdownHtml && highlightedLine === undefined;
 
   return (
-    <Modal title={title} onClose={onClose}>
+    <DetailPanel title={title} onClose={onClose}>
       <div className="local-file-modal-content">
         {loading && <div className="local-file-loading">Loading...</div>}
         {error && (
@@ -187,6 +187,6 @@ export function LocalFileModal({
           </>
         )}
       </div>
-    </Modal>
+    </DetailPanel>
   );
 }
