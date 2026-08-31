@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CODEX_PROTOCOL_BASELINE } from "../src/sdk/providers/codex-protocol/baseline.js";
 
 // Dynamic import so vi.resetModules() gives us fresh module state (clears cache)
 async function importVersion() {
@@ -224,9 +225,8 @@ describe("GET /version", () => {
     expect(json.resumeProtocolVersion).toBeTypeOf("number");
     expect(Array.isArray(json.capabilities)).toBe(true);
     expect(json.codexProtocol).toEqual({
-      version: "0.147.0",
-      schemaHash:
-        "sha256:e46a86223fe756a8d93a7acb1a0a8a6371381b6d0d11c41dbda5a978637865a3",
+      version: CODEX_PROTOCOL_BASELINE.codexVersion,
+      schemaHash: CODEX_PROTOCOL_BASELINE.experimentalSchemaHash,
       profile: "experimental",
       experimentalApi: true,
       unknownNotificationsTotal: expect.any(Number),

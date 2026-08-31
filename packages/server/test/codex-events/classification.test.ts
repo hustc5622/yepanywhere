@@ -27,20 +27,13 @@ const manifest = JSON.parse(
 ) as ProtocolManifest;
 
 describe("Codex notification classification contract", () => {
-  it("classifies every 0.147.0 manifest notification explicitly", () => {
+  it("classifies every synchronized manifest notification explicitly", () => {
     const classified = Object.keys(CODEX_NOTIFICATION_CLASSIFICATIONS);
     const generated =
       manifest.capabilityProfiles.experimental.serverNotifications;
 
-    expect(
-      generated.filter(
-        (method) =>
-          method !== "rawResponse/completed" &&
-          method !== "rawResponseItem/completed",
-      ),
-    ).toHaveLength(70);
     expect([...classified].sort()).toEqual([...generated].sort());
-    expect(classified).toHaveLength(72);
+    expect(classified).toHaveLength(generated.length);
     expect(CODEX_NOTIFICATION_CLASSIFICATIONS["rawResponse/completed"]).toEqual(
       { domain: "compatibility", disposition: "diagnostic" },
     );
@@ -66,14 +59,13 @@ describe("Codex notification classification contract", () => {
     });
   });
 
-  it("maps all 18 generated ThreadItem variants", () => {
+  it("maps every generated ThreadItem variant", () => {
     const generated = manifest.capabilityProfiles.experimental.threadItems;
-    expect(generated).toHaveLength(18);
     expect(Object.keys(CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE).sort()).toEqual(
       [...generated].sort(),
     );
     expect(
       new Set(Object.values(CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE)).size,
-    ).toBe(18);
+    ).toBe(generated.length);
   });
 });

@@ -31,6 +31,7 @@ export const CODEX_BRIDGE_TERMINAL_METHODS = new Set<string>([
   "serverRequest/resolved",
   "thread/closed",
   "thread/deleted",
+  "thread/realtime/item/completed",
   "turn/completed",
 ]);
 
@@ -42,11 +43,14 @@ const CODEX_BRIDGE_LIFECYCLE_METHODS = new Set<string>([
   "thread/goal/cleared",
   "thread/goal/updated",
   "thread/name/updated",
+  "thread/queue/changed",
+  "thread/realtime/item/started",
   "thread/settings/updated",
   "thread/started",
   "thread/status/changed",
   "thread/tokenUsage/updated",
   "thread/unarchived",
+  "thread/reverted",
   "turn/plan/updated",
   "turn/started",
 ]);

@@ -21,7 +21,7 @@ const manifest = JSON.parse(
 ) as ProtocolManifest;
 
 describe("Codex native control capability contract", () => {
-  it("keeps enabled controls inside the 0.147 stable manifest", () => {
+  it("keeps enabled controls inside the synchronized stable manifest", () => {
     expect(CODEX_NATIVE_CAPABILITIES.codexVersion).toBe(manifest.codex.version);
     expect(CODEX_NATIVE_CAPABILITIES.experimentalApi).toBe(false);
 

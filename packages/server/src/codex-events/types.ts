@@ -92,6 +92,7 @@ export const CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE = {
   userMessage: "user_message",
   hookPrompt: "hook_prompt",
   agentMessage: "assistant_message",
+  functionCallOutput: "function_call_output",
   plan: "plan",
   reasoning: "reasoning",
   commandExecution: "command_execution",

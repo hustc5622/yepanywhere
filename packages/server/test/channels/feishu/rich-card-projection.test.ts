@@ -271,7 +271,7 @@ describe("FeishuRichCardProjection", () => {
     expect(rendered).not.toContain("正在推理");
   });
 
-  it("projects all 18 canonical ThreadItem variants into safe bounded sections", () => {
+  it("projects every canonical ThreadItem variant into safe bounded sections", () => {
     const projection = new FeishuRichCardProjection();
     const items: ThreadItem[] = [
       {
@@ -302,6 +302,13 @@ describe("FeishuRichCardProjection", () => {
         phase: "commentary",
         text: "正在检查 token=commentary-secret /private/work/src/app.ts",
         memoryCitation: null,
+      },
+      {
+        type: "functionCallOutput",
+        id: "function-output-1",
+        name: "lookup",
+        namespace: "fixture",
+        output: "FUNCTION_OUTPUT_SECRET",
       },
       {
         type: "plan",
@@ -471,6 +478,7 @@ describe("FeishuRichCardProjection", () => {
     expect(rendered).toContain("Command execution · 已完成");
     expect(rendered).toContain("MCP · files/read · 已完成");
     expect(rendered).toContain("Dynamic tool · apps/search · 已完成");
+    expect(rendered).toContain("Function output · fixture/lookup · 已完成");
     expect(rendered).toContain("Web search · 已完成");
     expect(rendered).toContain("Image view · 已完成");
     expect(rendered).toContain("Image generation · 已完成");

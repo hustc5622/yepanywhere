@@ -6,6 +6,7 @@
     "setup:core": "corepack pnpm --filter yep-anywhere --filter @yep-anywhere/server... --filter @yep-anywhere/client... install",
     "setup-vapid": "tsx scripts/setup-vapid.ts",
     "codex:protocol:update": "node scripts/update-codex-protocol.mjs",
+    "codex:protocol:sync": "node scripts/update-codex-protocol.mjs --sync",
     "codex:protocol:check": "node scripts/update-codex-protocol.mjs --check",
     "codex:protocol:test": "corepack pnpm --filter @yep-anywhere/server test -- test/sdk/providers/codex-protocol.test.ts",
     "feishu:migration:preflight": "node scripts/feishu-migration-preflight.mjs",
@@ -16,9 +17,14 @@
     "deploy": "scripts/deploy.sh",
     "launchd:install": "scripts/install-launchagents.sh",
     "launchd:uninstall": "scripts/uninstall-launchagents.sh",
+    "predev": "corepack pnpm codex:protocol:sync",
     "dev": "node scripts/dev.js",
+    "predev:8022": "corepack pnpm codex:protocol:sync",
     "dev:8022": "node scripts/dev-8022.js",
+    "predev:8022:replace": "corepack pnpm codex:protocol:sync",
     "dev:8022:replace": "node scripts/dev-8022.js --replace",
+    "predev:auto": "corepack pnpm codex:protocol:sync",
+    "prestaging": "corepack pnpm codex:protocol:sync",
     "staging": "node scripts/staging.js",
     "dev:auto": "corepack pnpm --filter server dev & corepack pnpm --filter client dev",
     "dev-tailscale": "tailscale serve --bg 3400 && corepack pnpm dev",
@@ -63,7 +69,7 @@
   },
   "yepAnywhere": {
     "codexCli": {
-      "expectedVersion": "0.147.0"
+      "expectedVersion": "0.151.0"
     }
   },
   "dependencies": {},

@@ -21,6 +21,7 @@ export const CODEX_EVENT_DELTA_METHODS = new Set<string>([
   "item/reasoning/textDelta",
   "process/outputDelta",
   "thread/realtime/outputAudio/delta",
+  "thread/realtime/item/transcript/delta",
   "thread/realtime/transcript/delta",
   "turn/diff/updated",
 ]);

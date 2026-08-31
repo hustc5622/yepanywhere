@@ -712,6 +712,8 @@ function itemTitle(item: CanonicalCodexItemState): string {
       return "MCP tool call";
     case "dynamic_tool_call":
       return "Dynamic tool call";
+    case "function_call_output":
+      return "Function call output";
     case "collab_agent_tool_call":
       return "Collaboration tool call";
     case "subagent_activity":

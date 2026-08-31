@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { asRecord } from "../bridge-common/util.js";
 import {
   CODEX_EVENT_RUNTIME_IDENTITY,
+  CODEX_PROVIDER_RUNTIME_IDENTITY,
   CodexEventIngress,
   type CodexEventStore,
   type CodexRuntimeIdentity,
@@ -11,9 +12,6 @@ import {
 } from "../codex-events/index.js";
 import { idKey } from "./interactions.js";
 import type { JsonRpcId, JsonRpcMessage } from "./types.js";
-
-const EXPERIMENTAL_SCHEMA_HASH =
-  "sha256:e46a86223fe756a8d93a7acb1a0a8a6371381b6d0d11c41dbda5a978637865a3";
 
 export interface CodexBridgeEventSpineOptions {
   store: CodexEventStore;
@@ -275,10 +273,7 @@ function runtimeFromInitializeParams(params: unknown): CodexRuntimeIdentity {
   const experimentalApi = capabilities?.experimentalApi === true;
   return experimentalApi
     ? {
-        ...CODEX_EVENT_RUNTIME_IDENTITY,
-        profile: "experimental",
-        experimentalApi: true,
-        schemaHash: EXPERIMENTAL_SCHEMA_HASH,
+        ...CODEX_PROVIDER_RUNTIME_IDENTITY,
       }
     : CODEX_EVENT_RUNTIME_IDENTITY;
 }

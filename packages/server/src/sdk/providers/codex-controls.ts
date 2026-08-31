@@ -1,3 +1,4 @@
+import { CODEX_PROTOCOL_BASELINE } from "./codex-protocol/baseline.js";
 import type { ReviewDelivery } from "./codex-protocol/generated/v2/ReviewDelivery.js";
 import type { ReviewStartResponse } from "./codex-protocol/generated/v2/ReviewStartResponse.js";
 import type { ReviewTarget } from "./codex-protocol/generated/v2/ReviewTarget.js";
@@ -25,7 +26,7 @@ export type CodexNativeControlMethod =
 
 /** Stable control surface pinned to the checked-in Codex protocol manifest. */
 export const CODEX_NATIVE_CAPABILITIES = Object.freeze({
-  codexVersion: "0.147.0",
+  codexVersion: CODEX_PROTOCOL_BASELINE.codexVersion,
   experimentalApi: false,
   methods: Object.freeze({
     "skills/list": true,

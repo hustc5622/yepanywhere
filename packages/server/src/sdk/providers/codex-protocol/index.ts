@@ -29,3 +29,4 @@ export type { ServerRequest } from "./generated/ServerRequest.js";
 export type { ServerNotification } from "./generated/ServerNotification.js";
 export type { InitializeCapabilities } from "./generated/InitializeCapabilities.js";
 export type { UserInput } from "./generated/v2/UserInput.js";
+export { CODEX_PROTOCOL_BASELINE } from "./baseline.js";

@@ -30,10 +30,12 @@ JSON Schema 未包含它们。因此 method registry 必须合并双源，不能
 
 ## 更新与检查
 
-根 `package.json` 的 `yepAnywhere.codexCli.expectedVersion` 是允许生成的明确
-版本。安装版本不一致时脚本 fail closed，避免意外用另一版本覆盖基线。
+根 `package.json` 的 `yepAnywhere.codexCli.expectedVersion` 记录最后一次成功同步的
+版本。sync 检测到已安装 CLI 版本变化时，以该二进制为事实来源重新生成；只有 schema
+生成和显式 coverage 审计全部通过后，才同时更新 artifacts、runtime baseline 与版本号。
 
 ```bash
+pnpm codex:protocol:sync
 pnpm codex:protocol:update
 pnpm codex:protocol:check
 pnpm codex:protocol:test
@@ -41,11 +43,18 @@ pnpm codex:protocol:test
 
 更新流程：
 
-1. 先明确修改 `expectedVersion`；
-2. 运行 update 生成 artifacts 和 manifest；
-3. 根据报出的 missing/extra 项手工审计并更新 `coverage-registry.json`；
-4. 运行 check 和聚焦测试；
+1. 升级本机 Codex CLI；
+2. 运行 `sync`（`pnpm dev`、`dev:8022`、`dev:8022:replace`、`dev:auto`、`staging`
+   也会在启动前自动运行）；
+3. 如果上游新增 server-facing capability，sync 会在写文件前 fail closed；根据报出的
+   missing/extra 项审计并更新 `coverage-registry.json`，然后重新 sync；
+4. 运行只读 `check` 和聚焦测试；
 5. 在变更说明中记录 Codex version、两套 schema hash 和 capability 差异。
+
+`sync` 在版本未变化且 baseline 已存在时快速退出；未安装 Codex CLI 的开发环境会跳过；
+本机 CLI 旧于 checked baseline 时也只提示并跳过，不会自动降级仓库。
+`update` 强制按当前 CLI 重生成，但同样自动写入 `expectedVersion`。`check` 永远只读，
+版本或 artifacts 不一致时只报错，不自动修改工作树。
 
 四类 coverage registry 分别覆盖：
 

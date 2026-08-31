@@ -721,6 +721,16 @@ export class FeishuRichCardProjection {
         this.setTool(id, name, status);
         return true;
       }
+      case "functionCallOutput": {
+        const namespace = safeIdentifier(item.namespace, 32);
+        const name = safeIdentifier(item.name, 48);
+        const label =
+          namespace || name
+            ? `Function output · ${[namespace, name].filter(Boolean).join("/")}`
+            : "Function output";
+        this.setTool(id, label, status);
+        return true;
+      }
       case "collabAgentToolCall": {
         const tool = safeIdentifier(item.tool, 40) ?? "collaboration";
         this.setSubagent(id, `子代理 · ${tool}`, status);

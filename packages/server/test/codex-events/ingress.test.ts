@@ -649,12 +649,12 @@ describe("Codex event ingress", () => {
       expect.arrayContaining([
         expect.objectContaining({
           direction: "server_notification",
-          runtimeVersion: "0.147.0",
+          runtimeVersion: CODEX_EVENT_RUNTIME_IDENTITY.codexVersion,
           schemaFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
         }),
         expect.objectContaining({
           direction: "server_request",
-          runtimeVersion: "0.147.0",
+          runtimeVersion: CODEX_EVENT_RUNTIME_IDENTITY.codexVersion,
           schemaFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{20}$/),
         }),
       ]),

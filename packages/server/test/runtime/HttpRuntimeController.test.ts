@@ -330,7 +330,7 @@ describe("HttpRuntimeController", () => {
       permissionMode: "default",
       state: "in-turn",
       codexNativeCapabilities: {
-        codexVersion: "0.147.0",
+        codexVersion: CODEX_NATIVE_CAPABILITIES.codexVersion,
         experimentalApi: false,
       },
     });

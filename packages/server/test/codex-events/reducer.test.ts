@@ -36,7 +36,9 @@ describe("canonical Codex event reducer", () => {
     );
     const items = state.threads["thread-1"]?.turns["turn-1"]?.items;
 
-    expect(Object.keys(items ?? {})).toHaveLength(18);
+    expect(Object.keys(items ?? {})).toHaveLength(
+      Object.keys(CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE).length,
+    );
     for (const [nativeType, kind] of Object.entries(
       CODEX_THREAD_ITEM_KIND_BY_NATIVE_TYPE,
     )) {

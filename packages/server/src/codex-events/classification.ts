@@ -48,7 +48,7 @@ function policy(
 }
 
 /**
- * Explicit classification for every method in Codex 0.147.0's generated
+ * Explicit classification for every method in the synchronized Codex
  * ServerNotification TypeScript union. Keep this hand-maintained: adding an
  * upstream method must produce a TypeScript error until it is audited.
  */
@@ -57,6 +57,7 @@ export const CODEX_NOTIFICATION_CLASSIFICATIONS = {
   "account/rateLimits/updated": policy("account", "record"),
   "account/updated": policy("account", "record"),
   "app/list/updated": policy("application", "record"),
+  "autoApprovalReview/strictReviewRequired": policy("interaction", "record"),
   "command/exec/outputDelta": policy("command", "record"),
   configWarning: policy("warning", "record"),
   deprecationNotice: policy("compatibility", "record"),
@@ -84,12 +85,14 @@ export const CODEX_NOTIFICATION_CLASSIFICATIONS = {
   "item/reasoning/textDelta": policy("item", "reduce"),
   "item/started": policy("item", "reduce"),
   "mcpServer/oauthLogin/completed": policy("mcp", "record"),
+  "mcpServer/event/stream/notification": policy("mcp", "record"),
   "mcpServer/startupStatus/updated": policy("mcp", "record"),
   "model/rerouted": policy("model", "record"),
   "model/safetyBuffering/updated": policy("model", "record"),
   "model/verification": policy("model", "record"),
   "process/exited": policy("process", "record"),
   "process/outputDelta": policy("process", "record"),
+  "project/changed": policy("application", "record"),
   "rawResponse/completed": policy("compatibility", "diagnostic"),
   "rawResponseItem/completed": policy("compatibility", "diagnostic"),
   "remoteControl/status/changed": policy("configuration", "record"),
@@ -104,14 +107,20 @@ export const CODEX_NOTIFICATION_CLASSIFICATIONS = {
   "thread/goal/cleared": policy("thread", "reduce"),
   "thread/goal/updated": policy("thread", "reduce"),
   "thread/name/updated": policy("thread", "record"),
+  "thread/project/updated": policy("thread", "record"),
+  "thread/queue/changed": policy("thread", "record"),
   "thread/realtime/closed": policy("realtime", "record"),
   "thread/realtime/error": policy("realtime", "record"),
   "thread/realtime/itemAdded": policy("realtime", "record"),
+  "thread/realtime/item/completed": policy("realtime", "record"),
+  "thread/realtime/item/started": policy("realtime", "record"),
+  "thread/realtime/item/transcript/delta": policy("realtime", "record"),
   "thread/realtime/outputAudio/delta": policy("realtime", "record"),
   "thread/realtime/sdp": policy("realtime", "record"),
   "thread/realtime/started": policy("realtime", "record"),
   "thread/realtime/transcript/delta": policy("realtime", "record"),
   "thread/realtime/transcript/done": policy("realtime", "record"),
+  "thread/reverted": policy("thread", "reduce"),
   "thread/settings/updated": policy("thread", "record"),
   "thread/started": policy("thread", "reduce"),
   "thread/status/changed": policy("thread", "reduce"),

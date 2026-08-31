@@ -60,6 +60,10 @@
       "stability": "stable",
       "classification": "application_catalog"
     },
+    "autoApprovalReview/strictReviewRequired": {
+      "stability": "stable",
+      "classification": "approval_review"
+    },
     "command/exec/outputDelta": {
       "stability": "stable",
       "classification": "command_output"
@@ -147,6 +151,10 @@
       "stability": "stable",
       "classification": "mcp_lifecycle"
     },
+    "mcpServer/event/stream/notification": {
+      "stability": "stable",
+      "classification": "mcp_event_stream"
+    },
     "mcpServer/startupStatus/updated": {
       "stability": "stable",
       "classification": "mcp_lifecycle"
@@ -161,6 +169,10 @@
     "process/outputDelta": {
       "stability": "stable",
       "classification": "process"
+    },
+    "project/changed": {
+      "stability": "stable",
+      "classification": "project"
     },
     "rawResponse/completed": {
       "stability": "stable",
@@ -209,6 +221,14 @@
       "stability": "stable",
       "classification": "thread_metadata"
     },
+    "thread/project/updated": {
+      "stability": "stable",
+      "classification": "project"
+    },
+    "thread/queue/changed": {
+      "stability": "stable",
+      "classification": "thread_queue"
+    },
     "thread/realtime/closed": {
       "stability": "stable",
       "classification": "realtime"
@@ -218,6 +238,18 @@
       "classification": "realtime"
     },
     "thread/realtime/itemAdded": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/item/completed": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/item/started": {
+      "stability": "stable",
+      "classification": "realtime"
+    },
+    "thread/realtime/item/transcript/delta": {
       "stability": "stable",
       "classification": "realtime"
     },
@@ -240,6 +272,10 @@
     "thread/realtime/transcript/done": {
       "stability": "stable",
       "classification": "realtime"
+    },
+    "thread/reverted": {
+      "stability": "stable",
+      "classification": "thread_lifecycle"
     },
     "thread/settings/updated": {
       "stability": "stable",
@@ -306,6 +342,10 @@
     "enteredReviewMode": { "stability": "stable", "classification": "review" },
     "exitedReviewMode": { "stability": "stable", "classification": "review" },
     "fileChange": { "stability": "stable", "classification": "file_change" },
+    "functionCallOutput": {
+      "stability": "stable",
+      "classification": "function_output"
+    },
     "hookPrompt": { "stability": "stable", "classification": "hook" },
     "imageGeneration": { "stability": "stable", "classification": "image" },
     "imageView": { "stability": "stable", "classification": "image" },
