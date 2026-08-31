@@ -21,11 +21,22 @@ import type { GeneratedArtifactManifest } from "@yep-anywhere/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import {
+  CODEX_PROVIDER_RUNTIME_IDENTITY,
   InMemoryCodexEventStore,
   replayCodexSession,
 } from "../../../src/codex-events/index.js";
 import { getCodexMcpAppServerArgs } from "../../../src/codex/mcp-profile.js";
 import {
+  isCodexHistoryPaginationUnsupported,
+  isCodexLifecycleExcludeTurnsUnsupported,
+  isCodexLifecycleHistoryControlsUnsupported,
+  isCodexLifecycleInitialTurnsPageUnsupported,
+  isCodexNoActiveTurnToSteer,
+} from "../../../src/sdk/providers/codex-history-compat.js";
+import { CODEX_PROTOCOL_BASELINE } from "../../../src/sdk/providers/codex-protocol/baseline.js";
+import {
+  CodexAppServerClient,
+  CodexJsonRpcError,
   CodexProvider,
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
@@ -40,6 +51,84 @@ function restoreEnv(name: string, value: string | undefined): void {
     process.env[name] = value;
   }
 }
+
+describe("Codex paginated-history compatibility classifiers", () => {
+  it.each([
+    new CodexJsonRpcError(-32602, "unknown field `excludeTurns`"),
+    new CodexJsonRpcError(-32600, "exclude turns is not supported"),
+    new CodexJsonRpcError(-32602, "unknown field `exclude_turns`"),
+  ])("recognizes a lifecycle excludeTurns rejection", (error) => {
+    expect(isCodexLifecycleExcludeTurnsUnsupported(error)).toBe(true);
+  });
+
+  it.each([
+    new CodexJsonRpcError(-32602, "invalid params"),
+    new CodexJsonRpcError(-32600, "no rollout found for thread id thread-1"),
+    new CodexJsonRpcError(-32000, "excludeTurns is unavailable"),
+    new Error("excludeTurns is unavailable"),
+  ])("does not downgrade unrelated lifecycle errors", (error) => {
+    expect(isCodexLifecycleExcludeTurnsUnsupported(error)).toBe(false);
+  });
+
+  it.each([
+    new CodexJsonRpcError(-32601, "Method not found"),
+    new CodexJsonRpcError(-32602, "unknown method thread/turns/list"),
+    new CodexJsonRpcError(
+      -32600,
+      'unknown variant "paginated", expected "legacy"',
+    ),
+    new CodexJsonRpcError(-32602, "invalid enum value `paginated`"),
+  ])("recognizes unsupported paginated-history protocol", (error) => {
+    expect(isCodexHistoryPaginationUnsupported(error)).toBe(true);
+  });
+
+  it.each([
+    new CodexJsonRpcError(-32602, "invalid cursor"),
+    new CodexJsonRpcError(-32600, "paginated thread was not found"),
+    new CodexJsonRpcError(-32000, "thread store unavailable"),
+  ])("does not classify paging/runtime failures as unsupported", (error) => {
+    expect(isCodexHistoryPaginationUnsupported(error)).toBe(false);
+  });
+
+  it("recognizes initialTurnsPage rejection without matching generic params errors", () => {
+    expect(
+      isCodexLifecycleInitialTurnsPageUnsupported(
+        new CodexJsonRpcError(-32602, "unknown field `initialTurnsPage`"),
+      ),
+    ).toBe(true);
+    expect(
+      isCodexLifecycleHistoryControlsUnsupported(
+        new CodexJsonRpcError(-32600, "initial turns page is unsupported"),
+      ),
+    ).toBe(true);
+    expect(
+      isCodexLifecycleHistoryControlsUnsupported(
+        new CodexJsonRpcError(-32602, "invalid params"),
+      ),
+    ).toBe(false);
+  });
+
+  it("matches only the exact completed-before-steer race", () => {
+    expect(
+      isCodexNoActiveTurnToSteer(
+        new CodexJsonRpcError(-32600, "no active turn to steer"),
+      ),
+    ).toBe(true);
+    expect(
+      isCodexNoActiveTurnToSteer(
+        new CodexJsonRpcError(
+          -32600,
+          "expected active turn id `old` but found `new`",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isCodexNoActiveTurnToSteer(
+        new CodexJsonRpcError(-32602, "invalid params"),
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("CodexProvider", () => {
   let provider: CodexProvider;
@@ -141,6 +230,102 @@ function request(id, method, params) {
   );
 }
 
+function fakeHistoryMode() {
+  return process.env.CODEX_FAKE_HISTORY_MODE || "legacy";
+}
+
+function fakeSourceTurns() {
+  return JSON.parse(process.env.CODEX_FAKE_SOURCE_TURNS || "[]");
+}
+
+function maybeNotifyFullHistoryDeprecation(method, params) {
+  if (
+    process.env.CODEX_FAKE_DEPRECATION_NOTICE !== "1" ||
+    fakeHistoryMode() !== "paginated"
+  ) {
+    return;
+  }
+  const requestsFullHistory =
+    method === "thread/read"
+      ? params.includeTurns === true
+      : params.excludeTurns !== true;
+  if (
+    !requestsFullHistory &&
+    process.env.CODEX_FAKE_FORCE_DEPRECATION_NOTICE !== "1"
+  ) {
+    return;
+  }
+  const codeTick = String.fromCharCode(96);
+  notify("deprecationNotice", {
+    summary:
+      method === "thread/read"
+        ? "Full-history hydration is deprecated for paginated threads; omit " +
+          codeTick + "includeTurns" + codeTick + " or set it to " + codeTick +
+          "false" + codeTick + ", then page with " + codeTick +
+          "thread/turns/list" + codeTick + " and " + codeTick +
+          "thread/items/list" + codeTick + "."
+        : "Full-history hydration is deprecated for paginated threads; use " +
+          codeTick + "excludeTurns: true" + codeTick + ", then page with " +
+          codeTick + "thread/turns/list" + codeTick + " and " + codeTick +
+          "thread/items/list" + codeTick + ".",
+    details: null,
+  });
+}
+
+function rejectUnsupportedExcludeTurns(message) {
+  if (
+    process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS !== "1" ||
+    (process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS_METHOD &&
+      process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS_METHOD !== message.method) ||
+    message.params.excludeTurns !== true
+  ) {
+    return false;
+  }
+  sendError(
+    message.id,
+    Number.parseInt(process.env.CODEX_FAKE_EXCLUDE_TURNS_ERROR_CODE || "-32602", 10),
+    process.env.CODEX_FAKE_EXCLUDE_TURNS_ERROR || "unknown field excludeTurns",
+  );
+  return true;
+}
+
+function fakeTurnsPage(params) {
+  const sourceTurns = fakeSourceTurns();
+  const ordered =
+    params.sortDirection === "asc"
+      ? [...sourceTurns]
+      : [...sourceTurns].reverse();
+  let offset = 0;
+  if (params.cursor !== null && params.cursor !== undefined) {
+    const match = /^fake-turns:(\\d+)$/.exec(params.cursor);
+    if (!match) return null;
+    offset = Number.parseInt(match[1], 10);
+  }
+  const requestedLimit = Number.isSafeInteger(params.limit) ? params.limit : 100;
+  const fixtureLimit = Number.parseInt(
+    process.env.CODEX_FAKE_TURNS_PAGE_SIZE || String(requestedLimit),
+    10,
+  );
+  const limit = Math.max(1, Math.min(requestedLimit, fixtureLimit));
+  const data = ordered.slice(offset, offset + limit).map((turn) => ({
+    ...turn,
+    items: params.itemsView === "notLoaded" ? [] : turn.items || [],
+    itemsView: params.itemsView || "summary",
+  }));
+  const nextOffset = offset + data.length;
+  const nextCursor =
+    process.env.CODEX_FAKE_REPEAT_TURNS_CURSOR === "1" && data.length > 0
+      ? params.cursor || "fake-turns:0"
+      : nextOffset < ordered.length
+        ? "fake-turns:" + nextOffset
+        : null;
+  return {
+    data,
+    nextCursor,
+    backwardsCursor: data.length > 0 ? "fake-turns:" + offset : null,
+  };
+}
+
 function sendThread(id, threadId, cwd, options = {}) {
   send(id, {
     thread: {
@@ -149,6 +334,7 @@ function sendThread(id, threadId, cwd, options = {}) {
       modelProvider: "openai",
       status: { type: "idle" },
       turns: options.turns || [],
+      historyMode: options.historyMode || fakeHistoryMode(),
       forkedFromId: options.forkedFromId || null,
     },
     model: "gpt-5.5",
@@ -156,6 +342,9 @@ function sendThread(id, threadId, cwd, options = {}) {
     serviceTier: null,
     cwd,
     reasoningEffort: null,
+    initialTurnsPage: options.initialTurnsPage || null,
+    turnsBackwardsCursor: options.turnsBackwardsCursor || null,
+    itemsBackwardsCursor: options.itemsBackwardsCursor || null,
   });
 }
 
@@ -212,13 +401,38 @@ function handle(message) {
     });
     return;
   }
+  if (message.method === "thread/read") {
+    maybeNotifyFullHistoryDeprecation(message.method, message.params);
+    sendThread(message.id, message.params.threadId, process.cwd(), {
+      turns: message.params.includeTurns === true ? fakeSourceTurns() : [],
+    });
+    return;
+  }
+  if (message.method === "thread/turns/list") {
+    if (process.env.CODEX_FAKE_TURNS_LIST_UNSUPPORTED === "1") {
+      sendError(message.id, -32601, "Method not found: thread/turns/list");
+      return;
+    }
+    const page = fakeTurnsPage(message.params);
+    if (!page) {
+      sendError(message.id, -32602, "invalid cursor");
+      return;
+    }
+    send(message.id, page);
+    return;
+  }
   if (message.method === "thread/fork") {
-    const turns = JSON.parse(process.env.CODEX_FAKE_SOURCE_TURNS || "[]");
+    if (rejectUnsupportedExcludeTurns(message)) return;
+    maybeNotifyFullHistoryDeprecation(message.method, message.params);
+    const turns = fakeSourceTurns();
     const boundary = turns.findIndex(
       (turn) => turn.id === message.params.lastTurnId,
     );
     sendThread(message.id, "thread-forked", message.params.cwd, {
-      turns: boundary < 0 ? [] : turns.slice(0, boundary + 1),
+      turns:
+        message.params.excludeTurns === true || boundary < 0
+          ? []
+          : turns.slice(0, boundary + 1),
       forkedFromId: message.params.threadId,
     });
     return;
@@ -426,6 +640,12 @@ function handle(message) {
     sendError(message.id, code, "no rollout found for thread id " + threadId);
     return;
   }
+  if (
+    message.method === "thread/resume" &&
+    rejectUnsupportedExcludeTurns(message)
+  ) {
+    return;
+  }
   const overloadAttempts = Number.parseInt(
     process.env.CODEX_FAKE_OVERLOAD_ATTEMPTS || "0",
     10,
@@ -473,9 +693,28 @@ function handle(message) {
         : message.params.threadId || "thread-new";
   const turns =
     message.method === "thread/resume"
-      ? JSON.parse(process.env.CODEX_FAKE_SOURCE_TURNS || "[]")
+      ? message.params.excludeTurns === true
+        ? []
+        : fakeSourceTurns()
       : [];
-  sendThread(message.id, threadId, message.params.cwd, { turns });
+  if (message.method === "thread/resume") {
+    maybeNotifyFullHistoryDeprecation(message.method, message.params);
+  }
+  const initialTurnsPage =
+    message.method === "thread/resume" && message.params.initialTurnsPage
+      ? fakeTurnsPage({
+          ...message.params.initialTurnsPage,
+          cursor: null,
+        })
+      : null;
+  sendThread(message.id, threadId, message.params.cwd, {
+    turns,
+    initialTurnsPage,
+    turnsBackwardsCursor:
+      fakeHistoryMode() === "paginated" && fakeSourceTurns().length > 0
+        ? "fake-turns:0"
+        : null,
+  });
 }
 
 process.stdin.setEncoding("utf8");
@@ -497,9 +736,323 @@ process.stdin.on("data", (chunk) => {
       return fakeCodexPath;
     }
 
+    it("reproduces paginated full-history deprecation and bounded turn pages", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-history-compat-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousDeprecation = process.env.CODEX_FAKE_DEPRECATION_NOTICE;
+      const previousRejectExclude = process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS;
+      let client: CodexAppServerClient | null = null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_HISTORY_MODE = "paginated";
+      process.env.CODEX_FAKE_DEPRECATION_NOTICE = "1";
+      process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS = "1";
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify([
+        { id: "turn-1", status: "completed", items: [], error: null },
+        { id: "turn-2", status: "completed", items: [], error: null },
+        { id: "turn-3", status: "completed", items: [], error: null },
+      ]);
+
+      try {
+        client = new CodexAppServerClient(fakeCodexPath, tempDir, process.env);
+        await client.connect();
+        await client.request("initialize", {
+          clientInfo: { name: "history-compat-test", version: "dev" },
+          capabilities: null,
+        });
+        client.notify("initialized");
+
+        const resumed = await client.request<{
+          thread: { historyMode: string; turns: Array<{ id: string }> };
+        }>("thread/resume", {
+          threadId: "thread-existing",
+          cwd: tempDir,
+        });
+        const notice = await client.nextNotification();
+        expect(resumed.thread).toMatchObject({
+          historyMode: "paginated",
+          turns: [{ id: "turn-1" }, { id: "turn-2" }, { id: "turn-3" }],
+        });
+        expect(notice).toEqual({
+          method: "deprecationNotice",
+          params: {
+            summary:
+              "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.",
+            details: null,
+          },
+        });
+
+        const firstPage = await client.request<{
+          data: Array<{ id: string }>;
+          nextCursor: string | null;
+        }>("thread/turns/list", {
+          threadId: "thread-existing",
+          cursor: null,
+          limit: 2,
+          sortDirection: "desc",
+          itemsView: "notLoaded",
+        });
+        const secondPage = await client.request<{
+          data: Array<{ id: string }>;
+          nextCursor: string | null;
+        }>("thread/turns/list", {
+          threadId: "thread-existing",
+          cursor: firstPage.nextCursor,
+          limit: 2,
+          sortDirection: "desc",
+          itemsView: "notLoaded",
+        });
+        expect(firstPage.data.map(({ id }) => id)).toEqual([
+          "turn-3",
+          "turn-2",
+        ]);
+        expect(firstPage.nextCursor).toBe("fake-turns:2");
+        expect(secondPage.data.map(({ id }) => id)).toEqual(["turn-1"]);
+        expect(secondPage.nextCursor).toBeNull();
+
+        await expect(
+          client.request("thread/resume", {
+            threadId: "thread-existing",
+            cwd: tempDir,
+            excludeTurns: true,
+          }),
+        ).rejects.toSatisfy((error: unknown) => {
+          return isCodexLifecycleExcludeTurnsUnsupported(error);
+        });
+      } finally {
+        client?.close();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_DEPRECATION_NOTICE", previousDeprecation);
+        restoreEnv("CODEX_FAKE_REJECT_EXCLUDE_TURNS", previousRejectExclude);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("resumes a paginated stdio thread without hydrating its turns", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-metadata-resume-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousDeprecation = process.env.CODEX_FAKE_DEPRECATION_NOTICE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_HISTORY_MODE = "paginated";
+      process.env.CODEX_FAKE_DEPRECATION_NOTICE = "1";
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify([
+        { id: "turn-old-1", status: "completed", items: [], error: null },
+        { id: "turn-old-2", status: "completed", items: [], error: null },
+      ]);
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "continue", uuid: "metadata-resume" },
+        });
+
+        const messages: SDKMessage[] = [];
+        for await (const message of session.iterator) {
+          messages.push(message);
+          if (
+            message.type === "result" &&
+            message.clientUserMessageId === "metadata-resume"
+          ) {
+            break;
+          }
+        }
+
+        const requests = readMessageCapture(messageCapturePath);
+        expect(
+          requests.find(({ method }) => method === "initialize")?.params,
+        ).toMatchObject({ capabilities: null });
+        expect(
+          requests.filter(({ method }) => method === "thread/resume"),
+        ).toEqual([
+          expect.objectContaining({
+            params: expect.objectContaining({
+              threadId: "thread-existing",
+              excludeTurns: true,
+            }),
+          }),
+        ]);
+        expect(
+          requests.some(({ method }) => method === "thread/turns/list"),
+        ).toBe(false);
+        expect(
+          messages.some(
+            (message) =>
+              message.type === "system" &&
+              message.subtype === "warning" &&
+              message.warningKind === "deprecationNotice",
+          ),
+        ).toBe(false);
+        expect(
+          requests.find(({ method }) => method === "turn/start")?.params,
+        ).toMatchObject({ threadId: "thread-existing" });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_DEPRECATION_NOTICE", previousDeprecation);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps a provider deprecation notice out of the yielded transcript", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-deprecation-projection-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+      const previousDeprecation = process.env.CODEX_FAKE_DEPRECATION_NOTICE;
+      const previousForcedDeprecation =
+        process.env.CODEX_FAKE_FORCE_DEPRECATION_NOTICE;
+      const previousEventMode = process.env.CODEX_FAKE_EVENT_MODE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_HISTORY_MODE = "paginated";
+      process.env.CODEX_FAKE_DEPRECATION_NOTICE = "1";
+      process.env.CODEX_FAKE_FORCE_DEPRECATION_NOTICE = "1";
+      process.env.CODEX_FAKE_EVENT_MODE = "1";
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "continue", uuid: "deprecation-hidden" },
+        });
+
+        const messages: SDKMessage[] = [];
+        for await (const message of session.iterator) {
+          messages.push(message);
+          if (
+            message.type === "result" &&
+            message.clientUserMessageId === "deprecation-hidden"
+          ) {
+            break;
+          }
+        }
+
+        expect(
+          messages.some(
+            (message) =>
+              message.type === "system" &&
+              message.subtype === "warning" &&
+              message.warningKind === "deprecationNotice",
+          ),
+        ).toBe(false);
+        expect(messages.some((message) => message.type === "assistant")).toBe(
+          true,
+        );
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+        restoreEnv("CODEX_FAKE_DEPRECATION_NOTICE", previousDeprecation);
+        restoreEnv(
+          "CODEX_FAKE_FORCE_DEPRECATION_NOTICE",
+          previousForcedDeprecation,
+        );
+        restoreEnv("CODEX_FAKE_EVENT_MODE", previousEventMode);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("retries resume once without excludeTurns for a precisely classified old server", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-legacy-resume-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousRejectExclude = process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_HISTORY_MODE = "legacy";
+      process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS = "1";
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify([
+        { id: "turn-old", status: "completed", items: [], error: null },
+      ]);
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "continue", uuid: "legacy-resume" },
+        });
+
+        for await (const message of session.iterator) {
+          if (
+            message.type === "result" &&
+            message.clientUserMessageId === "legacy-resume"
+          ) {
+            break;
+          }
+        }
+
+        const resumeRequests = readMessageCapture(messageCapturePath).filter(
+          ({ method }) => method === "thread/resume",
+        );
+        expect(resumeRequests).toHaveLength(2);
+        expect(resumeRequests[0]).toMatchObject({
+          attempt: 1,
+          params: expect.objectContaining({ excludeTurns: true }),
+        });
+        expect(resumeRequests[1]).toMatchObject({ attempt: 2 });
+        expect(resumeRequests[1]?.params).not.toHaveProperty("excludeTurns");
+        expect(
+          readMessageCapture(messageCapturePath).some(
+            ({ method }) => method === "thread/turns/list",
+          ),
+        ).toBe(false);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_REJECT_EXCLUDE_TURNS", previousRejectExclude);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("rejoins a bridge-owned active turn over WebSocket without spawning stdio", async () => {
       const requests: Array<{ method: string; params?: unknown }> = [];
       const websocketPaths: string[] = [];
+      const eventStore = new InMemoryCodexEventStore();
       const httpServer = createServer((req, res) => {
         res.setHeader("content-type", "application/json");
         if (req.url === "/sessions/thread-bridge/active") {
@@ -542,11 +1095,575 @@ process.stdin.on("data", (chunk) => {
                 cwd: "/repo",
                 modelProvider: "openai",
                 status: { type: "active", activeFlags: [] },
+                turns: [],
+                historyMode: "paginated",
+                forkedFromId: null,
+              },
+              initialTurnsPage: {
+                data: [
+                  {
+                    id: "turn-live",
+                    status: "inProgress",
+                    items: [],
+                    itemsView: "notLoaded",
+                    error: null,
+                  },
+                ],
+                nextCursor: "older-turns",
+                backwardsCursor: "live-turn",
+              },
+              turnsBackwardsCursor: "persisted-head",
+              itemsBackwardsCursor: "persisted-item-head",
+              model: "gpt-5.5",
+              modelProvider: "openai",
+              serviceTier: null,
+              cwd: "/repo",
+              reasoningEffort: null,
+            });
+          } else if (message.method === "turn/steer") {
+            send({ turnId: "turn-live" });
+            socket.send(
+              JSON.stringify({
+                method: "turn/completed",
+                params: {
+                  threadId: "thread-bridge",
+                  turn: {
+                    id: "turn-live",
+                    status: "completed",
+                    items: [],
+                    error: null,
+                  },
+                },
+              }),
+            );
+          }
+        });
+      });
+      await new Promise<void>((resolve) =>
+        httpServer.listen(0, "127.0.0.1", resolve),
+      );
+      const address = httpServer.address() as AddressInfo;
+      const provider = new CodexProvider({
+        codexPath: "/path-that-must-not-be-spawned/codex",
+        eventSpine: { store: eventStore },
+        bridgeExecution: {
+          mode: "external",
+          controlUrl: `http://127.0.0.1:${address.port}`,
+        },
+      });
+      const session = await provider.startSession({
+        cwd: "/repo",
+        resumeSessionId: "thread-bridge",
+        initialMessage: { text: "continue", uuid: "bridge-message" },
+      });
+      try {
+        for await (const message of session.iterator) {
+          if (
+            message.type === "result" &&
+            message.clientUserMessageId === "bridge-message"
+          ) {
+            break;
+          }
+        }
+        expect(requests.map((request) => request.method)).toContain(
+          "turn/steer",
+        );
+        expect(requests.map((request) => request.method)).not.toContain(
+          "turn/start",
+        );
+        expect(websocketPaths).toEqual(["/?mcp=full"]);
+        expect(
+          requests.find((request) => request.method === "initialize")?.params,
+        ).toMatchObject({ capabilities: { experimentalApi: true } });
+        expect(
+          requests.find((request) => request.method === "thread/resume")
+            ?.params,
+        ).toMatchObject({
+          threadId: "thread-bridge",
+          excludeTurns: true,
+          initialTurnsPage: {
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "notLoaded",
+          },
+        });
+        expect(requests.map((request) => request.method)).not.toContain(
+          "thread/turns/list",
+        );
+        expect(
+          requests.find((request) => request.method === "turn/steer")?.params,
+        ).toMatchObject({
+          threadId: "thread-bridge",
+          expectedTurnId: "turn-live",
+          clientUserMessageId: "bridge-message",
+        });
+        const events = await eventStore.replay({
+          sessionId: "thread-bridge",
+        });
+        expect(events.length).toBeGreaterThan(0);
+        expect(
+          events.every(
+            ({ runtime }) =>
+              runtime.codexVersion ===
+                CODEX_PROVIDER_RUNTIME_IDENTITY.codexVersion &&
+              runtime.schemaHash ===
+                CODEX_PROVIDER_RUNTIME_IDENTITY.schemaHash &&
+              runtime.profile === CODEX_PROVIDER_RUNTIME_IDENTITY.profile &&
+              runtime.experimentalApi ===
+                CODEX_PROVIDER_RUNTIME_IDENTITY.experimentalApi,
+          ),
+        ).toBe(true);
+      } finally {
+        session.abort();
+        for (const client of wsServer.clients) client.terminate();
+        await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      }
+    });
+
+    it("starts the child turn directly after forking an active bridge thread", async () => {
+      const requests: Array<{
+        method: string;
+        params?: Record<string, unknown>;
+      }> = [];
+      const httpServer = createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/sessions/thread-bridge/active") {
+          res.end(JSON.stringify({ active: true, mcpProfile: "full" }));
+          return;
+        }
+        if (req.url === "/status") {
+          const address = httpServer.address() as AddressInfo;
+          res.end(
+            JSON.stringify({
+              listening: true,
+              url: `ws://127.0.0.1:${address.port}`,
+            }),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not found" }));
+      });
+      const wsServer = new WebSocketServer({ server: httpServer });
+      wsServer.on("connection", (socket) => {
+        socket.on("message", (raw) => {
+          const message = JSON.parse(raw.toString()) as {
+            id: number;
+            method: string;
+            params?: Record<string, unknown>;
+          };
+          requests.push({ method: message.method, params: message.params });
+          const send = (result: unknown) =>
+            socket.send(JSON.stringify({ id: message.id, result }));
+          if (message.method === "initialize") {
+            send({ userAgent: "fake-bridge" });
+          } else if (message.method === "config/read") {
+            send({ config: { mcp_servers: {} }, origins: {} });
+          } else if (message.method === "thread/resume") {
+            send({
+              thread: {
+                id: "thread-bridge",
+                cwd: "/repo",
+                modelProvider: "openai",
+                status: { type: "active", activeFlags: [] },
+                turns: [],
+                historyMode: "paginated",
+                forkedFromId: null,
+              },
+              initialTurnsPage: {
+                data: [
+                  {
+                    id: "turn-live",
+                    status: "inProgress",
+                    items: [],
+                    itemsView: "notLoaded",
+                    error: null,
+                  },
+                  {
+                    id: "turn-retained",
+                    status: "completed",
+                    items: [],
+                    itemsView: "notLoaded",
+                    error: null,
+                  },
+                ],
+                nextCursor: null,
+                backwardsCursor: "turn-live",
+              },
+              turnsBackwardsCursor: "turn-live",
+              itemsBackwardsCursor: null,
+              model: "gpt-5.5",
+              modelProvider: "openai",
+              serviceTier: null,
+              cwd: "/repo",
+              reasoningEffort: null,
+            });
+          } else if (message.method === "thread/fork") {
+            send({
+              thread: {
+                id: "thread-forked",
+                cwd: "/repo",
+                modelProvider: "openai",
+                status: { type: "idle" },
+                turns: [],
+                historyMode: "paginated",
+                forkedFromId: "thread-bridge",
+              },
+              model: "gpt-5.5",
+              modelProvider: "openai",
+              serviceTier: null,
+              cwd: "/repo",
+              reasoningEffort: null,
+            });
+          } else if (message.method === "turn/start") {
+            send({
+              turn: {
+                id: "turn-child",
+                status: "completed",
+                items: [],
+                error: null,
+              },
+            });
+          } else if (message.method === "turn/steer") {
+            socket.send(
+              JSON.stringify({
+                id: message.id,
+                error: {
+                  code: -32602,
+                  message: "unexpected stale source turn identity",
+                },
+              }),
+            );
+          }
+        });
+      });
+      await new Promise<void>((resolve) =>
+        httpServer.listen(0, "127.0.0.1", resolve),
+      );
+      const address = httpServer.address() as AddressInfo;
+      const provider = new CodexProvider({
+        codexPath: "/path-that-must-not-be-spawned/codex",
+        bridgeExecution: {
+          mode: "external",
+          controlUrl: `http://127.0.0.1:${address.port}`,
+        },
+      });
+      const session = await provider.startSession({
+        cwd: "/repo",
+        resumeSessionId: "thread-bridge",
+        initialMessage: { text: "edited prompt", uuid: "bridge-edit" },
+        rollbackNumTurns: 1,
+      });
+      try {
+        let terminal: SDKMessage | undefined;
+        for await (const message of session.iterator) {
+          if (
+            message.subtype === "history_fork_complete" ||
+            message.type === "error"
+          ) {
+            terminal = message;
+            break;
+          }
+        }
+
+        expect(terminal).toMatchObject({
+          type: "system",
+          subtype: "history_fork_complete",
+          session_id: "thread-forked",
+          forkParentSessionId: "thread-bridge",
+          turnId: "turn-child",
+        });
+        expect(
+          requests.find(({ method }) => method === "thread/fork")?.params,
+        ).toMatchObject({
+          threadId: "thread-bridge",
+          lastTurnId: "turn-retained",
+          excludeTurns: true,
+        });
+        expect(
+          requests.filter(({ method }) => method === "turn/steer"),
+        ).toHaveLength(0);
+        expect(
+          requests.filter(({ method }) => method === "turn/start"),
+        ).toEqual([
+          expect.objectContaining({
+            params: expect.objectContaining({ threadId: "thread-forked" }),
+          }),
+        ]);
+      } finally {
+        session.abort();
+        for (const client of wsServer.clients) client.terminate();
+        await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      }
+    });
+
+    it.each([
+      {
+        name: "idle metadata after steer",
+        initialTurnPresent: true,
+        runtimeStatus: "idle" as const,
+        startsNewTurn: true,
+      },
+      {
+        name: "active metadata after steer",
+        initialTurnPresent: true,
+        runtimeStatus: "active" as const,
+        startsNewTurn: false,
+      },
+      {
+        name: "missing active turn snapshot",
+        initialTurnPresent: false,
+        runtimeStatus: "active" as const,
+        startsNewTurn: false,
+      },
+    ])(
+      "handles bridge rejoin safely for $name",
+      async ({ initialTurnPresent, runtimeStatus, startsNewTurn }) => {
+        const requests: Array<{
+          method: string;
+          params?: Record<string, unknown>;
+        }> = [];
+        const httpServer = createServer((req, res) => {
+          res.setHeader("content-type", "application/json");
+          if (req.url === "/sessions/thread-bridge/active") {
+            res.end(JSON.stringify({ active: true, mcpProfile: "full" }));
+            return;
+          }
+          if (req.url === "/status") {
+            const address = httpServer.address() as AddressInfo;
+            res.end(
+              JSON.stringify({
+                listening: true,
+                url: `ws://127.0.0.1:${address.port}`,
+              }),
+            );
+            return;
+          }
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: "not found" }));
+        });
+        const wsServer = new WebSocketServer({ server: httpServer });
+        wsServer.on("connection", (socket) => {
+          socket.on("message", (raw) => {
+            const message = JSON.parse(raw.toString()) as {
+              id: number;
+              method: string;
+              params?: Record<string, unknown>;
+            };
+            requests.push({ method: message.method, params: message.params });
+            const send = (result: unknown) =>
+              socket.send(JSON.stringify({ id: message.id, result }));
+            if (message.method === "initialize") {
+              send({ userAgent: "fake-bridge" });
+            } else if (message.method === "config/read") {
+              send({ config: { mcp_servers: {} }, origins: {} });
+            } else if (message.method === "thread/resume") {
+              send({
+                thread: {
+                  id: "thread-bridge",
+                  cwd: "/repo",
+                  modelProvider: "openai",
+                  historyMode: "paginated",
+                  status: { type: "active", activeFlags: [] },
+                  turns: [],
+                  forkedFromId: null,
+                },
+                initialTurnsPage: {
+                  data: initialTurnPresent
+                    ? [
+                        {
+                          id: "turn-live",
+                          status: "inProgress",
+                          items: [],
+                          itemsView: "notLoaded",
+                          error: null,
+                        },
+                      ]
+                    : [],
+                  nextCursor: null,
+                  backwardsCursor: "turn-live",
+                },
+                turnsBackwardsCursor: "persisted-head",
+                itemsBackwardsCursor: null,
+                model: "gpt-5.5",
+                modelProvider: "openai",
+                serviceTier: null,
+                cwd: "/repo",
+                reasoningEffort: null,
+              });
+            } else if (message.method === "turn/steer") {
+              socket.send(
+                JSON.stringify({
+                  id: message.id,
+                  error: { code: -32600, message: "no active turn to steer" },
+                }),
+              );
+            } else if (message.method === "thread/read") {
+              send({
+                thread: {
+                  id: "thread-bridge",
+                  cwd: "/repo",
+                  modelProvider: "openai",
+                  historyMode: "paginated",
+                  status:
+                    runtimeStatus === "idle"
+                      ? { type: "idle" }
+                      : { type: "active", activeFlags: [] },
+                  turns: [],
+                  forkedFromId: null,
+                },
+              });
+            } else if (message.method === "turn/start") {
+              send({
+                turn: {
+                  id: "turn-new",
+                  status: "completed",
+                  items: [],
+                  error: null,
+                },
+              });
+            }
+          });
+        });
+        await new Promise<void>((resolve) =>
+          httpServer.listen(0, "127.0.0.1", resolve),
+        );
+        const address = httpServer.address() as AddressInfo;
+        const provider = new CodexProvider({
+          codexPath: "/path-that-must-not-be-spawned/codex",
+          bridgeExecution: {
+            mode: "external",
+            controlUrl: `http://127.0.0.1:${address.port}`,
+          },
+        });
+        const session = await provider.startSession({
+          cwd: "/repo",
+          resumeSessionId: "thread-bridge",
+          initialMessage: { text: "continue", uuid: "bridge-race" },
+        });
+        try {
+          let terminalMessage: SDKMessage | undefined;
+          for await (const message of session.iterator) {
+            if (
+              (startsNewTurn &&
+                message.type === "result" &&
+                message.clientUserMessageId === "bridge-race") ||
+              (!startsNewTurn && message.type === "error")
+            ) {
+              terminalMessage = message;
+              break;
+            }
+          }
+
+          expect(terminalMessage?.type).toBe(
+            startsNewTurn ? "result" : "error",
+          );
+          const metadataRead = requests.find(
+            ({ method }) => method === "thread/read",
+          );
+          if (initialTurnPresent) {
+            expect(metadataRead?.params).toEqual({
+              threadId: "thread-bridge",
+              includeTurns: false,
+            });
+          } else {
+            expect(metadataRead).toBeUndefined();
+          }
+          expect(
+            requests.filter(({ method }) => method === "turn/steer"),
+          ).toHaveLength(initialTurnPresent ? 1 : 0);
+          expect(
+            requests.filter(({ method }) => method === "turn/start"),
+          ).toHaveLength(startsNewTurn ? 1 : 0);
+          expect(
+            requests.some(
+              ({ method, params }) =>
+                method === "thread/read" && params?.includeTurns === true,
+            ),
+          ).toBe(false);
+          expect(
+            requests.some(({ method }) => method === "thread/turns/list"),
+          ).toBe(false);
+        } finally {
+          session.abort();
+          for (const client of wsServer.clients) client.terminate();
+          await new Promise<void>((resolve) => wsServer.close(() => resolve()));
+          await new Promise<void>((resolve) =>
+            httpServer.close(() => resolve()),
+          );
+        }
+      },
+    );
+
+    it("falls back once to legacy bridge hydration when initialTurnsPage is unsupported", async () => {
+      const requests: Array<{
+        method: string;
+        params?: Record<string, unknown>;
+      }> = [];
+      let resumeAttempt = 0;
+      const httpServer = createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/sessions/thread-bridge/active") {
+          res.end(JSON.stringify({ active: true, mcpProfile: "full" }));
+          return;
+        }
+        if (req.url === "/status") {
+          const address = httpServer.address() as AddressInfo;
+          res.end(
+            JSON.stringify({
+              listening: true,
+              url: `ws://127.0.0.1:${address.port}`,
+            }),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not found" }));
+      });
+      const wsServer = new WebSocketServer({ server: httpServer });
+      wsServer.on("connection", (socket) => {
+        socket.on("message", (raw) => {
+          const message = JSON.parse(raw.toString()) as {
+            id: number;
+            method: string;
+            params?: Record<string, unknown>;
+          };
+          requests.push({ method: message.method, params: message.params });
+          const send = (result: unknown) =>
+            socket.send(JSON.stringify({ id: message.id, result }));
+          if (message.method === "initialize") {
+            send({ userAgent: "fake-legacy-bridge" });
+          } else if (message.method === "config/read") {
+            send({ config: { mcp_servers: {} }, origins: {} });
+          } else if (message.method === "thread/resume") {
+            resumeAttempt += 1;
+            if (resumeAttempt === 1) {
+              socket.send(
+                JSON.stringify({
+                  id: message.id,
+                  error: {
+                    code: -32602,
+                    message: "unknown field `initialTurnsPage`",
+                  },
+                }),
+              );
+              return;
+            }
+            send({
+              thread: {
+                id: "thread-bridge",
+                cwd: "/repo",
+                modelProvider: "openai",
+                historyMode: "legacy",
+                status: { type: "active", activeFlags: [] },
                 turns: [
                   {
                     id: "turn-live",
                     status: "inProgress",
                     items: [],
+                    itemsView: "full",
                     error: null,
                   },
                 ],
@@ -591,31 +1708,40 @@ process.stdin.on("data", (chunk) => {
       const session = await provider.startSession({
         cwd: "/repo",
         resumeSessionId: "thread-bridge",
-        initialMessage: { text: "continue", uuid: "bridge-message" },
+        initialMessage: { text: "continue", uuid: "legacy-bridge" },
       });
       try {
         for await (const message of session.iterator) {
           if (
             message.type === "result" &&
-            message.clientUserMessageId === "bridge-message"
+            message.clientUserMessageId === "legacy-bridge"
           ) {
             break;
           }
         }
-        expect(requests.map((request) => request.method)).toContain(
-          "turn/steer",
+
+        const resumeRequests = requests.filter(
+          ({ method }) => method === "thread/resume",
         );
-        expect(requests.map((request) => request.method)).not.toContain(
-          "turn/start",
-        );
-        expect(websocketPaths).toEqual(["/?mcp=full"]);
-        expect(
-          requests.find((request) => request.method === "turn/steer")?.params,
-        ).toMatchObject({
-          threadId: "thread-bridge",
-          expectedTurnId: "turn-live",
-          clientUserMessageId: "bridge-message",
+        expect(resumeRequests).toHaveLength(2);
+        expect(resumeRequests[0]?.params).toMatchObject({
+          excludeTurns: true,
+          initialTurnsPage: {
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "notLoaded",
+          },
         });
+        expect(resumeRequests[1]?.params).not.toHaveProperty("excludeTurns");
+        expect(resumeRequests[1]?.params).not.toHaveProperty(
+          "initialTurnsPage",
+        );
+        expect(
+          requests.filter(({ method }) => method === "turn/steer"),
+        ).toHaveLength(1);
+        expect(
+          requests.some(({ method }) => method === "thread/turns/list"),
+        ).toBe(false);
       } finally {
         session.abort();
         for (const client of wsServer.clients) client.terminate();
@@ -1036,7 +2162,7 @@ process.stdin.on("data", (chunk) => {
         session = await provider.startSession({ cwd: tempDir });
         const controls = session.codexControls;
         expect(controls?.capabilities).toMatchObject({
-          codexVersion: "0.147.0",
+          codexVersion: CODEX_PROTOCOL_BASELINE.codexVersion,
           experimentalApi: false,
           methods: {
             "skills/list": true,
@@ -1066,7 +2192,7 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
-    it("maps stable native controls to exact 0.147 request contracts", async () => {
+    it("maps stable native controls to synchronized request contracts", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-controls-contract-"),
       );
@@ -2079,8 +3205,22 @@ process.stdin.on("data", (chunk) => {
 
         const requests = readMessageCapture(messageCapturePath);
         expect(
+          requests.find(({ method }) => method === "initialize")?.params,
+        ).toMatchObject({ capabilities: { experimentalApi: true } });
+        expect(
           requests.filter(({ method }) => method === "thread/resume"),
-        ).toHaveLength(1);
+        ).toEqual([
+          expect.objectContaining({
+            params: expect.objectContaining({
+              excludeTurns: true,
+              initialTurnsPage: {
+                limit: 2,
+                sortDirection: "desc",
+                itemsView: "notLoaded",
+              },
+            }),
+          }),
+        ]);
         expect(
           requests.filter(({ method }) => method === "thread/fork"),
         ).toEqual([
@@ -2088,6 +3228,7 @@ process.stdin.on("data", (chunk) => {
             params: expect.objectContaining({
               threadId: "thread-existing",
               lastTurnId: "turn-source-2",
+              excludeTurns: true,
               config: expect.objectContaining({
                 mcp_servers: expect.objectContaining({
                   web: expect.objectContaining({ enabled: false }),
@@ -2103,6 +3244,9 @@ process.stdin.on("data", (chunk) => {
           requests.find(({ method }) => method === "turn/start")?.params,
         ).toMatchObject({ threadId: "thread-forked" });
         expect(
+          requests.some(({ method }) => method === "thread/turns/list"),
+        ).toBe(false);
+        expect(
           requests.some(({ method }) => method === "thread/rollback"),
         ).toBe(false);
       } finally {
@@ -2111,6 +3255,341 @@ process.stdin.on("data", (chunk) => {
         restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
         restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
         restoreEnv("CODEX_FAKE_MCP_SERVERS", previousMcpServers);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("loads only the paginated suffix needed for a cross-page fork boundary", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-paginated-fork-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousPageSize = process.env.CODEX_FAKE_TURNS_PAGE_SIZE;
+      const previousDeprecation = process.env.CODEX_FAKE_DEPRECATION_NOTICE;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_HISTORY_MODE = "paginated";
+      process.env.CODEX_FAKE_TURNS_PAGE_SIZE = "2";
+      process.env.CODEX_FAKE_DEPRECATION_NOTICE = "1";
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify(
+        Array.from({ length: 6 }, (_, index) => ({
+          id: `turn-source-${index + 1}`,
+          status: "completed",
+          items: [],
+          error: null,
+        })),
+      );
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "edited prompt", uuid: "message-edit" },
+          rollbackNumTurns: 3,
+        });
+
+        for await (const message of session.iterator) {
+          if (message.subtype === "history_fork_complete") break;
+        }
+
+        const requests = readMessageCapture(messageCapturePath);
+        expect(
+          requests.find(({ method }) => method === "thread/resume")?.params,
+        ).toMatchObject({
+          threadId: "thread-existing",
+          excludeTurns: true,
+          initialTurnsPage: {
+            limit: 4,
+            sortDirection: "desc",
+            itemsView: "notLoaded",
+          },
+        });
+        expect(
+          requests.filter(({ method }) => method === "thread/turns/list"),
+        ).toEqual([
+          expect.objectContaining({
+            params: {
+              threadId: "thread-existing",
+              cursor: "fake-turns:2",
+              limit: 2,
+              sortDirection: "desc",
+              itemsView: "notLoaded",
+            },
+          }),
+        ]);
+        expect(
+          requests.find(({ method }) => method === "thread/fork")?.params,
+        ).toMatchObject({
+          threadId: "thread-existing",
+          lastTurnId: "turn-source-3",
+          excludeTurns: true,
+        });
+        expect(
+          requests.some(
+            ({ method, params }) =>
+              method === "thread/read" && params?.includeTurns === true,
+          ),
+        ).toBe(false);
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_TURNS_PAGE_SIZE", previousPageSize);
+        restoreEnv("CODEX_FAKE_DEPRECATION_NOTICE", previousDeprecation);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      { historyMode: "legacy" as const, fallsBackToFullRead: true },
+      { historyMode: "paginated" as const, fallsBackToFullRead: false },
+    ])(
+      "handles unsupported turn paging for $historyMode history",
+      async ({ historyMode, fallsBackToFullRead }) => {
+        const tempDir = mkdtempSync(
+          join(require("node:os").tmpdir(), "codex-fork-list-fallback-"),
+        );
+        const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+        const capturePath = join(tempDir, "capture.json");
+        const messageCapturePath = join(tempDir, "messages.jsonl");
+        const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+        const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+        const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+        const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+        const previousPageSize = process.env.CODEX_FAKE_TURNS_PAGE_SIZE;
+        const previousListUnsupported =
+          process.env.CODEX_FAKE_TURNS_LIST_UNSUPPORTED;
+        let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+          null;
+
+        process.env.CODEX_FAKE_CAPTURE = capturePath;
+        process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+        process.env.CODEX_FAKE_HISTORY_MODE = historyMode;
+        process.env.CODEX_FAKE_TURNS_PAGE_SIZE = "1";
+        process.env.CODEX_FAKE_TURNS_LIST_UNSUPPORTED = "1";
+        process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify(
+          Array.from({ length: 4 }, (_, index) => ({
+            id: `turn-source-${index + 1}`,
+            status: "completed",
+            items: [],
+            error: null,
+          })),
+        );
+
+        try {
+          const provider = new CodexProvider({ codexPath: fakeCodexPath });
+          session = await provider.startSession({
+            cwd: tempDir,
+            resumeSessionId: "thread-existing",
+            initialMessage: { text: "edited prompt", uuid: "message-edit" },
+            rollbackNumTurns: 2,
+          });
+
+          let terminal: SDKMessage | undefined;
+          for await (const message of session.iterator) {
+            if (
+              (fallsBackToFullRead &&
+                message.subtype === "history_fork_complete") ||
+              (!fallsBackToFullRead && message.type === "error")
+            ) {
+              terminal = message;
+              break;
+            }
+          }
+
+          expect(terminal?.type).toBe(fallsBackToFullRead ? "system" : "error");
+          const requests = readMessageCapture(messageCapturePath);
+          expect(
+            requests.filter(({ method }) => method === "thread/turns/list"),
+          ).toHaveLength(1);
+          expect(
+            requests.filter(
+              ({ method, params }) =>
+                method === "thread/read" && params?.includeTurns === true,
+            ),
+          ).toHaveLength(fallsBackToFullRead ? 1 : 0);
+          expect(
+            requests.filter(({ method }) => method === "thread/fork"),
+          ).toHaveLength(fallsBackToFullRead ? 1 : 0);
+          if (fallsBackToFullRead) {
+            expect(
+              requests.find(({ method }) => method === "thread/fork")?.params,
+            ).toMatchObject({
+              lastTurnId: "turn-source-2",
+              excludeTurns: true,
+            });
+          }
+        } finally {
+          session?.abort();
+          restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+          restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+          restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+          restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+          restoreEnv("CODEX_FAKE_TURNS_PAGE_SIZE", previousPageSize);
+          restoreEnv(
+            "CODEX_FAKE_TURNS_LIST_UNSUPPORTED",
+            previousListUnsupported,
+          );
+          rmSync(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it("fails closed when paginated fork history repeats a cursor or page", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-fork-repeated-cursor-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousPageSize = process.env.CODEX_FAKE_TURNS_PAGE_SIZE;
+      const previousRepeatCursor = process.env.CODEX_FAKE_REPEAT_TURNS_CURSOR;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_HISTORY_MODE = "paginated";
+      process.env.CODEX_FAKE_TURNS_PAGE_SIZE = "2";
+      process.env.CODEX_FAKE_REPEAT_TURNS_CURSOR = "1";
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify(
+        Array.from({ length: 6 }, (_, index) => ({
+          id: `turn-source-${index + 1}`,
+          status: "completed",
+          items: [],
+          error: null,
+        })),
+      );
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "edited prompt" },
+          rollbackNumTurns: 3,
+        });
+
+        let terminal: SDKMessage | undefined;
+        for await (const message of session.iterator) {
+          if (
+            message.type === "error" ||
+            message.subtype === "history_fork_complete"
+          ) {
+            terminal = message;
+            break;
+          }
+        }
+        const requests = readMessageCapture(messageCapturePath);
+        expect(
+          terminal?.type,
+          JSON.stringify({ terminal, requests }, null, 2),
+        ).toBe("error");
+        expect(
+          requests.filter(({ method }) => method === "thread/turns/list"),
+        ).toHaveLength(1);
+        expect(requests.some(({ method }) => method === "thread/fork")).toBe(
+          false,
+        );
+        expect(requests.some(({ method }) => method === "turn/start")).toBe(
+          false,
+        );
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_TURNS_PAGE_SIZE", previousPageSize);
+        restoreEnv("CODEX_FAKE_REPEAT_TURNS_CURSOR", previousRepeatCursor);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("retries metadata-only fork once when an old server rejects excludeTurns", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-fork-legacy-retry-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const messageCapturePath = join(tempDir, "messages.jsonl");
+      const previousCapturePath = process.env.CODEX_FAKE_CAPTURE;
+      const previousMessageCapture = process.env.CODEX_FAKE_MESSAGE_CAPTURE;
+      const previousHistoryMode = process.env.CODEX_FAKE_HISTORY_MODE;
+      const previousSourceTurns = process.env.CODEX_FAKE_SOURCE_TURNS;
+      const previousRejectExclude = process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS;
+      const previousRejectMethod =
+        process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS_METHOD;
+      let session: Awaited<ReturnType<CodexProvider["startSession"]>> | null =
+        null;
+
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MESSAGE_CAPTURE = messageCapturePath;
+      process.env.CODEX_FAKE_HISTORY_MODE = "paginated";
+      process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS = "1";
+      process.env.CODEX_FAKE_REJECT_EXCLUDE_TURNS_METHOD = "thread/fork";
+      process.env.CODEX_FAKE_SOURCE_TURNS = JSON.stringify([
+        { id: "turn-source-1", status: "completed", items: [], error: null },
+        { id: "turn-source-2", status: "completed", items: [], error: null },
+        { id: "turn-source-3", status: "completed", items: [], error: null },
+      ]);
+
+      try {
+        const provider = new CodexProvider({ codexPath: fakeCodexPath });
+        session = await provider.startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          initialMessage: { text: "edited prompt", uuid: "message-edit" },
+          rollbackNumTurns: 1,
+        });
+
+        for await (const message of session.iterator) {
+          if (message.subtype === "history_fork_complete") break;
+        }
+
+        const requests = readMessageCapture(messageCapturePath);
+        const forkRequests = requests.filter(
+          ({ method }) => method === "thread/fork",
+        );
+        expect(forkRequests).toHaveLength(2);
+        expect(forkRequests[0]?.params).toMatchObject({
+          lastTurnId: "turn-source-2",
+          excludeTurns: true,
+        });
+        expect(forkRequests[1]?.params).toMatchObject({
+          lastTurnId: "turn-source-2",
+        });
+        expect(forkRequests[1]?.params).not.toHaveProperty("excludeTurns");
+        expect(
+          requests.find(({ method }) => method === "turn/start")?.params,
+        ).toMatchObject({ threadId: "thread-forked" });
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapturePath);
+        restoreEnv("CODEX_FAKE_MESSAGE_CAPTURE", previousMessageCapture);
+        restoreEnv("CODEX_FAKE_HISTORY_MODE", previousHistoryMode);
+        restoreEnv("CODEX_FAKE_SOURCE_TURNS", previousSourceTurns);
+        restoreEnv("CODEX_FAKE_REJECT_EXCLUDE_TURNS", previousRejectExclude);
+        restoreEnv(
+          "CODEX_FAKE_REJECT_EXCLUDE_TURNS_METHOD",
+          previousRejectMethod,
+        );
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
@@ -2162,6 +3641,16 @@ process.stdin.on("data", (chunk) => {
         await session.iterator.next();
 
         const requests = readMessageCapture(messageCapturePath);
+        expect(
+          requests.find(({ method }) => method === "thread/resume")?.params,
+        ).toMatchObject({
+          excludeTurns: true,
+          initialTurnsPage: {
+            limit: 4,
+            sortDirection: "desc",
+            itemsView: "notLoaded",
+          },
+        });
         expect(
           requests.filter(({ method }) => method === "thread/start"),
         ).toHaveLength(1);
@@ -4017,7 +5506,7 @@ describe("CodexProvider Event Normalization", () => {
     expect(buffers.size).toBe(0);
   });
 
-  it("converts warning notifications into visible system messages", () => {
+  it("keeps actionable warnings visible and protocol deprecations diagnostic-only", () => {
     const provider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (
         notification: { method: string; params?: unknown },
@@ -4042,6 +5531,21 @@ describe("CodexProvider Event Normalization", () => {
       warningKind: "warning",
     });
 
+    const guardianWarning = provider.convertNotificationToSDKMessages(
+      {
+        method: "guardianWarning",
+        params: { threadId: "thread-1", message: "Approval is required" },
+      },
+      "session-1",
+      new Map(),
+    );
+    expect(guardianWarning[0]).toMatchObject({
+      type: "system",
+      subtype: "warning",
+      content: "Approval is required",
+      warningKind: "guardianWarning",
+    });
+
     const deprecation = provider.convertNotificationToSDKMessages(
       {
         method: "deprecationNotice",
@@ -4050,11 +5554,7 @@ describe("CodexProvider Event Normalization", () => {
       "session-1",
       new Map(),
     );
-    expect(deprecation[0]).toMatchObject({
-      type: "system",
-      subtype: "warning",
-      content: "Old flag\nUse --new-flag instead",
-    });
+    expect(deprecation).toEqual([]);
 
     const rollbackDeprecation = provider.convertNotificationToSDKMessages(
       {
@@ -4067,11 +5567,7 @@ describe("CodexProvider Event Normalization", () => {
       "session-1",
       new Map(),
     );
-    expect(rollbackDeprecation[0]).toMatchObject({
-      type: "system",
-      subtype: "warning",
-      content: "thread/rollback is deprecated and will be removed soon",
-    });
+    expect(rollbackDeprecation).toEqual([]);
 
     const empty = provider.convertNotificationToSDKMessages(
       { method: "configWarning", params: {} },

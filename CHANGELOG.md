@@ -41,6 +41,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复 Codex paginated session 在恢复、bridge active-turn rejoin、编辑分支和 steer 竞态中请求完整历史的问题：lifecycle 请求改用 `excludeTurns`，bridge 通过原生 `initialTurnsPage` 原子取得 live turn，edit/fork 只分页读取尾部 boundary，且仅对已确认的 legacy history 保留一次受控 full-read fallback；app-server 的 `deprecationNotice` 现在只进入有界去重诊断，不再显示为用户 transcript warning。
 - 修复飞书通道误用启动 shell 遗留代理的问题：账号新增 `proxyMode`，`auto` 默认让国内 Feishu 直连、国际 Lark 的 OpenAPI 与 WebSocket endpoint discovery 继承环境代理，`direct` / `environment` 可按账号覆盖；直连使用与 SDK 全局实例隔离的 HTTP wrapper，不再修改 Lark SDK 的全局 Axios 配置。这样本地 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY` 指向的代理关闭后，Feishu 机器人身份校验不会持续报 `BOT_IDENTITY_FAILED`，依赖代理的 Lark 账号也不受影响；失败日志只记录脱敏的网络错误码、HTTP 状态和实际绕过标记，不记录代理地址、凭据或请求体。
 - 修复“全部会话”仍只按时间排列、没有体现置顶优先级的问题：当前筛选范围内的置顶会话现在统一排在普通会话之前，两组内部继续按最近更新时间排序；接口会补齐落在普通首屏之外的置顶项，并用补齐前的时间页边界继续分页，避免“加载更多”漏掉中间会话。
 - 修复 Codex 新会话在实时回显与 rollout 刷新交汇时偶发重复显示用户消息的问题：保留 Codex 原生 `user_message.client_id`，并让 Process 回显、rollout normalization、canonical overlay 与 app-server history 统一发布同一个用户消息 correlation identity；附件的 `<image>`/`input_image` 表示差异和落盘延迟不再参与消息身份判断。

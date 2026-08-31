@@ -23,6 +23,7 @@ import {
 } from "../../codex-bridge/interactions.js";
 import {
   CODEX_EVENT_RUNTIME_IDENTITY,
+  CODEX_PROVIDER_RUNTIME_IDENTITY,
   type CodexEventEnvelope,
   CodexEventIngress,
   type CodexEventProjectionMode,
@@ -103,6 +104,11 @@ import {
   codexControlFailure,
 } from "./codex-controls.js";
 import {
+  isCodexHistoryPaginationUnsupported,
+  isCodexLifecycleHistoryControlsUnsupported,
+  isCodexNoActiveTurnToSteer,
+} from "./codex-history-compat.js";
+import {
   type CodexModelSourceDefinition,
   DEFAULT_CODEX_MODEL_SOURCE,
   getCodexModelSourceRegistry,
@@ -110,6 +116,9 @@ import {
 import type { ThreadGoal as CodexThreadGoal } from "./codex-protocol/generated/v2/ThreadGoal.js";
 import type { ThreadGoalStatus as CodexThreadGoalStatus } from "./codex-protocol/generated/v2/ThreadGoalStatus.js";
 import type { ThreadReadResponse } from "./codex-protocol/generated/v2/ThreadReadResponse.js";
+import type { ThreadTurnsListParams } from "./codex-protocol/generated/v2/ThreadTurnsListParams.js";
+import type { ThreadTurnsListResponse } from "./codex-protocol/generated/v2/ThreadTurnsListResponse.js";
+import type { Turn } from "./codex-protocol/generated/v2/Turn.js";
 import type { TurnInterruptParams } from "./codex-protocol/generated/v2/TurnInterruptParams.js";
 import type { TurnInterruptResponse } from "./codex-protocol/generated/v2/TurnInterruptResponse.js";
 import type { TurnSteerParams } from "./codex-protocol/generated/v2/TurnSteerParams.js";
@@ -211,8 +220,13 @@ const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
 const MAX_APP_SERVER_STDERR_LENGTH = 64 * 1024;
 const APP_SERVER_OVERLOAD_MAX_ATTEMPTS = 4;
 const APP_SERVER_OVERLOAD_BASE_DELAY_MS = 50;
+const CODEX_FORK_BOUNDARY_PAGE_LIMIT = 100;
+const CODEX_FORK_BOUNDARY_MAX_TURNS = 10_000;
+const CODEX_FORK_BOUNDARY_MAX_PAGES = 100;
 /** Max characters of live command output kept for the streaming preview. */
 const CODEX_COMMAND_OUTPUT_PREVIEW_LIMIT = 16_000;
+const CODEX_DEPRECATION_LOG_SUMMARY_LIMIT = 512;
+const CODEX_DEPRECATION_LOG_KEY_LIMIT = 32;
 const DEFAULT_CODEX_MODEL_PROVIDER = DEFAULT_CODEX_MODEL_SOURCE;
 const CODEX_MODEL_PROVIDER_NAMES = new Set(["openai", "azure"]);
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
@@ -663,6 +677,30 @@ interface AppServerRetryUpdate {
   metadata?: AppServerRequestMetadata;
 }
 
+type CodexLifecycleHistorySupport = "unknown" | "exclude-turns" | "legacy-only";
+
+interface CodexForkBoundaryExchange {
+  requestId: JsonRpcId;
+  method: "thread/turns/list" | "thread/read";
+  params: ThreadTurnsListParams | { threadId: string; includeTurns: true };
+  result: ThreadTurnsListResponse | ThreadReadResponse;
+}
+
+type CodexForkBoundaryResult =
+  | {
+      kind: "boundary";
+      turn: Turn;
+      examinedTurnCount: number;
+      pageCount: number;
+      exchanges: CodexForkBoundaryExchange[];
+    }
+  | {
+      kind: "empty-child";
+      sourceTurnCount: number;
+      pageCount: number;
+      exchanges: CodexForkBoundaryExchange[];
+    };
+
 type AppServerRetryHandler = (
   update: AppServerRetryUpdate,
 ) => void | Promise<void>;
@@ -719,6 +757,7 @@ export class CodexAppServerClient {
   private onServerRequest: AppServerRequestHandler | null = null;
   private eventObserver: AppServerEventObserver | null = null;
   private inboundObservationTail: Promise<void> = Promise.resolve();
+  private readonly reportedDeprecationSummaries = new Set<string>();
   private closed = false;
 
   constructor(
@@ -929,6 +968,9 @@ export class CodexAppServerClient {
           ? { emittedAtMs: message.emittedAtMs }
           : {}),
       };
+      if (method === "deprecationNotice") {
+        this.logDeprecationNotice(notification.params);
+      }
       const observer = this.eventObserver;
       this.enqueueInboundObservation(async () => {
         const canonicalEvent =
@@ -979,6 +1021,33 @@ export class CodexAppServerClient {
         pending.resolve(message.result);
       });
     }
+  }
+
+  private logDeprecationNotice(params: unknown): void {
+    const summaryValue = asRecord(params)?.summary;
+    if (typeof summaryValue !== "string") return;
+    const summary = summaryValue.trim();
+    if (!summary) return;
+    const boundedSummary = summary.slice(
+      0,
+      CODEX_DEPRECATION_LOG_SUMMARY_LIMIT,
+    );
+    if (
+      this.reportedDeprecationSummaries.has(boundedSummary) ||
+      this.reportedDeprecationSummaries.size >= CODEX_DEPRECATION_LOG_KEY_LIMIT
+    ) {
+      return;
+    }
+    this.reportedDeprecationSummaries.add(boundedSummary);
+    log.warn(
+      {
+        event: "codex_deprecation_notice_suppressed",
+        warningKind: "deprecationNotice",
+        summary: boundedSummary,
+        summaryTruncated: summary.length > boundedSummary.length,
+      },
+      "Recorded Codex protocol deprecation outside the user transcript",
+    );
   }
 
   private enqueueInboundObservation(operation: () => Promise<void>): void {
@@ -2373,6 +2442,349 @@ export class CodexProvider implements AgentProvider {
   }
 
   /**
+   * Prefer bounded lifecycle responses while retaining a single, narrowly
+   * classified retry for app-server versions that reject `excludeTurns`.
+   */
+  private async *requestLifecycleWithExcludeTurnsFallback<
+    TParams extends { excludeTurns?: boolean; initialTurnsPage?: unknown },
+    TResponse,
+  >(input: {
+    appServer: CodexAppServerClient;
+    method: "thread/resume" | "thread/fork";
+    params: TParams;
+    historySupport: CodexLifecycleHistorySupport;
+    sessionId?: () => string | undefined;
+    onRetry?: (
+      update: AppServerRetryUpdate,
+    ) => Promise<CodexEventEnvelope | undefined>;
+  }): AsyncGenerator<
+    SDKMessage,
+    {
+      requestId: JsonRpcId;
+      result: TResponse;
+      params: TParams;
+      historySupport: CodexLifecycleHistorySupport;
+    },
+    undefined
+  > {
+    const params = { ...input.params };
+    if (input.historySupport === "legacy-only") {
+      Reflect.deleteProperty(params, "excludeTurns");
+      Reflect.deleteProperty(params, "initialTurnsPage");
+    }
+
+    try {
+      const tracked = yield* this.requestTrackedWithRetryProjection<TResponse>({
+        appServer: input.appServer,
+        method: input.method,
+        params,
+        sessionId: input.sessionId,
+        onRetry: input.onRetry,
+      });
+      return {
+        ...tracked,
+        params,
+        historySupport:
+          params.excludeTurns === true ? "exclude-turns" : input.historySupport,
+      };
+    } catch (error) {
+      if (
+        params.excludeTurns !== true ||
+        !isCodexLifecycleHistoryControlsUnsupported(error)
+      ) {
+        throw error;
+      }
+
+      const fallbackParams = { ...params };
+      Reflect.deleteProperty(fallbackParams, "excludeTurns");
+      Reflect.deleteProperty(fallbackParams, "initialTurnsPage");
+      log.warn(
+        {
+          event: "codex_lifecycle_compatibility_fallback",
+          method: input.method,
+          sessionId: input.sessionId?.() ?? null,
+          errorCode:
+            error instanceof CodexJsonRpcError ? error.code : undefined,
+          historySupport: "legacy-only",
+        },
+        "Codex app-server rejected bounded lifecycle history controls; retrying once with legacy hydration",
+      );
+      const tracked = yield* this.requestTrackedWithRetryProjection<TResponse>({
+        appServer: input.appServer,
+        method: input.method,
+        params: fallbackParams,
+        sessionId: input.sessionId,
+        onRetry: input.onRetry,
+      });
+      return {
+        ...tracked,
+        params: fallbackParams,
+        historySupport: "legacy-only",
+      };
+    }
+  }
+
+  private resolveCodexForkBoundaryFromFullHistory(input: {
+    sourceThreadId: string;
+    excludedTurnCount: number;
+    turns: Turn[];
+    pageCount: number;
+    exchanges: CodexForkBoundaryExchange[];
+  }): CodexForkBoundaryResult {
+    if (input.excludedTurnCount > input.turns.length) {
+      throw new Error(
+        `Cannot fork Codex thread ${input.sourceThreadId}: requested exclusion of ${input.excludedTurnCount} trailing turns, but the source contains ${input.turns.length}`,
+      );
+    }
+    if (input.excludedTurnCount === input.turns.length) {
+      return {
+        kind: "empty-child",
+        sourceTurnCount: input.turns.length,
+        pageCount: input.pageCount,
+        exchanges: input.exchanges,
+      };
+    }
+
+    const boundaryTurn =
+      input.turns[input.turns.length - input.excludedTurnCount - 1];
+    if (
+      !boundaryTurn ||
+      typeof boundaryTurn.id !== "string" ||
+      boundaryTurn.id.length === 0 ||
+      boundaryTurn.status === "inProgress"
+    ) {
+      throw new Error(
+        `Cannot fork Codex thread ${input.sourceThreadId}: the retained turn boundary is missing or still in progress`,
+      );
+    }
+    return {
+      kind: "boundary",
+      turn: boundaryTurn,
+      examinedTurnCount: input.turns.length,
+      pageCount: input.pageCount,
+      exchanges: input.exchanges,
+    };
+  }
+
+  /** Load only the descending suffix needed to identify an inclusive fork boundary. */
+  private async *loadCodexForkBoundary(input: {
+    appServer: CodexAppServerClient;
+    sourceThreadId: string;
+    excludedTurnCount: number;
+    resumeParams: ThreadResumeParams;
+    resumeResponse: ThreadResumeResponse;
+    sessionId: () => string | undefined;
+    onRetry?: (
+      update: AppServerRetryUpdate,
+    ) => Promise<CodexEventEnvelope | undefined>;
+  }): AsyncGenerator<SDKMessage, CodexForkBoundaryResult, undefined> {
+    const requiredTurnCount = input.excludedTurnCount + 1;
+    if (requiredTurnCount > CODEX_FORK_BOUNDARY_MAX_TURNS) {
+      throw new Error(
+        `Cannot fork Codex thread ${input.sourceThreadId}: requested boundary exceeds the ${CODEX_FORK_BOUNDARY_MAX_TURNS}-turn safety limit`,
+      );
+    }
+
+    const exchanges: CodexForkBoundaryExchange[] = [];
+    // A legacy compatibility retry (or an older server that ignored the field)
+    // may already have returned full chronological turns.
+    if (
+      input.resumeParams.excludeTurns !== true ||
+      input.resumeResponse.thread.turns.length > 0
+    ) {
+      return this.resolveCodexForkBoundaryFromFullHistory({
+        sourceThreadId: input.sourceThreadId,
+        excludedTurnCount: input.excludedTurnCount,
+        turns: input.resumeResponse.thread.turns,
+        pageCount: 0,
+        exchanges,
+      });
+    }
+
+    const descendingTurns: Turn[] = [];
+    const seenTurnIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let pageCount = 0;
+    let cursor: string | null = null;
+    let exhausted = false;
+
+    const appendPage = (page: {
+      data: Turn[];
+      nextCursor: string | null;
+    }): void => {
+      pageCount += 1;
+      for (const turn of page.data) {
+        if (
+          typeof turn.id !== "string" ||
+          turn.id.length === 0 ||
+          seenTurnIds.has(turn.id)
+        ) {
+          throw new Error(
+            `Cannot fork Codex thread ${input.sourceThreadId}: paginated turn history repeated or omitted a turn identity`,
+          );
+        }
+        seenTurnIds.add(turn.id);
+        descendingTurns.push(turn);
+      }
+      cursor = page.nextCursor;
+      exhausted = cursor === null;
+    };
+
+    if (input.resumeResponse.initialTurnsPage) {
+      appendPage(input.resumeResponse.initialTurnsPage);
+    } else if (input.resumeResponse.thread.status.type === "active") {
+      throw new Error(
+        `Cannot fork Codex thread ${input.sourceThreadId}: active resume did not return its requested initial turn page`,
+      );
+    }
+
+    while (descendingTurns.length < requiredTurnCount && !exhausted) {
+      if (pageCount >= CODEX_FORK_BOUNDARY_MAX_PAGES) {
+        throw new Error(
+          `Cannot fork Codex thread ${input.sourceThreadId}: paginated turn history exceeded the ${CODEX_FORK_BOUNDARY_MAX_PAGES}-page safety limit`,
+        );
+      }
+      const requestCursor = cursor;
+      if (requestCursor !== null) {
+        if (seenCursors.has(requestCursor)) {
+          throw new Error(
+            `Cannot fork Codex thread ${input.sourceThreadId}: paginated turn history returned a repeated cursor`,
+          );
+        }
+        seenCursors.add(requestCursor);
+      }
+      const params: ThreadTurnsListParams = {
+        threadId: input.sourceThreadId,
+        cursor: requestCursor,
+        limit: Math.min(
+          CODEX_FORK_BOUNDARY_PAGE_LIMIT,
+          requiredTurnCount - descendingTurns.length,
+        ),
+        sortDirection: "desc",
+        itemsView: "notLoaded",
+      };
+      try {
+        const tracked =
+          yield* this.requestTrackedWithRetryProjection<ThreadTurnsListResponse>(
+            {
+              appServer: input.appServer,
+              method: "thread/turns/list",
+              params,
+              sessionId: input.sessionId,
+              onRetry: input.onRetry,
+            },
+          );
+        exchanges.push({
+          requestId: tracked.requestId,
+          method: "thread/turns/list",
+          params,
+          result: tracked.result,
+        });
+        if (
+          tracked.result.data.length === 0 &&
+          tracked.result.nextCursor !== null
+        ) {
+          throw new Error(
+            `Cannot fork Codex thread ${input.sourceThreadId}: paginated turn history returned an empty non-terminal page`,
+          );
+        }
+        appendPage(tracked.result);
+      } catch (error) {
+        if (
+          !isCodexHistoryPaginationUnsupported(error) ||
+          input.resumeResponse.thread.historyMode !== "legacy"
+        ) {
+          throw error;
+        }
+
+        const readParams = {
+          threadId: input.sourceThreadId,
+          includeTurns: true as const,
+        };
+        log.warn(
+          {
+            event: "codex_fork_boundary_legacy_fallback",
+            sourceThreadId: input.sourceThreadId,
+            errorCode:
+              error instanceof CodexJsonRpcError ? error.code : undefined,
+          },
+          "Codex legacy thread does not support turn paging; reading its full history once",
+        );
+        const tracked =
+          yield* this.requestTrackedWithRetryProjection<ThreadReadResponse>({
+            appServer: input.appServer,
+            method: "thread/read",
+            params: readParams,
+            sessionId: input.sessionId,
+            onRetry: input.onRetry,
+          });
+        if (tracked.result.thread.historyMode !== "legacy") {
+          throw new Error(
+            `Cannot fork Codex thread ${input.sourceThreadId}: refusing full hydration after history mode changed`,
+          );
+        }
+        exchanges.push({
+          requestId: tracked.requestId,
+          method: "thread/read",
+          params: readParams,
+          result: tracked.result,
+        });
+        return this.resolveCodexForkBoundaryFromFullHistory({
+          sourceThreadId: input.sourceThreadId,
+          excludedTurnCount: input.excludedTurnCount,
+          turns: tracked.result.thread.turns,
+          pageCount,
+          exchanges,
+        });
+      }
+    }
+
+    log.debug(
+      {
+        event: "codex_fork_boundary_page_loaded",
+        sourceThreadId: input.sourceThreadId,
+        excludedTurnCount: input.excludedTurnCount,
+        examinedTurnCount: descendingTurns.length,
+        pageCount,
+        historyMode: input.resumeResponse.thread.historyMode,
+      },
+      "Loaded bounded Codex fork history suffix",
+    );
+
+    if (descendingTurns.length > input.excludedTurnCount) {
+      const boundaryTurn = descendingTurns[input.excludedTurnCount];
+      if (
+        !boundaryTurn ||
+        typeof boundaryTurn.id !== "string" ||
+        boundaryTurn.id.length === 0 ||
+        boundaryTurn.status === "inProgress"
+      ) {
+        throw new Error(
+          `Cannot fork Codex thread ${input.sourceThreadId}: the retained turn boundary is missing or still in progress`,
+        );
+      }
+      return {
+        kind: "boundary",
+        turn: boundaryTurn,
+        examinedTurnCount: descendingTurns.length,
+        pageCount,
+        exchanges,
+      };
+    }
+    if (descendingTurns.length === input.excludedTurnCount && exhausted) {
+      return {
+        kind: "empty-child",
+        sourceTurnCount: descendingTurns.length,
+        pageCount,
+        exchanges,
+      };
+    }
+    throw new Error(
+      `Cannot fork Codex thread ${input.sourceThreadId}: requested exclusion of ${input.excludedTurnCount} trailing turns, but the source contains ${descendingTurns.length}`,
+    );
+  }
+
+  /**
    * Main session loop using codex app-server.
    */
   private async *runSession(
@@ -2455,6 +2867,8 @@ export class CodexProvider implements AgentProvider {
     try {
       const bridgeTarget = await this.resolveBridgeExecutionTarget(options);
       transportKind = bridgeTarget ? "bridge-websocket" : "stdio";
+      const needsPaginatedHistoryApi =
+        bridgeTarget !== null || options.rollbackNumTurns !== undefined;
       const codexCommand = bridgeTarget
         ? "codex-bridge"
         : await this.resolveCodexCommand();
@@ -2517,7 +2931,9 @@ export class CodexProvider implements AgentProvider {
             name: this.getCodexClientName(),
             version: "dev",
           },
-          capabilities: null,
+          capabilities: needsPaginatedHistoryApi
+            ? { experimentalApi: true }
+            : null,
         },
         sessionId: () => sessionId || options.resumeSessionId,
         onRetry: captureStartupRetry,
@@ -2560,6 +2976,31 @@ export class CodexProvider implements AgentProvider {
         );
       }
 
+      const forkExcludedTurnCount = this.normalizeCodexForkExcludedTurnCount(
+        options.rollbackNumTurns,
+      );
+      if (forkExcludedTurnCount !== null && !options.resumeSessionId) {
+        throw new Error("Codex edit fork requires a source session ID");
+      }
+      // Bridge rejoin and edit/fork bootstrap an authoritative bounded page in
+      // the native resume response. Ordinary stdio resume needs no history.
+      const initialResumeTurnsPage =
+        forkExcludedTurnCount !== null
+          ? {
+              limit: Math.min(
+                CODEX_FORK_BOUNDARY_PAGE_LIMIT,
+                forkExcludedTurnCount + 1,
+              ),
+              sortDirection: "desc" as const,
+              itemsView: "notLoaded" as const,
+            }
+          : transportKind === "bridge-websocket"
+            ? {
+                limit: 1,
+                sortDirection: "desc" as const,
+                itemsView: "notLoaded" as const,
+              }
+            : undefined;
       const threadResumeParams: ThreadResumeParams = {
         threadId: options.resumeSessionId ?? sessionId,
         model: requestedModel,
@@ -2568,6 +3009,10 @@ export class CodexProvider implements AgentProvider {
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
         config: mcpProfile.threadConfig,
+        excludeTurns: true,
+        ...(initialResumeTurnsPage
+          ? { initialTurnsPage: initialResumeTurnsPage }
+          : {}),
       };
       const threadStartParams: ThreadStartParams = {
         model: requestedModel,
@@ -2577,12 +3022,9 @@ export class CodexProvider implements AgentProvider {
         sandbox: policy.sandbox,
         config: mcpProfile.threadConfig,
       };
-      const forkExcludedTurnCount = this.normalizeCodexForkExcludedTurnCount(
-        options.rollbackNumTurns,
-      );
-      if (forkExcludedTurnCount !== null && !options.resumeSessionId) {
-        throw new Error("Codex edit fork requires a source session ID");
-      }
+      let lifecycleHistorySupport: CodexLifecycleHistorySupport = "unknown";
+      let resumedActiveTurnId: string | undefined;
+      let resumedActiveTurnLookupUncertain = false;
 
       let threadResult:
         | ThreadResumeResponse
@@ -2597,21 +3039,34 @@ export class CodexProvider implements AgentProvider {
       if (options.resumeSessionId) {
         try {
           startupStage = "thread-resume";
-          const tracked =
-            yield* this.requestTrackedWithRetryProjection<ThreadResumeResponse>(
-              {
-                appServer,
-                method: "thread/resume",
-                params: threadResumeParams,
-                sessionId: () => sessionId || options.resumeSessionId,
-                onRetry: captureStartupRetry,
-              },
-            );
+          const tracked = yield* this.requestLifecycleWithExcludeTurnsFallback<
+            ThreadResumeParams,
+            ThreadResumeResponse
+          >({
+            appServer,
+            method: "thread/resume",
+            params: threadResumeParams,
+            historySupport: lifecycleHistorySupport,
+            sessionId: () => sessionId || options.resumeSessionId,
+            onRetry: captureStartupRetry,
+          });
+          lifecycleHistorySupport = tracked.historySupport;
+          if (transportKind === "bridge-websocket") {
+            const resumeTurns =
+              tracked.result.initialTurnsPage?.data ??
+              (tracked.params.excludeTurns === true
+                ? []
+                : tracked.result.thread.turns);
+            resumedActiveTurnId = findLastInProgressCodexTurnId(resumeTurns);
+            resumedActiveTurnLookupUncertain =
+              !resumedActiveTurnId &&
+              tracked.result.thread.status.type === "active";
+          }
           threadResult = tracked.result;
           threadExchange = {
             requestId: tracked.requestId,
             method: "thread/resume",
-            params: threadResumeParams,
+            params: tracked.params,
             result: tracked.result,
           };
         } catch (error) {
@@ -2684,6 +3139,7 @@ export class CodexProvider implements AgentProvider {
       let historyForkPending = forkExcludedTurnCount !== null;
       let forkParentSessionId: string | undefined;
       let forkStartedFresh = false;
+      const forkBoundaryExchanges: CodexForkBoundaryExchange[] = [];
       let forkExchange:
         | {
             requestId: JsonRpcId;
@@ -2701,20 +3157,18 @@ export class CodexProvider implements AgentProvider {
       if (forkExcludedTurnCount !== null) {
         const sourceThreadId = sessionId;
         forkParentSessionId = sourceThreadId;
-        if (!Array.isArray(threadResult.thread.turns)) {
-          throw new Error(
-            `Cannot fork Codex thread ${sourceThreadId}: thread/resume did not return its turn history`,
-          );
-        }
-        const sourceTurns = threadResult.thread.turns;
-        if (forkExcludedTurnCount > sourceTurns.length) {
-          throw new Error(
-            `Cannot fork Codex thread ${sourceThreadId}: requested exclusion of ${forkExcludedTurnCount} trailing turns, but the source contains ${sourceTurns.length}`,
-          );
-        }
+        const boundary = yield* this.loadCodexForkBoundary({
+          appServer,
+          sourceThreadId,
+          excludedTurnCount: forkExcludedTurnCount,
+          resumeParams: threadExchange.params as ThreadResumeParams,
+          resumeResponse: threadResult as ThreadResumeResponse,
+          sessionId: () => sessionId || options.resumeSessionId,
+          onRetry: captureStartupRetry,
+        });
+        forkBoundaryExchanges.push(...boundary.exchanges);
 
-        const retainedTurnCount = sourceTurns.length - forkExcludedTurnCount;
-        if (retainedTurnCount === 0) {
+        if (boundary.kind === "empty-child") {
           // Stable 0.147 has no stable "fork before the first turn" boundary.
           // Start an empty child and persist its lineage in Yep metadata.
           log.info(
@@ -2722,6 +3176,8 @@ export class CodexProvider implements AgentProvider {
               event: "codex_thread_fork_fresh_start_requested",
               sourceThreadId,
               excludedTurnCount: forkExcludedTurnCount,
+              sourceTurnCount: boundary.sourceTurnCount,
+              boundaryPageCount: boundary.pageCount,
             },
             "Starting an empty Codex child for a first-prompt edit fork",
           );
@@ -2742,53 +3198,47 @@ export class CodexProvider implements AgentProvider {
             result: tracked.result,
           };
         } else {
-          const boundaryTurn = sourceTurns[retainedTurnCount - 1];
-          if (
-            !boundaryTurn ||
-            typeof boundaryTurn.id !== "string" ||
-            boundaryTurn.id.length === 0 ||
-            boundaryTurn.status === "inProgress"
-          ) {
-            throw new Error(
-              `Cannot fork Codex thread ${sourceThreadId}: the retained turn boundary is missing or still in progress`,
-            );
-          }
-
           // Use only the stable inclusive boundary. Keep the current-main MCP
           // enablement in thread config; never send experimental beforeTurnId.
           const forkParams: ThreadForkParams = {
             threadId: sourceThreadId,
-            lastTurnId: boundaryTurn.id,
+            lastTurnId: boundary.turn.id,
             model: requestedModel,
             modelProvider: modelSource.id,
             cwd: options.cwd,
             approvalPolicy: policy.approvalPolicy,
             sandbox: policy.sandbox,
             config: mcpProfile.threadConfig,
+            excludeTurns: true,
           };
           log.info(
             {
               event: "codex_thread_fork_requested",
               sourceThreadId,
-              lastTurnId: boundaryTurn.id,
-              retainedTurnCount,
+              lastTurnId: boundary.turn.id,
               excludedTurnCount: forkExcludedTurnCount,
+              examinedTurnCount: boundary.examinedTurnCount,
+              boundaryPageCount: boundary.pageCount,
             },
             "Requesting a source-preserving Codex history fork",
           );
-          const tracked =
-            yield* this.requestTrackedWithRetryProjection<ThreadForkResponse>({
-              appServer,
-              method: "thread/fork",
-              params: forkParams,
-              sessionId: () => sessionId || options.resumeSessionId,
-              onRetry: captureStartupRetry,
-            });
+          const tracked = yield* this.requestLifecycleWithExcludeTurnsFallback<
+            ThreadForkParams,
+            ThreadForkResponse
+          >({
+            appServer,
+            method: "thread/fork",
+            params: forkParams,
+            historySupport: lifecycleHistorySupport,
+            sessionId: () => sessionId || options.resumeSessionId,
+            onRetry: captureStartupRetry,
+          });
+          lifecycleHistorySupport = tracked.historySupport;
           threadResult = tracked.result;
           forkExchange = {
             requestId: tracked.requestId,
             method: "thread/fork",
-            params: forkParams,
+            params: tracked.params,
             result: tracked.result,
           };
         }
@@ -2800,6 +3250,11 @@ export class CodexProvider implements AgentProvider {
           );
         }
         runtimeState.threadId = sessionId;
+        // Active-turn lookup belongs to the resumed source thread. Once a
+        // fork switches execution to its child, the first edited prompt must
+        // start a child turn instead of steering the source turn identity.
+        resumedActiveTurnId = undefined;
+        resumedActiveTurnLookupUncertain = false;
         log.info(
           {
             event: "codex_thread_fork_completed",
@@ -2825,7 +3280,9 @@ export class CodexProvider implements AgentProvider {
       );
       eventIngress = await CodexEventIngress.create({
         store: this.eventStore,
-        runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+        runtime: needsPaginatedHistoryApi
+          ? CODEX_PROVIDER_RUNTIME_IDENTITY
+          : CODEX_EVENT_RUNTIME_IDENTITY,
         sessionId,
         workspaceRoot: options.cwd,
         journalMode: this.eventJournalMode,
@@ -2852,6 +3309,9 @@ export class CodexProvider implements AgentProvider {
         ...threadExchange,
         result: threadExchange.result,
       });
+      for (const exchange of forkBoundaryExchanges) {
+        await activeEventIngress.ingestClientExchange(exchange);
+      }
       if (forkExchange) {
         await activeEventIngress.ingestClientExchange({
           requestId: forkExchange.requestId,
@@ -2909,6 +3369,7 @@ export class CodexProvider implements AgentProvider {
           codexMcpMode: options.codexMcpMode ?? "standard",
           codexEventProjectionMode: projectionMode,
           codexEventConnectionId: eventIngress.connectionId,
+          paginatedHistoryApiEnabled: needsPaginatedHistoryApi,
           policyOverrides: {
             approvalPolicy: CODEX_POLICY_OVERRIDES.approvalPolicy,
             sandbox: CODEX_POLICY_OVERRIDES.sandbox,
@@ -2942,10 +3403,6 @@ export class CodexProvider implements AgentProvider {
 
       const messageGen = queue.generator();
       let isFirstMessage = !options.resumeSessionId || forkStartedFresh;
-      let resumedActiveTurnId =
-        transportKind === "bridge-websocket" && options.resumeSessionId
-          ? findLastInProgressCodexTurnId(threadResult.thread.turns)
-          : undefined;
       startupStage = "turn-runtime";
 
       for await (const message of messageGen) {
@@ -3022,22 +3479,16 @@ export class CodexProvider implements AgentProvider {
             activeTurnId = steer.result.turnId;
             sourceEvent = "turn/steer";
           } catch (error) {
-            if (
-              !(error instanceof CodexJsonRpcError) ||
-              error.code !== -32602
-            ) {
+            if (!isCodexNoActiveTurnToSteer(error)) {
               throw error;
             }
             const latest = await appServer.request<ThreadReadResponse>(
               "thread/read",
-              { threadId: sessionId, includeTurns: true },
+              { threadId: sessionId, includeTurns: false },
             );
-            const stillActiveTurnId = findLastInProgressCodexTurnId(
-              latest.thread.turns,
-            );
-            if (stillActiveTurnId) {
+            if (latest.thread.status.type !== "idle") {
               throw new Error(
-                `Bridge-owned Codex active turn ${stillActiveTurnId} cannot accept direct input yet`,
+                "Bridge-owned Codex thread is not idle after turn/steer rejection",
                 { cause: error },
               );
             }
@@ -3060,6 +3511,11 @@ export class CodexProvider implements AgentProvider {
               )).result;
             activeTurnId = turnResult.turn.id;
           }
+        } else if (resumedActiveTurnLookupUncertain) {
+          resumedActiveTurnLookupUncertain = false;
+          throw new Error(
+            "Bridge-owned Codex thread is active, but resume did not identify its active turn",
+          );
         } else {
           turnResult =
             (yield* this.requestTrackedWithRetryProjection<TurnStartResponse>({
@@ -4336,9 +4792,14 @@ export class CodexProvider implements AgentProvider {
         ];
       }
 
+      case "deprecationNotice":
+        // Protocol migration guidance is actionable by Yep maintainers, not
+        // by the end user. CodexAppServerClient already records a bounded,
+        // per-client diagnostic for it.
+        return [];
+
       case "warning":
       case "guardianWarning":
-      case "deprecationNotice":
       case "configWarning": {
         const params = notification.params as
           | {

@@ -358,7 +358,7 @@ async function createBridgeHarness(options: {
         socket.send(
           JSON.stringify({
             id: message.id,
-            result: resumeResponse(),
+            result: resumeResponse(message.params),
           }),
         );
         return;
@@ -411,23 +411,37 @@ async function createBridgeHarness(options: {
   };
 }
 
-function resumeResponse() {
+function resumeResponse(params: unknown) {
+  const request =
+    params !== null && typeof params === "object"
+      ? (params as Record<string, unknown>)
+      : {};
+  const excludeTurns = request.excludeTurns === true;
+  const initialTurnsPage =
+    request.initialTurnsPage !== null &&
+    typeof request.initialTurnsPage === "object";
+  const activeTurn = {
+    id: TURN_ID,
+    status: "inProgress",
+    items: [],
+    itemsView: "notLoaded",
+    error: null,
+  };
   return {
     thread: {
       id: THREAD_ID,
       cwd: "/repo",
       modelProvider: "openai",
+      historyMode: "paginated",
       status: { type: "active", activeFlags: [] },
-      turns: [
-        {
-          id: TURN_ID,
-          status: "inProgress",
-          items: [],
-          error: null,
-        },
-      ],
+      turns: excludeTurns ? [] : [activeTurn],
       forkedFromId: null,
     },
+    initialTurnsPage: initialTurnsPage
+      ? { data: [activeTurn], nextCursor: null, backwardsCursor: "turn-live" }
+      : null,
+    turnsBackwardsCursor: "turn-live",
+    itemsBackwardsCursor: null,
     model: "gpt-5.5",
     modelProvider: "openai",
     serviceTier: null,
