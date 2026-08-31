@@ -103,6 +103,41 @@ describe("FileViewer", () => {
     expect(screen.getByText("notes.md")).toBeTruthy();
   });
 
+  it("offers independent actions for copying the title and full text", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+
+    renderViewer();
+
+    const copyTitle = await screen.findByRole("button", {
+      name: "Copy title",
+    });
+    const copyFullText = screen.getByRole("button", {
+      name: "Copy full text",
+    });
+
+    fireEvent.click(copyTitle);
+    expect(
+      await screen.findByRole("button", { name: "Title copied!" }),
+    ).toBeTruthy();
+    expect(writeText).toHaveBeenNthCalledWith(1, "notes.md");
+    expect(copyFullText.getAttribute("aria-label")).toBe("Copy full text");
+
+    fireEvent.click(copyFullText);
+    expect(
+      await screen.findByRole("button", { name: "Full text copied!" }),
+    ).toBeTruthy();
+    expect(writeText).toHaveBeenNthCalledWith(2, "hello world\n");
+    expect(screen.getByRole("button", { name: "Title copied!" })).toBeTruthy();
+  });
+
   it("copies through the synchronous fallback in an insecure context", async () => {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -122,10 +157,12 @@ describe("FileViewer", () => {
 
     renderViewer();
     fireEvent.click(
-      await screen.findByRole("button", { name: "Copy content" }),
+      await screen.findByRole("button", { name: "Copy full text" }),
     );
 
-    expect(await screen.findByRole("button", { name: "Copied!" })).toBeTruthy();
+    expect(
+      await screen.findByRole("button", { name: "Full text copied!" }),
+    ).toBeTruthy();
     expect(execCommand).toHaveBeenCalledWith("copy");
   });
 
@@ -150,11 +187,11 @@ describe("FileViewer", () => {
 
     renderViewer();
     fireEvent.click(
-      await screen.findByRole("button", { name: "Copy content" }),
+      await screen.findByRole("button", { name: "Copy full text" }),
     );
 
     expect(
-      await screen.findByRole("button", { name: "Copy failed" }),
+      await screen.findByRole("button", { name: "Failed to copy full text" }),
     ).toBeTruthy();
     expect(writeText).toHaveBeenCalledWith("hello world\n");
     expect(execCommand).toHaveBeenCalledWith("copy");

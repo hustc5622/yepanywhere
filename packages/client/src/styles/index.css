@@ -3156,8 +3156,8 @@ a.sidebar-nav-item {
   }
 }
 
-/* Session title dropdown trigger */
-.session-title-dropdown-trigger {
+/* Expandable session title trigger */
+.session-title-expand-trigger {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
@@ -3179,8 +3179,42 @@ a.sidebar-nav-item {
   transition: transform 0.15s ease;
 }
 
-.session-title-dropdown-trigger:hover .session-title-chevron {
+.session-title-expand-trigger:hover .session-title-chevron {
   opacity: 1;
+}
+
+.session-title-expand-trigger[aria-expanded="true"] .session-title-chevron {
+  transform: rotate(180deg);
+}
+
+.session-title-details-popover {
+  box-sizing: border-box;
+  padding: var(--space-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 10001;
+}
+
+.session-title-details-heading {
+  margin-bottom: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.session-title-details-text {
+  max-height: min(50vh, 400px);
+  overflow: auto;
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
 }
 
 /* Recent sessions dropdown */

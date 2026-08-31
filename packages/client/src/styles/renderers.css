@@ -2244,10 +2244,25 @@ details[open] .collapsible__icon {
   right: auto;
   align-self: flex-end;
   margin-top: 0.25rem;
+  opacity: 0.6;
 }
 
-/* Show button on hover for desktop */
-.edit-collapsed-preview:hover .diff-expand-button {
+.edit-result .diff-expand-button {
+  opacity: 0.6;
+}
+
+.edit-result > .diff-expand-button {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  align-self: flex-end;
+  margin-top: 0.25rem;
+}
+
+/* Keep the Edit side-panel affordance discoverable, then strengthen it when
+   the user moves into the preview. */
+.edit-collapsed-preview:hover .diff-expand-button,
+.edit-result:hover .diff-expand-button {
   opacity: 1;
 }
 
@@ -2388,7 +2403,7 @@ details[open] .collapsible__icon {
 }
 
 /* Expand button (appears on hover) — icon-only, sits in the corner of a
-   truncated diff/patch preview. The aria-label / title carries the
+   diff/patch preview. The aria-label / title carries the
    descriptive text ("Show full diff", "Show full patch", etc.). */
 .diff-expand-button {
   position: absolute;
@@ -4778,6 +4793,52 @@ body.detail-panel-resizing {
   background: var(--bg-code);
   border-radius: 4px;
   overflow: auto;
+}
+
+/* A split detail panel should trade vertical space for readability instead of
+   forcing the user to pan horizontally. Inline transcript previews keep the
+   traditional code-scroller behaviour; only the full right-hand diff wraps. */
+.detail-panel .diff-modal-content {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.detail-panel .diff-modal-content .diff-content {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.detail-panel .diff-modal-content .diff-content > div,
+.detail-panel .diff-modal-content .code-block,
+.detail-panel .diff-modal-content .code-block code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.detail-panel .diff-modal-content .code-block {
+  overflow-x: hidden;
+}
+
+.detail-panel .diff-modal-content .highlighted-diff,
+.detail-panel .diff-modal-content .highlighted-diff pre.shiki {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.detail-panel .diff-modal-content .highlighted-diff code {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.detail-panel .diff-modal-content .highlighted-diff .line {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .file-content-range-notice {

@@ -12,6 +12,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { api, isQueuedResumeSessionResponse } from "../api/client";
+import { ExpandableSessionTitle } from "../components/ExpandableSessionTitle";
 import { GoalModal } from "../components/GoalModal";
 import { MessageInput, type UploadProgress } from "../components/MessageInput";
 import { MessageInputToolbar } from "../components/MessageInputToolbar";
@@ -20,7 +21,6 @@ import { ModelSwitchModal } from "../components/ModelSwitchModal";
 import { PinIcon } from "../components/PinIcon";
 import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { QuestionAnswerPanel } from "../components/QuestionAnswerPanel";
-import { RecentSessionsDropdown } from "../components/RecentSessionsDropdown";
 import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
@@ -654,10 +654,6 @@ function SessionPageContent({
   const [isRenaming, setIsRenaming] = useState(false);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const isSavingTitleRef = useRef(false);
-
-  // Recent sessions dropdown state
-  const [showRecentSessions, setShowRecentSessions] = useState(false);
-  const titleButtonRef = useRef<HTMLButtonElement>(null);
 
   // Local metadata state (for optimistic updates)
   // Reset when session changes to avoid showing stale data from previous session
@@ -1958,36 +1954,9 @@ function SessionPageContent({
                   />
                 ) : (
                   <>
-                    <button
-                      ref={titleButtonRef}
-                      type="button"
-                      className="session-title session-title-dropdown-trigger"
-                      onClick={() => setShowRecentSessions(!showRecentSessions)}
-                      title={session?.fullTitle ?? displayTitle}
-                    >
-                      <span className="session-title-text">{displayTitle}</span>
-                      <svg
-                        className="session-title-chevron"
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <polyline points="6 9 12 15 18 9" />
-                      </svg>
-                    </button>
-                    <RecentSessionsDropdown
-                      currentSessionId={sessionId}
-                      isOpen={showRecentSessions}
-                      onClose={() => setShowRecentSessions(false)}
-                      onNavigate={() => setShowRecentSessions(false)}
-                      triggerRef={titleButtonRef}
-                      basePath={basePath}
+                    <ExpandableSessionTitle
+                      title={displayTitle}
+                      fullTitle={session?.fullTitle}
                     />
                     {isGeneratingTitle && <SessionTitleGenerationStatus />}
                   </>

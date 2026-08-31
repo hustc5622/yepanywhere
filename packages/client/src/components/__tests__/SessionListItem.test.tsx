@@ -173,6 +173,23 @@ describe("SessionListItem actions", () => {
     );
   });
 
+  it("copies only the displayed session title from the menu", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    renderItem({ title: "Title to copy" });
+
+    fireEvent.click(screen.getByRole("button", { name: /options/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy title" }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("Title to copy");
+      expect(screen.getByText("Session title copied")).toBeTruthy();
+    });
+  });
+
   it("generates a title only after the session menu action is clicked", async () => {
     let resolveTitle!: (value: { title: string }) => void;
     mockGenerateSessionTitle.mockImplementationOnce(

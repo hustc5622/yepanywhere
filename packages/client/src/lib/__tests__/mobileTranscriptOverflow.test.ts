@@ -26,4 +26,16 @@ describe("mobile transcript horizontal overflow", () => {
       /\.highlighted-diff pre\.shiki\s*\{[^}]*overflow-x:\s*auto;[^}]*overscroll-behavior-x:\s*contain;[^}]*max-width:\s*100%;/s,
     );
   });
+
+  it("soft-wraps long diff lines inside the right-hand detail panel", () => {
+    expect(rendererCss).toMatch(
+      /\.detail-panel \.diff-modal-content \.highlighted-diff code\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/s,
+    );
+    expect(rendererCss).toMatch(
+      /\.detail-panel \.diff-modal-content \.highlighted-diff \.line\s*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/s,
+    );
+    expect(rendererCss).toMatch(
+      /\.detail-panel \.diff-modal-content \.diff-content > div,[^{]*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;/s,
+    );
+  });
 });

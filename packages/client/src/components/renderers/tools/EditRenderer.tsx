@@ -14,8 +14,8 @@ import { DetailPanel } from "../../ui/DetailPanel";
 import type { EditInput, EditResult, PatchHunk, ToolRenderer } from "./types";
 
 /**
- * Compact icon button used in collapsed diff/patch previews to open the
- * full-content modal. Replaces the previous bulky text buttons
+ * Compact icon button used in diff/patch previews to open the full content in
+ * the detail panel. Replaces the previous bulky text buttons
  * ("Show full diff", "Show full patch", "Click to expand"). The descriptive
  * label is preserved via aria-label / title so screen readers and
  * hover-tooltips still surface intent.
@@ -451,8 +451,7 @@ function DiffModalContent({
 }
 
 /**
- * Collapsed preview showing diff with expand button
- * Clicking opens a modal with the full diff.
+ * Collapsed preview showing diff with a detail-panel button.
  * Reads augment data directly from input._structuredPatch and input._diffHtml.
  */
 function EditCollapsedPreview({
@@ -587,7 +586,7 @@ function EditCollapsedPreview({
               {proposedDiffTruncated && <div className="diff-fade-overlay" />}
             </div>
           )}
-          {hasProposedDiff && proposedDiffTruncated && (
+          {hasProposedDiff && (
             <DiffExpandButton
               label="Show full diff"
               onClick={(e) => {
@@ -626,7 +625,6 @@ function EditCollapsedPreview({
     }
 
     if (rawPatch) {
-      const rawPatchPreview = truncateByLines(rawPatch, MAX_VISIBLE_LINES);
       return (
         <>
           <div className="edit-collapsed-preview">
@@ -637,15 +635,13 @@ function EditCollapsedPreview({
               rawPatch={rawPatch}
               truncateLines={MAX_VISIBLE_LINES}
             />
-            {rawPatchPreview.truncated && (
-              <DiffExpandButton
-                label="Show full patch"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIsModalOpen(true);
-                }}
-              />
-            )}
+            <DiffExpandButton
+              label="Show full patch"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsModalOpen(true);
+              }}
+            />
           </div>
           {isModalOpen && (
             <DetailPanel
@@ -693,9 +689,7 @@ function EditCollapsedPreview({
           </div>
           {isTruncated && <div className="diff-fade-overlay" />}
         </div>
-        {isTruncated && (
-          <DiffExpandButton label="Show full diff" onClick={handleClick} />
-        )}
+        <DiffExpandButton label="Show full diff" onClick={handleClick} />
       </div>
       {isModalOpen && (
         <DetailPanel
@@ -976,18 +970,14 @@ function EditToolResult({
                   <DiffLines lines={proposedDiffLines} />
                 )}
               </div>
-              {proposedDiffTruncated && (
-                <>
-                  <div className="diff-fade-overlay" />
-                  <DiffExpandButton
-                    label="Show full diff"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowModal(true);
-                    }}
-                  />
-                </>
-              )}
+              {proposedDiffTruncated && <div className="diff-fade-overlay" />}
+              <DiffExpandButton
+                label="Show full diff"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowModal(true);
+                }}
+              />
             </div>
           )}
         </div>
@@ -1013,7 +1003,6 @@ function EditToolResult({
   // Use input data as fallback when result data is missing
   if (structuredPatch.length === 0) {
     if (rawPatch) {
-      const rawPatchPreview = truncateByLines(rawPatch, MAX_VISIBLE_LINES);
       return (
         <>
           <div className="edit-result">
@@ -1029,15 +1018,13 @@ function EditToolResult({
               rawPatch={rawPatch}
               truncateLines={MAX_VISIBLE_LINES}
             />
-            {rawPatchPreview.truncated && (
-              <DiffExpandButton
-                label="Show full patch"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowModal(true);
-                }}
-              />
-            )}
+            <DiffExpandButton
+              label="Show full patch"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowModal(true);
+              }}
+            />
           </div>
           {showModal && (
             <DetailPanel
@@ -1105,18 +1092,14 @@ function EditToolResult({
               <DiffHunk key={`hunk-${hunk.oldStart}-${i}`} hunk={hunk} />
             ))}
           </div>
-          {isTruncated && (
-            <>
-              <div className="diff-fade-overlay" />
-              <DiffExpandButton
-                label="Click to expand"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowModal(true);
-                }}
-              />
-            </>
-          )}
+          {isTruncated && <div className="diff-fade-overlay" />}
+          <DiffExpandButton
+            label="Show full diff"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowModal(true);
+            }}
+          />
         </div>
       </div>
       {showModal && (

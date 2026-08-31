@@ -1,5 +1,7 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { I18nProvider } from "../../../../i18n";
+import { UI_KEYS } from "../../../../lib/storageKeys";
 import { editRenderer } from "../EditRenderer";
 
 vi.mock("../../../../contexts/SchemaValidationContext", () => ({
@@ -11,6 +13,10 @@ vi.mock("../../../../contexts/SchemaValidationContext", () => ({
     clearIgnoredTools: vi.fn(),
     ignoredTools: [],
   }),
+}));
+
+vi.mock("../../../../contexts/SessionMetadataContext", () => ({
+  useSessionMetadata: () => ({ projectPath: "/workspace" }),
 }));
 
 const renderContext = {
@@ -61,6 +67,42 @@ describe("EditRenderer collapsed preview fallback", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("opens a short structured Edit diff in the detail panel", () => {
+    localStorage.setItem(UI_KEYS.locale, "en");
+    vi.spyOn(window.history, "back").mockImplementation(() => undefined);
+    const input = {
+      file_path: "/workspace/src/example.ts",
+      old_string: "const x = 1;",
+      new_string: "const x = 2;",
+      _structuredPatch: [
+        {
+          oldStart: 1,
+          oldLines: 1,
+          newStart: 1,
+          newLines: 1,
+          lines: ["-const x = 1;", "+const x = 2;"],
+        },
+      ],
+    };
+
+    render(
+      <I18nProvider>
+        <div>
+          {renderCollapsedPreview(
+            input as never,
+            { ok: true } as never,
+            false,
+            renderContext,
+          )}
+        </div>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show full diff" }));
+    expect(screen.getByRole("dialog", { name: "example.ts" })).toBeDefined();
   });
 
   it("renders raw patch text for completed rows when structured patch is missing", () => {

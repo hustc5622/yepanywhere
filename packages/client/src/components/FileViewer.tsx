@@ -17,7 +17,73 @@ interface FileViewerProps {
   lineEnd?: number;
 }
 
-type CopyFeedback = { status: "copied" | "failed" } | null;
+type CopyFeedback = "copied" | "failed" | null;
+
+function FileViewerCopyAction({
+  value,
+  label,
+  copiedLabel,
+  failedLabel,
+  kind,
+}: {
+  value: string;
+  label: string;
+  copiedLabel: string;
+  failedLabel: string;
+  kind: "title" | "content";
+}) {
+  const [feedback, setFeedback] = useState<CopyFeedback>(null);
+
+  useEffect(() => {
+    if (!feedback) return;
+    const handle = setTimeout(() => setFeedback(null), 2000);
+    return () => clearTimeout(handle);
+  }, [feedback]);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await writeClipboardText(value);
+      setFeedback("copied");
+    } catch (err) {
+      console.error(`Failed to copy file ${kind}:`, err);
+      setFeedback("failed");
+    }
+  }, [kind, value]);
+
+  const feedbackLabel =
+    feedback === "copied"
+      ? copiedLabel
+      : feedback === "failed"
+        ? failedLabel
+        : label;
+
+  return (
+    <button
+      type="button"
+      className={`file-viewer-action${
+        feedback === "copied"
+          ? " copied"
+          : feedback === "failed"
+            ? " copy-failed"
+            : ""
+      }`}
+      onClick={handleCopy}
+      aria-label={feedbackLabel}
+      aria-live="polite"
+      title={feedbackLabel}
+    >
+      {feedback === "copied" ? (
+        <CheckIcon />
+      ) : feedback === "failed" ? (
+        <CopyFailedIcon />
+      ) : kind === "title" ? (
+        <CopyTitleIcon />
+      ) : (
+        <CopyIcon />
+      )}
+    </button>
+  );
+}
 
 /**
  * Format file size for display.
@@ -201,7 +267,6 @@ export const FileViewer = memo(function FileViewer({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [errorFilePath, setErrorFilePath] = useState<string | null>(null);
-  const [copyFeedback, setCopyFeedback] = useState<CopyFeedback>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [highlightedLineRef, setHighlightedLineRef] =
@@ -259,23 +324,6 @@ export const FileViewer = memo(function FileViewer({
       });
     }
   }, [highlightedLineRef]);
-
-  useEffect(() => {
-    if (!copyFeedback) return;
-    const handle = setTimeout(() => setCopyFeedback(null), 2000);
-    return () => clearTimeout(handle);
-  }, [copyFeedback]);
-
-  const handleCopy = useCallback(async () => {
-    if (!fileData?.content) return;
-    try {
-      await writeClipboardText(fileData.content);
-      setCopyFeedback({ status: "copied" });
-    } catch (err) {
-      console.error("Failed to copy:", err);
-      setCopyFeedback({ status: "failed" });
-    }
-  }, [fileData?.content]);
 
   const handleDownload = useCallback(() => {
     const url = api.getFileRawUrl(projectId, filePath, true);
@@ -339,13 +387,6 @@ export const FileViewer = memo(function FileViewer({
   const { metadata, content, rawUrl } = fileData;
   const displayPath = metadata.absolutePath ?? filePath;
   const isImage = isImageFile(metadata.mimeType);
-  const copyStatus = copyFeedback?.status;
-  const copyLabel =
-    copyStatus === "copied"
-      ? t("fileViewerCopied" as never)
-      : copyStatus === "failed"
-        ? t("fileViewerCopyFailed" as never)
-        : t("fileViewerCopyContent" as never);
   const fileMeta = [
     formatFileSize(metadata.size),
     metadata.isText && content !== undefined
@@ -524,29 +565,21 @@ export const FileViewer = memo(function FileViewer({
         meta={fileMeta}
       />
       <div className="file-viewer-actions">
-        {content && (
-          <button
-            type="button"
-            className={`file-viewer-action${
-              copyStatus === "copied"
-                ? " copied"
-                : copyStatus === "failed"
-                  ? " copy-failed"
-                  : ""
-            }`}
-            onClick={handleCopy}
-            aria-label={copyLabel}
-            aria-live="polite"
-            title={copyLabel}
-          >
-            {copyStatus === "copied" ? (
-              <CheckIcon />
-            ) : copyStatus === "failed" ? (
-              <CopyFailedIcon />
-            ) : (
-              <CopyIcon />
-            )}
-          </button>
+        <FileViewerCopyAction
+          value={fileName}
+          label={t("fileViewerCopyTitle" as never)}
+          copiedLabel={t("fileViewerTitleCopied" as never)}
+          failedLabel={t("fileViewerTitleCopyFailed" as never)}
+          kind="title"
+        />
+        {content !== undefined && (
+          <FileViewerCopyAction
+            value={content}
+            label={t("fileViewerCopyFullText" as never)}
+            copiedLabel={t("fileViewerFullTextCopied" as never)}
+            failedLabel={t("fileViewerFullTextCopyFailed" as never)}
+            kind="content"
+          />
         )}
         {!standalone && (
           <button
@@ -609,6 +642,26 @@ export const FileViewer = memo(function FileViewer({
 });
 
 // Icons
+function CopyTitleIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="5" y="5" width="9" height="9" rx="1.5" />
+      <path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2H3.5A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" />
+      <path d="M7.25 8h4.5M9.5 8v3.75" />
+    </svg>
+  );
+}
+
 function CopyIcon() {
   return (
     <svg
