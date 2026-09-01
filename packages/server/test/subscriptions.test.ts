@@ -153,7 +153,7 @@ describe("createSessionSubscription", () => {
     });
   });
 
-  it("replays message history with markSubagent", () => {
+  it("replays message history with markSubagent", async () => {
     const messages = [
       { type: "assistant", message: { content: "Hello" } },
       { type: "user", message: { content: "Hi" } },
@@ -163,7 +163,8 @@ describe("createSessionSubscription", () => {
     });
     const { emit, events } = collectEmit();
 
-    createSessionSubscription(process, emit);
+    const { ready } = createSessionSubscription(process, emit);
+    await ready;
 
     const messageEvents = events.filter(([type]) => type === "message");
     expect(messageEvents).toHaveLength(2);
@@ -174,7 +175,7 @@ describe("createSessionSubscription", () => {
     ).toBe(true);
   });
 
-  it("replays only message history after replayAfterMessageId", () => {
+  it("replays only message history after replayAfterMessageId", async () => {
     const messages = [
       { type: "user", uuid: "msg-1", message: { content: "One" } },
       { type: "assistant", uuid: "msg-2", message: { content: "Two" } },
@@ -185,9 +186,10 @@ describe("createSessionSubscription", () => {
     });
     const { emit, events } = collectEmit();
 
-    createSessionSubscription(process, emit, {
+    const { ready } = createSessionSubscription(process, emit, {
       replayAfterMessageId: "msg-2",
     });
+    await ready;
 
     const messageEvents = events.filter(([type]) => type === "message");
     expect(messageEvents).toHaveLength(1);
@@ -197,7 +199,7 @@ describe("createSessionSubscription", () => {
     });
   });
 
-  it("falls back to full replay when replayAfterMessageId is not in history", () => {
+  it("falls back to full replay when replayAfterMessageId is not in history", async () => {
     const messages = [
       { type: "user", uuid: "msg-1", message: { content: "One" } },
       { type: "assistant", uuid: "msg-2", message: { content: "Two" } },
@@ -207,9 +209,10 @@ describe("createSessionSubscription", () => {
     });
     const { emit, events } = collectEmit();
 
-    createSessionSubscription(process, emit, {
+    const { ready } = createSessionSubscription(process, emit, {
       replayAfterMessageId: "missing",
     });
+    await ready;
 
     const messageEvents = events.filter(([type]) => type === "message");
     expect(messageEvents).toHaveLength(2);
@@ -413,6 +416,99 @@ describe("createSessionSubscription", () => {
     expect(input?._rawPatch).toContain("diff --git a/src/example.ts");
     expect(Array.isArray(input?._structuredPatch)).toBe(true);
     expect(input?._structuredPatch?.length).toBeGreaterThan(0);
+  });
+
+  it("augments replayed Codex FileChange before later live messages", async () => {
+    const replayedEdit = {
+      type: "assistant",
+      uuid: "msg-replayed-file-change",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "exec-replayed-file-change",
+            name: "Edit",
+            input: {
+              file_path: "packages/server/test/example.ts",
+              changes: [
+                {
+                  path: "packages/server/test/example.ts",
+                  kind: "update",
+                  diff: [
+                    "@@ -1,1 +1,1 @@",
+                    "-const before = true;",
+                    "+const after = true;",
+                  ].join("\n"),
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+    const processBufferedEdit = structuredClone(replayedEdit);
+    processBufferedEdit.uuid = "msg-process-buffered-file-change";
+    processBufferedEdit.message.content[0].id =
+      "exec-process-buffered-file-change";
+    const { process, fireEventDetached, drain } = createMockProcess({
+      getMessageHistory: vi.fn(() => [processBufferedEdit]),
+    });
+    const { emit, events } = collectEmit();
+
+    const { ready } = createSessionSubscription(process, emit, {
+      replayEvents: [{ eventType: "message", data: replayedEdit }],
+    });
+    fireEventDetached({
+      type: "message",
+      message: {
+        type: "assistant",
+        uuid: "msg-live-after-replay",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "exec-live-after-replay",
+              name: "Bash",
+              input: { command: "pnpm test" },
+            },
+          ],
+        },
+      },
+    } as ProcessEvent);
+
+    await ready;
+    await drain();
+
+    const messageEvents = events.filter(([type]) => type === "message");
+    expect(
+      messageEvents.map(([, data]) => (data as { uuid?: string }).uuid),
+    ).toEqual([
+      "msg-replayed-file-change",
+      "msg-process-buffered-file-change",
+      "msg-live-after-replay",
+    ]);
+
+    for (const messageEvent of messageEvents.slice(0, 2)) {
+      const replayed = messageEvent?.[1] as {
+        isReplay?: boolean;
+        message?: {
+          content?: Array<{
+            input?: {
+              _rawPatch?: string;
+              _structuredPatch?: unknown[];
+              _diffHtml?: string;
+            };
+          }>;
+        };
+      };
+      const input = replayed.message?.content?.[0]?.input;
+      expect(replayed.isReplay).toBe(true);
+      expect(input?._rawPatch).toContain("-const before = true;");
+      expect(input?._structuredPatch).toHaveLength(1);
+      expect(input?._diffHtml).toContain('class="line line-deleted"');
+    }
   });
 
   it("preserves provider emission order across uneven augmentation work", async () => {

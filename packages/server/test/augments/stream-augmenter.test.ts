@@ -84,4 +84,25 @@ describe("createStreamAugmenter", () => {
         captured.pending.length > 0,
     ).toBe(true);
   });
+
+  it("augments replayed messages without treating their text as a live delta", async () => {
+    const { augmenter, captured } = await createHarness();
+
+    await augmenter.processMessage(
+      {
+        type: "assistant",
+        uuid: "msg_replay",
+        message: { role: "assistant", content: "Historical answer.\n\n" },
+      },
+      { mode: "replay" },
+    );
+
+    expect(captured.augments).toHaveLength(1);
+    expect(captured.augments[0]).toMatchObject({
+      messageId: "msg_replay",
+    });
+    expect(captured.augments[0]?.blockIndex).toBeUndefined();
+    expect(captured.pending).toEqual([]);
+    expect(augmenter.getCurrentMessageId()).toBeNull();
+  });
 });

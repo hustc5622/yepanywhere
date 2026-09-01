@@ -36,6 +36,19 @@ export interface SubscriptionOptions {
   logLabel?: string;
   /** Replay only buffered session messages after this message ID. */
   replayAfterMessageId?: string;
+  /** Durable runtime events to replay before the Process short-term buffer. */
+  replayEvents?: readonly SubscriptionReplayEvent[];
+}
+
+export interface SubscriptionReplayEvent {
+  eventType: string;
+  data: unknown;
+}
+
+export interface SessionSubscription {
+  cleanup: () => void;
+  /** Resolves after all replay and catch-up work queued during subscription. */
+  ready: Promise<void>;
 }
 
 function getReplayMessageId(message: Record<string, unknown>): string | null {
@@ -98,7 +111,7 @@ export function createSessionSubscription(
   process: Process,
   emit: Emit,
   options?: SubscriptionOptions,
-): { cleanup: () => void } {
+): SessionSubscription {
   let completed = false;
   let currentStreamingMessageId: string | null = null;
 
@@ -157,6 +170,51 @@ export function createSessionSubscription(
     return eventQueue;
   };
 
+  const forwardMessage = async (
+    rawMessage: Record<string, unknown>,
+    mode: "live" | "replay",
+  ): Promise<void> => {
+    if (completed) return;
+    const message = normalizeStreamMessage(
+      mode === "replay"
+        ? {
+            ...rawMessage,
+            isReplay: true,
+          }
+        : rawMessage,
+    );
+    const aug = await getAugmenter();
+    await aug.processMessage(message, { mode });
+    if (completed) return;
+    emit("message", markSubagent(message));
+
+    if (mode === "replay") return;
+
+    const streamStartMessageId = extractMessageIdFromStart(message);
+    if (streamStartMessageId) {
+      streamedMessageIds.add(streamStartMessageId);
+    }
+    const startMessageId =
+      streamStartMessageId ?? extractIdFromAssistant(message);
+    if (startMessageId) {
+      currentStreamingMessageId = startMessageId;
+    }
+
+    const finalId = extractIdFromAssistant(message);
+    const alreadyStreamed = finalId !== null && streamedMessageIds.has(finalId);
+    const textDelta =
+      extractTextDelta(message) ??
+      (alreadyStreamed ? null : extractTextFromAssistant(message));
+    if (textDelta && currentStreamingMessageId) {
+      process.accumulateStreamingText(currentStreamingMessageId, textDelta);
+    }
+
+    if (isStreamingComplete(message)) {
+      currentStreamingMessageId = null;
+      process.clearStreamingText();
+    }
+  };
+
   // IMPORTANT: Subscribe BEFORE capturing state to prevent race condition.
   // Any state change is guaranteed to either:
   // 1. Be captured in the state snapshot below (if it happened before)
@@ -168,40 +226,10 @@ export function createSessionSubscription(
       try {
         switch (event.type) {
           case "message": {
-            const message = normalizeStreamMessage(
+            await forwardMessage(
               event.message as Record<string, unknown>,
+              "live",
             );
-            const aug = await getAugmenter();
-            await aug.processMessage(message);
-            emit("message", markSubagent(message));
-
-            const streamStartMessageId = extractMessageIdFromStart(message);
-            if (streamStartMessageId) {
-              streamedMessageIds.add(streamStartMessageId);
-            }
-            const startMessageId =
-              streamStartMessageId ?? extractIdFromAssistant(message);
-            if (startMessageId) {
-              currentStreamingMessageId = startMessageId;
-            }
-
-            const finalId = extractIdFromAssistant(message);
-            const alreadyStreamed =
-              finalId !== null && streamedMessageIds.has(finalId);
-            const textDelta =
-              extractTextDelta(message) ??
-              (alreadyStreamed ? null : extractTextFromAssistant(message));
-            if (textDelta && currentStreamingMessageId) {
-              process.accumulateStreamingText(
-                currentStreamingMessageId,
-                textDelta,
-              );
-            }
-
-            if (isStreamingComplete(message)) {
-              currentStreamingMessageId = null;
-              process.clearStreamingText();
-            }
             break;
           }
 
@@ -270,39 +298,51 @@ export function createSessionSubscription(
     ...(deferredMessages.length > 0 ? { deferredMessages } : {}),
   });
 
-  // Replay buffered messages for late-joining clients
+  // Durable journal replay and the Process short-term buffer share the same
+  // ordered augmentation queue as subsequent live events.
+  for (const replayEvent of options?.replayEvents ?? []) {
+    void enqueue(async () => {
+      if (completed) return;
+      if (
+        replayEvent.eventType === "message" &&
+        replayEvent.data !== null &&
+        typeof replayEvent.data === "object" &&
+        !Array.isArray(replayEvent.data)
+      ) {
+        await forwardMessage(
+          replayEvent.data as Record<string, unknown>,
+          "replay",
+        );
+        return;
+      }
+      emit(replayEvent.eventType, replayEvent.data);
+    });
+  }
+
   for (const message of getReplayMessages(
     process.getMessageHistory() as ReplayHistoryMessage[],
     options?.replayAfterMessageId,
   )) {
-    emit(
-      "message",
-      markSubagent({
-        ...message,
-        isReplay: true,
-      }),
-    );
+    void enqueue(() => forwardMessage(message, "replay"));
   }
 
   // Catch-up: send accumulated streaming text as pending HTML
   const streamingContent = process.getStreamingContent();
   if (streamingContent) {
-    getAugmenter()
-      .then(async (aug) => {
-        await aug.processCatchUp(
-          streamingContent.text,
-          streamingContent.messageId,
-        );
-      })
-      .catch((err) => {
-        console.warn(
-          "[subscription] Failed to send catch-up pending HTML:",
-          err,
-        );
-      });
+    void enqueue(async () => {
+      if (completed) return;
+      const aug = await getAugmenter();
+      await aug.processCatchUp(
+        streamingContent.text,
+        streamingContent.messageId,
+      );
+    });
   }
 
+  const ready = eventQueue;
+
   return {
+    ready,
     cleanup: () => {
       completed = true;
       clearInterval(heartbeatInterval);

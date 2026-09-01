@@ -78,6 +78,14 @@ export interface StreamAugmenterConfig {
   onError?: (error: unknown, context: string) => void;
 }
 
+export interface StreamAugmenterProcessOptions {
+  /**
+   * Replay messages need the same embedded renderer augments as live messages,
+   * but must not enter the streaming markdown coordinator as fresh text.
+   */
+  mode?: "live" | "replay";
+}
+
 /** Stream augmenter instance */
 export interface StreamAugmenter {
   /**
@@ -88,7 +96,10 @@ export interface StreamAugmenter {
    * For final assistant messages (with uuid), this also emits a markdown-augment
    * event with the fully rendered HTML.
    */
-  processMessage(message: Record<string, unknown>): Promise<void>;
+  processMessage(
+    message: Record<string, unknown>,
+    options?: StreamAugmenterProcessOptions,
+  ): Promise<void>;
 
   /**
    * Process text through the streaming coordinator.
@@ -500,15 +511,23 @@ export async function createStreamAugmenter(
   };
 
   return {
-    async processMessage(message: Record<string, unknown>): Promise<void> {
-      // Track message ID from message_start or assistant messages
-      const streamStartMessageId = extractMessageIdFromStart(message);
-      if (streamStartMessageId) {
-        streamedMessageIds.add(streamStartMessageId);
-      }
-      const messageId = streamStartMessageId ?? extractIdFromAssistant(message);
-      if (messageId) {
-        currentStreamingMessageId = messageId;
+    async processMessage(
+      message: Record<string, unknown>,
+      options?: StreamAugmenterProcessOptions,
+    ): Promise<void> {
+      const mode = options?.mode ?? "live";
+
+      if (mode === "live") {
+        // Track message ID from message_start or assistant messages.
+        const streamStartMessageId = extractMessageIdFromStart(message);
+        if (streamStartMessageId) {
+          streamedMessageIds.add(streamStartMessageId);
+        }
+        const messageId =
+          streamStartMessageId ?? extractIdFromAssistant(message);
+        if (messageId) {
+          currentStreamingMessageId = messageId;
+        }
       }
 
       // Render final markdown augment BEFORE the message is sent
@@ -519,6 +538,11 @@ export async function createStreamAugmenter(
       await augmentEditInputs(message);
       await augmentWriteInputs(message);
       await augmentExitPlanMode(message);
+
+      // Replay carries complete historical messages. Feeding their text into
+      // the coordinator would generate duplicate pending/delta UI and could
+      // contaminate the next live message's streaming state.
+      if (mode === "replay") return;
 
       // Process text deltas for streaming markdown.
       // `extractTextFromAssistant` exists for providers that never stream

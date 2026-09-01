@@ -5,7 +5,7 @@ import type {
   PermissionMode,
   SlashCommand,
 } from "@yep-anywhere/shared";
-import { markSubagent } from "../augments/index.js";
+import { createStreamAugmenter, markSubagent } from "../augments/index.js";
 import {
   type CodexNativeCapabilities,
   codexControlFailure,
@@ -513,8 +513,6 @@ export class EmbeddedRuntimeController implements RuntimeController {
       .reverse()
       .map((record) => this.getRecordMessageId(record))
       .find((messageId): messageId is string => Boolean(messageId));
-    let journalReplayed = false;
-
     if (options?.signal?.aborted) return null;
 
     // After a web/runtime restart there is no live Process to attach to, but a
@@ -542,19 +540,41 @@ export class EmbeddedRuntimeController implements RuntimeController {
         state: "idle",
         replayOnly: true,
       });
+      const replayAugmenter = await createStreamAugmenter({
+        onMarkdownAugment: (data) => {
+          if (!closed) emit("markdown-augment", data);
+        },
+        onPending: (data) => {
+          if (!closed) emit("pending", data);
+        },
+        onError: (error) => options?.onError?.(error),
+      });
       for (const record of terminalRecords) {
         // A historical process completion is terminal only when there is no
         // newer live process. The active-process branch intentionally omits it.
-        if (closed) continue;
-        emit(
-          record.type,
+        if (closed || options?.signal?.aborted) {
+          closed = true;
+          continue;
+        }
+        if (
           record.type === "message" &&
-            record.data !== null &&
-            typeof record.data === "object"
-            ? { ...record.data, isReplay: true }
-            : record.data,
-        );
+          record.data !== null &&
+          typeof record.data === "object" &&
+          !Array.isArray(record.data)
+        ) {
+          const message = normalizeStreamMessage({
+            ...(record.data as Record<string, unknown>),
+            isReplay: true,
+          });
+          await replayAugmenter.processMessage(message, { mode: "replay" });
+          if (!closed && !options?.signal?.aborted) {
+            emit("message", markSubagent(message));
+          }
+          continue;
+        }
+        emit(record.type, record.data);
       }
+      if (closed || options?.signal?.aborted) return null;
       if (transportCompleteIndex < 0 && turnTerminal) {
         // This closes only the replay transport. The correlated result/error
         // above remains the sole authority for the turn outcome.
@@ -572,32 +592,25 @@ export class EmbeddedRuntimeController implements RuntimeController {
       };
     }
 
-    const subscription = createSessionSubscription(
-      process,
-      (eventType, data) => {
-        emit(eventType, data);
-        if (eventType !== "connected" || journalReplayed) return;
-        journalReplayed = true;
-        for (const record of replayRecords) {
-          if (!this.isReplayableRecord(record)) continue;
-          emit(
-            record.type,
-            record.type === "message" &&
-              record.data !== null &&
-              typeof record.data === "object"
-              ? { ...record.data, isReplay: true }
-              : record.data,
-          );
-        }
-      },
-      {
-        ...options,
-        replayAfterMessageId:
-          lastReplayMessageId ?? options?.replayAfterMessageId,
-      },
-    );
+    const subscription = createSessionSubscription(process, emit, {
+      ...options,
+      replayAfterMessageId:
+        lastReplayMessageId ?? options?.replayAfterMessageId,
+      replayEvents: replayRecords
+        .filter((record) => this.isReplayableRecord(record))
+        .map((record) => ({
+          eventType: record.type,
+          data: record.data,
+        })),
+    });
     const abort = () => subscription.cleanup();
     options?.signal?.addEventListener("abort", abort, { once: true });
+    await subscription.ready;
+    if (options?.signal?.aborted) {
+      options.signal.removeEventListener("abort", abort);
+      subscription.cleanup();
+      return null;
+    }
     return {
       cleanup: () => {
         options?.signal?.removeEventListener("abort", abort);

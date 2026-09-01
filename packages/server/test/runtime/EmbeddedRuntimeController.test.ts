@@ -320,6 +320,35 @@ describe("EmbeddedRuntimeController", () => {
       sessionId,
       type: "message",
       data: {
+        type: "assistant",
+        uuid: "offline-edit",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "offline-edit-tool",
+              name: "Edit",
+              input: {
+                file_path: "src/offline.ts",
+                changes: [
+                  {
+                    path: "src/offline.ts",
+                    kind: "update",
+                    diff: "@@ -1 +1 @@\n-before\n+after",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    });
+    await firstStore.append({
+      processId: "old-process",
+      sessionId,
+      type: "message",
+      data: {
         type: "system",
         subtype: "turn_complete",
         turnStatus: "completed",
@@ -356,6 +385,32 @@ describe("EmbeddedRuntimeController", () => {
       type: "message",
       data: { type: "user", tempId: "restarted-turn", isReplay: true },
     });
+    const replayedEdit = events.find(
+      (event) =>
+        event.type === "message" &&
+        (event.data as { uuid?: string }).uuid === "offline-edit",
+    )?.data as {
+      isReplay?: boolean;
+      message?: {
+        content?: Array<{
+          input?: {
+            _rawPatch?: string;
+            _structuredPatch?: unknown[];
+            _diffHtml?: string;
+          };
+        }>;
+      };
+    };
+    expect(replayedEdit.isReplay).toBe(true);
+    expect(replayedEdit.message?.content?.[0]?.input?._rawPatch).toContain(
+      "-before",
+    );
+    expect(
+      replayedEdit.message?.content?.[0]?.input?._structuredPatch,
+    ).toHaveLength(1);
+    expect(replayedEdit.message?.content?.[0]?.input?._diffHtml).toContain(
+      'class="line line-deleted"',
+    );
     expect(events.at(-1)).toEqual({
       type: "complete",
       data: { timestamp: "2026-08-08T00:00:00.000Z" },
