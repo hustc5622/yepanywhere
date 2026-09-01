@@ -1,4 +1,12 @@
-import type { SubagentDescriptor, SubagentMetrics } from "@yep-anywhere/shared";
+import {
+  type ContextStatusResponse,
+  type ContextUsage,
+  SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+  type SessionDisplayPage,
+  type SessionQuestion,
+  type SubagentDescriptor,
+  type SubagentMetrics,
+} from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type PaginationInfo, api } from "../api/client";
 import {
@@ -72,6 +80,12 @@ export interface UseSessionMessagesOptions {
   sessionId: string;
   /** Branch id selected from the URL query. */
   branchId?: string;
+  /** Prefer the lightweight persisted-history API for inactive sessions. */
+  preferDisplayHistory?: boolean;
+  /** The live runtime has settled and may replace legacy rows with display. */
+  displayHistoryEligible?: boolean;
+  /** This client owns the active stream and may flush closed raw prefixes. */
+  displayHistoryLiveOwned?: boolean;
   /** Called when initial load completes with session data */
   onLoadComplete?: (result: SessionLoadResult) => void;
   /** Called on load error */
@@ -82,6 +96,13 @@ export interface UseSessionMessagesOptions {
 export interface UseSessionMessagesResult {
   /** Messages in the session */
   messages: Message[];
+  /** Lightweight persisted timeline; null means the legacy Message[] path. */
+  displayPage: SessionDisplayPage | null;
+  /** Independently loaded complete/partial user-question directory. */
+  displayQuestions: SessionQuestion[];
+  displayQuestionCoverage: "complete" | "partial" | "unavailable";
+  /** Display group replaced by the in-memory raw self-owned live tail. */
+  hydratedLiveTailDetailRef: string | null;
   /** Subagent content keyed by agentId */
   agentContent: AgentContentMap;
   /** Mapping from Task tool_use_id → agentId */
@@ -203,17 +224,167 @@ function cacheSessionApiSnapshot(
  * messages load on demand via the top-of-list infinite scroll.
  */
 const INITIAL_MESSAGE_LIMIT = 100;
-/**
- * One-shot delayed metadata retry when the initial GET returns no
- * contextUsage (bridge session not yet readable from disk, or the first
- * turn has not finished). No later event is guaranteed to fill the gap,
- * so the indicator would otherwise stay hidden until the next navigation.
- */
+const ACTIVE_LIVE_TAIL_MAX_DETAIL_PAGES = 4;
+const ACTIVE_DISPLAY_BOUNDARY_RETRY_DELAYS_MS = [80, 200, 500, 1_000, 2_000];
+/** One delayed retry after the immediate context-status fallback misses. */
 const CONTEXT_USAGE_RETRY_MS = 3_000;
 const ACTIVE_WINDOW_TARGET_MESSAGES = INITIAL_MESSAGE_LIMIT;
 const ACTIVE_WINDOW_TRIGGER_MESSAGES = INITIAL_MESSAGE_LIMIT + 50;
 const ACTIVE_WINDOW_TURN_BOUNDARY_LOOKBACK = 25;
 const ACTIVE_WINDOW_MIN_BOUNDARY_AGE_MS = 60_000;
+
+function findDisplayLiveTail(page: SessionDisplayPage) {
+  for (let turnIndex = page.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = page.turns[turnIndex];
+    if (!turn) continue;
+    for (
+      let segmentIndex = turn.segments.length - 1;
+      segmentIndex >= 0;
+      segmentIndex -= 1
+    ) {
+      const segment = turn.segments[segmentIndex];
+      if (segment?.type === "tool_group" && segment.liveTail) return segment;
+    }
+  }
+  return null;
+}
+
+function isDisplayDetailStale(error: unknown): boolean {
+  const code =
+    error && typeof error === "object"
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return (
+    code === "SESSION_DISPLAY_STALE" ||
+    code === "SESSION_DISPLAY_CHANGED" ||
+    code === "SESSION_TOOL_GROUP_NOT_FOUND"
+  );
+}
+
+function contextUsageFromStatus(
+  status: ContextStatusResponse,
+): ContextUsage | undefined {
+  if (status.source === "jsonl") return status.contextUsage;
+  if (
+    !Number.isFinite(status.totalTokens) ||
+    status.totalTokens <= 0 ||
+    !Number.isFinite(status.rawMaxTokens) ||
+    status.rawMaxTokens <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    inputTokens: status.totalTokens,
+    percentage: Math.round((status.totalTokens / status.rawMaxTokens) * 100),
+    contextWindow: status.rawMaxTokens,
+  };
+}
+
+function mergeSameSessionMetadata(
+  current: Session | null,
+  incoming: Session,
+): Session {
+  if (current?.id !== incoming.id) return incoming;
+  const merged = { ...current, ...incoming };
+  if (incoming.contextUsage === undefined && current.contextUsage) {
+    merged.contextUsage = current.contextUsage;
+  }
+  return merged;
+}
+
+function isReadableAssistantBoundary(message: Message): boolean {
+  if (message._displayLiveTail || message._isStreaming) return false;
+  const role = message.message?.role ?? message.role;
+  if (
+    role !== "assistant" &&
+    message.type !== "assistant" &&
+    message.type !== "summary"
+  ) {
+    return false;
+  }
+  const content = getMessageContent(message);
+  if (typeof content === "string") return content.trim().length > 0;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block) =>
+        block?.type === "text" &&
+        typeof block.text === "string" &&
+        block.text.trim().length > 0,
+    )
+  );
+}
+
+function displayContainsAssistantBoundary(
+  page: SessionDisplayPage,
+  message: Message,
+): boolean {
+  const messageId = getMessageId(message);
+  const codexCorrelationKey = nonEmptyMessageIdentity(
+    message.codexCorrelationKey,
+  );
+  return page.turns.some((turn) =>
+    turn.segments.some(
+      (segment) =>
+        segment.type === "assistant_text" &&
+        ((codexCorrelationKey !== null &&
+          segment.codexCorrelationKey === codexCorrelationKey) ||
+          segment.id === messageId ||
+          segment.id.startsWith(`${messageId}:`)),
+    ),
+  );
+}
+
+/**
+ * A persisted display boundary closes every raw message that preceded it in
+ * the same Codex turn. Usually the boundary itself is still present in the raw
+ * list and gives us an exact array cut. During startup replay, however, display
+ * can already own the final assistant item before the buffered tool messages
+ * are flushed. In that case the closing item is never inserted into raw state,
+ * so remove the already-seen prefix by native turn identity instead.
+ */
+function removeRawPrefixClosedByDisplayBoundary(
+  messages: Message[],
+  boundary: Message,
+): Message[] {
+  const boundaryId = getMessageId(boundary);
+  const boundaryCorrelationKey = nonEmptyMessageIdentity(
+    boundary.codexCorrelationKey,
+  );
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if (!candidate) continue;
+    if (
+      getMessageId(candidate) === boundaryId ||
+      (boundaryCorrelationKey !== null &&
+        nonEmptyMessageIdentity(candidate.codexCorrelationKey) ===
+          boundaryCorrelationKey)
+    ) {
+      return messages.slice(index + 1);
+    }
+  }
+
+  const codexTurnId = nonEmptyMessageIdentity(boundary.codexTurnId);
+  if (!codexTurnId) return messages;
+  const filtered = messages.filter(
+    (message) => nonEmptyMessageIdentity(message.codexTurnId) !== codexTurnId,
+  );
+  return filtered.length === messages.length ? messages : filtered;
+}
+
+function messageContainsToolUse(message: Message): boolean {
+  if (message.toolUse) return true;
+  const content = getMessageContent(message);
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block) =>
+        block?.type === "tool_use" ||
+        block?.type === "toolCall" ||
+        block?.type === "function_call",
+    )
+  );
+}
 
 function mergeOlderPagination(
   current: PaginationInfo | undefined,
@@ -331,6 +502,92 @@ function isRealUserPromptMessage(message: Message): boolean {
       typeof block === "object" &&
       (block as { type?: unknown }).type === "tool_result",
   );
+}
+
+function nonEmptyMessageIdentity(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+function displayContainsUserMessageIdentity(
+  page: SessionDisplayPage,
+  message: Message,
+): boolean {
+  if (!isRealUserPromptMessage(message)) return false;
+  const clientUserMessageId = nonEmptyMessageIdentity(
+    message.clientUserMessageId,
+  );
+  const codexCorrelationKey = nonEmptyMessageIdentity(
+    message.codexCorrelationKey,
+  );
+  if (!clientUserMessageId && !codexCorrelationKey) return false;
+
+  return page.turns.some((turn) => {
+    const question = turn.question;
+    if (!question) return false;
+    return (
+      (clientUserMessageId !== null &&
+        question.clientUserMessageId === clientUserMessageId) ||
+      (codexCorrelationKey !== null &&
+        question.codexCorrelationKey === codexCorrelationKey)
+    );
+  });
+}
+
+function displayContainsAssistantMessageIdentity(
+  page: SessionDisplayPage,
+  message: Message,
+): boolean {
+  if (!isReadableAssistantBoundary(message)) return false;
+  const codexCorrelationKey = nonEmptyMessageIdentity(
+    message.codexCorrelationKey,
+  );
+  if (!codexCorrelationKey) return false;
+  return page.turns.some((turn) =>
+    turn.segments.some(
+      (segment) =>
+        segment.type === "assistant_text" &&
+        segment.codexCorrelationKey === codexCorrelationKey,
+    ),
+  );
+}
+
+function displayOwnsClosedCodexTurn(
+  page: SessionDisplayPage,
+  message: Message,
+): boolean {
+  const codexTurnId = nonEmptyMessageIdentity(message.codexTurnId);
+  if (!codexTurnId) return false;
+  return page.turns.some(
+    (turn) =>
+      turn.id === `turn:${codexTurnId}` &&
+      turn.segments.some(
+        (segment) =>
+          segment.type === "assistant_text" && segment.phase === "final",
+      ),
+  );
+}
+
+function displayContainsMessageIdentity(
+  page: SessionDisplayPage,
+  message: Message,
+): boolean {
+  return (
+    displayOwnsClosedCodexTurn(page, message) ||
+    displayContainsUserMessageIdentity(page, message) ||
+    displayContainsAssistantMessageIdentity(page, message)
+  );
+}
+
+function removeMessagesRepresentedByDisplay(
+  messages: Message[],
+  page: SessionDisplayPage,
+): Message[] {
+  const filtered = messages.filter(
+    (message) => !displayContainsMessageIdentity(page, message),
+  );
+  return filtered.length === messages.length ? messages : filtered;
 }
 
 export interface ActiveMessageWindowTrimPlan {
@@ -471,8 +728,16 @@ export function truncateMessagesForEdit(
 export function useSessionMessages(
   options: UseSessionMessagesOptions,
 ): UseSessionMessagesResult {
-  const { projectId, sessionId, branchId, onLoadComplete, onLoadError } =
-    options;
+  const {
+    projectId,
+    sessionId,
+    branchId,
+    preferDisplayHistory = false,
+    displayHistoryEligible = false,
+    displayHistoryLiveOwned = false,
+    onLoadComplete,
+    onLoadError,
+  } = options;
   const initialSnapshotRef = useRef<SessionSnapshotValue | null | undefined>(
     undefined,
   );
@@ -483,12 +748,30 @@ export function useSessionMessages(
       branchId,
     });
   }
-  const initialSnapshot = initialSnapshotRef.current;
+  const initialSnapshot = preferDisplayHistory
+    ? null
+    : initialSnapshotRef.current;
 
   // Core state
   const [messages, setMessages] = useState<Message[]>(
     () => initialSnapshot?.messages ?? [],
   );
+  const messagesRef = useRef(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  const [displayPage, setDisplayPage] = useState<SessionDisplayPage | null>(
+    null,
+  );
+  const [displayQuestions, setDisplayQuestions] = useState<SessionQuestion[]>(
+    [],
+  );
+  const [displayQuestionCoverage, setDisplayQuestionCoverage] = useState<
+    "complete" | "partial" | "unavailable"
+  >("unavailable");
+  const [hydratedLiveTailDetailRef, setHydratedLiveTailDetailRef] = useState<
+    string | null
+  >(null);
   const [agentContent, setAgentContent] = useState<AgentContentMap>({});
   const [toolUseToAgent, setToolUseToAgent] = useState<Map<string, string>>(
     () => new Map(),
@@ -510,6 +793,16 @@ export function useSessionMessages(
   const [activeWindowTrimCheckRevision, setActiveWindowTrimCheckRevision] =
     useState(0);
   const sessionRef = useRef<Session | null>(initialSnapshot?.session ?? null);
+  const displayPageRef = useRef<SessionDisplayPage | null>(null);
+  const displayQuestionLoadGenerationRef = useRef(0);
+  useEffect(() => {
+    displayPageRef.current = displayPage;
+    if (displayPage) {
+      setMessages((current) =>
+        removeMessagesRepresentedByDisplay(current, displayPage),
+      );
+    }
+  }, [displayPage]);
 
   // Buffering: queue stream messages until initial load completes
   const streamBufferRef = useRef<
@@ -617,6 +910,19 @@ export function useSessionMessages(
         incomingTimestampMs <= maxPersistedTimestampMsRef.current;
 
       setMessages((prev) => {
+        const currentDisplay = displayPageRef.current;
+        if (
+          currentDisplay &&
+          displayContainsAssistantBoundary(currentDisplay, incoming)
+        ) {
+          return removeRawPrefixClosedByDisplayBoundary(prev, incoming);
+        }
+        if (
+          currentDisplay &&
+          displayContainsMessageIdentity(currentDisplay, incoming)
+        ) {
+          return prev;
+        }
         // Replay history from the stream should not re-add messages that are
         // already persisted and loaded from JSONL.
         if (isPersistedReplay) {
@@ -760,17 +1066,181 @@ export function useSessionMessages(
     }
   }, [projectId, sessionId]);
 
+  const refreshDisplayQuestions = useCallback(
+    async (targetBranchId = branchId) => {
+      const generation = ++displayQuestionLoadGenerationRef.current;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let cursor: string | undefined;
+        let accumulated: SessionQuestion[] = [];
+        try {
+          for (let pageIndex = 0; pageIndex < 1_000; pageIndex += 1) {
+            const page = await api.getSessionQuestions(projectId, sessionId, {
+              cursor,
+              branchId: targetBranchId,
+            });
+            if (generation !== displayQuestionLoadGenerationRef.current) return;
+            const incoming = page.questions.map((question) => ({
+              id: question.messageId,
+              turnId: question.turnId,
+              ...(question.clientUserMessageId
+                ? { clientUserMessageId: question.clientUserMessageId }
+                : {}),
+              ...(question.codexCorrelationKey
+                ? { codexCorrelationKey: question.codexCorrelationKey }
+                : {}),
+              text: question.preview,
+              ...(question.timestamp ? { timestamp: question.timestamp } : {}),
+            }));
+            const byId = new Map(
+              [...incoming, ...accumulated].map((question) => [
+                question.id,
+                question,
+              ]),
+            );
+            accumulated = [...byId.values()];
+            setDisplayQuestions(accumulated);
+            setDisplayQuestionCoverage(page.coverage);
+            cursor = page.nextCursor;
+            if (!cursor) return;
+          }
+          setDisplayQuestionCoverage("partial");
+          return;
+        } catch (error) {
+          if (generation !== displayQuestionLoadGenerationRef.current) return;
+          if (attempt === 0 && isDisplayDetailStale(error)) continue;
+          throw error;
+        }
+      }
+    },
+    [branchId, projectId, sessionId],
+  );
+
+  const loadSelfLiveTail = useCallback(
+    async (
+      page: SessionDisplayPage,
+    ): Promise<{
+      detailRef: string;
+      messages: Message[];
+    } | null> => {
+      const liveTail = findDisplayLiveTail(page);
+      if (!liveTail) return null;
+      let cursor: string | undefined;
+      const messages: Message[] = [];
+      for (
+        let pageIndex = 0;
+        pageIndex < ACTIVE_LIVE_TAIL_MAX_DETAIL_PAGES;
+        pageIndex += 1
+      ) {
+        const detail = await api.getSessionToolGroupDetails(
+          projectId,
+          sessionId,
+          liveTail.detailRef,
+          {
+            revision: page.revision,
+            cursor,
+            branchId,
+          },
+        );
+        messages.push(
+          ...detail.messages.map((message) => ({
+            ...message,
+            _source: "sdk" as const,
+            _displayLiveTail: true,
+          })),
+        );
+        cursor = detail.nextCursor;
+        if (!cursor) {
+          return { detailRef: liveTail.detailRef, messages };
+        }
+      }
+      // Keep the summary group when the open tail exceeds the bounded raw
+      // hydration budget. The user can still page it through the normal row.
+      return null;
+    },
+    [branchId, projectId, sessionId],
+  );
+
+  const refreshLightweightDisplay = useCallback(
+    async (
+      force = false,
+      acceptSnapshot?: (snapshot: {
+        session: Session;
+        messages: Message[];
+      }) => boolean,
+      targetBranchId = branchId,
+      allowCreate = false,
+    ): Promise<Session | null> => {
+      const activating = displayPageRef.current === null;
+      if (activating && !allowCreate) return null;
+      try {
+        let metadata = await api.getSessionMetadata(projectId, sessionId);
+        if (activating && metadata.ownership.owner !== "none") return null;
+        if (!force && metadata.ownership.owner === "self") {
+          return null;
+        }
+        if (
+          acceptSnapshot &&
+          !acceptSnapshot({ session: metadata.session, messages: [] })
+        ) {
+          return null;
+        }
+        const page = await api.getSessionDisplay(projectId, sessionId, {
+          branchId: targetBranchId,
+          limit: SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+        });
+        if (activating) {
+          const confirmed = await api.getSessionMetadata(projectId, sessionId);
+          if (confirmed.ownership.owner !== "none") return null;
+          metadata = confirmed;
+        }
+        displayPageRef.current = page;
+        setDisplayPage(page);
+        setMessages([]);
+        setHydratedLiveTailDetailRef(null);
+        lastMessageIdRef.current = undefined;
+        loadedMessageCountRef.current = 0;
+        const nextSession = mergeSameSessionMetadata(
+          sessionRef.current,
+          metadata.session,
+        );
+        sessionRef.current = nextSession;
+        setSession(nextSession);
+        providerRef.current = nextSession.provider;
+        setPagination(undefined);
+        void refreshDisplayQuestions(targetBranchId).catch(() => {
+          setDisplayQuestionCoverage((coverage) =>
+            coverage === "unavailable" ? "unavailable" : "partial",
+          );
+        });
+        onLoadComplete?.({
+          session: nextSession,
+          status: metadata.ownership,
+          permissionMode: metadata.permissionMode,
+          modeVersion: metadata.modeVersion,
+          pendingInputRequest: metadata.pendingInputRequest,
+          slashCommands: metadata.slashCommands,
+        });
+        return nextSession;
+      } catch {
+        return null;
+      }
+    },
+    [branchId, onLoadComplete, projectId, refreshDisplayQuestions, sessionId],
+  );
+
   // Initial load. Branch switches reload message content for the same
   // session without returning the page to its full-screen loading state.
   useEffect(() => {
     const sessionLoadKey = `${projectId}\u0000${sessionId}`;
     const isBranchReloadWithinSession =
       loadedSessionKeyRef.current === sessionLoadKey;
-    const cachedSnapshot = getSessionSnapshot({
-      projectId,
-      sessionId,
-      branchId,
-    });
+    const cachedSnapshot = preferDisplayHistory
+      ? null
+      : getSessionSnapshot({
+          projectId,
+          sessionId,
+          branchId,
+        });
     const cachedHistorySource = cachedSnapshot?.historySource;
     let isCurrent = true;
 
@@ -796,85 +1266,185 @@ export function useSessionMessages(
       setAgentContent({});
       setToolUseToAgent(new Map());
       setToolUseToAgentIds(new Map());
+      setDisplayQuestions([]);
+      setDisplayQuestionCoverage("unavailable");
     }
 
-    api
-      .getSession(projectId, sessionId, undefined, {
+    const markReady = () => {
+      initialLoadCompleteRef.current = true;
+      flushBuffer();
+      loadedSessionKeyRef.current = sessionLoadKey;
+      setLoading(false);
+    };
+
+    const loadMissingContextUsage = async (): Promise<boolean> => {
+      try {
+        const status = await api.getContextStatus(projectId, sessionId);
+        if (!isCurrent) return false;
+        const contextUsage = contextUsageFromStatus(status);
+        if (!contextUsage) return false;
+        setSession((current) => {
+          if (!current || current.contextUsage) return current;
+          const next: Session = {
+            ...current,
+            contextUsage,
+            ...(!current.model && status.model ? { model: status.model } : {}),
+            ...(!current.cumulativeUsage && status.cumulativeUsage
+              ? { cumulativeUsage: status.cumulativeUsage }
+              : {}),
+            ...(!current.compactEvents && status.compactEvents
+              ? { compactEvents: status.compactEvents }
+              : {}),
+          };
+          sessionRef.current = next;
+          return next;
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const scheduleContextUsageRetry = (loadedSession: Session) => {
+      if (loadedSession.contextUsage) return;
+      void loadMissingContextUsage().then((loaded) => {
+        if (!isCurrent || loaded) return;
+        contextUsageRetryTimerRef.current = setTimeout(() => {
+          contextUsageRetryTimerRef.current = undefined;
+          if (!isCurrent || sessionRef.current?.contextUsage) return;
+          void loadMissingContextUsage();
+        }, CONTEXT_USAGE_RETRY_MS);
+      });
+    };
+
+    const loadLegacySnapshot = async () => {
+      const data = await api.getSession(projectId, sessionId, undefined, {
         view: "canonical",
         tailCompactions: 2,
         maxMessages: INITIAL_MESSAGE_LIMIT,
         branchId,
-      })
-      .then((data) => {
-        if (!isCurrent) return;
-        const supersededByCommittedRefresh =
-          initialLoadGeneration < refreshAppliedGenerationRef.current;
-        if (!supersededByCommittedRefresh) {
-          const historySource = getSessionHistorySource(data);
-          const shouldMergeCachedSnapshot =
-            cachedSnapshot !== null &&
-            cachedHistorySource === historySource &&
-            isCodexProvider(data.session.provider) &&
-            !codexSnapshotDeactivatesCurrentBranch(
-              sessionRef.current,
-              data.session,
-            );
-          applySessionSnapshot(data, {
-            mergeCodexMessages: shouldMergeCachedSnapshot,
-          });
-          if (cachedHistorySource && cachedHistorySource !== historySource) {
-            invalidateSessionSnapshots({
-              projectId,
-              sessionId,
-              branchId,
-              historySource: cachedHistorySource,
-            });
-          }
-          cacheSessionApiSnapshot(projectId, sessionId, branchId, data);
-        }
-
-        // Mark ready and flush buffer
-        initialLoadCompleteRef.current = true;
-        flushBuffer();
-
-        loadedSessionKeyRef.current = sessionLoadKey;
-        setLoading(false);
-
-        // The initial GET can legitimately miss contextUsage (bridge session
-        // not yet readable from disk, first turn unfinished), and no later
-        // event is guaranteed to fill the gap. Retry metadata once so the
-        // context indicator appears without requiring a navigation.
-        if (!data.session.contextUsage) {
-          contextUsageRetryTimerRef.current = setTimeout(() => {
-            contextUsageRetryTimerRef.current = undefined;
-            if (isCurrent) void fetchSessionMetadata();
-          }, CONTEXT_USAGE_RETRY_MS);
-        }
-
-        if (!supersededByCommittedRefresh) {
-          // Notify parent only for the snapshot that was actually applied.
-          onLoadComplete?.({
-            session: data.session,
-            status: data.ownership,
-            permissionMode: data.permissionMode,
-            modeVersion: data.modeVersion,
-            pendingInputRequest: data.pendingInputRequest,
-            slashCommands: data.slashCommands,
-          });
-        }
-      })
-      .catch((err) => {
-        if (!isCurrent) return;
-        initialLoadCompleteRef.current = true;
-        flushBuffer();
-        setLoading(false);
-        // A stale snapshot remains useful during a transient SWR failure. Cold
-        // loads preserve the existing error behavior.
-        if (!cachedSnapshot) onLoadError?.(err);
       });
+      if (!isCurrent) return;
+      setDisplayPage(null);
+      displayPageRef.current = null;
+      setHydratedLiveTailDetailRef(null);
+      const supersededByCommittedRefresh =
+        initialLoadGeneration < refreshAppliedGenerationRef.current;
+      if (!supersededByCommittedRefresh) {
+        const historySource = getSessionHistorySource(data);
+        const shouldMergeCachedSnapshot =
+          cachedSnapshot !== null &&
+          cachedHistorySource === historySource &&
+          isCodexProvider(data.session.provider) &&
+          !codexSnapshotDeactivatesCurrentBranch(
+            sessionRef.current,
+            data.session,
+          );
+        applySessionSnapshot(data, {
+          mergeCodexMessages: shouldMergeCachedSnapshot,
+        });
+        if (cachedHistorySource && cachedHistorySource !== historySource) {
+          invalidateSessionSnapshots({
+            projectId,
+            sessionId,
+            branchId,
+            historySource: cachedHistorySource,
+          });
+        }
+        cacheSessionApiSnapshot(projectId, sessionId, branchId, data);
+      }
+      markReady();
+      scheduleContextUsageRetry(data.session);
+      if (!supersededByCommittedRefresh) {
+        onLoadComplete?.({
+          session: data.session,
+          status: data.ownership,
+          permissionMode: data.permissionMode,
+          modeVersion: data.modeVersion,
+          pendingInputRequest: data.pendingInputRequest,
+          slashCommands: data.slashCommands,
+        });
+      }
+    };
+
+    const loadInitialSnapshot = async () => {
+      if (preferDisplayHistory) {
+        try {
+          const metadata = await api.getSessionMetadata(projectId, sessionId);
+          if (!isCurrent) return;
+          let page: SessionDisplayPage | null = null;
+          let liveTail: Awaited<ReturnType<typeof loadSelfLiveTail>> = null;
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              page = await api.getSessionDisplay(projectId, sessionId, {
+                branchId,
+                limit: SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+              });
+            } catch (error) {
+              if (attempt === 0 && isDisplayDetailStale(error)) continue;
+              throw error;
+            }
+            if (metadata.ownership.owner !== "self") break;
+            try {
+              liveTail = await loadSelfLiveTail(page);
+              break;
+            } catch (error) {
+              if (attempt === 0 && isDisplayDetailStale(error)) continue;
+              liveTail = null;
+              break;
+            }
+          }
+          if (!isCurrent || !page) return;
+          sessionRef.current = metadata.session;
+          setSession(metadata.session);
+          providerRef.current = metadata.session.provider;
+          setPagination(undefined);
+          setMessages(liveTail?.messages ?? []);
+          setHydratedLiveTailDetailRef(liveTail?.detailRef ?? null);
+          const lastLiveTailMessage = liveTail?.messages.at(-1);
+          lastMessageIdRef.current = lastLiveTailMessage
+            ? getMessageId(lastLiveTailMessage)
+            : undefined;
+          loadedMessageCountRef.current = liveTail?.messages.length ?? 0;
+          displayPageRef.current = page;
+          setDisplayPage(page);
+          markReady();
+          scheduleContextUsageRetry(metadata.session);
+          onLoadComplete?.({
+            session: metadata.session,
+            status: metadata.ownership,
+            permissionMode: metadata.permissionMode,
+            modeVersion: metadata.modeVersion,
+            pendingInputRequest: metadata.pendingInputRequest,
+            slashCommands: metadata.slashCommands,
+          });
+          void refreshDisplayQuestions().catch(() => {
+            if (!isCurrent) return;
+            setDisplayQuestionCoverage((coverage) =>
+              coverage === "unavailable" ? "unavailable" : "partial",
+            );
+          });
+          return;
+        } catch {
+          // Older servers or unavailable display projections fall back below.
+        }
+      }
+      await loadLegacySnapshot();
+    };
+
+    void loadInitialSnapshot().catch((err) => {
+      if (!isCurrent) return;
+      initialLoadCompleteRef.current = true;
+      flushBuffer();
+      setLoading(false);
+      // A stale snapshot remains useful during a transient SWR failure. Cold
+      // loads preserve the existing error behavior.
+      if (!cachedSnapshot) onLoadError?.(err);
+    });
 
     return () => {
       isCurrent = false;
+      displayQuestionLoadGenerationRef.current += 1;
       clearTimeout(contextUsageRetryTimerRef.current);
       contextUsageRetryTimerRef.current = undefined;
     };
@@ -882,12 +1452,169 @@ export function useSessionMessages(
     projectId,
     sessionId,
     branchId,
+    preferDisplayHistory,
     onLoadComplete,
     onLoadError,
     flushBuffer,
     applySessionSnapshot,
-    fetchSessionMetadata,
+    loadSelfLiveTail,
+    refreshDisplayQuestions,
   ]);
+
+  const settledDisplayTransitionRef = useRef({
+    key: `${projectId}\u0000${sessionId}\u0000${branchId ?? ""}`,
+    eligible: displayHistoryEligible,
+    pending: false,
+  });
+  useEffect(() => {
+    const key = `${projectId}\u0000${sessionId}\u0000${branchId ?? ""}`;
+    const state = settledDisplayTransitionRef.current;
+    if (state.key !== key) {
+      settledDisplayTransitionRef.current = {
+        key,
+        eligible: displayHistoryEligible,
+        pending: false,
+      };
+      return;
+    }
+
+    const becameEligible = displayHistoryEligible && !state.eligible;
+    state.eligible = displayHistoryEligible;
+    if (!displayHistoryEligible) {
+      state.pending = false;
+      return;
+    }
+    if (becameEligible) state.pending = true;
+    if (!preferDisplayHistory || !state.pending || loading) {
+      return;
+    }
+
+    state.pending = false;
+    void refreshLightweightDisplay(false, undefined, branchId, true);
+  }, [
+    branchId,
+    displayHistoryEligible,
+    loading,
+    preferDisplayHistory,
+    projectId,
+    refreshLightweightDisplay,
+    sessionId,
+  ]);
+
+  const displayBoundaryFlushRef = useRef<{
+    key: string;
+    lastScheduledId: string | null;
+    generation: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>({
+    key: `${projectId}\u0000${sessionId}\u0000${branchId ?? ""}`,
+    lastScheduledId: null,
+    generation: 0,
+    timer: null,
+  });
+  useEffect(() => {
+    const key = `${projectId}\u0000${sessionId}\u0000${branchId ?? ""}`;
+    const state = displayBoundaryFlushRef.current;
+    if (state.key !== key) {
+      if (state.timer) clearTimeout(state.timer);
+      state.key = key;
+      state.lastScheduledId = null;
+      state.generation += 1;
+      state.timer = null;
+    }
+    if (
+      !preferDisplayHistory ||
+      !displayHistoryLiveOwned ||
+      !displayPageRef.current
+    ) {
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = null;
+      state.generation += 1;
+      return;
+    }
+
+    const boundary = [...messages].reverse().find(isReadableAssistantBoundary);
+    const boundaryId = boundary ? getMessageId(boundary) : undefined;
+    const boundaryKey = boundary
+      ? (nonEmptyMessageIdentity(boundary.codexCorrelationKey) ?? boundaryId)
+      : undefined;
+    if (!boundaryId || !boundaryKey || boundaryKey === state.lastScheduledId)
+      return;
+
+    state.lastScheduledId = boundaryKey;
+    state.generation += 1;
+    const generation = state.generation;
+    if (state.timer) clearTimeout(state.timer);
+
+    const attempt = async (attemptIndex: number) => {
+      if (generation !== state.generation) return;
+      try {
+        const page = await api.getSessionDisplay(projectId, sessionId, {
+          branchId,
+          limit: SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+        });
+        if (generation !== state.generation) return;
+        if (boundary && displayContainsAssistantBoundary(page, boundary)) {
+          const currentMessages = messagesRef.current;
+          let boundaryIndex = -1;
+          for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
+            const candidate = currentMessages[index];
+            if (candidate && getMessageId(candidate) === boundaryId) {
+              boundaryIndex = index;
+              break;
+            }
+          }
+          if (boundaryIndex < 0) return;
+          const remaining = currentMessages.slice(boundaryIndex + 1);
+          const nextLiveTail = findDisplayLiveTail(page);
+          displayPageRef.current = page;
+          setDisplayPage(page);
+          setHydratedLiveTailDetailRef(
+            nextLiveTail && remaining.some(messageContainsToolUse)
+              ? nextLiveTail.detailRef
+              : null,
+          );
+          messagesRef.current = remaining;
+          setMessages(remaining);
+          const last = remaining.at(-1);
+          lastMessageIdRef.current = last ? getMessageId(last) : undefined;
+          loadedMessageCountRef.current = remaining.length;
+          state.timer = null;
+          return;
+        }
+      } catch {
+        // Persistence can lag the live stream; retry within the bounded window.
+      }
+
+      const delay = ACTIVE_DISPLAY_BOUNDARY_RETRY_DELAYS_MS[attemptIndex + 1];
+      if (delay === undefined || generation !== state.generation) {
+        state.timer = null;
+        return;
+      }
+      state.timer = setTimeout(() => {
+        void attempt(attemptIndex + 1);
+      }, delay);
+    };
+
+    state.timer = setTimeout(() => {
+      void attempt(0);
+    }, ACTIVE_DISPLAY_BOUNDARY_RETRY_DELAYS_MS[0]);
+  }, [
+    branchId,
+    displayHistoryLiveOwned,
+    messages,
+    preferDisplayHistory,
+    projectId,
+    sessionId,
+  ]);
+  useEffect(() => {
+    return () => {
+      const state = displayBoundaryFlushRef.current;
+      state.generation += 1;
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = null;
+    };
+  }, []);
 
   const updateActiveWindowFollowingBottom = useCallback(
     (followingBottom: boolean) => {
@@ -1044,6 +1771,10 @@ export function useSessionMessages(
 
   // Fetch new messages incrementally (for file change events)
   const fetchNewMessages = useCallback(async () => {
+    if (displayPageRef.current) {
+      await refreshLightweightDisplay(false);
+      return;
+    }
     if (pagination?.hasNewerMessages) {
       return;
     }
@@ -1098,6 +1829,7 @@ export function useSessionMessages(
     branchId,
     pagination?.hasNewerMessages,
     applySessionSnapshot,
+    refreshLightweightDisplay,
     updatePersistedTimestampWatermark,
     onLoadComplete,
   ]);
@@ -1111,11 +1843,18 @@ export function useSessionMessages(
         messages: Message[];
       }) => boolean;
     }) => {
-      const requestGeneration = ++refreshRequestGenerationRef.current;
       const resolvedBranchId =
         options?.branchId === undefined
           ? branchId
           : (options.branchId ?? undefined);
+      if (displayPageRef.current) {
+        return refreshLightweightDisplay(
+          options?.replaceMessages === true,
+          options?.acceptSnapshot,
+          resolvedBranchId,
+        );
+      }
+      const requestGeneration = ++refreshRequestGenerationRef.current;
       const cachedSnapshot = getSessionSnapshot({
         projectId,
         sessionId,
@@ -1187,11 +1926,63 @@ export function useSessionMessages(
         return null;
       }
     },
-    [projectId, sessionId, branchId, applySessionSnapshot, onLoadComplete],
+    [
+      projectId,
+      sessionId,
+      branchId,
+      applySessionSnapshot,
+      onLoadComplete,
+      refreshLightweightDisplay,
+    ],
   );
 
   // Load older messages (previous chunk before the current truncation point)
   const loadOlderMessages = useCallback(async () => {
+    const currentDisplay = displayPageRef.current;
+    if (currentDisplay) {
+      if (!currentDisplay.nextCursor) return;
+      activeWindowTrimSuppressedRef.current = true;
+      setLoadingOlder(true);
+      try {
+        const older = await api.getSessionDisplay(projectId, sessionId, {
+          cursor: currentDisplay.nextCursor,
+          branchId,
+          limit: SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+        });
+        const merged: SessionDisplayPage = {
+          ...currentDisplay,
+          revision: older.revision,
+          turns: [...older.turns, ...currentDisplay.turns],
+          nextCursor: older.nextCursor,
+        };
+        displayPageRef.current = merged;
+        setDisplayPage(merged);
+      } catch (error) {
+        if (
+          error &&
+          typeof error === "object" &&
+          (error as { code?: unknown }).code === "SESSION_DISPLAY_STALE"
+        ) {
+          try {
+            const refreshed = await api.getSessionDisplay(
+              projectId,
+              sessionId,
+              {
+                branchId,
+                limit: SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+              },
+            );
+            displayPageRef.current = refreshed;
+            setDisplayPage(refreshed);
+          } catch {
+            // Leave the current lightweight page visible.
+          }
+        }
+      } finally {
+        setLoadingOlder(false);
+      }
+      return;
+    }
     if (!pagination?.hasOlderMessages || !pagination.truncatedBeforeMessageId) {
       return;
     }
@@ -1283,6 +2074,38 @@ export function useSessionMessages(
   const loadTargetMessageWindow = useCallback(
     async (messageId: string): Promise<boolean> => {
       if (!messageId) return false;
+      const currentDisplay = displayPageRef.current;
+      if (currentDisplay) {
+        const containsTarget = (page: SessionDisplayPage) =>
+          page.turns.some((turn) => turn.question?.messageId === messageId);
+        if (containsTarget(currentDisplay)) return true;
+        setLoadingTargetMessage(true);
+        try {
+          let merged = currentDisplay;
+          for (let pageIndex = 0; pageIndex < 1_000; pageIndex += 1) {
+            if (!merged.nextCursor) return false;
+            const older = await api.getSessionDisplay(projectId, sessionId, {
+              cursor: merged.nextCursor,
+              branchId,
+              limit: SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+            });
+            merged = {
+              ...merged,
+              revision: older.revision,
+              turns: [...older.turns, ...merged.turns],
+              nextCursor: older.nextCursor,
+            };
+            displayPageRef.current = merged;
+            setDisplayPage(merged);
+            if (containsTarget(older)) return true;
+          }
+          return false;
+        } catch {
+          return false;
+        } finally {
+          setLoadingTargetMessage(false);
+        }
+      }
       // A user-directed window replacement supersedes background tail refreshes.
       refreshRequestGenerationRef.current += 1;
       refreshAppliedGenerationRef.current = refreshRequestGenerationRef.current;
@@ -1345,6 +2168,16 @@ export function useSessionMessages(
       refreshRequestGenerationRef.current += 1;
       refreshAppliedGenerationRef.current = refreshRequestGenerationRef.current;
       invalidateSessionSnapshots({ projectId, sessionId, branchId });
+      setDisplayPage((current) => {
+        if (!current) return current;
+        const turnIndex = current.turns.findIndex(
+          (turn) => turn.question?.messageId === uuid,
+        );
+        if (turnIndex < 0) return current;
+        const next = { ...current, turns: current.turns.slice(0, turnIndex) };
+        displayPageRef.current = next;
+        return next;
+      });
       setMessages((prev) =>
         truncateMessagesForEdit(prev, uuid, preserveTempId),
       );
@@ -1354,6 +2187,10 @@ export function useSessionMessages(
 
   return {
     messages,
+    displayPage,
+    displayQuestions,
+    displayQuestionCoverage,
+    hydratedLiveTailDetailRef,
     agentContent,
     toolUseToAgent,
     toolUseToAgentIds,

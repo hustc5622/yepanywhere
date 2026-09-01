@@ -490,6 +490,109 @@ describe("CodexSessionReader - OSS Support", () => {
     expect(summary?.provider).toBe("codex");
   });
 
+  it("keeps current item_completed client identity in summary questions", async () => {
+    const sessionId = "current-user-question-identity";
+    const now = "2026-09-01T11:47:39.000Z";
+    await writeFile(
+      join(testDir, `${sessionId}.jsonl`),
+      `${[
+        {
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            id: sessionId,
+            cwd: "/test/project",
+            timestamp: now,
+            model_provider: "openai",
+          },
+        },
+        {
+          type: "response_item",
+          timestamp: "2026-09-01T11:47:42.595Z",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Inspect duplicate" }],
+            internal_chat_message_metadata_passthrough: {
+              turn_id: "turn-current-question",
+            },
+          },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-09-01T11:47:42.597Z",
+          payload: {
+            type: "item_completed",
+            turn_id: "turn-current-question",
+            item: {
+              type: "UserMessage",
+              id: "native-user-question",
+              client_id: "client-current-question",
+              content: [{ type: "text", text: "Inspect duplicate" }],
+            },
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n")}\n`,
+    );
+
+    const summary = await reader.getSessionSummary(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+
+    expect(summary?.userQuestions).toEqual([
+      expect.objectContaining({
+        turnId: "turn:turn-current-question",
+        clientUserMessageId: "client-current-question",
+        codexCorrelationKey: "codex:user-message:client-current-question",
+        text: "Inspect duplicate",
+      }),
+    ]);
+  });
+
+  it("marks the bounded summary question index partial when it reaches its cap", async () => {
+    const sessionId = "bounded-question-coverage";
+    const now = "2026-09-01T11:47:39.000Z";
+    const lines = [
+      {
+        type: "session_meta",
+        timestamp: now,
+        payload: {
+          id: sessionId,
+          cwd: "/test/project",
+          timestamp: now,
+          model_provider: "openai",
+        },
+      },
+      ...Array.from({ length: 2_049 }, (_, index) => ({
+        type: "response_item",
+        timestamp: now,
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `Question ${index}` }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: `turn-${index}`,
+          },
+        },
+      })),
+    ];
+    await writeFile(
+      join(testDir, `${sessionId}.jsonl`),
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+    );
+
+    const summary = await reader.getSessionSummary(
+      sessionId,
+      "test-project" as UrlProjectId,
+    );
+
+    expect(summary?.userQuestions).toHaveLength(2_048);
+    expect(summary?.userQuestionCoverage).toBe("partial");
+  });
+
   it("identifies DeepSeek cloud sessions as codex, not codex-oss", async () => {
     // model_provider=deepseek is a cloud Responses-API source; the "deepseek"
     // brand in the model name must not misroute it to the local OSS provider.

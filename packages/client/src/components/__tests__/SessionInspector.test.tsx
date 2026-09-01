@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import type { SessionQuestion } from "@yep-anywhere/shared";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -95,6 +101,7 @@ describe("SessionInspector", () => {
       },
     ];
     renderInspector("codex", messages);
+    fireEvent.click(screen.getByRole("tab", { name: "Files" }));
     const firstFile = screen.getByTitle(first);
     expect(firstFile.textContent).toContain("Edit - 2");
     expect(screen.getByTitle(second).textContent).toContain("Modified - Edit");
@@ -122,8 +129,117 @@ describe("SessionInspector", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("loads the complete session index as soon as the inspector is visible", async () => {
+    const onLoadLegacyDetails = vi.fn();
+    window.localStorage.setItem(UI_KEYS.locale, "en");
+    render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionInspector
+            presentation="sidebar"
+            messages={[]}
+            userQuestions={[
+              { id: "user-1", text: "Question", turnId: "turn:user-1" },
+            ]}
+            questionCoverage="complete"
+            hasLegacyDetails={false}
+            onLoadLegacyDetails={onLoadLegacyDetails}
+            projectId="project-1"
+            sessionId="session-1"
+            provider="codex"
+            status={{ owner: "none" }}
+            onSelectMessage={vi.fn()}
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Question")).not.toBeNull();
+    await waitFor(() => expect(onLoadLegacyDetails).toHaveBeenCalledTimes(1));
+    expect(
+      screen.queryByText("Load files, checks, plan, and sub-agent details"),
+    ).toBeNull();
+  });
+
+  it("waits for the mobile inspector drawer to open before loading its index", async () => {
+    const onLoadLegacyDetails = vi.fn();
+    window.localStorage.setItem(UI_KEYS.locale, "en");
+    const { rerender } = render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionInspector
+            presentation="drawer"
+            isOpen={false}
+            messages={[]}
+            hasLegacyDetails={false}
+            onLoadLegacyDetails={onLoadLegacyDetails}
+            projectId="project-1"
+            sessionId="session-1"
+            provider="codex"
+            status={{ owner: "none" }}
+            onSelectMessage={vi.fn()}
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    expect(onLoadLegacyDetails).not.toHaveBeenCalled();
+    rerender(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionInspector
+            presentation="drawer"
+            isOpen
+            messages={[]}
+            hasLegacyDetails={false}
+            onLoadLegacyDetails={onLoadLegacyDetails}
+            projectId="project-1"
+            sessionId="session-1"
+            provider="codex"
+            status={{ owner: "none" }}
+            onSelectMessage={vi.fn()}
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(onLoadLegacyDetails).toHaveBeenCalledTimes(1));
+  });
+
+  it("offers an explicit retry only after automatic index loading fails", () => {
+    const onLoadLegacyDetails = vi.fn();
+    window.localStorage.setItem(UI_KEYS.locale, "en");
+    render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionInspector
+            presentation="sidebar"
+            messages={[]}
+            hasLegacyDetails={false}
+            legacyDetailsError
+            onLoadLegacyDetails={onLoadLegacyDetails}
+            projectId="project-1"
+            sessionId="session-1"
+            provider="codex"
+            status={{ owner: "none" }}
+            onSelectMessage={vi.fn()}
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    expect(onLoadLegacyDetails).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Session index failed to load. Retry",
+      }),
+    );
+    expect(onLoadLegacyDetails).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the current project branch visible when the working tree is clean", () => {
     renderInspector("claude", []);
+    fireEvent.click(screen.getByRole("tab", { name: "Git" }));
 
     expect(screen.getByText("Current project state")).not.toBeNull();
     expect(screen.getByText("main")).not.toBeNull();
@@ -380,6 +496,33 @@ describe("SessionInspector", () => {
     expect(
       screen.getByText("Earlier prompt from the raw session file"),
     ).not.toBeNull();
+  });
+
+  it("merges display and live questions by stable Codex identity", () => {
+    renderInspector(
+      "codex",
+      [
+        {
+          uuid: "live-question",
+          type: "user",
+          clientUserMessageId: "client-question-1",
+          codexCorrelationKey: "codex:user-message:client-question-1",
+          timestamp: "2026-09-01T11:47:39.535Z",
+          message: { role: "user", content: "Same prompt" },
+        },
+      ],
+      [
+        {
+          id: "persisted-question",
+          clientUserMessageId: "client-question-1",
+          codexCorrelationKey: "codex:user-message:client-question-1",
+          text: "Same prompt",
+          timestamp: "2026-09-01T11:47:42.595Z",
+        },
+      ],
+    );
+
+    expect(screen.getAllByText("Same prompt")).toHaveLength(1);
   });
 
   it("shows all backend user questions instead of only the latest ones", () => {

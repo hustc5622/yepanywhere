@@ -18,7 +18,12 @@ import {
   augmentTextBlocks,
   renderMarkdownToHtml,
 } from "../augments/markdown-augments.js";
-import type { Message } from "../supervisor/types.js";
+import type { ContentBlock, Message } from "../supervisor/types.js";
+
+function getContentBlocks(message: Message): ContentBlock[] | null {
+  const content = message.message?.content ?? message.content;
+  return Array.isArray(content) ? (content as ContentBlock[]) : null;
+}
 
 /**
  * Embed Edit augment data directly into tool_use inputs.
@@ -29,8 +34,8 @@ export async function augmentEditToolUses(messages: Message[]): Promise<void> {
 
   for (const msg of messages) {
     if (msg.type !== "assistant") continue;
-    const content = msg.message?.content;
-    if (!Array.isArray(content)) continue;
+    const content = getContentBlocks(msg);
+    if (!content) continue;
 
     for (const block of content) {
       if (
@@ -145,8 +150,8 @@ export async function augmentWriteToolUses(messages: Message[]): Promise<void> {
 
   for (const msg of messages) {
     if (msg.type !== "assistant") continue;
-    const content = msg.message?.content;
-    if (!Array.isArray(content)) continue;
+    const content = getContentBlocks(msg);
+    if (!content) continue;
 
     for (const block of content) {
       if (block.type === "tool_use" && block.name === "Write" && block.input) {
@@ -193,8 +198,8 @@ export async function augmentExitPlanModeAndReadResults(
 
   for (const msg of messages) {
     if (msg.type === "assistant") {
-      const content = msg.message?.content;
-      if (!Array.isArray(content)) continue;
+      const content = getContentBlocks(msg);
+      if (!content) continue;
 
       for (const block of content) {
         if (

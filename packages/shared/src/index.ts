@@ -349,6 +349,40 @@ export type {
   SessionLocateResponse,
 } from "./session/index.js";
 
+// Lightweight, read-only session display projection.
+export {
+  SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+  SESSION_DISPLAY_MAX_NOTICE_LENGTH,
+  SESSION_DISPLAY_MAX_TOOL_NAMES,
+  SESSION_DISPLAY_QUESTION_PREVIEW_MAX_LENGTH,
+  SESSION_DISPLAY_TOOL_DETAIL_PAGE_LIMIT,
+  SessionDisplayActionRequiredSegmentSchema,
+  SessionDisplayAssistantTextSegmentSchema,
+  SessionDisplayBranchRefSchema,
+  SessionDisplayErrorSegmentSchema,
+  SessionDisplayNoticeSegmentSchema,
+  SessionDisplayPageSchema,
+  SessionDisplayQuestionSchema,
+  SessionDisplaySegmentSchema,
+  SessionDisplayToolGroupSegmentSchema,
+  SessionDisplayTurnSchema,
+  SessionDisplayUserContentSchema,
+  SessionDisplayUserMediaBlockSchema,
+  SessionDisplayUserTextBlockSchema,
+  SessionQuestionPageItemSchema,
+  SessionQuestionPageSchema,
+} from "./session-display.js";
+export type {
+  SessionDisplayPage,
+  SessionDisplayQuestion,
+  SessionDisplaySegment,
+  SessionDisplayTurn,
+  SessionDisplayUserContent,
+  SessionQuestionPage,
+  SessionQuestionPageItem,
+  SessionToolGroupDetailPage,
+} from "./session-display.js";
+
 // Context status (full SDK breakdown + fallback estimate)
 export type {
   ContextStatusResponse,

@@ -33,6 +33,71 @@ describe("UserPromptBlock", () => {
     expect(copyButton.closest(".message-actions-bubble")).not.toBeNull();
   });
 
+  it("switches from an edited Codex prompt to its parent-session sibling", () => {
+    const onSelectBranch = vi.fn();
+    const alternatives = [
+      {
+        id: "b1",
+        sessionId: "parent-session",
+        parentId: "a",
+        prompt: "b",
+        title: "b",
+        depth: 2,
+        index: 2,
+        siblingIndex: 1,
+        siblingCount: 2,
+        isActive: false,
+        provider: "codex" as const,
+      },
+      {
+        id: "b2",
+        sessionId: "child-session",
+        parentId: "a",
+        prompt: "b2",
+        title: "b2",
+        depth: 2,
+        index: 4,
+        siblingIndex: 2,
+        siblingCount: 2,
+        isActive: true,
+        provider: "codex" as const,
+      },
+    ];
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock
+          content="b2"
+          branch={{
+            sessionId: "child-session",
+            branchId: "b2",
+            activeBranchId: "d",
+            selectedBranchId: "d",
+            parentId: "a",
+            siblingIndex: 2,
+            siblingCount: 2,
+            alternatives,
+          }}
+          onSelectBranch={onSelectBranch}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByText("Branch 2/2")).toBeDefined();
+    expect(screen.getByText("Session child-session")).toBeDefined();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Previous conversation branch" }),
+    );
+    expect(onSelectBranch).toHaveBeenCalledWith("b1");
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Next conversation branch",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+
   it("renders Codex input_image blocks as uploaded file metadata", () => {
     const content: ContentBlock[] = [
       {

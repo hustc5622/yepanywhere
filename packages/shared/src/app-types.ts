@@ -159,8 +159,14 @@ export interface AppMessageExtensions {
   codexTurnId?: string;
   /** Stable app-server item identity without duplicating the native payload. */
   codexThreadItemId?: string;
+  /** Client-generated identity shared by Codex live and persisted user rows. */
+  clientUserMessageId?: string;
   /** Stable native identity shared by Codex live items and rollout records. */
   codexCorrelationKey?: string;
+  /** User prompt that owns a body-free Session Inspector index row. */
+  inspectorNavigationMessageId?: string;
+  /** Body-free boundary used to reconnect paginated Inspector rows to a turn. */
+  inspectorQuestionBoundary?: boolean;
   codexEventSequence?: number;
   codexRawReasoningAllowed?: boolean;
   /** Policy-checked, Yep-managed artifacts. Never contains a local path. */
@@ -277,6 +283,12 @@ export interface ContextUsage {
 export interface SessionQuestion {
   /** Message id used for deep-linking to the prompt when it is loaded. */
   id: string;
+  /** Display turn identity when it differs from the message-derived fallback. */
+  turnId?: string;
+  /** Client-generated identity shared by live and persisted user messages. */
+  clientUserMessageId?: string;
+  /** Codex correlation identity shared across SDK, rollout and app-server rows. */
+  codexCorrelationKey?: string;
   /** Compact display text for the prompt. */
   text: string;
   /** Provider timestamp for the user message, when available. */

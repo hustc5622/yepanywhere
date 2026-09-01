@@ -4,6 +4,8 @@ export interface CollapsibleForkFamilyMember {
   forkParentSessionId?: string;
   /** ISO timestamp used to pick the most recent member as the representative. */
   updatedAt: string;
+  title?: string | null;
+  fullTitle?: string | null;
 }
 
 /**
@@ -57,7 +59,17 @@ export function collapseEditForkFamilies<T extends CollapsibleForkFamilyMember>(
   const keep = new Set(
     [...representativeByRoot.values()].map((summary) => summary.id),
   );
-  return summaries.filter((summary) => keep.has(summary.id));
+  return summaries
+    .filter((summary) => keep.has(summary.id))
+    .map((summary) => {
+      const root = byId.get(find(summary.id));
+      if (!root || root.id === summary.id || !root.title) return summary;
+      return {
+        ...summary,
+        title: root.title,
+        fullTitle: root.fullTitle ?? root.title,
+      };
+    });
 }
 
 function isMoreRecentMember(

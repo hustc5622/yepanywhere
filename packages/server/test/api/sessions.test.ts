@@ -377,7 +377,8 @@ describe("Sessions API", () => {
       const sessionMetadataService = {
         getProvider: vi.fn(() => "codex"),
         getExecutor: vi.fn(() => undefined),
-        setForkParentSessionId: vi.fn(async () => undefined),
+        getMetadata: vi.fn(() => undefined),
+        setEditForkMetadata: vi.fn(async () => undefined),
         setProvider: vi.fn(async () => undefined),
         setCreatedBy: vi.fn(async () => undefined),
         setProjectLocation: vi.fn(async () => undefined),
@@ -408,6 +409,10 @@ describe("Sessions API", () => {
           body: JSON.stringify({
             message: "q2-1",
             rollbackNumTurns: 2,
+            rollbackTarget: {
+              messageId: "user-q2-turn-q2",
+              text: "q2",
+            },
           }),
         },
       );
@@ -430,9 +435,13 @@ describe("Sessions API", () => {
         }),
         { requireImmediate: true },
       );
-      expect(
-        sessionMetadataService.setForkParentSessionId,
-      ).toHaveBeenCalledWith("thread-codex-child", "sess-existing");
+      expect(sessionMetadataService.setEditForkMetadata).toHaveBeenCalledWith(
+        "thread-codex-child",
+        expect.objectContaining({
+          forkParentSessionId: "sess-existing",
+          forkTargetMessageId: "user-q2-turn-q2",
+        }),
+      );
     });
 
     it("does not pass Codex rollbackNumTurns when resuming Claude", async () => {
@@ -1041,6 +1050,94 @@ describe("Sessions API", () => {
       expect(Array.isArray(json.messages)).toBe(true);
       expect(json.messages.length).toBeGreaterThan(0);
       expect(json.status).toBe("completed");
+    });
+
+    it("augments Edit renderer data in a persisted agent transcript", async () => {
+      const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
+      const records = [
+        {
+          type: "user",
+          uuid: "agent-user",
+          parentUuid: null,
+          message: { role: "user", content: "Edit the file" },
+        },
+        {
+          type: "assistant",
+          uuid: "agent-edit",
+          parentUuid: "agent-user",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "agent-edit-tool",
+                name: "Edit",
+                input: {
+                  file_path: "src/agent.ts",
+                  changes: [
+                    {
+                      path: "src/agent.ts",
+                      kind: "update",
+                      diff: "@@ -1 +1 @@\n-before\n+after",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          uuid: "agent-edit-result",
+          parentUuid: "agent-edit",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "agent-edit-tool",
+                content: "ok",
+              },
+            ],
+          },
+        },
+        {
+          type: "assistant",
+          uuid: "agent-final",
+          parentUuid: "agent-edit-result",
+          message: { role: "assistant", content: "Done" },
+        },
+        {
+          type: "result",
+          uuid: "agent-result",
+          parentUuid: "agent-final",
+          result: { type: "result" },
+        },
+      ];
+      await writeFile(
+        join(sessionDir, "agent-edit-agent.jsonl"),
+        `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      );
+
+      const res = await app.request(
+        `/api/projects/${projectId}/sessions/sess-existing/agents/edit-agent`,
+      );
+      const json = await res.json();
+      const edit = json.messages
+        .flatMap((message: { message?: { content?: unknown } }) =>
+          Array.isArray(message.message?.content)
+            ? message.message.content
+            : [],
+        )
+        .find(
+          (block: { type?: string; name?: string }) =>
+            block.type === "tool_use" && block.name === "Edit",
+        );
+
+      expect(res.status).toBe(200);
+      expect(edit.input._rawPatch).toContain("-before");
+      expect(edit.input._structuredPatch).toHaveLength(1);
+      expect(edit.input._diffHtml).toContain('class="line line-deleted"');
     });
 
     it("returns 200 with empty messages for unknown agent", async () => {

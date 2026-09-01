@@ -341,7 +341,7 @@ describe("SessionIndexService", () => {
       await writeFile(
         indexPath,
         JSON.stringify({
-          version: 11,
+          version: 12,
           projectId,
           sessions: {
             "session-1": {
@@ -975,7 +975,7 @@ describe("SessionIndexService", () => {
       await writeFile(
         indexPath,
         JSON.stringify({
-          version: 11,
+          version: 12,
           projectId,
           sessions: {
             legacy: {

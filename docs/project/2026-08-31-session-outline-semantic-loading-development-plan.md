@@ -1,13 +1,20 @@
 # Session Outline、语义化加载与行为验证开发计划
 
 > 日期：2026-08-31<br>
-> 状态：方案待评审，尚未实施<br>
+> 状态：**已废弃（2026-09-01）**，仅保留为历史分析材料，不再作为设计或实施依据<br>
 > 适用范围：Yep Anywhere Web/PWA、Hono session API、所有已支持 provider<br>
 > 关联文档：
 > - [Session 切换加载性能与内容缓存方案](./2026-08-13-session-switching-performance-plan.md)
 > - [Codex Session 列表与切换性能开发计划](./2026-08-22-codex-session-switching-performance-development-plan.md)
 > - [Codex Session 切换轻量化后续优化](./2026-08-22-codex-session-switching-lightweight-followups.md)
 > - [Yep Anywhere 性能瓶颈审计](./2026-08-24-performance-bottleneck-audit.md)
+
+> [!CAUTION]
+> 本文档把 session 展示加载、用户问题目录、全文搜索索引、工具详情懒加载、成果展示、产品埋点和
+> Overview 实验合并成了一项计划，问题边界过大，实施路径也产生了不必要的耦合。后续工作将按独立问题
+> 拆分为可单独评审、实现和回滚的文档；第一份替代文档为
+> [Session 展示语义压缩与工具详情按需加载方案](./2026-09-01-session-display-compression-and-lazy-tool-details-plan.md)，
+> 不改变 Codex、Pi、Kimi 等 provider 的原始 session 文件、上下文或模型请求流程。
 
 ## 0. 执行摘要
 

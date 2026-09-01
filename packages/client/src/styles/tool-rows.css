@@ -293,3 +293,75 @@
 .tool-content-json code {
   color: var(--text-primary, #ccc);
 }
+.display-tool-group {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.display-tool-group.status-failed,
+.display-tool-group.status-mixed {
+  border-color: color-mix(in srgb, var(--error-color) 45%, var(--border-color));
+}
+
+.display-tool-group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.display-tool-group-summary {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.display-tool-group-names {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.display-tool-group-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-color);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.display-tool-group-content {
+  padding: 0 8px 8px;
+}
+
+.display-tool-group-state {
+  padding: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.display-tool-group-state.is-error {
+  color: var(--error-color);
+}
+
+.display-tool-group-more {
+  margin: 6px 0 0;
+  padding: 5px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: inherit;
+  cursor: pointer;
+}

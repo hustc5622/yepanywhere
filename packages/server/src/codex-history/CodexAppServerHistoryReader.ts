@@ -1,7 +1,12 @@
-import type { UrlProjectId } from "@yep-anywhere/shared";
+import type {
+  SessionBranchState,
+  UrlProjectId,
+  ZCodeStoredMessage,
+} from "@yep-anywhere/shared";
 import {
   buildCodexEditInput,
   publicCodexFileChanges,
+  publicCodexFilePath,
 } from "../codex/file-change.js";
 import { codexUserMessageIdentity } from "../codex/user-message-identity.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
@@ -13,6 +18,7 @@ import {
   publicCodexThreadItem,
 } from "../sdk/providers/codex.js";
 import type { GetSessionOptions, LoadedSession } from "../sessions/types.js";
+import { buildCopiedPrefixForkBranchView } from "../sessions/zcode-branch.js";
 import type {
   ContentBlock,
   Message,
@@ -30,6 +36,11 @@ const APP_SERVER_CURSOR_PREFIX = "yep-codex-history-v2.";
 const DEFAULT_MESSAGE_LIMIT = 100;
 const MAX_ITEM_PAGE_LIMIT = 100;
 const MAX_TURN_PAGE_LIMIT = 100;
+const SEMANTIC_ITEM_READ_CONCURRENCY = 4;
+const MAX_SEMANTIC_ITEMS_PER_TURN = 10_000;
+const MAX_FORK_BRANCH_FAMILY_SIZE = 64;
+const MAX_FORK_BRANCH_ITEM_PAGES = 100;
+const MAX_FORK_BRANCH_ITEMS = 10_000;
 const LOCAL_MODEL_PROVIDERS = new Set(["ollama", "lmstudio", "local"]);
 const KNOWN_THREAD_ITEM_TYPES = new Set([
   "userMessage",
@@ -54,12 +65,54 @@ const KNOWN_THREAD_ITEM_TYPES = new Set([
 
 class CodexHistoryParityError extends Error {}
 
+type CodexThreadProjectionMode = "strict" | "semantic-display";
+
 export type CodexAppServerHistoryReadResult =
   | { kind: "loaded"; session: LoadedSession }
   | {
       kind: "fallback";
       reason: CodexHistoryFallbackReason;
       historyCapabilityMs?: number;
+    };
+
+export type CodexAppServerSemanticPageResult =
+  | {
+      kind: "loaded";
+      messages: Message[];
+      summary: SessionSummary;
+      provider: "codex" | "codex-oss";
+      revision: string;
+      nextCursor?: string;
+    }
+  | {
+      kind: "fallback";
+      reason: CodexHistoryFallbackReason;
+    };
+
+export interface CodexAppServerSemanticPageOptions {
+  cursor?: string;
+  limit: number;
+  itemsView: "summary" | "full";
+  expectedRevision?: string;
+}
+
+export interface CodexForkBranchCandidate {
+  id: string;
+  forkParentSessionId?: string;
+  forkTargetMessageId?: string;
+  createdAt?: string;
+  provider?: "codex" | "codex-oss";
+}
+
+export type CodexAppServerSemanticTurnResult =
+  | {
+      kind: "loaded";
+      messages: Message[];
+      revision: string;
+    }
+  | {
+      kind: "fallback";
+      reason: CodexHistoryFallbackReason;
     };
 
 export interface CodexAppServerHistoryReaderOptions {
@@ -131,6 +184,265 @@ export class CodexAppServerHistoryReader {
     this.mode =
       options.mode ??
       resolveHistoryReadMode(process.env.YEP_CODEX_HISTORY_READ_MODE);
+  }
+
+  /**
+   * Read provider-native turn pages for the lightweight display/questions API.
+   * Each selected turn is hydrated through thread/items/list because Codex's
+   * summary view retains only the first user item and would silently omit
+   * same-turn steer prompts. Question pages immediately discard non-user
+   * items; full pages retain every item for display projection.
+   */
+  async getSemanticTurnsPage(
+    sessionId: string,
+    projectId: UrlProjectId,
+    projectPath: string,
+    options: CodexAppServerSemanticPageOptions,
+  ): Promise<CodexAppServerSemanticPageResult> {
+    if (this.mode === "rollout") {
+      return { kind: "fallback", reason: "disabled" };
+    }
+    const cursorScoped = Boolean(options.cursor || options.expectedRevision);
+    let metadata: Awaited<ReturnType<CodexHistoryClient["readThread"]>>;
+    try {
+      metadata = await this.options.client.readThread({
+        threadId: sessionId,
+        includeTurns: false,
+      });
+    } catch (error) {
+      if (cursorScoped) throw staleCursorError();
+      return this.semanticClientFailure(error);
+    }
+    const thread = metadata.thread;
+    if (
+      canonicalizeProjectPath(thread.cwd) !==
+      canonicalizeProjectPath(projectPath)
+    ) {
+      return cursorScoped
+        ? Promise.reject(staleCursorError())
+        : semanticFallback("provider_mismatch");
+    }
+    if (thread.historyMode !== "paginated") {
+      return cursorScoped
+        ? Promise.reject(staleCursorError())
+        : semanticFallback("legacy_history");
+    }
+    const revision = codexAppServerSemanticRevision(
+      thread.id,
+      thread.updatedAt,
+    );
+    if (options.expectedRevision && options.expectedRevision !== revision) {
+      throw staleCursorError();
+    }
+
+    try {
+      const turnsPage = await this.options.client.listTurns({
+        threadId: sessionId,
+        cursor: options.cursor ?? null,
+        limit: Math.max(1, Math.min(MAX_TURN_PAGE_LIMIT, options.limit)),
+        sortDirection: "desc",
+        itemsView: "summary",
+      });
+      const newestTurn = turnsPage.data[0];
+      const provider = providerFromModelProvider(thread.modelProvider);
+      const pageTurns = await mapWithConcurrency(
+        turnsPage.data,
+        SEMANTIC_ITEM_READ_CONCURRENCY,
+        async (turn) => {
+          const items = await readAllTurnItems(
+            this.options.client,
+            sessionId,
+            turn.id,
+          );
+          return {
+            ...turn,
+            items:
+              options.itemsView === "full"
+                ? items
+                : items.filter((item) => item.type === "userMessage"),
+            itemsView: options.itemsView,
+          };
+        },
+      );
+      for (const turn of pageTurns) {
+        for (const item of turn.items) {
+          if (!hasStableThreadItemIdentity(item)) {
+            throw new CodexHistoryParityError();
+          }
+        }
+      }
+      const messages: Message[] = [];
+      for (const turn of [...pageTurns].reverse()) {
+        const entries = turn.items.map((item) => ({ turnId: turn.id, item }));
+        messages.push(
+          ...projectThreadEntries(
+            sessionId,
+            entries,
+            new Map([[turn.id, turn]]),
+            true,
+            projectPath,
+            "semantic-display",
+          ),
+        );
+        if (
+          entries.length === 0 &&
+          turn.status === "failed" &&
+          turn.error?.message
+        ) {
+          messages.push({
+            uuid: `provider-error-${turn.id}`,
+            timestamp: turn.completedAt
+              ? new Date(turn.completedAt * 1_000).toISOString()
+              : undefined,
+            type: "error",
+            error: turn.error.message,
+            content: turn.error.message,
+            codexThreadId: sessionId,
+            codexTurnId: turn.id,
+            _source: "jsonl",
+          });
+        }
+      }
+
+      return {
+        kind: "loaded",
+        messages,
+        summary: threadSummary(
+          thread,
+          projectId,
+          provider,
+          messages.length,
+          newestTurn,
+        ),
+        provider,
+        revision,
+        ...(turnsPage.nextCursor ? { nextCursor: turnsPage.nextCursor } : {}),
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message === "ROLLOUT_CURSOR_STALE") {
+        throw error;
+      }
+      if (error instanceof CodexHistoryParityError) {
+        return cursorScoped
+          ? Promise.reject(staleCursorError())
+          : semanticFallback("transcript_parity");
+      }
+      if (cursorScoped) throw staleCursorError();
+      return this.semanticClientFailure(error);
+    }
+  }
+
+  /** Read one exact native turn for an explicit tool-detail request. */
+  async getSemanticTurn(
+    sessionId: string,
+    projectPath: string,
+    turnId: string,
+    expectedRevision: string,
+  ): Promise<CodexAppServerSemanticTurnResult> {
+    if (this.mode === "rollout") {
+      return { kind: "fallback", reason: "disabled" };
+    }
+    let metadata: Awaited<ReturnType<CodexHistoryClient["readThread"]>>;
+    try {
+      metadata = await this.options.client.readThread({
+        threadId: sessionId,
+        includeTurns: false,
+      });
+    } catch {
+      throw staleCursorError();
+    }
+    const thread = metadata.thread;
+    if (
+      thread.historyMode !== "paginated" ||
+      canonicalizeProjectPath(thread.cwd) !==
+        canonicalizeProjectPath(projectPath)
+    ) {
+      throw staleCursorError();
+    }
+    const revision = codexAppServerSemanticRevision(
+      thread.id,
+      thread.updatedAt,
+    );
+    if (revision !== expectedRevision) throw staleCursorError();
+
+    try {
+      const items = await readAllTurnItems(
+        this.options.client,
+        sessionId,
+        turnId,
+      );
+      for (const item of items) {
+        if (!hasStableThreadItemIdentity(item)) {
+          throw new CodexHistoryParityError();
+        }
+      }
+      const messages = projectThreadEntries(
+        sessionId,
+        items.map((item) => ({ turnId, item })),
+        new Map(),
+        true,
+        projectPath,
+        "semantic-display",
+      );
+      return { kind: "loaded", messages, revision };
+    } catch (error) {
+      if (error instanceof CodexHistoryParityError) {
+        return { kind: "fallback", reason: "transcript_parity" };
+      }
+      throw staleCursorError();
+    }
+  }
+
+  /**
+   * Build the provider-neutral b1/b2 branch graph for a native Codex fork
+   * family. Paginated forks retain copied turn/item ids, so native identity —
+   * not prompt text — proves the shared prefix even when an edit keeps the
+   * exact same text.
+   */
+  async getForkBranchState(
+    sessionId: string,
+    candidates: readonly CodexForkBranchCandidate[],
+    selectedBranchId?: string,
+  ): Promise<SessionBranchState | undefined> {
+    if (this.mode === "rollout") return undefined;
+    const family = findCodexForkBranchFamily(candidates, sessionId);
+    if (family.length <= 1 || family.length > MAX_FORK_BRANCH_FAMILY_SIZE) {
+      return undefined;
+    }
+
+    try {
+      const familySessions = await mapWithConcurrency(
+        family,
+        SEMANTIC_ITEM_READ_CONCURRENCY,
+        async (candidate) => ({
+          id: candidate.id,
+          parentId: candidate.forkParentSessionId ?? null,
+          forkBoundaryMessageId: candidate.forkTargetMessageId,
+          createdAt: candidate.createdAt,
+          messages: await readCodexForkBranchMessages(
+            this.options.client,
+            candidate.id,
+          ),
+        }),
+      );
+      const provider =
+        family.find((candidate) => candidate.id === sessionId)?.provider ??
+        "codex";
+      return buildCopiedPrefixForkBranchView(
+        familySessions,
+        sessionId,
+        selectedBranchId,
+        {
+          provider,
+          sessionRootPrefix: "codex-session-root",
+          isCopiedMessage: (child, parent) => child.id === parent.id,
+        },
+      ).branchState;
+    } catch {
+      // Branch controls are additive UI metadata. A stale catalog row or an
+      // unavailable history page must not make the transcript itself fail.
+      return undefined;
+    }
   }
 
   async getSession(
@@ -372,6 +684,192 @@ export class CodexAppServerHistoryReader {
         return fallback("app_server_unavailable");
     }
   }
+
+  private semanticClientFailure(
+    error: unknown,
+  ): CodexAppServerSemanticPageResult {
+    const failure = this.clientFailure(error);
+    if (failure.kind !== "fallback") {
+      throw new Error("Unexpected loaded result while mapping client failure");
+    }
+    return semanticFallback(failure.reason);
+  }
+}
+
+function codexAppServerSemanticRevision(
+  threadId: string,
+  updatedAt: number,
+): string {
+  return `cas1.${updatedAt}.${threadId}`;
+}
+
+function semanticFallback(
+  reason: CodexHistoryFallbackReason,
+): CodexAppServerSemanticPageResult {
+  return { kind: "fallback", reason };
+}
+
+function findCodexForkBranchFamily(
+  candidates: readonly CodexForkBranchCandidate[],
+  currentSessionId: string,
+): CodexForkBranchCandidate[] {
+  const byId = new Map(
+    candidates.map((candidate) => [candidate.id, candidate]),
+  );
+  if (!byId.has(currentSessionId)) return [];
+
+  const adjacent = new Map<string, Set<string>>();
+  const connect = (left: string, right: string) => {
+    const neighbors = adjacent.get(left) ?? new Set<string>();
+    neighbors.add(right);
+    adjacent.set(left, neighbors);
+  };
+  for (const candidate of byId.values()) {
+    const parentId = candidate.forkParentSessionId;
+    if (!parentId || !byId.has(parentId) || parentId === candidate.id) continue;
+    connect(candidate.id, parentId);
+    connect(parentId, candidate.id);
+  }
+
+  const family: CodexForkBranchCandidate[] = [];
+  const queue = [currentSessionId];
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const id = queue.shift();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const candidate = byId.get(id);
+    if (candidate) family.push(candidate);
+    if (family.length > MAX_FORK_BRANCH_FAMILY_SIZE) return family;
+    queue.push(...(adjacent.get(id) ?? []));
+  }
+  return family;
+}
+
+async function readCodexForkBranchMessages(
+  client: Pick<CodexHistoryClient, "listItems">,
+  sessionId: string,
+): Promise<ZCodeStoredMessage[]> {
+  const entries: ThreadItemEntry[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  for (
+    let pageIndex = 0;
+    pageIndex < MAX_FORK_BRANCH_ITEM_PAGES;
+    pageIndex += 1
+  ) {
+    const page = await client.listItems({
+      threadId: sessionId,
+      turnId: null,
+      cursor,
+      limit: MAX_ITEM_PAGE_LIMIT,
+      sortDirection: "asc",
+    });
+    entries.push(...page.data);
+    if (entries.length > MAX_FORK_BRANCH_ITEMS) {
+      throw new CodexHistoryParityError();
+    }
+    if (!page.nextCursor) {
+      cursor = null;
+      break;
+    }
+    if (!seenCursors.add(page.nextCursor)) {
+      throw new CodexHistoryParityError();
+    }
+    cursor = page.nextCursor;
+  }
+  if (cursor) throw new CodexHistoryParityError();
+
+  const messages: ZCodeStoredMessage[] = [];
+  for (const entry of entries) {
+    if (entry.item.type !== "userMessage") continue;
+    const id = codexSemanticMessageId(entry.item.id, entry.turnId);
+    messages.push({
+      id,
+      role: "user",
+      parts: [
+        {
+          id: `${id}:text`,
+          messageID: id,
+          sessionID: sessionId,
+          type: "text",
+          text: codexUserPromptText(entry.item),
+        },
+      ],
+    });
+  }
+  return messages;
+}
+
+function codexUserPromptText(
+  item: Extract<ThreadItem, { type: "userMessage" }>,
+): string {
+  return item.content
+    .map((input) => {
+      if (input.type === "text") return input.text;
+      if (input.type === "skill") return `$${input.name}`;
+      if (input.type === "mention") return `@${input.name}`;
+      return "";
+    })
+    .join("");
+}
+
+function codexSemanticMessageId(itemId: string, turnId: string): string {
+  return `${itemId}-${turnId}`;
+}
+
+async function readAllTurnItems(
+  client: Pick<CodexHistoryClient, "listItems">,
+  sessionId: string,
+  turnId: string,
+): Promise<ThreadItem[]> {
+  const items: ThreadItem[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    if (cursor) {
+      if (seenCursors.has(cursor)) throw new CodexHistoryParityError();
+      seenCursors.add(cursor);
+    }
+    const page = await client.listItems({
+      threadId: sessionId,
+      turnId,
+      cursor,
+      limit: MAX_ITEM_PAGE_LIMIT,
+      sortDirection: "asc",
+    });
+    for (const entry of page.data) {
+      if (entry.turnId !== turnId) throw new CodexHistoryParityError();
+      items.push(entry.item);
+      if (items.length > MAX_SEMANTIC_ITEMS_PER_TURN) {
+        throw new CodexHistoryParityError();
+      }
+    }
+    cursor = page.nextCursor;
+  } while (cursor);
+  return items;
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(Math.max(1, concurrency), values.length) },
+    async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const value = values[index];
+        if (value !== undefined) results[index] = await mapper(value);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 function isCodexAppServerCursor(value: string | undefined): boolean {
@@ -465,13 +963,22 @@ function projectThreadEntries(
   turnsById: ReadonlyMap<string, Turn>,
   includeTerminalErrorForLastTurn: boolean,
   workspaceRoot: string,
+  projectionMode: CodexThreadProjectionMode = "strict",
 ): Message[] {
   const messages: Message[] = [];
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index];
     if (!entry) continue;
     const turn = turnsById.get(entry.turnId);
-    messages.push(...projectThreadItem(sessionId, entry, turn, workspaceRoot));
+    messages.push(
+      ...projectThreadItem(
+        sessionId,
+        entry,
+        turn,
+        workspaceRoot,
+        projectionMode,
+      ),
+    );
     if (
       turn?.status === "failed" &&
       turn.error?.message &&
@@ -501,9 +1008,10 @@ function projectThreadItem(
   entry: ThreadItemEntry,
   turn: Turn | undefined,
   workspaceRoot: string,
+  projectionMode: CodexThreadProjectionMode,
 ): Message[] {
   const item = entry.item;
-  const uuid = `${item.id}-${entry.turnId}`;
+  const uuid = codexSemanticMessageId(item.id, entry.turnId);
   const timestamp = turn?.startedAt
     ? new Date(turn.startedAt * 1_000).toISOString()
     : undefined;
@@ -524,7 +1032,14 @@ function projectThreadItem(
           ...base,
           ...codexUserMessageIdentity(item.clientId),
           type: "user",
-          message: { role: "user", content: userInputBlocks(item.content) },
+          message: {
+            role: "user",
+            content: userInputBlocks(
+              item.content,
+              projectionMode,
+              workspaceRoot,
+            ),
+          },
         },
       ];
     case "agentMessage":
@@ -532,6 +1047,7 @@ function projectThreadItem(
         {
           ...base,
           type: "assistant",
+          codexCorrelationKey: `codex:${entry.turnId}:agent-message:${item.id}`,
           ...(item.phase ? { codexMessagePhase: item.phase } : {}),
           message: { role: "assistant", content: item.text },
         },
@@ -611,16 +1127,58 @@ function projectThreadItem(
         isError: false,
         completed: item.results !== null,
       });
-    case "imageView":
-    case "imageGeneration":
+    case "imageView": {
+      if (projectionMode === "strict") {
+        throw new CodexHistoryParityError();
+      }
+      const publicPath = publicCodexFilePath(item.path, { workspaceRoot });
+      return toolMessages(base, "ViewImage", { path: publicPath }, item.id, {
+        content: `Viewed image: ${publicPath}`,
+        isError: false,
+        completed: true,
+      });
+    }
+    case "imageGeneration": {
+      if (projectionMode === "strict") {
+        throw new CodexHistoryParityError();
+      }
+      const publicPath = item.savedPath
+        ? publicCodexFilePath(item.savedPath, { workspaceRoot })
+        : undefined;
+      const failed = item.failure !== null || item.status === "failed";
+      return toolMessages(
+        base,
+        "ViewImage",
+        {
+          title: "Generated image",
+          status: item.status,
+          ...(item.revisedPrompt ? { revised_prompt: item.revisedPrompt } : {}),
+          ...(publicPath ? { path: publicPath } : {}),
+        },
+        item.id,
+        {
+          content: failed
+            ? `Image generation failed: ${item.status}`
+            : publicPath
+              ? `Generated image: ${publicPath}`
+              : `Image generation status: ${item.status}`,
+          isError: failed,
+          completed: itemIsComplete(item),
+        },
+      );
+    }
     case "hookPrompt":
     case "sleep":
     case "enteredReviewMode":
-    case "exitedReviewMode":
+    case "exitedReviewMode": {
+      if (projectionMode === "semantic-display") {
+        return [opaqueNativeSystemMessage(base, item.type)];
+      }
       // These need managed local-media materialization or a real renderer.
       // A label/status-only projection would silently lose the artifact or
       // transcript semantics, so let the existing rollout path handle them.
       throw new CodexHistoryParityError();
+    }
     case "contextCompaction":
       return [
         {
@@ -635,8 +1193,45 @@ function projectThreadItem(
     case "subAgentActivity":
       return [nativeSystemMessage(base, item)];
     default:
+      if (projectionMode === "semantic-display") {
+        return [opaqueNativeSystemMessage(base, threadItemType(entry.item))];
+      }
       throw new CodexHistoryParityError();
   }
+}
+
+function opaqueNativeSystemMessage(
+  base: Record<string, unknown> & { uuid: string },
+  itemType: string,
+): Message {
+  return {
+    ...base,
+    type: "system",
+    subtype: "codex_native_item",
+    codexThreadItem: { type: publicThreadItemType(itemType) },
+  } as Message;
+}
+
+function publicThreadItemType(value: string): string {
+  const normalized = value.trim().slice(0, 128);
+  return /^[A-Za-z][A-Za-z0-9_-]*$/.test(normalized) ? normalized : "unknown";
+}
+
+function threadItemType(value: unknown): string {
+  if (!value || typeof value !== "object") return "unknown";
+  const type = (value as { type?: unknown }).type;
+  return typeof type === "string" ? type : "unknown";
+}
+
+function hasStableThreadItemIdentity(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const item = value as { id?: unknown; type?: unknown };
+  return (
+    typeof item.id === "string" &&
+    item.id.length > 0 &&
+    typeof item.type === "string" &&
+    item.type.length > 0
+  );
 }
 
 function nativeSystemMessage(
@@ -689,6 +1284,8 @@ function toolMessages(
 
 function userInputBlocks(
   inputs: Extract<ThreadItem, { type: "userMessage" }>["content"],
+  projectionMode: CodexThreadProjectionMode,
+  workspaceRoot: string,
 ): ContentBlock[] {
   return inputs.map((input): ContentBlock => {
     switch (input.type) {
@@ -696,6 +1293,13 @@ function userInputBlocks(
         return { type: "text", text: input.text };
       case "image":
         if (!publicCodexImageUrl(input.url)) {
+          if (projectionMode === "semantic-display") {
+            return {
+              type: "input_image",
+              deferred: true,
+              ...(input.detail ? { detail: input.detail } : {}),
+            };
+          }
           throw new CodexHistoryParityError();
         }
         return {
@@ -703,15 +1307,35 @@ function userInputBlocks(
           image_url: input.url,
           ...(input.detail ? { detail: input.detail } : {}),
         };
-      case "localImage":
+      case "localImage": {
+        if (projectionMode === "semantic-display") {
+          return {
+            type: "input_image",
+            file_path: publicCodexFilePath(input.path, { workspaceRoot }),
+            deferred: true,
+            ...(input.detail ? { detail: input.detail } : {}),
+          };
+        }
         throw new CodexHistoryParityError();
+      }
       case "audio":
         if (!publicCodexImageUrl(input.url)) {
+          if (projectionMode === "semantic-display") {
+            return { type: "input_audio", deferred: true };
+          }
           throw new CodexHistoryParityError();
         }
         return { type: "input_audio", audio_url: input.url };
-      case "localAudio":
+      case "localAudio": {
+        if (projectionMode === "semantic-display") {
+          return {
+            type: "input_audio",
+            file_path: publicCodexFilePath(input.path, { workspaceRoot }),
+            deferred: true,
+          };
+        }
         throw new CodexHistoryParityError();
+      }
       case "skill":
         return { type: "text", text: `$${input.name}` };
       case "mention":

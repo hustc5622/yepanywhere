@@ -28,12 +28,15 @@ import type {
   ReportUploadResponse,
   ReportsListResponse,
   SessionCreatedBy,
+  SessionDisplayPage,
   SessionKind,
   SessionLastTurnStatus,
   SessionLocateResponse,
   SessionQuestion,
+  SessionQuestionPage,
   SessionRetryStatus,
   SessionRuntime,
+  SessionToolGroupDetailPage,
   SlashCommand,
   ThinkingOption,
   UploadedFile,
@@ -984,6 +987,50 @@ export const api = {
   getProject: (projectId: string) =>
     fetchJSON<{ project: Project }>(`/projects/${projectId}`),
 
+  getSessionDisplay: (
+    projectId: string,
+    sessionId: string,
+    options?: { cursor?: string; branchId?: string; limit?: number },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.branchId) params.set("branchId", options.branchId);
+    if (options?.limit !== undefined)
+      params.set("limit", String(options.limit));
+    const query = params.toString();
+    return fetchJSON<SessionDisplayPage>(
+      `/projects/${projectId}/sessions/${sessionId}/display${query ? `?${query}` : ""}`,
+    );
+  },
+
+  getSessionQuestions: (
+    projectId: string,
+    sessionId: string,
+    options?: { cursor?: string; branchId?: string },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.branchId) params.set("branchId", options.branchId);
+    const query = params.toString();
+    return fetchJSON<SessionQuestionPage>(
+      `/projects/${projectId}/sessions/${sessionId}/display/questions${query ? `?${query}` : ""}`,
+    );
+  },
+
+  getSessionToolGroupDetails: (
+    projectId: string,
+    sessionId: string,
+    detailRef: string,
+    options: { revision: string; cursor?: string; branchId?: string },
+  ) => {
+    const params = new URLSearchParams({ revision: options.revision });
+    if (options.cursor) params.set("cursor", options.cursor);
+    if (options.branchId) params.set("branchId", options.branchId);
+    return fetchJSON<SessionToolGroupDetailPage<Message>>(
+      `/projects/${projectId}/sessions/${sessionId}/display/tool-groups/${encodeURIComponent(detailRef)}?${params.toString()}`,
+    );
+  },
+
   getSession: (
     projectId: string,
     sessionId: string,
@@ -1001,11 +1048,14 @@ export const api = {
       deferMedia?: boolean;
       /** Omit Pi thinking blocks when explicitly requested. */
       deferThinking?: boolean;
+      /** Return the body-free message subset used by Session Inspector. */
+      inspectorProjection?: boolean;
     },
   ) => {
     const params = new URLSearchParams();
     if (afterMessageId) params.set("afterMessageId", afterMessageId);
     if (options?.view) params.set("view", options.view);
+    if (options?.inspectorProjection) params.set("projection", "inspector");
     if (options?.tailCompactions !== undefined)
       params.set("tailCompactions", String(options.tailCompactions));
     if (options?.beforeMessageId)
@@ -1155,7 +1205,11 @@ export const api = {
      * Lets the server recompute the authoritative excluded-turn count from the
      * persisted Codex turn tree instead of trusting the client-side count.
      */
-    rollbackTarget?: { timestamp?: string; text?: string },
+    rollbackTarget?: {
+      messageId?: string;
+      timestamp?: string;
+      text?: string;
+    },
   ) =>
     fetchJSON<ResumeSessionResponse>(
       `/projects/${projectId}/sessions/${sessionId}/resume`,

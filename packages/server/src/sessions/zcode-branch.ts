@@ -39,6 +39,8 @@ export interface ZCodeBranchFamilySession {
   id: string;
   /** Fork parent session id (native sqlite parent_id / Yep metadata union). */
   parentId?: string | null;
+  /** Exact source user message replaced by this fork, when provider supplies it. */
+  forkBoundaryMessageId?: string;
   /** ISO timestamp used to order siblings (session.time_created). */
   createdAt?: string;
   messages: ZCodeStoredMessage[];
@@ -64,6 +66,15 @@ export interface CopiedPrefixBranchViewOptions {
   provider?: ProviderName;
   /** Prefix for the synthetic root parent of each family root session. */
   sessionRootPrefix?: string;
+  /**
+   * Provider-specific proof that one leading child row is copied history.
+   * ZCode/Pi use same-position text; Codex can use its retained native ids so
+   * an edit that keeps the same prompt text is not mistaken for copied input.
+   */
+  isCopiedMessage?: (
+    child: ZCodeStoredMessage,
+    parent: ZCodeStoredMessage,
+  ) => boolean;
 }
 
 interface ValidForkRelation {
@@ -106,18 +117,31 @@ function branchTitle(prompt: string): string {
 function copiedPrefixLength(
   child: ZCodeStoredMessage[],
   parent: ZCodeStoredMessage[],
+  isCopiedMessage: NonNullable<
+    CopiedPrefixBranchViewOptions["isCopiedMessage"]
+  > = defaultCopiedMessageMatch,
 ): number {
   let length = 0;
   while (
     length < child.length &&
     length < parent.length &&
-    child[length]?.role === parent[length]?.role &&
-    messageText(child[length] as ZCodeStoredMessage) ===
-      messageText(parent[length] as ZCodeStoredMessage)
+    isCopiedMessage(
+      child[length] as ZCodeStoredMessage,
+      parent[length] as ZCodeStoredMessage,
+    )
   ) {
     length += 1;
   }
   return length;
+}
+
+function defaultCopiedMessageMatch(
+  child: ZCodeStoredMessage,
+  parent: ZCodeStoredMessage,
+): boolean {
+  return (
+    child.role === parent.role && messageText(child) === messageText(parent)
+  );
 }
 
 function orderFamilySessions(
@@ -194,12 +218,21 @@ export function buildCopiedPrefixForkBranchView(
     const prefixMessageCount = copiedPrefixLength(
       session.messages,
       parent.messages,
+      options.isCopiedMessage,
     );
     // The fork replaced the first user message after the copied prefix —
     // the original edited prompt M in the parent.
-    const boundary = parent.messages
-      .slice(prefixMessageCount)
-      .find((entry) => entry.role === "user");
+    const explicitBoundary = session.forkBoundaryMessageId
+      ? parent.messages.find(
+          (entry) =>
+            entry.id === session.forkBoundaryMessageId && entry.role === "user",
+        )
+      : undefined;
+    const boundary =
+      explicitBoundary ??
+      parent.messages
+        .slice(prefixMessageCount)
+        .find((entry) => entry.role === "user");
     if (!boundary) {
       diagnostics.push({
         code: "missing_boundary_message",

@@ -8,6 +8,7 @@ import {
   type ContextUsage,
   type GeneratedArtifactManifest,
   type ProviderName,
+  type SessionBranchState,
   type UrlProjectId,
   escalateContextWindow,
   getModelContextWindow,
@@ -19,7 +20,6 @@ import {
   type ArchivedSessionRecord,
   type SessionArchiveService,
 } from "../archive/index.js";
-import { augmentTextBlocks } from "../augments/markdown-augments.js";
 import {
   type BridgeControllers,
   getAnyBridgeSessionView,
@@ -43,9 +43,13 @@ import {
   selectCodexEventSourceWithCache,
   selectCodexProviderErrorEventSource,
 } from "../codex-events/index.js";
-import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
+import type {
+  CodexAppServerHistoryReader,
+  CodexForkBranchCandidate,
+} from "../codex-history/CodexAppServerHistoryReader.js";
 import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
 import type { CodexHistoryFallbackReason } from "../codex-history/types.js";
+import type { ISessionIndexService } from "../indexes/types.js";
 import {
   type SessionInputResponseBody,
   SessionInteractionService,
@@ -56,7 +60,7 @@ import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
-import { encodeProjectId } from "../projects/paths.js";
+import { canonicalizeProjectPath, encodeProjectId } from "../projects/paths.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
@@ -82,8 +86,12 @@ import {
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
+import { projectSessionInspectorMessages } from "../sessions/inspector-projection.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
-import { normalizeSession } from "../sessions/normalization.js";
+import {
+  annotateBranchMessages,
+  normalizeSession,
+} from "../sessions/normalization.js";
 import {
   type PaginationInfo,
   sliceAfterMessage,
@@ -118,6 +126,7 @@ import type {
 import { UploadManager } from "../uploads/index.js";
 import type { EventBus } from "../watcher/index.js";
 import { ServerTimingRecorder } from "./server-timing.js";
+import { registerSessionDisplayRoutes } from "./session-display.js";
 
 const SESSION_DETAIL_TIMING_NAMES = [
   "projectLookup",
@@ -172,6 +181,8 @@ export interface SessionsDeps {
   codexAppServerHistoryReader?: CodexAppServerHistoryReader;
   /** Provider-wide cheap Codex metadata and provider-resolution source. */
   codexSessionCatalog?: CodexSessionCatalog;
+  /** Shared persisted summary cache used by context/status fallbacks. */
+  sessionIndexService?: ISessionIndexService;
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   /** Optional shared Gemini reader factory for cross-provider session lookups */
@@ -616,6 +627,7 @@ async function resolveReaderForSession(
 function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
   return {
     readerFactory: deps.readerFactory,
+    sessionIndexService: deps.sessionIndexService,
     sessionMetadataService: deps.sessionMetadataService,
     codexSessionsDir: deps.codexSessionsDir,
     codexReaderFactory: deps.codexReaderFactory,
@@ -834,6 +846,114 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           projectPath,
         })
       : null);
+  const getCodexForkBranchState = async (
+    project: Project,
+    sessionId: string,
+    currentSummary: SessionSummary,
+    selectedBranchId?: string,
+  ): Promise<SessionBranchState | undefined> => {
+    const historyReader = deps.codexAppServerHistoryReader;
+    const catalog = deps.codexSessionCatalog;
+    if (
+      !historyReader ||
+      typeof historyReader.getForkBranchState !== "function" ||
+      !catalog ||
+      typeof catalog.getSnapshot !== "function" ||
+      !isCodexProviderName(currentSummary.provider)
+    ) {
+      return undefined;
+    }
+
+    const projectPath = canonicalizeProjectPath(project.path);
+    const candidates = new Map<string, CodexForkBranchCandidate>();
+    const snapshot = await catalog.getSnapshot().catch(() => null);
+    for (const summary of snapshot?.byProjectPath.get(projectPath) ?? []) {
+      if (!isCodexProviderName(summary.provider)) continue;
+      candidates.set(summary.id, {
+        id: summary.id,
+        forkParentSessionId: summary.forkParentSessionId,
+        createdAt: summary.createdAt,
+        provider: summary.provider,
+      });
+    }
+
+    // Native `forkedFromId` wins. The sidecar supplies first-prompt forks,
+    // where Codex must use thread/start and therefore has no native parent.
+    for (const [candidateId, metadata] of Object.entries(
+      deps.sessionMetadataService?.getAllMetadata() ?? {},
+    )) {
+      if (
+        !metadata.forkParentSessionId ||
+        !isCodexProviderName(metadata.provider) ||
+        !metadata.projectPath ||
+        canonicalizeProjectPath(metadata.projectPath) !== projectPath
+      ) {
+        continue;
+      }
+      const existing = candidates.get(candidateId);
+      candidates.set(candidateId, {
+        id: candidateId,
+        forkParentSessionId:
+          existing?.forkParentSessionId ?? metadata.forkParentSessionId,
+        forkTargetMessageId:
+          existing?.forkTargetMessageId ?? metadata.forkTargetMessageId,
+        createdAt: existing?.createdAt,
+        provider: existing?.provider ?? metadata.provider,
+      });
+    }
+
+    const currentMetadata = deps.sessionMetadataService?.getMetadata(sessionId);
+    const current = candidates.get(sessionId);
+    candidates.set(sessionId, {
+      id: sessionId,
+      forkParentSessionId:
+        current?.forkParentSessionId ??
+        currentMetadata?.forkParentSessionId ??
+        currentSummary.forkParentSessionId,
+      forkTargetMessageId:
+        current?.forkTargetMessageId ?? currentMetadata?.forkTargetMessageId,
+      createdAt: current?.createdAt ?? currentSummary.createdAt,
+      provider: current?.provider ?? currentSummary.provider,
+    });
+    return historyReader.getForkBranchState(
+      sessionId,
+      [...candidates.values()],
+      selectedBranchId,
+    );
+  };
+  registerSessionDisplayRoutes(routes, {
+    scanner: deps.scanner,
+    providerResolution: toProviderResolutionDeps(deps),
+    codexAppServerHistoryReader: deps.codexAppServerHistoryReader,
+    getCanonicalSessionId: (sessionId) =>
+      deps.sessionMetadataService?.getCanonicalSessionId?.(sessionId) ??
+      sessionId,
+    getPersistedProvider: (sessionId) =>
+      deps.sessionMetadataService?.getProvider(sessionId),
+    getBranchState: getCodexForkBranchState,
+    getRuntimeState: async (sessionId) => {
+      const [process, bridgeView] = await Promise.all([
+        runtimeController.getProcessSnapshotForSession(sessionId),
+        getBridgeSessionView(deps, sessionId),
+      ]);
+      const pendingInputRequest = await sessionCommandService.getPendingInput(
+        sessionId,
+        { processSnapshot: process },
+      );
+      const externalActive =
+        (deps.externalTracker?.isExternal(sessionId) ?? false) ||
+        (bridgeView !== null && isActiveBridgeSessionView(bridgeView));
+      return {
+        provider: process?.provider ?? bridgeView?.session.provider,
+        toolsMayBeActive:
+          process?.state === "in-turn" ||
+          process?.state === "waiting-input" ||
+          pendingInputRequest !== null ||
+          externalActive,
+        pendingInputRequest,
+      };
+    },
+  });
   // GET /api/archive/sessions - List physically archived sessions.
   routes.get("/archive/sessions", (c) => {
     if (!deps.sessionArchiveService) {
@@ -938,8 +1058,9 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         return c.json({ error: "Agent session not found" }, 404);
       }
 
-      // Add server-rendered HTML to text blocks for markdown display
-      await augmentTextBlocks(agentSession.messages);
+      // Agent transcripts use the same renderers as the parent session, so
+      // apply the complete persisted augmentation pipeline, not Markdown only.
+      await augmentPersistedSessionMessages(agentSession.messages);
 
       return c.json(agentSession);
     },
@@ -1055,13 +1176,44 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             sessionSummary.updatedAt,
           )
         : undefined;
+    const resolvedProvider =
+      sessionSummary?.provider ??
+      metadataProvider ??
+      process?.provider ??
+      project.provider;
+    const forkBranchState =
+      sessionSummary && isCodexProviderName(resolvedProvider)
+        ? await getCodexForkBranchState(project, sessionId, {
+            ...sessionSummary,
+            provider: resolvedProvider,
+            forkParentSessionId:
+              metadata?.forkParentSessionId ??
+              sessionSummary.forkParentSessionId,
+          })
+        : undefined;
+    const forkFamilyRootId = forkBranchState?.branches[0]?.sessionId;
+    const forkFamilyRootSummary = forkFamilyRootId
+      ? await deps.codexSessionCatalog
+          ?.getSessionSummary(forkFamilyRootId, project.path)
+          .catch(() => null)
+      : null;
 
     return c.json({
       session: {
         id: sessionId,
         projectId,
-        title: sessionSummary?.title ?? null,
-        fullTitle: sessionSummary?.fullTitle ?? null,
+        title:
+          metadata?.forkFamilyTitle ??
+          forkFamilyRootSummary?.title ??
+          sessionSummary?.title ??
+          null,
+        fullTitle:
+          metadata?.forkFamilyFullTitle ??
+          metadata?.forkFamilyTitle ??
+          forkFamilyRootSummary?.fullTitle ??
+          forkFamilyRootSummary?.title ??
+          sessionSummary?.fullTitle ??
+          null,
         createdAt: sessionSummary?.createdAt ?? new Date().toISOString(),
         updatedAt: sessionSummary?.updatedAt ?? new Date().toISOString(),
         ...(catalogSummary && !bridgedSession
@@ -1069,11 +1221,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           : { messageCount: sessionSummary?.messageCount ?? 0 }),
         userQuestions: sessionSummary?.userQuestions,
         ownership,
-        provider:
-          sessionSummary?.provider ??
-          metadataProvider ??
-          process?.provider ??
-          project.provider,
+        provider: resolvedProvider,
         parentSessionId: sessionSummary?.parentSessionId,
         forkParentSessionId:
           metadata?.forkParentSessionId ?? sessionSummary?.forkParentSessionId,
@@ -1088,6 +1236,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         source: sessionSummary?.source,
         approvalPolicy: sessionSummary?.approvalPolicy,
         sandboxPolicy: sessionSummary?.sandboxPolicy,
+        branchState: forkBranchState ?? sessionSummary?.branchState,
+        codexBranchState: forkBranchState ?? sessionSummary?.codexBranchState,
         contextUsage: sessionSummary?.contextUsage,
         cumulativeUsage: sessionSummary?.cumulativeUsage,
         compactCount: sessionSummary?.compactCount,
@@ -1314,6 +1464,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
   //   ?deferMedia=1 - omit inline Pi image payloads from the first response
   //   ?deferThinking=1 - omit Pi thinking blocks from the first response
   //   ?view=canonical - explicitly request canonical overlay; default is legacy
+  //   ?projection=inspector - return only body-free Inspector index messages
   routes.get("/projects/:projectId/sessions/:sessionId", async (c) => {
     const serverTiming = new ServerTimingRecorder(SESSION_DETAIL_TIMING_NAMES);
     const applyServerTiming = () => {
@@ -1337,6 +1488,8 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const maxMessagesParam = c.req.query("maxMessages");
     const viewParam = c.req.query("view");
     const canonicalViewRequested = viewParam === "canonical";
+    const inspectorProjectionRequested =
+      c.req.query("projection") === "inspector";
     const tailCompactions =
       tailCompactionsParam !== undefined
         ? Number.parseInt(tailCompactionsParam, 10)
@@ -1878,6 +2031,25 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       }
     }
 
+    if (session && isCodexProviderName(session.provider)) {
+      const forkBranchState = await getCodexForkBranchState(
+        project,
+        sessionId,
+        session,
+        branchId,
+      );
+      if (forkBranchState) {
+        session = {
+          ...session,
+          branchState: forkBranchState,
+          codexBranchState: forkBranchState,
+          messages: annotateBranchMessages(session.messages, forkBranchState, {
+            includeCodexAlias: true,
+          }),
+        };
+      }
+    }
+
     const runtime = deriveSessionRuntime({
       process,
       externalActive: isExternal,
@@ -1922,6 +2094,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           deferMedia,
           deferThinking,
         });
+        await augmentPersistedSessionMessages(processMessages);
         // Extract context usage from raw SDK messages (has usage field)
         // Use process.contextWindow (captured from result messages) as primary source
         const mis = deps.modelInfoService;
@@ -2040,6 +2213,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
 
     // Get session metadata (custom title, archived, starred)
     const metadata = deps.sessionMetadataService?.getMetadata(sessionId);
+    if (metadata?.forkFamilyTitle) {
+      session = {
+        ...session,
+        title: metadata.forkFamilyTitle,
+        fullTitle: metadata.forkFamilyFullTitle ?? metadata.forkFamilyTitle,
+      };
+    }
     if (loadedSession?.historySource === "codex-app-server" && metadata) {
       session = {
         ...session,
@@ -2096,10 +2276,18 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       paginationInfo = sliced.pagination;
     }
 
-    // Keep persisted rendering in lockstep with stream augmentation behavior.
-    await serverTiming.measure("augment", () =>
-      augmentPersistedSessionMessages(session.messages),
-    );
+    // Inspector reads keep only safe, body-free index metadata. Do this before
+    // renderer augmentation so hidden tools never pay diff/Markdown work and
+    // no augment field can accidentally widen the public projection.
+    const responseMessages = inspectorProjectionRequested
+      ? projectSessionInspectorMessages(session.messages)
+      : session.messages;
+    if (!inspectorProjectionRequested) {
+      // Keep persisted rendering in lockstep with stream augmentation behavior.
+      await serverTiming.measure("augment", () =>
+        augmentPersistedSessionMessages(responseMessages),
+      );
+    }
 
     const persistedPendingInputRequest =
       activePendingInputRequest === null &&
@@ -2182,7 +2370,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         lastSeenAt,
         hasUnread,
       },
-      messages: session.messages,
+      messages: responseMessages,
       ownership,
       runtime,
       pendingInputRequest,

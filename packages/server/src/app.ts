@@ -1263,6 +1263,7 @@ export function createApp(options: AppOptions): AppResult {
       codexReaderFactory,
       codexAppServerHistoryReader,
       codexSessionCatalog,
+      sessionIndexService: options.sessionIndexService,
       geminiScanner,
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,

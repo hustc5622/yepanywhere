@@ -55,6 +55,11 @@ export interface SessionMetadata {
   permissionMode?: PermissionMode;
   /** Source session for a provider-native, source-preserving edit fork. */
   forkParentSessionId?: string;
+  /** Exact source user-message id replaced by this edit fork. */
+  forkTargetMessageId?: string;
+  /** Stable logical-session title shared by every member of the fork family. */
+  forkFamilyTitle?: string;
+  forkFamilyFullTitle?: string;
   /** Whether Yep created this session, or it was discovered from an external client. */
   createdBy?: SessionCreatedBy;
   /** Non-identifying inbound channel. Channel/chat identities are stored separately. */
@@ -419,6 +424,42 @@ export class SessionMetadataService {
     return this.getMetadata(sessionId)?.forkParentSessionId;
   }
 
+  async setEditForkMetadata(
+    sessionId: string,
+    input: {
+      forkParentSessionId: string;
+      forkTargetMessageId?: string;
+      forkFamilyTitle?: string;
+      forkFamilyFullTitle?: string;
+    },
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      forkParentSessionId: input.forkParentSessionId,
+      forkTargetMessageId: input.forkTargetMessageId,
+      forkFamilyTitle: input.forkFamilyTitle,
+      forkFamilyFullTitle: input.forkFamilyFullTitle,
+    }));
+    await this.save();
+  }
+
+  getForkTargetMessageId(sessionId: string): string | undefined {
+    return this.getMetadata(sessionId)?.forkTargetMessageId;
+  }
+
+  getForkFamilyTitle(
+    sessionId: string,
+  ): { title?: string; fullTitle?: string } | undefined {
+    const metadata = this.getMetadata(sessionId);
+    if (!metadata?.forkFamilyTitle && !metadata?.forkFamilyFullTitle) {
+      return undefined;
+    }
+    return {
+      title: metadata.forkFamilyTitle,
+      fullTitle: metadata.forkFamilyFullTitle,
+    };
+  }
+
   /**
    * Move metadata from a provider's temporary session ID to its durable ID.
    *
@@ -557,6 +598,15 @@ export class SessionMetadataService {
     }
     if (updated.forkParentSessionId) {
       cleaned.forkParentSessionId = updated.forkParentSessionId;
+    }
+    if (updated.forkTargetMessageId) {
+      cleaned.forkTargetMessageId = updated.forkTargetMessageId;
+    }
+    if (updated.forkFamilyTitle) {
+      cleaned.forkFamilyTitle = updated.forkFamilyTitle;
+    }
+    if (updated.forkFamilyFullTitle) {
+      cleaned.forkFamilyFullTitle = updated.forkFamilyFullTitle;
     }
     if (updated.createdBy) cleaned.createdBy = updated.createdBy;
     if (updated.originChannel) cleaned.originChannel = updated.originChannel;

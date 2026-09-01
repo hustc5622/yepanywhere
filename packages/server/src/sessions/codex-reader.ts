@@ -40,6 +40,11 @@ import {
 } from "@yep-anywhere/shared";
 import { isCodexImageGenerationRecord } from "../codex/image-generation.js";
 import { canonicalizeCodexToolName } from "../codex/normalization.js";
+import {
+  codexEventUserMessageClientId,
+  codexUserMessageIdentity,
+  collectCodexResponseUserClientIds,
+} from "../codex/user-message-identity.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type {
   ContentBlock,
@@ -150,6 +155,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function codexQuestionTurnId(payload: CodexResponseItemEntry["payload"]): {
+  turnId?: string;
+} {
+  if (payload.type !== "message") return {};
+  const turnId = payload.internal_chat_message_metadata_passthrough?.turn_id;
+  return typeof turnId === "string" && turnId
+    ? { turnId: `turn:${turnId}` }
+    : {};
+}
+
 function boundCodexSummaryText(value: string): string {
   return value.length <= CODEX_MAX_SUMMARY_TEXT_CHARS
     ? value
@@ -174,6 +189,8 @@ interface CodexSummaryScan {
   responseMessageCount: number;
   responseQuestions: SessionQuestion[];
   eventQuestions: SessionQuestion[];
+  responseQuestionsTruncated: boolean;
+  eventQuestionsTruncated: boolean;
   responseTitle: { title: string; fullTitle: string } | null;
   eventTitle: { title: string; fullTitle: string } | null;
   model?: string;
@@ -683,6 +700,9 @@ export class CodexSessionReader implements ISessionReader {
     let eventUserMessageCount = 0;
     let responseQuestionIndex = 0;
     let eventQuestionIndex = 0;
+    let responseQuestionsTruncated = false;
+    let eventQuestionsTruncated = false;
+    let pendingResponseQuestion: SessionQuestion | null = null;
     let responseTitle: { title: string; fullTitle: string } | null = null;
     let eventTitle: { title: string; fullTitle: string } | null = null;
     let model: string | undefined;
@@ -770,10 +790,11 @@ export class CodexSessionReader implements ISessionReader {
     const addQuestion = (
       target: SessionQuestion[],
       question: SessionQuestion | null,
-    ): void => {
-      if (question && target.length < CODEX_MAX_SUMMARY_ITEMS) {
-        target.push(question);
-      }
+    ): boolean => {
+      if (!question) return false;
+      if (target.length >= CODEX_MAX_SUMMARY_ITEMS) return true;
+      target.push(question);
+      return false;
     };
 
     const addBranchTurn = (
@@ -831,6 +852,9 @@ export class CodexSessionReader implements ISessionReader {
       }
 
       if (entry.type === "response_item") {
+        const isUserResponse =
+          entry.payload.type === "message" && entry.payload.role === "user";
+        if (!isUserResponse) pendingResponseQuestion = null;
         if (entry.payload.type === "message") {
           if (entry.payload.role === "user") {
             hasResponseItemUser = true;
@@ -853,17 +877,19 @@ export class CodexSessionReader implements ISessionReader {
               entry,
               `${responseQuestionIndex}-${entry.timestamp}`,
             );
-            addQuestion(
-              responseQuestions,
-              createSessionQuestion(
-                {
-                  id: `codex-${anchor}`,
-                  text,
-                  timestamp: entry.timestamp,
-                },
-                `codex-user-${anchor}`,
-              ),
+            const question = createSessionQuestion(
+              {
+                id: `codex-${anchor}`,
+                ...codexQuestionTurnId(entry.payload),
+                text,
+                timestamp: entry.timestamp,
+              },
+              `codex-user-${anchor}`,
             );
+            responseQuestionsTruncated =
+              addQuestion(responseQuestions, question) ||
+              responseQuestionsTruncated;
+            pendingResponseQuestion = question;
             responseQuestionIndex += 1;
           }
           if (
@@ -927,6 +953,16 @@ export class CodexSessionReader implements ISessionReader {
       if (entry.type !== "event_msg") continue;
       const payload = entry.payload;
       const payloadType = (payload as { type?: unknown }).type;
+      const userClientId = codexEventUserMessageClientId(payload);
+      if (userClientId) {
+        if (pendingResponseQuestion) {
+          Object.assign(
+            pendingResponseQuestion,
+            codexUserMessageIdentity(userClientId),
+          );
+        }
+        pendingResponseQuestion = null;
+      }
 
       if (payloadType === "thread_rolled_back") {
         hasRollbackMarker = true;
@@ -975,22 +1011,26 @@ export class CodexSessionReader implements ISessionReader {
           entry,
           `${eventQuestionIndex}-${entry.timestamp}`,
         );
-        addQuestion(
-          eventQuestions,
-          createSessionQuestion(
-            {
-              id: `codex-event-${anchor}`,
-              text: [
-                publicPrompt,
-                ...((payload as { images?: unknown[] }).images?.length
-                  ? ["[image]"]
-                  : []),
-              ].join("\n"),
-              timestamp: entry.timestamp,
-            },
-            `codex-event-user-${anchor}`,
-          ),
-        );
+        eventQuestionsTruncated =
+          addQuestion(
+            eventQuestions,
+            createSessionQuestion(
+              {
+                id: `codex-event-${anchor}`,
+                ...codexUserMessageIdentity(
+                  (payload as { client_id?: unknown }).client_id,
+                ),
+                text: [
+                  publicPrompt,
+                  ...((payload as { images?: unknown[] }).images?.length
+                    ? ["[image]"]
+                    : []),
+                ].join("\n"),
+                timestamp: entry.timestamp,
+              },
+              `codex-event-user-${anchor}`,
+            ),
+          ) || eventQuestionsTruncated;
         eventQuestionIndex += 1;
         continue;
       }
@@ -1119,6 +1159,8 @@ export class CodexSessionReader implements ISessionReader {
       responseMessageCount,
       responseQuestions,
       eventQuestions,
+      responseQuestionsTruncated,
+      eventQuestionsTruncated,
       responseTitle,
       eventTitle,
       model,
@@ -1626,6 +1668,13 @@ export class CodexSessionReader implements ISessionReader {
             ? scan.responseQuestions
             : scan.eventQuestions
           : undefined,
+      userQuestionCoverage: (
+        scan.hasResponseItemUser
+          ? scan.responseQuestionsTruncated
+          : scan.eventQuestionsTruncated
+      )
+        ? "partial"
+        : "complete",
       ownership: { owner: "none" },
       contextUsage: scan.contextUsage,
       cumulativeUsage,
@@ -1744,6 +1793,7 @@ export class CodexSessionReader implements ISessionReader {
           stats.mtime.toISOString(),
         messageCount,
         userQuestions,
+        userQuestionCoverage: "complete",
         ownership: { owner: "none" },
         contextUsage,
         cumulativeUsage,
@@ -2257,6 +2307,7 @@ export class CodexSessionReader implements ISessionReader {
   ): SessionQuestion[] {
     const questions: SessionQuestion[] = [];
     const hasResponseItemUser = this.hasResponseItemUserMessages(entries);
+    const responseUserClientIds = collectCodexResponseUserClientIds(entries);
     const compactedTimestamps = entries
       .filter((entry) => entry.type === "compacted")
       .map((entry) => timestampToMs(entry.timestamp))
@@ -2279,6 +2330,8 @@ export class CodexSessionReader implements ISessionReader {
           const question = createSessionQuestion(
             {
               id: `codex-${anchor}`,
+              ...codexQuestionTurnId(payload),
+              ...codexUserMessageIdentity(responseUserClientIds.get(entry)),
               text: this.extractCodexUserMessageText(payload.content),
               timestamp: entry.timestamp,
             },
@@ -2308,6 +2361,7 @@ export class CodexSessionReader implements ISessionReader {
         const question = createSessionQuestion(
           {
             id: `codex-event-${anchor}`,
+            ...codexUserMessageIdentity(entry.payload.client_id),
             text: [
               sanitizeCodexPublicUserPrompt(entry.payload.message),
               ...(entry.payload.images?.length ? ["[image]"] : []),

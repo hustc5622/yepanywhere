@@ -133,6 +133,12 @@ export interface Message {
   orphanedToolUseIds?: string[];
   /** Source tracking: "sdk" for streaming, "jsonl" for persisted */
   _source?: "sdk" | "jsonl";
+  /** Raw detail restored only for the active display live tail. */
+  _displayLiveTail?: boolean;
+  /** User prompt that owns a body-free Session Inspector index row. */
+  inspectorNavigationMessageId?: string;
+  /** Body-free boundary used to reconnect paginated Inspector rows to a turn. */
+  inspectorQuestionBoundary?: boolean;
   /** True if this message is from a Task subagent */
   isSubagent?: boolean;
   /** True if message is still being streamed (incomplete) */
@@ -184,6 +190,8 @@ export interface SessionNavigationState {
   initialProvider?: ProviderNameType;
   targetMessageId?: string;
   targetBranchId?: string;
+  /** Poll the newly-created native edit fork until its sibling graph lands. */
+  refreshBranchAfterNavigation?: boolean;
 }
 
 /**

@@ -137,6 +137,547 @@ describe("CodexAppServerHistoryReader", () => {
     expect(fake.readThread).not.toHaveBeenCalled();
   });
 
+  it("hydrates semantic turn pages through per-turn items/list reads", async () => {
+    const summaryTurn = {
+      id: "turn-semantic",
+      items: [
+        {
+          type: "userMessage" as const,
+          id: "summary-user",
+          clientId: "semantic-client",
+          content: [
+            { type: "text" as const, text: "Run checks", text_elements: [] },
+          ],
+        },
+        {
+          type: "agentMessage" as const,
+          id: "summary-final",
+          text: "Checks done",
+          phase: "final_answer" as const,
+          memoryCitation: null,
+        },
+      ],
+      itemsView: "summary" as const,
+      status: "completed" as const,
+      error: null,
+      startedAt: 1_777_000_010,
+      completedAt: 1_777_000_020,
+      durationMs: 10_000,
+    };
+    const listTurns = vi.fn(async () => ({
+      data: [summaryTurn],
+      nextCursor: "older-turns",
+      backwardsCursor: null,
+    }));
+    const listItems = vi.fn(async () => ({
+      data: [
+        {
+          turnId: "turn-semantic",
+          item: summaryTurn.items[0],
+        },
+        {
+          turnId: "turn-semantic",
+          item: {
+            type: "commandExecution" as const,
+            id: "semantic-command",
+            pluginId: null,
+            scriptPath: null,
+            command: "pnpm test",
+            cwd: "/tmp/project",
+            processId: null,
+            source: "agent" as const,
+            status: "completed" as const,
+            commandActions: [],
+            aggregatedOutput: "passed",
+            exitCode: 0,
+            durationMs: 10,
+          },
+        },
+        {
+          turnId: "turn-semantic",
+          item: summaryTurn.items[1],
+        },
+      ],
+      nextCursor: null,
+      backwardsCursor: null,
+    }));
+    const fake = client({ listTurns, listItems });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+
+    const result = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 20, itemsView: "full" },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    expect(result.nextCursor).toBe("older-turns");
+    expect(result.revision).toBe(`cas1.${thread().updatedAt}.${thread().id}`);
+    expect(result.messages.map((message) => message.uuid)).toEqual([
+      "summary-user-turn-semantic",
+      "semantic-command-turn-semantic",
+      "semantic-command-turn-semantic-result",
+      "summary-final-turn-semantic",
+    ]);
+    expect(listTurns).toHaveBeenCalledWith(
+      expect.objectContaining({ itemsView: "summary", limit: 20 }),
+    );
+    expect(listItems).toHaveBeenCalledWith(
+      expect.objectContaining({
+        turnId: "turn-semantic",
+        sortDirection: "asc",
+      }),
+    );
+
+    const exact = await reader.getSemanticTurn(
+      thread().id,
+      "/tmp/project",
+      "turn-semantic",
+      result.revision,
+    );
+    expect(exact.kind).toBe("loaded");
+    if (exact.kind === "loaded") {
+      expect(exact.messages).toHaveLength(4);
+    }
+  });
+
+  it("hydrates all same-turn user items for the complete question directory", async () => {
+    const fake = client({
+      listTurns: vi.fn(async () => ({
+        data: [
+          {
+            id: "turn-question",
+            items: [
+              {
+                type: "userMessage" as const,
+                id: "question-user",
+                clientId: null,
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "Question only",
+                    text_elements: [],
+                  },
+                ],
+              },
+              {
+                type: "agentMessage" as const,
+                id: "question-final",
+                text: "Answer only",
+                phase: "final_answer" as const,
+                memoryCitation: null,
+              },
+            ],
+            itemsView: "summary" as const,
+            status: "completed" as const,
+            error: null,
+            startedAt: 1_777_000_010,
+            completedAt: 1_777_000_020,
+            durationMs: 10_000,
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+      listItems: vi.fn(async () => ({
+        data: [
+          {
+            turnId: "turn-question",
+            item: {
+              type: "userMessage" as const,
+              id: "question-user",
+              clientId: null,
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Question only",
+                  text_elements: [],
+                },
+              ],
+            },
+          },
+          {
+            turnId: "turn-question",
+            item: {
+              type: "commandExecution" as const,
+              id: "hidden-command",
+              pluginId: null,
+              scriptPath: null,
+              command: "secret command",
+              cwd: "/tmp/project",
+              processId: null,
+              source: "agent" as const,
+              status: "completed" as const,
+              commandActions: [],
+              aggregatedOutput: "secret output",
+              exitCode: 0,
+              durationMs: 1,
+            },
+          },
+          {
+            turnId: "turn-question",
+            item: {
+              type: "userMessage" as const,
+              id: "steer-user",
+              clientId: "steer-client",
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Steer question",
+                  text_elements: [],
+                },
+              ],
+            },
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+
+    const result = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 100, itemsView: "summary" },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind === "loaded") {
+      expect(result.messages.map((message) => message.type)).toEqual([
+        "user",
+        "user",
+      ]);
+      expect(JSON.stringify(result.messages)).not.toContain("secret command");
+      expect(JSON.stringify(result.messages)).not.toContain("secret output");
+    }
+    expect(fake.listItems).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps inherited fork turns when semantic pages contain local media", async () => {
+    const forkedThread = {
+      ...thread(),
+      forkedFromId: "0198f000-0000-7000-8000-000000000000",
+    };
+    const listTurns = vi.fn(async () => ({
+      data: [
+        {
+          id: "turn-edited",
+          items: [],
+          itemsView: "summary" as const,
+          status: "completed" as const,
+          error: null,
+          startedAt: 1_777_000_030,
+          completedAt: 1_777_000_040,
+          durationMs: 10_000,
+        },
+        {
+          id: "turn-inherited-media",
+          items: [],
+          itemsView: "summary" as const,
+          status: "completed" as const,
+          error: null,
+          startedAt: 1_777_000_010,
+          completedAt: 1_777_000_020,
+          durationMs: 10_000,
+        },
+      ],
+      nextCursor: null,
+      backwardsCursor: null,
+    }));
+    const listItems = vi.fn(async ({ turnId }: { turnId: string }) => ({
+      data:
+        turnId === "turn-edited"
+          ? [
+              {
+                turnId,
+                item: {
+                  type: "userMessage" as const,
+                  id: "edited-user",
+                  clientId: "edited-client",
+                  content: [
+                    {
+                      type: "text" as const,
+                      text: "Edited question",
+                      text_elements: [],
+                    },
+                  ],
+                },
+              },
+            ]
+          : [
+              {
+                turnId,
+                item: {
+                  type: "userMessage" as const,
+                  id: "inherited-user",
+                  clientId: "inherited-client",
+                  content: [
+                    {
+                      type: "text" as const,
+                      text: "Question with screenshot",
+                      text_elements: [],
+                    },
+                    {
+                      type: "localImage" as const,
+                      path: "/tmp/project/screenshot.png",
+                    },
+                  ],
+                },
+              },
+              {
+                turnId,
+                item: {
+                  type: "imageView" as const,
+                  id: "image-view",
+                  path: "/tmp/project/screenshot.png",
+                },
+              },
+            ],
+      nextCursor: null,
+      backwardsCursor: null,
+    }));
+    const fake = client({
+      readThread: vi.fn(async () => ({ thread: forkedThread })),
+      listTurns,
+      listItems,
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+
+    const result = await reader.getSemanticTurnsPage(
+      forkedThread.id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 40, itemsView: "full" },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    expect(result.messages.map((message) => message.uuid)).toEqual([
+      "inherited-user-turn-inherited-media",
+      "image-view-turn-inherited-media",
+      "image-view-turn-inherited-media-result",
+      "edited-user-turn-edited",
+    ]);
+    expect(result.messages[0]?.message?.content).toEqual([
+      { type: "text", text: "Question with screenshot" },
+      {
+        type: "input_image",
+        file_path: "/tmp/project/screenshot.png",
+        deferred: true,
+      },
+    ]);
+    expect(result.messages[1]?.message?.content).toEqual([
+      {
+        type: "tool_use",
+        id: "image-view",
+        name: "ViewImage",
+        input: { path: "/tmp/project/screenshot.png" },
+      },
+    ]);
+    expect(JSON.stringify(result.messages)).not.toContain("data:image");
+
+    const exact = await reader.getSemanticTurn(
+      forkedThread.id,
+      "/tmp/project",
+      "turn-inherited-media",
+      result.revision,
+    );
+    expect(exact.kind).toBe("loaded");
+    if (exact.kind === "loaded") {
+      expect(exact.messages).toHaveLength(3);
+    }
+  });
+
+  it("projects hydrated question-page local media as deferred", async () => {
+    const localImage = {
+      type: "userMessage" as const,
+      id: "summary-local-image",
+      clientId: "summary-local-client",
+      content: [
+        {
+          type: "text" as const,
+          text: "Inspect this image",
+          text_elements: [],
+        },
+        {
+          type: "localImage" as const,
+          path: "/tmp/project/summary.png",
+        },
+      ],
+    };
+    const fake = client({
+      listTurns: vi.fn(async () => ({
+        data: [
+          {
+            id: "turn-summary-media",
+            items: [localImage],
+            itemsView: "summary" as const,
+            status: "completed" as const,
+            error: null,
+            startedAt: 1_777_000_010,
+            completedAt: 1_777_000_020,
+            durationMs: 10_000,
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+      listItems: vi.fn(async () => ({
+        data: [{ turnId: "turn-summary-media", item: localImage }],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+
+    const result = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 40, itemsView: "summary" },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    expect(result.messages[0]?.message?.content).toEqual([
+      { type: "text", text: "Inspect this image" },
+      {
+        type: "input_image",
+        file_path: "/tmp/project/summary.png",
+        deferred: true,
+      },
+    ]);
+    expect(fake.listItems).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses an opaque semantic notice for an unknown future ThreadItem", async () => {
+    const fake = client({
+      listItems: vi.fn(async () => ({
+        data: [
+          {
+            turnId: "turn-1",
+            item: {
+              type: "futureSecretItem",
+              id: "future-secret",
+              secret: "must-not-leak",
+            },
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+
+    const result = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 40, itemsView: "full" },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    expect(result.messages).toEqual([
+      expect.objectContaining({
+        uuid: "future-secret-turn-1",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItem: { type: "futureSecretItem" },
+      }),
+    ]);
+    expect(JSON.stringify(result.messages)).not.toContain("must-not-leak");
+  });
+
+  it("builds b1/b2 navigation across a native Codex fork family", async () => {
+    const userEntry = (turnId: string, itemId: string, text: string) => ({
+      turnId,
+      item: {
+        type: "userMessage" as const,
+        id: itemId,
+        clientId: null,
+        content: [{ type: "text" as const, text, text_elements: [] }],
+      },
+    });
+    const rootItems = [
+      userEntry("turn-a", "user-a", "a"),
+      // Multiple steered user messages can share one native turn. The stored
+      // target must select b rather than the first post-prefix message x.
+      userEntry("turn-steered", "user-x", "x"),
+      userEntry("turn-b", "user-b", "b"),
+      userEntry("turn-c", "user-c", "c"),
+    ];
+    const childItems = [
+      userEntry("turn-a", "user-a", "a"),
+      // Keep the same text as b: retained native identity, not text, proves
+      // that this is the replacement rather than copied history.
+      userEntry("turn-b2", "user-b2", "b"),
+      userEntry("turn-d", "user-d", "d"),
+    ];
+    const fake = client({
+      listItems: vi.fn(async ({ threadId }: { threadId: string }) => ({
+        data: threadId === "child" ? childItems : rootItems,
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+    const candidates = [
+      {
+        id: "root",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        provider: "codex" as const,
+      },
+      {
+        id: "child",
+        forkParentSessionId: "root",
+        forkTargetMessageId: "user-b-turn-b",
+        createdAt: "2026-09-01T00:01:00.000Z",
+        provider: "codex" as const,
+      },
+    ];
+
+    const state = await reader.getForkBranchState(
+      "child",
+      candidates,
+      "user-b2-turn-b2",
+    );
+
+    expect(state).toMatchObject({
+      sessionId: "child",
+      provider: "codex",
+      activeBranchId: "user-d-turn-d",
+      selectedBranchId: "user-b2-turn-b2",
+    });
+    const branches = new Map(
+      state?.branches.map((branch) => [branch.id, branch]),
+    );
+    expect(branches.get("user-b-turn-b")).toMatchObject({
+      sessionId: "root",
+      parentId: "user-x-turn-steered",
+      siblingIndex: 1,
+      siblingCount: 2,
+      isActive: false,
+    });
+    expect(branches.get("user-b2-turn-b2")).toMatchObject({
+      sessionId: "child",
+      parentId: "user-x-turn-steered",
+      siblingIndex: 2,
+      siblingCount: 2,
+      isActive: true,
+    });
+    expect(branches.get("user-c-turn-c")?.parentId).toBe("user-b-turn-b");
+    expect(branches.get("user-d-turn-d")?.parentId).toBe("user-b2-turn-b2");
+
+    const rootState = await reader.getForkBranchState("root", candidates);
+    expect(rootState?.activeBranchId).toBe("user-c-turn-c");
+    expect(rootState?.branches).toHaveLength(6);
+  });
+
   it("maps a bounded paginated item page without reading the rollout", async () => {
     const fake = client();
     const reader = new CodexAppServerHistoryReader({ client: fake });

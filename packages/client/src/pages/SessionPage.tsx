@@ -1,5 +1,7 @@
 import type {
   ProviderName,
+  SessionDisplayPage,
+  SessionDisplaySegment,
   UploadedFile,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
@@ -65,6 +67,7 @@ import {
   resolveCodexSkillInputs,
 } from "../lib/codexInputCommands";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
+import { groupToolsBeforeAssistantOutput } from "../lib/liveToolGrouping";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
 import { preprocessMessages } from "../lib/preprocessMessages";
@@ -81,6 +84,11 @@ import {
   shouldRestoreHistoricalEditAfterFailure,
   supportsHistoricalMessageEditing,
 } from "../lib/sessionBranching";
+import {
+  buildSessionDisplayRenderItems,
+  mergeSessionInspectorMessages,
+  resolveSessionInspectorNavigation,
+} from "../lib/sessionDisplay";
 import { generateUUID } from "../lib/uuid";
 import type { Message, Session, SessionNavigationState } from "../types";
 import { getSessionDisplayTitle } from "../utils";
@@ -118,6 +126,60 @@ function isCodexAppServerProvider(
   provider: ProviderName | string | undefined | null,
 ): provider is "codex" {
   return provider === "codex";
+}
+
+type DisplayNotice = Extract<SessionDisplaySegment, { type: "notice" }>;
+type Translate = ReturnType<typeof useI18n>["t"];
+
+function formatDisplayNotice(notice: DisplayNotice, t: Translate): string {
+  const detail = notice.message ?? notice.title;
+  const withDetail = (label: string) =>
+    detail && detail !== label ? `${label}: ${detail}` : label;
+  switch (notice.kind) {
+    case "session_setup":
+      return t("sessionDisplaySetup", { count: notice.count ?? 1 });
+    case "compaction":
+      return t("sessionDisplayCompaction");
+    case "warning":
+      return withDetail(t("sessionDisplayWarning"));
+    case "turn_aborted":
+      return t("sessionDisplayTurnAborted");
+    case "goal":
+      return withDetail(t("sessionDisplayGoal"));
+    case "plan":
+      return withDetail(t("sessionDisplayPlan"));
+    case "subagent":
+      return withDetail(t("sessionDisplaySubagent"));
+    case "provider_event":
+      return withDetail(t("sessionDisplayProviderEvent"));
+  }
+}
+
+function calculateDisplayForkExcludedTurns(
+  page: SessionDisplayPage | null,
+  messageId: string,
+): number | null {
+  if (!page) return null;
+  const questions = page.turns.flatMap((turn) =>
+    turn.question ? [turn.question] : [],
+  );
+  const index = questions.findIndex(
+    (question) => question.messageId === messageId,
+  );
+  if (index < 0) return null;
+  const excluded = questions.length - index;
+  return excluded > 0 ? excluded : null;
+}
+
+function isRetryableInspectorHistoryError(error: unknown): boolean {
+  const code =
+    error && typeof error === "object"
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return (
+    code === "SESSION_HISTORY_CURSOR_STALE" ||
+    code === "SESSION_HISTORY_CHANGED"
+  );
 }
 
 function getApprovalAgentName(
@@ -198,6 +260,7 @@ function SessionPageContent({
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedBranchId = searchParams.get("branch") || undefined;
+  const displayHistoryEnabled = searchParams.get("history") !== "legacy";
   // Get initial status and title from navigation state (passed by NewSessionPage)
   // This allows SSE to connect immediately and show optimistic title without waiting for getSession
   // Also get provider so provider-specific controls can render immediately
@@ -230,6 +293,10 @@ function SessionPageContent({
   const {
     session,
     messages,
+    displayPage,
+    displayQuestions,
+    displayQuestionCoverage,
+    hydratedLiveTailDetailRef,
     agentContent,
     setAgentContent,
     toolUseToAgent,
@@ -282,6 +349,7 @@ function SessionPageContent({
     initialStatus,
     streamingMarkdownCallbacks,
     selectedBranchId,
+    displayHistoryEnabled,
   );
   const retryActionLink = normalizeExternalHttpUrl(
     turnHealth?.retryStatus?.actionLink,
@@ -343,6 +411,7 @@ function SessionPageContent({
   const editBranchRefreshTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
+  const forkBranchRefreshSessionRef = useRef<string | null>(null);
   // Deep-link target message (from search or cross-session branch navigation).
   const [targetMessageId, setTargetMessageId] = useState<string | null>(
     initialBranchFocus.messageId,
@@ -353,6 +422,21 @@ function SessionPageContent({
     setIsExpanded: setInspectorExpanded,
   } = useSessionInspectorPreference();
   const [isSessionSearchOpen, setSessionSearchOpen] = useState(false);
+  const [legacyInspectorMessages, setLegacyInspectorMessages] = useState<
+    Message[] | null
+  >(null);
+  const [legacyInspectorLoading, setLegacyInspectorLoading] = useState(false);
+  const [legacyInspectorError, setLegacyInspectorError] = useState(false);
+  const legacyInspectorLoadGenerationRef = useRef(0);
+  const legacyInspectorRevisionRef = useRef<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: session/branch identity intentionally invalidates the derived Inspector index
+  useEffect(() => {
+    legacyInspectorLoadGenerationRef.current += 1;
+    legacyInspectorRevisionRef.current = null;
+    setLegacyInspectorMessages(null);
+    setLegacyInspectorLoading(false);
+    setLegacyInspectorError(false);
+  }, [actualSessionId, selectedBranchId]);
   const handleTargetFocused = useCallback(() => {
     setTargetMessageId(null);
   }, []);
@@ -366,6 +450,152 @@ function SessionPageContent({
   const handleCloseSessionSearch = useCallback(() => {
     setSessionSearchOpen(false);
   }, []);
+
+  const loadLegacyInspectorHistory = useCallback(
+    async (force = false) => {
+      if (
+        !displayPage ||
+        (!force && legacyInspectorMessages) ||
+        legacyInspectorLoading
+      )
+        return;
+      const generation = ++legacyInspectorLoadGenerationRef.current;
+      const projectedRevision = displayPage.revision;
+      setLegacyInspectorLoading(true);
+      setLegacyInspectorError(false);
+      try {
+        let loaded: Message[] | null = null;
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            let data = await api.getSession(
+              projectId,
+              actualSessionId,
+              undefined,
+              {
+                view: "canonical",
+                inspectorProjection: true,
+                tailCompactions: 2,
+                maxMessages: 100,
+                branchId: selectedBranchId,
+              },
+            );
+            let snapshot = data.messages.map((message) => ({
+              ...message,
+              _source: "jsonl" as const,
+            }));
+            for (let pageIndex = 0; pageIndex < 1_000; pageIndex += 1) {
+              const paginationInfo = data.pagination;
+              if (
+                !paginationInfo?.hasOlderMessages ||
+                !paginationInfo.truncatedBeforeMessageId
+              ) {
+                break;
+              }
+              data = await api.getSession(
+                projectId,
+                actualSessionId,
+                undefined,
+                {
+                  view: "canonical",
+                  inspectorProjection: true,
+                  tailCompactions: 2,
+                  maxMessages: 100,
+                  beforeMessageId: paginationInfo.truncatedBeforeMessageId,
+                  rolloutRevision: paginationInfo.rolloutRevision,
+                  branchId: selectedBranchId,
+                },
+              );
+              snapshot = [
+                ...data.messages.map((message) => ({
+                  ...message,
+                  _source: "jsonl" as const,
+                })),
+                ...snapshot,
+              ];
+            }
+            if (data.pagination?.hasOlderMessages) {
+              throw new Error(
+                "Session index exceeds the safe pagination budget",
+              );
+            }
+            loaded = snapshot;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (attempt === 0 && isRetryableInspectorHistoryError(error)) {
+              continue;
+            }
+            throw error;
+          }
+        }
+        if (!loaded)
+          throw lastError ?? new Error("Session index is unavailable");
+        if (generation !== legacyInspectorLoadGenerationRef.current) return;
+        const seen = new Set<string>();
+        setLegacyInspectorMessages(
+          resolveSessionInspectorNavigation(
+            loaded.filter((message) => {
+              const id = getMessageId(message);
+              if (seen.has(id)) return false;
+              seen.add(id);
+              return true;
+            }),
+          ),
+        );
+        legacyInspectorRevisionRef.current = projectedRevision;
+      } catch (error) {
+        if (generation !== legacyInspectorLoadGenerationRef.current) return;
+        console.error("Failed to load session inspector index:", error);
+        if (force && legacyInspectorMessages) {
+          // Keep the last complete safe index and wait for the next revision
+          // instead of turning one transient idle refresh into a retry loop.
+          legacyInspectorRevisionRef.current = projectedRevision;
+          return;
+        }
+        setLegacyInspectorError(true);
+        showToast(t("sessionInspectorDetailsLoadFailed"), "error");
+      } finally {
+        if (generation === legacyInspectorLoadGenerationRef.current) {
+          setLegacyInspectorLoading(false);
+        }
+      }
+    },
+    [
+      actualSessionId,
+      displayPage,
+      legacyInspectorLoading,
+      legacyInspectorMessages,
+      projectId,
+      selectedBranchId,
+      showToast,
+      t,
+    ],
+  );
+
+  useEffect(() => {
+    if (
+      !displayPage ||
+      !legacyInspectorMessages ||
+      legacyInspectorLoading ||
+      processState !== "idle" ||
+      legacyInspectorRevisionRef.current === displayPage.revision
+    ) {
+      return;
+    }
+    void loadLegacyInspectorHistory(true);
+  }, [
+    displayPage,
+    legacyInspectorLoading,
+    legacyInspectorMessages,
+    loadLegacyInspectorHistory,
+    processState,
+  ]);
+
+  const inspectorMessages = useMemo(
+    () => mergeSessionInspectorMessages(legacyInspectorMessages, messages),
+    [legacyInspectorMessages, messages],
+  );
 
   // React Router can reuse this component when only the session parameter
   // changes, so useState initializers alone are not enough for cross-session
@@ -394,15 +624,19 @@ function SessionPageContent({
     }: { text: string; uuid: string; parentUuid: string | null }) => {
       if (isViewingHistoricalBranch) return;
       const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
-        ? calculateCodexForkExcludedTurns(messagesRef.current, uuid)
+        ? (calculateDisplayForkExcludedTurns(displayPage, uuid) ??
+          calculateCodexForkExcludedTurns(messagesRef.current, uuid))
         : null;
       const editedMessage = messagesRef.current.find(
         (message) => getMessageId(message) === uuid,
       );
+      const displayQuestion = displayPage?.turns
+        .flatMap((turn) => (turn.question ? [turn.question] : []))
+        .find((question) => question.messageId === uuid);
       const timestamp =
         typeof editedMessage?.timestamp === "string"
           ? editedMessage.timestamp
-          : undefined;
+          : displayQuestion?.timestamp;
       setEditRewind({
         parentUuid,
         uuid,
@@ -413,7 +647,7 @@ function SessionPageContent({
       draftControlsRef.current?.setText(text);
       setScrollTrigger((prev) => prev + 1);
     },
-    [effectiveProvider, isViewingHistoricalBranch],
+    [displayPage, effectiveProvider, isViewingHistoricalBranch],
   );
 
   const handleSelectBranch = useCallback(
@@ -508,6 +742,19 @@ function SessionPageContent({
   useEffect(() => clearEditBranchRefreshTimer, [clearEditBranchRefreshTimer]);
 
   useEffect(() => {
+    if (
+      !navState?.refreshBranchAfterNavigation ||
+      forkBranchRefreshSessionRef.current === sessionId
+    ) {
+      return;
+    }
+    forkBranchRefreshSessionRef.current = sessionId;
+    editBranchRefreshAttemptsRef.current = 0;
+    clearEditBranchRefreshTimer();
+    setPendingEditBranchRefresh(true);
+  }, [clearEditBranchRefreshTimer, navState, sessionId]);
+
+  useEffect(() => {
     if (!pendingEditBranchRefresh) return;
 
     let cancelled = false;
@@ -517,13 +764,16 @@ function SessionPageContent({
       if (cancelled) return;
 
       const attempt = editBranchRefreshAttemptsRef.current;
-      if (hasBranchChoices(refreshedSession) || attempt >= 2) {
+      if (hasBranchChoices(refreshedSession) || attempt >= 9) {
         setPendingEditBranchRefresh(false);
         return;
       }
 
       editBranchRefreshAttemptsRef.current = attempt + 1;
-      editBranchRefreshTimerRef.current = setTimeout(refreshActiveBranch, 600);
+      editBranchRefreshTimerRef.current = setTimeout(
+        refreshActiveBranch,
+        Math.min(1_500, 300 + attempt * 200),
+      );
     };
 
     clearEditBranchRefreshTimer();
@@ -887,6 +1137,7 @@ function SessionPageContent({
           currentAttachments.length > 0 ? currentAttachments : undefined;
         const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
           ? (editRewind.rollbackNumTurns ??
+            calculateDisplayForkExcludedTurns(displayPage, editRewind.uuid) ??
             calculateCodexForkExcludedTurns(messages, editRewind.uuid))
           : editRewind.rollbackNumTurns;
         const editSubmission = resolveSessionEditSubmission(effectiveProvider, {
@@ -908,6 +1159,7 @@ function SessionPageContent({
               // Original prompt identity so the server can recompute the
               // fork exclusion count from the persisted Codex turn tree.
               {
+                messageId: editRewind.uuid,
                 timestamp: editRewind.timestamp,
                 text: editRewind.preview,
               },
@@ -935,6 +1187,8 @@ function SessionPageContent({
                   processId: result.processId,
                 },
                 initialProvider: effectiveProvider,
+                initialTitle: session?.title ?? undefined,
+                refreshBranchAfterNavigation: true,
               },
             },
           );
@@ -1587,8 +1841,20 @@ function SessionPageContent({
     (hasSessionUpdateStream && !sessionUpdatesConnected);
 
   const renderItems = useMemo(() => {
+    const displayItems = displayPage
+      ? buildSessionDisplayRenderItems(displayPage, {
+          projectId,
+          branchId: selectedBranchId,
+          branchState: session?.branchState ?? session?.codexBranchState,
+          omitToolGroupDetailRef: hydratedLiveTailDetailRef,
+          formatNotice: (notice) => formatDisplayNotice(notice, t),
+        })
+      : [];
+    const timelineMessages = displayPage
+      ? messages.filter((message) => message._source !== "jsonl")
+      : messages;
     const result = preprocessMessagesCached(
-      messages,
+      timelineMessages,
       {
         markdown: markdownAugments,
         activeToolApproval,
@@ -1596,8 +1862,23 @@ function SessionPageContent({
       preprocessCacheRef.current,
     );
     preprocessCacheRef.current = result.cache;
-    return result.renderItems;
-  }, [messages, markdownAugments, activeToolApproval]);
+    const combined = [...displayItems, ...result.renderItems];
+    return displayHistoryEnabled
+      ? groupToolsBeforeAssistantOutput(combined)
+      : combined;
+  }, [
+    displayPage,
+    hydratedLiveTailDetailRef,
+    messages,
+    markdownAugments,
+    activeToolApproval,
+    projectId,
+    selectedBranchId,
+    session?.branchState,
+    session?.codexBranchState,
+    t,
+    displayHistoryEnabled,
+  ]);
 
   // Detect if session has pending tool calls without results
   // This can happen when the session is unowned but was active in another process (VS Code, CLI)
@@ -1606,9 +1887,15 @@ function SessionPageContent({
     if (status.owner !== "none") return false;
     return renderItems.some(
       (item) =>
-        item.type === "tool_call" &&
-        item.status === "pending" &&
-        item.toolResult === undefined,
+        (item.type === "tool_call" &&
+          item.status === "pending" &&
+          item.toolResult === undefined) ||
+        (item.type === "assistant_output_tool_group" &&
+          item.tools.some(
+            (tool) =>
+              tool.status === "pending" && tool.toolResult === undefined,
+          )) ||
+        (item.type === "display_tool_group" && item.group.status === "running"),
     );
   }, [renderItems, status.owner]);
 
@@ -2197,7 +2484,11 @@ function SessionPageContent({
                   }
                   markdownAugments={markdownAugments}
                   activeToolApproval={activeToolApproval}
-                  hasOlderMessages={pagination?.hasOlderMessages}
+                  hasOlderMessages={
+                    displayPage
+                      ? Boolean(displayPage.nextCursor)
+                      : pagination?.hasOlderMessages
+                  }
                   hasNewerMessages={pagination?.hasNewerMessages}
                   loadingOlder={loadingOlder}
                   loadingNewer={loadingNewer}
@@ -2431,8 +2722,17 @@ function SessionPageContent({
           <SessionInspector
             presentation="sidebar"
             onClose={() => setInspectorExpanded(false)}
-            messages={messages}
-            userQuestions={session?.userQuestions}
+            messages={inspectorMessages}
+            userQuestions={
+              displayPage ? displayQuestions : session?.userQuestions
+            }
+            questionCoverage={
+              displayPage ? displayQuestionCoverage : "complete"
+            }
+            hasLegacyDetails={!displayPage || legacyInspectorMessages !== null}
+            legacyDetailsLoading={legacyInspectorLoading}
+            legacyDetailsError={legacyInspectorError}
+            onLoadLegacyDetails={() => loadLegacyInspectorHistory()}
             markdownAugments={markdownAugments}
             activeToolApproval={activeToolApproval}
             projectId={projectId}
@@ -2452,8 +2752,15 @@ function SessionPageContent({
           presentation="drawer"
           isOpen={isInspectorDrawerOpen}
           onClose={() => setInspectorDrawerOpen(false)}
-          messages={messages}
-          userQuestions={session?.userQuestions}
+          messages={inspectorMessages}
+          userQuestions={
+            displayPage ? displayQuestions : session?.userQuestions
+          }
+          questionCoverage={displayPage ? displayQuestionCoverage : "complete"}
+          hasLegacyDetails={!displayPage || legacyInspectorMessages !== null}
+          legacyDetailsLoading={legacyInspectorLoading}
+          legacyDetailsError={legacyInspectorError}
+          onLoadLegacyDetails={() => loadLegacyInspectorHistory()}
           markdownAugments={markdownAugments}
           activeToolApproval={activeToolApproval}
           projectId={projectId}

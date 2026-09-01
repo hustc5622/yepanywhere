@@ -42,6 +42,7 @@ export interface CachedSessionSummary {
   updatedAt: string;
   messageCount: number;
   userQuestions?: SessionSummary["userQuestions"];
+  userQuestionCoverage?: SessionSummary["userQuestionCoverage"];
   contextUsage?: { inputTokens: number; percentage: number };
   cumulativeUsage?: ContextCumulativeUsage;
   compactCount?: number;
@@ -85,16 +86,15 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
-  // v11 anchors Codex message/question ids to entry byte offsets instead of a
-  // running counter, so cached `userQuestions[].id` values from v10 no longer
-  // match the ids the reader now produces. The strict equality check below
-  // discards the old index and rebuilds it.
-  version: 11;
+  // v12 persists question coverage so a bounded Codex summary cannot be
+  // mistaken for a complete directory. It also rebuilds v11 entries whose
+  // question ids were already byte-offset stable but lacked this field.
+  version: 12;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 11;
+const CURRENT_VERSION = 12;
 
 function needsPiTurnStatusMigration(index: SessionIndexState): boolean {
   return Object.values(index.sessions).some(
@@ -638,6 +638,7 @@ export class SessionIndexService implements ISessionIndexService {
       updatedAt: cached.updatedAt,
       messageCount: cached.messageCount,
       userQuestions: cached.userQuestions,
+      userQuestionCoverage: cached.userQuestionCoverage,
       ownership: { owner: "none" },
       contextUsage: cached.contextUsage,
       cumulativeUsage: cached.cumulativeUsage,
@@ -671,6 +672,7 @@ export class SessionIndexService implements ISessionIndexService {
       updatedAt: summary.updatedAt,
       messageCount: summary.messageCount,
       userQuestions: summary.userQuestions,
+      userQuestionCoverage: summary.userQuestionCoverage,
       contextUsage: summary.contextUsage,
       cumulativeUsage: summary.cumulativeUsage,
       compactCount: summary.compactCount,
@@ -969,6 +971,7 @@ export class SessionIndexService implements ISessionIndexService {
             updatedAt: cached.updatedAt,
             messageCount: cached.messageCount,
             userQuestions: cached.userQuestions,
+            userQuestionCoverage: cached.userQuestionCoverage,
             ownership: { owner: "none" },
             contextUsage: cached.contextUsage,
             cumulativeUsage: cached.cumulativeUsage,

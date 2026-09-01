@@ -497,6 +497,7 @@ export function useSession(
   initialStatus?: Extract<SessionStatus, { owner: "self" }>,
   streamingMarkdownCallbacks?: StreamingMarkdownCallbacks,
   branchId?: string,
+  preferDisplayHistory = true,
 ) {
   // Use initial status if provided (from navigation state) to connect stream immediately
   const [status, setStatus] = useState<SessionStatus>(
@@ -678,6 +679,10 @@ export function useSession(
   // Use the session messages hook for message state and stream buffering
   const {
     messages,
+    displayPage,
+    displayQuestions,
+    displayQuestionCoverage,
+    hydratedLiveTailDetailRef,
     agentContent,
     toolUseToAgent,
     toolUseToAgentIds,
@@ -710,6 +715,9 @@ export function useSession(
     projectId,
     sessionId,
     branchId,
+    preferDisplayHistory,
+    displayHistoryEligible: status.owner === "none" && processState === "idle",
+    displayHistoryLiveOwned: status.owner === "self",
     onLoadComplete: handleLoadComplete,
     onLoadError: handleLoadError,
   });
@@ -851,7 +859,7 @@ export function useSession(
       }
       authoritativeSnapshotRefreshTimerRef.current = null;
       const refreshed = await refreshSessionMessages(
-        provider === "kimi"
+        provider === "kimi" && !displayPage
           ? {
               replaceMessages: true,
               acceptSnapshot: ({ messages: persistedMessages }) =>
@@ -882,7 +890,7 @@ export function useSession(
     authoritativeSnapshotRefreshTimerRef.current = setTimeout(() => {
       void refresh(0);
     }, initialDelay);
-  }, [refreshSessionMessages, session?.provider]);
+  }, [displayPage, refreshSessionMessages, session?.provider]);
 
   useEffect(() => {
     return () => {
@@ -2103,6 +2111,10 @@ export function useSession(
     session,
     setSessionModel,
     messages,
+    displayPage,
+    displayQuestions,
+    displayQuestionCoverage,
+    hydratedLiveTailDetailRef,
     agentContent, // Subagent messages keyed by agentId (for Task tool)
     setAgentContent, // Setter for merging lazy-loaded agent content
     toolUseToAgent, // Mapping from Task tool_use_id → agentId (for rendering during streaming)

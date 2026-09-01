@@ -104,6 +104,38 @@ describe("provider fork lineage resolution", () => {
     });
   });
 
+  it("keeps one logical title on the latest fork-family card", async () => {
+    const source = {
+      ...summary("source", "2026-08-08T00:00:00.000Z"),
+      title: "Stable family",
+      fullTitle: "Stable family",
+    };
+    const child = {
+      ...summary("child", "2026-08-08T01:00:00.000Z"),
+      title: "edited preview",
+      fullTitle: "edited preview",
+      forkParentSessionId: "source",
+    };
+    const deps = {
+      readerFactory: () => reader([source, child]),
+      sessionMetadataService: {
+        getForkParentSessionId: () => undefined,
+        getForkFamilyTitle: (sessionId: string) =>
+          sessionId === "child"
+            ? { title: "Stable family", fullTitle: "Stable family" }
+            : undefined,
+      },
+    };
+
+    await expect(listSessionsAcrossProviders(project, deps)).resolves.toEqual([
+      expect.objectContaining({
+        id: "child",
+        title: "Stable family",
+        fullTitle: "Stable family",
+      }),
+    ]);
+  });
+
   it("accepts metadata adapters that predate fork-lineage support", async () => {
     const child = summary("child", "2026-08-08T01:00:00.000Z");
     const deps = {

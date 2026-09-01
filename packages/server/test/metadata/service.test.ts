@@ -338,6 +338,30 @@ describe("SessionMetadataService", () => {
         provider: "codex",
       });
     });
+
+    it("persists the exact edit boundary and stable family title", async () => {
+      await service.initialize();
+      await service.setEditForkMetadata("child-session", {
+        forkParentSessionId: "source-session",
+        forkTargetMessageId: "user-b-turn-shared",
+        forkFamilyTitle: "Stable family",
+        forkFamilyFullTitle: "Stable family full title",
+      });
+
+      const reloaded = new SessionMetadataService({ dataDir: testDir });
+      await reloaded.initialize();
+
+      expect(reloaded.getForkTargetMessageId("child-session")).toBe(
+        "user-b-turn-shared",
+      );
+      expect(reloaded.getForkFamilyTitle("child-session")).toEqual({
+        title: "Stable family",
+        fullTitle: "Stable family full title",
+      });
+      expect(reloaded.getForkParentSessionId("child-session")).toBe(
+        "source-session",
+      );
+    });
   });
 
   describe("setProjectLocation", () => {

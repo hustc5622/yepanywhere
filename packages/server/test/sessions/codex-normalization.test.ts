@@ -455,6 +455,48 @@ describe("Codex Normalization", () => {
     ).not.toHaveProperty("clientUserMessageId");
   });
 
+  it("projects current item_completed user identity onto the owning response item", () => {
+    const entries: CodexSessionEntry[] = [
+      {
+        type: "response_item",
+        timestamp: "2026-09-01T11:47:42.595Z",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Inspect the duplicate" }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: "turn-current-user-1",
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2026-09-01T11:47:42.597Z",
+        payload: {
+          type: "item_completed",
+          turn_id: "turn-current-user-1",
+          item: {
+            type: "UserMessage",
+            id: "native-user-item-1",
+            client_id: "client-current-user-1",
+            content: [{ type: "text", text: "Inspect the duplicate" }],
+          },
+        },
+      },
+    ];
+
+    const result = normalizeSession(buildLoadedSession(entries));
+
+    expect(result.messages).toEqual([
+      expect.objectContaining({
+        type: "user",
+        codexTurnId: "turn-current-user-1",
+        clientUserMessageId: "client-current-user-1",
+        codexCorrelationKey: "codex:user-message:client-current-user-1",
+      }),
+    ]);
+  });
+
   it("applies Codex thread_rolled_back markers before normalizing", () => {
     const entries: CodexSessionEntry[] = [
       codexUserMessage("q1", 1),

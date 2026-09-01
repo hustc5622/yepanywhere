@@ -405,6 +405,104 @@ describe("Sessions metadata route", () => {
     );
   });
 
+  it("augments live Edit messages before the session file exists", async () => {
+    const project = createProject();
+    const process = {
+      id: "proc-codex-edit",
+      sessionId: "sess-codex-edit",
+      projectId: project.id,
+      projectPath: project.path,
+      projectName: project.name,
+      sessionTitle: null,
+      state: "in-turn",
+      startedAt: "2026-09-01T00:00:00.000Z",
+      queueDepth: 0,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      permissionMode: "default",
+      modeVersion: 0,
+      pendingInputRequest: null,
+      supportsDynamicModels: false,
+      supportsDynamicCommands: false,
+      supportsSetModel: false,
+      messageHistory: [
+        {
+          type: "assistant",
+          uuid: "live-edit-message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "live-edit-tool",
+                name: "Edit",
+                input: {
+                  file_path: "src/live.ts",
+                  changes: [
+                    {
+                      path: "src/live.ts",
+                      kind: "update",
+                      diff: "@@ -1 +1 @@\n-before\n+after",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          uuid: "live-edit-result",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "live-edit-tool",
+                content: "ok",
+              },
+            ],
+          },
+        },
+      ],
+    } satisfies RuntimeProcessSnapshot;
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => process),
+        wasEverOwned: vi.fn(async () => true),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () =>
+          ({
+            getSession: vi.fn(async () => null),
+            getSessionSummary: vi.fn(async () => null),
+          }) as unknown as ISessionReader,
+      ),
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${process.sessionId}`,
+    );
+    const json = await response.json();
+    const edit = json.messages
+      .flatMap((message: { content?: unknown }) =>
+        Array.isArray(message.content) ? message.content : [],
+      )
+      .find(
+        (block: { type?: string; name?: string }) =>
+          block.type === "tool_use" && block.name === "Edit",
+      );
+
+    expect(response.status).toBe(200);
+    expect(edit.input._rawPatch).toContain("-before");
+    expect(edit.input._structuredPatch).toHaveLength(1);
+    expect(edit.input._diffHtml).toContain('class="line line-deleted"');
+  });
+
   it("persists live and idle permission-mode changes", async () => {
     const testDir = join(tmpdir(), `session-mode-route-${randomUUID()}`);
     const metadata = new SessionMetadataService({ dataDir: testDir });
@@ -625,6 +723,188 @@ describe("Sessions metadata route", () => {
     expect(json.session).not.toHaveProperty("messageCount");
     expect(catalogLookup).toHaveBeenCalledWith(summary.id, project.path);
     expect(claudeGetSummary).not.toHaveBeenCalled();
+    expect(codexGetSummary).not.toHaveBeenCalled();
+  });
+
+  it("returns the native Codex edit-fork branch family in metadata", async () => {
+    const project = createProject();
+    const root = {
+      ...createSummary(),
+      id: "root-session",
+      title: "a",
+      fullTitle: "a",
+    };
+    const child = {
+      ...createSummary(),
+      id: "child-session",
+      title: "b2",
+      fullTitle: "b2",
+      forkParentSessionId: root.id,
+      updatedAt: "2026-09-01T00:01:00.000Z",
+    };
+    const branchState = {
+      sessionId: child.id,
+      provider: "codex" as const,
+      activeBranchId: "user-d-turn-d",
+      selectedBranchId: "user-d-turn-d",
+      branches: [
+        {
+          id: "user-b-turn-b",
+          sessionId: root.id,
+          parentId: "user-a-turn-a",
+          prompt: "b",
+          title: "b",
+          depth: 2,
+          index: 2,
+          siblingIndex: 1,
+          siblingCount: 2,
+          isActive: false,
+          provider: "codex" as const,
+        },
+        {
+          id: "user-b2-turn-b2",
+          sessionId: child.id,
+          parentId: "user-a-turn-a",
+          prompt: "b2",
+          title: "b2",
+          depth: 2,
+          index: 4,
+          siblingIndex: 2,
+          siblingCount: 2,
+          isActive: true,
+          provider: "codex" as const,
+        },
+      ],
+    };
+    const getForkBranchState = vi.fn(async () => branchState);
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () =>
+          ({
+            getSessionSummary: vi.fn(async () => null),
+          }) as unknown as ISessionReader,
+      ),
+      codexSessionCatalog: {
+        getSessionSummary: vi.fn(async () => child),
+        getSnapshot: vi.fn(async () => ({
+          sessions: [child, root],
+          byProjectPath: new Map([[project.path, [child, root]]]),
+          unknownMessageCountIds: new Set([child.id, root.id]),
+          createdAt: Date.now(),
+        })),
+      } as unknown as NonNullable<SessionsDeps["codexSessionCatalog"]>,
+      codexAppServerHistoryReader: {
+        getForkBranchState,
+      } as unknown as NonNullable<SessionsDeps["codexAppServerHistoryReader"]>,
+      sessionMetadataService: {
+        getProvider: vi.fn(() => "codex"),
+        getMetadata: vi.fn(() => ({
+          provider: "codex",
+          projectPath: project.path,
+          forkParentSessionId: root.id,
+          forkTargetMessageId: "user-b-turn-b",
+          forkFamilyTitle: "Stable family",
+          forkFamilyFullTitle: "Stable family full title",
+        })),
+        getAllMetadata: vi.fn(() => ({})),
+      } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${child.id}/metadata`,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      session: {
+        id: child.id,
+        title: "Stable family",
+        fullTitle: "Stable family full title",
+        forkParentSessionId: root.id,
+        branchState,
+        codexBranchState: branchState,
+      },
+    });
+    expect(getForkBranchState).toHaveBeenCalledWith(
+      child.id,
+      expect.arrayContaining([
+        expect.objectContaining({ id: root.id }),
+        expect.objectContaining({
+          id: child.id,
+          forkParentSessionId: root.id,
+          forkTargetMessageId: "user-b-turn-b",
+        }),
+      ]),
+      undefined,
+    );
+  });
+
+  it("uses the shared summary index for a missing Codex context meter", async () => {
+    const project = createProject();
+    const summary: SessionSummary = {
+      ...createSummary(),
+      model: "gpt-5.6-sol",
+      contextUsage: {
+        inputTokens: 394_295,
+        percentage: 52,
+        contextWindow: 760_000,
+        outputTokens: 700,
+        cacheReadTokens: 393_856,
+      },
+    };
+    const codexGetSummary = vi.fn(async () => {
+      throw new Error("context status should use the shared summary index");
+    });
+    const codexReader = {
+      getSessionSummary: codexGetSummary,
+    } as unknown as CodexSessionReader;
+    const getSessionSummaryWithCache = vi.fn(async () => summary);
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () =>
+          ({
+            getSessionSummary: vi.fn(async () => null),
+          }) as unknown as ISessionReader,
+      ),
+      sessionMetadataService: {
+        getProvider: vi.fn(() => "codex"),
+      } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
+      codexSessionsDir: "/tmp/codex-sessions",
+      codexReaderFactory: vi.fn(() => codexReader),
+      sessionIndexService: {
+        getSessionSummaryWithCache,
+      } as unknown as NonNullable<SessionsDeps["sessionIndexService"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}/context-status`,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      source: "jsonl",
+      model: "gpt-5.6-sol",
+      contextUsage: summary.contextUsage,
+    });
+    expect(getSessionSummaryWithCache).toHaveBeenCalledWith(
+      "/tmp/codex-sessions",
+      project.id,
+      summary.id,
+      codexReader,
+    );
     expect(codexGetSummary).not.toHaveBeenCalled();
   });
 
@@ -890,6 +1170,176 @@ describe("Sessions metadata route", () => {
     expect(json.session).not.toHaveProperty("messageCount");
     expect(appHistoryGetSession).toHaveBeenCalledOnce();
     expect(rolloutGetSession).not.toHaveBeenCalled();
+  });
+
+  it("returns a body-free canonical projection for the automatic Inspector index", async () => {
+    const project = { ...createProject(), provider: "codex" as const };
+    const summary: SessionSummary = {
+      id: "inspector-projection-session",
+      projectId: project.id,
+      title: "Inspector projection",
+      fullTitle: "Inspector projection",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:01.000Z",
+      messageCount: 3,
+      ownership: { owner: "none" },
+      provider: "codex",
+    };
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+        wasEverOwned: vi.fn(async () => false),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(
+        () => ({ getSession: vi.fn() }) as unknown as ISessionReader,
+      ),
+      codexAppServerHistoryReader: {
+        getSession: vi.fn(async () => ({
+          kind: "loaded" as const,
+          session: {
+            summary,
+            data: { provider: "codex" as const, session: { entries: [] } },
+            projectedMessages: [
+              {
+                uuid: "question-1",
+                type: "user",
+                message: { role: "user", content: "Run the checks" },
+              },
+              {
+                uuid: "tool-message",
+                type: "assistant",
+                message: {
+                  role: "assistant",
+                  content: [
+                    {
+                      type: "tool_use",
+                      id: "check-1",
+                      name: "Bash",
+                      input: {
+                        command: "pnpm test",
+                        description: "INPUT_SECRET",
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                uuid: "result-message",
+                type: "user",
+                message: {
+                  role: "user",
+                  content: [
+                    {
+                      type: "tool_result",
+                      tool_use_id: "check-1",
+                      content: "RESULT_SECRET",
+                    },
+                  ],
+                },
+              },
+            ],
+            paginationApplied: true,
+            pagination: {
+              hasOlderMessages: false,
+              totalMessageCount: 3,
+              returnedMessageCount: 3,
+              totalCompactions: 0,
+            },
+            historySource: "codex-app-server" as const,
+          },
+        })),
+      } as unknown as NonNullable<SessionsDeps["codexAppServerHistoryReader"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}?view=canonical&projection=inspector`,
+    );
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    const serialized = JSON.stringify(json.messages);
+    expect(serialized).toContain("pnpm test");
+    expect(serialized).not.toContain("INPUT_SECRET");
+    expect(serialized).not.toContain("RESULT_SECRET");
+  });
+
+  it("marks an externally-owned display tool batch as the live tail", async () => {
+    const project = createProject();
+    const summary: SessionSummary = {
+      id: "external-display-session",
+      projectId: project.id,
+      title: "External display",
+      fullTitle: "External display",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:01.000Z",
+      messageCount: 2,
+      ownership: { owner: "none" },
+      provider: "codex",
+    };
+    const reader = {
+      getSessionSummary: vi.fn(async () => summary),
+      getSessionFileStats: vi.fn(async () => ({ mtime: 1, size: 2 })),
+      getSession: vi.fn(async () => ({
+        summary,
+        data: { provider: "codex" as const, session: { entries: [] } },
+        projectedMessages: [
+          {
+            uuid: "question-1",
+            type: "user",
+            message: { role: "user", content: "Run externally" },
+          },
+          {
+            uuid: "tool-1-message",
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "external-tool-1",
+                  name: "Bash",
+                  input: { command: "pnpm test" },
+                },
+              ],
+            },
+          },
+        ],
+      })),
+    };
+    const routes = createSessionsRoutes({
+      supervisor: {} as SessionsDeps["supervisor"],
+      runtimeController: {
+        getProcessSnapshotForSession: vi.fn(async () => null),
+      } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+      sessionCommandService: {
+        getPendingInput: vi.fn(async () => null),
+      } as unknown as NonNullable<SessionsDeps["sessionCommandService"]>,
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as SessionsDeps["scanner"],
+      readerFactory: vi.fn(() => reader as unknown as ISessionReader),
+      externalTracker: {
+        isExternal: vi.fn(() => true),
+      } as unknown as NonNullable<SessionsDeps["externalTracker"]>,
+    });
+
+    const response = await routes.request(
+      `/projects/${project.id}/sessions/${summary.id}/display`,
+    );
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.turns[0].segments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool_group",
+          status: "running",
+          liveTail: true,
+        }),
+      ]),
+    );
   });
 
   it("resolves a process-less Codex session from the catalog in a mixed-provider project", async () => {

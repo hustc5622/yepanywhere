@@ -91,6 +91,8 @@ export interface SessionSummary {
   updatedAt: string;
   messageCount: number;
   userQuestions?: SessionQuestion[];
+  /** Whether userQuestions covers the complete provider history. */
+  userQuestionCoverage?: "complete" | "partial";
   ownership: SessionOwnership;
   // Notification fields (added by enrichSessionsWithNotifications)
   /** Type of pending input if session needs user action */

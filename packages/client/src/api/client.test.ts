@@ -342,6 +342,67 @@ describe("session detail view", () => {
       expect.any(Object),
     );
   });
+
+  it("builds display, question, and tool-detail URLs with opaque cursors", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    } as Response);
+
+    await api.getSessionDisplay("project-1", "session-1", {
+      cursor: "display.cursor",
+      branchId: "branch-1",
+      limit: 20,
+    });
+    await api.getSessionQuestions("project-1", "session-1", {
+      cursor: "question.cursor",
+      branchId: "branch-1",
+    });
+    await api.getSessionToolGroupDetails(
+      "project-1",
+      "session-1",
+      "detail/ref",
+      {
+        revision: "revision 1",
+        cursor: "detail.cursor",
+        branchId: "branch-1",
+      },
+    );
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/projects/project-1/sessions/session-1/display?cursor=display.cursor&branchId=branch-1&limit=20",
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/projects/project-1/sessions/session-1/display/questions?cursor=question.cursor&branchId=branch-1",
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/api/projects/project-1/sessions/session-1/display/tool-groups/detail%2Fref?revision=revision+1&cursor=detail.cursor&branchId=branch-1",
+      expect.any(Object),
+    );
+  });
+
+  it("requests the body-free Inspector projection explicitly", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    } as Response);
+
+    await api.getSession("project-1", "session-1", undefined, {
+      view: "canonical",
+      inspectorProjection: true,
+      maxMessages: 100,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project-1/sessions/session-1?view=canonical&projection=inspector&maxMessages=100&deferMedia=1",
+      expect.any(Object),
+    );
+  });
 });
 
 describe("Codex native controls", () => {

@@ -43,6 +43,11 @@ interface SessionInspectorProps {
   onClose?: () => void;
   messages: Message[];
   userQuestions?: SessionQuestion[];
+  questionCoverage?: "complete" | "partial" | "unavailable";
+  hasLegacyDetails?: boolean;
+  legacyDetailsLoading?: boolean;
+  legacyDetailsError?: boolean;
+  onLoadLegacyDetails?: () => void | Promise<void>;
   markdownAugments?: Record<string, MarkdownAugment>;
   activeToolApproval?: ActiveToolApproval;
   projectId: string;
@@ -61,6 +66,8 @@ interface QuestionItem {
   id: string;
   text: string;
   timestamp?: string;
+  clientUserMessageId?: string;
+  codexCorrelationKey?: string;
 }
 
 interface FileActivity {
@@ -133,6 +140,11 @@ export function SessionInspector({
   onClose,
   messages,
   userQuestions,
+  questionCoverage = "complete",
+  hasLegacyDetails = true,
+  legacyDetailsLoading = false,
+  legacyDetailsError = false,
+  onLoadLegacyDetails,
   markdownAugments,
   activeToolApproval,
   projectId,
@@ -195,6 +207,24 @@ export function SessionInspector({
     [isCodexProvider, messages],
   );
 
+  useEffect(() => {
+    if (
+      !isOpen ||
+      hasLegacyDetails ||
+      legacyDetailsLoading ||
+      legacyDetailsError
+    ) {
+      return;
+    }
+    void onLoadLegacyDetails?.();
+  }, [
+    hasLegacyDetails,
+    isOpen,
+    legacyDetailsError,
+    legacyDetailsLoading,
+    onLoadLegacyDetails,
+  ]);
+
   const handleSelect = (messageId: string) => {
     onSelectMessage(messageId);
     if (presentation === "drawer") {
@@ -226,6 +256,13 @@ export function SessionInspector({
           </h2>
           <div className="session-inspector-subtitle">
             {questions.length} {t("sessionInspectorQuestions").toLowerCase()}
+            {questionCoverage !== "complete"
+              ? ` · ${t(
+                  questionCoverage === "partial"
+                    ? "sessionInspectorQuestionsPartial"
+                    : "sessionInspectorQuestionsUnavailable",
+                )}`
+              : ""}
           </div>
         </div>
         {onClose && (
@@ -326,6 +363,16 @@ export function SessionInspector({
             {copiedSessionId ? <CopiedIcon /> : <CopyIcon />}
           </button>
         </div>
+        {!hasLegacyDetails && legacyDetailsError && onLoadLegacyDetails && (
+          <button
+            type="button"
+            className="session-inspector-section-link"
+            onClick={() => void onLoadLegacyDetails()}
+            disabled={legacyDetailsLoading}
+          >
+            {t("sessionInspectorRetryDetails")}
+          </button>
+        )}
       </div>
 
       {currentCodexGoal && (
@@ -336,22 +383,20 @@ export function SessionInspector({
 
       {planProgress && <InspectorPlanProgress progress={planProgress} t={t} />}
 
-      {presentation === "drawer" && (
-        <div className="session-inspector-tabs" role="tablist">
-          {BASE_TAB_KEYS.map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              className={`session-inspector-tab ${activeTab === tab ? "active" : ""}`}
-              onClick={() => setActiveTab(tab)}
-              role="tab"
-              aria-selected={activeTab === tab}
-            >
-              {getTabLabel(t, tab)}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="session-inspector-tabs" role="tablist">
+        {BASE_TAB_KEYS.map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            className={`session-inspector-tab ${activeTab === tab ? "active" : ""}`}
+            onClick={() => setActiveTab(tab)}
+            role="tab"
+            aria-selected={activeTab === tab}
+          >
+            {getTabLabel(t, tab)}
+          </button>
+        ))}
+      </div>
 
       <div className="session-inspector-content">
         {subagents.length > 0 && (
@@ -387,7 +432,7 @@ export function SessionInspector({
           </InspectorSection>
         )}
 
-        {presentation === "sidebar" || activeTab === "questions" ? (
+        {activeTab === "questions" ? (
           <InspectorSection
             title={t("sessionInspectorQuestions")}
             count={questions.length}
@@ -425,12 +470,14 @@ export function SessionInspector({
           </InspectorSection>
         ) : null}
 
-        {presentation === "sidebar" || activeTab === "files" ? (
+        {activeTab === "files" ? (
           <InspectorSection
             title={t("sessionInspectorFiles")}
             count={fileActivities.length}
           >
-            {fileActivities.length > 0 ? (
+            {legacyDetailsLoading && !hasLegacyDetails ? (
+              <EmptyState text={t("sessionInspectorLoadingDetails")} />
+            ) : fileActivities.length > 0 ? (
               <ul className="session-inspector-list">
                 {fileActivities.slice(0, 10).map((activity) => (
                   <li key={activity.path}>
@@ -463,12 +510,14 @@ export function SessionInspector({
           </InspectorSection>
         ) : null}
 
-        {presentation === "sidebar" || activeTab === "checks" ? (
+        {activeTab === "checks" ? (
           <InspectorSection
             title={t("sessionInspectorChecks")}
             count={checks.length}
           >
-            {checks.length > 0 ? (
+            {legacyDetailsLoading && !hasLegacyDetails ? (
+              <EmptyState text={t("sessionInspectorLoadingDetails")} />
+            ) : checks.length > 0 ? (
               <ul className="session-inspector-list">
                 {checks.slice(0, 8).map((check) => (
                   <li key={check.id}>
@@ -502,7 +551,7 @@ export function SessionInspector({
           </InspectorSection>
         ) : null}
 
-        {presentation === "sidebar" || activeTab === "git" ? (
+        {activeTab === "git" ? (
           <InspectorSection
             title={t("sessionInspectorGit")}
             count={gitStatus?.files.length}
@@ -874,6 +923,12 @@ function buildQuestionItems(items: RenderItem[]): QuestionItem[] {
       id: item.id,
       text: compactText(contentToText(item.content), 140) || "Untitled",
       timestamp: item.sourceMessages[0]?.timestamp,
+      clientUserMessageId: readNonEmptyString(
+        item.sourceMessages[0]?.clientUserMessageId,
+      ),
+      codexCorrelationKey: readNonEmptyString(
+        item.sourceMessages[0]?.codexCorrelationKey,
+      ),
     }));
 }
 
@@ -884,22 +939,42 @@ function mergeQuestionItems(
   const merged: QuestionItem[] = [];
   const seenIds = new Set<string>();
   const seenSemanticKeys = new Set<string>();
+  const seenIdentityKeys = new Set<string>();
 
   const append = (question: QuestionItem) => {
     const text = compactText(question.text, 140) || "Untitled";
     const id = question.id || `${question.timestamp ?? ""}:${text}`;
     const semanticKey = `${question.timestamp ?? ""}\n${text}`;
+    const identityKeys = [
+      ...(question.clientUserMessageId
+        ? [`client:${question.clientUserMessageId}`]
+        : []),
+      ...(question.codexCorrelationKey
+        ? [`correlation:${question.codexCorrelationKey}`]
+        : []),
+    ];
 
-    if (seenIds.has(id) || seenSemanticKeys.has(semanticKey)) {
+    if (
+      seenIds.has(id) ||
+      seenSemanticKeys.has(semanticKey) ||
+      identityKeys.some((key) => seenIdentityKeys.has(key))
+    ) {
       return;
     }
 
     seenIds.add(id);
     seenSemanticKeys.add(semanticKey);
+    for (const key of identityKeys) seenIdentityKeys.add(key);
     merged.push({
       id,
       text,
       timestamp: question.timestamp,
+      ...(question.clientUserMessageId
+        ? { clientUserMessageId: question.clientUserMessageId }
+        : {}),
+      ...(question.codexCorrelationKey
+        ? { codexCorrelationKey: question.codexCorrelationKey }
+        : {}),
     });
   };
 
@@ -963,7 +1038,7 @@ function buildFileActivities(items: RenderItem[]): FileActivity[] {
     if (paths.length === 0) return;
     const kind = getFileActivityKind(item.toolName);
     const messageId = item.sourceMessages[0]
-      ? getMessageIdLike(item.sourceMessages[0])
+      ? getInspectorNavigationMessageId(item.sourceMessages[0])
       : item.id;
 
     for (const path of paths) {
@@ -999,7 +1074,7 @@ function buildCheckItems(items: RenderItem[]): CheckItem[] {
       const command = extractCommand(item.toolInput);
       if (!command || !CHECK_COMMAND_RE.test(command)) return [];
       const messageId = item.sourceMessages[0]
-        ? getMessageIdLike(item.sourceMessages[0])
+        ? getInspectorNavigationMessageId(item.sourceMessages[0])
         : item.id;
       return [
         {
@@ -1018,6 +1093,10 @@ function buildCheckItems(items: RenderItem[]): CheckItem[] {
 
 function getMessageIdLike(message: Message): string {
   return message.uuid ?? message.id ?? "";
+}
+
+function getInspectorNavigationMessageId(message: Message): string {
+  return message.inspectorNavigationMessageId ?? getMessageIdLike(message);
 }
 
 /**

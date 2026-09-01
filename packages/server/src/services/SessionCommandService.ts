@@ -201,6 +201,7 @@ export interface StartSessionBody {
   resumeSessionAt?: string;
   rollbackNumTurns?: number;
   rollbackTarget?: {
+    messageId?: string;
     timestamp?: string;
     text?: string;
   };
@@ -1209,9 +1210,45 @@ export class SessionCommandService {
         providerName === "codex" &&
         effectiveCodexForkExcludedTurns !== undefined
       ) {
-        await this.deps.sessionMetadataService?.setForkParentSessionId?.(
+        const sourceMetadata =
+          this.deps.sessionMetadataService?.getMetadata(sessionId);
+        const forkSourceSummary =
+          sessionSummary ??
+          (
+            await findSessionSummaryAcrossProviders(
+              project,
+              sessionId,
+              resolvedProjectId,
+              this.toProviderResolutionDeps(),
+              providerName,
+            )
+          )?.summary;
+        const inheritedFamilyTitle =
+          sourceMetadata?.forkFamilyTitle ??
+          sourceMetadata?.customTitle ??
+          sourceMetadata?.aiTitle ??
+          forkSourceSummary?.title ??
+          undefined;
+        const inheritedFamilyFullTitle =
+          sourceMetadata?.forkFamilyFullTitle ??
+          sourceMetadata?.customTitle ??
+          sourceMetadata?.aiTitle ??
+          forkSourceSummary?.fullTitle ??
+          inheritedFamilyTitle;
+        const forkTargetMessageId =
+          typeof body.rollbackTarget?.messageId === "string" &&
+          body.rollbackTarget.messageId.trim().length > 0 &&
+          body.rollbackTarget.messageId.length <= 4_096
+            ? body.rollbackTarget.messageId.trim()
+            : undefined;
+        await this.deps.sessionMetadataService?.setEditForkMetadata?.(
           actualSessionId,
-          sessionId,
+          {
+            forkParentSessionId: sessionId,
+            forkTargetMessageId,
+            forkFamilyTitle: inheritedFamilyTitle ?? undefined,
+            forkFamilyFullTitle: inheritedFamilyFullTitle ?? undefined,
+          },
         );
         const codexMcpMode =
           parsedCodexMcpMode.codexMcpMode ??

@@ -45,6 +45,9 @@ export interface ProviderResolutionDeps {
   /** Yep sidecar lineage used when a stable provider API cannot persist it. */
   sessionMetadataService?: {
     getForkParentSessionId?: (sessionId: string) => string | undefined;
+    getForkFamilyTitle?: (
+      sessionId: string,
+    ) => { title?: string; fullTitle?: string } | undefined;
   };
 }
 
@@ -381,9 +384,21 @@ function applyForkLineageMetadata(
   const metadata = deps.sessionMetadataService;
   if (!metadata) return sessions;
   return sessions.map((session) => {
-    if (session.forkParentSessionId) return session;
-    const forkParentSessionId = metadata.getForkParentSessionId?.(session.id);
-    return forkParentSessionId ? { ...session, forkParentSessionId } : session;
+    const forkParentSessionId =
+      session.forkParentSessionId ??
+      metadata.getForkParentSessionId?.(session.id);
+    const familyTitle = metadata.getForkFamilyTitle?.(session.id);
+    if (!forkParentSessionId && !familyTitle) return session;
+    return {
+      ...session,
+      ...(forkParentSessionId ? { forkParentSessionId } : {}),
+      ...(familyTitle?.title ? { title: familyTitle.title } : {}),
+      ...(familyTitle?.fullTitle
+        ? { fullTitle: familyTitle.fullTitle }
+        : familyTitle?.title
+          ? { fullTitle: familyTitle.title }
+          : {}),
+    };
   });
 }
 
