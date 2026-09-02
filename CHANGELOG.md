@@ -47,6 +47,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复 Codex 会话中同一张上传图片在用户消息里显示两个附件标识：轻量 display 投影会剥掉 `input_image` 的内联 `image_url`/mime，只留下 `deferred` 占位，客户端因该占位没有预览数据而无法把它并入文本中列出的托管附件，于是额外渲染出 `pasted-image-1.*`。现在没有任何文件名信息的 Codex 内联图片占位会直接并入同条消息里的图片附件，不再重复显示。
 - 修复 Pi 运行中会话在离开再返回（或 WebSocket 重连）后，用户提问在时间线和会话索引中重复展示的问题。根因是 Pi 以自己的 entry id 持久化提问、不会记录 Yep 的 client UUID，实时流里的乐观用户消息与 session 文件里的那条无法按身份对应；轻量 display 首开路径既匹配不到 `clientUserMessageId`，也没有已持久化时间水位，服务端重放的乐观消息就被当作新消息追加。现在 Pi provider 在收到提问的 `message_end` 后通过 RPC `get_entries`（以上次 leaf 为 `since` 游标，只传增量）取回刚追加的 entry id，并以该 id 重新发出用户消息，同时用 `supersedesMessageId` 指明它替换的乐观行；Process 历史与客户端都原地替换乐观行而不是追加，display 路径按 `question.messageId` 直接识别。这也让运行中的提问立刻拥有真实 entry id，无需刷新即可作为 Pi 原生分支/编辑锚点。作为兜底，display 路径还会用 display 页与已恢复 live tail 的时间戳初始化水位，并对重放/乐观提问按文本加 15s 时间窗做语义匹配。
 - 修复 Codex 会话在切换 reasoning effort 并重启 app-server 后只展示首轮历史：本地 transport 关闭现在会等待旧子进程真正退出后才允许 Supervisor 恢复同一 thread，避免新旧 rollout writer 在交接窗口写出重复 ordinal；轻量 `display`/`display/questions` 也会把“无下一页但少于完整 rollout 问题索引”的原生投影视为不完整并自动回退 JSONL，因此已有损坏的 thread-history SQLite 投影无需改写原始会话即可恢复全部展示。
 - 修复语义化轻量历史把 assistant 文本降级为纯文本的问题：display 投影现在只为实际可见的 assistant 文本补充与旧历史路径一致的安全 Markdown HTML，恢复本地文档跳链、右侧文件预览、列表、行内代码和代码块，同时继续保持工具正文按需加载。

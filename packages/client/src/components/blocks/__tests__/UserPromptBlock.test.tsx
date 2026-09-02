@@ -401,6 +401,30 @@ User uploaded files:
     expect(screen.getByRole("img", { name: /screenshot\.png/i })).toBeDefined();
   });
 
+  it("does not duplicate a managed attachment when the Codex image is deferred", () => {
+    const downloadUrl =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_screenshot.png";
+    const content: ContentBlock[] = [
+      {
+        type: "text",
+        text: `Check this image.\n\nUser uploaded files:\n- screenshot.png (1 KB, image/png): ${downloadUrl}`,
+      },
+      // Display projection strips image_url/mime_type and only leaves a marker.
+      { type: "input_image", deferred: true },
+    ];
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    expect(
+      screen.getAllByRole("button", { name: /screenshot\.png/i }),
+    ).toHaveLength(1);
+    expect(screen.queryByText(/pasted-image-1/i)).toBeNull();
+  });
+
   it("renders injected skill blocks as clickable skill references", () => {
     const content = `<skill>
 <name>git-commit-push</name>

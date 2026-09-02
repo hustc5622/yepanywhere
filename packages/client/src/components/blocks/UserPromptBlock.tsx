@@ -345,6 +345,17 @@ function filenameFromUrl(imageUrl: string): string | null {
   }
 }
 
+const CODEX_INLINE_IMAGE_PATH_PREFIX = "codex-inline://image/";
+
+/**
+ * A Codex `input_image` block that carries no identity of its own (no
+ * file_path, no URL-derived filename). This includes deferred blocks whose
+ * inline payload was stripped server-side, so we can only show a placeholder.
+ */
+function isAnonymousCodexInlineImage(file: UploadedFileInfo): boolean {
+  return file.path.startsWith(CODEX_INLINE_IMAGE_PATH_PREFIX);
+}
+
 function extractCodexImageFiles(content: ContentBlock[]): UploadedFileInfo[] {
   const files: UploadedFileInfo[] = [];
   let imageIndex = 0;
@@ -374,7 +385,7 @@ function extractCodexImageFiles(content: ContentBlock[]): UploadedFileInfo[] {
     const path =
       filePath ||
       (imageUrl && !imageUrl.startsWith("data:") ? imageUrl : "") ||
-      `codex-inline://image/${imageIndex}`;
+      `${CODEX_INLINE_IMAGE_PATH_PREFIX}${imageIndex}`;
 
     files.push({
       originalName: fileName,
@@ -400,13 +411,19 @@ function mergeUploadedFiles(
     if (seen.has(file.path)) continue;
     seen.add(file.path);
 
+    // A managed upload listed in the prompt text and a Codex input_image
+    // block usually describe the same image. Fold the Codex block into the
+    // named attachment when it either carries inline preview data or is an
+    // anonymous placeholder (e.g. deferred media with image_url stripped),
+    // so the same image is not rendered twice.
     const companionIndex = remainingSecondary.findIndex(
       (candidate) =>
         candidate.path === file.path ||
         (!file.previewUrl &&
           isImageMimeType(file.mimeType) &&
           isImageMimeType(candidate.mimeType) &&
-          Boolean(candidate.previewUrl)),
+          (Boolean(candidate.previewUrl) ||
+            isAnonymousCodexInlineImage(candidate))),
     );
     if (companionIndex === -1) {
       merged.push(file);
