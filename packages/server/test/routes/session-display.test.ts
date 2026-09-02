@@ -182,7 +182,7 @@ describe("session display routes", () => {
       fullTitle: "Fork child",
       createdAt: "2026-09-01T00:00:00.000Z",
       updatedAt: "2026-09-01T00:03:00.000Z",
-      messageCount: 3,
+      messageCount: 4,
       ownership: { owner: "none" },
       provider: "codex",
       forkParentSessionId: "parent-session",
@@ -246,6 +246,16 @@ describe("session display routes", () => {
         message: { role: "user", content: "d" },
         codexTurnId: "turn-d",
       },
+      {
+        uuid: "assistant-markdown-turn-d",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content:
+            "See [the plan](/tmp/session-display-project/docs/plan.md:7).",
+        },
+        codexTurnId: "turn-d",
+      },
     ];
     const getSemanticTurnsPage = vi.fn(async () => ({
       kind: "loaded" as const,
@@ -290,6 +300,11 @@ describe("session display routes", () => {
             siblingCount: number;
           };
         } | null;
+        segments: Array<{
+          type: string;
+          content?: string;
+          renderedHtml?: string;
+        }>;
       }>;
     };
     expect(page.revision).toBe("cas1.1.session");
@@ -303,6 +318,15 @@ describe("session display routes", () => {
         siblingCount: 2,
       },
     });
+    const markdownSegment = page.turns[2]?.segments.find(
+      (segment) => segment.type === "assistant_text",
+    );
+    expect(markdownSegment?.content).toContain("[the plan](");
+    expect(markdownSegment?.renderedHtml).toContain('class="local-file-link"');
+    expect(markdownSegment?.renderedHtml).toContain(
+      'data-file-path="/tmp/session-display-project/docs/plan.md"',
+    );
+    expect(markdownSegment?.renderedHtml).toContain('data-line="7"');
     expect(getSession).not.toHaveBeenCalled();
   });
 

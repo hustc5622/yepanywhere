@@ -437,6 +437,17 @@ function SessionPageContent({
     setLegacyInspectorLoading(false);
     setLegacyInspectorError(false);
   }, [actualSessionId, selectedBranchId]);
+  useEffect(() => {
+    if (processState !== "in-turn") return;
+    // The lightweight display and live tail remain authoritative while a turn
+    // is changing. A complete Inspector index spans multiple persisted-history
+    // pages, so cancel its logical generation instead of mixing pages from
+    // different active snapshots or surfacing a transient stale cursor.
+    legacyInspectorLoadGenerationRef.current += 1;
+    legacyInspectorRevisionRef.current = null;
+    setLegacyInspectorLoading(false);
+    setLegacyInspectorError(false);
+  }, [processState]);
   const handleTargetFocused = useCallback(() => {
     setTargetMessageId(null);
   }, []);
@@ -455,6 +466,7 @@ function SessionPageContent({
     async (force = false) => {
       if (
         !displayPage ||
+        processState === "in-turn" ||
         (!force && legacyInspectorMessages) ||
         legacyInspectorLoading
       )
@@ -480,6 +492,7 @@ function SessionPageContent({
                 branchId: selectedBranchId,
               },
             );
+            if (generation !== legacyInspectorLoadGenerationRef.current) return;
             let snapshot = data.messages.map((message) => ({
               ...message,
               _source: "jsonl" as const,
@@ -506,6 +519,8 @@ function SessionPageContent({
                   branchId: selectedBranchId,
                 },
               );
+              if (generation !== legacyInspectorLoadGenerationRef.current)
+                return;
               snapshot = [
                 ...data.messages.map((message) => ({
                   ...message,
@@ -523,6 +538,7 @@ function SessionPageContent({
             break;
           } catch (error) {
             lastError = error;
+            if (generation !== legacyInspectorLoadGenerationRef.current) return;
             if (attempt === 0 && isRetryableInspectorHistoryError(error)) {
               continue;
             }
@@ -567,6 +583,7 @@ function SessionPageContent({
       legacyInspectorLoading,
       legacyInspectorMessages,
       projectId,
+      processState,
       selectedBranchId,
       showToast,
       t,

@@ -29,6 +29,12 @@ export interface GetSessionOptions {
   deferMedia?: boolean;
   /** Omit Pi thinking blocks from the normalized transcript. */
   deferThinking?: boolean;
+  /**
+   * Return a body-free Inspector index. Codex may use safe semantic
+   * placeholders for media/provider-native items because the route removes
+   * those bodies before responding; ordinary transcript reads remain strict.
+   */
+  inspectorProjection?: boolean;
   /** Return only a bounded message window (Codex uses this before parsing). */
   maxMessages?: number;
   /** Number of compact boundaries to retain at the tail (Codex). */

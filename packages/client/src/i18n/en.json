@@ -1333,6 +1333,7 @@
   "sessionInspectorQuestionsPartial": "loading more",
   "sessionInspectorQuestionsUnavailable": "coverage unavailable",
   "sessionInspectorLoadingDetails": "Loading session details...",
+  "sessionInspectorDetailsDeferred": "Complete details will load when the current turn finishes.",
   "sessionInspectorDetailsLoadFailed": "Could not load the session index",
   "sessionInspectorRetryDetails": "Session index failed to load. Retry",
   "sessionInspectorNoFiles": "No file activity yet",

@@ -1571,6 +1571,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       branchId,
       deferMedia,
       deferThinking,
+      inspectorProjection: inspectorProjectionRequested,
       maxMessages: boundedMaxMessages,
       tailCompactions: boundedTailCompactions,
       beforeMessageId,

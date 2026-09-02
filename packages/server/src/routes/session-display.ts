@@ -13,6 +13,7 @@ import {
   isUrlProjectId,
 } from "@yep-anywhere/shared";
 import type { Context, Hono } from "hono";
+import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
 import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import {
@@ -305,7 +306,7 @@ async function readDisplayPage(
           : {}),
         toolsMayBeActive: !cursor && resolved.runtime.toolsMayBeActive,
       });
-      return {
+      const page: SessionDisplayPage = {
         ...projection.page,
         ...(native.nextCursor
           ? {
@@ -320,6 +321,7 @@ async function readDisplayPage(
             }
           : {}),
       };
+      return augmentDisplayAssistantText(page);
     }
     if (cursor) throw staleDisplayError();
   } else if (cursor?.source === "app-server") {
@@ -466,7 +468,7 @@ async function readGenericDisplayPage(
       "Could not identify the next user turn cursor",
     );
   }
-  return {
+  const page: SessionDisplayPage = {
     sessionId: resolved.sessionId,
     revision,
     turns: selected.turns,
@@ -485,6 +487,33 @@ async function readGenericDisplayPage(
         }
       : {}),
   };
+  return augmentDisplayAssistantText(page);
+}
+
+/**
+ * Keep the compact display projection renderer-complete for the text that is
+ * actually visible. Tool bodies remain lazy, while assistant Markdown retains
+ * links, lists, code blocks and the same sanitized HTML used by legacy reads.
+ */
+async function augmentDisplayAssistantText(
+  page: SessionDisplayPage,
+): Promise<SessionDisplayPage> {
+  await Promise.all(
+    page.turns.flatMap((turn) =>
+      turn.segments.map(async (segment) => {
+        if (segment.type !== "assistant_text" || !segment.content.trim()) {
+          return;
+        }
+        try {
+          segment.renderedHtml = await renderMarkdownToHtml(segment.content);
+        } catch {
+          // Rendering is best-effort; the client retains a readable plain-text
+          // fallback if an individual Markdown augment cannot be generated.
+        }
+      }),
+    ),
+  );
+  return page;
 }
 
 function selectDisplayTurns(

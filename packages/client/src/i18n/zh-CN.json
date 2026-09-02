@@ -1333,6 +1333,7 @@
   "sessionInspectorQuestionsPartial": "正在补全",
   "sessionInspectorQuestionsUnavailable": "覆盖范围未知",
   "sessionInspectorLoadingDetails": "正在加载会话详情...",
+  "sessionInspectorDetailsDeferred": "本轮任务结束后将自动补齐完整详情。",
   "sessionInspectorDetailsLoadFailed": "无法加载会话索引",
   "sessionInspectorRetryDetails": "会话索引加载失败，点击重试",
   "sessionInspectorNoFiles": "还没有文件活动",

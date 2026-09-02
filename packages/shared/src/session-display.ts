@@ -75,6 +75,8 @@ export const SessionDisplayAssistantTextSegmentSchema = z
     codexCorrelationKey: NonEmptyIdSchema.optional(),
     phase: z.enum(["progress", "final", "text"]),
     content: z.string(),
+    /** Server-rendered, sanitized Markdown for the visible assistant text. */
+    renderedHtml: z.string().optional(),
     timestamp: TimestampSchema.optional(),
   })
   .strict();

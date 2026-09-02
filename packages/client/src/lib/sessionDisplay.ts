@@ -116,6 +116,9 @@ export function buildSessionDisplayRenderItems(
             type: "text",
             id: segment.id,
             text: segment.content,
+            ...(segment.renderedHtml
+              ? { augmentHtml: segment.renderedHtml }
+              : {}),
             ...(segment.phase === "progress"
               ? { phase: "commentary" as const }
               : segment.phase === "final"

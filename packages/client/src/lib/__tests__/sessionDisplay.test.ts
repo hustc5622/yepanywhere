@@ -44,6 +44,8 @@ describe("buildSessionDisplayRenderItems", () => {
               id: "text-2",
               phase: "final",
               content: "Done.",
+              renderedHtml:
+                '<p>See <a href="/api/local-file?path=plan.md">plan</a>.</p>',
             },
           ],
         },
@@ -79,6 +81,12 @@ describe("buildSessionDisplayRenderItems", () => {
           codexCorrelationKey: "codex:native-1:agent-message:text-1",
         },
       ],
+    });
+    expect(items[3]).toMatchObject({
+      type: "text",
+      text: "Done.",
+      augmentHtml:
+        '<p>See <a href="/api/local-file?path=plan.md">plan</a>.</p>',
     });
     expect(JSON.stringify(items)).not.toContain("tool_result");
     expect(items[2]).toMatchObject({

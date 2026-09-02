@@ -46,6 +46,7 @@ const KNOWN_THREAD_ITEM_TYPES = new Set([
   "userMessage",
   "hookPrompt",
   "agentMessage",
+  "functionCallOutput",
   "plan",
   "reasoning",
   "commandExecution",
@@ -588,6 +589,7 @@ export class CodexAppServerHistoryReader {
         (direction === "older" && !cursor) ||
           (direction === "newer" && !itemsPage.nextCursor),
         projectPath,
+        options.inspectorProjection ? "semantic-display" : "strict",
       );
       if (messages.length > messageLimit) {
         throw new CodexHistoryParityError();

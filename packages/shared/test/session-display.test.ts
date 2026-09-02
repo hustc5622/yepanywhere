@@ -35,6 +35,7 @@ describe("session display contract", () => {
               id: "text-1",
               phase: "progress",
               content: "I will inspect it.",
+              renderedHtml: "<p>I will inspect it.</p>",
             },
             {
               type: "tool_group",
@@ -58,6 +59,10 @@ describe("session display contract", () => {
       count: 3,
       failedCount: 1,
       liveTail: true,
+    });
+    expect(page.turns[0]?.segments[0]).toMatchObject({
+      type: "assistant_text",
+      renderedHtml: "<p>I will inspect it.</p>",
     });
   });
 

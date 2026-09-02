@@ -161,6 +161,42 @@ describe("SessionInspector", () => {
     ).toBeNull();
   });
 
+  it("defers the complete index during an active turn and loads it once idle", async () => {
+    const onLoadLegacyDetails = vi.fn();
+    window.localStorage.setItem(UI_KEYS.locale, "en");
+    const renderSessionInspector = (processState: "in-turn" | "idle") => (
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionInspector
+            presentation="sidebar"
+            messages={[]}
+            hasLegacyDetails={false}
+            onLoadLegacyDetails={onLoadLegacyDetails}
+            projectId="project-1"
+            sessionId="session-1"
+            provider="codex"
+            status={{ owner: "self", processId: "process-1" }}
+            processState={processState}
+            onSelectMessage={vi.fn()}
+          />
+        </I18nProvider>
+      </MemoryRouter>
+    );
+    const { rerender } = render(renderSessionInspector("in-turn"));
+
+    expect(onLoadLegacyDetails).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Files" }));
+    expect(
+      screen.getByText(
+        "Complete details will load when the current turn finishes.",
+      ),
+    ).not.toBeNull();
+
+    rerender(renderSessionInspector("idle"));
+
+    await waitFor(() => expect(onLoadLegacyDetails).toHaveBeenCalledTimes(1));
+  });
+
   it("waits for the mobile inspector drawer to open before loading its index", async () => {
     const onLoadLegacyDetails = vi.fn();
     window.localStorage.setItem(UI_KEYS.locale, "en");

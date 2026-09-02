@@ -1360,6 +1360,13 @@ describe("CodexAppServerHistoryReader", () => {
       clientId: null,
       content: [{ type: "localAudio", path: "/private/audio.wav" }],
     },
+    {
+      type: "functionCallOutput",
+      id: "standalone-output",
+      name: "private-tool",
+      namespace: null,
+      output: "hidden output",
+    },
     { type: "imageView", id: "image-view", path: "/private/view.png" },
     {
       type: "hookPrompt",
@@ -1390,6 +1397,116 @@ describe("CodexAppServerHistoryReader", () => {
       kind: "fallback",
       reason: "transcript_parity",
     });
+  });
+
+  it("keeps a source-locked Inspector page readable when it contains local media", async () => {
+    const fake = client({
+      listItems: vi.fn(async () => ({
+        data: [
+          {
+            turnId: "turn-1",
+            item: {
+              type: "userMessage" as const,
+              id: "question-with-image",
+              clientId: "question-with-image-client",
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Inspect this screenshot",
+                  text_elements: [],
+                },
+                {
+                  type: "localImage" as const,
+                  path: "/tmp/project/screenshot.png",
+                },
+              ],
+            },
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: "newer-items",
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+    const result = await reader.getSession(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      undefined,
+      {
+        beforeMessageId: encodeCodexAppServerCursor("older-items", {
+          direction: "older",
+          sessionId: thread().id,
+        }),
+        inspectorProjection: true,
+        maxMessages: 10,
+      },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    expect(result.session.projectedMessages?.[0]?.message?.content).toEqual([
+      { type: "text", text: "Inspect this screenshot" },
+      {
+        type: "input_image",
+        file_path: "/tmp/project/screenshot.png",
+        deferred: true,
+      },
+    ]);
+  });
+
+  it("keeps a source-locked Inspector page readable when it contains a body-only native item", async () => {
+    const fake = client({
+      listItems: vi.fn(async () => ({
+        data: [
+          {
+            turnId: "turn-1",
+            item: {
+              type: "functionCallOutput" as const,
+              id: "standalone-output",
+              name: "private-tool",
+              namespace: null,
+              output: [
+                {
+                  type: "input_text" as const,
+                  text: "STANDALONE_OUTPUT_MUST_NOT_LEAK",
+                },
+              ],
+            },
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: "newer-items",
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+    const result = await reader.getSession(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      undefined,
+      {
+        beforeMessageId: encodeCodexAppServerCursor("older-items", {
+          direction: "older",
+          sessionId: thread().id,
+        }),
+        inspectorProjection: true,
+        maxMessages: 10,
+      },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    expect(result.session.projectedMessages).toMatchObject([
+      {
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItem: { type: "functionCallOutput" },
+      },
+    ]);
+    expect(JSON.stringify(result.session.projectedMessages)).not.toContain(
+      "STANDALONE_OUTPUT_MUST_NOT_LEAK",
+    );
   });
 
   it("retains generated path-bearing fields while omitting inline image bodies", () => {

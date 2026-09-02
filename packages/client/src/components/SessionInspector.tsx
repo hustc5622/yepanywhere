@@ -206,11 +206,13 @@ export function SessionInspector({
     () => (isCodexProvider ? buildCodexChannelSummaries(messages) : []),
     [isCodexProvider, messages],
   );
+  const legacyDetailsDeferred = !hasLegacyDetails && processState === "in-turn";
 
   useEffect(() => {
     if (
       !isOpen ||
       hasLegacyDetails ||
+      legacyDetailsDeferred ||
       legacyDetailsLoading ||
       legacyDetailsError
     ) {
@@ -220,6 +222,7 @@ export function SessionInspector({
   }, [
     hasLegacyDetails,
     isOpen,
+    legacyDetailsDeferred,
     legacyDetailsError,
     legacyDetailsLoading,
     onLoadLegacyDetails,
@@ -363,16 +366,19 @@ export function SessionInspector({
             {copiedSessionId ? <CopiedIcon /> : <CopyIcon />}
           </button>
         </div>
-        {!hasLegacyDetails && legacyDetailsError && onLoadLegacyDetails && (
-          <button
-            type="button"
-            className="session-inspector-section-link"
-            onClick={() => void onLoadLegacyDetails()}
-            disabled={legacyDetailsLoading}
-          >
-            {t("sessionInspectorRetryDetails")}
-          </button>
-        )}
+        {!hasLegacyDetails &&
+          !legacyDetailsDeferred &&
+          legacyDetailsError &&
+          onLoadLegacyDetails && (
+            <button
+              type="button"
+              className="session-inspector-section-link"
+              onClick={() => void onLoadLegacyDetails()}
+              disabled={legacyDetailsLoading}
+            >
+              {t("sessionInspectorRetryDetails")}
+            </button>
+          )}
       </div>
 
       {currentCodexGoal && (
@@ -475,8 +481,15 @@ export function SessionInspector({
             title={t("sessionInspectorFiles")}
             count={fileActivities.length}
           >
-            {legacyDetailsLoading && !hasLegacyDetails ? (
-              <EmptyState text={t("sessionInspectorLoadingDetails")} />
+            {(legacyDetailsLoading || legacyDetailsDeferred) &&
+            !hasLegacyDetails ? (
+              <EmptyState
+                text={t(
+                  legacyDetailsDeferred
+                    ? "sessionInspectorDetailsDeferred"
+                    : "sessionInspectorLoadingDetails",
+                )}
+              />
             ) : fileActivities.length > 0 ? (
               <ul className="session-inspector-list">
                 {fileActivities.slice(0, 10).map((activity) => (
@@ -515,8 +528,15 @@ export function SessionInspector({
             title={t("sessionInspectorChecks")}
             count={checks.length}
           >
-            {legacyDetailsLoading && !hasLegacyDetails ? (
-              <EmptyState text={t("sessionInspectorLoadingDetails")} />
+            {(legacyDetailsLoading || legacyDetailsDeferred) &&
+            !hasLegacyDetails ? (
+              <EmptyState
+                text={t(
+                  legacyDetailsDeferred
+                    ? "sessionInspectorDetailsDeferred"
+                    : "sessionInspectorLoadingDetails",
+                )}
+              />
             ) : checks.length > 0 ? (
               <ul className="session-inspector-list">
                 {checks.slice(0, 8).map((check) => (
