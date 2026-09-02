@@ -306,22 +306,32 @@ async function readDisplayPage(
           : {}),
         toolsMayBeActive: !cursor && resolved.runtime.toolsMayBeActive,
       });
-      const page: SessionDisplayPage = {
-        ...projection.page,
-        ...(native.nextCursor
-          ? {
-              nextCursor: encodeCursor(resolved.sessionId, {
-                version: 1,
-                kind: "display",
-                revision: native.revision,
-                source: "app-server",
-                anchor: native.nextCursor,
-                ...(branchId ? { branchId } : {}),
-              }),
-            }
-          : {}),
-      };
-      return augmentDisplayAssistantText(page);
+      if (
+        !nativeCompletePageMissesIndexedQuestions(
+          resolved,
+          projection.questions.questions.length,
+          cursor,
+          branchId,
+          native.nextCursor,
+        )
+      ) {
+        const page: SessionDisplayPage = {
+          ...projection.page,
+          ...(native.nextCursor
+            ? {
+                nextCursor: encodeCursor(resolved.sessionId, {
+                  version: 1,
+                  kind: "display",
+                  revision: native.revision,
+                  source: "app-server",
+                  anchor: native.nextCursor,
+                  ...(branchId ? { branchId } : {}),
+                }),
+              }
+            : {}),
+        };
+        return augmentDisplayAssistantText(page);
+      }
     }
     if (cursor) throw staleDisplayError();
   } else if (cursor?.source === "app-server") {
@@ -329,6 +339,32 @@ async function readDisplayPage(
   }
 
   return readGenericDisplayPage(deps, resolved, cursor, branchId, limit);
+}
+
+/**
+ * A lagging Codex thread-history projection can still answer turns/list with
+ * no cursor, making a truncated prefix look complete. The rollout summary is
+ * scanned independently, so a complete question index proves when that
+ * native page omitted durable user turns. Only compare the first active-branch
+ * page: branch and cursor pages intentionally contain subsets. A native page
+ * with more questions is accepted because the summary may lag a live append.
+ */
+function nativeCompletePageMissesIndexedQuestions(
+  resolved: ResolvedDisplaySession,
+  nativeQuestionCount: number,
+  cursor: SessionDisplayCursor | null,
+  branchId: string | undefined,
+  nativeNextCursor: string | undefined,
+): boolean {
+  if (
+    cursor ||
+    branchId ||
+    nativeNextCursor ||
+    resolved.summary.userQuestionCoverage !== "complete"
+  ) {
+    return false;
+  }
+  return nativeQuestionCount < (resolved.summary.userQuestions?.length ?? 0);
 }
 
 async function readGenericDisplayPage(
@@ -582,21 +618,31 @@ async function readQuestionPage(
         messages: native.messages,
         questionCoverage: native.nextCursor ? "partial" : "complete",
       });
-      return SessionQuestionPageSchema.parse({
-        ...projection.questions,
-        ...(native.nextCursor
-          ? {
-              nextCursor: encodeCursor(resolved.sessionId, {
-                version: 1,
-                kind: "questions",
-                revision: native.revision,
-                source: "app-server",
-                anchor: native.nextCursor,
-                ...(branchId ? { branchId } : {}),
-              }),
-            }
-          : {}),
-      });
+      if (
+        !nativeCompletePageMissesIndexedQuestions(
+          resolved,
+          projection.questions.questions.length,
+          cursor,
+          branchId,
+          native.nextCursor,
+        )
+      ) {
+        return SessionQuestionPageSchema.parse({
+          ...projection.questions,
+          ...(native.nextCursor
+            ? {
+                nextCursor: encodeCursor(resolved.sessionId, {
+                  version: 1,
+                  kind: "questions",
+                  revision: native.revision,
+                  source: "app-server",
+                  anchor: native.nextCursor,
+                  ...(branchId ? { branchId } : {}),
+                }),
+              }
+            : {}),
+        });
+      }
     }
     if (cursor) throw staleDisplayError();
   } else if (cursor?.source === "app-server") {

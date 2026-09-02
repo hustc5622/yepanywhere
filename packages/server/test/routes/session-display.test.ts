@@ -330,6 +330,96 @@ describe("session display routes", () => {
     expect(getSession).not.toHaveBeenCalled();
   });
 
+  it("falls back when a complete native page misses rollout-indexed questions", async () => {
+    const messages = buildMessages(3);
+    const summary: SessionSummary = {
+      id: SESSION_ID,
+      projectId: PROJECT_ID,
+      title: "Lagging native history",
+      fullTitle: "Lagging native history",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:03:00.000Z",
+      messageCount: messages.length,
+      userQuestions: Array.from({ length: 3 }, (_, turn) => ({
+        id: `user-${turn}`,
+        text: `Question ${turn}`,
+      })),
+      userQuestionCoverage: "complete",
+      ownership: { owner: "none" },
+      provider: "codex",
+    };
+    const getSession = vi.fn(
+      async (): Promise<LoadedSession> => ({
+        summary,
+        data: { provider: "codex", session: { entries: [] } },
+        projectedMessages: structuredClone(messages),
+      }),
+    );
+    const reader = {
+      getSession,
+      getSessionSummary: vi.fn(async () => summary),
+      getSessionFileStats: vi.fn(async () => ({
+        mtime: 1,
+        size: messages.length,
+      })),
+    };
+    const getSemanticTurnsPage = vi.fn(async () => ({
+      kind: "loaded" as const,
+      messages: buildMessages(1),
+      summary,
+      provider: "codex" as const,
+      revision: "cas1.stale.session",
+    }));
+    const app = new Hono();
+    registerSessionDisplayRoutes(app, {
+      scanner: {
+        getOrCreateProject: vi.fn(async () => ({
+          ...project(),
+          provider: "codex" as const,
+        })),
+      },
+      providerResolution: {
+        readerFactory: () => reader as never,
+        codexSessionsDir: "/tmp/codex-sessions",
+        codexReaderFactory: () => reader as never,
+      },
+      codexAppServerHistoryReader: {
+        getSemanticTurnsPage,
+        getSemanticTurn: vi.fn(),
+      },
+    });
+
+    const displayResponse = await app.request(
+      `/projects/${PROJECT_ID}/sessions/${SESSION_ID}/display`,
+    );
+    expect(displayResponse.status).toBe(200);
+    const display = (await displayResponse.json()) as {
+      revision: string;
+      turns: Array<{ question: { messageId: string } | null }>;
+    };
+    expect(display.revision).not.toBe("cas1.stale.session");
+    expect(
+      display.turns.map((turn) => turn.question?.messageId).filter(Boolean),
+    ).toEqual(["user-0", "user-1", "user-2"]);
+    expect(getSession).toHaveBeenCalledOnce();
+
+    const questionsResponse = await app.request(
+      `/projects/${PROJECT_ID}/sessions/${SESSION_ID}/display/questions`,
+    );
+    expect(questionsResponse.status).toBe(200);
+    const questions = (await questionsResponse.json()) as {
+      coverage: string;
+      questions: Array<{ messageId: string }>;
+    };
+    expect(questions.coverage).toBe("complete");
+    expect(questions.questions.map((question) => question.messageId)).toEqual([
+      "user-0",
+      "user-1",
+      "user-2",
+    ]);
+    expect(getSemanticTurnsPage).toHaveBeenCalledTimes(2);
+  });
+
   it("paginates by user turns and keeps questions independent of tool bodies", async () => {
     const { app, getSession } = createRoutes(45);
     const firstResponse = await app.request(

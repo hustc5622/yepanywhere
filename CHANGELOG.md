@@ -46,6 +46,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复 Codex 会话在切换 reasoning effort 并重启 app-server 后只展示首轮历史：本地 transport 关闭现在会等待旧子进程真正退出后才允许 Supervisor 恢复同一 thread，避免新旧 rollout writer 在交接窗口写出重复 ordinal；轻量 `display`/`display/questions` 也会把“无下一页但少于完整 rollout 问题索引”的原生投影视为不完整并自动回退 JSONL，因此已有损坏的 thread-history SQLite 投影无需改写原始会话即可恢复全部展示。
 - 修复语义化轻量历史把 assistant 文本降级为纯文本的问题：display 投影现在只为实际可见的 assistant 文本补充与旧历史路径一致的安全 Markdown HTML，恢复本地文档跳链、右侧文件预览、列表、行内代码和代码块，同时继续保持工具正文按需加载。
 - 修复 Codex 会话打开 Session Inspector 时偶发“无法加载会话索引”：完整 Files/Checks/plan/goal/subagent 索引需要跨多页组合 app-server turns/items，活跃 turn 的投影并非原子快照，旧实现会在写入期间继续扫描并把中途 parity 变化统一显示成 stale 错误；即使进入 idle，较早页面只要含本地图片/音频等严格 transcript 必须回退的 item，source-locked app-server cursor 也会被误报为 stale。Inspector 现在在 `in-turn` 阶段保留轻量 display、问题目录和实时尾部，取消已开始的全量索引 generation，并在本轮结束后自动补齐；body-free projection 意图会传入 history reader，媒体和无专用 renderer 的 native item 只在该安全索引内降为 deferred/opaque 占位，随后由 Inspector 投影移除正文，普通 canonical transcript 仍保持 strict parity。等待期间显示明确的延迟状态，稳定状态下的真实失败仍保留错误与手动重试入口。
 - 修复仍会绕过完整 renderer augmentation 的四条消息出口：轻量 display 现在只对用户实际展开或 active live-tail 恢复的工具详情页生成 Edit/Write/Read/Markdown 增强，完成的子智能体详情、session 文件落盘前的进程快照及无 live Process 的离线 durable replay 也复用同一增强语义；Codex `FileChange` 在这些路径中不再只剩文件名和 `Patch preview unavailable`，同时不对隐藏 turn 预计算 diff。

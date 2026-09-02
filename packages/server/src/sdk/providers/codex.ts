@@ -463,7 +463,7 @@ async function terminateChildProcess(
   child: ChildProcess | null | undefined,
   graceMs = APP_SERVER_SHUTDOWN_GRACE_MS,
 ): Promise<void> {
-  if (!child?.pid || child.killed || child.exitCode !== null) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) {
     return;
   }
 
@@ -481,7 +481,7 @@ async function terminateChildProcess(
   }
 
   const timer = setTimeout(() => {
-    if (child.exitCode !== null || child.killed) {
+    if (child.exitCode !== null || child.signalCode !== null) {
       return;
     }
     try {
@@ -759,6 +759,7 @@ export class CodexAppServerClient {
   private inboundObservationTail: Promise<void> = Promise.resolve();
   private readonly reportedDeprecationSummaries = new Set<string>();
   private closed = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
     private readonly command: string,
@@ -1201,7 +1202,13 @@ export class CodexAppServerClient {
   }
 
   close(): void {
-    if (this.closed) return;
+    void this.closeAndWait();
+  }
+
+  /** Close the transport and wait until its local app-server child exits. */
+  closeAndWait(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    if (this.closed) return Promise.resolve();
     this.closed = true;
 
     const closeError = new Error("Codex app-server client closed");
@@ -1223,7 +1230,8 @@ export class CodexAppServerClient {
     ) {
       socket.close(1000, "Yep session detached");
     }
-    void terminateChildProcess(child);
+    this.shutdownPromise = terminateChildProcess(child);
+    return this.shutdownPromise;
   }
 
   private handleProcessClose(error: Error): void {
@@ -3813,7 +3821,7 @@ export class CodexProvider implements AgentProvider {
     } finally {
       runtimeState.activeTurnId = null;
       runtimeState.ready = false;
-      appServer?.close();
+      await appServer?.closeAndWait();
     }
 
     yield logMessage({

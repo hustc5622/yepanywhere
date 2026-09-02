@@ -736,6 +736,37 @@ process.stdin.on("data", (chunk) => {
       return fakeCodexPath;
     }
 
+    it("waits for a local app-server child to exit during shutdown", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-shutdown-wait-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const client = new CodexAppServerClient(
+        fakeCodexPath,
+        tempDir,
+        process.env,
+      );
+
+      try {
+        await client.connect();
+        const pid = client.pid;
+        expect(pid).toBeTypeOf("number");
+
+        await client.closeAndWait();
+
+        let childExists = true;
+        try {
+          process.kill(pid as number, 0);
+        } catch {
+          childExists = false;
+        }
+        expect(childExists).toBe(false);
+      } finally {
+        await client.closeAndWait();
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("reproduces paginated full-history deprecation and bounded turn pages", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-history-compat-"),
