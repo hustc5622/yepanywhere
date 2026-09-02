@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_LLM_GATEWAY_CHANNEL_ID,
   invalidateLlmGatewayOverlayCache,
+  isHiddenGatewayModel,
   resolveLlmGatewayChannels,
   resolveLlmGatewayChannelsDetailed,
   resolveLlmGatewayOverlayPath,
@@ -133,6 +134,44 @@ describe("LLM gateway credentials overlay", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("hides exact Yep-facing model ids without changing gateway credentials", async () => {
+    await writeOverlay({
+      hiddenModels: ["gpt-5.6-luna", "AITL/claude-fable-5"],
+    });
+
+    expect(isHiddenGatewayModel("gpt-5.6-luna", baseEnv())).toBe(true);
+    expect(isHiddenGatewayModel("aitl/claude-fable-5", baseEnv())).toBe(true);
+    expect(isHiddenGatewayModel("claude-fable-5", baseEnv())).toBe(false);
+    expect(isHiddenGatewayModel("aitl/claude-fable-5-1", baseEnv())).toBe(
+      false,
+    );
+    expect(
+      resolveLlmGatewayChannels(baseEnv()).map((channel) => channel.apiKey),
+    ).toEqual(["env-default-key", "env-extra-key"]);
+  });
+
+  it("reports malformed hidden model entries", async () => {
+    await writeOverlay({
+      channels: "invalid",
+      hiddenModels: ["ok", "", 42],
+    });
+
+    expect(resolveLlmGatewayChannelsDetailed(baseEnv()).problems).toEqual([
+      {
+        entry: `${overlayPath}.channels`,
+        reason: "expected an array of channel entries",
+      },
+      {
+        entry: `${overlayPath}.hiddenModels[1]`,
+        reason: "model id must be a non-empty string",
+      },
+      {
+        entry: `${overlayPath}.hiddenModels[2]`,
+        reason: "model id must be a non-empty string",
+      },
+    ]);
   });
 
   it("reports a malformed overlay instead of dropping working channels", async () => {

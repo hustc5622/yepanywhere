@@ -151,6 +151,8 @@ Gemini、doubao、qwen、mimo、M2-her、gpt-5.5、glm-5.1、kimi-k2.x、MiniMax
 
 `YEP_LLM_GATEWAY_MODELS=前缀1,前缀2` 整表替换；置空 = 全显示（测试 fixture 就用这个）。
 
+运行时 overlay `llm-gateways.json` 还可用顶层 `hiddenModels` 按完整 Yep 模型 ID 精确隐藏选择器条目，例如 `aitl/claude-fable-5`。匹配不区分大小写且只影响展示；完整目录、历史会话恢复和模型路由不受影响。它与 key rotation 一样按文件 mtime 热重载，适合屏蔽特定 channel 上临时不可用、但不应从其他 channel 一并移除的同名模型。
+
 **关键约束：不展示 ≠ 不可路由。** `getAvailableModels()`（选择器/切换模型）过滤，`loadRoutableModels()`（会话启动、extension provider 注册、`resolvePiModelRoute`）不过滤。否则任何已经绑在被过滤模型上的历史会话会直接开不起来 —— 有专门测试守住这条。
 
 ### 已知取舍与后续

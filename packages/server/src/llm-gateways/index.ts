@@ -322,6 +322,7 @@ export function resolveLlmGatewayOverlayPath(env: Env): string | null {
 interface OverlayCacheEntry {
   /** `null` records "file is absent", which is the common case. */
   specs: RawChannelSpec[] | null;
+  hiddenModels: string[];
   problems: LlmGatewayChannelProblem[];
   mtimeMs: number;
   size: number;
@@ -347,7 +348,10 @@ export function invalidateLlmGatewayOverlayCache(): void {
  * Accepted shape:
  *
  * ```json
- * { "channels": [{ "id": "aitl", "apiKey": "sk-..." }] }
+ * {
+ *   "channels": [{ "id": "aitl", "apiKey": "sk-..." }],
+ *   "hiddenModels": ["gpt-5.6-luna", "aitl/claude-fable-5"]
+ * }
  * ```
  *
  * An entry whose id matches a channel from the environment overrides only the
@@ -356,14 +360,19 @@ export function invalidateLlmGatewayOverlayCache(): void {
  */
 function readLlmGatewayOverlay(env: Env): {
   specs: RawChannelSpec[];
+  hiddenModels: string[];
   problems: LlmGatewayChannelProblem[];
 } {
   const path = resolveLlmGatewayOverlayPath(env);
-  if (!path) return { specs: [], problems: [] };
+  if (!path) return { specs: [], hiddenModels: [], problems: [] };
   const now = Date.now();
   const cached = overlayCache.get(path);
   if (cached && now - cached.checkedAt < OVERLAY_REVALIDATE_MS) {
-    return { specs: cached.specs ?? [], problems: cached.problems };
+    return {
+      specs: cached.specs ?? [],
+      hiddenModels: cached.hiddenModels,
+      problems: cached.problems,
+    };
   }
 
   let mtimeMs: number;
@@ -375,29 +384,41 @@ function readLlmGatewayOverlay(env: Env): {
   } catch {
     overlayCache.set(path, {
       specs: null,
+      hiddenModels: [],
       problems: [],
       mtimeMs: 0,
       size: 0,
       checkedAt: now,
     });
-    return { specs: [], problems: [] };
+    return { specs: [], hiddenModels: [], problems: [] };
   }
 
   if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
     overlayCache.set(path, { ...cached, checkedAt: now });
-    return { specs: cached.specs ?? [], problems: cached.problems };
+    return {
+      specs: cached.specs ?? [],
+      hiddenModels: cached.hiddenModels,
+      problems: cached.problems,
+    };
   }
 
   const problems: LlmGatewayChannelProblem[] = [];
-  const specs = parseOverlayFile(path, problems);
-  overlayCache.set(path, { specs, problems, mtimeMs, size, checkedAt: now });
-  return { specs, problems };
+  const { specs, hiddenModels } = parseOverlayFile(path, problems);
+  overlayCache.set(path, {
+    specs,
+    hiddenModels,
+    problems,
+    mtimeMs,
+    size,
+    checkedAt: now,
+  });
+  return { specs, hiddenModels, problems };
 }
 
 function parseOverlayFile(
   path: string,
   problems: LlmGatewayChannelProblem[],
-): RawChannelSpec[] {
+): { specs: RawChannelSpec[]; hiddenModels: string[] } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
@@ -408,22 +429,73 @@ function parseOverlayFile(
         error instanceof Error ? error.message : String(error)
       }`,
     });
-    return [];
+    return { specs: [], hiddenModels: [] };
   }
 
-  const list = Array.isArray(parsed)
-    ? parsed
-    : isRecord(parsed) && Array.isArray(parsed.channels)
-      ? parsed.channels
-      : null;
-  if (!list) {
+  if (Array.isArray(parsed)) {
+    return {
+      specs: parsed.filter(isRecord) as RawChannelSpec[],
+      hiddenModels: [],
+    };
+  }
+  if (!isRecord(parsed)) {
     problems.push({
       entry: path,
-      reason: 'expected {"channels": [...]} or a channel array',
+      reason:
+        'expected {"channels": [...], "hiddenModels": [...]} or a channel array',
     });
-    return [];
+    return { specs: [], hiddenModels: [] };
   }
-  return list.filter(isRecord) as RawChannelSpec[];
+
+  const specs =
+    parsed.channels === undefined
+      ? []
+      : Array.isArray(parsed.channels)
+        ? (parsed.channels.filter(isRecord) as RawChannelSpec[])
+        : [];
+  if (parsed.channels !== undefined && !Array.isArray(parsed.channels)) {
+    problems.push({
+      entry: `${path}.channels`,
+      reason: "expected an array of channel entries",
+    });
+  }
+
+  const hiddenModels: string[] = [];
+  if (
+    parsed.hiddenModels !== undefined &&
+    !Array.isArray(parsed.hiddenModels)
+  ) {
+    problems.push({
+      entry: `${path}.hiddenModels`,
+      reason: "expected an array of model ids",
+    });
+  } else if (Array.isArray(parsed.hiddenModels)) {
+    for (const [index, value] of parsed.hiddenModels.entries()) {
+      const modelId = clean(stringOrUndefined(value));
+      if (!modelId) {
+        problems.push({
+          entry: `${path}.hiddenModels[${index}]`,
+          reason: "model id must be a non-empty string",
+        });
+        continue;
+      }
+      hiddenModels.push(modelId.toLowerCase());
+    }
+  }
+
+  return { specs, hiddenModels };
+}
+
+/** Whether a complete Yep-facing gateway model id is hidden from pickers. */
+export function isHiddenGatewayModel(
+  modelId: string,
+  env: Env = process.env,
+): boolean {
+  const normalized = modelId.trim().toLowerCase();
+  return (
+    normalized.length > 0 &&
+    readLlmGatewayOverlay(env).hiddenModels.includes(normalized)
+  );
 }
 
 /** Merge overlay entries into the environment-derived channel list, in place. */

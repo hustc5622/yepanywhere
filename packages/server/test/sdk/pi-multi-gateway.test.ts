@@ -188,6 +188,35 @@ describe("PiProvider multi-gateway channels", () => {
     ]);
   });
 
+  it("hides exact channel-qualified picker models without hiding namesakes", async () => {
+    stubTwoChannels();
+    const root = join(tmpdir(), `pi-hidden-picker-${randomUUID()}`);
+    const overlayPath = join(root, "llm-gateways.json");
+    tempDirs.push(root);
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      overlayPath,
+      JSON.stringify({ hiddenModels: ["aitl/claude-opus-4-8"] }),
+    );
+    vi.stubEnv("YEP_LLM_GATEWAYS_FILE", overlayPath);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        catalogResponse([
+          {
+            id: "claude-opus-4-8",
+            supported_endpoint_types: ["anthropic"],
+          },
+        ]),
+      ),
+    );
+
+    const visible = await new PiProvider({
+      timeout: 5_000,
+    }).getAvailableModels();
+    expect(visible.map((model) => model.id)).toEqual(["claude-opus-4-8"]);
+  });
+
   it("returns nothing when no gateway channel is configured", async () => {
     vi.stubEnv("YEP_LLM_GATEWAY_API_KEY", "");
     vi.stubEnv("LLM_API_KEY", "");

@@ -21,6 +21,7 @@ import {
   LLM_GATEWAYS_ENV,
   type LlmGatewayChannel,
   fetchLlmGatewayModels,
+  isHiddenGatewayModel,
   isVisibleGatewayModel,
   resolveLlmGatewayChannels,
   resolveLlmGatewayProxyBaseUrl,
@@ -719,7 +720,9 @@ export class PiProvider implements AgentProvider {
     const catalog = await this.loadRoutableCatalog(options);
     return catalog.models.filter((model) => {
       const bareModelId = catalog.routes.get(model.id)?.bareModelId ?? model.id;
-      return isVisibleGatewayModel(bareModelId);
+      return (
+        isVisibleGatewayModel(bareModelId) && !isHiddenGatewayModel(model.id)
+      );
     });
   }
 
