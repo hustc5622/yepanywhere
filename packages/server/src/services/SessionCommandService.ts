@@ -138,6 +138,13 @@ export interface ResumeSessionCommandInput {
     CodexNativeControlRequest,
     { control: "thread/compact/start" }
   >;
+  /** Internal-only source override used by the Feishu usage-limit router. */
+  codexModelProviderOverride?: {
+    sourceId: string;
+    reason: "usage_limit_fallback" | "usage_limit_recovered";
+  };
+  /** Replace a create-only Codex thread when no rollout was materialized yet. */
+  allowMissingRolloutReplacement?: boolean;
 }
 
 export interface ResumeCodexControlCommandInput {
@@ -164,6 +171,15 @@ export interface SendSessionMessageCommandInput
   extends ResumeSessionCommandInput {
   /** Keep this input as its own provider turn instead of steering an active one. */
   allowSteer?: boolean;
+}
+
+export interface SwitchCodexModelSourceCommandInput {
+  projectId: string;
+  sessionId: string;
+  body: StartSessionBody;
+  origin?: SessionCommandOrigin;
+  /** Remove the just-failed, side-effect-free turn before replaying its input. */
+  excludeFailedTurn?: boolean;
 }
 
 export interface SessionCommandOrigin {
@@ -1069,19 +1085,21 @@ export class SessionCommandService {
         : undefined);
     const resumeCodexModelProvider =
       providerName === "codex"
-        ? resolveCodexResumeSource(
+        ? (input.codexModelProviderOverride?.sourceId ??
+          resolveCodexResumeSource(
             sessionSummary?.model ?? model,
             sessionSummary?.codexModelProvider ??
               this.deps.sessionMetadataService?.getCodexModelProvider?.(
                 sessionId,
               ),
-          )
+          ))
         : undefined;
     if (
       providerName === "codex" &&
       body.codexModelProvider &&
       resumeCodexModelProvider &&
-      body.codexModelProvider !== resumeCodexModelProvider
+      body.codexModelProvider !== resumeCodexModelProvider &&
+      !input.codexModelProviderOverride
     ) {
       getLogger().warn(
         {
@@ -1091,6 +1109,18 @@ export class SessionCommandService {
           persisted: resumeCodexModelProvider,
         },
         "Ignoring codexModelProvider on resume; keeping the session's original source",
+      );
+    }
+    if (input.codexModelProviderOverride) {
+      getLogger().info(
+        {
+          event: "codex_model_provider_failover_requested",
+          sessionId,
+          model,
+          modelProvider: input.codexModelProviderOverride.sourceId,
+          reason: input.codexModelProviderOverride.reason,
+        },
+        "Switching the Codex model source for channel failover",
       );
     }
 
@@ -1110,6 +1140,7 @@ export class SessionCommandService {
         input.requireImmediate ||
         isSourcePreservingFork ||
         !!controlAfterResume,
+      allowMissingRolloutReplacement: input.allowMissingRolloutReplacement,
       modelSettings: {
         model,
         thinking,
@@ -1148,7 +1179,11 @@ export class SessionCommandService {
         parsedCodexMcpMode.codexMcpMode,
       );
     }
-    if (providerName === "codex" && resumeCodexModelProvider) {
+    if (
+      providerName === "codex" &&
+      resumeCodexModelProvider &&
+      !input.codexModelProviderOverride
+    ) {
       await this.deps.sessionMetadataService?.setCodexModelProvider?.(
         sessionId,
         resumeCodexModelProvider,
@@ -1183,6 +1218,12 @@ export class SessionCommandService {
     }
 
     const actualSessionId = result.sessionId ?? sessionId;
+    if (providerName === "codex" && resumeCodexModelProvider) {
+      await this.deps.sessionMetadataService?.setCodexModelProvider?.(
+        actualSessionId,
+        resumeCodexModelProvider,
+      );
+    }
     await this.persistPermissionMode(
       actualSessionId,
       result.permissionMode ?? effectivePermissionMode,
@@ -1573,6 +1614,77 @@ export class SessionCommandService {
       });
     }
     return this.resume(input);
+  }
+
+  /**
+   * Keep the Codex CLI/runtime and switch only its model source. A failed
+   * usage-limit turn is forked away before replay; recovery switches a quiet
+   * resident thread back to its preferred source without rewriting history.
+   */
+  async switchCodexModelSource(
+    input: SwitchCodexModelSourceCommandInput,
+  ): Promise<SessionCommandResult<Record<string, unknown>>> {
+    const model = input.body.model?.trim();
+    if (!model)
+      return commandFailure("Codex source switch requires a model", 400);
+    const source = resolveCodexModelProviderForStart("codex", undefined, model);
+    if (!source.value || source.error) {
+      return commandFailure(
+        source.error ?? "Codex model source is unavailable",
+        400,
+        {
+          ...(source.code ? { code: source.code } : {}),
+        },
+      );
+    }
+
+    const process =
+      await this.deps.runtimeController.getProcessSnapshotForSession(
+        input.sessionId,
+      );
+    if (process && process.provider !== "codex") {
+      return commandFailure("Session is not backed by Codex app-server", 400, {
+        code: "unsupported_provider",
+      });
+    }
+    if (
+      !input.excludeFailedTurn &&
+      process &&
+      process.state !== "idle" &&
+      process.state !== "terminated"
+    ) {
+      return commandFailure(
+        "Wait for the active Codex turn before switching model source",
+        409,
+        { code: "session_busy" },
+      );
+    }
+    if (!input.excludeFailedTurn && process?.state === "idle") {
+      const released = await this.releaseSession(input.sessionId);
+      if (!released.ok) return released;
+    }
+
+    return this.resume({
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      body: {
+        ...input.body,
+        provider: "codex",
+        model,
+        codexModelProvider: source.value,
+        ...(input.excludeFailedTurn ? { rollbackNumTurns: 1 } : {}),
+      },
+      origin: input.origin,
+      requireImmediate: true,
+      allowMissingRolloutReplacement: true,
+      codexModelProviderOverride: {
+        sourceId: source.value,
+        reason:
+          source.value === "deepseek"
+            ? "usage_limit_fallback"
+            : "usage_limit_recovered",
+      },
+    });
   }
 
   async interrupt(

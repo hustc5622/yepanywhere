@@ -32,14 +32,24 @@ describe("FeishuAccountConfigStore", () => {
     await store.initialize();
 
     await store.upsert({
-      ...makeAccount(),
+      ...makeAccount({
+        defaultModel: "gpt-5.6-sol",
+        codexUsageLimitFallbackModel: "deepseek-v4-flash-vision-exp",
+      }),
       appSecret: "must-not-be-persisted",
     } as FeishuAccountConfig & { appSecret: string });
 
     const content = await readFile(store.filePath, "utf8");
     expect(JSON.parse(content)).toMatchObject({
       version: 1,
-      accounts: [{ id: "team-bot", appId: "cli_0123456789abcdef" }],
+      accounts: [
+        {
+          id: "team-bot",
+          appId: "cli_0123456789abcdef",
+          defaultModel: "gpt-5.6-sol",
+          codexUsageLimitFallbackModel: "deepseek-v4-flash-vision-exp",
+        },
+      ],
     });
     expect(content).not.toContain("must-not-be-persisted");
     if (process.platform !== "win32") {

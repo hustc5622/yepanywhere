@@ -159,6 +159,8 @@ export interface ResumeRuntimeSessionRequest {
   modelSettings?: ModelSettings;
   /** Reject atomically instead of admitting this resume to the worker queue. */
   requireImmediate?: boolean;
+  /** Allow Codex to replace a create-only thread that has no persisted rollout. */
+  allowMissingRolloutReplacement?: boolean;
 }
 
 export interface QueueRuntimeMessageRequest {

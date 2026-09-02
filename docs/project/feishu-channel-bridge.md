@@ -58,9 +58,12 @@
 - `defaultProjectPath`：首次消息的默认项目，必须位于允许根目录内；
 - `groupSessionMode`：通常使用 `thread-when-available`；
 - `defaultModel` / `defaultReasoningEffort`：留空时沿用 provider 默认值；
+- `codexUsageLimitFallbackModel`：可选的 Codex model source 故障转移模型。仅在 OpenAI Codex 原生报告 `usageLimitExceeded` 且失败 turn 尚无文本、工具或审批副作用时重派；例如 `deepseek-v4-flash-vision-exp` 仍由 Codex CLI/app-server 执行，并保留原消息中的图片附件；
 - `defaultCodexMcpMode`：`standard`、`clear` 或 `full`；
 - `defaultPermissionMode`：`default`、`plan`、`acceptEdits` 或当前 schema 允许的安全值；
 - `requireMentionInGroup`：生产群建议开启。
+
+故障转移不替换顶层 provider，也不把账号默认模型永久改成 DeepSeek。飞书渠道复用新建会话页的 Codex `account/rateLimits/read` 数据：一个本机 Codex 订阅耗尽后，所有飞书账号在 `resetsAt` 前共享备用路由；到点后刷新用量，确认窗口不再耗尽才让下一条消息切回各账号的 `defaultModel`。服务重启后若 binding 仍在备用模型，会先刷新同一用量快照再决定是否切回。
 
 App Secret 通过独立 write-only API 保存。客户端不读取或回显原值；secret 不得写入普通配置、日志、诊断包、issue 或版本库。
 

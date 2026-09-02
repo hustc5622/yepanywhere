@@ -72,6 +72,35 @@ describe("FeishuBindingStore", () => {
     expect(store.get("team-bot:group:oc_fixture")).toBeUndefined();
   });
 
+  it("moves a binding to a fallback session only for its current owner", async () => {
+    const dataDir = await createDataDir(dataDirs);
+    const store = new FeishuBindingStore({ dataDir });
+    await store.initialize();
+    await store.upsert(makeBinding({ model: "gpt-5.6-sol" }));
+
+    await expect(
+      store.updateIfSession(
+        "team-bot:group:oc_fixture",
+        "session-stale",
+        (binding) => ({ ...binding, sessionId: "must-not-win" }),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.updateIfSession(
+        "team-bot:group:oc_fixture",
+        "session-temp",
+        (binding) => ({
+          ...binding,
+          sessionId: "session-deepseek",
+          model: "deepseek-v4-flash-vision-exp",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      sessionId: "session-deepseek",
+      model: "deepseek-v4-flash-vision-exp",
+    });
+  });
+
   it("rejects bypassPermissions and restores owner-only file permissions", async () => {
     const dataDir = await createDataDir(dataDirs);
     const store = new FeishuBindingStore({ dataDir });

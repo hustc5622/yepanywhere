@@ -107,6 +107,36 @@ export class FeishuBindingStore {
     return removed;
   }
 
+  /** Atomically update a scope only while it still owns the expected session. */
+  async updateIfSession(
+    scopeKey: string,
+    expectedSessionId: string,
+    update: (current: FeishuSessionBinding) => FeishuSessionBinding,
+  ): Promise<FeishuSessionBinding | undefined> {
+    this.assertInitialized();
+    let updated: FeishuSessionBinding | undefined;
+    await this.enqueueWrite(async () => {
+      const index = this.state.bindings.findIndex(
+        (item) =>
+          item.scopeKey === scopeKey && item.sessionId === expectedSessionId,
+      );
+      if (index === -1) return;
+      const current = this.state.bindings[index];
+      if (!current) return;
+      const next = FeishuSessionBindingSchema.parse(
+        update(structuredClone(current)),
+      ) as FeishuSessionBinding;
+      if (next.scopeKey !== scopeKey) {
+        throw new Error("Feishu binding scope cannot change during update");
+      }
+      const bindings = [...this.state.bindings];
+      bindings[index] = next;
+      await this.save({ version: 1, bindings });
+      updated = next;
+    });
+    return updated ? structuredClone(updated) : undefined;
+  }
+
   async remapSessionId(
     oldSessionId: string,
     newSessionId: string,

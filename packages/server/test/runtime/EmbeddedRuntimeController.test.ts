@@ -177,6 +177,35 @@ describe("EmbeddedRuntimeController", () => {
     await expect(controller.listProcesses()).resolves.toHaveLength(1);
   });
 
+  it("forwards provisional Codex rollout replacement on resume", async () => {
+    const resumeSession = vi.fn(async () => ({
+      error: "immediate_start_unavailable" as const,
+    }));
+    const controller = new EmbeddedRuntimeController({
+      resumeSession,
+    } as unknown as Supervisor);
+
+    await controller.resumeSession({
+      sessionId: "provisional-thread",
+      projectPath: "/tmp/runtime-provisional-resume",
+      message: { text: "first turn" },
+      requireImmediate: true,
+      allowMissingRolloutReplacement: true,
+    });
+
+    expect(resumeSession).toHaveBeenCalledWith(
+      "provisional-thread",
+      "/tmp/runtime-provisional-resume",
+      { text: "first turn" },
+      undefined,
+      undefined,
+      {
+        requireImmediate: true,
+        allowMissingRolloutReplacement: true,
+      },
+    );
+  });
+
   it("forwards live session controls through structured methods", async () => {
     const controller = createController();
     const started = await controller.startSession({

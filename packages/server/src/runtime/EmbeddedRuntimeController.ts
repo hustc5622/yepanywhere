@@ -49,8 +49,24 @@ import {
 
 function immediateAdmissionArgs(
   requireImmediate: boolean | undefined,
-): [] | [{ requireImmediate: true }] {
-  return requireImmediate ? [{ requireImmediate: true }] : [];
+  allowMissingRolloutReplacement?: boolean,
+):
+  | []
+  | [
+      {
+        requireImmediate?: true;
+        allowMissingRolloutReplacement?: true;
+      },
+    ] {
+  if (!requireImmediate && !allowMissingRolloutReplacement) return [];
+  return [
+    {
+      ...(requireImmediate ? { requireImmediate: true as const } : {}),
+      ...(allowMissingRolloutReplacement
+        ? { allowMissingRolloutReplacement: true as const }
+        : {}),
+    },
+  ];
 }
 
 function queueAdmissionArgs(input: {
@@ -266,7 +282,10 @@ export class EmbeddedRuntimeController implements RuntimeController {
       input.message,
       input.permissionMode,
       input.modelSettings,
-      ...immediateAdmissionArgs(input.requireImmediate),
+      ...immediateAdmissionArgs(
+        input.requireImmediate,
+        input.allowMissingRolloutReplacement,
+      ),
     );
     if ("id" in result) await this.ensureJournalSubscription(result.sessionId);
     return this.toStartResponse(result);

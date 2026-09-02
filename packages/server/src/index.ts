@@ -600,6 +600,19 @@ const explicitPublicServerUrl =
 const feishuChannelRuntime = new FeishuChannelRuntime({
   dataDir: config.dataDir,
   maxUploadSizeBytes: config.maxUploadSizeBytes,
+  ...(codexBridgeService?.getUsage
+    ? {
+        readCodexUsage: async () => {
+          const response = await codexBridgeService.getUsage?.({ fresh: true });
+          if (!response?.usage) {
+            throw new Error(
+              response?.error ?? "Codex usage snapshot is unavailable",
+            );
+          }
+          return response.usage;
+        },
+      }
+    : {}),
   ...(explicitPublicServerUrl
     ? { publicBaseUrl: explicitPublicServerUrl }
     : {}),

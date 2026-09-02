@@ -1,8 +1,10 @@
 import { join } from "node:path";
+import type { CodexUsageSnapshot } from "../../codex-bridge/types.js";
 import type { SessionCommandService } from "../../services/SessionCommandService.js";
 import { UploadManager } from "../../uploads/manager.js";
 import type { EventBus } from "../../watcher/index.js";
 import { FeishuBindingStore } from "./binding-store.js";
+import { FeishuCodexModelRouter } from "./codex-model-router.js";
 import { FeishuInboundProcessor } from "./inbound-processor.js";
 import { FeishuDurableInbox } from "./inbox.js";
 import { FeishuInteractionManager } from "./interaction-manager.js";
@@ -27,6 +29,8 @@ export interface FeishuChannelRuntimeOptions {
   bindingStore?: FeishuBindingStore;
   inbox?: FeishuDurableInbox;
   operationStore?: FeishuOperationStore;
+  /** Reuses the same account/rateLimits/read path shown by the new-session UI. */
+  readCodexUsage?(): Promise<CodexUsageSnapshot>;
   onDiagnostic?(code: FeishuChannelRuntimeDiagnosticCode): void;
 }
 
@@ -58,6 +62,7 @@ export class FeishuChannelRuntime {
   private readonly dataDir: string;
   private readonly maxUploadSizeBytes?: number;
   private readonly publicBaseUrl?: string;
+  private readonly readCodexUsage?: FeishuChannelRuntimeOptions["readCodexUsage"];
   private readonly onDiagnostic?: FeishuChannelRuntimeOptions["onDiagnostic"];
   private prepareTask?: Promise<FeishuChannelRuntimePrepareResult>;
   private prepareResult?: FeishuChannelRuntimePrepareResult;
@@ -86,6 +91,7 @@ export class FeishuChannelRuntime {
       new FeishuOperationStore({ dataDir: options.dataDir });
     this.maxUploadSizeBytes = options.maxUploadSizeBytes;
     this.publicBaseUrl = options.publicBaseUrl;
+    this.readCodexUsage = options.readCodexUsage;
     this.onDiagnostic = options.onDiagnostic;
   }
 
@@ -232,6 +238,9 @@ export class FeishuChannelRuntime {
       replyManager,
       skillSelectionManager,
       statusRegistry: this.service.statusRegistry,
+      codexModelRouter: new FeishuCodexModelRouter({
+        ...(this.readCodexUsage ? { readUsage: this.readCodexUsage } : {}),
+      }),
     });
     this.interactionManager = interactionManager;
     this.replyManager = replyManager;

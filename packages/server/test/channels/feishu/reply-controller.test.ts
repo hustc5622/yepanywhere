@@ -792,6 +792,113 @@ describe("FeishuReplyController", () => {
     expect(content).toContain("synthetic-private-provider-action");
   });
 
+  it("keeps one reply open while a side-effect-free usage limit switches models", async () => {
+    const terminal = vi.fn();
+    const fallback = vi.fn(async () => true);
+    const controller = new FeishuReplyController({
+      target: TARGET,
+      replyMode: "card",
+      tempId: "temp-usage-fallback",
+      onUsageLimitFallback: fallback,
+      onTerminal: terminal,
+    });
+    controllers.push(controller);
+    await controller.start();
+    controller.dispatchAccepted();
+    await controller.handleRuntimeEvent(
+      "message",
+      userMessage("temp-usage-fallback", "turn-openai"),
+    );
+    await controller.handleRuntimeEvent("message", {
+      type: "system",
+      subtype: "warning",
+      turnId: "turn-openai",
+      willRetry: true,
+      warning: "You've hit your usage limit; retrying",
+      codexError: {
+        code: "CODEX_QUOTA_EXCEEDED",
+        category: "quota",
+        quotaKind: "usage_limit",
+        retryable: true,
+        publicMessage: "Usage exhausted",
+        nextAction: "Wait for reset",
+      },
+    });
+    await controller.handleRuntimeEvent("message", {
+      type: "error",
+      turnId: "turn-openai",
+      codexError: {
+        code: "CODEX_QUOTA_EXCEEDED",
+        category: "quota",
+        quotaKind: "usage_limit",
+        retryable: true,
+        publicMessage: "Usage exhausted",
+        nextAction: "Wait for reset",
+      },
+    });
+
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(controller.state).toBe("retrying");
+    expect(terminal).not.toHaveBeenCalled();
+
+    await controller.handleRuntimeEvent(
+      "message",
+      userMessage("temp-usage-fallback", "turn-deepseek"),
+    );
+    await controller.handleRuntimeEvent("message", {
+      type: "assistant",
+      turnId: "turn-deepseek",
+      message: { content: "DeepSeek answer" },
+    });
+    await controller.handleRuntimeEvent("message", {
+      type: "system",
+      subtype: "turn_complete",
+      turnId: "turn-deepseek",
+      turnStatus: "completed",
+    });
+
+    expect(controller.state).toBe("completed");
+    expect(controller.text).toBe("DeepSeek answer");
+    expect(terminal).toHaveBeenCalledWith("completed", "completed");
+  });
+
+  it("does not replay a usage-limit turn after model or tool activity", async () => {
+    const fallback = vi.fn(async () => true);
+    const controller = new FeishuReplyController({
+      target: TARGET,
+      replyMode: "card",
+      tempId: "temp-unsafe-fallback",
+      onUsageLimitFallback: fallback,
+    });
+    controllers.push(controller);
+    await controller.start();
+    controller.dispatchAccepted();
+    await controller.handleRuntimeEvent(
+      "message",
+      userMessage("temp-unsafe-fallback", "turn-1"),
+    );
+    await controller.handleRuntimeEvent("message", {
+      type: "assistant",
+      turnId: "turn-1",
+      message: { content: "partial" },
+    });
+    await controller.handleRuntimeEvent("message", {
+      type: "error",
+      turnId: "turn-1",
+      codexError: {
+        code: "CODEX_QUOTA_EXCEEDED",
+        category: "quota",
+        quotaKind: "usage_limit",
+        retryable: true,
+        publicMessage: "Usage exhausted",
+        nextAction: "Wait for reset",
+      },
+    });
+
+    expect(fallback).not.toHaveBeenCalled();
+    expect(controller.state).toBe("failed");
+  });
+
   it("replays an SDK error that races ahead of dispatch confirmation", async () => {
     const api = makeOutboundApi();
     const controller = new FeishuReplyController({

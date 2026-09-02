@@ -22,6 +22,11 @@ export {
   type CodexRemoteCommandSupport,
 } from "./codex-command-registry.js";
 export {
+  FeishuCodexModelRouter,
+  type FeishuCodexModelRoute,
+  type FeishuCodexModelRouterOptions,
+} from "./codex-model-router.js";
+export {
   FeishuInboundProcessor,
   formatFeishuAttachmentManifest,
   type FeishuCommandName,
@@ -159,6 +164,8 @@ export {
   type FeishuReplyManagerOptions,
   type FeishuTurnReplyHandle,
   type FeishuTurnReplyInput,
+  type FeishuUsageLimitFallbackHandler,
+  type FeishuUsageLimitFallbackResult,
 } from "./reply-manager.js";
 export {
   FeishuRichCardProjection,

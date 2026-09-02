@@ -11,6 +11,11 @@ interface ErrorCase {
   code: CanonicalCodexErrorCode;
   category: CodexErrorCategory;
   retryable: boolean;
+  quotaKind?:
+    | "usage_limit"
+    | "context_window"
+    | "session_budget"
+    | "rate_limit";
 }
 
 const CASES: ErrorCase[] = [
@@ -56,6 +61,7 @@ const CASES: ErrorCase[] = [
     code: "CODEX_QUOTA_EXCEEDED",
     category: "quota",
     retryable: true,
+    quotaKind: "usage_limit",
   },
   {
     name: "native cyber policy info",
@@ -118,10 +124,15 @@ const CASES: ErrorCase[] = [
 describe("Codex canonical error taxonomy", () => {
   it.each(CASES)(
     "classifies $name while retaining original diagnostics",
-    ({ input, code, category, retryable }) => {
+    ({ input, code, category, retryable, quotaKind }) => {
       const classified = classifyCodexError(input);
 
-      expect(classified).toMatchObject({ code, category, retryable });
+      expect(classified).toMatchObject({
+        code,
+        category,
+        retryable,
+        ...(quotaKind ? { quotaKind } : {}),
+      });
       expect(classified.publicMessage).toMatch(/[A-Za-z]/u);
       expect(classified.nextAction).toMatch(/[A-Za-z]/u);
       expect(classified.publicMessage).not.toMatch(/[\u4e00-\u9fff]/u);

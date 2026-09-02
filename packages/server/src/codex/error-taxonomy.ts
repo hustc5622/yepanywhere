@@ -10,6 +10,12 @@ export type CodexErrorCategory =
   | "sandbox"
   | "unknown";
 
+export type CodexQuotaKind =
+  | "usage_limit"
+  | "context_window"
+  | "session_budget"
+  | "rate_limit";
+
 export type CanonicalCodexErrorCode =
   | "CODEX_NO_ROLLOUT"
   | "CODEX_OVERLOADED"
@@ -30,6 +36,8 @@ export interface CanonicalCodexError {
   publicMessage: string;
   /** English wire fallback; clients/channels localize the stable code. */
   nextAction: string;
+  /** Safe quota subtype. Automatic provider failover keys only on usage_limit. */
+  quotaKind?: CodexQuotaKind;
   correlationId?: string;
 }
 
@@ -169,17 +177,43 @@ export function classifyCodexError(
       ERROR_DESCRIPTORS[category].code ===
       (record ? safeRead(record, "code") : undefined),
   );
-  const category = knownCategory ?? classifySignals(collectErrorSignals(error));
+  const signals = collectErrorSignals(error);
+  const category = knownCategory ?? classifySignals(signals);
   const descriptor = ERROR_DESCRIPTORS[category];
   const correlationId = safeCorrelationId(options.correlationId);
+  const quotaKind =
+    category === "quota"
+      ? (codexQuotaKindValue(record?.quotaKind) ?? classifyQuotaKind(signals))
+      : undefined;
   return {
     code: descriptor.code,
     category,
     retryable: descriptor.retryable,
     publicMessage: originalErrorMessage(error) ?? descriptor.publicMessage,
     nextAction: descriptor.nextAction,
+    ...(quotaKind ? { quotaKind } : {}),
     ...(correlationId ? { correlationId } : {}),
   };
+}
+
+function classifyQuotaKind(signals: ErrorSignals): CodexQuotaKind | undefined {
+  if (signals.codexErrorInfo.has("usageLimitExceeded")) return "usage_limit";
+  if (signals.codexErrorInfo.has("contextWindowExceeded")) {
+    return "context_window";
+  }
+  if (signals.codexErrorInfo.has("sessionBudgetExceeded")) {
+    return "session_budget";
+  }
+  return signals.httpStatuses.has(429) ? "rate_limit" : undefined;
+}
+
+function codexQuotaKindValue(value: unknown): CodexQuotaKind | undefined {
+  return value === "usage_limit" ||
+    value === "context_window" ||
+    value === "session_budget" ||
+    value === "rate_limit"
+    ? value
+    : undefined;
 }
 
 function classifySignals(signals: ErrorSignals): CodexErrorCategory {

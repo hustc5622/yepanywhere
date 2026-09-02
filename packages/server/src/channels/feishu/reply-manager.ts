@@ -62,7 +62,17 @@ export interface FeishuTurnReplyHandle {
   ): Promise<void>;
   dispatchFailed(): Promise<void>;
   addTerminalCleanup(cleanup: () => Promise<void>): void;
+  setUsageLimitFallback(handler: FeishuUsageLimitFallbackHandler): void;
 }
+
+export interface FeishuUsageLimitFallbackResult {
+  sessionId: string;
+  processId: string;
+}
+
+export type FeishuUsageLimitFallbackHandler = () => Promise<
+  FeishuUsageLimitFallbackResult | undefined
+>;
 
 export interface FeishuDispatchRuntimeGeneration {
   /** Process returned by the accepted SessionCommandService dispatch. */
@@ -87,6 +97,10 @@ interface ManagedReply {
   openRequestId?: string;
   interactionChain: Promise<void>;
   terminalCleanups: Array<() => Promise<void>>;
+  usageLimitFallback?: {
+    handler: FeishuUsageLimitFallbackHandler;
+    attempted: boolean;
+  };
 }
 
 export class FeishuReplyManager {
@@ -240,6 +254,7 @@ export class FeishuReplyManager {
           durationMs,
         );
       },
+      onUsageLimitFallback: () => this.attemptUsageLimitFallback(input.tempId),
       onTerminal: async (
         _state: FeishuReplyState,
         outcome: "completed" | "interrupted" | "failed",
@@ -368,7 +383,51 @@ export class FeishuReplyManager {
         }
         managed.terminalCleanups.push(cleanup);
       },
+      setUsageLimitFallback: (handler) => {
+        managed.usageLimitFallback = { handler, attempted: false };
+      },
     };
+  }
+
+  private async attemptUsageLimitFallback(tempId: string): Promise<boolean> {
+    const managed = this.replies.get(tempId);
+    const fallback = managed?.usageLimitFallback;
+    if (
+      !managed ||
+      !fallback ||
+      fallback.attempted ||
+      managed.pendingRequest ||
+      managed.openRequestId ||
+      [...this.replies.values()].some(
+        (candidate) =>
+          candidate !== managed &&
+          (candidate.input.scopeKey === managed.input.scopeKey ||
+            candidate.sessionId === managed.sessionId),
+      )
+    ) {
+      return false;
+    }
+    fallback.attempted = true;
+
+    try {
+      managed.subscription?.cleanup();
+    } catch {
+      // The failed turn is already terminal; replacement remains safe.
+    }
+    managed.subscription = undefined;
+    managed.runtimeGeneration += 1;
+    managed.controller.activateRuntimeGeneration(managed.runtimeGeneration);
+    managed.runtimeProcessId = undefined;
+    managed.sawTurnMessage = false;
+    managed.clientUserMessageId = undefined;
+    managed.turnId = undefined;
+
+    const result = await fallback.handler().catch(() => undefined);
+    if (!result) return false;
+    managed.sessionId = result.sessionId;
+    await this.subscribe(managed, result.sessionId);
+    managed.runtimeProcessId = result.processId;
+    return Boolean(managed.subscription);
   }
 
   private async subscribe(

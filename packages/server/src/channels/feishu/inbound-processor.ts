@@ -7,8 +7,13 @@ import type {
 } from "@yep-anywhere/shared";
 import { encodeProjectId } from "../../projects/paths.js";
 import type { CodexNativeControlRequest } from "../../sdk/providers/codex-controls.js";
+import { getCodexModelSourceRegistry } from "../../sdk/providers/codex-model-sources.js";
 import type { SessionCommandService } from "../../services/SessionCommandService.js";
 import type { FeishuBindingStore } from "./binding-store.js";
+import {
+  type FeishuCodexModelRoute,
+  FeishuCodexModelRouter,
+} from "./codex-model-router.js";
 import {
   FeishuInboundEventError,
   type FeishuInboundEventHeader,
@@ -57,6 +62,7 @@ export interface FeishuInboundProcessorOptions {
   replyManager?: FeishuReplyManager;
   skillSelectionManager?: FeishuSkillSelectionManager;
   statusRegistry?: FeishuStatusRegistry;
+  codexModelRouter?: FeishuCodexModelRouter;
   debounceMs?: number;
   onOutcome?(outcome: FeishuInboundOutcome): void | Promise<void>;
 }
@@ -120,6 +126,12 @@ interface ResolvedProject {
   projectPath: string;
 }
 
+interface FeishuUsageLimitModelPolicy {
+  preferredModel: string;
+  fallbackModel: string;
+  route: FeishuCodexModelRoute;
+}
+
 type FeishuCommandPermissionMode = "default" | "plan" | "acceptEdits";
 
 export class FeishuInboundProcessor {
@@ -131,6 +143,7 @@ export class FeishuInboundProcessor {
   private readonly replyManager?: FeishuReplyManager;
   private readonly skillSelectionManager?: FeishuSkillSelectionManager;
   private readonly statusRegistry?: FeishuStatusRegistry;
+  private readonly codexModelRouter: FeishuCodexModelRouter;
   private readonly onOutcome?: FeishuInboundProcessorOptions["onOutcome"];
   private readonly ingressScheduler: FeishuScopeScheduler<
     AcceptedInboundEvent,
@@ -150,6 +163,8 @@ export class FeishuInboundProcessor {
     this.replyManager = options.replyManager;
     this.skillSelectionManager = options.skillSelectionManager;
     this.statusRegistry = options.statusRegistry;
+    this.codexModelRouter =
+      options.codexModelRouter ?? new FeishuCodexModelRouter();
     this.onOutcome = options.onOutcome;
     this.ingressScheduler = new FeishuScopeScheduler({
       debounceMs: options.debounceMs,
@@ -547,6 +562,18 @@ export class FeishuInboundProcessor {
       // the real thread ID. The durable inbox tempId is an opaque, path-safe
       // staging scope; it is never persisted as a Feishu session binding.
       binding ??= this.buildBinding(first, project, first.record.tempId);
+      const activeModel = binding.model;
+      const modelPolicy = await this.resolveUsageLimitModelPolicy(
+        first.account,
+        binding,
+      );
+      const targetModel = modelPolicy?.route.model ?? activeModel;
+      const switchesExistingModel = Boolean(
+        !isFreshBinding && targetModel && targetModel !== activeModel,
+      );
+      if (targetModel !== binding.model) {
+        binding = { ...binding, model: targetModel };
+      }
 
       const lastMessage = messages.at(-1);
       const skillSelection = lastMessage
@@ -567,7 +594,7 @@ export class FeishuInboundProcessor {
             records: messages.map((message) => message.record),
             replyToMessageId: lastMessage.normalized.messageId,
             requesterOpenId: lastMessage.normalized.senderId,
-            deferSubscription: isFreshBinding,
+            deferSubscription: isFreshBinding || switchesExistingModel,
             allowedOperatorOpenIds: [
               ...new Set([
                 ...messages.map((message) => message.normalized.senderId),
@@ -615,6 +642,65 @@ export class FeishuInboundProcessor {
         tempId: messages[0]?.record.tempId,
         ...(skillSelection ? { codexInputs: skillSelection.codexInputs } : {}),
       };
+      if (
+        replyHandle &&
+        modelPolicy &&
+        targetModel === modelPolicy.preferredModel
+      ) {
+        replyHandle.setUsageLimitFallback(async () => {
+          void this.codexModelRouter.recordUsageLimit();
+          const current = this.bindingStore.get(scopeKey);
+          if (!current) return undefined;
+          const expectedSessionId = current.sessionId;
+          const fallbackResult =
+            await this.sessionCommandService.switchCodexModelSource({
+              projectId: current.projectId,
+              sessionId: expectedSessionId,
+              origin,
+              body: { ...body, model: modelPolicy.fallbackModel },
+              excludeFailedTurn: true,
+            });
+          if (!fallbackResult.ok || fallbackResult.status !== 200) {
+            return undefined;
+          }
+          const fallbackSessionId = readString(fallbackResult.body.sessionId);
+          const fallbackProcessId = readString(fallbackResult.body.processId);
+          if (!fallbackSessionId || !fallbackProcessId) return undefined;
+          const afterSwitch = this.bindingStore.get(scopeKey);
+          const updateOwner =
+            afterSwitch?.sessionId === fallbackSessionId
+              ? fallbackSessionId
+              : expectedSessionId;
+          const rebound = await this.bindingStore.updateIfSession(
+            scopeKey,
+            updateOwner,
+            (latest) => ({
+              ...latest,
+              sessionId: fallbackSessionId,
+              model: modelPolicy.fallbackModel,
+              updatedAt: new Date().toISOString(),
+            }),
+          );
+          if (!rebound) {
+            await this.sessionCommandService
+              .releaseSession(fallbackSessionId)
+              .catch(() => undefined);
+            return undefined;
+          }
+          binding = rebound;
+          await Promise.all(
+            messages.map((message) =>
+              this.inbox.markDispatched(message.record.key, {
+                sessionId: fallbackSessionId,
+              }),
+            ),
+          );
+          return {
+            sessionId: fallbackSessionId,
+            processId: fallbackProcessId,
+          };
+        });
+      }
       const result = isFreshBinding
         ? await this.sessionCommandService.start({
             projectId: binding.projectId,
@@ -622,14 +708,22 @@ export class FeishuInboundProcessor {
             body,
             requireImmediate: true,
           })
-        : await this.sessionCommandService.send({
-            projectId: binding.projectId,
-            sessionId: binding.sessionId,
-            origin,
-            body,
-            requireImmediate: true,
-            allowSteer: false,
-          });
+        : switchesExistingModel
+          ? await this.sessionCommandService.switchCodexModelSource({
+              projectId: binding.projectId,
+              sessionId: binding.sessionId,
+              origin,
+              body,
+            })
+          : await this.sessionCommandService.send({
+              projectId: binding.projectId,
+              sessionId: binding.sessionId,
+              origin,
+              body,
+              requireImmediate: true,
+              allowSteer: false,
+              allowMissingRolloutReplacement: true,
+            });
       if (!result.ok || result.status !== 200) {
         throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
       }
@@ -651,6 +745,7 @@ export class FeishuInboundProcessor {
       binding = await this.bindingStore.upsert({
         ...binding,
         sessionId: actualSessionId,
+        model: targetModel,
         updatedAt: new Date().toISOString(),
         lastInboundMessageId: lastMessage?.normalized.messageId,
         lastInboundSenderOpenId: lastMessage?.normalized.senderId,
@@ -1025,6 +1120,33 @@ export class FeishuInboundProcessor {
       createdAt: now,
       updatedAt: now,
       lastInboundSenderOpenId: message.normalized.senderId,
+    };
+  }
+
+  private async resolveUsageLimitModelPolicy(
+    account: FeishuAccountConfig,
+    binding: FeishuSessionBinding,
+  ): Promise<FeishuUsageLimitModelPolicy | undefined> {
+    const preferredModel = account.defaultModel?.trim();
+    const fallbackModel = account.codexUsageLimitFallbackModel?.trim();
+    if (!preferredModel || !fallbackModel || preferredModel === fallbackModel) {
+      return undefined;
+    }
+    const registry = getCodexModelSourceRegistry();
+    const preferredSource =
+      registry.findModelSource(preferredModel) ?? "openai";
+    const fallbackSource = registry.findModelSource(fallbackModel);
+    if (preferredSource !== "openai" || fallbackSource !== "deepseek") {
+      return undefined;
+    }
+    return {
+      preferredModel,
+      fallbackModel,
+      route: await this.codexModelRouter.selectModel({
+        preferredModel,
+        fallbackModel,
+        activeModel: binding.model,
+      }),
     };
   }
 

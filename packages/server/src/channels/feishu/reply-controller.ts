@@ -72,6 +72,13 @@ export interface FeishuReplyControllerOptions {
       | "completed",
     durationMs?: number,
   ): void;
+  /**
+   * Retry a side-effect-free OpenAI Codex turn after a native usage-limit
+   * failure. Returning true keeps this reply open on the replacement runtime.
+   */
+  onUsageLimitFallback?(
+    failure: CanonicalCodexError,
+  ): boolean | Promise<boolean>;
   onTerminal?(
     state: FeishuReplyState,
     outcome: "completed" | "interrupted" | "failed",
@@ -199,8 +206,9 @@ export class FeishuReplyController {
   private readonly startedAt = Date.now();
   private firstFeedbackRecorded = false;
   private firstTokenRecorded = false;
+  private providerActivityObserved = false;
   private failure?: CanonicalCodexError;
-  private readonly projection = new FeishuRichCardProjection();
+  private projection = new FeishuRichCardProjection();
   /** IDs enter this set only after the native Feishu send succeeds. */
   private readonly generatedArtifactEffectIds = new Set<string>();
   private readonly generatedArtifactWarningIds = new Set<string>();
@@ -357,6 +365,7 @@ export class FeishuReplyController {
       const status = objectValue(data);
       const state = stringValue(status?.state);
       if (state === "waiting-input" && this.turnStarted) {
+        this.providerActivityObserved = true;
         this.setState("waiting_input", "等待你在飞书或 Yep 中审批/回答…");
       } else if (state === "in-turn" && this.turnStarted) {
         this.setState("streaming", "Codex 正在处理…");
@@ -488,17 +497,25 @@ export class FeishuReplyController {
       return;
     }
 
-    this.projection.observe(message);
-    await this.projectGeneratedArtifact(message);
-
     if (
       message.type === "system" &&
       message.subtype === "warning" &&
       message.willRetry === true
     ) {
+      // The app-server still owns this turn and has not produced a model/tool
+      // effect. Keep it eligible for model-source failover if the retry later
+      // terminates with usageLimitExceeded.
+      this.projection.observe(message);
       this.setState("streaming", "Codex 暂时遇到问题，正在重试…");
       return;
     }
+
+    // Any model/tool/input activity makes replay unsafe because the failed
+    // turn may already have produced an external effect. Usage-limit failures
+    // normally arrive before this boundary.
+    this.providerActivityObserved = true;
+    this.projection.observe(message);
+    await this.projectGeneratedArtifact(message);
 
     const toolName = extractSafeToolName(message);
     if (toolName) {
@@ -589,7 +606,52 @@ export class FeishuReplyController {
     terminal: CorrelatedTurnTerminal,
   ): Promise<void> {
     if (terminal.failure !== undefined) this.captureFailure(terminal.failure);
+    if (terminal.outcome === "failed" && (await this.tryUsageLimitFallback())) {
+      return;
+    }
     await this.finalize(terminal.outcome);
+  }
+
+  private async tryUsageLimitFallback(): Promise<boolean> {
+    const failure = this.failure;
+    if (
+      !failure ||
+      failure.quotaKind !== "usage_limit" ||
+      !this.options.onUsageLimitFallback ||
+      this.providerActivityObserved ||
+      this.answer.trim()
+    ) {
+      return false;
+    }
+
+    // Invalidate all turn correlation before the replacement process can emit
+    // its user echo. The CardKit identity stays stable, so the user sees one
+    // reply transition rather than a failed card followed by a second card.
+    this.sawTurnMessage = false;
+    this.turnStarted = false;
+    this.clientUserMessageId = undefined;
+    this.expectedTurnId = undefined;
+    this.pendingTurnTerminals.clear();
+    this.preDispatchEvents.length = 0;
+    this.providerActivityObserved = false;
+    this.failure = undefined;
+    this.projection = new FeishuRichCardProjection();
+    this.generatedArtifactEffectIds.clear();
+    this.generatedArtifactWarningIds.clear();
+    this.generatedArtifactInFlightIds.clear();
+    this.generatedArtifactRetryableIds.clear();
+    this.setState("retrying", "Codex 额度不足，正在切换备用模型…");
+
+    try {
+      if (await this.options.onUsageLimitFallback(failure)) {
+        this.setState("retrying", "已切换备用模型，正在重新处理…");
+        return true;
+      }
+    } catch {
+      // Fall through to the original stable failure projection.
+    }
+    this.failure = failure;
+    return false;
   }
 
   private async projectGeneratedArtifact(
@@ -1308,7 +1370,21 @@ function canonicalCodexErrorValue(
         : copy.publicMessage,
     nextAction:
       typeof error.nextAction === "string" ? error.nextAction : copy.nextAction,
+    ...(isCodexQuotaKind(error.quotaKind)
+      ? { quotaKind: error.quotaKind }
+      : {}),
   };
+}
+
+function isCodexQuotaKind(
+  value: unknown,
+): value is NonNullable<CanonicalCodexError["quotaKind"]> {
+  return (
+    value === "usage_limit" ||
+    value === "context_window" ||
+    value === "session_budget" ||
+    value === "rate_limit"
+  );
 }
 
 function feishuCodexErrorCopy(error: CanonicalCodexError): {

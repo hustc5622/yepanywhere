@@ -8,6 +8,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 飞书 Codex 渠道支持订阅额度故障转移：账号可配置 `codexUsageLimitFallbackModel`；当 OpenAI Codex 原生返回 `usageLimitExceeded` 且该 turn 尚未产生文本、工具或审批副作用时，Yep 会在同一 Codex CLI/app-server 执行链内移除失败 turn，并以 DeepSeek model source 重派原消息及图片附件。所有飞书账号复用“新建会话”页同源的 `account/rateLimits/read` 用量与 `resetsAt`，耗尽期间共享 DeepSeek 路由；窗口重置并刷新确认后，下一条消息自动切回账号的 `defaultModel`。上下文超限、session budget、普通 429 和已有副作用的失败不会自动重放；`/new` 创建但尚未写入 rollout 的 provisional thread 会在首条消息或切源时安全替换，不再以 `CODEX_NO_ROLLOUT` 失败。
 - 新增只读 session display API 与客户端请求契约：`display` 按 40 个真实用户 turn 分页，`display/questions` 独立分页并显式报告 `complete`/`partial` coverage，`display/tool-groups/:detailRef` 仅在展开时恢复目标组且按 50 个 renderer 工具分页；opaque cursor/detailRef 均绑定 session、branch 与 revision，过期引用返回明确的 409 stale。Codex app-server 使用 `turns/list(itemsView="summary")` 保留 turn 身份与 cursor，并以有界并发逐 turn 读取 items：display 投影保留完整语义，问题目录立即丢弃非用户 item，确保同一原生 turn 内后续 steer 问题不会被 summary 的“仅第一问”规则漏掉；Codex rollout 复用 byte-offset cursor，Pi 等 provider 复用 normalized fallback。Codex 原生 `turn_id` 现在也进入轻量问题元数据，确保目录跳转到正确的 display turn。
 - 新增 session 轻量展示的 strict 共享契约与服务端只读投影器：按真实用户 turn 保留问题和 assistant 文本，将连续工具调用压缩为只含状态、数量、文件/检查计数及不透明详情引用的工具组，保留审批、提问、错误与必要的 provider 时间线通知，并把用户媒体降为无正文占位；首屏 40 turns、工具详情每页 50 项作为后续 API/UI 接入的固定默认值。Codex、Pi、Kimi normalization oracle 和超大工具结果测试确保投影不携带 tool input/output、内联媒体或隐藏工具正文中的本地路径，且不修改 provider 消息。
 - 用户消息复制按钮现在会复制整条 session 输入：保留纯文本剪贴板格式，同时把该条输入中的全部可读图片写入富剪贴板；粘贴到现有会话或新建会话输入框时会恢复原文本和所有图片附件。无法使用富剪贴板或读取部分图片时会降级为文本并显示部分复制提示。

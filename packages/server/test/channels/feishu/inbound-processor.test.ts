@@ -7,6 +7,7 @@ import {
 } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FeishuBindingStore } from "../../../src/channels/feishu/binding-store.js";
+import { FeishuCodexModelRouter } from "../../../src/channels/feishu/codex-model-router.js";
 import {
   type FeishuInboundOutcome,
   FeishuInboundProcessor,
@@ -23,6 +24,7 @@ import type {
 import { FeishuReplyManager } from "../../../src/channels/feishu/reply-manager.js";
 import { FeishuSkillSelectionManager } from "../../../src/channels/feishu/skill-selection-manager.js";
 import { FeishuStatusRegistry } from "../../../src/channels/feishu/status.js";
+import { encodeProjectId } from "../../../src/projects/paths.js";
 import type { CodexNativeControlRequest } from "../../../src/sdk/providers/codex-controls.js";
 import type { SessionCommandService } from "../../../src/services/SessionCommandService.js";
 
@@ -502,6 +504,84 @@ describe("FeishuInboundProcessor", () => {
     expect(fixture.commands.send).not.toHaveBeenCalled();
   });
 
+  it("returns a persisted DeepSeek binding to Codex after usage resets", async () => {
+    const fixture = await createFixture(dataDirs);
+    const account = makeAccount({
+      defaultProjectPath: fixture.projectPath,
+      allowedWorkspaceRoots: [fixture.allowedRoot],
+      defaultModel: "gpt-5.6-sol",
+      codexUsageLimitFallbackModel: "deepseek-v4-flash-vision-exp",
+    });
+    const scopeKey = `${account.id}:p2p:oc_chat`;
+    const now = new Date().toISOString();
+    await fixture.bindings.upsert({
+      version: 1,
+      scopeKey,
+      accountId: account.id,
+      chatId: "oc_chat",
+      projectId: encodeProjectId(fixture.projectPath),
+      projectPath: fixture.projectPath,
+      sessionId: "session-deepseek",
+      provider: "codex",
+      permissionMode: "default",
+      model: "deepseek-v4-flash-vision-exp",
+      codexMcpMode: "standard",
+      createdAt: now,
+      updatedAt: now,
+    });
+    fixture.commands.switchCodexModelSource.mockResolvedValueOnce({
+      ok: true as const,
+      status: 200 as const,
+      body: {
+        sessionId: "session-deepseek",
+        processId: "process-openai",
+      },
+    });
+    const outcomes: FeishuInboundOutcome[] = [];
+    const processor = new FeishuInboundProcessor({
+      sessionCommandService:
+        fixture.commands as unknown as SessionCommandService,
+      bindingStore: fixture.bindings,
+      inbox: fixture.inbox,
+      codexModelRouter: new FeishuCodexModelRouter({
+        readUsage: vi.fn(async () => ({
+          primary: {
+            usedPercent: 0,
+            windowDurationMins: 10_080,
+            resetsAt: null,
+          },
+          secondary: null,
+          planType: "pro",
+          resetCredits: null,
+          additionalBuckets: [],
+          updatedAt: new Date().toISOString(),
+        })),
+      }),
+      debounceMs: 0,
+      onOutcome: (outcome) => outcomes.push(outcome),
+    });
+    processors.push(processor);
+
+    await processor.accept({
+      account,
+      event: makeEvent("om_usage_recovered", "Use Codex again"),
+      botIdentity: BOT,
+    });
+    await eventually(() => expect(outcomes).toHaveLength(1));
+
+    expect(fixture.commands.switchCodexModelSource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "session-deepseek",
+        body: expect.objectContaining({ model: "gpt-5.6-sol" }),
+      }),
+    );
+    expect(fixture.bindings.get(scopeKey)).toMatchObject({
+      sessionId: "session-deepseek",
+      model: "gpt-5.6-sol",
+    });
+    expect(fixture.commands.send).not.toHaveBeenCalled();
+  });
+
   it("does not persist a fresh binding when atomic start is not accepted", async () => {
     const fixture = await createFixture(dataDirs);
     const statuses = new FeishuStatusRegistry();
@@ -910,6 +990,173 @@ describe("FeishuInboundProcessor", () => {
     expect(api.finishStreamingReply).toHaveBeenCalledTimes(1);
   });
 
+  it("replays a side-effect-free usage-limit turn on multimodal DeepSeek", async () => {
+    const fixture = await createFixture(dataDirs);
+    const account = makeAccount({
+      defaultProjectPath: fixture.projectPath,
+      allowedWorkspaceRoots: [fixture.allowedRoot],
+      defaultModel: "gpt-5.6-sol",
+      codexUsageLimitFallbackModel: "deepseek-v4-flash-vision-exp",
+    });
+    const attachment = {
+      id: "123e4567-e89b-12d3-a456-426614174000",
+      originalName: "fixture.png",
+      name: "123e4567-e89b-12d3-a456-426614174000_fixture.png",
+      path: join(fixture.dataDir, "staged", "fixture.png"),
+      size: 7,
+      mimeType: "image/png",
+    };
+    const releaseTaskAudioStaging = vi.fn(async () => undefined);
+    const mediaDownloader = {
+      downloadAll: vi.fn(async () => ({
+        attachments: [attachment],
+        manifests: [],
+        failures: [],
+      })),
+      releaseTaskAudioStaging,
+      stopRetentionCleanup: vi.fn(),
+    } as unknown as FeishuMediaDownloader;
+    const replyManager = new FeishuReplyManager({
+      sessionCommandService:
+        fixture.commands as unknown as SessionCommandService,
+      inbox: fixture.inbox,
+      controllerOptions: { throttleMs: 0 },
+    });
+    replyManagers.push(replyManager);
+    const modelRouter = new FeishuCodexModelRouter({
+      readUsage: vi.fn(async () => ({
+        primary: {
+          usedPercent: 100,
+          windowDurationMins: 10_080,
+          resetsAt: Math.floor(Date.now() / 1_000) + 3_600,
+        },
+        secondary: null,
+        planType: "pro",
+        resetCredits: null,
+        additionalBuckets: [],
+        updatedAt: new Date().toISOString(),
+      })),
+    });
+    const outcomes: FeishuInboundOutcome[] = [];
+    const processor = new FeishuInboundProcessor({
+      sessionCommandService:
+        fixture.commands as unknown as SessionCommandService,
+      bindingStore: fixture.bindings,
+      inbox: fixture.inbox,
+      mediaDownloader,
+      replyManager,
+      codexModelRouter: modelRouter,
+      debounceMs: 0,
+      onOutcome: (outcome) => outcomes.push(outcome),
+    });
+    processors.push(processor);
+    const event = makeEvent("om_usage_image", "") as {
+      message: { message_type: string; content: string };
+    };
+    event.message.message_type = "image";
+    event.message.content = JSON.stringify({ image_key: "img_fixture" });
+    const api = {
+      ...makeOutboundApi(),
+      downloadMessageResource: vi.fn(),
+    };
+
+    const accepted = await processor.accept({
+      account,
+      event,
+      botIdentity: BOT,
+      api,
+    });
+    await eventually(() => expect(outcomes).toHaveLength(1));
+    const inboxKey = accepted.inboxKey ?? "";
+    const record = fixture.inbox.get(inboxKey);
+    fixture.commands.emit("session-1", "message", {
+      type: "user",
+      tempId: record?.tempId,
+      uuid: "client-usage-image",
+      clientUserMessageId: "client-usage-image",
+      turnId: "turn-openai",
+      codexTurnId: "turn-openai",
+      message: { content: "Inspect the image" },
+    });
+    fixture.commands.emit("session-1", "message", {
+      type: "system",
+      subtype: "warning",
+      turnId: "turn-openai",
+      willRetry: true,
+      warning: "You've hit your usage limit; retrying",
+      codexError: {
+        code: "CODEX_QUOTA_EXCEEDED",
+        category: "quota",
+        quotaKind: "usage_limit",
+        retryable: true,
+        publicMessage: "Usage exhausted",
+        nextAction: "Wait for reset",
+      },
+    });
+    fixture.commands.emit("session-1", "message", {
+      type: "error",
+      turnId: "turn-openai",
+      codexError: {
+        code: "CODEX_QUOTA_EXCEEDED",
+        category: "quota",
+        quotaKind: "usage_limit",
+        retryable: true,
+        publicMessage: "Usage exhausted",
+        nextAction: "Wait for reset",
+      },
+    });
+
+    await eventually(() =>
+      expect(fixture.commands.switchCodexModelSource).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "session-1",
+          excludeFailedTurn: true,
+          body: expect.objectContaining({
+            model: "deepseek-v4-flash-vision-exp",
+            attachments: [attachment],
+          }),
+        }),
+      ),
+    );
+    await eventually(() =>
+      expect(fixture.bindings.list()[0]).toMatchObject({
+        sessionId: "session-2",
+        model: "deepseek-v4-flash-vision-exp",
+      }),
+    );
+    await eventually(() =>
+      expect(fixture.inbox.get(inboxKey)).toMatchObject({
+        status: "dispatched",
+        sessionId: "session-2",
+      }),
+    );
+
+    fixture.commands.emit("session-2", "message", {
+      type: "user",
+      tempId: record?.tempId,
+      uuid: "client-usage-image",
+      clientUserMessageId: "client-usage-image",
+      turnId: "turn-deepseek",
+      codexTurnId: "turn-deepseek",
+      message: { content: "Inspect the image" },
+    });
+    fixture.commands.emit("session-2", "message", {
+      type: "assistant",
+      turnId: "turn-deepseek",
+      message: { content: "Vision result" },
+    });
+    fixture.commands.emit("session-2", "message", {
+      type: "system",
+      subtype: "turn_complete",
+      turnId: "turn-deepseek",
+      turnStatus: "completed",
+    });
+    await eventually(() =>
+      expect(fixture.inbox.get(inboxKey)?.status).toBe("completed"),
+    );
+    expect(releaseTaskAudioStaging).toHaveBeenCalled();
+  });
+
   it("passes an accepted replacement process generation to the reply manager", async () => {
     const fixture = await createFixture(dataDirs);
     fixture.commands.start.mockResolvedValueOnce({
@@ -1023,6 +1270,7 @@ describe("FeishuInboundProcessor", () => {
         },
         requireImmediate: true,
         allowSteer: false,
+        allowMissingRolloutReplacement: true,
       }),
     );
     expect(fixture.bindings.list()[0]).toMatchObject({
@@ -1934,6 +2182,17 @@ function makeCommands() {
       status: 200 as const,
       body: { queued: true, processId: "process-existing" },
     })),
+    switchCodexModelSource: vi.fn(async () => {
+      created += 1;
+      return {
+        ok: true as const,
+        status: 200 as const,
+        body: {
+          sessionId: `session-${created}`,
+          processId: `process-${created}`,
+        },
+      };
+    }),
     interrupt: vi.fn(async () => ({
       ok: true as const,
       status: 200 as const,

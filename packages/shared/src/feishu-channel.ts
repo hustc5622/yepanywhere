@@ -65,6 +65,11 @@ export const FeishuAccountConfigSchema = z.object({
   ),
   defaultProvider: z.literal("codex").default("codex"),
   defaultModel: z.string().trim().min(1).max(512).optional(),
+  /**
+   * Codex model used only when the current OpenAI-backed turn fails with the
+   * native `usageLimitExceeded` signal. Omit to disable automatic failover.
+   */
+  codexUsageLimitFallbackModel: z.string().trim().min(1).max(512).optional(),
   defaultReasoningEffort: z.string().trim().min(1).max(64).optional(),
   defaultCodexMcpMode: z
     .enum(["clear", "standard", "full"])

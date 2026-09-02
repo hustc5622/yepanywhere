@@ -755,6 +755,162 @@ describe("SessionCommandService runtime boundary", () => {
     });
   });
 
+  it("switches only the Codex model source and forks away a failed usage turn", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "fixture-deepseek-key");
+    const projectPath = mkdtempSync(join(tmpdir(), "codex-source-failover-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project: Project = {
+        id: projectId,
+        path: projectPath,
+        name: "codex-source-failover",
+        sessionCount: 1,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "codex",
+      };
+      const resumeSession = vi
+        .fn()
+        .mockResolvedValueOnce({
+          id: "process-deepseek",
+          sessionId: "thread-deepseek-fork",
+          provider: "codex" as const,
+          permissionMode: "default" as const,
+          modeVersion: 1,
+        })
+        .mockResolvedValueOnce({
+          id: "process-openai",
+          sessionId: "thread-deepseek-fork",
+          provider: "codex" as const,
+          permissionMode: "default" as const,
+          modeVersion: 2,
+        });
+      const abortProcess = vi.fn(async () => ({ aborted: true }));
+      const setCodexModelProvider = vi.fn(async () => undefined);
+      const service = new SessionCommandService({
+        runtimeController: {
+          getProcessSnapshotForSession: vi.fn(async () =>
+            processSnapshot({ state: "idle" }),
+          ),
+          abortProcess,
+          resumeSession,
+        } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+          mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+        sessionMetadataService: {
+          getMetadata: vi.fn(() => undefined),
+          getPersistedProvider: vi.fn(() => "codex"),
+          getPermissionMode: vi.fn(() => "default"),
+          getExecutor: vi.fn(() => undefined),
+          getLlmGatewayConfig: vi.fn(() => undefined),
+          getCodexMcpMode: vi.fn(() => "standard"),
+          getCodexModelProvider: vi.fn(() => "openai"),
+          setPermissionMode: vi.fn(async () => undefined),
+          setProvider: vi.fn(async () => undefined),
+          setCodexMcpMode: vi.fn(async () => undefined),
+          setCodexModelProvider,
+          setForkParentSessionId: vi.fn(async () => undefined),
+          setCreatedBy: vi.fn(async () => undefined),
+          setProjectLocation: vi.fn(async () => undefined),
+        } as unknown as SessionMetadataService,
+      });
+      const attachment = {
+        id: "123e4567-e89b-12d3-a456-426614174000",
+        originalName: "screen.png",
+        name: "screen.png",
+        path: join(projectPath, "screen.png"),
+        size: 10,
+        mimeType: "image/png",
+      };
+
+      await expect(
+        service.switchCodexModelSource({
+          projectId,
+          sessionId: "thread-openai",
+          excludeFailedTurn: true,
+          origin: { createdBy: "channel", originChannel: "feishu" },
+          body: {
+            message: "Inspect this screenshot",
+            attachments: [attachment],
+            provider: "codex",
+            model: "deepseek-v4-flash-vision-exp",
+            tempId: "feishu-source-failover",
+          },
+        }),
+      ).resolves.toMatchObject({
+        ok: true,
+        status: 200,
+        body: {
+          sessionId: "thread-deepseek-fork",
+          processId: "process-deepseek",
+          forkParentSessionId: "thread-openai",
+        },
+      });
+      expect(resumeSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "thread-openai",
+          requireImmediate: true,
+          allowMissingRolloutReplacement: true,
+          message: expect.objectContaining({ attachments: [attachment] }),
+          modelSettings: expect.objectContaining({
+            providerName: "codex",
+            model: "deepseek-v4-flash-vision-exp",
+            codexModelProvider: "deepseek",
+            rollbackNumTurns: 1,
+          }),
+        }),
+      );
+      expect(setCodexModelProvider).toHaveBeenCalledWith(
+        "thread-deepseek-fork",
+        "deepseek",
+      );
+
+      await expect(
+        service.switchCodexModelSource({
+          projectId,
+          sessionId: "thread-deepseek-fork",
+          body: {
+            message: "Codex is available again",
+            provider: "codex",
+            model: "gpt-5.6-sol",
+          },
+        }),
+      ).resolves.toMatchObject({
+        ok: true,
+        status: 200,
+        body: {
+          sessionId: "thread-deepseek-fork",
+          processId: "process-openai",
+        },
+      });
+      expect(abortProcess).toHaveBeenCalledWith("process-1");
+      expect(resumeSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          sessionId: "thread-deepseek-fork",
+          message: expect.objectContaining({
+            text: "Codex is available again",
+          }),
+          modelSettings: expect.objectContaining({
+            model: "gpt-5.6-sol",
+            codexModelProvider: "openai",
+          }),
+        }),
+      );
+      expect(
+        resumeSession.mock.calls.at(-1)?.[0].modelSettings.rollbackNumTurns,
+      ).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it("persists live and idle permission modes", async () => {
     const setPermissionModeMetadata = vi.fn(async () => undefined);
     const metadata = {
