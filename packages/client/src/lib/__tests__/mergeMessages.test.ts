@@ -550,6 +550,87 @@ describe("mergeJSONLMessages", () => {
 });
 
 describe("mergeStreamMessage", () => {
+  describe("superseded optimistic row", () => {
+    it("replaces the optimistic prompt in place when the persisted-id echo arrives", () => {
+      const existing: Message[] = [
+        { uuid: "a-0", type: "assistant", _source: "jsonl" },
+        {
+          uuid: "client-1",
+          type: "user",
+          isOptimistic: true,
+          message: { role: "user", content: "hello" },
+          _source: "sdk",
+        },
+        { uuid: "pi-assistant-1", type: "assistant", _source: "sdk" },
+      ];
+      const incoming: Message = {
+        uuid: "entry-1",
+        type: "user",
+        clientUserMessageId: "client-1",
+        supersedesMessageId: "client-1",
+        timestamp: "2026-09-02T07:59:17.393Z",
+        message: { role: "user", content: "hello" },
+      };
+
+      const result = mergeStreamMessage(existing, incoming);
+
+      expect(result.index).toBe(1);
+      expect(result.messages.map((m) => m.uuid)).toEqual([
+        "a-0",
+        "entry-1",
+        "pi-assistant-1",
+      ]);
+      expect(result.messages[1]).toMatchObject({
+        isOptimistic: false,
+        clientUserMessageId: "client-1",
+        _source: "sdk",
+      });
+    });
+
+    it("drops the optimistic row when the persisted copy is already loaded", () => {
+      const existing: Message[] = [
+        {
+          uuid: "entry-1",
+          type: "user",
+          message: { role: "user", content: "hello" },
+          _source: "jsonl",
+        },
+        {
+          uuid: "client-1",
+          type: "user",
+          isOptimistic: true,
+          message: { role: "user", content: "hello" },
+          _source: "sdk",
+        },
+      ];
+      const incoming: Message = {
+        uuid: "entry-1",
+        type: "user",
+        supersedesMessageId: "client-1",
+        message: { role: "user", content: "hello" },
+      };
+
+      const result = mergeStreamMessage(existing, incoming);
+
+      expect(result.messages.map((m) => m.uuid)).toEqual(["entry-1"]);
+      expect(result.messages[0]?._source).toBe("jsonl");
+    });
+
+    it("appends normally when the superseded row is not present", () => {
+      const incoming: Message = {
+        uuid: "entry-1",
+        type: "user",
+        supersedesMessageId: "client-1",
+        message: { role: "user", content: "hello" },
+      };
+
+      const result = mergeStreamMessage([], incoming);
+
+      expect(result.messages.map((m) => m.uuid)).toEqual(["entry-1"]);
+      expect(result.index).toBe(0);
+    });
+  });
+
   describe("same ID merge", () => {
     it("merges with existing message by ID", () => {
       const existing: Message[] = [

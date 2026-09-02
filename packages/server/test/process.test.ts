@@ -1632,6 +1632,54 @@ describe("Process", () => {
   });
 
   describe("messageHistory", () => {
+    it("replaces the optimistic row when a provider echo names it via supersedesMessageId", async () => {
+      const pending: Array<(result: IteratorResult<SDKMessage>) => void> = [];
+      const iterator: AsyncIterator<SDKMessage> = {
+        next: () => new Promise((resolve) => pending.push(resolve)),
+      };
+      const push = (message: SDKMessage) =>
+        pending.shift()?.({ done: false, value: message });
+      const process = new Process(iterator, {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        provider: "pi",
+        idleTimeoutMs: 100,
+        queue: new MessageQueue(),
+      });
+
+      await process.queueMessage({ text: "hello pi", tempId: "temp-1" });
+      const optimistic = process
+        .getMessageHistory()
+        .find((message) => message.type === "user");
+      expect(optimistic).toBeDefined();
+      const clientUuid = optimistic?.uuid as string;
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      push({
+        type: "user",
+        uuid: "pi-entry-1",
+        session_id: "sess-1",
+        clientUserMessageId: clientUuid,
+        supersedesMessageId: clientUuid,
+        message: { role: "user", content: "hello pi" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const userRows = process
+        .getMessageHistory()
+        .filter((message) => message.type === "user");
+      expect(userRows).toHaveLength(1);
+      expect(userRows[0]).toMatchObject({
+        uuid: "pi-entry-1",
+        clientUserMessageId: clientUuid,
+        tempId: "temp-1",
+        isOptimistic: false,
+      });
+
+      pending.shift()?.({ done: true, value: undefined });
+      await process.abort();
+    });
     it("should add user messages to history for real SDK sessions (with queue)", async () => {
       const iterator = createMockIterator([
         { type: "system", subtype: "init", session_id: "sess-1" },

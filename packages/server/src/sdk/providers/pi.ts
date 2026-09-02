@@ -149,12 +149,26 @@ interface PiRuntimeRef {
   currentModel?: string;
   sessionId?: string;
   contextWindow?: number;
+  /**
+   * Last session entry id Yep has observed through `get_entries`. Used as the
+   * `since` cursor so a turn only transfers the entries it appended.
+   */
+  leafEntryId?: string;
+}
+
+/** The prompt Yep has handed to Pi whose persisted entry id is still unknown. */
+interface PiPendingUserPrompt {
+  uuid: string;
+  tempId?: string;
+  internalPrompt: string;
+  publicPrompt: string;
 }
 
 interface PiStreamState {
   assistantId: string | null;
   blocks: Map<number, ContentBlock>;
   sequence: number;
+  pendingUser?: PiPendingUserPrompt;
 }
 
 interface PiExtensionProviderConfig {
@@ -208,6 +222,21 @@ function numberValue(value: unknown): number | undefined {
  * `delayMs` is a duration; the UI renders a wall-clock deadline, so it is
  * resolved against the moment the event arrived.
  */
+/** Text of a persisted Pi user entry, matching how Pi stores a prompt. */
+function piUserEntryText(entry: JsonRecord): string | undefined {
+  const message = isRecord(entry.message) ? entry.message : undefined;
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  return content
+    .flatMap((block) =>
+      isRecord(block) && block.type === "text" && typeof block.text === "string"
+        ? [block.text]
+        : [],
+    )
+    .join("\n");
+}
+
 function piRetryStatus(event: JsonRecord): SessionRetryStatus {
   const attempt = numberValue(event.attempt);
   const maxAttempts = numberValue(event.maxAttempts);
@@ -1213,6 +1242,12 @@ export class PiProvider implements AgentProvider {
           assistantId: null,
           blocks: new Map(),
           sequence: 0,
+          pendingUser: {
+            uuid: userId,
+            tempId: message.tempId,
+            internalPrompt: projection.internalPrompt,
+            publicPrompt: projection.publicPrompt,
+          },
         };
         let settled = false;
         while (!signal.aborted && !settled) {
@@ -1238,6 +1273,7 @@ export class PiProvider implements AgentProvider {
             options,
             client,
             signal,
+            runtime,
           );
           for (const sdkMessage of emitted) yield sdkMessage;
         }
@@ -1264,6 +1300,7 @@ export class PiProvider implements AgentProvider {
     options: StartSessionOptions,
     client: PiRpcClient,
     signal: AbortSignal,
+    runtime?: PiRuntimeRef,
   ): Promise<SDKMessage[]> {
     if (event.type === "extension_ui_request") {
       await this.handleExtensionUiRequest(event, options, client, signal);
@@ -1325,9 +1362,117 @@ export class PiProvider implements AgentProvider {
       if (message.role === "toolResult") {
         return [this.toolResultSdkMessage(message, sessionId)];
       }
+      if (message.role === "user" && stream.pendingUser && runtime) {
+        const pending = stream.pendingUser;
+        stream.pendingUser = undefined;
+        const echo = await this.persistedUserEchoSdkMessage(
+          client,
+          runtime,
+          pending,
+          message,
+          sessionId,
+        );
+        return echo ? [echo] : [];
+      }
       return [];
     }
     return [];
+  }
+
+  /**
+   * Pi persists the prompt under its own entry id and never stores Yep's
+   * client UUID, so the optimistic user row and the session-file row could not
+   * be correlated by identity. Once Pi reports `message_end` for the prompt
+   * (AgentSession appends the entry synchronously before that event is written
+   * to stdout), read the newly appended entries and re-emit the prompt under
+   * the persisted id. The client swaps the optimistic row in place, which also
+   * makes live prompts usable as native fork anchors before any reload.
+   */
+  private async persistedUserEchoSdkMessage(
+    client: PiRpcClient,
+    runtime: PiRuntimeRef,
+    pending: PiPendingUserPrompt,
+    message: JsonRecord,
+    sessionId: string,
+  ): Promise<SDKMessage | undefined> {
+    const entryId = await this.resolvePersistedUserEntryId(
+      client,
+      runtime,
+      pending.internalPrompt,
+    );
+    if (!entryId || entryId === pending.uuid) return undefined;
+    return {
+      type: "user",
+      uuid: entryId,
+      session_id: sessionId,
+      timestamp: toIsoTimestamp(message.timestamp),
+      clientUserMessageId: pending.uuid,
+      supersedesMessageId: pending.uuid,
+      ...(pending.tempId ? { tempId: pending.tempId } : {}),
+      message: { role: "user", content: pending.publicPrompt },
+    };
+  }
+
+  private async resolvePersistedUserEntryId(
+    client: PiRpcClient,
+    runtime: PiRuntimeRef,
+    internalPrompt: string,
+  ): Promise<string | undefined> {
+    const fetchEntries = async (
+      since: string | undefined,
+    ): Promise<{ entries: JsonRecord[]; leafId?: string } | undefined> => {
+      const response = await client.send({
+        type: "get_entries",
+        ...(since ? { since } : {}),
+      });
+      const data = isRecord(response.data) ? response.data : {};
+      if (!Array.isArray(data.entries)) return undefined;
+      return {
+        entries: data.entries.filter(isRecord),
+        leafId: stringValue(data.leafId),
+      };
+    };
+
+    try {
+      let result: { entries: JsonRecord[]; leafId?: string } | undefined;
+      try {
+        result = await fetchEntries(runtime.leafEntryId);
+      } catch (error) {
+        // A native fork/resume replaces the entry chain; the cursor Yep held
+        // may no longer exist. Retry from the beginning of the session.
+        if (!runtime.leafEntryId) throw error;
+        runtime.leafEntryId = undefined;
+        result = await fetchEntries(undefined);
+      }
+      if (!result) return undefined;
+      if (result.leafId) runtime.leafEntryId = result.leafId;
+
+      const userEntries = result.entries.filter((entry) => {
+        if (entry.type !== "message" || !isRecord(entry.message)) return false;
+        return entry.message.role === "user";
+      });
+      if (userEntries.length === 0) return undefined;
+
+      // Prefer the exact prompt text; Pi may expand templates or skills, in
+      // which case the only user entry appended in this window is still ours.
+      let exact: JsonRecord | undefined;
+      for (let index = userEntries.length - 1; index >= 0; index -= 1) {
+        const entry = userEntries[index];
+        if (entry && piUserEntryText(entry) === internalPrompt) {
+          exact = entry;
+          break;
+        }
+      }
+      const match =
+        exact ?? (userEntries.length === 1 ? userEntries[0] : undefined);
+      return match ? stringValue(match.id) : undefined;
+    } catch (error) {
+      getLogger().debug(
+        { error },
+        "Pi get_entries failed; live prompt keeps its client id",
+      );
+      return undefined;
+    }
   }
 
   private applyAssistantUpdate(

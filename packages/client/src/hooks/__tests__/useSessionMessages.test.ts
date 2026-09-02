@@ -476,6 +476,206 @@ describe("useSessionMessages lightweight display history", () => {
     ]);
   });
 
+  it("drops a replayed Pi prompt and tail rows already persisted under different ids", async () => {
+    const session = codexSession("2026-09-02T07:59:31.000Z", [], {
+      provider: "pi",
+      ownership: { owner: "self", processId: "process-1" },
+      activity: "in-turn",
+    });
+    mockGetSessionMetadata.mockResolvedValue({
+      session,
+      ownership: session.ownership,
+    });
+    mockGetSessionDisplay.mockResolvedValue({
+      sessionId: "session-1",
+      revision: "revision-pi",
+      turns: [
+        {
+          id: "turn:7bf2d331",
+          question: {
+            messageId: "7bf2d331",
+            content: "git-commit-push 一下",
+            timestamp: "2026-09-02T07:59:17.396Z",
+          },
+          segments: [
+            {
+              type: "tool_group",
+              id: "group-live",
+              status: "running",
+              count: 1,
+              failedCount: 0,
+              toolNames: ["Bash"],
+              detailRef: "detail-live",
+              liveTail: true,
+              timestamp: "2026-09-02T07:59:31.399Z",
+            },
+          ],
+        },
+      ],
+    });
+    mockGetSessionToolGroupDetails.mockResolvedValue({
+      sessionId: "session-1",
+      revision: "revision-pi",
+      detailRef: "detail-live",
+      messages: [
+        message("0c9dff55", {
+          type: "assistant",
+          timestamp: "2026-09-02T07:59:31.365Z",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "call-3", name: "Bash", input: {} },
+            ],
+          },
+        }),
+      ],
+    });
+    mockGetSessionQuestions.mockResolvedValue({
+      questions: [],
+      coverage: "complete",
+    });
+
+    const { result } = renderHook(() =>
+      useSessionMessages({
+        projectId: "project-1",
+        sessionId: "session-1",
+        preferDisplayHistory: true,
+      }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.messages.map((item) => item.id)).toEqual([
+      "0c9dff55",
+    ]);
+
+    // Reconnect replay: the optimistic prompt carries the client UUID, which
+    // Pi never persists, and the tool rows carry synthetic live ids.
+    act(() => {
+      result.current.handleStreamMessageEvent(
+        message("client-uuid-1", {
+          uuid: "client-uuid-1",
+          _source: "sdk",
+          isReplay: true,
+          isOptimistic: true,
+          clientUserMessageId: "client-uuid-1",
+          timestamp: "2026-09-02T07:59:17.380Z",
+          message: { role: "user", content: "git-commit-push 一下" },
+        }),
+      );
+      result.current.handleStreamMessageEvent(
+        message("pi-assistant-1", {
+          uuid: "pi-assistant-1",
+          type: "assistant",
+          _source: "sdk",
+          isReplay: true,
+          timestamp: "2026-09-02T07:59:31.365Z",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "call-3", name: "Bash", input: {} },
+            ],
+          },
+        }),
+      );
+    });
+    expect(result.current.messages.map((item) => item.id)).toEqual([
+      "0c9dff55",
+    ]);
+
+    // A newer live row past the persisted watermark is still appended.
+    act(() => {
+      result.current.handleStreamMessageEvent(
+        message("pi-assistant-2", {
+          uuid: "pi-assistant-2",
+          type: "assistant",
+          _source: "sdk",
+          isReplay: true,
+          timestamp: "2026-09-02T07:59:40.047Z",
+          message: {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "next" }],
+          },
+        }),
+      );
+    });
+    expect(result.current.messages.map((item) => item.uuid ?? item.id)).toEqual(
+      ["0c9dff55", "pi-assistant-2"],
+    );
+
+    // A genuinely new prompt with the same text is not swallowed.
+    act(() => {
+      result.current.handleStreamMessageEvent(
+        message("client-uuid-2", {
+          uuid: "client-uuid-2",
+          _source: "sdk",
+          isOptimistic: true,
+          clientUserMessageId: "client-uuid-2",
+          timestamp: "2026-09-02T08:03:00.000Z",
+          message: { role: "user", content: "git-commit-push 一下" },
+        }),
+      );
+    });
+    expect(result.current.messages.map((item) => item.uuid ?? item.id)).toEqual(
+      ["0c9dff55", "pi-assistant-2", "client-uuid-2"],
+    );
+  });
+
+  it("matches a replayed Pi prompt to the display question by text when nothing newer is persisted", async () => {
+    const session = codexSession("2026-09-02T07:59:17.000Z", [], {
+      provider: "pi",
+      ownership: { owner: "self", processId: "process-1" },
+      activity: "in-turn",
+    });
+    mockGetSessionMetadata.mockResolvedValue({
+      session,
+      ownership: session.ownership,
+    });
+    mockGetSessionDisplay.mockResolvedValue({
+      sessionId: "session-1",
+      revision: "revision-pi",
+      turns: [
+        {
+          id: "turn:7bf2d331",
+          question: {
+            messageId: "7bf2d331",
+            content: "git-commit-push 一下",
+            timestamp: "2026-09-02T07:59:17.396Z",
+          },
+          segments: [],
+        },
+      ],
+    });
+    mockGetSessionQuestions.mockResolvedValue({
+      questions: [],
+      coverage: "complete",
+    });
+
+    const { result } = renderHook(() =>
+      useSessionMessages({
+        projectId: "project-1",
+        sessionId: "session-1",
+        preferDisplayHistory: true,
+      }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.handleStreamMessageEvent(
+        message("client-uuid-1", {
+          uuid: "client-uuid-1",
+          _source: "sdk",
+          isReplay: true,
+          isOptimistic: true,
+          clientUserMessageId: "client-uuid-1",
+          // Stamped after the persisted entry, so the watermark alone would
+          // not catch it.
+          timestamp: "2026-09-02T07:59:17.900Z",
+          message: { role: "user", content: "git-commit-push  一下" },
+        }),
+      );
+    });
+    expect(result.current.messages).toEqual([]);
+  });
+
   it("does not re-add live assistant text already owned by display", async () => {
     const session = codexSession("2026-09-01T12:19:29.000Z", [], {
       ownership: { owner: "self", processId: "process-1" },

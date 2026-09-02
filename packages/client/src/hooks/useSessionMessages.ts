@@ -3,6 +3,7 @@ import {
   type ContextUsage,
   SESSION_DISPLAY_INITIAL_TURN_LIMIT,
   type SessionDisplayPage,
+  type SessionDisplayUserContent,
   type SessionQuestion,
   type SubagentDescriptor,
   type SubagentMetrics,
@@ -510,28 +511,92 @@ function nonEmptyMessageIdentity(value: unknown): string | null {
   return normalized || null;
 }
 
+/**
+ * Providers such as Pi and Kimi persist their own entry ids and never carry
+ * the client-generated UUID into the session file, so a replayed optimistic
+ * prompt cannot be matched to the persisted display question by identity.
+ * Fall back to the prompt text plus a narrow timestamp window in that case.
+ */
+const DISPLAY_QUESTION_SEMANTIC_MATCH_WINDOW_MS = 15_000;
+
+function normalizePromptText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function displayQuestionText(content: SessionDisplayUserContent): string {
+  if (typeof content === "string") return normalizePromptText(content);
+  return normalizePromptText(
+    content
+      .flatMap((block) => (block.type === "text" ? [block.text] : []))
+      .join("\n"),
+  );
+}
+
+function userPromptText(message: Message): string {
+  const content = getMessageContent(message);
+  if (typeof content === "string") return normalizePromptText(content);
+  if (!Array.isArray(content)) return "";
+  return normalizePromptText(
+    content
+      .flatMap((block) =>
+        block &&
+        typeof block === "object" &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string"
+          ? [(block as { text: string }).text]
+          : [],
+      )
+      .join("\n"),
+  );
+}
+
 function displayContainsUserMessageIdentity(
   page: SessionDisplayPage,
   message: Message,
 ): boolean {
   if (!isRealUserPromptMessage(message)) return false;
+  const messageId = getMessageId(message);
   const clientUserMessageId = nonEmptyMessageIdentity(
     message.clientUserMessageId,
   );
   const codexCorrelationKey = nonEmptyMessageIdentity(
     message.codexCorrelationKey,
   );
-  if (!clientUserMessageId && !codexCorrelationKey) return false;
-
-  return page.turns.some((turn) => {
+  const matchedByIdentity = page.turns.some((turn) => {
     const question = turn.question;
     if (!question) return false;
     return (
+      // Pi echoes the prompt under its persisted entry id once known.
+      question.messageId === messageId ||
       (clientUserMessageId !== null &&
         question.clientUserMessageId === clientUserMessageId) ||
       (codexCorrelationKey !== null &&
         question.codexCorrelationKey === codexCorrelationKey)
     );
+  });
+  if (matchedByIdentity) return true;
+
+  // Only stream copies of a prompt the client itself sent (optimistic echo or
+  // reconnect replay) are eligible for the semantic fallback. A brand-new
+  // prompt with identical text is far outside the window of the old question.
+  if (message.isReplay !== true && message.isOptimistic !== true) return false;
+  const messageTimestampMs = getMessageTimestampMs(message);
+  if (messageTimestampMs === null) return false;
+  const text = userPromptText(message);
+  if (!text) return false;
+
+  return page.turns.some((turn) => {
+    const question = turn.question;
+    if (!question?.timestamp) return false;
+    const questionTimestampMs = Date.parse(question.timestamp);
+    if (!Number.isFinite(questionTimestampMs)) return false;
+    if (
+      Math.abs(questionTimestampMs - messageTimestampMs) >
+      DISPLAY_QUESTION_SEMANTIC_MATCH_WINDOW_MS
+    ) {
+      return false;
+    }
+    return displayQuestionText(question.content) === text;
   });
 }
 
@@ -567,6 +632,20 @@ function displayOwnsClosedCodexTurn(
           segment.type === "assistant_text" && segment.phase === "final",
       ),
   );
+}
+
+function maxDisplayPageTimestampMs(page: SessionDisplayPage): number {
+  let maxMs = Number.NEGATIVE_INFINITY;
+  const consider = (timestamp: string | undefined) => {
+    if (!timestamp) return;
+    const ms = Date.parse(timestamp);
+    if (Number.isFinite(ms) && ms > maxMs) maxMs = ms;
+  };
+  for (const turn of page.turns) {
+    consider(turn.question?.timestamp);
+    for (const segment of turn.segments) consider(segment.timestamp);
+  }
+  return maxMs;
 }
 
 function displayContainsMessageIdentity(
@@ -1400,6 +1479,20 @@ export function useSessionMessages(
           providerRef.current = metadata.session.provider;
           setPagination(undefined);
           setMessages(liveTail?.messages ?? []);
+          if (
+            metadata.session.provider === "pi" ||
+            metadata.session.provider === "kimi"
+          ) {
+            // These providers persist ids that never match live stream UUIDs,
+            // so a reconnect replay cannot be deduplicated by identity. Seed
+            // the persisted watermark from the display page and hydrated tail
+            // so `isPersistedReplay` drops rows that are already on disk.
+            updatePersistedTimestampWatermark(liveTail?.messages ?? []);
+            const pageMaxMs = maxDisplayPageTimestampMs(page);
+            if (pageMaxMs > maxPersistedTimestampMsRef.current) {
+              maxPersistedTimestampMsRef.current = pageMaxMs;
+            }
+          }
           setHydratedLiveTailDetailRef(liveTail?.detailRef ?? null);
           const lastLiveTailMessage = liveTail?.messages.at(-1);
           lastMessageIdRef.current = lastLiveTailMessage
@@ -1459,6 +1552,7 @@ export function useSessionMessages(
     applySessionSnapshot,
     loadSelfLiveTail,
     refreshDisplayQuestions,
+    updatePersistedTimestampWatermark,
   ]);
 
   const settledDisplayTransitionRef = useRef({

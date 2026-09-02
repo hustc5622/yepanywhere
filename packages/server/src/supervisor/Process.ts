@@ -2090,20 +2090,24 @@ export class Process {
         if (shouldEmitMessage(message) && message.type !== "stream_event") {
           // Check for duplicates before adding to history
           // This handles the case where queueMessage added the optimistic message
-          // and now the provider is echoing it back with the same UUID
+          // and now the provider is echoing it back with the same UUID, or (Pi)
+          // under the persisted entry id while naming the optimistic row it
+          // supersedes.
+          const matchesHistoryRow = (existing: SDKMessage): boolean =>
+            existing.uuid === message.uuid ||
+            (typeof message.supersedesMessageId === "string" &&
+              existing.uuid === message.supersedesMessageId);
           const duplicateBucket =
             message.type === "user" &&
             message.uuid &&
-            (this.currentBucket.some((m) => m.uuid === message.uuid)
+            (this.currentBucket.some(matchesHistoryRow)
               ? this.currentBucket
-              : this.previousBucket.some((m) => m.uuid === message.uuid)
+              : this.previousBucket.some(matchesHistoryRow)
                 ? this.previousBucket
                 : undefined);
 
           if (duplicateBucket) {
-            const duplicateIndex = duplicateBucket.findIndex(
-              (existing) => existing.uuid === message.uuid,
-            );
+            const duplicateIndex = duplicateBucket.findIndex(matchesHistoryRow);
             const optimistic = duplicateBucket[duplicateIndex];
             if (optimistic) {
               // Keep one public-history row, but enrich the optimistic entry
@@ -2116,7 +2120,9 @@ export class Process {
                   message.clientUserMessageId ?? optimistic.clientUserMessageId,
                 message: message.message ?? optimistic.message,
                 isOptimistic:
-                  message.turnId || message.codexTurnId
+                  message.turnId ||
+                  message.codexTurnId ||
+                  message.supersedesMessageId
                     ? false
                     : (message.isOptimistic ?? optimistic.isOptimistic),
               } as TimestampedSDKMessage;

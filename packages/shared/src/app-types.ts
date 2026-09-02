@@ -161,6 +161,11 @@ export interface AppMessageExtensions {
   codexThreadItemId?: string;
   /** Client-generated identity shared by Codex live and persisted user rows. */
   clientUserMessageId?: string;
+  /**
+   * Provider echo of a prompt under its persisted id. Names the optimistic row
+   * (by uuid) that this message replaces once the persisted identity is known.
+   */
+  supersedesMessageId?: string;
   /** Stable native identity shared by Codex live items and rollout records. */
   codexCorrelationKey?: string;
   /** User prompt that owns a body-free Session Inspector index row. */

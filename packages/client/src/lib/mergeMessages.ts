@@ -570,6 +570,38 @@ export function mergeStreamMessage(
   // Check for existing message with same ID
   const existingIdx = existing.findIndex((m) => getMessageId(m) === incomingId);
 
+  // A provider echo under the persisted id names the optimistic row it
+  // replaces (Pi: client UUID -> session entry id). Swap that row in place so
+  // the prompt keeps its position and does not render twice.
+  const supersededId =
+    typeof incoming.supersedesMessageId === "string" &&
+    incoming.supersedesMessageId !== incomingId
+      ? incoming.supersedesMessageId
+      : null;
+  const supersededIdx =
+    supersededId === null
+      ? -1
+      : existing.findIndex((m) => getMessageId(m) === supersededId);
+  if (supersededIdx >= 0) {
+    if (existingIdx >= 0) {
+      // The persisted copy is already loaded; drop the optimistic row and let
+      // the echo merge into the existing message below.
+      const withoutSuperseded = existing.filter(
+        (_, index) => index !== supersededIdx,
+      );
+      return mergeStreamMessage(withoutSuperseded, incoming);
+    }
+    const optimistic = existing[supersededIdx];
+    const updated = [...existing];
+    updated[supersededIdx] = {
+      ...optimistic,
+      ...incoming,
+      isOptimistic: false,
+      _source: "sdk",
+    };
+    return { messages: updated, index: supersededIdx };
+  }
+
   if (existingIdx >= 0) {
     // Merge with existing message
     const existingMsg = existing[existingIdx];
