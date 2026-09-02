@@ -1,7 +1,12 @@
 import type { ProviderName } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { type SearchMatch, type SearchResultSession, api } from "../api/client";
+import {
+  type SearchMatch,
+  type SearchResultSession,
+  type SearchSort,
+  api,
+} from "../api/client";
 import {
   FilterDropdown,
   type FilterOption,
@@ -10,11 +15,17 @@ import { PageHeader } from "../components/PageHeader";
 import { SessionListSkeleton } from "../components/Skeleton";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
+import {
+  parseSearchSort,
+  useSearchSortPreference,
+} from "../hooks/useSearchSortPreference";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
+import { formatSmartTime } from "../lib/datetime";
 
 const DEBOUNCE_MS = 300;
 const MIN_QUERY_LENGTH = 2;
+const SORT_OPTIONS: SearchSort[] = ["recent", "relevance"];
 
 /** Render a snippet with the matched substring wrapped in <mark>. */
 function HighlightedSnippet({ match }: { match: SearchMatch }) {
@@ -37,7 +48,7 @@ function HighlightedSnippet({ match }: { match: SearchMatch }) {
  * the matched message on click.
  */
 export function SearchPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { openSidebar, isWideScreen } = useNavigationLayout();
   const basePath = useRemoteBasePath();
   const navigate = useNavigate();
@@ -45,6 +56,12 @@ export function SearchPage() {
 
   const query = searchParams.get("q") || "";
   const projectFilter = searchParams.get("project") || undefined;
+
+  // URL wins for the current visit (shared links keep their ordering); the
+  // stored preference is the fallback and is refreshed from the URL below.
+  const urlSort = parseSearchSort(searchParams.get("sort"));
+  const { storedSort, rememberSort } = useSearchSortPreference();
+  const sort = urlSort ?? storedSort;
 
   const [searchInput, setSearchInput] = useState(query);
   const [results, setResults] = useState<SearchResultSession[]>([]);
@@ -118,7 +135,27 @@ export function SearchPage() {
     [setSearchParams],
   );
 
-  // Run the search whenever the query or project scope changes.
+  const handleSortChange = useCallback(
+    (next: SearchSort) => {
+      rememberSort(next);
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          params.set("sort", next);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams, rememberSort],
+  );
+
+  // Landing on a link that pins an ordering also updates the saved preference.
+  useEffect(() => {
+    if (urlSort && urlSort !== storedSort) rememberSort(urlSort);
+  }, [urlSort, storedSort, rememberSort]);
+
+  // Run the search whenever the query, project scope or ordering changes.
   useEffect(() => {
     const trimmed = query.trim();
     if (trimmed.length < MIN_QUERY_LENGTH) {
@@ -133,7 +170,7 @@ export function SearchPage() {
     setLoading(true);
     setError(null);
     api
-      .search({ q: trimmed, project: projectFilter })
+      .search({ q: trimmed, project: projectFilter, sort })
       .then((res) => {
         if (cancelled) return;
         setResults(res.results);
@@ -155,7 +192,7 @@ export function SearchPage() {
     return () => {
       cancelled = true;
     };
-  }, [query, projectFilter]);
+  }, [query, projectFilter, sort]);
 
   const trimmedQuery = query.trim();
   const hasQuery = trimmedQuery.length >= MIN_QUERY_LENGTH;
@@ -226,6 +263,31 @@ export function SearchPage() {
               )}
             </div>
 
+            <div className="search-sort-bar">
+              <span className="search-sort-label">{t("searchSortLabel")}</span>
+              <div
+                className="settings-segmented-control search-sort-control"
+                role="group"
+                aria-label={t("searchSortLabel")}
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    className={`settings-segmented-option${
+                      sort === option ? " active" : ""
+                    }`}
+                    aria-pressed={sort === option}
+                    onClick={() => handleSortChange(option)}
+                  >
+                    {option === "recent"
+                      ? t("searchSortRecent")
+                      : t("searchSortRelevance")}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {summaryText && !loading && (
               <p className="search-summary">{summaryText}</p>
             )}
@@ -282,6 +344,11 @@ export function SearchPage() {
                           {result.projectName}
                         </span>
                         <ProviderTag provider={result.provider} />
+                        {result.updatedAt && (
+                          <span className="search-result-time">
+                            {formatSmartTime(result.updatedAt, locale)}
+                          </span>
+                        )}
                         <span className="search-result-count">
                           {result.matchCount === 1
                             ? t("searchMatchCountOne")

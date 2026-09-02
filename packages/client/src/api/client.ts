@@ -277,8 +277,13 @@ export interface SearchResultSession {
   matches: SearchMatch[];
 }
 
+/** Result ordering for content search. */
+export type SearchSort = "recent" | "relevance";
+
 export interface SearchResponse {
   query: string;
+  /** Ordering actually applied by the server. */
+  sort: SearchSort;
   results: SearchResultSession[];
   totalSessions: number;
   totalMatches: number;
@@ -1821,12 +1826,14 @@ export const api = {
     project?: string;
     session?: string;
     limit?: number;
+    sort?: SearchSort;
   }) => {
     const searchParams = new URLSearchParams();
     searchParams.set("q", params.q);
     if (params.project) searchParams.set("project", params.project);
     if (params.session) searchParams.set("session", params.session);
     if (params.limit) searchParams.set("limit", String(params.limit));
+    if (params.sort) searchParams.set("sort", params.sort);
     return fetchJSON<SearchResponse>(`/search?${searchParams.toString()}`);
   },
 

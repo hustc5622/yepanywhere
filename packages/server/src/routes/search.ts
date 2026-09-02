@@ -4,7 +4,8 @@
  * Scope is global by default, a single project via `?project=`, or a single
  * session via `?project=&session=`.
  * Results are grouped per session, each with snippet matches that the client
- * can deep-link + highlight. Backed by SessionContentIndexService, which caches
+ * can deep-link + highlight. Ordering is controlled by `?sort=` (`recent`,
+ * default, or `relevance`). Backed by SessionContentIndexService, which caches
  * per-message text and only re-parses files that changed (mtime/size + watcher
  * dirty-tracking), so repeat searches are served from memory.
  */
@@ -75,12 +76,26 @@ export interface SearchResultSession {
   matches: SearchMatch[];
 }
 
+/**
+ * Result ordering:
+ * - `recent`: newest session first (default; matches how the session lists sort).
+ * - `relevance`: title hits first, then match count, then recency.
+ */
+export type SearchSort = "recent" | "relevance";
+
+export const DEFAULT_SEARCH_SORT: SearchSort = "recent";
+
 export interface SearchResponse {
   query: string;
+  sort: SearchSort;
   results: SearchResultSession[];
   totalSessions: number;
   totalMatches: number;
   searchDurationMs: number;
+}
+
+function parseSort(raw: string | undefined): SearchSort {
+  return raw === "relevance" || raw === "recent" ? raw : DEFAULT_SEARCH_SORT;
 }
 
 const DEFAULT_LIMIT = 20;
@@ -114,10 +129,11 @@ export function createSearchRoutes(deps: SearchDeps): Hono {
   const routes = new Hono();
   const loadMessages = createLoadMessages();
 
-  // GET /api/search?q=&project=&session=&limit=
+  // GET /api/search?q=&project=&session=&limit=&sort=
   routes.get("/", async (c) => {
     const start = Date.now();
     const rawQuery = c.req.query("q")?.trim() ?? "";
+    const sort = parseSort(c.req.query("sort"));
     const filterProjectId = c.req.query("project");
     const filterSessionId = c.req.query("session")?.trim() || undefined;
     const limitParam = c.req.query("limit");
@@ -130,6 +146,7 @@ export function createSearchRoutes(deps: SearchDeps): Hono {
       return c.json(
         {
           query: rawQuery,
+          sort,
           results: [],
           totalSessions: 0,
           totalMatches: 0,
@@ -232,25 +249,40 @@ export function createSearchRoutes(deps: SearchDeps): Hono {
       });
     }
 
-    // Rank: title matches first, then more matches, then most recent.
     const titleHit = (item: SearchResultSession): boolean =>
       (item.title?.toLowerCase().includes(queryLower) ?? false) ||
       (item.customTitle?.toLowerCase().includes(queryLower) ?? false) ||
       (item.aiTitle?.toLowerCase().includes(queryLower) ?? false);
 
-    items.sort((a, b) => {
-      const at = titleHit(a) ? 1 : 0;
-      const bt = titleHit(b) ? 1 : 0;
-      if (at !== bt) return bt - at;
-      if (a.matchCount !== b.matchCount) return b.matchCount - a.matchCount;
-      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-    });
+    const updatedAtMs = (item: SearchResultSession): number => {
+      const ms = new Date(item.updatedAt).getTime();
+      return Number.isFinite(ms) ? ms : 0;
+    };
+
+    if (sort === "relevance") {
+      // Title matches first, then more matches, then most recent.
+      items.sort((a, b) => {
+        const at = titleHit(a) ? 1 : 0;
+        const bt = titleHit(b) ? 1 : 0;
+        if (at !== bt) return bt - at;
+        if (a.matchCount !== b.matchCount) return b.matchCount - a.matchCount;
+        return updatedAtMs(b) - updatedAtMs(a);
+      });
+    } else {
+      // Newest session first, then more matches as tie-break.
+      items.sort((a, b) => {
+        const delta = updatedAtMs(b) - updatedAtMs(a);
+        if (delta !== 0) return delta;
+        return b.matchCount - a.matchCount;
+      });
+    }
 
     const totalSessions = items.length;
     const results = items.slice(0, limit);
 
     return c.json({
       query: rawQuery,
+      sort,
       results,
       totalSessions,
       totalMatches,

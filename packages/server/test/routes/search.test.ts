@@ -65,6 +65,7 @@ describe("Search Routes", () => {
     expect(searchScope).toHaveBeenCalledWith(index, "needle", 200, "session-2");
     expect(body).toMatchObject({
       query: "needle",
+      sort: "recent",
       totalSessions: 1,
       totalMatches: 2,
       results: [
@@ -75,5 +76,70 @@ describe("Search Routes", () => {
         },
       ],
     });
+  });
+
+  it("orders results by recency by default and by relevance on request", async () => {
+    const project: Project = {
+      id: "project-1" as UrlProjectId,
+      path: "/tmp/project-1",
+      name: "project-1",
+      sessionCount: 2,
+      sessionDir: "/tmp/project-1/sessions",
+      activeOwnedCount: 0,
+      activeExternalCount: 0,
+      lastActivity: null,
+      provider: "claude",
+    };
+    const index = { sessions: {} } as SessionContentIndexState;
+    const makeResult = (
+      sessionId: string,
+      updatedAt: string,
+      matchCount: number,
+    ) => ({
+      sessionId,
+      title: `${sessionId} title`,
+      updatedAt,
+      provider: "claude" as const,
+      matchCount,
+      titleMatch: false,
+      matches: [
+        {
+          messageId: `${sessionId}-m1`,
+          role: "user",
+          snippet: "needle",
+          matchStart: 0,
+          matchLength: 6,
+        },
+      ],
+    });
+
+    const routes = createSearchRoutes({
+      scanner: {
+        listProjects: vi.fn(async () => [project]),
+      } as unknown as ProjectScanner,
+      readerFactory: vi.fn(() => ({}) as ISessionReader),
+      sessionContentIndexService: {
+        ensureIndexed: vi.fn(async () => index),
+        searchScope: vi.fn(() => [
+          // Older session with many matches, newer session with a single match.
+          makeResult("old-many", "2026-01-01T00:00:00.000Z", 9),
+          makeResult("new-few", "2026-07-31T00:00:00.000Z", 1),
+        ]),
+      } as unknown as SessionContentIndexService,
+    });
+
+    const recent = await (await routes.request("/?q=needle")).json();
+    expect(recent.sort).toBe("recent");
+    expect(
+      recent.results.map((r: { sessionId: string }) => r.sessionId),
+    ).toEqual(["new-few", "old-many"]);
+
+    const relevance = await (
+      await routes.request("/?q=needle&sort=relevance")
+    ).json();
+    expect(relevance.sort).toBe("relevance");
+    expect(
+      relevance.results.map((r: { sessionId: string }) => r.sessionId),
+    ).toEqual(["old-many", "new-few"]);
   });
 });
