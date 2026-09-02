@@ -77,6 +77,7 @@ describe("FeishuInboundProcessor", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await Promise.all(
       processors.splice(0).map((processor) => processor.shutdown()),
     );
@@ -242,6 +243,10 @@ describe("FeishuInboundProcessor", () => {
     });
     processors.push(processor);
 
+    // Durable inbox writes fsync each event. Keep that real I/O outside the
+    // batching assertion so a loaded CI runner cannot consume the synthetic
+    // 25ms window before both concurrently accepted events are admitted.
+    vi.useFakeTimers();
     await Promise.all([
       processor.accept({
         account: fixture.account,
@@ -256,12 +261,12 @@ describe("FeishuInboundProcessor", () => {
       }),
     ]);
 
-    await eventually(() =>
-      expect(api.fetchMessageItems).toHaveBeenCalledOnce(),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 35));
+    await vi.advanceTimersByTimeAsync(25);
+    expect(api.fetchMessageItems).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(35);
     expect(fixture.commands.start).not.toHaveBeenCalled();
     expect(fixture.commands.send).not.toHaveBeenCalled();
+    vi.useRealTimers();
 
     forwardedItems.resolve([
       {
