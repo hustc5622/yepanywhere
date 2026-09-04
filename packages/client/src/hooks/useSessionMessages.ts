@@ -2,6 +2,7 @@ import {
   type ContextStatusResponse,
   type ContextUsage,
   SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+  SESSION_DISPLAY_QUESTION_PREVIEW_MAX_LENGTH,
   type SessionDisplayPage,
   type SessionDisplayUserContent,
   type SessionQuestion,
@@ -530,6 +531,61 @@ function displayQuestionText(content: SessionDisplayUserContent): string {
       .flatMap((block) => (block.type === "text" ? [block.text] : []))
       .join("\n"),
   );
+}
+
+/**
+ * Fold the questions carried by a lightweight display page into the question
+ * index. The live boundary flush moves finished prompts out of the streamed
+ * message list and into the projection, so without this merge the inspector
+ * would lose every prompt sent after the initial question fetch until the
+ * session is reopened.
+ */
+export function appendDisplayPageQuestions(
+  current: SessionQuestion[],
+  page: SessionDisplayPage,
+): SessionQuestion[] {
+  const knownIds = new Set(current.map((question) => question.id));
+  const knownIdentities = new Set(
+    current.flatMap((question) => [
+      ...(question.clientUserMessageId
+        ? [`client:${question.clientUserMessageId}`]
+        : []),
+      ...(question.codexCorrelationKey
+        ? [`correlation:${question.codexCorrelationKey}`]
+        : []),
+    ]),
+  );
+  const additions: SessionQuestion[] = [];
+  for (const turn of page.turns) {
+    const question = turn.question;
+    if (!question || knownIds.has(question.messageId)) continue;
+    const identities = [
+      ...(question.clientUserMessageId
+        ? [`client:${question.clientUserMessageId}`]
+        : []),
+      ...(question.codexCorrelationKey
+        ? [`correlation:${question.codexCorrelationKey}`]
+        : []),
+    ];
+    if (identities.some((identity) => knownIdentities.has(identity))) continue;
+    const text = displayQuestionText(question.content);
+    if (!text) continue;
+    knownIds.add(question.messageId);
+    for (const identity of identities) knownIdentities.add(identity);
+    additions.push({
+      id: question.messageId,
+      turnId: turn.id,
+      ...(question.clientUserMessageId
+        ? { clientUserMessageId: question.clientUserMessageId }
+        : {}),
+      ...(question.codexCorrelationKey
+        ? { codexCorrelationKey: question.codexCorrelationKey }
+        : {}),
+      text: text.slice(0, SESSION_DISPLAY_QUESTION_PREVIEW_MAX_LENGTH),
+      ...(question.timestamp ? { timestamp: question.timestamp } : {}),
+    });
+  }
+  return additions.length > 0 ? [...current, ...additions] : current;
 }
 
 function userPromptText(message: Message): string {
@@ -1697,6 +1753,11 @@ export function useSessionMessages(
           const nextLiveTail = findDisplayLiveTail(page);
           displayPageRef.current = page;
           setDisplayPage(page);
+          // Prompts that just moved from the live stream into the projection
+          // must stay visible in the inspector's question index.
+          setDisplayQuestions((currentQuestions) =>
+            appendDisplayPageQuestions(currentQuestions, page),
+          );
           setHydratedLiveTailDetailRef(
             nextLiveTail && remaining.some(messageContainsToolUse)
               ? nextLiveTail.detailRef

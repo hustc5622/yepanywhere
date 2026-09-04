@@ -954,6 +954,117 @@ describe("useSessionMessages lightweight display history", () => {
     expect(mockGetSessionDisplay).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps prompts sent after the question snapshot in the question index", async () => {
+    const session = codexSession("2026-09-01T00:00:00.000Z", [], {
+      ownership: { owner: "self", processId: "process-1" },
+      activity: "in-turn",
+    });
+    mockGetSessionMetadata.mockResolvedValue({
+      session,
+      ownership: session.ownership,
+    });
+    mockGetSessionDisplay
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        revision: "revision-1",
+        turns: [
+          {
+            id: "turn:user-1",
+            question: { messageId: "user-1", content: "First question" },
+            segments: [],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        revision: "revision-2",
+        turns: [
+          {
+            id: "turn:user-1",
+            question: { messageId: "user-1", content: "First question" },
+            segments: [],
+          },
+          {
+            id: "turn:user-2",
+            question: {
+              messageId: "user-2",
+              content: "Second question",
+              timestamp: "2026-09-01T00:01:00.000Z",
+            },
+            segments: [
+              {
+                type: "assistant_text",
+                id: "persisted-progress:0",
+                codexCorrelationKey:
+                  "codex:turn-2:agent-message:native-progress-1",
+                phase: "progress",
+                content: "Working on it.",
+              },
+            ],
+          },
+        ],
+      });
+    mockGetSessionQuestions.mockResolvedValue({
+      questions: [
+        {
+          messageId: "user-1",
+          turnId: "turn:user-1",
+          preview: "First question",
+        },
+      ],
+      coverage: "complete",
+    });
+
+    const { result } = renderHook(() =>
+      useSessionMessages({
+        projectId: "project-1",
+        sessionId: "session-1",
+        preferDisplayHistory: true,
+        displayHistoryLiveOwned: true,
+      }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() =>
+      expect(
+        result.current.displayQuestions.map((question) => question.id),
+      ).toEqual(["user-1"]),
+    );
+
+    act(() => {
+      result.current.handleStreamMessageEvent(
+        message("live-user-2", {
+          message: { role: "user", content: "Second question" },
+          _source: "sdk",
+        }),
+      );
+      result.current.handleStreamMessageEvent(
+        message("live-progress", {
+          type: "assistant",
+          role: "assistant",
+          codexCorrelationKey: "codex:turn-2:agent-message:native-progress-1",
+          message: { role: "assistant", content: "Working on it." },
+          _source: "sdk",
+        }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(result.current.displayPage?.revision).toBe("revision-2"),
+    );
+    // The prompt left the live message list with the boundary flush, so the
+    // inspector index has to pick it up from the refreshed projection.
+    expect(result.current.messages).toEqual([]);
+    expect(
+      result.current.displayQuestions.map((question) => ({
+        id: question.id,
+        text: question.text,
+      })),
+    ).toEqual([
+      { id: "user-1", text: "First question" },
+      { id: "user-2", text: "Second question" },
+    ]);
+  });
+
   it("drops buffered Codex tools when display already owns the closing final answer", async () => {
     const session = codexSession("2026-09-01T00:00:01.000Z", []);
     const metadata = deferred<{
