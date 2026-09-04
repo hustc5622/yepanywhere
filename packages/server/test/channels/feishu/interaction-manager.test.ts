@@ -153,6 +153,59 @@ describe("FeishuInteractionManager", () => {
     );
   });
 
+  it("forwards deny guidance from the approval form through the broker", async () => {
+    const fixture = await createFixture(makeApproval());
+    fixtures.push(fixture);
+    await fixture.manager.projectPendingInput(fixture.context, fixture.request);
+
+    await expect(
+      fixture.manager.acceptCardAction({
+        accountId: "account-fixture",
+        event: {
+          ...makeAction(fixture.operation.operationId, 0, "deny_with_feedback"),
+          formValue: {
+            approval_feedback: "Use a task-specific temporary directory",
+          },
+        },
+        api: fixture.api,
+      }),
+    ).resolves.toBe("claimed");
+
+    await eventually(() =>
+      expect(fixture.providerResolver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response: "deny",
+          feedback: "Use a task-specific temporary directory",
+        }),
+      ),
+    );
+  });
+
+  it("rejects an empty deny-guidance submission without resolving", async () => {
+    const fixture = await createFixture(makeApproval());
+    fixtures.push(fixture);
+    await fixture.manager.projectPendingInput(fixture.context, fixture.request);
+
+    await expect(
+      fixture.manager.acceptCardAction({
+        accountId: "account-fixture",
+        event: {
+          ...makeAction(fixture.operation.operationId, 0, "deny_with_feedback"),
+          formValue: { approval_feedback: "   " },
+        },
+        api: fixture.api,
+      }),
+    ).resolves.toBe("claimed");
+
+    await eventually(() =>
+      expect(fixture.api.updateInputCard).toHaveBeenCalledTimes(1),
+    );
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.broker.get(fixture.operation.operationId)?.state).toBe(
+      "open",
+    );
+  });
+
   it("projects a broker-owned provider rejection as failed", async () => {
     const fixture = await createFixture(makeApproval(), {
       providerAccepted: false,
@@ -298,6 +351,7 @@ async function createFixture(
           requestId: string;
           response: string;
           answers?: Record<string, string | string[]>;
+          feedback?: string;
           operationId: string;
           operationVersion: number;
           actor: {
@@ -314,6 +368,7 @@ async function createFixture(
           expectedVersion: body.operationVersion,
           response: body.response,
           answers: body.answers,
+          feedback: body.feedback,
           actor: body.actor,
           terminalReason: respondOptions?.terminalReason,
         });

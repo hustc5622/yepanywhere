@@ -161,6 +161,14 @@ export type {
   ZCodeBridgeDecision,
 } from "./types.js";
 export { ALL_LLM_GATEWAY_REQUEST_PROTOCOLS } from "./types.js";
+export type {
+  ToolApprovalPersistence,
+  ToolApprovalPersistenceKind,
+} from "./tool-approval.js";
+export {
+  getToolApprovalPersistence,
+  supportsToolApprovalFeedback,
+} from "./tool-approval.js";
 export {
   ALL_PROVIDERS,
   DEFAULT_PERMISSION_MODE,

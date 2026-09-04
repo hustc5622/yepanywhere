@@ -1,3 +1,7 @@
+import {
+  getToolApprovalPersistence,
+  supportsToolApprovalFeedback,
+} from "@yep-anywhere/shared";
 import type { InputRequest, InteractionOperation } from "@yep-anywhere/shared";
 import type { SessionCommandService } from "../../services/SessionCommandService.js";
 import {
@@ -7,6 +11,7 @@ import {
   buildFeishuQuestionAnswers,
   buildFeishuResolvedInputCard,
   parseFeishuInputActionValue,
+  readFeishuApprovalFeedback,
 } from "./input-request.js";
 import type { FeishuMessageApi } from "./normalization/types.js";
 import type {
@@ -408,18 +413,25 @@ export class FeishuInteractionManager {
     }
 
     const response =
-      value.action === "deny"
+      value.action === "deny" || value.action === "deny_with_feedback"
         ? "deny"
         : value.action === "approve_always"
           ? "approve_always"
-          : "approve";
+          : value.action === "approve_for_session"
+            ? "approve_for_session"
+            : "approve";
     const answers =
       pending.type === "tool-approval"
         ? undefined
         : buildFeishuQuestionAnswers(pending, event, value);
+    const feedback =
+      pending.type === "tool-approval" && value.action === "deny_with_feedback"
+        ? readFeishuApprovalFeedback(event)
+        : undefined;
     if (
       !isActionAllowed(pending, value.action) ||
-      (pending.type !== "tool-approval" && response !== "deny" && !answers)
+      (pending.type !== "tool-approval" && response !== "deny" && !answers) ||
+      (value.action === "deny_with_feedback" && !feedback)
     ) {
       this.statusRegistry?.recordInput(record.accountId, "rejected");
       await this.updatePendingCard(record.projectionId, pending, api);
@@ -432,6 +444,7 @@ export class FeishuInteractionManager {
         requestId: pending.id,
         response,
         answers,
+        feedback,
         operationId: value.operationId,
         operationVersion: value.operationVersion,
         actor: { id: event.operatorOpenId, channel: "feishu" },
@@ -844,8 +857,15 @@ function isActionAllowed(
   action: FeishuInputActionValue["action"],
 ): boolean {
   if (request.type === "tool-approval") {
+    const persistence = getToolApprovalPersistence(request.toolInput);
+    if (action === "approve_for_session") {
+      return persistence?.response === "approve_for_session";
+    }
     if (action === "approve_always") {
-      return persistentDecisionKind(request.toolInput) !== undefined;
+      return persistence?.response === "approve_always";
+    }
+    if (action === "deny_with_feedback") {
+      return supportsToolApprovalFeedback(request.toolInput, request.source);
     }
     return action === "approve" || action === "deny";
   }
@@ -854,14 +874,14 @@ function isActionAllowed(
 
 function actionPresentation(
   request: InputRequest,
-  response: "approve" | "approve_always" | "deny",
+  response: "approve" | "approve_for_session" | "approve_always" | "deny",
 ): FeishuOperationPresentation {
   const result: FeishuOperationResult =
     response === "deny"
       ? "deny"
       : request.type !== "tool-approval"
         ? "answered"
-        : response === "approve_always"
+        : response === "approve_always" || response === "approve_for_session"
           ? "approve_always"
           : "approve";
   return {
@@ -872,43 +892,24 @@ function actionPresentation(
 
 function nativeDecisionDescriptor(
   request: InputRequest,
-  response: "approve" | "approve_always" | "deny",
+  response: "approve" | "approve_for_session" | "approve_always" | "deny",
 ): FeishuNativeDecisionDescriptor {
   if (request.type !== "tool-approval") {
     return { kind: "answer", scope: "none" };
   }
   if (response === "deny") return { kind: "decline", scope: "none" };
   if (response === "approve") return { kind: "accept", scope: "once" };
-  const persistent = persistentDecisionKind(request.toolInput);
-  if (
-    persistent === "acceptWithExecpolicyAmendment" ||
-    persistent === "applyNetworkPolicyAmendment"
-  ) {
-    return { kind: persistent, scope: "policy" };
+  if (response === "approve_for_session") {
+    return { kind: "acceptForSession", scope: "session" };
+  }
+  const persistence = getToolApprovalPersistence(request.toolInput);
+  if (persistence?.kind === "command-policy") {
+    return { kind: "acceptWithExecpolicyAmendment", scope: "policy" };
+  }
+  if (persistence?.kind === "network-policy") {
+    return { kind: "applyNetworkPolicyAmendment", scope: "policy" };
   }
   return { kind: "acceptForSession", scope: "session" };
-}
-
-function persistentDecisionKind(
-  toolInput: unknown,
-):
-  | "acceptForSession"
-  | "acceptWithExecpolicyAmendment"
-  | "applyNetworkPolicyAmendment"
-  | undefined {
-  const decisions = asRecord(toolInput)?.availableDecisions;
-  if (!Array.isArray(decisions)) return undefined;
-  for (const decision of decisions) {
-    if (decision === "acceptForSession") return decision;
-    const value = asRecord(decision);
-    if (asRecord(value?.acceptWithExecpolicyAmendment)) {
-      return "acceptWithExecpolicyAmendment";
-    }
-    if (asRecord(value?.applyNetworkPolicyAmendment)) {
-      return "applyNetworkPolicyAmendment";
-    }
-  }
-  return undefined;
 }
 
 function readBrokerOperation(value: unknown): InteractionOperation | undefined {

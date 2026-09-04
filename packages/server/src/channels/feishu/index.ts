@@ -56,6 +56,7 @@ export {
   buildFeishuQuestionAnswers,
   buildFeishuResolvedInputCard,
   parseFeishuInputActionValue,
+  readFeishuApprovalFeedback,
   type FeishuCardActionEvent,
   type FeishuInputAction,
   type FeishuInputActionValue,

@@ -5,6 +5,7 @@ import {
   buildFeishuQuestionAnswers,
   buildFeishuResolvedInputCard,
   parseFeishuInputActionValue,
+  readFeishuApprovalFeedback,
 } from "../../../src/channels/feishu/input-request.js";
 
 const OPERATION_ID = "int_01234567-89ab-cdef-0123-456789abcdef";
@@ -58,6 +59,8 @@ describe("Feishu input request projection", () => {
     expect(serialized).toContain(OPERATION_ID);
     expect(serialized).toContain('"action":"approve"');
     expect(serialized).toContain('"action":"deny"');
+    expect(serialized).toContain('"action":"deny_with_feedback"');
+    expect(serialized).toContain('"name":"approval_feedback"');
     expect(serialized).not.toContain("approve_always");
     expect(serialized).not.toContain("secret-request-id");
     expect(serialized).not.toContain("secret-session-id");
@@ -85,6 +88,7 @@ describe("Feishu input request projection", () => {
       "acceptForSession",
       ["accept", "acceptForSession", "decline"],
       "本 Session 允许",
+      "approve_for_session",
     ],
     [
       "execpolicy amendment",
@@ -98,6 +102,7 @@ describe("Feishu input request projection", () => {
         "decline",
       ],
       "应用命令策略",
+      "approve_always",
     ],
     [
       "network policy amendment",
@@ -114,10 +119,11 @@ describe("Feishu input request projection", () => {
         "decline",
       ],
       "应用网络策略",
+      "approve_always",
     ],
   ])(
     "renders an exact label for an offered %s decision",
-    (_, decisions, label) => {
+    (_, decisions, label, persistentAction) => {
       const request = makeApprovalRequest({ availableDecisions: decisions });
 
       const serialized = JSON.stringify(
@@ -125,11 +131,24 @@ describe("Feishu input request projection", () => {
       );
 
       expect(serialized).toContain('"action":"approve"');
-      expect(serialized).toContain('"action":"approve_always"');
+      expect(serialized).toContain(`"action":"${persistentAction as string}"`);
       expect(serialized).toContain('"action":"deny"');
       expect(serialized).toContain(label);
     },
   );
+
+  it("reads bounded approval feedback from a Feishu form", () => {
+    expect(
+      readFeishuApprovalFeedback({
+        formValue: { approval_feedback: "  use a safer temporary directory  " },
+      }),
+    ).toBe("use a safer temporary directory");
+    expect(
+      readFeishuApprovalFeedback({
+        formValue: { approval_feedback: "   " },
+      }),
+    ).toBeUndefined();
+  });
 
   it("keeps the resolved policy decision distinct from session approval", () => {
     const card = buildFeishuResolvedInputCard({

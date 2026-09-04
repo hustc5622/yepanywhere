@@ -1,5 +1,10 @@
+import {
+  getToolApprovalPersistence,
+  supportsToolApprovalFeedback,
+} from "@yep-anywhere/shared";
 import type {
   InputRequest,
+  ToolApprovalPersistenceKind,
   UserQuestionAnswer,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
@@ -8,8 +13,10 @@ export const FEISHU_ACTION_NAMESPACE = "yep-feishu";
 
 export type FeishuInputAction =
   | "approve"
+  | "approve_for_session"
   | "approve_always"
   | "deny"
+  | "deny_with_feedback"
   | "answer"
   | "submit";
 
@@ -44,6 +51,7 @@ interface ProjectedQuestion {
 const MAX_PROMPT_CHARS = 1_200;
 const MAX_QUESTIONS = 8;
 const MAX_OPTIONS = 20;
+const MAX_FEEDBACK_CHARS = 2_000;
 
 export function parseFeishuInputActionValue(
   value: unknown,
@@ -190,20 +198,30 @@ export function buildFeishuQuestionAnswers(
   return Object.keys(answers).length > 0 ? answers : undefined;
 }
 
+export function readFeishuApprovalFeedback(
+  event: Pick<FeishuCardActionEvent, "formValue">,
+): string | undefined {
+  const raw = event.formValue?.approval_feedback;
+  if (typeof raw !== "string") return undefined;
+  const feedback = raw.replaceAll("\0", "").trim();
+  return feedback ? feedback.slice(0, MAX_FEEDBACK_CHARS) : undefined;
+}
+
 function buildApprovalCard(
   request: InputRequest,
   identity: Parameters<typeof buildFeishuInputCard>[1],
 ): object {
   const toolName = sanitizePlainText(request.toolName ?? "Tool", 80);
   const prompt = escapeCardMarkdown(request.prompt, MAX_PROMPT_CHARS);
+  const persistence = getToolApprovalPersistence(request.toolInput);
   const columns = [
     buttonColumn("允许一次", "primary", actionValue(identity, "approve")),
-    ...(offersPersistentApproval(request.toolInput)
+    ...(persistence
       ? [
           buttonColumn(
-            persistentApprovalLabel(request.toolInput),
+            persistentApprovalLabel(persistence.kind),
             "default",
-            actionValue(identity, "approve_always"),
+            actionValue(identity, persistence.response),
           ),
         ]
       : []),
@@ -229,43 +247,24 @@ function buildApprovalCard(
           flex_mode: "flow",
           columns,
         },
+        ...(supportsToolApprovalFeedback(request.toolInput, request.source)
+          ? [buildApprovalFeedbackForm(identity)]
+          : []),
         safetyNotice(),
       ],
     },
   };
 }
 
-function offersPersistentApproval(toolInput: unknown): boolean {
-  const availableDecisions = asRecord(toolInput)?.availableDecisions;
-  return (
-    Array.isArray(availableDecisions) &&
-    availableDecisions.some((decision) => {
-      if (decision === "acceptForSession") return true;
-      const nativeDecision = asRecord(decision);
-      return (
-        asRecord(nativeDecision?.acceptWithExecpolicyAmendment) !== undefined ||
-        asRecord(nativeDecision?.applyNetworkPolicyAmendment) !== undefined
-      );
-    })
-  );
-}
-
-function persistentApprovalLabel(toolInput: unknown): string {
-  const availableDecisions = asRecord(toolInput)?.availableDecisions;
-  if (!Array.isArray(availableDecisions)) return "本 Session 允许";
-  if (availableDecisions.includes("acceptForSession")) {
-    return "本 Session 允许";
-  }
-  for (const decision of availableDecisions) {
-    const nativeDecision = asRecord(decision);
-    if (asRecord(nativeDecision?.acceptWithExecpolicyAmendment)) {
+function persistentApprovalLabel(kind: ToolApprovalPersistenceKind): string {
+  switch (kind) {
+    case "command-policy":
       return "应用命令策略";
-    }
-    if (asRecord(nativeDecision?.applyNetworkPolicyAmendment)) {
+    case "network-policy":
       return "应用网络策略";
-    }
+    case "session":
+      return "本 Session 允许";
   }
-  return "本 Session 允许";
 }
 
 function buildQuestionCard(
@@ -395,6 +394,45 @@ function buildQuestionForm(
     element_id: "question_form",
     name: "question_form",
     elements,
+  };
+}
+
+function buildApprovalFeedbackForm(
+  identity: Parameters<typeof buildFeishuInputCard>[1],
+): object {
+  return {
+    tag: "form",
+    element_id: "approval_feedback_form",
+    name: "approval_feedback_form",
+    elements: [
+      {
+        tag: "markdown",
+        element_id: "approval_feedback_label",
+        content: "**告诉 Codex 应该改做什么**",
+      },
+      {
+        tag: "input",
+        element_id: "approval_feedback_input",
+        name: "approval_feedback",
+        required: true,
+        width: "fill",
+        input_type: "multiline_text",
+        max_length: MAX_FEEDBACK_CHARS,
+        placeholder: {
+          tag: "plain_text",
+          content: "输入替代做法或修改建议",
+        },
+      },
+      {
+        ...buttonElement(
+          "拒绝并发送反馈",
+          "danger",
+          actionValue(identity, "deny_with_feedback"),
+          "approval_feedback_submit",
+        ),
+        form_action_type: "submit",
+      },
+    ],
   };
 }
 
@@ -548,9 +586,15 @@ function sanitizePlainText(value: string, limit: number): string {
 }
 
 function isInputAction(value: unknown): value is FeishuInputAction {
-  return ["approve", "approve_always", "deny", "answer", "submit"].includes(
-    String(value),
-  );
+  return [
+    "approve",
+    "approve_for_session",
+    "approve_always",
+    "deny",
+    "deny_with_feedback",
+    "answer",
+    "submit",
+  ].includes(String(value));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

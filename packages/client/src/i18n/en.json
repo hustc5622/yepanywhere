@@ -538,6 +538,8 @@
   "toolApprovalNoKeepPlanning": "No, keep planning",
   "toolApprovalAllowOnce": "Allow",
   "toolApprovalAllowForSession": "Allow for this session",
+  "toolApprovalApplyCommandPolicy": "Apply command policy",
+  "toolApprovalApplyNetworkPolicy": "Apply network policy",
   "toolApprovalAlwaysAllow": "Always allow",
   "toolApprovalGrantForTurn": "Grant for this turn",
   "toolApprovalGrantWithReview": "Grant for this turn with strict command review",

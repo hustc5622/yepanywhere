@@ -538,6 +538,8 @@
   "toolApprovalNoKeepPlanning": "否，继续规划",
   "toolApprovalAllowOnce": "允许",
   "toolApprovalAllowForSession": "本会话允许",
+  "toolApprovalApplyCommandPolicy": "应用命令策略",
+  "toolApprovalApplyNetworkPolicy": "应用网络策略",
   "toolApprovalAlwaysAllow": "始终允许",
   "toolApprovalGrantForTurn": "仅本轮授予权限",
   "toolApprovalGrantWithReview": "本轮授予，并严格复核后续命令",

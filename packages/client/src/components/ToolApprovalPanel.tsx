@@ -1,3 +1,7 @@
+import {
+  getToolApprovalPersistence,
+  supportsToolApprovalFeedback,
+} from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToolApprovalFeedbackDraft } from "../hooks/useDrafts";
 import { useI18n } from "../i18n";
@@ -56,10 +60,6 @@ function getSubagentOriginTitle(request: InputRequest): string | undefined {
   );
 }
 
-function getAvailableApprovalDecisions(request: InputRequest): string[] {
-  return getStringArray(asRecord(request.toolInput)?.availableDecisions);
-}
-
 function getApprovalPrompt(request: InputRequest): string | undefined {
   return getString(asRecord(request.toolInput)?.approvalPrompt);
 }
@@ -80,32 +80,6 @@ function getApprovalAction(
   } catch {
     return null;
   }
-}
-
-function requestSupportsPersistentApproval(request: InputRequest): boolean {
-  const input = asRecord(request.toolInput);
-  if (!input) return false;
-
-  const availableDecisions = Array.isArray(input.availableDecisions)
-    ? input.availableDecisions
-    : [];
-  if (
-    availableDecisions.some((decision) => {
-      if (decision === "acceptForSession") return true;
-      const decisionRecord = asRecord(decision);
-      return (
-        !!decisionRecord?.acceptWithExecpolicyAmendment ||
-        !!decisionRecord?.applyNetworkPolicyAmendment
-      );
-    })
-  ) {
-    return true;
-  }
-
-  return (
-    input.proposedExecpolicyAmendment !== undefined ||
-    input.proposedNetworkPolicyAmendments !== undefined
-  );
 }
 
 interface Props {
@@ -169,14 +143,18 @@ export function ToolApprovalPanel({
   const mcpApprovalScopes = getMcpApprovalScopes(request);
   const isScopedMcpApproval = mcpApprovalScopes.length > 0;
   const isPermissionsApproval = approvalKind === "permissions";
-  const usesProviderSessionApproval =
+  const usesProviderPersistentApproval =
     approvalKind === "command_execution" || approvalKind === "file_change";
+  const approvalPersistence = getToolApprovalPersistence(request.toolInput);
   const canApproveMcpForSession = mcpApprovalScopes.includes("session");
   const canApproveMcpAlways = mcpApprovalScopes.includes("always");
   const canApprovePersistently =
     !isScopedMcpApproval &&
     !isPermissionsApproval &&
-    (isEditTool || requestSupportsPersistentApproval(request));
+    (isEditTool || approvalPersistence !== undefined);
+  const canDenyWithFeedback =
+    Boolean(onDenyWithFeedback) &&
+    supportsToolApprovalFeedback(request.toolInput, request.source);
 
   const handleApprove = useCallback(async () => {
     setSubmitting(true);
@@ -249,11 +227,15 @@ export function ToolApprovalPanel({
     }
   }, [onDenyWithFeedback, feedback, clearFeedback]);
 
-  const handlePersistentApproval = usesProviderSessionApproval
-    ? handleApproveForSession
+  const handlePersistentApproval = usesProviderPersistentApproval
+    ? approvalPersistence?.response === "approve_always"
+      ? handleApproveAlways
+      : handleApproveForSession
     : handleApproveAcceptEdits;
-  const hasPersistentApprovalHandler = usesProviderSessionApproval
-    ? Boolean(onApproveForSession)
+  const hasPersistentApprovalHandler = usesProviderPersistentApproval
+    ? approvalPersistence?.response === "approve_always"
+      ? Boolean(onApproveAlways)
+      : Boolean(onApproveForSession)
     : Boolean(onApproveAcceptEdits);
 
   // Focus feedback input when shown
@@ -690,8 +672,12 @@ export function ToolApprovalPanel({
                   >
                     <kbd>2</kbd>
                     <span>
-                      {usesProviderSessionApproval
-                        ? t("toolApprovalAllowForSession")
+                      {usesProviderPersistentApproval
+                        ? approvalPersistence?.kind === "command-policy"
+                          ? t("toolApprovalApplyCommandPolicy")
+                          : approvalPersistence?.kind === "network-policy"
+                            ? t("toolApprovalApplyNetworkPolicy")
+                            : t("toolApprovalAllowForSession")
                         : t("toolApprovalYesDontAsk")}
                     </span>
                   </button>
@@ -713,48 +699,42 @@ export function ToolApprovalPanel({
               </>
             )}
 
-            {onDenyWithFeedback &&
-              !isScopedMcpApproval &&
-              !isPermissionsApproval &&
-              !showFeedback && (
+            {canDenyWithFeedback && !showFeedback && (
+              <button
+                type="button"
+                className="tool-approval-option feedback-toggle"
+                onClick={() => setShowFeedback(true)}
+                disabled={!armed || submitting}
+              >
+                <span>
+                  {t("toolApprovalTellInstead", { agent: agentName })}
+                </span>
+              </button>
+            )}
+
+            {canDenyWithFeedback && showFeedback && (
+              <div className="tool-approval-feedback">
+                <input
+                  ref={feedbackInputRef}
+                  type="text"
+                  placeholder={t("toolApprovalFeedbackPlaceholder", {
+                    agent: agentName,
+                  })}
+                  value={feedback}
+                  onChange={(e) => setFeedback(e.target.value)}
+                  disabled={!armed || submitting}
+                  className="tool-approval-feedback-input"
+                />
                 <button
                   type="button"
-                  className="tool-approval-option feedback-toggle"
-                  onClick={() => setShowFeedback(true)}
-                  disabled={!armed || submitting}
+                  className="tool-approval-feedback-submit"
+                  onClick={handleDenyWithFeedback}
+                  disabled={!armed || submitting || !feedback.trim()}
                 >
-                  <span>
-                    {t("toolApprovalTellInstead", { agent: agentName })}
-                  </span>
+                  {t("toolApprovalSend")}
                 </button>
-              )}
-
-            {onDenyWithFeedback &&
-              !isScopedMcpApproval &&
-              !isPermissionsApproval &&
-              showFeedback && (
-                <div className="tool-approval-feedback">
-                  <input
-                    ref={feedbackInputRef}
-                    type="text"
-                    placeholder={t("toolApprovalFeedbackPlaceholder", {
-                      agent: agentName,
-                    })}
-                    value={feedback}
-                    onChange={(e) => setFeedback(e.target.value)}
-                    disabled={!armed || submitting}
-                    className="tool-approval-feedback-input"
-                  />
-                  <button
-                    type="button"
-                    className="tool-approval-feedback-submit"
-                    onClick={handleDenyWithFeedback}
-                    disabled={!armed || submitting || !feedback.trim()}
-                  >
-                    {t("toolApprovalSend")}
-                  </button>
-                </div>
-              )}
+              </div>
+            )}
           </div>
         </div>
       )}

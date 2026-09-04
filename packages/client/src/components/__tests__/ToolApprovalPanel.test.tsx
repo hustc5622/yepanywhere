@@ -177,4 +177,55 @@ describe("ToolApprovalPanel", () => {
     await waitFor(() => expect(onApproveForSession).toHaveBeenCalledTimes(1));
     expect(onApproveAcceptEdits).not.toHaveBeenCalled();
   });
+
+  it("applies an offered Codex command policy instead of claiming a session grant", async () => {
+    const onApproveForSession = vi.fn(async () => undefined);
+    const onApproveAlways = vi.fn(async () => undefined);
+    const request: InputRequest = {
+      id: "approval-command-policy",
+      sessionId: "session-command-policy",
+      type: "tool-approval",
+      prompt: "Allow Bash?",
+      toolName: "Bash",
+      toolInput: {
+        approvalKind: "command_execution",
+        command: "git status",
+        availableDecisions: [
+          "accept",
+          {
+            acceptWithExecpolicyAmendment: {
+              execpolicy_amendment: ["git", "status"],
+            },
+          },
+          "decline",
+        ],
+      },
+      timestamp: "2026-09-04T00:00:00.000Z",
+    };
+    render(
+      <I18nProvider>
+        <ToolApprovalPanel
+          request={request}
+          sessionId="session-command-policy"
+          onApprove={vi.fn(async () => undefined)}
+          onApproveForSession={onApproveForSession}
+          onApproveAlways={onApproveAlways}
+          onDeny={vi.fn(async () => undefined)}
+        />
+      </I18nProvider>,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: /Allow for this session/i }),
+    ).toBeNull();
+    const applyPolicy = screen.getByRole("button", {
+      name: /Apply command policy/i,
+    });
+    await waitFor(() =>
+      expect((applyPolicy as HTMLButtonElement).disabled).toBe(false),
+    );
+    fireEvent.click(applyPolicy);
+    await waitFor(() => expect(onApproveAlways).toHaveBeenCalledTimes(1));
+    expect(onApproveForSession).not.toHaveBeenCalled();
+  });
 });
