@@ -17,8 +17,10 @@ import {
   sessionTurnHealthFromSession,
   shouldDeferUncorrelatedPersistedSync,
   shouldFetchSessionMetadataForUpdate,
+  shouldForceOwnedPersistedDisplayRefresh,
   shouldRefreshFullPersistedSession,
   shouldRefreshSettledAuthoritativeSnapshot,
+  shouldWatchOwnedSessionFile,
 } from "../useSession";
 
 function pending(overrides?: Partial<PendingMessage>): PendingMessage {
@@ -315,6 +317,59 @@ describe("shouldDeferUncorrelatedPersistedSync", () => {
       );
     },
   );
+});
+
+describe("shouldForceOwnedPersistedDisplayRefresh", () => {
+  it.each(["pi", "kimi"] as const)(
+    "forces the display refresh for an owned %s session",
+    (provider) => {
+      expect(
+        shouldForceOwnedPersistedDisplayRefresh(provider, "self", true),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    // Legacy message mode has no display guard to force past.
+    ["pi", "self", false],
+    // Non-owned sessions already pass the display guard unforced.
+    ["pi", "none", true],
+    ["pi", "external", true],
+    // Other providers can correlate persisted ids and must not be replaced.
+    ["codex", "self", true],
+    ["claude", "self", true],
+  ] as const)(
+    "does not force provider=%s owner=%s displayPage=%s",
+    (provider, owner, hasDisplayPage) => {
+      expect(
+        shouldForceOwnedPersistedDisplayRefresh(
+          provider,
+          owner,
+          hasDisplayPage,
+        ),
+      ).toBe(false);
+    },
+  );
+});
+
+describe("shouldWatchOwnedSessionFile", () => {
+  it.each(["pi", "kimi"] as const)(
+    "keeps the focused watch for owned %s sessions",
+    (provider) => {
+      expect(shouldWatchOwnedSessionFile(provider)).toBe(true);
+    },
+  );
+
+  it.each([
+    "claude",
+    "codex",
+    "codex-oss",
+    "gemini",
+    "zcode",
+    undefined,
+  ] as const)("leaves owned %s sessions on their live stream", (provider) => {
+    expect(shouldWatchOwnedSessionFile(provider)).toBe(false);
+  });
 });
 
 describe("buildAgentMappingLoadPlan", () => {

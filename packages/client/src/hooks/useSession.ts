@@ -300,6 +300,51 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
 }
 
 /**
+ * Providers whose persisted entry ids never match their live stream UUIDs.
+ * They can only converge by replacing the whole visible snapshot.
+ */
+function hasUncorrelatedPersistedIds(
+  provider: Session["provider"] | undefined,
+): boolean {
+  return provider === "pi" || provider === "kimi";
+}
+
+/**
+ * Whether a settled persisted refresh must be forced past the display-mode
+ * "owned sessions stay on their stream" guard.
+ *
+ * `refreshLightweightDisplay` drops any refresh for an owned session unless it
+ * is forced. For Pi/Kimi that guard is fatal: their live stream replay only
+ * covers the last ~30s of process history, so anything written to JSONL while
+ * the client was disconnected (mobile shell suspends its subscriptions while
+ * hidden) can never reach the transcript, and the session appears frozen until
+ * it is reopened. Callers must only force once the turn has settled, because a
+ * forced display refresh discards the not-yet-persisted live tail.
+ */
+export function shouldForceOwnedPersistedDisplayRefresh(
+  provider: Session["provider"] | undefined,
+  owner: SessionStatus["owner"],
+  hasDisplayPage: boolean,
+): boolean {
+  return (
+    hasUncorrelatedPersistedIds(provider) && owner === "self" && hasDisplayPage
+  );
+}
+
+/**
+ * Whether an owned session still needs the focused file watch.
+ *
+ * Owned sessions normally rely on their live stream, but Pi/Kimi cannot replay
+ * a missed tail, so the targeted watch is their only durable convergence
+ * signal when activity-bus events are lost (e.g. a suspended mobile shell).
+ */
+export function shouldWatchOwnedSessionFile(
+  provider: Session["provider"] | undefined,
+): boolean {
+  return hasUncorrelatedPersistedIds(provider);
+}
+
+/**
  * Pi and Kimi persist different message ids from the UUIDs used by their live
  * streams. Do not merge or replace an owned live tail with a potentially
  * lagging full snapshot until the turn has settled.
@@ -835,6 +880,11 @@ export function useSession(
     messagesRef.current = messages;
   }, [messages]);
 
+  const processStateRef = useRef(processState);
+  useEffect(() => {
+    processStateRef.current = processState;
+  }, [processState]);
+
   // Pi and Kimi use different identities for live and persisted
   // messages. Once a turn settles, replace the whole visible snapshot so a
   // full persisted response cannot be appended as duplicate historical turns.
@@ -858,26 +908,42 @@ export function useSession(
         return;
       }
       authoritativeSnapshotRefreshTimerRef.current = null;
+      // A forced display refresh drops the not-yet-persisted live tail, so it
+      // must never land on a turn that restarted while it was pending.
+      if (displayPage && processStateRef.current !== "idle") {
+        return;
+      }
+      // Display mode keeps its own snapshot and refuses unforced refreshes for
+      // owned sessions. Every caller of this scheduler fires only once the turn
+      // has settled, so forcing here is what lets a Pi/Kimi transcript converge
+      // without reopening the session. The `acceptSnapshot` gate is dropped in
+      // display mode because the lightweight path reports no messages, which
+      // would make the Kimi readiness check reject every refresh.
       const refreshed = await refreshSessionMessages(
-        provider === "kimi" && !displayPage
-          ? {
-              replaceMessages: true,
-              acceptSnapshot: ({ messages: persistedMessages }) =>
-                isKimiAuthoritativeSnapshotReady(
-                  messagesRef.current,
-                  persistedMessages,
-                ),
-            }
-          : undefined,
+        displayPage
+          ? { replaceMessages: true }
+          : provider === "kimi"
+            ? {
+                replaceMessages: true,
+                acceptSnapshot: ({ messages: persistedMessages }) =>
+                  isKimiAuthoritativeSnapshotReady(
+                    messagesRef.current,
+                    persistedMessages,
+                  ),
+              }
+            : undefined,
       );
       if (
-        provider !== "kimi" ||
+        (!displayPage && provider !== "kimi") ||
         refreshed ||
         generation !== authoritativeSnapshotRefreshGenerationRef.current
       ) {
         return;
       }
 
+      // A forced display refresh can lose the race with persistence (metadata
+      // or the display projection may not have caught up yet). Retry within a
+      // bounded window instead of leaving the transcript short a turn.
       const nextDelay = KIMI_SNAPSHOT_RETRY_DELAYS_MS[attempt + 1];
       if (nextDelay === undefined) return;
       authoritativeSnapshotRefreshTimerRef.current = setTimeout(() => {
@@ -900,6 +966,17 @@ export function useSession(
       }
     };
   }, []);
+
+  // A new turn invalidates any pending forced display refresh: replacing the
+  // snapshot now would erase the prompt and tail the stream is producing. The
+  // next settle schedules a fresh one.
+  useEffect(() => {
+    if (!displayPage || processState === "idle") return;
+    if (!authoritativeSnapshotRefreshTimerRef.current) return;
+    authoritativeSnapshotRefreshGenerationRef.current += 1;
+    clearTimeout(authoritativeSnapshotRefreshTimerRef.current);
+    authoritativeSnapshotRefreshTimerRef.current = null;
+  }, [displayPage, processState]);
 
   // Set hold state (soft pause) for the session
   const setHold = useCallback(
@@ -1133,27 +1210,44 @@ export function useSession(
       return;
     }
 
+    // The defer guard above means an owned Pi/Kimi session has settled by now.
+    // Display mode still drops unforced refreshes for owned sessions, so force
+    // it; otherwise a tail written while this client was disconnected would
+    // stay invisible until the session is reopened.
+    const forceOwnedDisplayRefresh = shouldForceOwnedPersistedDisplayRefresh(
+      provider,
+      status.owner,
+      Boolean(displayPage),
+    );
+
     // Kimi cannot incrementally slice its synthesized ids. Even while idle,
     // reject a disk snapshot that has not caught up with the current live tail.
     if (provider === "kimi") {
-      void refreshSessionMessages({
-        replaceMessages: true,
-        acceptSnapshot: ({ messages: persistedMessages }) =>
-          isKimiAuthoritativeSnapshotReady(
-            messagesRef.current,
-            persistedMessages,
-          ),
-      });
+      void refreshSessionMessages(
+        forceOwnedDisplayRefresh
+          ? { replaceMessages: true }
+          : {
+              replaceMessages: true,
+              acceptSnapshot: ({ messages: persistedMessages }) =>
+                isKimiAuthoritativeSnapshotReady(
+                  messagesRef.current,
+                  persistedMessages,
+                ),
+            },
+      );
       return;
     }
 
     // Providers can rewrite recent transcript entries and tool parts in place.
     if (shouldRefreshFullPersistedSession(provider)) {
-      void refreshSessionMessages();
+      void refreshSessionMessages(
+        forceOwnedDisplayRefresh ? { replaceMessages: true } : undefined,
+      );
       return;
     }
     void fetchNewMessages();
   }, [
+    displayPage,
     fetchNewMessages,
     processState,
     refreshSessionMessages,
@@ -1484,11 +1578,22 @@ export function useSession(
   const handleSessionWatchChange = useCallback(() => {
     if (status.owner === "self") {
       if (historyRewriteRequest) signalHistoryRewriteSync();
+      // Owned Pi/Kimi sessions cannot replay a missed tail, so treat a settled
+      // file write as the signal to pull the authoritative snapshot.
+      if (
+        shouldWatchOwnedSessionFile(session?.provider) &&
+        processState === "idle"
+      ) {
+        scheduleAuthoritativeSnapshotRefresh();
+      }
       return;
     }
     throttledFetch();
   }, [
     historyRewriteRequest,
+    processState,
+    scheduleAuthoritativeSnapshotRefresh,
+    session?.provider,
     signalHistoryRewriteSync,
     status.owner,
     throttledFetch,
@@ -1496,7 +1601,9 @@ export function useSession(
 
   const sessionWatchTarget = useMemo(
     () =>
-      status.owner === "self" && !historyRewriteRequest
+      status.owner === "self" &&
+      !historyRewriteRequest &&
+      !shouldWatchOwnedSessionFile(session?.provider)
         ? null
         : {
             sessionId,
