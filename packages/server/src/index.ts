@@ -1042,6 +1042,21 @@ async function startServer() {
   codexBridgeForShutdown = codexBridgeService ?? null;
   sessionArchiveServiceForShutdown = sessionArchiveService;
 
+  // The external runtime controller was already started above. The embedded one
+  // is created inside createApp(), so open its durable event journal here.
+  // Journaling is best effort: losing it costs reconnect replay depth, not the
+  // ability to run sessions.
+  if (!configuredRuntimeController) {
+    try {
+      await runtimeController.start();
+    } catch (error) {
+      console.error(
+        "[AgentRuntime] Failed to start embedded runtime journal:",
+        error,
+      );
+    }
+  }
+
   // Set up debug context for maintenance server
   setDebugContext({
     supervisor,

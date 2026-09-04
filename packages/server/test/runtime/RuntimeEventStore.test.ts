@@ -204,6 +204,28 @@ describe("RuntimeEventStore", () => {
     await expect(readdir(testDir)).resolves.not.toContain("old-process.jsonl");
   });
 
+  it("re-applies retention on demand while the runtime keeps running", async () => {
+    // initialize() only prunes at startup; a server that stays up for weeks
+    // would otherwise accumulate one journal file per process forever.
+    const store = new RuntimeEventStore({
+      eventsDir: testDir,
+      retentionMs: 1_000,
+    });
+    await store.initialize();
+
+    const stalePath = path.join(testDir, "stale-process.jsonl");
+    await writeFile(stalePath, "stale event\n");
+    const staleTime = new Date(Date.now() - 60_000);
+    await utimes(stalePath, staleTime, staleTime);
+    await expect(readdir(testDir)).resolves.toContain("stale-process.jsonl");
+
+    await store.prune();
+
+    await expect(readdir(testDir)).resolves.not.toContain(
+      "stale-process.jsonl",
+    );
+  });
+
   it("removes the oldest segments until the global byte budget is met", async () => {
     const olderPath = path.join(testDir, "older.jsonl");
     const newerPath = path.join(testDir, "newer.jsonl");

@@ -82,14 +82,40 @@ function queueAdmissionArgs(input: {
   ];
 }
 
+/** Re-apply the journal retention budget while the runtime keeps running. */
+const JOURNAL_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * How far back a subscribe without a usable client cursor may replay.
+ *
+ * A cursor-less subscribe is a shell that just loaded the persisted transcript
+ * from disk (fresh page load, session switch, app restart). Everything older
+ * than the live tail is therefore already on screen, and the Process in-memory
+ * buffer covers the not-yet-persisted part. Replaying the whole journal there
+ * would resend the entire process lifetime — megabytes over a tunnel — only to
+ * be deduplicated or watermarked away by the client. A reconnecting shell does
+ * carry a cursor and still receives every event it missed, which is the gap the
+ * journal exists for.
+ */
+const UNCURSORED_JOURNAL_REPLAY_WINDOW_MS = 10 * 60 * 1000;
+
+export interface EmbeddedRuntimeControllerOptions {
+  /** Overridable for tests. */
+  journalPruneIntervalMs?: number;
+  /** Overridable for tests. */
+  uncursoredReplayWindowMs?: number;
+}
+
 export class EmbeddedRuntimeController implements RuntimeController {
   readonly mode = "embedded" as const;
   private readonly journalSubscriptions = new Map<string, () => void>();
+  private journalPruneTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly supervisor: Supervisor,
     private readonly eventBus?: EventBus,
     private readonly eventStore?: RuntimeEventStore,
+    private readonly options: EmbeddedRuntimeControllerOptions = {},
   ) {}
 
   async start(): Promise<void> {
@@ -100,6 +126,27 @@ export class EmbeddedRuntimeController implements RuntimeController {
         .getAllProcesses()
         .map((process) => this.ensureJournalSubscription(process.sessionId)),
     );
+    this.startJournalMaintenance();
+  }
+
+  private startJournalMaintenance(): void {
+    const store = this.eventStore;
+    if (!store || this.journalPruneTimer) return;
+    const interval =
+      this.options.journalPruneIntervalMs ?? JOURNAL_PRUNE_INTERVAL_MS;
+    if (interval <= 0) return;
+    this.journalPruneTimer = setInterval(() => {
+      void store.prune().catch((error) => {
+        console.error("[AgentRuntime] Failed to prune event journal:", error);
+      });
+    }, interval);
+    this.journalPruneTimer.unref?.();
+  }
+
+  private stopJournalMaintenance(): void {
+    if (!this.journalPruneTimer) return;
+    clearInterval(this.journalPruneTimer);
+    this.journalPruneTimer = null;
   }
 
   async updateProviderSettings(
@@ -111,6 +158,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
   }
 
   async shutdown(options: { abortActive?: boolean } = {}): Promise<void> {
+    this.stopJournalMaintenance();
     if (!options.abortActive) {
       await this.eventStore?.flush();
       return;
@@ -525,9 +573,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
           afterSeq: options?.afterSeq,
         })
       : [];
-    const replayRecords = replay.slice(
-      this.findReplayStart(replay, options?.replayAfterMessageId),
-    );
+    const replayRecords = this.selectReplayRecords(replay, options);
     const lastReplayMessageId = [...replayRecords]
       .reverse()
       .map((record) => this.getRecordMessageId(record))
@@ -540,18 +586,21 @@ export class EmbeddedRuntimeController implements RuntimeController {
     // finished task as unrecoverable. Resident providers can stay idle after a
     // turn terminal, so the journal may not have a transport-level `complete`.
     if (!process) {
-      const transportCompleteIndex = replayRecords.findIndex(
+      // The turn outcome only exists in the journal here, so an aged-out
+      // window must not make an already finished task look unrecoverable.
+      const recoveryRecords = replayRecords.length > 0 ? replayRecords : replay;
+      const transportCompleteIndex = recoveryRecords.findIndex(
         (record) => record.type === "complete",
       );
       const turnTerminal =
         transportCompleteIndex < 0
-          ? this.findAuthoritativeTurnTerminal(replayRecords)
+          ? this.findAuthoritativeTurnTerminal(recoveryRecords)
           : null;
       if (transportCompleteIndex < 0 && !turnTerminal) return null;
       const terminalRecords =
         transportCompleteIndex >= 0
-          ? replayRecords.slice(0, transportCompleteIndex + 1)
-          : replayRecords;
+          ? recoveryRecords.slice(0, transportCompleteIndex + 1)
+          : recoveryRecords;
       let closed = false;
       emit("connected", {
         processId: terminalRecords.at(-1)?.processId,
@@ -741,7 +790,48 @@ export class EmbeddedRuntimeController implements RuntimeController {
   }
 
   private isReplayableRecord(record: RuntimeEventRecord): boolean {
-    return record.type !== "complete";
+    // `complete` is the transport terminal and `error` is process-fatal. A live
+    // process outlived both, so replaying them to a subscriber that just
+    // attached would report a finished or failed stream for a session that is
+    // still running — the Feishu reply controller, for one, treats either as a
+    // terminal for the turn it is currently streaming. Anything still true for
+    // the live process is re-emitted by the subscription itself.
+    return record.type !== "complete" && record.type !== "error";
+  }
+
+  /**
+   * Slice the journal down to what this subscriber actually missed.
+   *
+   * A cursor that resolves to a journaled message is authoritative: everything
+   * after it is replayed no matter how long the shell was away. Without one
+   * (fresh subscribe) or with a cursor that has already aged out of the journal
+   * the replay is bounded to a recent window, because the caller reached this
+   * point by loading the persisted transcript first.
+   */
+  private selectReplayRecords(
+    replay: RuntimeEventRecord[],
+    options: RuntimeSessionSubscriptionOptions | undefined,
+  ): RuntimeEventRecord[] {
+    const cursorStart = this.findReplayStart(
+      replay,
+      options?.replayAfterMessageId,
+    );
+    if (cursorStart > 0 || options?.afterSeq !== undefined) {
+      return replay.slice(cursorStart);
+    }
+    return replay.slice(this.findBoundedReplayStart(replay));
+  }
+
+  private findBoundedReplayStart(records: RuntimeEventRecord[]): number {
+    const cutoff =
+      Date.now() -
+      (this.options.uncursoredReplayWindowMs ??
+        UNCURSORED_JOURNAL_REPLAY_WINDOW_MS);
+    for (let index = 0; index < records.length; index += 1) {
+      const timestamp = Date.parse(records[index]?.timestamp ?? "");
+      if (!Number.isFinite(timestamp) || timestamp >= cutoff) return index;
+    }
+    return records.length;
   }
 
   private findAuthoritativeTurnTerminal(

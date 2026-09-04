@@ -77,6 +77,19 @@ export class RuntimeEventStore {
     await this.initializePromise;
   }
 
+  /**
+   * Apply the retention and total-size budget again.
+   *
+   * `initialize()` only prunes at startup, which is enough for a short-lived
+   * runtime worker but not for the embedded runtime inside a server that stays
+   * up for weeks: every process writes its own journal file, so the directory
+   * would only ever grow between restarts.
+   */
+  async prune(): Promise<void> {
+    await this.initialize();
+    await this.pruneStoredEvents();
+  }
+
   private async pruneStoredEvents(): Promise<void> {
     const names = await readdir(this.eventsDir);
     const files = (

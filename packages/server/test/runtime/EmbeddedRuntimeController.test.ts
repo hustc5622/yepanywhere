@@ -60,6 +60,7 @@ describe("EmbeddedRuntimeController", () => {
     maxWorkers?: number;
     maxQueueSize?: number;
     eventStore?: RuntimeEventStore;
+    uncursoredReplayWindowMs?: number;
   }): EmbeddedRuntimeController {
     const supervisor = new Supervisor({
       provider: createLongRunningProvider(),
@@ -71,6 +72,9 @@ describe("EmbeddedRuntimeController", () => {
       supervisor,
       undefined,
       options?.eventStore,
+      options?.uncursoredReplayWindowMs === undefined
+        ? {}
+        : { uncursoredReplayWindowMs: options.uncursoredReplayWindowMs },
     );
     controllers.push(controller);
     return controller;
@@ -326,6 +330,47 @@ describe("EmbeddedRuntimeController", () => {
     });
   });
 
+  it("does not replay a stale transport terminal to a live process", async () => {
+    // A process that outlived a journaled error/complete is still running, so
+    // replaying either would report a dead stream for a live turn.
+    const eventsDir = path.join(
+      tmpdir(),
+      `embedded-runtime-stale-terminal-${randomUUID()}`,
+    );
+    eventDirs.push(eventsDir);
+    const eventStore = new RuntimeEventStore({ eventsDir });
+    const controller = createController({ eventStore });
+    const started = await controller.startSession({
+      projectPath: "/tmp/runtime-controller-stale-terminal",
+      message: { text: "initial" },
+    });
+    const sessionId = "sessionId" in started ? started.sessionId : "";
+    const processId = "id" in started ? started.id : "";
+    await eventStore.append({
+      processId,
+      sessionId,
+      type: "error",
+      data: { message: "earlier turn failed" },
+    });
+    await eventStore.append({
+      processId,
+      sessionId,
+      type: "complete",
+      data: { timestamp: new Date().toISOString() },
+    });
+    await eventStore.flush();
+
+    const events: Array<{ type: string; data: unknown }> = [];
+    const subscription = await controller.subscribeSession(
+      sessionId,
+      (type, data) => events.push({ type, data }),
+    );
+    subscription?.cleanup();
+
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.some((event) => event.type === "complete")).toBe(false);
+  });
+
   it("replays a durable terminal stream after restart without an active process", async () => {
     const eventsDir = path.join(
       tmpdir(),
@@ -534,6 +579,124 @@ describe("EmbeddedRuntimeController", () => {
       subscription?.cleanup();
     },
   );
+
+  it("bounds an uncursored journal replay to a recent window", async () => {
+    // A shell that subscribes without a cursor has just loaded the persisted
+    // transcript, so resending the whole process lifetime is pure waste. A
+    // reconnecting shell does carry a cursor and must still get everything it
+    // missed, however old the gap is.
+    const eventsDir = path.join(
+      tmpdir(),
+      `embedded-runtime-window-${randomUUID()}`,
+    );
+    eventDirs.push(eventsDir);
+    const eventStore = new RuntimeEventStore({ eventsDir });
+    const aged = (offsetMs: number) =>
+      new Date(Date.now() - offsetMs).toISOString();
+    await eventStore.append({
+      processId: "windowed-process",
+      sessionId: "windowed-session",
+      type: "message",
+      data: { type: "user", uuid: "aged-1", turnId: "aged-turn" },
+      timestamp: aged(3 * 60 * 60 * 1000),
+    });
+    await eventStore.append({
+      processId: "windowed-process",
+      sessionId: "windowed-session",
+      type: "message",
+      data: { type: "result", uuid: "aged-2", turnId: "aged-turn" },
+      timestamp: aged(2 * 60 * 60 * 1000),
+    });
+    await eventStore.append({
+      processId: "windowed-process",
+      sessionId: "windowed-session",
+      type: "message",
+      data: { type: "user", uuid: "recent-1", turnId: "recent-turn" },
+      timestamp: aged(30_000),
+    });
+    await eventStore.append({
+      processId: "windowed-process",
+      sessionId: "windowed-session",
+      type: "message",
+      data: { type: "result", uuid: "recent-2", turnId: "recent-turn" },
+      timestamp: aged(20_000),
+    });
+    await eventStore.flush();
+
+    const controller = createController({
+      eventStore: new RuntimeEventStore({ eventsDir }),
+      uncursoredReplayWindowMs: 60_000,
+    });
+    const replayedIds = async (
+      options?: Parameters<typeof controller.subscribeSession>[2],
+    ) => {
+      const events: Array<{ type: string; data: unknown }> = [];
+      const subscription = await controller.subscribeSession(
+        "windowed-session",
+        (type, data) => events.push({ type, data }),
+        options,
+      );
+      subscription?.cleanup();
+      return events
+        .filter((event) => event.type === "message")
+        .map((event) => (event.data as { uuid?: string }).uuid);
+    };
+
+    expect(await replayedIds()).toEqual(["recent-1", "recent-2"]);
+    expect(await replayedIds({ replayAfterMessageId: "aged-1" })).toEqual([
+      "aged-2",
+      "recent-1",
+      "recent-2",
+    ]);
+  });
+
+  it("falls back to the full journal when the window drops a durable terminal", async () => {
+    // Without a live process the journal is the only record of how the turn
+    // ended, so an aged-out window must not make it unrecoverable.
+    const eventsDir = path.join(
+      tmpdir(),
+      `embedded-runtime-window-fallback-${randomUUID()}`,
+    );
+    eventDirs.push(eventsDir);
+    const eventStore = new RuntimeEventStore({ eventsDir });
+    await eventStore.append({
+      processId: "stale-process",
+      sessionId: "stale-session",
+      type: "message",
+      data: { type: "user", uuid: "stale-user", turnId: "stale-turn" },
+      timestamp: "2026-08-08T00:00:00.000Z",
+    });
+    await eventStore.append({
+      processId: "stale-process",
+      sessionId: "stale-session",
+      type: "message",
+      data: { type: "result", uuid: "stale-result", turnId: "stale-turn" },
+      timestamp: "2026-08-08T00:00:01.000Z",
+    });
+    await eventStore.flush();
+
+    const controller = createController({
+      eventStore: new RuntimeEventStore({ eventsDir }),
+      uncursoredReplayWindowMs: 60_000,
+    });
+    const events: Array<{ type: string; data: unknown }> = [];
+    const subscription = await controller.subscribeSession(
+      "stale-session",
+      (type, data) => events.push({ type, data }),
+    );
+
+    expect(subscription).not.toBeNull();
+    expect(
+      events
+        .filter((event) => event.type === "message")
+        .map((event) => (event.data as { uuid?: string }).uuid),
+    ).toEqual(["stale-user", "stale-result"]);
+    expect(events.at(-1)).toMatchObject({
+      type: "complete",
+      data: { reason: "journal-turn-terminal" },
+    });
+    subscription?.cleanup();
+  });
 
   it("does not let an older terminal close a partial offline user/delta turn", async () => {
     const eventsDir = path.join(

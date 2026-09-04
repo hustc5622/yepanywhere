@@ -110,6 +110,7 @@ import { type UploadDeps, createUploadRoutes } from "./routes/upload.js";
 import { createVersionRoutes } from "./routes/version.js";
 import { createZCodeBridgeRoutes } from "./routes/zcode-bridge.js";
 import { EmbeddedRuntimeController } from "./runtime/EmbeddedRuntimeController.js";
+import { RuntimeEventStore } from "./runtime/RuntimeEventStore.js";
 import type { RuntimeController } from "./runtime/types.js";
 import {
   configureClaudeRemoteExecutors,
@@ -376,6 +377,31 @@ export function shouldSkipAutoArchiveForPinnedSession(
   // pin. Keeping the same bit preserves existing favorites and their retention
   // protection without a second source of truth.
   return metadata?.isStarred ?? session.isStarred ?? false;
+}
+
+/**
+ * Durable event journal for the embedded runtime.
+ *
+ * Without it `subscribeSession` can only replay `Process.getMessageHistory()`,
+ * which keeps roughly the last 15–30 seconds. A shell that is disconnected for
+ * longer — the mobile shell drops its subscriptions whenever the document is
+ * hidden — therefore loses every message produced in the meantime and can only
+ * recover by reloading the persisted transcript. Journaling to disk (the same
+ * store the standalone runtime worker uses) lets a reconnect resume from the
+ * client's last message id instead.
+ *
+ * Disabled without a data directory (route tests, embedded fixtures) or when
+ * `YEP_RUNTIME_EVENT_JOURNAL=0`.
+ */
+export function createEmbeddedRuntimeEventStore(
+  dataDir: string | undefined,
+): RuntimeEventStore | undefined {
+  if (!dataDir || process.env.YEP_RUNTIME_EVENT_JOURNAL === "0") {
+    return undefined;
+  }
+  return new RuntimeEventStore({
+    eventsDir: join(dataDir, "runtime", "events"),
+  });
 }
 
 export function createApp(options: AppOptions): AppResult {
@@ -781,7 +807,11 @@ export function createApp(options: AppOptions): AppResult {
   });
   const runtimeController =
     options.runtimeController ??
-    new EmbeddedRuntimeController(supervisor, options.eventBus);
+    new EmbeddedRuntimeController(
+      supervisor,
+      options.eventBus,
+      createEmbeddedRuntimeEventStore(options.dataDir),
+    );
   const sessionInteractionService = new SessionInteractionService({
     runtimeController,
     codexBridgeService: options.codexBridgeService,
