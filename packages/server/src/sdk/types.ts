@@ -18,6 +18,8 @@ export interface ContentBlock {
   tool_use_id?: string;
   /** For tool_result blocks - the result content */
   content?: string;
+  /** Live streaming output preview for a still-running tool. */
+  partialOutput?: string;
 }
 
 /**

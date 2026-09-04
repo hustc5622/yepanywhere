@@ -11,6 +11,16 @@ const APPROVAL_TITLE_PREFIX = "__YEP_PI_TOOL_APPROVAL__:";
 const MAX_APPROVAL_PAYLOAD_CHARS = 200_000;
 const PROVIDER_STATE_KEY = Symbol.for("yep.pi.provider-config.v1");
 
+// Pi's RPC event stream carries no tool progress, but the agent loop does emit
+// `tool_execution_update` to extensions. Relay a bounded tail of it through the
+// fire-and-forget `ui.notify` channel so Yep can render a live exec preview.
+const PARTIAL_OUTPUT_PREFIX = "__YEP_PI_TOOL_PARTIAL__:";
+const MAX_PARTIAL_OUTPUT_CHARS = 8_000;
+// The bash tool already throttles its own updates to 100ms; this is a second
+// gate so a chattier tool cannot flood the RPC stdout stream.
+const PARTIAL_OUTPUT_THROTTLE_MS = 200;
+const MAX_TRACKED_TOOL_CALLS = 32;
+
 function parseProviderConfig() {
   const retained = globalThis[PROVIDER_STATE_KEY];
   if (retained && Array.isArray(retained.providers)) return retained;
@@ -91,6 +101,117 @@ function parseProviderConfig() {
   }
 }
 
+function partialResultText(partialResult) {
+  if (typeof partialResult === "string") return partialResult;
+  if (!partialResult || typeof partialResult !== "object") return "";
+  const content = partialResult.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const block of content) {
+    if (block && typeof block === "object" && typeof block.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Forward a running tool's partial output to Yep.
+ *
+ * Updates are cumulative snapshots (not deltas), so a dropped or reordered
+ * notify only costs a frame: the server keeps the longest snapshot and the
+ * real `toolResult` still arrives through the normal RPC stream.
+ */
+function registerPartialOutputRelay(pi) {
+  /** @type {Map<string, { timer: NodeJS.Timeout | undefined, pending: string | undefined, lastSentAt: number, lastSent: string }>} */
+  const states = new Map();
+
+  const send = (ctx, toolCallId, text) => {
+    const state = states.get(toolCallId);
+    if (state) {
+      state.pending = undefined;
+      state.lastSentAt = Date.now();
+      state.lastSent = text;
+    }
+    try {
+      ctx.ui.notify(
+        `${PARTIAL_OUTPUT_PREFIX}${JSON.stringify({ toolCallId, text })}`,
+      );
+    } catch {
+      // A notify failure must never break tool execution.
+    }
+  };
+
+  const clear = (toolCallId) => {
+    const state = states.get(toolCallId);
+    if (state?.timer) clearTimeout(state.timer);
+    states.delete(toolCallId);
+  };
+
+  pi.on("tool_execution_start", (event) => {
+    clear(event.toolCallId);
+  });
+
+  pi.on("tool_execution_update", (event, ctx) => {
+    const toolCallId = event.toolCallId;
+    if (typeof toolCallId !== "string" || !toolCallId) return;
+    const full = partialResultText(event.partialResult);
+    if (!full) return;
+    const text =
+      full.length > MAX_PARTIAL_OUTPUT_CHARS
+        ? full.slice(-MAX_PARTIAL_OUTPUT_CHARS)
+        : full;
+
+    let state = states.get(toolCallId);
+    if (!state) {
+      state = {
+        timer: undefined,
+        pending: undefined,
+        lastSentAt: 0,
+        lastSent: "",
+      };
+      states.set(toolCallId, state);
+      // `tool_execution_end` normally removes the entry; evict the oldest ones
+      // anyway so an aborted turn cannot retain snapshots for the lifetime of
+      // the Pi process.
+      while (states.size > MAX_TRACKED_TOOL_CALLS) {
+        const oldest = states.keys().next();
+        if (oldest.done) break;
+        clear(oldest.value);
+      }
+    }
+    if (text === state.lastSent) return;
+
+    const wait = PARTIAL_OUTPUT_THROTTLE_MS - (Date.now() - state.lastSentAt);
+    if (wait <= 0) {
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = undefined;
+      }
+      send(ctx, toolCallId, text);
+      return;
+    }
+
+    // Coalesce into a trailing emit so a burst of updates still ends on the
+    // newest snapshot instead of a stale one.
+    state.pending = text;
+    state.timer ??= setTimeout(() => {
+      const current = states.get(toolCallId);
+      if (!current) return;
+      current.timer = undefined;
+      const pending = current.pending;
+      if (pending === undefined) return;
+      send(ctx, toolCallId, pending);
+    }, wait);
+    state.timer.unref?.();
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    clear(event.toolCallId);
+  });
+}
+
 function serializeApproval(event) {
   let payload;
   try {
@@ -128,6 +249,8 @@ export default function yepPiExtension(pi) {
     }));
   }
 
+  registerPartialOutputRelay(pi);
+
   pi.on("tool_call", async (event, ctx) => {
     const approved = await ctx.ui.confirm(
       `${APPROVAL_TITLE_PREFIX}${event.toolName}`,
@@ -143,4 +266,4 @@ export default function yepPiExtension(pi) {
   });
 }
 
-export { APPROVAL_TITLE_PREFIX };
+export { APPROVAL_TITLE_PREFIX, PARTIAL_OUTPUT_PREFIX };

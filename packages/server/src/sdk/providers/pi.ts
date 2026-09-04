@@ -68,6 +68,13 @@ import type {
 
 const execAsync = promisify(exec);
 const PI_APPROVAL_TITLE_PREFIX = "__YEP_PI_TOOL_APPROVAL__:";
+// Live tool output relayed by the Yep extension through Pi's `ui.notify`
+// channel; see packages/server/resources/pi-yep-extension.mjs.
+const PI_PARTIAL_OUTPUT_PREFIX = "__YEP_PI_TOOL_PARTIAL__:";
+const PI_PARTIAL_OUTPUT_LIMIT = 16_000;
+// One entry per tool call in the current turn. Bounded so a long session with
+// many tool calls cannot grow the map without limit.
+const PI_PARTIAL_OUTPUT_OWNERS_LIMIT = 64;
 const PI_MODEL_CATALOG_TTL_MS = 60_000;
 const PI_THINKING_LEVELS = new Set([
   "off",
@@ -169,6 +176,13 @@ interface PiStreamState {
   blocks: Map<number, ContentBlock>;
   sequence: number;
   pendingUser?: PiPendingUserPrompt;
+  /**
+   * Assistant message that introduced each tool_use id. A partial-output relay
+   * arrives after that message already ended, so the synthesized live snapshot
+   * has to reuse the same uuid (and envelope) for the client to merge it into
+   * the pending tool call instead of appending a new row.
+   */
+  toolCallOwners: Map<string, SDKMessage>;
 }
 
 interface PiExtensionProviderConfig {
@@ -1242,6 +1256,7 @@ export class PiProvider implements AgentProvider {
           assistantId: null,
           blocks: new Map(),
           sequence: 0,
+          toolCallOwners: new Map(),
           pendingUser: {
             uuid: userId,
             tempId: message.tempId,
@@ -1303,6 +1318,8 @@ export class PiProvider implements AgentProvider {
     runtime?: PiRuntimeRef,
   ): Promise<SDKMessage[]> {
     if (event.type === "extension_ui_request") {
+      const partial = this.partialToolOutputSdkMessages(event, stream);
+      if (partial) return partial;
       await this.handleExtensionUiRequest(event, options, client, signal);
       return [];
     }
@@ -1345,6 +1362,7 @@ export class PiProvider implements AgentProvider {
           stream.assistantId ??
           `pi-assistant-${Date.now()}-${stream.sequence++}`;
         const result = this.assistantSdkMessage(message, id, sessionId);
+        this.rememberToolCallOwner(stream, result);
         stream.assistantId = null;
         stream.blocks.clear();
         const errorMessage = stringValue(message.errorMessage);
@@ -1523,18 +1541,95 @@ export class PiProvider implements AgentProvider {
     }
 
     stream.assistantId ??= `pi-assistant-${Date.now()}-${stream.sequence++}`;
+    const snapshot: SDKMessage = {
+      type: "assistant",
+      uuid: stream.assistantId,
+      session_id: sessionId,
+      message: {
+        role: "assistant",
+        content: Array.from(stream.blocks.entries())
+          .sort(([a], [b]) => a - b)
+          .map(([, block]) => block),
+      },
+      usage: event.usage,
+    };
+    this.rememberToolCallOwner(stream, snapshot);
+    return [snapshot];
+  }
+
+  /**
+   * Track which assistant message carries each tool_use block so a later
+   * partial-output relay can be attached to it.
+   */
+  private rememberToolCallOwner(
+    stream: PiStreamState,
+    message: SDKMessage,
+  ): void {
+    const content = message.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (block.type !== "tool_use" || !block.id) continue;
+      // Re-insert so the eviction order below stays least-recently-updated.
+      stream.toolCallOwners.delete(block.id);
+      stream.toolCallOwners.set(block.id, message);
+    }
+    while (stream.toolCallOwners.size > PI_PARTIAL_OUTPUT_OWNERS_LIMIT) {
+      const oldest = stream.toolCallOwners.keys().next();
+      if (oldest.done) break;
+      stream.toolCallOwners.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Turn a `__YEP_PI_TOOL_PARTIAL__` notify into a live tool_use snapshot.
+   *
+   * Returns `undefined` for any other notify so the caller falls through to the
+   * regular extension UI handling. The synthesized message repeats the owning
+   * assistant message verbatim (same uuid, same blocks) with `partialOutput`
+   * attached, so the client's block merge cannot lose `usage`/`stopReason` or
+   * duplicate the row.
+   */
+  private partialToolOutputSdkMessages(
+    event: JsonRecord,
+    stream: PiStreamState,
+  ): SDKMessage[] | undefined {
+    if (stringValue(event.method) !== "notify") return undefined;
+    const raw = stringValue(event.message);
+    if (!raw?.startsWith(PI_PARTIAL_OUTPUT_PREFIX)) return undefined;
+
+    let payload: JsonRecord = {};
+    try {
+      const parsed = JSON.parse(
+        raw.slice(PI_PARTIAL_OUTPUT_PREFIX.length),
+      ) as unknown;
+      if (isRecord(parsed)) payload = parsed;
+    } catch {
+      // A malformed relay is a dropped preview frame, never a turn failure.
+      return [];
+    }
+    const toolCallId = stringValue(payload.toolCallId);
+    const text = typeof payload.text === "string" ? payload.text : "";
+    if (!toolCallId || !text) return [];
+
+    const owner = stream.toolCallOwners.get(toolCallId);
+    const content = owner?.message?.content;
+    if (!owner || !Array.isArray(content)) return [];
+
+    const bounded =
+      text.length > PI_PARTIAL_OUTPUT_LIMIT
+        ? text.slice(-PI_PARTIAL_OUTPUT_LIMIT)
+        : text;
     return [
       {
-        type: "assistant",
-        uuid: stream.assistantId,
-        session_id: sessionId,
+        ...owner,
         message: {
-          role: "assistant",
-          content: Array.from(stream.blocks.entries())
-            .sort(([a], [b]) => a - b)
-            .map(([, block]) => block),
+          ...owner.message,
+          content: content.map((block) =>
+            block.type === "tool_use" && block.id === toolCallId
+              ? { ...block, partialOutput: bounded }
+              : block,
+          ),
         },
-        usage: event.usage,
       },
     ];
   }
