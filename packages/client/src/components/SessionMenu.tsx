@@ -6,6 +6,7 @@ import { useToastContext } from "../contexts/ToastContext";
 import { useI18n } from "../i18n";
 import { appPath } from "../lib/apiPath";
 import { writeClipboardText } from "../lib/clipboard";
+import { parseUserPrompt } from "../lib/parseUserPrompt";
 import { getProvider } from "../providers/registry";
 import { PinIcon } from "./PinIcon";
 
@@ -37,6 +38,21 @@ function decodeProjectPath(projectId: string): string | undefined {
  * copied block carries the project path and a deep link, which is what makes
  * it useful when pasted into an agent running in some other directory.
  */
+/**
+ * Reduce a session title to one clean line for the `Label: value` block.
+ *
+ * Untitled sessions fall back to a preview of the first prompt, which can be a
+ * truncated multi-line blob still carrying an "User uploaded files:" manifest.
+ * Pasting that verbatim broke the block's line-per-field shape and made the
+ * receiving agent's transcript re-parse the quoted marker as real metadata.
+ */
+function flattenSessionInfoTitle(value: string): string {
+  const markerIndex = value.search(/(?:^|\n)\s*User uploaded files:/);
+  const head = markerIndex >= 0 ? value.slice(0, markerIndex) : value;
+  const cleaned = parseUserPrompt(head).text || head;
+  return cleaned.replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
 export function buildSessionInfoText(input: {
   sessionId: string;
   projectId: string;
@@ -45,7 +61,7 @@ export function buildSessionInfoText(input: {
 }): string {
   const { sessionId, projectId, title, provider } = input;
   const rows: Array<[string, string | undefined]> = [
-    ["Title", title ?? undefined],
+    ["Title", title ? flattenSessionInfoTitle(title) : undefined],
     ["Session ID", sessionId],
     ["Provider", provider],
     ["Project", decodeProjectPath(projectId)],

@@ -77,6 +77,20 @@ describe("buildSessionInfoText", () => {
     expect(text).toContain(`Link: ${window.location.origin}`);
   });
 
+  it("flattens a first-prompt preview title into one field line", () => {
+    const text = buildSessionInfoText({
+      sessionId: SESSION_ID,
+      projectId: PROJECT_ID,
+      title:
+        "看看这个 pi session\n\nUser uploaded files:\n- Screenshot_2026-09-03_com.yepan...",
+      provider: "pi",
+    });
+
+    expect(text).not.toContain("User uploaded files:");
+    expect(parse(text).Title).toBe("看看这个 pi session");
+    expect(text.split("\n")).toHaveLength(5);
+  });
+
   it("handles non-ascii project paths", () => {
     const path = "/Users/someone/工作/项目";
     const text = buildSessionInfoText({

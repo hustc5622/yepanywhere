@@ -62,42 +62,67 @@ export interface ParsedUserPrompt {
  */
 export const getFilename = sharedGetFilename;
 
+/** Marker line MessageQueue writes above the attachment manifest. */
+const UPLOAD_MARKER_LINE = "User uploaded files:";
+
+/** One manifest row: "- filename (size, mimetype): path" */
+const UPLOAD_LINE_PATTERN = /^- (.+?) \(([^,]+), ([^)]+)\): (.+)$/;
+
 /**
- * Parse the "User uploaded files:" section from message content.
- * Format: "- filename (size, mimetype): path"
+ * Parse the "User uploaded files:" section(s) from message content.
+ *
+ * The manifest is *appended* to the user's own text by MessageQueue, so the
+ * marker is not a reserved token: prompts routinely quote it back (copying a
+ * session's info block pastes a truncated first prompt that still contains the
+ * marker). Consuming "everything after the marker" therefore silently deleted
+ * the tail of such a prompt from the transcript. Only the contiguous run of
+ * well-formed manifest rows directly below a marker is treated as metadata;
+ * a marker with no parsable row below it stays visible as ordinary text.
  */
 function parseUploadedFiles(content: string): {
   textWithoutUploads: string;
   uploadedFiles: UploadedFileInfo[];
 } {
   const uploadedFiles: UploadedFileInfo[] = [];
+  const lines = content.split("\n");
+  const kept: string[] = [];
 
-  // Match the "User uploaded files:" section
-  const uploadMarker = "\n\nUser uploaded files:\n";
-  const markerIndex = content.indexOf(uploadMarker);
+  for (let index = 0; index < lines.length; index += 1) {
+    // The marker only counts when preceded by a blank line, matching the
+    // "\n\nUser uploaded files:\n" separator MessageQueue emits.
+    const isMarker =
+      lines[index] === UPLOAD_MARKER_LINE &&
+      index > 0 &&
+      lines[index - 1] === "";
 
-  if (markerIndex === -1) {
-    return { textWithoutUploads: content, uploadedFiles: [] };
-  }
+    if (isMarker) {
+      const section: UploadedFileInfo[] = [];
+      let next = index + 1;
+      while (next < lines.length) {
+        const match = lines[next]?.match(UPLOAD_LINE_PATTERN);
+        if (!match) break;
+        section.push({
+          originalName: match[1] ?? "",
+          size: match[2] ?? "",
+          mimeType: match[3] ?? "",
+          path: match[4] ?? "",
+        });
+        next += 1;
+      }
 
-  const textWithoutUploads = content.slice(0, markerIndex);
-  const uploadSection = content.slice(markerIndex + uploadMarker.length);
-
-  // Parse each line: "- filename (size, mimetype): path"
-  const lineRegex = /^- (.+?) \(([^,]+), ([^)]+)\): (.+)$/;
-  for (const line of uploadSection.split("\n")) {
-    const match = line.match(lineRegex);
-    if (match) {
-      uploadedFiles.push({
-        originalName: match[1] ?? "",
-        size: match[2] ?? "",
-        mimeType: match[3] ?? "",
-        path: match[4] ?? "",
-      });
+      if (section.length > 0) {
+        uploadedFiles.push(...section);
+        // Drop the blank separator that belonged to the removed manifest.
+        while (kept.length > 0 && kept.at(-1) === "") kept.pop();
+        index = next - 1;
+        continue;
+      }
     }
+
+    kept.push(lines[index] ?? "");
   }
 
-  return { textWithoutUploads, uploadedFiles };
+  return { textWithoutUploads: kept.join("\n"), uploadedFiles };
 }
 
 const SKILL_BLOCK_PATTERN = /<skill\b[^>]*>([\s\S]*?)<\/skill>/gi;

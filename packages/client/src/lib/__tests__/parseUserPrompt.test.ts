@@ -126,6 +126,64 @@ Commit and push current changes.
     ]);
   });
 
+  it("keeps prose that follows a quoted upload marker", () => {
+    // Pasting a copied session-info block: the truncated Title carries the
+    // marker, and the fields below it are the part the user cares about.
+    const content = `Title: 看看这个 pi session 为什么不会动态刷新
+
+User uploaded files:
+- Screenshot_2026-09-03-10-05-17-359_com.yepan...
+Session ID: 01a0660f-1da2-768a-8f36-da0b7d561b38
+Provider: pi
+Link: http://127.0.0.1:8022/yep/projects/abc/sessions/01a0660f`;
+
+    const parsed = parseUserPrompt(content);
+
+    expect(parsed.text).toBe(content);
+    expect(parsed.uploadedFiles).toEqual([]);
+  });
+
+  it("strips only the manifest rows when text follows a real attachment", () => {
+    const content = `Check this image.
+
+User uploaded files:
+- shot.png (1.0 KB, image/png): /tmp/shot.png
+Session ID: session-1
+Provider: pi`;
+
+    const parsed = parseUserPrompt(content);
+
+    expect(parsed.text).toBe(
+      "Check this image.\nSession ID: session-1\nProvider: pi",
+    );
+    expect(parsed.uploadedFiles).toEqual([
+      {
+        originalName: "shot.png",
+        size: "1.0 KB",
+        mimeType: "image/png",
+        path: "/tmp/shot.png",
+      },
+    ]);
+  });
+
+  it("still removes a trailing manifest appended by MessageQueue", () => {
+    const content = `Quoted block:
+
+User uploaded files:
+- Screenshot_...truncated
+
+User uploaded files:
+- real.png (2.0 KB, image/png): /tmp/real.png`;
+
+    const parsed = parseUserPrompt(content);
+
+    expect(parsed.text).toBe(
+      "Quoted block:\n\nUser uploaded files:\n- Screenshot_...truncated",
+    );
+    expect(parsed.uploadedFiles).toHaveLength(1);
+    expect(parsed.uploadedFiles[0]?.originalName).toBe("real.png");
+  });
+
   it("leaves incomplete skill examples in the visible text", () => {
     const content = `Do not show this as raw text:
 <skill>
