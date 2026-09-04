@@ -332,6 +332,49 @@ describe("SessionIndexService", () => {
       expect(sessions).toHaveLength(1);
     });
 
+    it("rebuilds a v12 index instead of serving its stale derived summary", async () => {
+      // Entries are revalidated only against file size/mtime, so a session
+      // whose file never changes again keeps whatever the reader derived at
+      // index time. v12 predates the Pi context-usage fix, where an
+      // aborted/errored turn zeroed `contextUsage` — the composer/list ring
+      // would have shown 0% forever. Bumping the schema version is what
+      // retires those readings.
+      await createSession("session-1", "Real title");
+      const fileStats = await stat(join(sessionDir, "session-1.jsonl"));
+      const indexPath = service.getIndexPath(sessionDir);
+      await mkdir(join(testDir, "indexes"), { recursive: true });
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          version: 12,
+          projectId,
+          sessions: {
+            "session-1": {
+              title: "Stale title",
+              fullTitle: "Stale title",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              messageCount: 1,
+              contextUsage: { inputTokens: 0, percentage: 0 },
+              indexedBytes: fileStats.size,
+              fileMtime: fileStats.mtimeMs,
+              provider: "pi",
+            },
+          },
+        }),
+      );
+
+      const reloaded = new SessionIndexService({ dataDir, projectsDir });
+      await reloaded.initialize();
+      const sessions = await reloaded.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.title).toBe("Real title");
+    });
+
     it("rebuilds a current-version index containing a poisoned Kimi title", async () => {
       await createSession("session-1", "Recovered title");
       const fileStats = await stat(join(sessionDir, "session-1.jsonl"));
@@ -341,7 +384,7 @@ describe("SessionIndexService", () => {
       await writeFile(
         indexPath,
         JSON.stringify({
-          version: 12,
+          version: 13,
           projectId,
           sessions: {
             "session-1": {
@@ -975,7 +1018,7 @@ describe("SessionIndexService", () => {
       await writeFile(
         indexPath,
         JSON.stringify({
-          version: 12,
+          version: 13,
           projectId,
           sessions: {
             legacy: {

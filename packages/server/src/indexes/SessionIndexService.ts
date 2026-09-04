@@ -16,6 +16,7 @@ import * as path from "node:path";
 import {
   type ContextCompactEvent,
   type ContextCumulativeUsage,
+  type ContextUsage,
   DEFAULT_PROVIDER,
   type ProviderName,
   type UrlProjectId,
@@ -43,7 +44,13 @@ export interface CachedSessionSummary {
   messageCount: number;
   userQuestions?: SessionSummary["userQuestions"];
   userQuestionCoverage?: SessionSummary["userQuestionCoverage"];
-  contextUsage?: { inputTokens: number; percentage: number };
+  /**
+   * Full `ContextUsage` as derived by the reader. The narrower
+   * `{ inputTokens, percentage }` shape this used to declare understated what
+   * is actually persisted (cache/output breakdowns are written too), which
+   * hides the fact that a derivation change invalidates the whole index.
+   */
+  contextUsage?: ContextUsage;
   cumulativeUsage?: ContextCumulativeUsage;
   compactCount?: number;
   compactEvents?: ContextCompactEvent[];
@@ -86,15 +93,22 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
+  // v13 rebuilds every cached summary because Pi's context-usage derivation
+  // changed: an aborted/errored turn no longer zeroes `contextUsage`, and
+  // context fill now uses the provider's `totalTokens` (which includes
+  // output) instead of `input + cacheRead + cacheWrite`. Entries are only
+  // revalidated against file size/mtime, so a session whose JSONL will never
+  // grow again would have served the stale 0% reading forever.
+  //
   // v12 persists question coverage so a bounded Codex summary cannot be
   // mistaken for a complete directory. It also rebuilds v11 entries whose
   // question ids were already byte-offset stable but lacked this field.
-  version: 12;
+  version: 13;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 12;
+const CURRENT_VERSION = 13;
 
 function needsPiTurnStatusMigration(index: SessionIndexState): boolean {
   return Object.values(index.sessions).some(

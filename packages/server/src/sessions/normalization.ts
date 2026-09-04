@@ -31,6 +31,7 @@ import type {
   PiSessionContent,
   PiSessionEntry,
   PiToolResultMessage,
+  PiUsage,
   ProviderName,
   SessionBranchOption,
   SessionBranchState,
@@ -553,6 +554,43 @@ function qualifyPiSessionModel(
   return `${channelId}/${modelId}`;
 }
 
+/**
+ * Context-window fill reported by one Pi assistant turn.
+ *
+ * Mirrors `calculateContextTokens()` in Pi itself
+ * (`references/pi/packages/ai/src/utils/estimate.ts`): the provider-reported
+ * `totalTokens` is authoritative, and the component sum — which **includes**
+ * `output` — is only the fallback for older logs that omitted it.
+ */
+function piContextTokens(usage: PiUsage): number {
+  return (
+    usage.totalTokens ||
+    (usage.input ?? 0) +
+      (usage.output ?? 0) +
+      (usage.cacheRead ?? 0) +
+      (usage.cacheWrite ?? 0)
+  );
+}
+
+/**
+ * Whether an assistant turn's `usage` describes the current context window.
+ *
+ * Pi persists an assistant entry even when the request never produced a
+ * response (`aborted`, `error`), and those entries carry an all-zero `usage`.
+ * Reading the newest assistant unconditionally therefore reported a 0% context
+ * meter right after any interrupt, which read as "empty session" in the
+ * composer ring until the next successful turn. Pi's own
+ * `getLastAssistantUsageInfo()` applies the same filter, and Codex's reader
+ * already guards with `inputTokens > 0` — this keeps Pi consistent with both.
+ */
+function isPiUsageBearingAssistant(message: PiAssistantMessage): boolean {
+  if (!message.usage) return false;
+  if (message.stopReason === "aborted" || message.stopReason === "error") {
+    return false;
+  }
+  return piContextTokens(message.usage) > 0;
+}
+
 interface PiDerivationAccumulator {
   model?: string;
   reasoningEffort?: string;
@@ -561,6 +599,13 @@ interface PiDerivationAccumulator {
   messageCount: number;
   lastConversationRole?: string;
   lastAssistant?: PiAssistantMessage;
+  /**
+   * Newest assistant turn whose `usage` can be trusted as a context-window
+   * snapshot. Tracked separately from `lastAssistant`, which still has to be
+   * the literal last entry so `lastTurnStatus`/`lastErrorMessage` keep
+   * reporting the interrupt.
+   */
+  lastUsageAssistant?: PiAssistantMessage;
   userQuestions: NonNullable<SessionSummary["userQuestions"]>;
   compactEvents: ContextCompactEvent[];
   cumulative: ContextCumulativeUsage;
@@ -637,10 +682,15 @@ function consumePiDerivation(
     accumulator.messageCount += 1;
     accumulator.lastConversationRole = "assistant";
     accumulator.lastAssistant = message;
+    if (isPiUsageBearingAssistant(message)) {
+      accumulator.lastUsageAssistant = message;
+    }
     accumulator.model = message.model
       ? qualifyPiSessionModel(message.model, message.provider)
       : accumulator.model;
-    if (message.usage) {
+    if (message.usage && piContextTokens(message.usage) > 0) {
+      // Aborted/errored turns log an all-zero usage block. Counting them
+      // inflated the "N turns" label without adding any spend.
       accumulator.cumulative.inputTokens += message.usage.input ?? 0;
       accumulator.cumulative.outputTokens += message.usage.output ?? 0;
       accumulator.cumulative.cacheReadTokens += message.usage.cacheRead ?? 0;
@@ -663,24 +713,31 @@ function finishPiDerivation(
   accumulator: PiDerivationAccumulator,
   options: PiSessionConversionOptions,
 ): PiDerivedSession {
-  const usage = accumulator.lastAssistant?.usage;
+  const usage = accumulator.lastUsageAssistant?.usage;
   const contextWindow =
     options.getContextWindow?.(accumulator.model, "pi", session.header.id) ??
     (accumulator.model
       ? getModelContextWindow(accumulator.model, "pi")
       : undefined);
-  const inputTokens = usage
-    ? (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
-    : 0;
+  const inputTokens = usage ? piContextTokens(usage) : 0;
+  // Leaving `contextUsage` undefined (rather than emitting a zeroed record) is
+  // load-bearing: the client only falls back to the live `context-status`
+  // endpoint when the field is absent, and `mergeSameSessionMetadata()` only
+  // preserves the previous good value for an undefined incoming one.
   const contextUsage =
-    usage && contextWindow
+    usage && contextWindow && inputTokens > 0
       ? {
           inputTokens,
           outputTokens: usage.output ?? 0,
           cacheReadTokens: usage.cacheRead ?? 0,
           cacheCreationTokens: usage.cacheWrite ?? 0,
           contextWindow,
-          percentage: Math.min(100, (inputTokens / contextWindow) * 100),
+          // Round like the Codex/Kimi/Gemini readers do. Pi's raw ratio is a
+          // float, and the meter label rendered it verbatim ("55.3906%").
+          percentage: Math.min(
+            100,
+            Math.round((inputTokens / contextWindow) * 100),
+          ),
         }
       : undefined;
   const stopReason = accumulator.lastAssistant?.stopReason;

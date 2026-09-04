@@ -209,7 +209,9 @@ describe("Pi native session reader", () => {
       lastTurnStatus: "completed",
       forkParentSessionId: parentId,
       contextUsage: {
-        inputTokens: 32,
+        // Context fill mirrors Pi's own `calculateContextTokens()`: the
+        // provider-reported `totalTokens` (which includes output).
+        inputTokens: 36,
         outputTokens: 4,
         cacheReadTokens: 2,
         cacheCreationTokens: 0,

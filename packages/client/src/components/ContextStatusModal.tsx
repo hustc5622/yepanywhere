@@ -150,18 +150,20 @@ function ContextStatusContent({ data }: { data: ContextStatusResponse }) {
 
       <CumulativeUsageSection usage={data.cumulativeUsage} />
 
-      <Section heading={t("contextCategoryHeading")}>
-        <TokenRowList
-          rows={sortedCategories.map((c) => ({
-            key: c.name,
-            label: c.name,
-            tokens: c.tokens,
-            color: c.color || undefined,
-          }))}
-          maxTokens={data.maxTokens}
-          showBar
-        />
-      </Section>
+      {sortedCategories.length > 0 && (
+        <Section heading={t("contextCategoryHeading")}>
+          <TokenRowList
+            rows={sortedCategories.map((c) => ({
+              key: c.name,
+              label: c.name,
+              tokens: c.tokens,
+              color: c.color || undefined,
+            }))}
+            maxTokens={data.maxTokens}
+            showBar
+          />
+        </Section>
+      )}
 
       {data.mcpTools.length > 0 && (
         <Section heading={t("contextMcpHeading")}>
@@ -238,6 +240,17 @@ interface HeroMeterProps {
   rawMaxLabel?: string;
 }
 
+/**
+ * Providers disagree on percentage precision: Claude/Codex round server-side,
+ * while Pi forwards the raw float from `get_session_stats` (e.g. 50.2158).
+ * Render at most one decimal so the hero number stays readable, and drop a
+ * trailing `.0` so already-rounded providers look unchanged.
+ */
+function formatPercent(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
+}
+
 function HeroMeter({
   percentage,
   used,
@@ -253,7 +266,7 @@ function HeroMeter({
     <div className="context-status-hero">
       <div className="context-status-hero-numbers">
         <span className={`context-status-percent-big severity-${severity}`}>
-          {clamped}%
+          {formatPercent(clamped)}%
         </span>
         <span className="context-status-fraction">
           {formatTokens(used)} / {formatTokens(total)}

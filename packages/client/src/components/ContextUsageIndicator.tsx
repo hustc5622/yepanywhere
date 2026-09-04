@@ -70,7 +70,10 @@ export function ContextUsageIndicator({
       ? usage.contextWindow
         ? `${formatTokens(usage.inputTokens)}/${formatTokens(usage.contextWindow)}`
         : formatTokens(usage.inputTokens)
-      : `${displayPercentage}%`;
+      : // Round the visible label even though the tooltip keeps full precision:
+        // producers disagree (Pi forwards a raw ratio), and "19.38%" does not
+        // fit the compact list/toolbar surfaces.
+        `${Math.round(displayPercentage)}%`;
 
   return (
     <ContextUsageWrapper
