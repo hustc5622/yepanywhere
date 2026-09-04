@@ -127,6 +127,23 @@ export function buildSessionDisplayRenderItems(
             sourceMessages: [source],
           });
           break;
+        case "thinking":
+          items.push({
+            type: "thinking",
+            id: segment.id,
+            thinking: segment.content,
+            status: "complete",
+            detail: {
+              projectId: options.projectId,
+              sessionId: page.sessionId,
+              revision: page.revision,
+              ...(options.branchId ? { branchId: options.branchId } : {}),
+              detailRef: segment.detailRef,
+              truncated: segment.truncated === true,
+            },
+            sourceMessages: [source],
+          });
+          break;
         case "tool_group":
         case "action_required":
           if (

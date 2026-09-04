@@ -622,6 +622,27 @@ details[open] .collapsible__icon {
   white-space: pre-wrap;
 }
 
+/* One-line hint that keeps collapsed reasoning rows distinguishable. */
+.thinking-block__preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-subtle, var(--text-muted));
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-block__state {
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.thinking-block__state.is-error {
+  color: var(--color-error, #f87171);
+}
+
 /* Button-style thinking toggle (collapsed state in new renderer) */
 .thinking-toggle-collapsed {
   display: inline-flex;

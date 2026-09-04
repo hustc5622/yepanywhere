@@ -1236,6 +1236,78 @@ describe("useSessionMessages lightweight display history", () => {
     expect(result.current.messages).toEqual([]);
   });
 
+  it("applies a forced display refresh for an owned Pi session", async () => {
+    // Pi's live stream cannot replay a tail older than the process buffer, so a
+    // settled forced refresh is the only way an owned session converges. The
+    // unforced refresh must still be dropped so an in-flight turn keeps its tail.
+    const session = codexSession("2026-09-01T00:00:00.000Z", [], {
+      provider: "pi",
+      ownership: { owner: "self", processId: "process-1" },
+      activity: "idle",
+    });
+    mockGetSessionMetadata.mockResolvedValue({
+      session,
+      ownership: session.ownership,
+    });
+    mockGetSessionDisplay
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        revision: "revision-stale",
+        turns: [
+          {
+            id: "turn:user-1",
+            question: { messageId: "user-1", content: "First" },
+            segments: [],
+          },
+        ],
+      })
+      .mockResolvedValue({
+        sessionId: "session-1",
+        revision: "revision-fresh",
+        turns: [
+          {
+            id: "turn:user-1",
+            question: { messageId: "user-1", content: "First" },
+            segments: [],
+          },
+          {
+            id: "turn:user-2",
+            question: { messageId: "user-2", content: "Written while away" },
+            segments: [],
+          },
+        ],
+      });
+    mockGetSessionQuestions.mockResolvedValue({
+      questions: [],
+      coverage: "complete",
+    });
+
+    const { result } = renderHook(() =>
+      useSessionMessages({
+        projectId: "project-1",
+        sessionId: "session-1",
+        preferDisplayHistory: true,
+        displayHistoryLiveOwned: true,
+      }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.displayPage?.revision).toBe("revision-stale");
+
+    await act(async () => {
+      await result.current.refreshSessionMessages();
+    });
+    expect(result.current.displayPage?.revision).toBe("revision-stale");
+
+    await act(async () => {
+      await result.current.refreshSessionMessages({ replaceMessages: true });
+    });
+    expect(result.current.displayPage?.revision).toBe("revision-fresh");
+    expect(result.current.displayPage?.turns.map((turn) => turn.id)).toEqual([
+      "turn:user-1",
+      "turn:user-2",
+    ]);
+  });
+
   it("switches an active legacy session to display history after it settles", async () => {
     const contextUsage = {
       inputTokens: 394_295,

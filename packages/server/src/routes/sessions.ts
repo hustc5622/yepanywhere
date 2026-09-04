@@ -7,6 +7,7 @@ import {
   type ContextStatusResponse,
   type ContextUsage,
   type GeneratedArtifactManifest,
+  PI_THINKING_PREVIEW_MAX_LENGTH,
   type ProviderName,
   type SessionBranchState,
   type UrlProjectId,
@@ -293,7 +294,20 @@ function deferPiProcessContent(
 
   return content.flatMap((block) => {
     if (!block || typeof block !== "object") return [block];
-    if (options.deferThinking && block.type === "thinking") return [];
+    if (options.deferThinking && block.type === "thinking") {
+      // Mirror the persisted read: keep a bounded preview so the reasoning row
+      // still exists and can be expanded through an explicit detail request.
+      const thinking = typeof block.thinking === "string" ? block.thinking : "";
+      if (thinking.length <= PI_THINKING_PREVIEW_MAX_LENGTH) return [block];
+      return [
+        {
+          ...block,
+          thinking: thinking.slice(0, PI_THINKING_PREVIEW_MAX_LENGTH),
+          deferred: true,
+          thinkingLength: thinking.length,
+        },
+      ];
+    }
     if (
       options.deferMedia &&
       (block.type === "image" || block.type === "input_image")

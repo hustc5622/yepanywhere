@@ -1100,4 +1100,180 @@ describe("session display routes", () => {
     );
     expect(JSON.stringify(display)).not.toContain("PI_TOOL_RESULT_BODY");
   });
+  it("splits Pi tool batches by reasoning rows and serves reasoning on demand", async () => {
+    const sessionsDir = await mkdtemp(join(tmpdir(), "display-pi-thinking-"));
+    tempDirs.push(sessionsDir);
+    const sessionId = randomUUID();
+    const projectDir = join(sessionsDir, "--display-project--");
+    await mkdir(projectDir, { recursive: true });
+    const longReasoning = `PI_REASONING_BODY:${"r".repeat(900)}`;
+    const records = [
+      {
+        type: "session",
+        version: 3,
+        id: sessionId,
+        timestamp: "2026-09-03T04:00:00.000Z",
+        cwd: PROJECT_PATH,
+      },
+      {
+        type: "message",
+        id: "pi-user",
+        parentId: null,
+        timestamp: "2026-09-03T04:00:01.000Z",
+        message: { role: "user", content: "Pi question" },
+      },
+      {
+        type: "message",
+        id: "pi-step-1",
+        parentId: "pi-user",
+        timestamp: "2026-09-03T04:00:02.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: longReasoning },
+            {
+              type: "toolCall",
+              id: "pi-tool-1",
+              name: "bash",
+              arguments: { command: "pnpm test" },
+            },
+          ],
+          stopReason: "toolUse",
+        },
+      },
+      {
+        type: "message",
+        id: "pi-result-1",
+        parentId: "pi-step-1",
+        timestamp: "2026-09-03T04:00:03.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "pi-tool-1",
+          toolName: "bash",
+          content: [{ type: "text", text: "PI_TOOL_RESULT_BODY" }],
+          isError: false,
+        },
+      },
+      {
+        type: "message",
+        id: "pi-step-2",
+        parentId: "pi-result-1",
+        timestamp: "2026-09-03T04:00:04.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "second reasoning" },
+            {
+              type: "toolCall",
+              id: "pi-tool-2",
+              name: "bash",
+              arguments: { command: "pnpm lint" },
+            },
+          ],
+          stopReason: "toolUse",
+        },
+      },
+      {
+        type: "message",
+        id: "pi-result-2",
+        parentId: "pi-step-2",
+        timestamp: "2026-09-03T04:00:05.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "pi-tool-2",
+          toolName: "bash",
+          content: [{ type: "text", text: "PI_TOOL_RESULT_BODY" }],
+          isError: false,
+        },
+      },
+      {
+        type: "message",
+        id: "pi-final",
+        parentId: "pi-result-2",
+        timestamp: "2026-09-03T04:00:06.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Pi answer" }],
+          stopReason: "stop",
+        },
+      },
+    ];
+    await writeFile(
+      join(projectDir, `session_${sessionId}.jsonl`),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
+    );
+    const reader = new PiSessionReader({
+      sessionsDir,
+      projectPath: PROJECT_PATH,
+    });
+    const piProject: Project = {
+      ...project(),
+      provider: "pi",
+      sessionDir: sessionsDir,
+    };
+    const app = new Hono();
+    registerSessionDisplayRoutes(app, {
+      scanner: { getOrCreateProject: vi.fn(async () => piProject) },
+      providerResolution: {
+        readerFactory: () => reader,
+        piSessionsDir: sessionsDir,
+        piReaderFactory: () => reader,
+      },
+    });
+
+    const response = await app.request(
+      `/projects/${PROJECT_ID}/sessions/${sessionId}/display`,
+    );
+    const display = (await response.json()) as {
+      revision: string;
+      turns: Array<{
+        segments: Array<{
+          type: string;
+          content?: string;
+          truncated?: boolean;
+          detailRef?: string;
+          count?: number;
+        }>;
+      }>;
+    };
+    const segments = display.turns[0]?.segments ?? [];
+    expect(response.status).toBe(200);
+    // Reasoning rows keep each tool batch separate instead of collapsing them.
+    expect(segments.map((segment) => segment.type)).toEqual([
+      "thinking",
+      "tool_group",
+      "thinking",
+      "tool_group",
+      "assistant_text",
+    ]);
+    expect(JSON.stringify(display)).not.toContain(longReasoning);
+    expect(JSON.stringify(display)).not.toContain("PI_TOOL_RESULT_BODY");
+
+    const truncated = segments[0];
+    expect(truncated).toMatchObject({ truncated: true });
+    const detailResponse = await app.request(
+      `/projects/${PROJECT_ID}/sessions/${sessionId}/display/thinking/${truncated?.detailRef}?revision=${encodeURIComponent(display.revision)}`,
+    );
+    expect(detailResponse.status).toBe(200);
+    expect(await detailResponse.json()).toMatchObject({
+      detailRef: truncated?.detailRef,
+      content: longReasoning,
+    });
+
+    // Tool-group refs still resolve once reasoning rows consume detail indices.
+    const group = segments.find((segment) => segment.type === "tool_group");
+    const groupResponse = await app.request(
+      `/projects/${PROJECT_ID}/sessions/${sessionId}/display/tool-groups/${group?.detailRef}?revision=${encodeURIComponent(display.revision)}`,
+    );
+    expect(groupResponse.status).toBe(200);
+    expect(JSON.stringify(await groupResponse.json())).toContain(
+      "PI_TOOL_RESULT_BODY",
+    );
+
+    const staleResponse = await app.request(
+      `/projects/${PROJECT_ID}/sessions/${sessionId}/display/thinking/${truncated?.detailRef}?revision=sdr1.stale`,
+    );
+    expect(staleResponse.status).toBe(404);
+  });
 });

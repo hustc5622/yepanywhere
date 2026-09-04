@@ -7,6 +7,8 @@ export const SESSION_DISPLAY_TOOL_DETAIL_PAGE_LIMIT = 50;
 export const SESSION_DISPLAY_MAX_TOOL_NAMES = 5;
 export const SESSION_DISPLAY_MAX_NOTICE_LENGTH = 8_192;
 export const SESSION_DISPLAY_QUESTION_PREVIEW_MAX_LENGTH = 140;
+/** Reasoning preview kept inline; longer bodies need an explicit detail read. */
+export const SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH = 240;
 
 const NonEmptyIdSchema = z.string().min(1);
 const TimestampSchema = z.string().min(1);
@@ -116,6 +118,25 @@ export const SessionDisplayToolGroupSegmentSchema = z
     }
   });
 
+/**
+ * A provider reasoning row.
+ *
+ * Reasoning is the only progress signal some providers emit between tool
+ * batches (Pi in particular), so it must exist in the lightweight page to keep
+ * the timeline readable and to close tool groups. Only a bounded preview is
+ * inlined; `truncated` marks rows whose full body lives behind `detailRef`.
+ */
+export const SessionDisplayThinkingSegmentSchema = z
+  .object({
+    type: z.literal("thinking"),
+    id: NonEmptyIdSchema,
+    content: z.string().max(SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH),
+    truncated: z.literal(true).optional(),
+    detailRef: NonEmptyIdSchema,
+    timestamp: TimestampSchema.optional(),
+  })
+  .strict();
+
 export const SessionDisplayActionRequiredSegmentSchema = z
   .object({
     type: z.literal("action_required"),
@@ -162,6 +183,7 @@ export const SessionDisplayNoticeSegmentSchema = z
 
 export const SessionDisplaySegmentSchema = z.discriminatedUnion("type", [
   SessionDisplayAssistantTextSegmentSchema,
+  SessionDisplayThinkingSegmentSchema,
   SessionDisplayToolGroupSegmentSchema,
   SessionDisplayActionRequiredSegmentSchema,
   SessionDisplayErrorSegmentSchema,
@@ -226,4 +248,12 @@ export interface SessionToolGroupDetailPage<TMessage = AppMessage> {
   detailRef: string;
   messages: TMessage[];
   nextCursor?: string;
+}
+
+/** Full reasoning body for one thinking segment, fetched only on expand. */
+export interface SessionThinkingDetail {
+  sessionId: string;
+  revision: string;
+  detailRef: string;
+  content: string;
 }

@@ -18,11 +18,22 @@ export interface PiImageContent {
   deferred?: boolean;
 }
 
+/**
+ * Reasoning text kept inline when a fast load defers the full body.
+ *
+ * Pi drives its whole narrative through reasoning blocks, so the display path
+ * needs enough text to label the row while the complete body stays behind an
+ * explicit detail request.
+ */
+export const PI_THINKING_PREVIEW_MAX_LENGTH = 240;
+
 export interface PiThinkingContent {
   type: "thinking";
   thinking: string;
-  /** True when the reasoning text was intentionally omitted for a fast load. */
+  /** True when `thinking` is a bounded preview of a longer deferred body. */
   deferred?: boolean;
+  /** Original reasoning length, present only when `deferred` is set. */
+  thinkingLength?: number;
   /** Pi's native opaque reasoning signature field. */
   thinkingSignature?: string;
   /** Compatibility alias accepted from older/custom Pi providers. */
@@ -275,7 +286,17 @@ function deferPiContentBlock(
     return { ...block, data: "", deferred: true };
   }
   if (block.type === "thinking" && options.deferThinking) {
-    return { ...block, thinking: "", deferred: true };
+    // Keep a bounded preview instead of dropping the text: the projection uses
+    // reasoning blocks as timeline rows and tool-group boundaries, so the block
+    // must stay visible (and non-empty) in every load mode.
+    const thinking = typeof block.thinking === "string" ? block.thinking : "";
+    if (thinking.length <= PI_THINKING_PREVIEW_MAX_LENGTH) return block;
+    return {
+      ...block,
+      thinking: thinking.slice(0, PI_THINKING_PREVIEW_MAX_LENGTH),
+      deferred: true,
+      thinkingLength: thinking.length,
+    };
   }
   return block;
 }

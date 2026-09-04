@@ -1,5 +1,9 @@
 import type { CodexSessionEntry } from "@yep-anywhere/shared";
-import { parseKimiWireJsonl, parsePiSessionJsonl } from "@yep-anywhere/shared";
+import {
+  SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH,
+  parseKimiWireJsonl,
+  parsePiSessionJsonl,
+} from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import {
   isSessionInspectorOnlyItem,
@@ -759,5 +763,172 @@ describe("session display projection", () => {
     expectOracleParity(codexMessages);
     expectOracleParity(piMessages);
     expectOracleParity(kimiMessages);
+  });
+  it("projects Pi reasoning as rows that split tool batches with stable detail refs", () => {
+    const longReasoning = `long-${"r".repeat(900)}`;
+    const jsonl = [
+      {
+        type: "session",
+        version: 3,
+        id: "pi-reasoning",
+        timestamp: "2026-09-03T00:00:00.000Z",
+        cwd: "/fixture",
+      },
+      {
+        type: "message",
+        id: "pi-user",
+        parentId: null,
+        timestamp: "2026-09-03T00:00:01.000Z",
+        message: { role: "user", content: "Fix the parser" },
+      },
+      {
+        type: "message",
+        id: "pi-step-1",
+        parentId: "pi-user",
+        timestamp: "2026-09-03T00:00:02.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "short reasoning" },
+            {
+              type: "toolCall",
+              id: "pi-tool-1",
+              name: "bash",
+              arguments: { command: "pnpm test" },
+            },
+          ],
+          stopReason: "toolUse",
+        },
+      },
+      {
+        type: "message",
+        id: "pi-result-1",
+        parentId: "pi-step-1",
+        timestamp: "2026-09-03T00:00:03.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "pi-tool-1",
+          toolName: "bash",
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+        },
+      },
+      {
+        type: "message",
+        id: "pi-step-2",
+        parentId: "pi-result-1",
+        timestamp: "2026-09-03T00:00:04.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: longReasoning },
+            {
+              type: "toolCall",
+              id: "pi-tool-2",
+              name: "bash",
+              arguments: { command: "pnpm lint" },
+            },
+          ],
+          stopReason: "toolUse",
+        },
+      },
+      {
+        type: "message",
+        id: "pi-result-2",
+        parentId: "pi-step-2",
+        timestamp: "2026-09-03T00:00:05.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "pi-tool-2",
+          toolName: "bash",
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+        },
+      },
+      {
+        type: "message",
+        id: "pi-final",
+        parentId: "pi-result-2",
+        timestamp: "2026-09-03T00:00:06.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Fixed." }],
+          stopReason: "stop",
+        },
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n");
+
+    const previewSession = parsePiSessionJsonl(jsonl, { deferThinking: true });
+    const fullSession = parsePiSessionJsonl(jsonl);
+    if (!previewSession || !fullSession) {
+      throw new Error("Pi reasoning fixture did not parse");
+    }
+    const build = (messages: readonly Message[], provider?: string) =>
+      buildSessionDisplayProjection({
+        sessionId: "pi-reasoning",
+        revision: "revision-1",
+        messages,
+        questionCoverage: "complete",
+        ...(provider ? { provider } : {}),
+      });
+    const preview = build(
+      convertPiSession(previewSession, { deferThinking: true }).messages,
+      "pi",
+    );
+    const full = build(convertPiSession(fullSession).messages, "pi");
+    const previewSegments = preview.page.turns[0]?.segments ?? [];
+
+    expect(previewSegments.map((segment) => segment.type)).toEqual([
+      "thinking",
+      "tool_group",
+      "thinking",
+      "tool_group",
+      "assistant_text",
+    ]);
+    expect(previewSegments[0]).toMatchObject({
+      type: "thinking",
+      content: "short reasoning",
+    });
+    expect(previewSegments[0]).not.toHaveProperty("truncated");
+    expect(previewSegments[2]).toMatchObject({
+      type: "thinking",
+      truncated: true,
+    });
+    const previewContent =
+      previewSegments[2]?.type === "thinking" ? previewSegments[2].content : "";
+    expect(previewContent.length).toBeLessThanOrEqual(
+      SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH,
+    );
+    expect(longReasoning.startsWith(previewContent)).toBe(true);
+    expect(JSON.stringify(preview.page)).not.toContain(longReasoning);
+
+    // Detail refs must survive the switch from the preview read to the full
+    // read that answers expand requests.
+    const refs = (projection: ReturnType<typeof build>) =>
+      projection.detailLocators.map((locator) => [
+        locator.kind,
+        locator.detailRef,
+      ]);
+    expect(refs(preview)).toEqual(refs(full));
+    const fullReasoningLocator = full.detailLocators.find(
+      (locator) =>
+        locator.kind === "thinking" &&
+        locator.detailRef ===
+          (previewSegments[2]?.type === "thinking"
+            ? previewSegments[2].detailRef
+            : ""),
+    );
+    expect(fullReasoningLocator?.thinkingText).toBe(longReasoning);
+
+    // Reasoning rows stay Pi-only until other providers opt in.
+    const otherProvider = build(convertPiSession(fullSession).messages);
+    expect(
+      (otherProvider.page.turns[0]?.segments ?? []).map(
+        (segment) => segment.type,
+      ),
+      // Without reasoning rows both batches collapse into one opaque group.
+    ).toEqual(["tool_group", "assistant_text"]);
   });
 });

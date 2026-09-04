@@ -515,7 +515,13 @@ export interface PiDerivedSession {
 export interface PiSessionConversionOptions {
   /** Omit inline image payloads from the normalized message blocks. */
   deferMedia?: boolean;
-  /** Omit thinking blocks from the normalized message blocks. */
+  /**
+   * Records that the parsed session was read with preview-only thinking.
+   *
+   * Reasoning blocks are always converted; the flag only participates in
+   * precomputed-message cache matching so a preview read is never reused for a
+   * caller that asked for full reasoning bodies.
+   */
   deferThinking?: boolean;
   /** Resolve provider-specific context windows while deriving the summary. */
   getContextWindow?: (
@@ -780,16 +786,26 @@ function piAssistantContent(
       case "text":
         blocks.push({ type: "text", text: block.text });
         break;
-      case "thinking":
-        if (options.deferThinking || block.deferred) break;
+      case "thinking": {
+        // Reasoning is a visible timeline row and a tool-group boundary, so the
+        // block is always emitted. Deferred loads carry a bounded preview plus
+        // the original length so the display layer can offer the full body
+        // behind an explicit detail request.
+        const thinking = block.thinking;
+        if (typeof thinking !== "string" || !thinking.trim()) break;
         blocks.push({
           type: "thinking",
-          thinking: block.thinking,
+          thinking,
+          ...(block.deferred ? { deferred: true } : {}),
+          ...(typeof block.thinkingLength === "number"
+            ? { thinkingLength: block.thinkingLength }
+            : {}),
           ...((block.thinkingSignature ?? block.signature)
             ? { signature: block.thinkingSignature ?? block.signature }
             : {}),
         });
         break;
+      }
       case "toolCall": {
         const toolBlock: ContentBlock = {
           type: "tool_use",

@@ -9,6 +9,7 @@ import {
   type SessionDisplayPage,
   type SessionQuestionPage,
   SessionQuestionPageSchema,
+  type SessionThinkingDetail,
   type SessionToolGroupDetailPage,
   isUrlProjectId,
 } from "@yep-anywhere/shared";
@@ -202,6 +203,37 @@ export function registerSessionDisplayRoutes(
           branchId,
         );
         return c.json(page);
+      } catch (error) {
+        return displayErrorResponse(c, error);
+      }
+    },
+  );
+  routes.get(
+    "/projects/:projectId/sessions/:sessionId/display/thinking/:detailRef",
+    async (c) => {
+      try {
+        const resolved = await resolveDisplaySession(
+          deps,
+          c.req.param("projectId"),
+          c.req.param("sessionId"),
+        );
+        const revision = c.req.query("revision");
+        if (!revision) {
+          throw new SessionDisplayRouteError(
+            400,
+            "SESSION_DISPLAY_REVISION_REQUIRED",
+            "revision is required for reasoning details",
+          );
+        }
+        const branchId = c.req.query("branchId") || undefined;
+        const detail = await readThinkingDetail(
+          deps,
+          resolved,
+          revision,
+          c.req.param("detailRef"),
+          branchId,
+        );
+        return c.json(detail);
       } catch (error) {
         return displayErrorResponse(c, error);
       }
@@ -451,6 +483,7 @@ async function readGenericDisplayPage(
       messages: mergedMessages,
       questionCoverage: hasOlderMessages ? "partial" : "complete",
       toolsMayBeActive: resolved.runtime.toolsMayBeActive,
+      provider: resolved.source.provider,
     });
     if (activeTailSnapshot) break;
     if (
@@ -488,6 +521,7 @@ async function readGenericDisplayPage(
       ? { pendingInputRequest: resolved.runtime.pendingInputRequest }
       : {}),
     toolsMayBeActive: !cursor && resolved.runtime.toolsMayBeActive,
+    provider: resolved.source.provider,
   });
   const selected = selectDisplayTurns(
     projection.page,
@@ -815,6 +849,7 @@ async function readToolGroupDetails(
     messages,
     questionCoverage: "partial",
     toolsMayBeActive: resolved.runtime.toolsMayBeActive,
+    provider: resolved.source.provider,
   });
   const locator = projection.detailLocators.find(
     (candidate) => candidate.detailRef === detailRef,
@@ -864,6 +899,90 @@ async function readToolGroupDetails(
           }),
         }
       : {}),
+  };
+}
+
+/**
+ * Resolve one reasoning row to its full body.
+ *
+ * The display page only carries a bounded preview, so this route re-reads the
+ * session with full reasoning enabled and rebuilds the same projection. Detail
+ * refs are stable across both reads because reasoning rows always exist and
+ * always consume a detail index, independent of the preview bound.
+ */
+async function readThinkingDetail(
+  deps: SessionDisplayRoutesDeps,
+  resolved: ResolvedDisplaySession,
+  revision: string,
+  detailRef: string,
+  branchId: string | undefined,
+): Promise<SessionThinkingDetail> {
+  const decoded = decodeSessionDisplayDetailRef(
+    resolved.sessionId,
+    revision,
+    detailRef,
+  );
+  if (!decoded || decoded.kind !== "thinking") {
+    throw new SessionDisplayRouteError(
+      404,
+      "SESSION_THINKING_NOT_FOUND",
+      "Reasoning reference is invalid",
+    );
+  }
+  const loaded = await resolved.source.reader.getSession(
+    resolved.sessionId,
+    resolved.project.id,
+    undefined,
+    {
+      includeOrphans: false,
+      branchId,
+      deferMedia: true,
+      deferThinking: false,
+      ...(decoded.sourceRevision
+        ? { rolloutRevision: decoded.sourceRevision }
+        : {}),
+    },
+  );
+  if (!loaded) throw sessionNotFoundError();
+  const session = normalizeSession(loaded, {
+    deferMedia: true,
+    deferThinking: false,
+  });
+  const currentRevision = await computeGenericRevision(
+    resolved.source,
+    loaded,
+    session,
+    branchId,
+    decoded.sourceRevision,
+  );
+  if (currentRevision !== revision) throw staleDisplayError();
+  const projection = buildSessionDisplayProjection({
+    sessionId: resolved.sessionId,
+    revision,
+    ...(decoded.sourceRevision
+      ? { detailSourceRevision: decoded.sourceRevision }
+      : {}),
+    messages: session.messages,
+    questionCoverage: "partial",
+    toolsMayBeActive: resolved.runtime.toolsMayBeActive,
+    provider: resolved.source.provider,
+  });
+  const locator = projection.detailLocators.find(
+    (candidate) =>
+      candidate.detailRef === detailRef && candidate.kind === "thinking",
+  );
+  if (!locator || locator.thinkingText === undefined) {
+    throw new SessionDisplayRouteError(
+      404,
+      "SESSION_THINKING_NOT_FOUND",
+      "Reasoning row is not present in the selected turn",
+    );
+  }
+  return {
+    sessionId: resolved.sessionId,
+    revision,
+    detailRef,
+    content: locator.thinkingText,
   };
 }
 

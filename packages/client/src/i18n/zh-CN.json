@@ -1364,6 +1364,8 @@
   "sessionToolGroupLoadFailed": "无法加载工具详情",
   "sessionToolGroupStale": "会话已发生变化，请刷新后查看当前工具详情。",
   "sessionToolGroupLoadMore": "加载更多工具详情",
+  "sessionThinkingLoading": "正在加载思考内容...",
+  "sessionThinkingLoadFailed": "无法加载思考内容",
   "sessionDisplaySetup": "会话初始化（{count}）",
   "sessionDisplayCompaction": "上下文已压缩",
   "sessionDisplayWarning": "警告",

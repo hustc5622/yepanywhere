@@ -1364,6 +1364,8 @@
   "sessionToolGroupLoadFailed": "Could not load tool details",
   "sessionToolGroupStale": "This session changed. Refresh to load current tool details.",
   "sessionToolGroupLoadMore": "Load more tool details",
+  "sessionThinkingLoading": "Loading reasoning...",
+  "sessionThinkingLoadFailed": "Could not load reasoning",
   "sessionDisplaySetup": "Session setup ({count})",
   "sessionDisplayCompaction": "Context compacted",
   "sessionDisplayWarning": "Warning",

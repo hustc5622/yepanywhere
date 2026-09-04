@@ -190,6 +190,7 @@ export const RenderItemComponent = memo(function RenderItemComponent({
             status={item.status}
             isExpanded={thinkingExpanded}
             onToggle={() => toggleThinkingExpanded(item.id)}
+            {...(item.detail ? { detail: item.detail } : {})}
           />
         );
 

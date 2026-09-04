@@ -108,6 +108,64 @@ describe("buildSessionDisplayRenderItems", () => {
       "text",
     ]);
   });
+
+  it("maps reasoning segments to collapsed thinking rows with a detail handle", () => {
+    const page: SessionDisplayPage = {
+      sessionId: "session-2",
+      revision: "revision-2",
+      turns: [
+        {
+          id: "turn:pi-1",
+          question: { messageId: "user-1", content: "Fix the parser" },
+          segments: [
+            {
+              type: "thinking",
+              id: "pi-step-1:0",
+              content: "short reasoning",
+              detailRef: "thinking-ref-1",
+            },
+            {
+              type: "thinking",
+              id: "pi-step-2:0",
+              content: "preview only",
+              truncated: true,
+              detailRef: "thinking-ref-2",
+            },
+          ],
+        },
+      ],
+    };
+
+    const items = buildSessionDisplayRenderItems(page, {
+      projectId: "project-1",
+      branchId: "branch-1",
+      formatNotice: () => "notice",
+    });
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user_prompt",
+      "thinking",
+      "thinking",
+    ]);
+    expect(items[1]).toMatchObject({
+      type: "thinking",
+      id: "pi-step-1:0",
+      thinking: "short reasoning",
+      status: "complete",
+      detail: {
+        projectId: "project-1",
+        sessionId: "session-2",
+        revision: "revision-2",
+        branchId: "branch-1",
+        detailRef: "thinking-ref-1",
+        truncated: false,
+      },
+    });
+    expect(items[2]).toMatchObject({
+      type: "thinking",
+      detail: { detailRef: "thinking-ref-2", truncated: true },
+    });
+  });
 });
 
 describe("mergeSessionInspectorMessages", () => {

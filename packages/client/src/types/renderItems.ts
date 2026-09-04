@@ -48,6 +48,23 @@ export interface ThinkingItem extends RenderItemBase {
   thinking: string;
   signature?: string;
   status: "streaming" | "complete";
+  /**
+   * Handle for reasoning that arrived as a bounded preview.
+   *
+   * The display page never ships full reasoning bodies; rows created from it
+   * carry this handle so expanding can fetch the remainder on demand.
+   */
+  detail?: ThinkingDetailRef;
+}
+
+export interface ThinkingDetailRef {
+  projectId: string;
+  sessionId: string;
+  revision: string;
+  branchId?: string;
+  detailRef: string;
+  /** True when the inline text is only a preview of a longer body. */
+  truncated: boolean;
 }
 
 export interface ToolCallItem extends RenderItemBase {

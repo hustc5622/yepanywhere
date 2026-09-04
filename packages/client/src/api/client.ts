@@ -36,6 +36,7 @@ import type {
   SessionQuestionPage,
   SessionRetryStatus,
   SessionRuntime,
+  SessionThinkingDetail,
   SessionToolGroupDetailPage,
   SlashCommand,
   ThinkingOption,
@@ -1033,6 +1034,19 @@ export const api = {
     if (options.branchId) params.set("branchId", options.branchId);
     return fetchJSON<SessionToolGroupDetailPage<Message>>(
       `/projects/${projectId}/sessions/${sessionId}/display/tool-groups/${encodeURIComponent(detailRef)}?${params.toString()}`,
+    );
+  },
+
+  getSessionThinkingDetail: (
+    projectId: string,
+    sessionId: string,
+    detailRef: string,
+    options: { revision: string; branchId?: string },
+  ) => {
+    const params = new URLSearchParams({ revision: options.revision });
+    if (options.branchId) params.set("branchId", options.branchId);
+    return fetchJSON<SessionThinkingDetail>(
+      `/projects/${projectId}/sessions/${sessionId}/display/thinking/${encodeURIComponent(detailRef)}?${params.toString()}`,
     );
   },
 

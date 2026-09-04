@@ -355,6 +355,7 @@ export {
   SESSION_DISPLAY_MAX_NOTICE_LENGTH,
   SESSION_DISPLAY_MAX_TOOL_NAMES,
   SESSION_DISPLAY_QUESTION_PREVIEW_MAX_LENGTH,
+  SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH,
   SESSION_DISPLAY_TOOL_DETAIL_PAGE_LIMIT,
   SessionDisplayActionRequiredSegmentSchema,
   SessionDisplayAssistantTextSegmentSchema,
@@ -364,6 +365,7 @@ export {
   SessionDisplayPageSchema,
   SessionDisplayQuestionSchema,
   SessionDisplaySegmentSchema,
+  SessionDisplayThinkingSegmentSchema,
   SessionDisplayToolGroupSegmentSchema,
   SessionDisplayTurnSchema,
   SessionDisplayUserContentSchema,
@@ -380,6 +382,7 @@ export type {
   SessionDisplayUserContent,
   SessionQuestionPage,
   SessionQuestionPageItem,
+  SessionThinkingDetail,
   SessionToolGroupDetailPage,
 } from "./session-display.js";
 

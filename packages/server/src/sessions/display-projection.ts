@@ -4,6 +4,7 @@ import {
   type InputRequest,
   SESSION_DISPLAY_MAX_NOTICE_LENGTH,
   SESSION_DISPLAY_MAX_TOOL_NAMES,
+  SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH,
   type SessionDisplayPage,
   SessionDisplayPageSchema,
   type SessionDisplayQuestion,
@@ -28,6 +29,20 @@ const CHECK_COMMAND_RE =
   /\b((pnpm|npm|yarn|bun)\s+(--filter\s+\S+\s+)?(run\s+)?(lint|typecheck|test(?::e2e)?|build)\b|tsc\b|vitest\b|playwright\s+test\b|biome\s+check\b)/i;
 const KNOWN_CODEX_THREAD_ITEM_TYPES = new Set<string>(CODEX_THREAD_ITEM_TYPES);
 const INSPECTOR_ONLY_CODEX_ITEM_TYPES = new Set(["threadGoal", "turnPlan"]);
+/** Compact, wire-stable detail kind codes; never renumber existing entries. */
+const DETAIL_REF_KIND_CODES = {
+  tool_group: "g",
+  action_required: "a",
+  thinking: "k",
+} as const;
+const DETAIL_REF_KINDS_BY_CODE: Record<
+  string,
+  SessionDisplayDetailLocator["kind"]
+> = {
+  g: "tool_group",
+  a: "action_required",
+  k: "thinking",
+};
 
 type QuestionCoverage = SessionQuestionPage["coverage"];
 type ToolStatus = "running" | "completed" | "failed";
@@ -60,10 +75,17 @@ interface TurnBuilder {
 export interface SessionDisplayDetailLocator {
   detailRef: string;
   turnId: string;
-  kind: "tool_group" | "action_required";
+  kind: "tool_group" | "action_required" | "thinking";
   /** One row per tool as rendered after transport-noise collapsing. */
   toolRows: string[][];
   toolUseIds: string[];
+  /**
+   * Full reasoning body as observed by this build.
+   *
+   * The lightweight page build only sees the bounded preview; the reasoning
+   * detail route rebuilds the projection from a full read to resolve it.
+   */
+  thinkingText?: string;
 }
 
 export interface DecodedSessionDisplayDetailRef {
@@ -92,6 +114,14 @@ export interface BuildSessionDisplayProjectionParams {
   pendingInputRequest?: InputRequest | null;
   /** Suppress stale orphan classification while a provider turn may be active. */
   toolsMayBeActive?: boolean;
+  /**
+   * Session provider, used to enable provider-specific rows.
+   *
+   * Reasoning rows are currently produced for Pi only: Pi drives its entire
+   * narrative through reasoning, while other providers already emit readable
+   * assistant text between tool batches.
+   */
+  provider?: string;
 }
 
 /**
@@ -111,6 +141,7 @@ export function buildSessionDisplayProjection(
   const seenQuestionIds = new Set<string>();
   const seenQuestionIdentityKeys = new Set<string>();
   const nextDetailIndexByTurn = new Map<string, number>();
+  const thinkingRowsEnabled = params.provider === "pi";
   let currentTurn: TurnBuilder | null = null;
   let preambleTurn: TurnBuilder | null = null;
   let pendingTools: ToolProjectionItem[] = [];
@@ -187,6 +218,51 @@ export function buildSessionDisplayProjection(
 
   const appendSegment = (segment: SessionDisplaySegment): void => {
     targetTurn().segments.push(segment);
+  };
+
+  /**
+   * Reasoning closes the current tool batch and becomes its own row.
+   *
+   * A detail index is taken for every reasoning row, even when the whole body
+   * already fits inline, so detail refs stay stable between the preview read
+   * that builds the page and the full read that answers detail requests.
+   */
+  const appendThinkingSegment = (
+    id: string,
+    thinking: string,
+    deferred: boolean,
+    timestamp?: string,
+  ): void => {
+    flushToolGroup();
+    const turn = targetTurn();
+    const detailRef = buildDetailRef(
+      params.sessionId,
+      params.revision,
+      turn.id,
+      "thinking",
+      takeDetailIndex(turn.id, nextDetailIndexByTurn),
+      params.detailSourceRevision,
+    );
+    const truncated =
+      deferred || thinking.length > SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH;
+    turn.segments.push({
+      type: "thinking",
+      id,
+      content: thinking.slice(0, SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH),
+      ...(truncated ? { truncated: true } : {}),
+      detailRef,
+      ...(timestamp ? { timestamp } : {}),
+    });
+    detailLocators.push({
+      detailRef,
+      turnId: turn.id,
+      kind: "thinking",
+      toolRows: [],
+      toolUseIds: [],
+      // Always carry the text this build could see: the page build only has the
+      // preview, while the detail build reads full reasoning bodies.
+      thinkingText: thinking,
+    });
   };
 
   const appendSetupNotice = (messageId: string, timestamp?: string): void => {
@@ -319,6 +395,20 @@ export function buildSessionDisplayProjection(
           content: rawBlock.text,
           ...(timestamp ? { timestamp } : {}),
         });
+        continue;
+      }
+      if (
+        thinkingRowsEnabled &&
+        rawBlock.type === "thinking" &&
+        typeof rawBlock.thinking === "string" &&
+        rawBlock.thinking.trim()
+      ) {
+        appendThinkingSegment(
+          `${messageId}:${blockIndex}`,
+          rawBlock.thinking,
+          rawBlock.deferred === true,
+          timestamp,
+        );
         continue;
       }
       if (
@@ -464,6 +554,7 @@ function markOpenLiveTail(turns: TurnBuilder[]): void {
     }
     if (
       segment.type === "assistant_text" ||
+      segment.type === "thinking" ||
       segment.type === "error" ||
       segment.type === "action_required"
     ) {
@@ -1062,7 +1153,7 @@ function buildDetailRef(
     JSON.stringify({
       v: 1,
       t: turnId,
-      k: kind === "tool_group" ? "g" : "a",
+      k: DETAIL_REF_KIND_CODES[kind],
       i: index,
       ...(sourceRevision ? { r: sourceRevision } : {}),
     }),
@@ -1090,12 +1181,16 @@ export function decodeSessionDisplayDetailRef(
     const decoded = JSON.parse(
       Buffer.from(payload, "base64url").toString("utf8"),
     ) as unknown;
+    const kind =
+      isRecord(decoded) && typeof decoded.k === "string"
+        ? DETAIL_REF_KINDS_BY_CODE[decoded.k]
+        : undefined;
     if (
       !isRecord(decoded) ||
       decoded.v !== 1 ||
       typeof decoded.t !== "string" ||
       !decoded.t ||
-      (decoded.k !== "g" && decoded.k !== "a") ||
+      !kind ||
       !Number.isSafeInteger(decoded.i) ||
       Number(decoded.i) < 0 ||
       (decoded.r !== undefined && (typeof decoded.r !== "string" || !decoded.r))
@@ -1104,7 +1199,7 @@ export function decodeSessionDisplayDetailRef(
     }
     return {
       turnId: decoded.t,
-      kind: decoded.k === "g" ? "tool_group" : "action_required",
+      kind,
       index: Number(decoded.i),
       ...(typeof decoded.r === "string" ? { sourceRevision: decoded.r } : {}),
     };

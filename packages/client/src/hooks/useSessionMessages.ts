@@ -655,7 +655,41 @@ function displayContainsMessageIdentity(
   return (
     displayOwnsClosedCodexTurn(page, message) ||
     displayContainsUserMessageIdentity(page, message) ||
-    displayContainsAssistantMessageIdentity(page, message)
+    displayContainsAssistantMessageIdentity(page, message) ||
+    displayContainsReasoningMessageIdentity(page, message)
+  );
+}
+
+/**
+ * Reasoning-only assistant messages are owned by display once it carries the
+ * matching reasoning row.
+ *
+ * Pi emits whole assistant turns as reasoning plus tool calls without readable
+ * text, so those raw rows are never closed by the assistant-boundary cut. A
+ * mid-turn display refresh would otherwise render the same reasoning twice.
+ */
+function displayContainsReasoningMessageIdentity(
+  page: SessionDisplayPage,
+  message: Message,
+): boolean {
+  if (message._displayLiveTail || message._isStreaming) return false;
+  if (isReadableAssistantBoundary(message)) return false;
+  const content = getMessageContent(message);
+  if (!Array.isArray(content)) return false;
+  const hasReasoning = content.some(
+    (block) =>
+      block?.type === "thinking" &&
+      typeof block.thinking === "string" &&
+      block.thinking.trim().length > 0,
+  );
+  if (!hasReasoning) return false;
+  const messageId = getMessageId(message);
+  return page.turns.some((turn) =>
+    turn.segments.some(
+      (segment) =>
+        segment.type === "thinking" &&
+        (segment.id === messageId || segment.id.startsWith(`${messageId}:`)),
+    ),
   );
 }
 

@@ -189,6 +189,7 @@ describe("normalizeSession", () => {
           uuid: "assistant-1",
           message: expect.objectContaining({
             content: [
+              { type: "thinking", thinking: "private reasoning" },
               { type: "text", text: "Done" },
               { type: "image", mime_type: "image/jpeg", deferred: true },
             ],
