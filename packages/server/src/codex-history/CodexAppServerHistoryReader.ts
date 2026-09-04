@@ -1123,12 +1123,42 @@ function projectThreadItem(
           completed: item.status !== "inProgress",
         },
       );
-    case "webSearch":
-      return toolMessages(base, "WebSearch", { query: item.query }, item.id, {
-        content: JSON.stringify(item.results ?? []),
-        isError: false,
-        completed: item.results !== null,
-      });
+    case "webSearch": {
+      const actionLabel = codexWebSearchActionLabel(item.action);
+      const query = item.query.trim() || actionLabel || "";
+      // Hosted `web_search_call` items never carry structured `results`
+      // (Codex maps them with `results: None`), so completion must be inferred
+      // from the end payload (query/action) instead of `results`. Only the
+      // web-search *begin* placeholder has an empty query, a null action and
+      // null results.
+      const completed =
+        item.results !== null || item.action !== null || query.length > 0;
+      return toolMessages(
+        base,
+        "WebSearch",
+        {
+          query,
+          ...(item.action ? { action: item.action } : {}),
+        },
+        item.id,
+        {
+          content:
+            item.results !== null
+              ? JSON.stringify(item.results)
+              : actionLabel
+                ? `Codex web search completed: ${actionLabel}`
+                : "Codex web search completed",
+          isError: false,
+          completed,
+          toolUseResult: {
+            query: query || "Codex web search",
+            results: item.results ?? [],
+            ...(actionLabel ? { codexActionLabel: actionLabel } : {}),
+            ...(item.action ? { codexAction: item.action } : {}),
+          },
+        },
+      );
+    }
     case "imageView": {
       if (projectionMode === "strict") {
         throw new CodexHistoryParityError();
@@ -1256,7 +1286,12 @@ function toolMessages(
   name: string,
   input: unknown,
   toolUseId: string,
-  result: { content: string; isError: boolean; completed: boolean },
+  result: {
+    content: string;
+    isError: boolean;
+    completed: boolean;
+    toolUseResult?: unknown;
+  },
 ): Message[] {
   const toolUse: Message = {
     ...base,
@@ -1280,8 +1315,42 @@ function toolMessages(
       uuid: `${base.uuid}-result`,
       type: "user",
       message: { role: "user", content: [resultBlock] },
+      ...(result.toolUseResult !== undefined
+        ? { toolUseResult: result.toolUseResult }
+        : {}),
     },
   ];
+}
+
+function codexWebSearchActionLabel(action: unknown): string | undefined {
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    !!value && typeof value === "object" && !Array.isArray(value);
+  if (!isRecord(action)) return undefined;
+  const type = typeof action.type === "string" ? action.type : undefined;
+  const first = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() ? value.trim() : undefined;
+  switch (type) {
+    case "search": {
+      const query =
+        first(action.query) ??
+        (Array.isArray(action.queries) ? first(action.queries[0]) : undefined);
+      return query ? `Search: ${query}` : "Search";
+    }
+    case "openPage":
+    case "open_page": {
+      const url = first(action.url);
+      return url ? `Open page: ${url}` : "Open page";
+    }
+    case "findInPage":
+    case "find_in_page": {
+      const target = [first(action.pattern), first(action.url)]
+        .filter(Boolean)
+        .join(" @ ");
+      return target ? `Find in page: ${target}` : "Find in page";
+    }
+    default:
+      return type && type !== "other" ? type : undefined;
+  }
 }
 
 function userInputBlocks(

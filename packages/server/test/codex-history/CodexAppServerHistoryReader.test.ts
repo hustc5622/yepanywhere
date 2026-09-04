@@ -243,6 +243,78 @@ describe("CodexAppServerHistoryReader", () => {
     }
   });
 
+  it("completes hosted web search items that carry no structured results", async () => {
+    const webSearchTurn = {
+      id: "turn-web",
+      items: [],
+      itemsView: "summary" as const,
+      status: "completed" as const,
+      error: null,
+      startedAt: 1_777_000_010,
+      completedAt: 1_777_000_020,
+      durationMs: 10_000,
+    };
+    const fake = client({
+      listTurns: vi.fn(async () => ({
+        data: [webSearchTurn],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+      listItems: vi.fn(async () => ({
+        data: [
+          {
+            turnId: "turn-web",
+            item: {
+              type: "webSearch" as const,
+              id: "ws-1",
+              query: "",
+              action: null,
+              results: null,
+            },
+          },
+          {
+            turnId: "turn-web",
+            item: {
+              type: "webSearch" as const,
+              id: "ws-2",
+              query: "https://example.com/docs",
+              action: {
+                type: "openPage" as const,
+                url: "https://example.com/docs",
+              },
+              results: null,
+            },
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+
+    const result = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 20, itemsView: "full" },
+    );
+
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    // The in-flight placeholder stays result-less, the completed hosted call
+    // gets a tool_result even though `results` is null.
+    expect(result.messages.map((message) => message.uuid)).toEqual([
+      "ws-1-turn-web",
+      "ws-2-turn-web",
+      "ws-2-turn-web-result",
+    ]);
+    expect(result.messages[2]).toMatchObject({
+      toolUseResult: {
+        codexActionLabel: "Open page: https://example.com/docs",
+      },
+    });
+  });
+
   it("hydrates all same-turn user items for the complete question directory", async () => {
     const fake = client({
       listTurns: vi.fn(async () => ({
