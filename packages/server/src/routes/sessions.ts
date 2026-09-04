@@ -125,6 +125,7 @@ import type {
 } from "../supervisor/types.js";
 import { UploadManager } from "../uploads/index.js";
 import type { EventBus } from "../watcher/index.js";
+import { conditionalJson } from "./conditional-json.js";
 import { ServerTimingRecorder } from "./server-timing.js";
 import { registerSessionDisplayRoutes } from "./session-display.js";
 
@@ -2336,7 +2337,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     } = session;
 
     applyServerTiming();
-    return c.json({
+    return conditionalJson(c, {
       session: {
         ...sessionWithoutMessages,
         ...(bridgedSession

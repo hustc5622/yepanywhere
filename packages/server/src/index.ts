@@ -102,6 +102,39 @@ import {
 // Several provider sessions can attach process-level listeners concurrently.
 process.setMaxListeners(50);
 
+/**
+ * Idle keep-alive window for HTTP connections.
+ *
+ * Node's default is 5 s, which is fine on loopback but expensive behind a
+ * tunnel. Establishing a connection through frp costs roughly two round trips
+ * (visitor -> frps, then frps -> frpc `StartWorkConn` and the work connection
+ * back), measured at ~40-70 ms against our frps hosts. With a 5 s window a user
+ * who reads one screen and then taps a session pays that again, and HTTP/1.1
+ * opens up to six connections for the first paint. A window longer than typical
+ * think time keeps those connections warm instead.
+ */
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = 70_000;
+
+/**
+ * `headersTimeout` must exceed `keepAliveTimeout`, otherwise Node can tear down
+ * a socket that is legitimately idle between keep-alive requests.
+ */
+const HTTP_HEADERS_TIMEOUT_MS = 75_000;
+
+function applyKeepAliveTuning(server: ReturnType<typeof serve>): void {
+  // `ServerType` also covers HTTP/2 servers, which do not expose these knobs.
+  const tunable = server as {
+    keepAliveTimeout?: number;
+    headersTimeout?: number;
+  };
+  if (typeof tunable.keepAliveTimeout === "number") {
+    tunable.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+  }
+  if (typeof tunable.headersTimeout === "number") {
+    tunable.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+  }
+}
+
 function isRecoverablePipeError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const value = error as { code?: unknown; message?: unknown };
@@ -1143,6 +1176,8 @@ async function startServer() {
           onReady,
         )
       : serve({ fetch: app.fetch, port, hostname }, onReady);
+
+    applyKeepAliveTuning(server);
 
     server.on("error", (error: unknown) => {
       const err = error as NodeJS.ErrnoException;
