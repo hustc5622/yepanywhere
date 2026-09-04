@@ -43,10 +43,21 @@ import {
   decodeFrameToParsedMessage,
   routeClientMessageSafely,
 } from "./ws-message-router.js";
+import { createSendQueue } from "./ws-send-queue.js";
 
 /** Progress report interval in bytes (64KB) */
 export const PROGRESS_INTERVAL = 64 * 1024;
-export const WS_JSON_COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
+/**
+ * Smallest JSON frame worth gzipping before it goes out on the socket.
+ *
+ * Aligned with the `/api/*` HTTP threshold in `app.ts`. The previous 16 KB bar
+ * left the bulk of remote traffic uncompressed: session-list refreshes,
+ * activity events and `markdown-augment` payloads (server-rendered shiki HTML)
+ * cluster in the 2–16 KB range and compress 5–8:1. Compression runs on zlib's
+ * threadpool via `gzipAsync`, so the extra frames cost a tick rather than
+ * event-loop time.
+ */
+export const WS_JSON_COMPRESSION_THRESHOLD_BYTES = 4 * 1024;
 
 const textEncoder = new TextEncoder();
 const gzipAsync = promisify(gzip);
@@ -83,6 +94,11 @@ export interface WsUploadState {
 export interface WSAdapter {
   send(data: string | ArrayBuffer | Uint8Array<ArrayBuffer>): void;
   close(code?: number, reason?: string): void;
+  /**
+   * Bytes queued in the socket's own send buffer, when the transport exposes
+   * it. Drives outbound backpressure; absent means "never congested".
+   */
+  bufferedAmount?(): number;
 }
 
 /**
@@ -142,43 +158,25 @@ export function cleanupConnectionState(_connState: ConnectionState): void {
 
 /**
  * Create a send function for a connection.
+ *
  * Uses binary JSON frames by default while preserving text-frame input support.
+ * Delivery goes through `createSendQueue`, which applies outbound backpressure
+ * and collapses superseded streaming state when the socket cannot keep up; see
+ * `ws-send-queue.ts` for why that is safe and which events qualify.
  */
 export function createSendFn(
   ws: WSAdapter,
   connState: ConnectionState,
 ): SendFn {
-  let sendQueue = Promise.resolve();
-  let sendFailed = false;
+  const queue = createSendQueue({
+    transport: ws,
+    encode: async (msg) =>
+      connState.useBinaryFrames
+        ? await encodeJsonMessageFrame(msg, connState.useCompressedJsonFrames)
+        : JSON.stringify(msg),
+  });
 
-  const sendOne = async (msg: YepMessage): Promise<void> => {
-    if (sendFailed) return;
-
-    try {
-      if (connState.useBinaryFrames) {
-        ws.send(
-          await encodeJsonMessageFrame(msg, connState.useCompressedJsonFrames),
-        );
-      } else {
-        ws.send(JSON.stringify(msg));
-      }
-    } catch (err) {
-      sendFailed = true;
-      console.warn("[WS] Failed to send message, closing socket:", err);
-      try {
-        ws.close(1011, "Send failed");
-      } catch {
-        // Socket already closing/closed
-      }
-    }
-  };
-
-  return (msg: YepMessage) => {
-    sendQueue = sendQueue.then(
-      () => sendOne(msg),
-      () => sendOne(msg),
-    );
-  };
+  return (msg: YepMessage) => queue.enqueue(msg);
 }
 
 async function encodeJsonMessageFrame(

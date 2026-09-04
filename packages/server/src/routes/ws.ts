@@ -142,6 +142,7 @@ export function createWsRoutes(
       onOpen(_evt, ws) {
         console.log("[WS] Client connected");
         // Create WSAdapter wrapper for Hono's WSContext
+        const rawSocket = ws.raw as RawWebSocket | undefined;
         wsAdapter = {
           send(data: string | ArrayBuffer | Uint8Array<ArrayBuffer>): void {
             try {
@@ -157,12 +158,19 @@ export function createWsRoutes(
               // Already closed
             }
           },
+          // Outbound backpressure needs the socket's real buffer depth. Hono's
+          // WSContext does not surface it, so read it off the underlying `ws`
+          // socket; without it the send queue treats the link as never
+          // congested.
+          bufferedAmount(): number {
+            return rawSocket?.bufferedAmount ?? 0;
+          },
         };
         // Create the send function that captures this connection's state
         send = createSendFn(wsAdapter, connState);
 
         // Start WebSocket ping every 30s for dead connection detection
-        const rawWs = ws.raw as RawWebSocket | undefined;
+        const rawWs = rawSocket;
         if (rawWs?.ping) {
           pingInterval = setInterval(() => {
             try {
