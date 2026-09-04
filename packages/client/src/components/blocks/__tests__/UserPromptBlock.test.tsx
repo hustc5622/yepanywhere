@@ -237,6 +237,47 @@ User uploaded files:
     );
   });
 
+  it("stops bare URL autolinks at CJK punctuation and prose", () => {
+    const content =
+      "线上域名是 https://api-testing.xaminim.com/，完成上线验收；备用 https://example.test/path。";
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    const links = screen.getAllByRole("link");
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "https://api-testing.xaminim.com/",
+      "https://example.test/path",
+    ]);
+    expect(links.map((link) => link.textContent)).toEqual([
+      "https://api-testing.xaminim.com/",
+      "https://example.test/path",
+    ]);
+    expect(screen.getByText(/，完成上线验收；备用/)).toBeDefined();
+  });
+
+  it("trims trailing sentence punctuation but keeps balanced parentheses", () => {
+    const content =
+      "see https://example.test/a. and https://example.test/wiki/Foo_(bar) plus (https://example.test/b)";
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    expect(
+      screen.getAllByRole("link").map((link) => link.getAttribute("href")),
+    ).toEqual([
+      "https://example.test/a",
+      "https://example.test/wiki/Foo_(bar)",
+      "https://example.test/b",
+    ]);
+  });
+
   it("opens preview modal for Codex inline input_image attachments", () => {
     const content: ContentBlock[] = [
       {

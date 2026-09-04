@@ -3,6 +3,10 @@ import { type ReactNode, memo, useState } from "react";
 import { useFetchedImage } from "../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../i18n";
 import { apiPath as resolveApiPath } from "../../lib/apiPath";
+import {
+  createLinkPattern,
+  splitTrailingUrlPunctuation,
+} from "../../lib/autolink";
 import type { ClipboardImageSource } from "../../lib/clipboard";
 import {
   type FeishuPromptInfo,
@@ -106,9 +110,14 @@ function managedUploadHref(path: string): string {
   return resolveApiPath(endpoint);
 }
 
+/**
+ * Characters that end a bare URL. Besides whitespace and markup delimiters we
+ * treat CJK/full-width characters as boundaries: Chinese prose routinely puts
+ * a full-width comma or more text right after a URL with no space in between
+ * (`https://example.com/，完成`), and a plain `[^\s]+` match would swallow it.
+ */
 function renderPromptTextWithLinks(text: string): ReactNode[] {
-  const pattern =
-    /\[([^\]\n]{1,300})\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/gi;
+  const pattern = createLinkPattern();
   const rendered: ReactNode[] = [];
   let cursor = 0;
 
@@ -121,11 +130,13 @@ function renderPromptTextWithLinks(text: string): ReactNode[] {
     let url = markdownUrl ?? match[3] ?? "";
     let trailing = "";
     if (!markdownUrl) {
-      const trailingMatch = /^(.*?)([.,;:!?，。；：！？]+)$/.exec(url);
-      if (trailingMatch) {
-        url = trailingMatch[1] ?? url;
-        trailing = trailingMatch[2] ?? "";
-      }
+      [url, trailing] = splitTrailingUrlPunctuation(url);
+    }
+
+    if (!url) {
+      rendered.push(match[0]);
+      cursor = index + match[0].length;
+      continue;
     }
 
     rendered.push(

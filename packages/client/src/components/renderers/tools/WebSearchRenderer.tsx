@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import type { ZodError } from "zod";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
+import {
+  createBareUrlPattern,
+  trimUrlTrailingPunctuation,
+} from "../../../lib/autolink";
 import { validateToolResult } from "../../../lib/validateToolResult";
 import { SchemaWarning } from "../../SchemaWarning";
 import type { ToolRenderer, WebSearchInput, WebSearchResult } from "./types";
@@ -126,7 +130,7 @@ function getRawSearchText(
 }
 
 function cleanUrl(url: string): string {
-  return url.replace(/[.,;:!?]+$/g, "");
+  return trimUrlTrailingPunctuation(url);
 }
 
 function getUrlTitle(url: string): string {
@@ -147,7 +151,7 @@ function pushUniqueLink(links: SearchLink[], link: SearchLink) {
 function extractLinksFromText(text: string): SearchLink[] {
   const links: SearchLink[] = [];
   const markdownLinkPattern = /\[([^\]]{1,200})\]\((https?:\/\/[^)\s]+)\)/g;
-  const bareUrlPattern = /https?:\/\/[^\s<>"')\]]+/g;
+  const bareUrlPattern = createBareUrlPattern();
 
   for (const match of text.matchAll(markdownLinkPattern)) {
     const title = match[1]?.trim();

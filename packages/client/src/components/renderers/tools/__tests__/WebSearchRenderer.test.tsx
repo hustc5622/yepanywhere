@@ -44,4 +44,26 @@ describe("WebSearchRenderer", () => {
       "https://www.seagate.com/products/nas-drives/ironwolf-hard-drive/",
     );
   });
+
+  it("stops extracted links at CJK punctuation and trims stray brackets", () => {
+    render(
+      <div>
+        {webSearchRenderer.renderToolResult(
+          "参考 https://example.test/docs/a，完成验收；参见（https://example.test/docs/b）和 https://en.wikipedia.org/wiki/Foo_(bar) 。",
+          false,
+          renderContext,
+          { query: "docs" },
+        )}
+      </div>,
+    );
+
+    const hrefs = screen
+      .getAllByRole("link")
+      .map((link) => (link as HTMLAnchorElement).getAttribute("href"));
+    expect(hrefs).toEqual([
+      "https://example.test/docs/a",
+      "https://example.test/docs/b",
+      "https://en.wikipedia.org/wiki/Foo_(bar)",
+    ]);
+  });
 });
