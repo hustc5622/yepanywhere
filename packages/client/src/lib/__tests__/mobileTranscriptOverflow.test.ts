@@ -38,4 +38,16 @@ describe("mobile transcript horizontal overflow", () => {
       /\.detail-panel \.diff-modal-content \.diff-content > div,[^{]*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;/s,
     );
   });
+
+  it("reflows file source lines as the docked detail panel is resized", () => {
+    expect(rendererCss).toMatch(
+      /\.detail-panel-host--docked \.file-viewer-code\s*\{[^}]*max-width:\s*100%;[^}]*overflow-x:\s*hidden;/s,
+    );
+    expect(rendererCss).toMatch(
+      /\.detail-panel-host--docked[^{]*\.file-viewer-code-highlighted[^{]*\.shiki-container[^{]*pre\.shiki\s*\{[^}]*width:\s*100%;[^}]*overflow-x:\s*hidden;[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/s,
+    );
+    expect(rendererCss).toMatch(
+      /\.detail-panel-host--docked \.code-highlighter-plain \.code-content code\s*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/s,
+    );
+  });
 });
