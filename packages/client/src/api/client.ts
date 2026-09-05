@@ -3,6 +3,7 @@ import type {
   AgentMapping,
   BrowserProfilesResponse,
   CodexMcpMode,
+  CodexServiceTier,
   ConnectionsResponse,
   ContextCompactEvent,
   ContextCumulativeUsage,
@@ -356,6 +357,8 @@ export interface SessionOptions {
   thinking?: ThinkingOption;
   /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
+  /** Initial Codex service tier; omitted preserves the provider default. */
+  serviceTier?: CodexServiceTier;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
@@ -1170,6 +1173,7 @@ export const api = {
         model: options?.model,
         thinking: options?.thinking,
         reasoningEffort: options?.reasoningEffort,
+        serviceTier: options?.serviceTier,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         codexModelProvider: options?.codexModelProvider,
@@ -1192,6 +1196,7 @@ export const api = {
         model: options?.model,
         thinking: options?.thinking,
         reasoningEffort: options?.reasoningEffort,
+        serviceTier: options?.serviceTier,
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         codexModelProvider: options?.codexModelProvider,

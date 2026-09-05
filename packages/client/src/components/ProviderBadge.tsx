@@ -1,5 +1,6 @@
 import type { LiveProviderName, ProviderName } from "@yep-anywhere/shared";
 import { resolveModelDisplayLabel } from "@yep-anywhere/shared";
+import { useOptionalI18n } from "../i18n";
 
 const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   claude: "var(--provider-claude)", // Claude orange
@@ -57,6 +58,7 @@ export function ProviderBadge({
   isThinking = false,
   className = "",
 }: ProviderBadgeProps) {
+  const i18n = useOptionalI18n();
   const color = PROVIDER_COLORS[provider as LiveProviderName] ?? "currentColor";
   const label = PROVIDER_LABELS[provider as LiveProviderName] ?? provider;
 
@@ -92,11 +94,24 @@ export function ProviderBadge({
     return normalized;
   };
 
+  const getServiceTierLabel = (): string | null => {
+    const normalized = normalizeConfigLabel(serviceTier);
+    if (provider === "codex" || provider === "codex-oss") {
+      if (normalized === "priority" || normalized === "fast") {
+        return i18n?.t("codexFastModeLabel") ?? "Fast (priority)";
+      }
+      if (normalized === "default") {
+        return i18n?.t("codexStandardModeLabel") ?? "Standard";
+      }
+    }
+    return normalized;
+  };
+
   const modelLabel = getModelLabel(model);
   const configLabel = [
     modelLabel,
     getReasoningEffortLabel(reasoningEffort),
-    normalizeConfigLabel(serviceTier),
+    getServiceTierLabel(),
   ]
     .filter((value): value is string => Boolean(value))
     .join(" · ");

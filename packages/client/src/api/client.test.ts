@@ -482,3 +482,33 @@ describe("Codex native controls", () => {
     );
   });
 });
+
+describe("Codex new-session service tier", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(["priority", "default"] as const)(
+    "sends %s in both creation flows",
+    async (serviceTier) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue({ ok: true, json: async () => ({}) });
+      vi.stubGlobal("fetch", fetchMock);
+      window.history.replaceState({}, "", "/");
+      const options = {
+        provider: "codex" as const,
+        model: "gpt-6-astra",
+        reasoningEffort: "high",
+        serviceTier,
+      };
+      await api.startSession("project-1", "hello", options);
+      await api.createSession("project-1", options);
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        "/api/projects/project-1/sessions",
+        "/api/projects/project-1/sessions/create",
+      ]);
+      for (const [, request] of fetchMock.mock.calls) {
+        expect(JSON.parse(request.body)).toMatchObject(options);
+      }
+    },
+  );
+});

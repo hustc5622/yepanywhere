@@ -395,6 +395,8 @@ interface AppServerModel {
     description?: string;
   }>;
   defaultReasoningEffort?: string;
+  serviceTiers?: Array<{ id: string }>;
+  additionalSpeedTiers?: string[];
 }
 
 interface TokenUsageSnapshot {
@@ -1826,6 +1828,11 @@ export class CodexProvider implements AgentProvider {
           })),
         defaultReasoningEffort:
           model.defaultReasoningEffort?.trim() || undefined,
+        supportsFastMode:
+          source.id === "openai" &&
+          (model.serviceTiers?.some((tier) => tier.id === "priority") ===
+            true ||
+            model.additionalSpeedTiers?.includes("fast") === true),
       });
 
       const upgradeId = model.upgrade?.trim();
@@ -3009,10 +3016,15 @@ export class CodexProvider implements AgentProvider {
                 itemsView: "notLoaded" as const,
               }
             : undefined;
+      // "default" explicitly opts out of Fast, including config/model defaults.
+      // Omission leaves the native thread tier intact on ordinary resume.
+      const serviceTier =
+        modelSource.id === "openai" ? options.serviceTier : undefined;
       const threadResumeParams: ThreadResumeParams = {
         threadId: options.resumeSessionId ?? sessionId,
         model: requestedModel,
         modelProvider: modelSource.id,
+        ...(serviceTier !== undefined ? { serviceTier } : {}),
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
@@ -3025,6 +3037,7 @@ export class CodexProvider implements AgentProvider {
       const threadStartParams: ThreadStartParams = {
         model: requestedModel,
         modelProvider: modelSource.id,
+        ...(serviceTier !== undefined ? { serviceTier } : {}),
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
@@ -3384,6 +3397,7 @@ export class CodexProvider implements AgentProvider {
           },
           model: requestedModel,
           codexModelProvider: effectiveModelProvider,
+          serviceTier: threadResult.serviceTier,
           transport: transportKind,
           credentialPresent: Boolean(
             modelSource.providerConfig?.envKey

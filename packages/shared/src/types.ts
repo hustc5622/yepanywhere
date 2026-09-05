@@ -305,6 +305,9 @@ export const ALL_PERMISSION_MODES: readonly PermissionMode[] = [
   "bypassPermissions",
 ] as const;
 
+/** Explicit Codex request tier: standard speed or Fast priority processing. */
+export type CodexServiceTier = "default" | "priority";
+
 /**
  * Codex MCP profile for app-server-backed sessions.
  * - "clear": Matches `cf -clear` profile (apps/plugins disabled, MCP disabled).
@@ -330,6 +333,8 @@ export interface NewSessionProviderDefaults {
   thinking?: ThinkingOption;
   /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
+  /** Codex Fast preference for new sessions. */
+  serviceTier?: CodexServiceTier;
   permissionMode?: PermissionMode;
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
@@ -426,6 +431,9 @@ function getLegacyNewSessionProviderDefaults(
   }
   if (defaults.reasoningEffort !== undefined) {
     providerDefaults.reasoningEffort = defaults.reasoningEffort;
+  }
+  if (defaults.serviceTier !== undefined) {
+    providerDefaults.serviceTier = defaults.serviceTier;
   }
   if (defaults.permissionMode !== undefined) {
     providerDefaults.permissionMode = defaults.permissionMode;

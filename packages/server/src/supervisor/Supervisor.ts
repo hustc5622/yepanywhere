@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   type CodexMcpMode,
+  type CodexServiceTier,
   DEFAULT_PERMISSION_MODE,
   type EffortLevel,
   type LlmGatewaySessionConfig,
@@ -81,6 +82,8 @@ export interface ModelSettings {
   effort?: EffortLevel;
   /** Exact provider reasoning effort. Currently consumed by Codex. */
   reasoningEffort?: string;
+  /** Initial Codex service tier; omitted preserves the provider default. */
+  serviceTier?: CodexServiceTier;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
@@ -477,6 +480,7 @@ export class Supervisor {
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
       reasoningEffort: modelSettings?.reasoningEffort,
+      serviceTier: modelSettings?.serviceTier,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
       codexEventAccountId: modelSettings?.codexEventAccountId,
@@ -658,6 +662,7 @@ export class Supervisor {
       thinking: modelSettings?.thinking,
       effort: modelSettings?.effort,
       reasoningEffort: modelSettings?.reasoningEffort,
+      serviceTier: modelSettings?.serviceTier,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
       codexEventAccountId: modelSettings?.codexEventAccountId,

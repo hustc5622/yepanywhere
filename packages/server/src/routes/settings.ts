@@ -310,6 +310,16 @@ function parseNewSessionProviderDefaults(
     }
   }
 
+  if (raw.serviceTier !== undefined) {
+    if (
+      (raw.serviceTier !== "default" && raw.serviceTier !== "priority") ||
+      (provider !== undefined && provider !== "codex")
+    ) {
+      return null;
+    }
+    parsed.serviceTier = raw.serviceTier;
+  }
+
   if ("permissionMode" in raw) {
     if (
       raw.permissionMode !== undefined &&

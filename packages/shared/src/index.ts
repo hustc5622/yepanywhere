@@ -129,6 +129,7 @@ export type {
   SlashCommand,
   PermissionMode,
   CodexMcpMode,
+  CodexServiceTier,
   NewSessionDefaults,
   NewSessionProviderDefaults,
   ModelOption,

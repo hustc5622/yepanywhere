@@ -339,7 +339,7 @@ function sendThread(id, threadId, cwd, options = {}) {
     },
     model: "gpt-5.5",
     modelProvider: "openai",
-    serviceTier: null,
+    serviceTier: options.serviceTier ?? process.env.CODEX_FAKE_SERVICE_TIER ?? null,
     cwd,
     reasoningEffort: null,
     initialTurnsPage: options.initialTurnsPage || null,
@@ -708,6 +708,7 @@ function handle(message) {
         })
       : null;
   sendThread(message.id, threadId, message.params.cwd, {
+    serviceTier: message.params.serviceTier,
     turns,
     initialTurnsPage,
     turnsBackwardsCursor:
@@ -735,6 +736,57 @@ process.stdin.on("data", (chunk) => {
       chmodSync(fakeCodexPath, 0o755);
       return fakeCodexPath;
     }
+
+    it.each([
+      [false, "priority"],
+      [false, "default"],
+      [false, undefined],
+      [true, "priority"],
+      [true, "default"],
+      [true, undefined],
+    ] as const)(
+      "preserves explicit or inherited service tier (resume=%s, tier=%s)",
+      async (resume, serviceTier) => {
+        const tempDir = mkdtempSync(
+          join(require("node:os").tmpdir(), "codex-service-tier-"),
+        );
+        const capturePath = join(tempDir, "capture.json");
+        vi.stubEnv("CODEX_FAKE_CAPTURE", capturePath);
+        vi.stubEnv("CODEX_FAKE_SERVICE_TIER", "priority");
+        let session:
+          | Awaited<ReturnType<CodexProvider["startSession"]>>
+          | undefined;
+        try {
+          const provider = new CodexProvider({
+            codexPath: writeFakeCodexAppServer(tempDir),
+          });
+          session = await provider.startSession({
+            cwd: tempDir,
+            resumeSessionId: resume ? "thread-existing" : undefined,
+            serviceTier,
+          });
+          const first = await session.iterator.next();
+          expect(first.value).toMatchObject({
+            type: "system",
+            subtype: "init",
+            serviceTier: serviceTier ?? "priority",
+          });
+          const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+          expect(captured.method).toBe(
+            resume ? "thread/resume" : "thread/start",
+          );
+          if (serviceTier === undefined) {
+            expect(captured.params).not.toHaveProperty("serviceTier");
+          } else {
+            expect(captured.params.serviceTier).toBe(serviceTier);
+          }
+        } finally {
+          session?.abort();
+          vi.unstubAllEnvs();
+          rmSync(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
 
     it("waits for a local app-server child to exit during shutdown", async () => {
       const tempDir = mkdtempSync(
@@ -6246,6 +6298,8 @@ describe("CodexProvider Configuration", () => {
       hidden?: boolean;
       isDefault?: boolean;
       upgrade?: string | null;
+      serviceTiers?: Array<{ id: string }>;
+      additionalSpeedTiers?: string[];
     };
     const normalize = (models: AppServerModel[]) =>
       (
@@ -6256,6 +6310,23 @@ describe("CodexProvider Configuration", () => {
           ) => Array<{ id: string }>;
         }
       ).normalizeModelList(models, { id: "openai" });
+
+    it("reads Fast capability from modern and legacy model metadata", () => {
+      const result = normalize([
+        { id: "modern", serviceTiers: [{ id: "priority" }] },
+        { id: "legacy", additionalSpeedTiers: ["fast"] },
+        { id: "standard", serviceTiers: [] },
+        { id: "unknown" },
+      ]);
+      expect(result).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "modern", supportsFastMode: true }),
+          expect.objectContaining({ id: "legacy", supportsFastMode: true }),
+          expect.objectContaining({ id: "standard", supportsFastMode: false }),
+          expect.objectContaining({ id: "unknown", supportsFastMode: false }),
+        ]),
+      );
+    });
 
     it("ranks the account default model first", () => {
       const result = normalize([

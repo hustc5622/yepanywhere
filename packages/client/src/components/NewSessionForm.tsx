@@ -1,5 +1,6 @@
 import {
   type CodexMcpMode,
+  type CodexServiceTier,
   DEFAULT_PERMISSION_MODE,
   type LiveProviderName,
   type LlmGatewayModelCapabilities,
@@ -310,6 +311,7 @@ export function NewSessionForm({
   const newSessionThemeStyle = {
     "--new-session-accent": selectedProviderAccent,
   } as CSSProperties;
+  const [codexFastMode, setCodexFastMode] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<
     string | null
@@ -446,6 +448,16 @@ export function NewSessionForm({
   const selectedModelInfo = availableModels.find(
     (model) => model.id === selectedModel,
   );
+  const showCodexFastMode =
+    selectedProvider === "codex" &&
+    (!selectedModelInfo?.modelProvider ||
+      selectedModelInfo.modelProvider === "openai");
+  const supportsCodexFastMode = selectedModelInfo?.supportsFastMode === true;
+  const serviceTierForRequest: CodexServiceTier | undefined = showCodexFastMode
+    ? codexFastMode && supportsCodexFastMode
+      ? "priority"
+      : "default"
+    : undefined;
   const selectedGatewayProtocols =
     selectedProvider === "pi"
       ? (selectedModelInfo?.supportedRequestProtocols ?? [])
@@ -709,6 +721,9 @@ export function NewSessionForm({
           savedDefaults?.permissionMode,
           provider.permissionModes,
         ),
+      );
+      setCodexFastMode(
+        providerName === "codex" && savedDefaults?.serviceTier === "priority",
       );
       setSelectedCodexMcpMode(
         providerName === "codex"
@@ -1132,6 +1147,7 @@ export function NewSessionForm({
       model: modelForRequest,
       thinking: thinkingForRequest,
       reasoningEffort: selectedReasoningEffort,
+      serviceTier: serviceTierForRequest,
       permissionMode: mode,
       codexMcpMode:
         selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
@@ -1146,6 +1162,7 @@ export function NewSessionForm({
       modelForRequest,
       selectedProvider,
       selectedReasoningEffort,
+      serviceTierForRequest,
       thinkingForRequest,
     ],
   );
@@ -1226,6 +1243,7 @@ export function NewSessionForm({
         model: modelForRequest,
         thinking,
         reasoningEffort: selectedReasoningEffort,
+        serviceTier: serviceTierForRequest,
         provider: selectedProvider ?? undefined,
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
@@ -1568,6 +1586,9 @@ export function NewSessionForm({
     savedPermissionMode === mode &&
     thinkingDefaultsMatch &&
     reasoningEffortDefaultsMatch &&
+    (serviceTierForRequest === undefined ||
+      (savedProviderDefaults?.serviceTier ?? "default") ===
+        serviceTierForRequest) &&
     codexMcpDefaultsMatch &&
     gatewayDefaultsMatch;
 
@@ -1946,18 +1967,42 @@ export function NewSessionForm({
               {modelOptions.length > 0 && (
                 <div className="new-session-config-field">
                   <h3>{t("newSessionModelTitle")}</h3>
-                  <FilterDropdown
-                    label={t("newSessionModelTitle")}
-                    options={modelOptions}
-                    selected={selectedModel ? [selectedModel] : []}
-                    onChange={handleModelSelect}
-                    accentColor={selectedProviderAccent}
-                    multiSelect={false}
-                    placeholder={t("newSessionModelPlaceholder")}
-                    selectedDescription={
-                      selectedModelCapabilitySummary ?? undefined
-                    }
-                  />
+                  <div className="new-session-model-picker">
+                    <FilterDropdown
+                      label={t("newSessionModelTitle")}
+                      options={modelOptions}
+                      selected={selectedModel ? [selectedModel] : []}
+                      onChange={handleModelSelect}
+                      accentColor={selectedProviderAccent}
+                      multiSelect={false}
+                      placeholder={t("newSessionModelPlaceholder")}
+                      selectedDescription={
+                        selectedModelCapabilitySummary ?? undefined
+                      }
+                    />
+                    {showCodexFastMode && (
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={serviceTierForRequest === "priority"}
+                        aria-label={t("codexFastModeLabel")}
+                        className="new-session-fast-toggle"
+                        disabled={isStarting || !supportsCodexFastMode}
+                        onClick={() => setCodexFastMode((enabled) => !enabled)}
+                        title={
+                          supportsCodexFastMode
+                            ? t("newSessionCodexFastDescription")
+                            : t("newSessionCodexFastUnavailable")
+                        }
+                      >
+                        <span
+                          className="new-session-fast-indicator"
+                          aria-hidden="true"
+                        />
+                        {t("codexFastModeLabel")}
+                      </button>
+                    )}
+                  </div>
                   {unavailableCodexSourceHints.length > 0 && (
                     <ul className="new-session-model-source-hints">
                       {unavailableCodexSourceHints.map((hint) => (

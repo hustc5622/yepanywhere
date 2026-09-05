@@ -117,6 +117,49 @@ describe("Settings Routes", () => {
   });
 
   describe("PUT /", () => {
+    it.each(["priority", "default"])(
+      "persists Codex service tier %s",
+      async (serviceTier) => {
+        const routes = createSettingsRoutes({
+          serverSettingsService: mockServerSettingsService,
+        });
+        const response = await routes.request("/", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            newSessionDefaults: { provider: "codex", serviceTier },
+          }),
+        });
+        expect(response.status).toBe(200);
+        expect(settings.newSessionDefaults).toMatchObject({
+          provider: "codex",
+          serviceTier,
+          byProvider: { codex: { serviceTier } },
+        });
+      },
+    );
+
+    it.each([
+      { provider: "codex", serviceTier: "fast" },
+      { provider: "codex", serviceTier: true },
+      { provider: "pi", serviceTier: "priority" },
+      { provider: "pi", byProvider: { pi: { serviceTier: "priority" } } },
+    ])(
+      "rejects invalid service tier defaults %j",
+      async (newSessionDefaults) => {
+        const routes = createSettingsRoutes({
+          serverSettingsService: mockServerSettingsService,
+        });
+        const response = await routes.request("/", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ newSessionDefaults }),
+        });
+        expect(response.status).toBe(400);
+        expect(mockServerSettingsService.updateSettings).not.toHaveBeenCalled();
+      },
+    );
+
     it("accepts Claude as the default provider", async () => {
       const routes = createSettingsRoutes({
         serverSettingsService: mockServerSettingsService,

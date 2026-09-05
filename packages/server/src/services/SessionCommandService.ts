@@ -2,6 +2,7 @@ import {
   ALL_CODEX_MCP_MODES,
   ALL_PERMISSION_MODES,
   type CodexMcpMode,
+  type CodexServiceTier,
   type LlmGatewayJsonObject,
   type LlmGatewayModelCapabilities,
   type LlmGatewayModelLimits,
@@ -201,6 +202,7 @@ export interface StartSessionBody {
   thinking?: ThinkingOption;
   /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
+  serviceTier?: CodexServiceTier;
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
@@ -228,6 +230,7 @@ export interface CreateSessionBody {
   model?: string;
   thinking?: ThinkingOption;
   reasoningEffort?: string;
+  serviceTier?: CodexServiceTier;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
   codexModelProvider?: string;
@@ -1982,6 +1985,19 @@ export class SessionCommandService {
     const provider = body.provider ?? project.provider;
     const providerFailure = this.validateRequestedProvider(provider);
     if (providerFailure) return { ok: false, result: providerFailure };
+    if (
+      body.serviceTier !== undefined &&
+      (provider !== "codex" ||
+        (body.serviceTier !== "default" && body.serviceTier !== "priority"))
+    ) {
+      return {
+        ok: false,
+        result: commandFailure(
+          "serviceTier must be default or priority for Codex",
+          400,
+        ),
+      };
+    }
     const model = resolveSessionModel(body.model, provider);
     const parsedCodexModelProvider = resolveCodexModelProviderForStart(
       provider,
@@ -2012,6 +2028,7 @@ export class SessionCommandService {
           provider,
           parsedReasoningEffort.reasoningEffort,
         ),
+        serviceTier: body.serviceTier,
         providerName: provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
         codexModelProvider: parsedCodexModelProvider.value,

@@ -1,6 +1,7 @@
 // Provider abstraction types for multi-provider support
 import type {
   CodexMcpMode,
+  CodexServiceTier,
   ContextStatusSdkPayload,
   LlmGatewaySessionConfig,
   ModelInfo,
@@ -73,6 +74,8 @@ export interface StartSessionOptions {
   effort?: import("@yep-anywhere/shared").EffortLevel;
   /** Exact provider reasoning effort / gateway model variant. */
   reasoningEffort?: string;
+  /** Initial Codex service tier; omitted preserves the provider default. */
+  serviceTier?: CodexServiceTier;
   /** Codex MCP profile. Only consumed by the Codex provider. */
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only consumed by Codex. */

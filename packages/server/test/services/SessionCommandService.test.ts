@@ -76,6 +76,79 @@ function createService(
 }
 
 describe("SessionCommandService runtime boundary", () => {
+  it.each([
+    ["start", "priority"],
+    ["start", "default"],
+    ["create", "priority"],
+    ["create", "default"],
+  ] as const)(
+    "passes %s service tier %s to runtime",
+    async (flow, serviceTier) => {
+      const projectPath = mkdtempSync(join(tmpdir(), "session-command-tier-"));
+      try {
+        const projectId = encodeProjectId(projectPath);
+        const project = {
+          id: projectId,
+          path: projectPath,
+          provider: "codex",
+        } as Project;
+        const start = vi.fn(async () => ({
+          id: "process-tier",
+          sessionId: "thread-tier",
+          provider: "codex",
+          permissionMode: "default",
+          modeVersion: 0,
+        }));
+        const service = new SessionCommandService({
+          runtimeController: {
+            startSession: start,
+            createSession: start,
+          } as unknown as RuntimeController,
+          scanner: {
+            getOrCreateProject: vi.fn(async () => project),
+          } as unknown as ProjectScanner,
+          readerFactory: () => ({}) as ISessionReader,
+          sessionInteractionService: interactionService(),
+        });
+        const result = await service[flow]({
+          projectId,
+          requireImmediate: true,
+          body: { message: "hello", provider: "codex", serviceTier },
+        });
+        expect(result).toMatchObject({ ok: true, status: 200 });
+        expect(start).toHaveBeenCalledWith(
+          expect.objectContaining({
+            modelSettings: expect.objectContaining({
+              serviceTier,
+              providerName: "codex",
+            }),
+          }),
+        );
+
+        start.mockClear();
+        for (const invalid of ["fast", true, null]) {
+          const result = await service[flow]({
+            projectId,
+            body: {
+              message: "hello",
+              provider: "codex",
+              serviceTier: invalid as "priority",
+            },
+          });
+          expect(result).toMatchObject({ ok: false, status: 400 });
+        }
+        const wrongProvider = await service[flow]({
+          projectId,
+          body: { message: "hello", provider: "pi", serviceTier },
+        });
+        expect(wrongProvider).toMatchObject({ ok: false, status: 400 });
+        expect(start).not.toHaveBeenCalled();
+      } finally {
+        rmSync(projectPath, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("starts one native Codex turn and persists lifecycle metadata", async () => {
     const projectPath = mkdtempSync(join(tmpdir(), "session-command-start-"));
     try {

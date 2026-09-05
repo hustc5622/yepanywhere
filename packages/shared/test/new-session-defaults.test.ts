@@ -13,6 +13,7 @@ describe("new session defaults", () => {
       model: "gpt-5.6-sol",
       thinking: "on:max",
       reasoningEffort: "max",
+      serviceTier: "priority",
       permissionMode: "bypassPermissions",
       codexMcpMode: "clear",
     };
@@ -26,6 +27,7 @@ describe("new session defaults", () => {
           model: "gpt-5.6-sol",
           thinking: "on:max",
           reasoningEffort: "max",
+          serviceTier: "priority",
           permissionMode: "bypassPermissions",
           codexMcpMode: "clear",
         },
@@ -42,6 +44,7 @@ describe("new session defaults", () => {
       model: "gpt-5.6-sol",
       permissionMode: "bypassPermissions",
       codexMcpMode: "full",
+      serviceTier: "default",
     });
     const llmGatewayConfig = {
       model: "claude-opus-4-8",
@@ -65,6 +68,7 @@ describe("new session defaults", () => {
       model: "gpt-5.6-sol",
       permissionMode: "bypassPermissions",
       codexMcpMode: "full",
+      serviceTier: "default",
     });
     expect(getNewSessionProviderDefaults(merged, "pi")).toEqual({
       permissionMode: "acceptEdits",
