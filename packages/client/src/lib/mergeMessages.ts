@@ -420,9 +420,23 @@ function pruneSupersededSdkSiblings(
  */
 export function mergeMessage(
   existing: Message | undefined,
-  incoming: Message,
+  incomingMessage: Message,
   incomingSource: "sdk" | "jsonl",
 ): Message {
+  // Adoption is monotonic: a late admission echo must not turn an already
+  // confirmed user prompt back into a pending bubble. Persisted input also
+  // clears the transient optimistic flag even though JSONL doesn't carry it.
+  const clearOptimistic =
+    incomingMessage.type === "user" &&
+    (incomingMessage.isOptimistic === true ||
+      existing?.isOptimistic === true) &&
+    (incomingSource === "jsonl" ||
+      existing?._source === "jsonl" ||
+      (existing?.type === "user" && existing.isOptimistic !== true));
+  const incoming = clearOptimistic
+    ? { ...incomingMessage, isOptimistic: false }
+    : incomingMessage;
+
   if (!existing) {
     return { ...incoming, _source: incomingSource };
   }

@@ -4220,6 +4220,62 @@ describe("CodexProvider Event Normalization", () => {
     return new CodexProvider();
   }
 
+  it("confirms adopted user inputs using the original client identity", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const params = {
+      threadId: "thread-1",
+      turnId: "active-turn",
+      item: {
+        type: "userMessage",
+        id: "native-user-item",
+        clientId: "client-steer",
+        content: [
+          { type: "text", text: "Follow up", text_elements: [] },
+          { type: "localImage", path: "/tmp/attachment.png" },
+        ],
+      },
+    };
+    for (const method of ["item/started", "item/completed"]) {
+      const messages = provider.convertNotificationToSDKMessages(
+        { method, params },
+        "thread-1",
+        new Map(),
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        type: "user",
+        uuid: "client-steer",
+        clientUserMessageId: "client-steer",
+        codexCorrelationKey: "codex:user-message:client-steer",
+        turnId: "active-turn",
+        isOptimistic: false,
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "Follow up" },
+            { type: "input_image", file_path: "/tmp/attachment.png" },
+          ],
+        },
+      });
+    }
+    expect(
+      provider.convertNotificationToSDKMessages(
+        {
+          method: "item/completed",
+          params: { ...params, item: { ...params.item, clientId: null } },
+        },
+        "thread-1",
+        new Map(),
+      ),
+    ).toEqual([]);
+  });
+
   it("should have correct provider interface", () => {
     const provider = createTestProvider();
 

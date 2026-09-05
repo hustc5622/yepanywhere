@@ -82,6 +82,39 @@ describe("getMessageContent", () => {
 });
 
 describe("mergeMessage", () => {
+  it("clears pending state when the persisted prompt omits transient flags", () => {
+    const pending: Message = {
+      uuid: "queued-user",
+      type: "user",
+      isOptimistic: true,
+      _source: "sdk",
+      message: { role: "user", content: "follow up" },
+    };
+    const persisted = mergeMessage(
+      pending,
+      { uuid: pending.uuid, type: "user", message: pending.message },
+      "jsonl",
+    );
+    expect(persisted.isOptimistic).toBe(false);
+    expect(mergeMessage(persisted, pending, "sdk").isOptimistic).toBe(false);
+  });
+
+  it("does not regress adoption when an optimistic echo arrives late", () => {
+    const adopted: Message = {
+      uuid: "steered-user",
+      type: "user",
+      isOptimistic: false,
+      _source: "sdk",
+      message: { role: "user", content: "follow up" },
+    };
+    const result = mergeMessage(
+      adopted,
+      { ...adopted, isOptimistic: true },
+      "sdk",
+    );
+    expect(result.isOptimistic).toBe(false);
+  });
+
   it("returns incoming with source tag when no existing", () => {
     const incoming: Message = { id: "1", content: "hello" };
     const result = mergeMessage(undefined, incoming, "sdk");

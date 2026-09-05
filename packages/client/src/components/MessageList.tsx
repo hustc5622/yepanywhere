@@ -990,7 +990,8 @@ export const MessageList = memo(function MessageList({
               {row.pending.content}
             </div>
             <div className="pending-message-status">
-              {row.pending.status || "Sending..."}
+              {row.pending.status ||
+                (i18n?.t("userPromptSending") ?? "Sending...")}
             </div>
           </div>
         );
@@ -1004,8 +1005,11 @@ export const MessageList = memo(function MessageList({
             <div className="deferred-message-footer">
               <span className="deferred-message-status">
                 {row.index === 0
-                  ? "Queued (next)"
-                  : `Queued (#${row.index + 1})`}
+                  ? (i18n?.t("userPromptQueuedNext") ??
+                    "Queued · after this turn")
+                  : (i18n?.t("userPromptQueuedPosition", {
+                      position: row.index + 1,
+                    }) ?? `Queued (#${row.index + 1})`)}
               </span>
               {row.deferred.tempId && onCancelDeferred && (
                 <button
@@ -1014,7 +1018,9 @@ export const MessageList = memo(function MessageList({
                   onClick={() =>
                     onCancelDeferred(row.deferred.tempId as string)
                   }
-                  aria-label="Cancel queued message"
+                  aria-label={
+                    i18n?.t("userPromptCancelQueued") ?? "Cancel queued message"
+                  }
                 >
                   ×
                 </button>

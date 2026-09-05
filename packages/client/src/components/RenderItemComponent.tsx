@@ -230,6 +230,7 @@ export const RenderItemComponent = memo(function RenderItemComponent({
         return (
           <UserPromptBlock
             content={item.content}
+            isPending={src?.isOptimistic === true && src?._source !== "jsonl"}
             timestamp={src?.timestamp}
             contextBefore={src?.contextBefore}
             branch={src?.branch}

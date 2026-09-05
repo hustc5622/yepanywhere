@@ -3805,8 +3805,13 @@ a.sidebar-nav-item {
   align-items: flex-end;
 }
 
-.pending-message-bubble {
-  opacity: 0.7;
+.pending-message-bubble,
+.deferred-message-bubble,
+.user-prompt-awaiting .message-user-prompt {
+  background: color-mix(in srgb, var(--bg-user-message) 35%, transparent);
+  outline: 1px dashed var(--border-color);
+  outline-offset: -1px;
+  opacity: 0.65;
 }
 
 .pending-message-status {
@@ -4916,7 +4921,8 @@ a.sidebar-nav-item {
   opacity: 0.85;
 }
 
-.send-button:disabled {
+.send-button:disabled,
+.queue-button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
@@ -4963,19 +4969,28 @@ a.sidebar-nav-item {
   color: white;
 }
 
-.queue-button:hover {
+.queue-button:hover:not(:disabled) {
   opacity: 0.85;
+}
+
+.message-submit-choice {
+  width: auto;
+  gap: var(--space-1);
+  padding: 0 var(--space-3);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.message-submit-choice:focus-visible {
+  outline: 2px solid var(--focus-border, var(--app-yep-green));
+  outline-offset: 2px;
 }
 
 /* Deferred messages - queued server-side */
 .deferred-message {
   margin-bottom: var(--space-3);
-}
-
-.deferred-message-bubble {
-  opacity: 0.7;
-  border-left: 3px solid var(--attention-color);
-  padding-left: var(--space-2);
 }
 
 .deferred-message-footer {
@@ -5035,6 +5050,22 @@ a.sidebar-nav-item {
   .message-input-left > button:not(.mode-button),
   .message-input-left .slash-command-container {
     flex-shrink: 0;
+  }
+  .message-input-toolbar-send-options {
+    flex-wrap: wrap;
+  }
+  .message-input-toolbar-send-options .message-input-left {
+    flex-basis: 100%;
+  }
+  .message-input-toolbar-send-options .message-input-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .message-input-toolbar-send-options .context-usage-indicator {
+    margin-right: auto;
+  }
+  .message-input-toolbar-send-options .message-submit-choice {
+    min-height: 40px;
   }
 }
 

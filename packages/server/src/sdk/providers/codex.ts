@@ -10,6 +10,7 @@ import { type ChildProcess, exec, spawn } from "node:child_process";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type {
+  AppContentBlock,
   CodexRetryStatus,
   ModelInfo,
   ProviderGoalAction,
@@ -3556,7 +3557,8 @@ export class CodexProvider implements AgentProvider {
         runtimeState.activeTurnId = activeTurnId;
         // Publish the provider-accepted echo only after turn/start returns the
         // authoritative turn identity. Process separately publishes the
-        // optimistic admission echo with the same UUID.
+        // optimistic admission echo with the same UUID. A resumed active turn
+        // uses steer, so its echo remains pending until userMessage arrives.
         const userMessage = withCodexTimestamp({
           type: "user",
           uuid: message.uuid,
@@ -3566,7 +3568,7 @@ export class CodexProvider implements AgentProvider {
           ...codexUserMessageIdentity(message.uuid),
           turnId: activeTurnId,
           codexTurnId: activeTurnId,
-          isOptimistic: false,
+          isOptimistic: sourceEvent === "turn/steer",
           message: {
             role: "user",
             content: publicPrompt,
@@ -4664,6 +4666,44 @@ export class CodexProvider implements AgentProvider {
             ? this.asItemStartedNotification(notification.params)
             : this.asItemCompletedNotification(notification.params);
         if (!params) return [];
+
+        // A steer response only admits input to Codex's pending queue. The
+        // userMessage lifecycle is emitted when that input enters the turn's
+        // history. Echo its client identity to confirm the optimistic bubble.
+        if (params.item.type === "userMessage") {
+          const identity = codexUserMessageIdentity(params.item.clientId);
+          // Inputs from older clients without a correlation id remain owned
+          // by history hydration; do not add an unmatchable second prompt.
+          if (!identity) return [];
+          return [
+            withCodexTimestamp({
+              type: "user",
+              uuid: identity.clientUserMessageId,
+              session_id: sessionId,
+              ...identity,
+              turnId: params.turnId,
+              codexTurnId: params.turnId,
+              isOptimistic: false,
+              message: {
+                role: "user",
+                content: params.item.content.flatMap<AppContentBlock>(
+                  (input) => {
+                    switch (input.type) {
+                      case "text":
+                        return [{ type: "text", text: input.text }];
+                      case "image":
+                        return [{ type: "input_image", image_url: input.url }];
+                      case "localImage":
+                        return [{ type: "input_image", file_path: input.path }];
+                      default:
+                        return [];
+                    }
+                  },
+                ),
+              },
+            } as SDKMessage),
+          ];
+        }
 
         const normalized = this.normalizeThreadItem(params.item);
         if (!normalized) {

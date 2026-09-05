@@ -49,7 +49,7 @@ function typeInTextarea(textarea: HTMLTextAreaElement, value: string) {
   fireEvent.keyUp(textarea);
 }
 
-describe("MessageInput command completion", () => {
+describe("MessageInput", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.stubGlobal("matchMedia", () => ({
@@ -67,6 +67,110 @@ describe("MessageInput command completion", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+  });
+
+  it.each(["Queue", "Insert now"])(
+    "routes the %s button to its own submission callback",
+    (choice) => {
+      const onQueue = vi.fn();
+      const onStop = vi.fn();
+      const { textarea, onSend } = renderMessageInput({
+        isRunning: true,
+        isThinking: true,
+        onQueue,
+        onStop,
+      });
+      const queueButton = screen.getByRole("button", {
+        name: "Queue",
+      }) as HTMLButtonElement;
+      const insertButton = screen.getByRole("button", {
+        name: "Insert now",
+      }) as HTMLButtonElement;
+      expect(queueButton.disabled).toBe(true);
+      expect(insertButton.disabled).toBe(true);
+
+      typeInTextarea(textarea, "Follow up");
+      expect(queueButton.disabled).toBe(false);
+      expect(insertButton.disabled).toBe(false);
+      expect(screen.getByRole("button", { name: "Stop" })).toBeDefined();
+      fireEvent.click(screen.getByRole("button", { name: choice }));
+      expect(choice === "Queue" ? onQueue : onSend).toHaveBeenCalledWith(
+        "Follow up",
+      );
+      expect(choice === "Queue" ? onSend : onQueue).not.toHaveBeenCalled();
+      expect(onStop).not.toHaveBeenCalled();
+      expect(textarea.value).toBe("");
+      expect(queueButton.disabled).toBe(true);
+      expect(insertButton.disabled).toBe(true);
+    },
+  );
+
+  it("keeps Enter for direct insertion and Ctrl+Enter for the deferred queue", () => {
+    const onQueue = vi.fn();
+    const { textarea, onSend } = renderMessageInput({
+      isRunning: true,
+      isThinking: true,
+      onQueue,
+    });
+    typeInTextarea(textarea, "Next turn");
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(onQueue).toHaveBeenCalledWith("Next turn");
+    expect(onSend).not.toHaveBeenCalled();
+
+    typeInTextarea(textarea, "Current turn");
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("Current turn");
+    expect(onQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    "honors disabled=%s for attachment-only submissions",
+    (disabled) => {
+      const onQueue = vi.fn();
+      const { onSend } = renderMessageInput({
+        isRunning: true,
+        isThinking: true,
+        onQueue,
+        disabled,
+        attachments: [
+          {
+            id: "attachment-1",
+            name: "attachment-1_image.png",
+            originalName: "image.png",
+            mimeType: "image/png",
+            size: 1024,
+            path: "/tmp/image.png",
+          },
+        ],
+      });
+      for (const name of ["Queue", "Insert now"]) {
+        const button = screen.getByRole("button", {
+          name,
+        }) as HTMLButtonElement;
+        expect(button.disabled).toBe(disabled);
+        fireEvent.click(button);
+      }
+      expect(onQueue).toHaveBeenCalledTimes(disabled ? 0 : 1);
+      expect(onSend).toHaveBeenCalledTimes(disabled ? 0 : 1);
+    },
+  );
+
+  it("keeps ordinary Send when the session has no active turn", () => {
+    renderMessageInput();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Queue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Insert now" })).toBeNull();
+  });
+
+  it("offers both send choices with visible Chinese labels", async () => {
+    localStorage.setItem("yep-anywhere-locale", "zh-CN");
+    renderMessageInput({ isRunning: true, isThinking: true, onQueue: vi.fn() });
+    expect(
+      (await screen.findByRole("button", { name: "排队" })).textContent,
+    ).toBe("排队");
+    expect(
+      (await screen.findByRole("button", { name: "直接插入" })).textContent,
+    ).toContain("直接插入");
   });
 
   it("shows and inserts Claude slash commands only for '/' tokens", () => {

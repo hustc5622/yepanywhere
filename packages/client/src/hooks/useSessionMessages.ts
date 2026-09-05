@@ -644,6 +644,18 @@ function displayContainsUserMessageIdentity(
   return page.turns.some((turn) => {
     const question = turn.question;
     if (!question?.timestamp) return false;
+    // Two distinct submissions can have the same text within this window.
+    // Explicit identities take precedence over the legacy text fallback.
+    if (
+      (clientUserMessageId &&
+        question.clientUserMessageId &&
+        question.clientUserMessageId !== clientUserMessageId) ||
+      (codexCorrelationKey &&
+        question.codexCorrelationKey &&
+        question.codexCorrelationKey !== codexCorrelationKey)
+    ) {
+      return false;
+    }
     const questionTimestampMs = Date.parse(question.timestamp);
     if (!Number.isFinite(questionTimestampMs)) return false;
     if (
@@ -708,9 +720,13 @@ function displayContainsMessageIdentity(
   page: SessionDisplayPage,
   message: Message,
 ): boolean {
+  // A turn can finish while a newly steered prompt is still pending. Only
+  // the matching question proves that display already owns that input.
+  if (isRealUserPromptMessage(message)) {
+    return displayContainsUserMessageIdentity(page, message);
+  }
   return (
     displayOwnsClosedCodexTurn(page, message) ||
-    displayContainsUserMessageIdentity(page, message) ||
     displayContainsAssistantMessageIdentity(page, message) ||
     displayContainsReasoningMessageIdentity(page, message)
   );
@@ -1749,7 +1765,13 @@ export function useSessionMessages(
             }
           }
           if (boundaryIndex < 0) return;
-          const remaining = currentMessages.slice(boundaryIndex + 1);
+          const remaining = currentMessages.filter(
+            (message, index) =>
+              index > boundaryIndex ||
+              (message.isOptimistic === true &&
+                isRealUserPromptMessage(message) &&
+                !displayContainsUserMessageIdentity(page, message)),
+          );
           const nextLiveTail = findDisplayLiveTail(page);
           displayPageRef.current = page;
           setDisplayPage(page);

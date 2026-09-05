@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
+import { mergeStreamMessage } from "../../lib/mergeMessages";
 import type { Message } from "../../types";
 import type { RenderItem } from "../../types/renderItems";
 import { RenderItemComponent } from "../RenderItemComponent";
@@ -65,6 +66,88 @@ describe("RenderItemComponent edit availability", () => {
     );
 
     expect(screen.queryByRole("button", { name: /edit/i })).toBeNull();
+  });
+});
+
+describe("RenderItemComponent pending input", () => {
+  afterEach(() => {
+    cleanup();
+    window.localStorage.clear();
+  });
+
+  it("keeps the same bubble while a steered prompt becomes adopted", () => {
+    const pending: Message = {
+      uuid: "client-steer",
+      type: "user",
+      _source: "sdk",
+      isOptimistic: true,
+      codexTurnId: "active-turn",
+      message: { role: "user", content: "Please check the latest source" },
+    };
+    const view = (message: Message) => (
+      <I18nProvider>
+        <RenderItemComponent
+          item={promptItem(message)}
+          isStreaming={false}
+          thinkingExpanded={false}
+          toggleThinkingExpanded={() => {}}
+          sessionProvider="codex"
+        />
+      </I18nProvider>
+    );
+    const { container, rerender } = render(view(pending));
+    const bubble = container.querySelector(".message-user-prompt");
+    expect(bubble?.closest(".user-prompt-awaiting")).not.toBeNull();
+    expect(screen.getByRole("status").textContent).toBe(
+      "Waiting to be picked up",
+    );
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeDefined();
+
+    const adopted = mergeStreamMessage([pending], {
+      ...pending,
+      isOptimistic: false,
+    }).messages[0];
+    if (!adopted) throw new Error("Missing adopted prompt");
+    rerender(view(adopted));
+    expect(container.querySelector(".message-user-prompt")).toBe(bubble);
+    expect(container.querySelector(".user-prompt-awaiting")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("shows pending status for image-only messages in Chinese", async () => {
+    window.localStorage.setItem("yep-anywhere-locale", "zh-CN");
+    renderPrompt(
+      {
+        uuid: "image-steer",
+        type: "user",
+        isOptimistic: true,
+        message: {
+          role: "user",
+          content: [
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+      },
+      "codex",
+    );
+    expect(await screen.findByText("等待采用")).toBeDefined();
+    expect(
+      document.querySelector(".user-prompt-awaiting .uploaded-file"),
+    ).not.toBeNull();
+  });
+
+  it("treats a persisted prompt as adopted even with a stale optimistic flag", () => {
+    renderPrompt(
+      {
+        uuid: "persisted-user",
+        type: "user",
+        _source: "jsonl",
+        isOptimistic: true,
+        message: { role: "user", content: "Already in history" },
+      },
+      "codex",
+    );
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });
 

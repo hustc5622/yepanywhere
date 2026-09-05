@@ -954,6 +954,97 @@ describe("useSessionMessages lightweight display history", () => {
     expect(mockGetSessionDisplay).toHaveBeenCalledTimes(2);
   });
 
+  it("preserves a pending steer across a display flush until its own question is persisted", async () => {
+    const session = codexSession("2026-09-01T00:00:00.000Z", [], {
+      ownership: { owner: "self", processId: "process-1" },
+      activity: "in-turn",
+    });
+    mockGetSessionMetadata.mockResolvedValue({
+      session,
+      ownership: session.ownership,
+    });
+    const question = {
+      messageId: "first-user",
+      clientUserMessageId: "first-client",
+      content: "Check again",
+      timestamp: "2026-09-01T00:00:00.000Z",
+    };
+    mockGetSessionDisplay
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        revision: "active",
+        turns: [{ id: "turn:turn-1", question, segments: [] }],
+      })
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        revision: "closed",
+        turns: [
+          {
+            id: "turn:turn-1",
+            question,
+            segments: [
+              {
+                type: "assistant_text",
+                id: "persisted-final",
+                codexCorrelationKey: "codex:turn-1:agent-message:final",
+                phase: "final",
+                content: "Done.",
+              },
+            ],
+          },
+        ],
+      });
+    mockGetSessionQuestions.mockResolvedValue({
+      questions: [],
+      coverage: "complete",
+    });
+    const { result } = renderHook(() =>
+      useSessionMessages({
+        projectId: "project-1",
+        sessionId: "session-1",
+        preferDisplayHistory: true,
+        displayHistoryLiveOwned: true,
+      }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const pending = message("second-client", {
+      uuid: "second-client",
+      type: "user",
+      isOptimistic: true,
+      _source: "sdk",
+      clientUserMessageId: "second-client",
+      codexTurnId: "turn-1",
+      timestamp: "2026-09-01T00:00:01.000Z",
+      message: { role: "user", content: "Check again" },
+    });
+    act(() => {
+      result.current.handleStreamMessageEvent(pending);
+      result.current.handleStreamMessageEvent(
+        message("live-final", {
+          type: "assistant",
+          codexCorrelationKey: "codex:turn-1:agent-message:final",
+          message: { role: "assistant", content: "Done." },
+        }),
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.displayPage?.revision).toBe("closed"),
+    );
+    expect(result.current.messages).toEqual([
+      expect.objectContaining({ uuid: "second-client", isOptimistic: true }),
+    ]);
+
+    act(() => {
+      result.current.handleStreamMessageEvent({
+        ...pending,
+        isOptimistic: false,
+      });
+    });
+    expect(result.current.messages).toEqual([
+      expect.objectContaining({ uuid: "second-client", isOptimistic: false }),
+    ]);
+  });
+
   it("keeps prompts sent after the question snapshot in the question index", async () => {
     const session = codexSession("2026-09-01T00:00:00.000Z", [], {
       ownership: { owner: "self", processId: "process-1" },

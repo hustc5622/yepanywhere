@@ -526,6 +526,64 @@ describe("Process", () => {
       await process.abort();
     });
 
+    it("keeps an early adoption echo confirmed when the steer RPC resolves later", async () => {
+      let emitUser: ((message: SDKMessage) => void) | undefined;
+      let finish: (() => void) | undefined;
+      async function* iterator(): AsyncGenerator<SDKMessage> {
+        yield await new Promise<SDKMessage>((resolve) => {
+          emitUser = resolve;
+        });
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      }
+      const process = new Process(iterator(), {
+        projectPath: "/test",
+        projectId: "proj-1",
+        sessionId: "sess-1",
+        provider: "codex",
+        queue: new MessageQueue(),
+        steerFn: async (message) => {
+          await vi.waitFor(() => expect(emitUser).toBeTypeOf("function"));
+          emitUser?.({
+            type: "user",
+            uuid: message.uuid,
+            turnId: "active-turn",
+            isOptimistic: false,
+            message: { role: "user", content: "provider-only expansion" },
+          });
+          await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+          return { accepted: true, turnId: "active-turn" };
+        },
+      });
+      const users: SDKMessage[] = [];
+      process.subscribe((event) => {
+        if (event.type === "message" && event.message.type === "user")
+          users.push(event.message);
+      });
+      try {
+        await expect(
+          process.queueMessage({
+            text: "Public follow up",
+            tempId: "temp-early",
+          }),
+        ).resolves.toMatchObject({ success: true });
+        expect(users).toHaveLength(1);
+        expect(users[0]).toMatchObject({
+          isOptimistic: false,
+          message: { content: "Public follow up" },
+        });
+        expect(
+          process
+            .getMessageHistory()
+            .filter((message) => message.type === "user"),
+        ).toEqual(users);
+      } finally {
+        finish?.();
+        await process.abort();
+      }
+    });
+
     it("rejects a steer fallback when the process terminates in flight", async () => {
       let resolveSteer: (accepted: boolean) => void;
       const iterator: AsyncIterator<SDKMessage> = {
@@ -1848,82 +1906,85 @@ describe("Process", () => {
       expect(publicProjection).toContain("/private/uploads/report.pdf");
     });
 
-    it("replaces a provider echo with the UUID-matched public prompt", async () => {
-      let emitProviderEcho: ((message: SDKMessage) => void) | undefined;
-      async function* providerIterator(): AsyncIterator<SDKMessage> {
-        yield { type: "system", subtype: "init", session_id: "sess-echo" };
-        const echo = await new Promise<SDKMessage>((resolve) => {
-          emitProviderEcho = resolve;
+    it.each([true, false])(
+      "preserves the public prompt and explicit pending state %s in replay",
+      async (isOptimistic) => {
+        let emitProviderEcho: ((message: SDKMessage) => void) | undefined;
+        async function* providerIterator(): AsyncIterator<SDKMessage> {
+          yield { type: "system", subtype: "init", session_id: "sess-echo" };
+          const echo = await new Promise<SDKMessage>((resolve) => {
+            emitProviderEcho = resolve;
+          });
+          yield echo;
+        }
+        const process = new Process(providerIterator(), {
+          projectPath: "/test",
+          projectId: "proj-1",
+          sessionId: "sess-echo",
+          idleTimeoutMs: 100,
+          queue: new MessageQueue(),
         });
-        yield echo;
-      }
-      const process = new Process(providerIterator(), {
-        projectPath: "/test",
-        projectId: "proj-1",
-        sessionId: "sess-echo",
-        idleTimeoutMs: 100,
-        queue: new MessageQueue(),
-      });
-      const emitted: SDKMessage[] = [];
-      process.subscribe((event) => {
-        if (event.type === "message") emitted.push(event.message);
-      });
+        const emitted: SDKMessage[] = [];
+        process.subscribe((event) => {
+          if (event.type === "message") emitted.push(event.message);
+        });
 
-      await process.queueMessage({
-        text: "Inspect",
-        attachments: [
-          {
-            id: "echo-file",
-            originalName: "echo.pdf",
-            size: 1024,
-            mimeType: "application/pdf",
-            path: "/private/provider-only/echo.pdf",
+        await process.queueMessage({
+          text: "Inspect",
+          attachments: [
+            {
+              id: "echo-file",
+              originalName: "echo.pdf",
+              size: 1024,
+              mimeType: "application/pdf",
+              path: "/private/provider-only/echo.pdf",
+            },
+          ],
+        });
+        const optimistic = emitted.find((message) => message.type === "user");
+        if (!optimistic?.uuid) throw new Error("expected optimistic user UUID");
+        await vi.waitFor(() => expect(emitProviderEcho).toBeTypeOf("function"));
+        emitProviderEcho?.({
+          type: "user",
+          uuid: optimistic.uuid,
+          clientUserMessageId: optimistic.uuid,
+          turnId: "turn-echo",
+          codexTurnId: "turn-echo",
+          isOptimistic,
+          message: {
+            role: "user",
+            content:
+              "Inspect\n\nUser uploaded files:\n- echo.pdf (1.0 KB, application/pdf): /private/provider-only/echo.pdf",
           },
-        ],
-      });
-      const optimistic = emitted.find((message) => message.type === "user");
-      if (!optimistic?.uuid) throw new Error("expected optimistic user UUID");
-      await vi.waitFor(() => expect(emitProviderEcho).toBeTypeOf("function"));
-      emitProviderEcho?.({
-        type: "user",
-        uuid: optimistic.uuid,
-        clientUserMessageId: optimistic.uuid,
-        turnId: "turn-echo",
-        codexTurnId: "turn-echo",
-        isOptimistic: false,
-        message: {
-          role: "user",
-          content:
-            "Inspect\n\nUser uploaded files:\n- echo.pdf (1.0 KB, application/pdf): /private/provider-only/echo.pdf",
-        },
-      });
-      await vi.waitFor(() => {
-        expect(
-          emitted.filter((message) => message.type === "user"),
-        ).toHaveLength(2);
-      });
+        });
+        await vi.waitFor(() => {
+          expect(
+            emitted.filter((message) => message.type === "user"),
+          ).toHaveLength(2);
+        });
 
-      expect(JSON.stringify(emitted)).toContain("/private/provider-only");
-      expect(JSON.stringify(process.getMessageHistory())).toContain(
-        "/private/provider-only",
-      );
-      expect(emitted.at(-1)?.message?.content).toContain(
-        "/private/provider-only/echo.pdf",
-      );
-      const replayedUser = process
-        .getMessageHistory()
-        .find((message) => message.type === "user");
-      expect(replayedUser).toMatchObject({
-        uuid: optimistic.uuid,
-        clientUserMessageId: optimistic.uuid,
-        turnId: "turn-echo",
-        codexTurnId: "turn-echo",
-        isOptimistic: false,
-        message: {
-          content: expect.stringContaining("/private/provider-only/echo.pdf"),
-        },
-      });
-    });
+        expect(JSON.stringify(emitted)).toContain("/private/provider-only");
+        expect(JSON.stringify(process.getMessageHistory())).toContain(
+          "/private/provider-only",
+        );
+        expect(emitted.at(-1)?.message?.content).toContain(
+          "/private/provider-only/echo.pdf",
+        );
+        const replayedUser = process
+          .getMessageHistory()
+          .find((message) => message.type === "user");
+        expect(replayedUser).toMatchObject({
+          uuid: optimistic.uuid,
+          clientUserMessageId: optimistic.uuid,
+          turnId: "turn-echo",
+          codexTurnId: "turn-echo",
+          isOptimistic,
+          message: {
+            content: expect.stringContaining("/private/provider-only/echo.pdf"),
+          },
+        });
+      },
+    );
 
     it("keeps structured Codex paths out of public history and SSE", async () => {
       const iterator = createMockIterator([

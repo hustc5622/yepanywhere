@@ -1299,6 +1299,13 @@ export class Process {
     // Create user message with UUID - this UUID will be used by both SSE and SDK
     const uuid = randomUUID();
     const messageWithUuid = { ...message, uuid };
+    // A provider can emit its adoption event before the steer RPC resolves.
+    // Register the public projection first so that early echo keeps attachments
+    // and never exposes provider-only prompt expansion.
+    this.rememberPublicUserPrompt(
+      uuid,
+      buildUserPromptProjection(messageWithUuid).publicPrompt,
+    );
 
     if (this.messageQueue) {
       // If provider supports in-turn steering, prefer that over queue-after-turn behavior.
@@ -1374,6 +1381,11 @@ export class Process {
     message: UserMessage & { uuid: string },
     turnId?: string,
   ): void {
+    const existing =
+      this.currentBucket.find((item) => item.uuid === message.uuid) ??
+      this.previousBucket.find((item) => item.uuid === message.uuid);
+    if (existing && existing.isOptimistic !== true) return;
+
     const content = buildUserPromptProjection(message).publicPrompt;
     this.rememberPublicUserPrompt(message.uuid, content);
     const sdkMessage = this.withTimestamp({
@@ -2120,11 +2132,9 @@ export class Process {
                   message.clientUserMessageId ?? optimistic.clientUserMessageId,
                 message: message.message ?? optimistic.message,
                 isOptimistic:
-                  message.turnId ||
-                  message.codexTurnId ||
-                  message.supersedesMessageId
+                  optimistic.isOptimistic === false
                     ? false
-                    : (message.isOptimistic ?? optimistic.isOptimistic),
+                    : (message.isOptimistic ?? false),
               } as TimestampedSDKMessage;
             }
           } else {

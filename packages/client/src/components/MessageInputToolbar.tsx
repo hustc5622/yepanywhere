@@ -105,6 +105,7 @@ export function MessageInputToolbar({
   const { t } = useI18n();
   const { thinkingMode, cycleThinkingMode, thinkingLevel } = useModelSettings();
   const [isContextModalOpen, setIsContextModalOpen] = useState(false);
+  const showStop = isRunning && onStop && isThinking;
   const visibleCommandButtons =
     commandButtons?.filter((button) => button.showButton) ??
     (showCommandButton
@@ -119,7 +120,9 @@ export function MessageInputToolbar({
       : []);
 
   return (
-    <div className="message-input-toolbar">
+    <div
+      className={`message-input-toolbar${onQueue ? " message-input-toolbar-send-options" : ""}`}
+    >
       <div className="message-input-left">
         {onModeChange && supportsPermissionMode && (
           <ModeSelector
@@ -262,12 +265,13 @@ export function MessageInputToolbar({
           }
           ariaLabel={t("contextBreakdownTitle")}
         />
-        {/* Queue button - shown when agent is running and there's content to queue */}
-        {onQueue && canSend && (
+        {/* Keep both submission choices visible while the agent is running. */}
+        {onQueue && (
           <button
             type="button"
             onClick={onQueue}
-            className="queue-button"
+            disabled={disabled || !canSend}
+            className="queue-button message-submit-choice"
             title={t("toolbarQueueTitle")}
             aria-label={t("toolbarQueueLabel")}
           >
@@ -289,29 +293,35 @@ export function MessageInputToolbar({
               <line x1="3" y1="12" x2="3.01" y2="12" />
               <line x1="3" y1="18" x2="3.01" y2="18" />
             </svg>
+            <span>{t("toolbarQueueLabel")}</span>
           </button>
         )}
-        {/* Show stop button when thinking and nothing to send, otherwise show send */}
-        {isRunning && onStop && isThinking && !canSend ? (
-          <button
-            type="button"
-            onClick={onStop}
-            className="stop-button"
-            aria-label={t("toolbarStop")}
-          >
-            <span className="stop-icon" />
-          </button>
-        ) : onSend ? (
+        {onSend && (onQueue || !showStop || canSend) && (
           <button
             type="button"
             onClick={onSend}
             disabled={disabled || !canSend}
-            className="send-button"
-            aria-label={t("toolbarSend")}
+            className={`send-button${onQueue ? " message-submit-choice" : ""}`}
+            title={onQueue ? t("toolbarInsertTitle") : undefined}
+            aria-label={onQueue ? t("toolbarInsertLabel") : t("toolbarSend")}
           >
-            <span className="send-icon">↑</span>
+            <span className="send-icon" aria-hidden="true">
+              ↑
+            </span>
+            {onQueue && <span>{t("toolbarInsertLabel")}</span>}
           </button>
-        ) : null}
+        )}
+        {showStop && (onQueue || !canSend) && (
+          <button
+            type="button"
+            onClick={onStop}
+            className="stop-button"
+            title={t("toolbarStop")}
+            aria-label={t("toolbarStop")}
+          >
+            <span className="stop-icon" />
+          </button>
+        )}
       </div>
       {isContextModalOpen && projectId && sessionId && (
         <ContextStatusModal

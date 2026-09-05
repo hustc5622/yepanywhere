@@ -29,6 +29,8 @@ const MAX_CHARS = MAX_LINES * 100;
 
 interface Props {
   content: string | ContentBlock[];
+  /** Server received this prompt; the provider has not adopted it yet. */
+  isPending?: boolean;
   /** ISO timestamp from the source JSONL entry, used for hover-revealed time. */
   timestamp?: string;
   /** Context-window usage snapshot associated with this prompt. */
@@ -789,8 +791,31 @@ function CollapsibleText({ text }: { text: string }) {
   );
 }
 
+function UserPromptContainer({
+  children,
+  isPending,
+}: {
+  children: ReactNode;
+  isPending?: boolean;
+}) {
+  const i18n = useOptionalI18n();
+  return (
+    <div
+      className={`user-prompt-container${isPending ? " user-prompt-awaiting" : ""}`}
+    >
+      {children}
+      {isPending && (
+        <div className="pending-message-status" role="status">
+          {i18n?.t("userPromptAwaiting") ?? "Waiting to be picked up"}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export const UserPromptBlock = memo(function UserPromptBlock({
   content,
+  isPending,
   timestamp,
   contextBefore,
   branch,
@@ -812,7 +837,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
       const hasMetadata = openedFiles.length > 0 || uploadedFiles.length > 0;
       if (copyImages.length > 0) {
         return (
-          <div className="user-prompt-container">
+          <UserPromptContainer isPending={isPending}>
             <div className="message message-user-prompt message-user-prompt-copyable">
               <MessageActions
                 copyText=""
@@ -825,12 +850,12 @@ export const UserPromptBlock = memo(function UserPromptBlock({
               </div>
             </div>
             <OpenedFilesMetadata files={openedFiles} />
-          </div>
+          </UserPromptContainer>
         );
       }
-      if (feishu && hasMetadata) {
+      if (hasMetadata && (feishu || isPending)) {
         return (
-          <div className="user-prompt-container">
+          <UserPromptContainer isPending={isPending}>
             <div className="message message-user-prompt">
               <div className="message-content">
                 <FeishuPromptSource info={feishu} />
@@ -838,7 +863,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
               </div>
             </div>
             <OpenedFilesMetadata files={openedFiles} />
-          </div>
+          </UserPromptContainer>
         );
       }
       return hasMetadata ? (
@@ -852,11 +877,11 @@ export const UserPromptBlock = memo(function UserPromptBlock({
     const copyText = text || getSkillCopyText(skills);
 
     return (
-      <div className="user-prompt-container">
+      <UserPromptContainer isPending={isPending}>
         <MessageActions
           timestamp={timestamp}
           contextBefore={contextBefore}
-          onEdit={onEdit && text ? () => onEdit(text) : undefined}
+          onEdit={!isPending && onEdit && text ? () => onEdit(text) : undefined}
         />
         <div className="message message-user-prompt message-user-prompt-copyable">
           <MessageActions
@@ -878,7 +903,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
           />
         )}
         <OpenedFilesMetadata files={openedFiles} />
-      </div>
+      </UserPromptContainer>
     );
   }
 
@@ -903,7 +928,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
     const hasMetadata = openedFiles.length > 0 || allUploadedFiles.length > 0;
     if (copyImages.length > 0) {
       return (
-        <div className="user-prompt-container">
+        <UserPromptContainer isPending={isPending}>
           <div className="message message-user-prompt message-user-prompt-copyable">
             <MessageActions
               copyText=""
@@ -916,12 +941,12 @@ export const UserPromptBlock = memo(function UserPromptBlock({
             </div>
           </div>
           <OpenedFilesMetadata files={openedFiles} />
-        </div>
+        </UserPromptContainer>
       );
     }
-    if (feishu && hasMetadata) {
+    if (hasMetadata && (feishu || isPending)) {
       return (
-        <div className="user-prompt-container">
+        <UserPromptContainer isPending={isPending}>
           <div className="message message-user-prompt">
             <div className="message-content">
               <FeishuPromptSource info={feishu} />
@@ -929,7 +954,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
             </div>
           </div>
           <OpenedFilesMetadata files={openedFiles} />
-        </div>
+        </UserPromptContainer>
       );
     }
     return hasMetadata ? (
@@ -949,11 +974,11 @@ export const UserPromptBlock = memo(function UserPromptBlock({
   const copyText = text || getSkillCopyText(skills);
 
   return (
-    <div className="user-prompt-container">
+    <UserPromptContainer isPending={isPending}>
       <MessageActions
         timestamp={timestamp}
         contextBefore={contextBefore}
-        onEdit={onEdit && text ? () => onEdit(text) : undefined}
+        onEdit={!isPending && onEdit && text ? () => onEdit(text) : undefined}
       />
       <div className="message message-user-prompt message-user-prompt-copyable">
         <MessageActions
@@ -972,6 +997,6 @@ export const UserPromptBlock = memo(function UserPromptBlock({
         <BranchControls branch={branchMetadata} onSelect={handleSelectBranch} />
       )}
       <OpenedFilesMetadata files={openedFiles} />
-    </div>
+    </UserPromptContainer>
   );
 });
