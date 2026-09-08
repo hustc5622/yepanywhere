@@ -8,6 +8,7 @@ import {
   SessionDisplayReducer,
   displayToolId,
 } from "../../src/display/SessionDisplayReducer.js";
+import { compactDisplayMessage } from "../../src/display/SessionDisplayService.js";
 import type { Message } from "../../src/supervisor/types.js";
 const view = { sessionId: "session", branchScopeId: "active", epoch: "epoch" };
 const prompt = {
@@ -65,6 +66,45 @@ function facts(snapshot: SessionDisplaySnapshot) {
   );
 }
 describe("SessionDisplayReducer", () => {
+  it("keeps async questions running across replay and allows later tools", () => {
+    const question = {
+      ...reply("question", "Which address?", "final_answer"),
+      codexAsyncMessage: {
+        delivery: "async" as const,
+        questions: [
+          { title: "Which address?", options: ["Production", "Local"] },
+        ],
+      },
+    };
+    const model = new SessionDisplayReducer(view, "codex");
+    model.setRuntime("running");
+    model.message(prompt);
+    model.message(question);
+    model.setRuntime("running");
+    expect(model.snapshot().activity.state).toBe("running");
+    expect(model.snapshot().nodes.at(-1)).toMatchObject({
+      segment: {
+        type: "assistant_text",
+        phase: "text",
+        asyncMessage: question.codexAsyncMessage,
+      },
+    });
+    expect(
+      SessionDisplaySnapshotSchema.safeParse(model.snapshot()).success,
+    ).toBe(true);
+    const replay = new SessionDisplayReducer(view, "codex");
+    replay.restore([prompt, compactDisplayMessage(question)] as Message[]);
+    replay.setRuntime("running");
+    expect(replay.snapshot().activity.state).toBe("running");
+    model.message(tool("after-question"));
+    model.message(result("after-question"));
+    expect(groups(model.snapshot())).toHaveLength(1);
+    model.message(reply("final", "Finished", "final_answer"));
+    expect(model.snapshot().activity.state).toBe("finishing");
+    model.message(terminal);
+    expect(model.snapshot().activity.state).toBe("completed");
+  });
+
   it("preserves text on both sides of a tool across live updates, replay and cold reads", () => {
     const model = new SessionDisplayReducer(view, "claude");
     const message: Message = {

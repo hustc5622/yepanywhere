@@ -1,3 +1,4 @@
+import type { CodexAsyncMessage } from "@yep-anywhere/shared";
 import {
   SESSION_DISPLAY_LIVE_STEP_LIMIT,
   SESSION_DISPLAY_STEP_PREVIEW_LIMIT,
@@ -210,6 +211,7 @@ export class SessionDisplayReducer {
     timestamp?: string,
     thinking = false,
     deferred = false,
+    asyncMessage?: CodexAsyncMessage,
   ): void {
     if (!text.trim()) return;
     if (streaming && this.committed.has(id)) return;
@@ -236,8 +238,10 @@ export class SessionDisplayReducer {
             id,
             content: text,
             streaming,
-            phase:
-              phase === "commentary"
+            ...(asyncMessage ? { asyncMessage } : {}),
+            phase: asyncMessage
+              ? "text"
+              : phase === "commentary"
                 ? "progress"
                 : phase === "final_answer"
                   ? "final"
@@ -248,7 +252,11 @@ export class SessionDisplayReducer {
     if (!streaming && !this.committed.has(id)) {
       this.committed.add(id);
       this.closeBefore(id);
-      if (phase === "final_answer" && this.runtime === "running")
+      if (
+        !asyncMessage &&
+        phase === "final_answer" &&
+        this.runtime === "running"
+      )
         this.runtime = "finishing";
     }
   }
@@ -609,6 +617,9 @@ export class SessionDisplayReducer {
               message._isStreaming === true,
               message.codexMessagePhase,
               timestamp,
+              false,
+              false,
+              message.codexAsyncMessage as CodexAsyncMessage | undefined,
             );
           } else if (
             block.type === "thinking" &&

@@ -4365,6 +4365,44 @@ describe("CodexProvider Event Normalization", () => {
     expect(typeof provider.startSession).toBe("function");
   });
 
+  it("preserves async questions through agent-message lifecycle notifications", () => {
+    const provider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params: unknown },
+        sessionId: string,
+        usage: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const questions = [
+      { title: "Which address?", options: ["Production", "Local"] },
+    ];
+    for (const method of ["item/started", "item/completed"]) {
+      const messages = provider.convertNotificationToSDKMessages(
+        {
+          method,
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              id: "question",
+              type: "agentMessage",
+              text: "Which address?",
+              phase: "final_answer",
+              delivery: "async",
+              questions,
+            },
+          },
+        },
+        "thread-1",
+        new Map(),
+      );
+      expect(messages[0]).toMatchObject({
+        codexMessagePhase: "final_answer",
+        codexAsyncMessage: { delivery: "async", questions },
+      });
+    }
+  });
+
   it("uses one stable correlation key for agent-message lifecycle updates", () => {
     const provider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (

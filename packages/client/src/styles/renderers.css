@@ -60,6 +60,27 @@
   background: color-mix(in srgb, var(--thinking-color) 5%, transparent);
 }
 
+.text-block-async {
+  padding: 0.625rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--attention-color) 40%, transparent);
+  border-left: 3px solid var(--attention-color);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--attention-color) 6%, transparent);
+}
+
+.text-block-async .text-block-phase {
+  color: var(--attention-color);
+}
+
+.text-block-async-header {
+  margin-bottom: 0.5rem;
+}
+
+.text-block-async-hint {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
 .text-block-phase {
   margin-bottom: 0.125rem;
   color: var(--thinking-color);

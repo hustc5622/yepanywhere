@@ -1,3 +1,4 @@
+import type { CodexAsyncMessage } from "@yep-anywhere/shared";
 // Import AgentStatus for local use in AgentSession interface
 import type {
   AgentStatus as AgentStatusType,
@@ -169,6 +170,7 @@ export interface Message {
   contextBefore?: ContextUsage;
   /** Codex app-server assistant message phase, when provided by Codex CLI. */
   codexMessagePhase?: "commentary" | "final_answer";
+  codexAsyncMessage?: CodexAsyncMessage;
   /** Allow any additional fields from SDK/server */
   [key: string]: unknown;
 }

@@ -1,3 +1,4 @@
+import type { CodexAsyncMessage } from "@yep-anywhere/shared";
 import {
   memo,
   useCallback,
@@ -37,6 +38,7 @@ interface Props {
   text: string;
   isStreaming?: boolean;
   phase?: "commentary" | "final_answer";
+  asyncMessage?: CodexAsyncMessage;
   /** Pre-rendered HTML from server (for completed messages) */
   augmentHtml?: string;
 }
@@ -151,6 +153,7 @@ export const TextBlock = memo(function TextBlock({
   text,
   isStreaming = false,
   phase,
+  asyncMessage,
   augmentHtml,
 }: Props) {
   const i18n = useOptionalI18n();
@@ -289,10 +292,23 @@ export const TextBlock = memo(function TextBlock({
     // biome-ignore lint/a11y/useKeyWithClickEvents: click handler intercepts local media links only
     <div
       ref={blockRef}
-      className={`text-block timeline-item${isStreaming ? " streaming" : ""}${phase === "commentary" ? " text-block-commentary" : ""}`}
+      className={`text-block timeline-item${isStreaming ? " streaming" : ""}${asyncMessage ? " text-block-async" : phase === "commentary" ? " text-block-commentary" : ""}`}
       onClick={handleClick}
     >
-      {phase === "commentary" && (
+      {asyncMessage && (
+        <div className="text-block-async-header">
+          <div className="text-block-phase">
+            {asyncMessage.questions?.length
+              ? (i18n?.t("messageAsyncQuestion") ?? "Question for you")
+              : (i18n?.t("messageAsyncUpdate") ?? "Async update")}
+          </div>
+          <div className="text-block-async-hint">
+            {i18n?.t("messageAsyncHint") ??
+              "This message does not pause the task. You can reply in the message box."}
+          </div>
+        </div>
+      )}
+      {!asyncMessage && phase === "commentary" && (
         <div className="text-block-phase">
           {i18n?.t("messagePhaseProgress") ?? "Progress"}
         </div>

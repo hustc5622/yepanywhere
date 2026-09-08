@@ -113,6 +113,7 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
     "codexCorrelationKey",
     "clientUserMessageId",
     "codexMessagePhase",
+    "codexAsyncMessage",
     "subtype",
     "turnStatus",
     "is_error",

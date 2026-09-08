@@ -1016,7 +1016,7 @@ function buildCodexChannelSummaries(
 
   for (const message of messages) {
     const phase = getCodexMessagePhase(message.codexMessagePhase);
-    if (!phase || message.type !== "assistant") {
+    if (!phase || message.type !== "assistant" || message.codexAsyncMessage) {
       continue;
     }
 

@@ -249,6 +249,7 @@ function isFinalAssistantResponseMessage(
 
   const codexMessagePhase = (message as { codexMessagePhase?: unknown })
     .codexMessagePhase;
+  if (message.codexAsyncMessage) return false;
   if (codexMessagePhase === "commentary") return false;
   if (codexMessagePhase === "final_answer") return true;
 

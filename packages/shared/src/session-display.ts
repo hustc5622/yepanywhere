@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AppMessage } from "./app-types.js";
+import { CodexAsyncMessageSchema } from "./codex-async-message.js";
 
 /** Product defaults confirmed for the first display-projection rollout. */
 export const SESSION_DISPLAY_INITIAL_TURN_LIMIT = 40;
@@ -104,6 +105,7 @@ export const SessionDisplayAssistantTextSegmentSchema = z
     /** Stable native identity shared by live and persisted assistant rows. */
     codexCorrelationKey: NonEmptyIdSchema.optional(),
     phase: z.enum(["progress", "final", "text"]),
+    asyncMessage: CodexAsyncMessageSchema.optional(),
     content: z.string(),
     streaming: z.boolean().optional(),
     /** Server-rendered, sanitized Markdown for the visible assistant text. */

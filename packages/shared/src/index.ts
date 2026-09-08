@@ -1,4 +1,9 @@
 export {
+  CodexAsyncMessageSchema,
+  readCodexAsyncMessage,
+} from "./codex-async-message.js";
+export type { CodexAsyncMessage } from "./codex-async-message.js";
+export {
   isIdeMetadata,
   stripIdeMetadata,
   stripBridgeMetadata,

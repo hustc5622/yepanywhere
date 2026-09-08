@@ -1,4 +1,5 @@
 import { basename, join } from "node:path";
+import { readCodexAsyncMessage } from "@yep-anywhere/shared";
 import type {
   ClaudeSessionEntry,
   CodexCompactedEntry,
@@ -1304,6 +1305,30 @@ export function convertCodexEntries(
     .filter((entry) => entry.type === "compacted")
     .map((entry) => timestampToMs(entry.timestamp))
     .filter((timestamp): timestamp is number => timestamp !== null);
+  // Async questions have an AgentMessage item but no ordinary response message.
+  const asyncItems = new Map<string, Record<string, unknown>>();
+  for (const entry of entries) {
+    if (entry.type !== "event_msg" || entry.payload.type !== "item_completed")
+      continue;
+    const item = entry.payload.item as Record<string, unknown>;
+    if (
+      item?.type === "AgentMessage" &&
+      typeof item.id === "string" &&
+      readCodexAsyncMessage(item)
+    ) {
+      asyncItems.set(item.id, item);
+    }
+  }
+  const responseMessageIds = new Set(
+    entries.flatMap((entry) =>
+      entry.type === "response_item" &&
+      entry.payload.type === "message" &&
+      entry.payload.id
+        ? [entry.payload.id]
+        : [],
+    ),
+  );
+  const emittedAsyncIds = new Set<string>();
   const toolCallContexts = new Map<string, CodexToolCallContext>();
   const externalToolCalls: PendingExternalCodexToolCall[] = [];
   const responseItemImageGenerationIds =
@@ -1330,6 +1355,13 @@ export function convertCodexEntries(
     );
 
     if (entry.type === "response_item") {
+      // The corresponding async AgentMessage is the user-facing representation.
+      if (
+        (entry.payload.type === "function_call" ||
+          entry.payload.type === "function_call_output") &&
+        asyncItems.has(entry.payload.call_id)
+      )
+        continue;
       messageIndex++;
       const converted = convertCodexResponseItem(
         entry,
@@ -1354,6 +1386,12 @@ export function convertCodexEntries(
         responseUserClientIds.get(entry),
       );
       for (const msg of convertedMessages) {
+        if (entry.payload.type === "message" && entry.payload.id) {
+          const asyncMessage = readCodexAsyncMessage(
+            asyncItems.get(entry.payload.id),
+          );
+          if (asyncMessage) msg.codexAsyncMessage = asyncMessage;
+        }
         if (correlationKey) {
           msg.codexCorrelationKey = correlationKey;
         }
@@ -1399,6 +1437,48 @@ export function convertCodexEntries(
         messages.push(msg);
       }
     } else if (entry.type === "event_msg") {
+      if (entry.payload.type === "item_completed") {
+        const item = entry.payload.item as Record<string, unknown>;
+        const id = typeof item?.id === "string" ? item.id : undefined;
+        const asyncMessage = id
+          ? readCodexAsyncMessage(asyncItems.get(id))
+          : undefined;
+        if (
+          id &&
+          asyncMessage &&
+          !responseMessageIds.has(id) &&
+          !emittedAsyncIds.has(id)
+        ) {
+          const text = Array.isArray(item.content)
+            ? item.content
+                .map((block) =>
+                  typeof block?.text === "string" ? block.text : "",
+                )
+                .join("")
+            : "";
+          if (text.trim()) {
+            emittedAsyncIds.add(id);
+            messageIndex++;
+            const turnId = getCodexEventPayloadTurnId(entry.payload);
+            messages.push({
+              uuid: anchor,
+              type: "assistant",
+              timestamp: entry.timestamp,
+              codexTurnId: turnId,
+              codexThreadItemId: id,
+              ...(turnId
+                ? { codexCorrelationKey: `codex:${turnId}:agent-message:${id}` }
+                : {}),
+              codexMessagePhase: normalizeCodexMessagePhase(
+                item.phase as CodexMessagePhase,
+              ),
+              codexAsyncMessage: asyncMessage,
+              message: { role: "assistant", content: text },
+            });
+          }
+          continue;
+        }
+      }
       if (entry.payload.type === "token_count") {
         const contextUsage = extractCodexTokenCountContextUsage(
           entries,

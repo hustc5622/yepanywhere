@@ -1,3 +1,4 @@
+import type { CodexAsyncMessage } from "./codex-async-message.js";
 /**
  * App-specific types that extend SDK types with runtime/computed fields.
  *
@@ -144,6 +145,7 @@ export interface AppMessageExtensions {
    * Values map to Codex protocol MessagePhase: "commentary" or "final_answer".
    */
   codexMessagePhase?: "commentary" | "final_answer";
+  codexAsyncMessage?: CodexAsyncMessage;
 
   /**
    * Optional native app-server item projection. Live and persisted adapters use

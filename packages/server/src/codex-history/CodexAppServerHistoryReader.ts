@@ -1,3 +1,4 @@
+import { readCodexAsyncMessage } from "@yep-anywhere/shared";
 import type {
   SessionBranchState,
   SessionDisplayTurnStatus,
@@ -1092,6 +1093,9 @@ function projectThreadItem(
           type: "assistant",
           codexCorrelationKey: `codex:${entry.turnId}:agent-message:${item.id}`,
           ...(item.phase ? { codexMessagePhase: item.phase } : {}),
+          ...(item.delivery === "async"
+            ? { codexAsyncMessage: readCodexAsyncMessage(item) }
+            : {}),
           message: { role: "assistant", content: item.text },
         },
       ];

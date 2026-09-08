@@ -383,6 +383,9 @@ export function buildSessionDisplayProjection(
           id: messageId,
           ...projectAssistantMessageIdentity(message),
           phase: projectAssistantPhase(message),
+          ...(message.codexAsyncMessage
+            ? { asyncMessage: message.codexAsyncMessage }
+            : {}),
           content,
           ...(timestamp ? { timestamp } : {}),
         });
@@ -402,6 +405,9 @@ export function buildSessionDisplayProjection(
           id: `${messageId}:${blockIndex}`,
           ...projectAssistantMessageIdentity(message),
           phase: projectAssistantPhase(message),
+          ...(message.codexAsyncMessage
+            ? { asyncMessage: message.codexAsyncMessage }
+            : {}),
           content: rawBlock.text,
           ...(timestamp ? { timestamp } : {}),
         });
@@ -778,6 +784,7 @@ function isAssistantLikeMessage(message: Message): boolean {
 function projectAssistantPhase(
   message: Message,
 ): "progress" | "final" | "text" {
+  if (message.codexAsyncMessage) return "text";
   return message.codexMessagePhase === "commentary"
     ? "progress"
     : message.codexMessagePhase === "final_answer"

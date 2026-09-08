@@ -83,6 +83,7 @@ export function projectSessionInspectorMessages(
     if (
       (message.codexMessagePhase === "commentary" ||
         message.codexMessagePhase === "final_answer") &&
+      !message.codexAsyncMessage &&
       hasReadableAssistantText(message)
     ) {
       projected.push({

@@ -17,6 +17,10 @@ import type {
   ProviderGoalState,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
+import {
+  type CodexAsyncMessage,
+  readCodexAsyncMessage,
+} from "@yep-anywhere/shared";
 import { WebSocket } from "ws";
 import {
   buildCodexInteractiveResponse,
@@ -508,6 +512,7 @@ type NormalizedThreadItem =
       type: "agent_message";
       text: string;
       phase?: CodexMessagePhase;
+      codexAsyncMessage?: CodexAsyncMessage;
     }
   | {
       id: string;
@@ -5163,6 +5168,7 @@ export class CodexProvider implements AgentProvider {
           id,
           type: "agent_message",
           text,
+          codexAsyncMessage: readCodexAsyncMessage(itemRecord),
           ...(normalizedType === "agent_message"
             ? { phase: this.getCodexMessagePhase(itemRecord.phase) }
             : {}),
@@ -5542,6 +5548,9 @@ export class CodexProvider implements AgentProvider {
             uuid,
             codexCorrelationKey: `codex:${turnId}:agent-message:${item.id}`,
             ...(item.phase ? { codexMessagePhase: item.phase } : {}),
+            ...(item.codexAsyncMessage
+              ? { codexAsyncMessage: item.codexAsyncMessage }
+              : {}),
             message: {
               role: "assistant",
               content: item.text,

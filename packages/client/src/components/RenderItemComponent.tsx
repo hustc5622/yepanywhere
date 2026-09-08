@@ -179,6 +179,7 @@ export const RenderItemComponent = memo(function RenderItemComponent({
             isStreaming={item.isStreaming}
             augmentHtml={item.augmentHtml}
             phase={item.phase}
+            asyncMessage={item.asyncMessage}
           />
         );
 

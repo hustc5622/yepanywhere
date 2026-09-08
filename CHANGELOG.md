@@ -60,6 +60,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复 Codex 异步提问被显示成最终回复的问题：实时消息与历史记录保留异步投递和问题信息，显示独立提问卡片及回复提示，不再因其 `final_answer` 标记误判任务正在收尾。
 - 修复统一会话展示中同一消息的多个文本块互相覆盖、工具前后回复顺序错乱的问题；重连时同步最新排队消息，避免待执行消息消失或已清空的队列重新出现。
 - 修复统一会话投影遗漏 assistant Markdown HTML，导致绝对文件路径链接、加粗和列表显示为原始语法：首开、历史分页和实时增量现在统一生成安全 Markdown，保留文件预览所需的路径及行号，并按文本节点缓存渲染结果。
 - 修复 Codex 新会话所选思考强度与实际 CLI session 不一致的问题：完整表单和紧凑表单统一使用模型支持的原生档位，同步提交与保存的强度；在线程创建、恢复和分支时就应用所选强度，避免初始化返回 CLI 默认值并覆盖后续请求，同时保留 `max` 与 `xhigh` 的独立展示。

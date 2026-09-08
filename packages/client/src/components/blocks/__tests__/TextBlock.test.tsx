@@ -161,6 +161,41 @@ describe("TextBlock", () => {
     expect(paragraph?.textContent).toBe(text);
   });
 
+  it("labels an async final_answer as a question without a progress or completion label", () => {
+    const { container } = renderWithSessionMetadata(
+      <TextBlock
+        text="Which address?"
+        phase="final_answer"
+        asyncMessage={{
+          delivery: "async",
+          questions: [
+            { title: "Which address?", options: ["Production", "Local"] },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("Question for you")).toBeDefined();
+    expect(
+      screen.getByText(
+        "This message does not pause the task. You can reply in the message box.",
+      ),
+    ).toBeDefined();
+    expect(screen.getByText("Which address?")).toBeDefined();
+    expect(container.querySelector(".text-block-async")).not.toBeNull();
+    expect(container.querySelector(".text-block-commentary")).toBeNull();
+  });
+
+  it("labels older async messages without structured questions", () => {
+    renderWithSessionMetadata(
+      <TextBlock
+        text="Update"
+        phase="final_answer"
+        asyncMessage={{ delivery: "async" }}
+      />,
+    );
+    expect(screen.getByText("Async update")).toBeDefined();
+  });
+
   it("highlights Codex commentary as a visible progress update", () => {
     const { container } = renderWithSessionMetadata(
       <TextBlock

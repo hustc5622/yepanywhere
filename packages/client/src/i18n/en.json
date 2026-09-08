@@ -1,4 +1,7 @@
 {
+  "messageAsyncQuestion": "Question for you",
+  "messageAsyncUpdate": "Async update",
+  "messageAsyncHint": "This message does not pause the task. You can reply in the message box.",
   "pageTitleProjects": "Projects",
   "pageTitleSettings": "Settings",
   "actionBack": "Back",

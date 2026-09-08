@@ -285,6 +285,13 @@ describe("SessionInspector", () => {
   it("shows Codex channel metadata for Codex sessions", () => {
     renderInspector("codex", [
       {
+        uuid: "async-question",
+        type: "assistant",
+        codexMessagePhase: "final_answer",
+        codexAsyncMessage: { delivery: "async" },
+        message: { role: "assistant", content: "Which address?" },
+      },
+      {
         uuid: "msg-1",
         type: "assistant",
         codexMessagePhase: "commentary",

@@ -119,6 +119,48 @@ function client(overrides: Record<string, unknown> = {}) {
 }
 
 describe("CodexAppServerHistoryReader", () => {
+  it("retains async question metadata in paginated history", async () => {
+    const questions = [
+      { title: "Which address?", options: ["Production", "Local"] },
+    ];
+    const fake = client({
+      listItems: vi.fn(async () => ({
+        data: [
+          {
+            turnId: "turn-1",
+            item: {
+              type: "agentMessage",
+              id: "question",
+              text: "Which address?",
+              phase: "final_answer",
+              delivery: "async",
+              questions,
+            },
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+    const result = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 20, itemsView: "full" },
+    );
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") return;
+    expect(
+      result.messages.find(
+        (message) => message.codexThreadItemId === "question",
+      ),
+    ).toMatchObject({
+      codexMessagePhase: "final_answer",
+      codexAsyncMessage: { delivery: "async", questions },
+    });
+  });
+
   it("honors the rollout kill switch without starting app-server reads", async () => {
     const fake = client();
     const reader = new CodexAppServerHistoryReader({

@@ -1,4 +1,7 @@
 {
+  "messageAsyncQuestion": "向你提问",
+  "messageAsyncUpdate": "异步消息",
+  "messageAsyncHint": "此消息不会暂停任务，你可以在输入框中回复。",
   "pageTitleProjects": "项目",
   "pageTitleSettings": "设置",
   "actionBack": "返回",

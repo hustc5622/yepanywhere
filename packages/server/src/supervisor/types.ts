@@ -1,5 +1,6 @@
 import type {
   AgentActivity,
+  CodexAsyncMessage,
   CodexBranchState,
   ContextCompactEvent,
   ContextCumulativeUsage,
@@ -211,6 +212,7 @@ export interface ContentBlock {
  * field contains the actual content. Use `type` for discrimination (user/assistant).
  */
 export interface Message {
+  codexAsyncMessage?: CodexAsyncMessage;
   type: string;
   uuid?: string;
   timestamp?: string;

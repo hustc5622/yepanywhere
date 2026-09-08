@@ -5,6 +5,22 @@ import { projectSessionInspectorMessages } from "../../src/sessions/inspector-pr
 import type { Message } from "../../src/supervisor/types.js";
 
 describe("session inspector projection", () => {
+  it("does not index async questions as final answers", () => {
+    expect(
+      projectSessionInspectorMessages([
+        {
+          uuid: "async-question",
+          type: "assistant",
+          codexMessagePhase: "final_answer",
+          codexAsyncMessage: {
+            delivery: "async",
+            questions: [{ title: "Which address?" }],
+          },
+          message: { role: "assistant", content: "Which address?" },
+        },
+      ]),
+    ).toEqual([]);
+  });
   it("keeps index metadata without returning hidden tool or assistant bodies", () => {
     const messages: Message[] = [
       {
