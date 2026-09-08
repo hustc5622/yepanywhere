@@ -1,6 +1,7 @@
 import { parseLineColumn, splitTextWithFilePaths } from "@yep-anywhere/shared";
 import {
   Marked,
+  Renderer,
   type RendererObject,
   type RendererThis,
   type Tokens,
@@ -184,7 +185,7 @@ const MARKDOWN_SANITIZE_OPTIONS = {
     ],
     code: ["class"],
     details: ["class", "open"],
-    div: ["class"],
+    div: ["class", "tabindex"],
     img: ["src", "alt", "title"],
     input: ["type", "checked", "disabled"],
     ol: ["start"],
@@ -223,12 +224,26 @@ function createRenderer(
   options: SafeMarkdownOptions = {},
 ): RendererObject<string, string> {
   return {
+    table(this: RendererThis<string, string>, token: Tokens.Table) {
+      // Preserve GFM cells/alignment and isolate wide tables from page scrolling.
+      const renderer = new Renderer();
+      renderer.parser = this.parser;
+      return `<div class="markdown-table-wrapper" tabindex="0">${renderer.table(token)}</div>\n`;
+    },
     html({ text }) {
       // Disable raw HTML passthrough from markdown by escaping it.
       return escapeHtml(text);
     },
-    text({ text }: Tokens.Text | Tokens.Escape) {
-      return renderTextWithLocalMediaLinks(text);
+    text(
+      this: RendererThis<string, string>,
+      token: Tokens.Text | Tokens.Escape,
+    ) {
+      // Tight list items contain a text token with already-parsed inline
+      // children. Preserve those links/emphasis instead of escaping raw syntax.
+      if ("tokens" in token && token.tokens) {
+        return this.parser.parseInline(token.tokens);
+      }
+      return renderTextWithLocalMediaLinks(token.text);
     },
     link(
       this: RendererThis<string, string>,
